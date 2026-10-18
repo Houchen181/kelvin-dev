@@ -68,6 +68,12 @@ def _self_test(port: int, key: str) -> int:
     req = urllib.request.Request(base + "/api/bootstrap", headers={"X-Kelvin-Token": key})
     with urllib.request.urlopen(req, timeout=10) as r:
         boot = json.load(r)
+    with urllib.request.urlopen(base + "/m", timeout=10) as r:   # the phone page and its script are packaged too
+        page_ok = page_ok and b"Pair this phone" in r.read()
+    with urllib.request.urlopen(base + "/static/mobile.js", timeout=10) as r:
+        page_ok = page_ok and r.status == 200
+    from . import carddraft, drivers  # noqa: F401  (loaded on demand at run time; make sure the build has them)
+    page_ok = page_ok and "card: 1" in carddraft.example()
     ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
     message = "Kelvin self-test: %s (lab %r)" % ("ok" if ok else "FAILED", boot.get("lab"))
     log.info(message)
