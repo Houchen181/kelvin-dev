@@ -20,7 +20,7 @@ from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.web.agent import ChatAgent  # noqa: E402
 from labharness.web.app import create_app  # noqa: E402
-from labharness.web.providers.base import ModelInfo, Provider, TurnResult  # noqa: E402
+from labharness.web.providers.base import ModelInfo, Provider, TurnResult, user_text  # noqa: E402
 from labharness.web.providers.demo import GATE_SWEEP, DemoProvider  # noqa: E402
 from labharness.web.settings import Settings  # noqa: E402
 from labharness.web.store import ChatStore  # noqa: E402
@@ -36,6 +36,7 @@ class Scripted(Provider):
         self.seen = []
         self.systems = []
         self.tool_names = []
+        self.prompts = []   # the user messages as the model sees them (with recalled memory)
 
     def available(self):
         return True
@@ -47,6 +48,7 @@ class Scripted(Provider):
         self.seen.append([m["role"] for m in history])
         self.systems.append(system)
         self.tool_names.append([t["name"] for t in tools])
+        self.prompts.append([user_text(m) for m in history if m["role"] == "user"])
         if self.delay:
             await asyncio.sleep(self.delay)
         blocks = self.turns.pop(0)
@@ -330,12 +332,15 @@ def test_projects_organize_conversations(parts):
         assert "project" not in store.load(a["id"])              # chat files never carry the project
 
 
-NOTE_CALL = [{"type": "text", "text": "Noting it."},
-             {"type": "tool_call", "id": "n1", "name": "save_note",
-              "input": {"kind": "quirk", "text": "Gate on D3 leaks above 6 V."}}]
+REMEMBER_QUIRK = [{"type": "text", "text": "Noting it."},
+                  {"type": "tool_call", "id": "n1", "name": "remember",
+                   "input": {"scope": "project", "kind": "quirk", "text": "Gate on D3 leaks above 6 V."}}]
+REMEMBER_PREF = [{"type": "text", "text": "Noting it."},
+                 {"type": "tool_call", "id": "n2", "name": "remember",
+                  "input": {"scope": "global", "kind": "preference", "text": "Give fields in tesla."}}]
 
 
-def test_project_memory_stays_in_its_project(parts):
+def test_memory_scopes_never_leak(parts):
     _, settings, store = parts
     from labharness.web.agent import SYSTEM
     a = store.create_project("Alpha")
@@ -344,72 +349,157 @@ def test_project_memory_stays_in_its_project(parts):
     store.set_instructions(b["id"], "BETA-RULE: secret sample S7.")
     store.add_note(b["id"], "BETA-NOTE: S7 is fragile.", "quirk")
     settings.update({"instructions": "GLOBAL-RULE: fields in tesla."})
-    bot = Scripted([NOTE_CALL, DONE, DONE, NOTE_CALL, DONE, DONE])
+    bot = Scripted([REMEMBER_QUIRK, DONE, DONE, REMEMBER_PREF, DONE, DONE, DONE])
     client, headers = client_for(parts, {"scripted": bot})
     with client:
         in_a = client.post("/api/chats", json={"model": "scripted:m1", "project": a["id"]}, headers=headers).json()
         loose = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
 
-        stream_turn(client, headers, in_a["id"], "the gate leaks above 6 V", "scripted:m1")  # saves a note
+        stream_turn(client, headers, in_a["id"], "the gate leaks above 6 V", "scripted:m1")  # keeps a project note
         first, after_note = bot.systems
         assert first == after_note                     # fixed for the whole turn: the cached prefix holds
-        assert "GLOBAL-RULE" in first and "ALPHA-RULE" in first and "Alpha" in first
-        assert "BETA" not in first
+        assert "GLOBAL-RULE" in first and "ALPHA-RULE" in first and "Alpha" in first and "BETA" not in first
         assert first.index(SYSTEM) < first.index("GLOBAL-RULE") < first.index("ALPHA-RULE")  # stable parts first
-        assert "save_note" in bot.tool_names[0]
+        assert "remember" in bot.tool_names[0]
         notes = client.get("/api/projects/" + a["id"], headers=headers).json()["notes"]
         assert [(n["kind"], n["text"], n["chat"]) for n in notes] == [("quirk", "Gate on D3 leaks above 6 V.", in_a["id"])]
         assert store.project(b["id"])["notes"][0]["text"] == "BETA-NOTE: S7 is fragile."  # B untouched
 
-        stream_turn(client, headers, in_a["id"], "and now?", "scripted:m1")
-        assert "Gate on D3 leaks above 6 V." in bot.systems[-1]   # the next turn knows the note
+        events = stream_turn(client, headers, in_a["id"], "and the gate now?", "scripted:m1")
+        assert bot.systems[-1] == first                          # notes never enter the system prompt
+        recalled = next(e for e in events if e["type"] == "memory")["notes"]
+        assert [(n["scope"], n["text"]) for n in recalled] == [("project", "Gate on D3 leaks above 6 V.")]
+        assert "<memory>" in bot.prompts[-1][-1] and "Gate on D3 leaks above 6 V." in bot.prompts[-1][-1]
+        assert "<memory>" not in bot.prompts[-1][0]              # earlier messages replay unchanged
 
-        events = stream_turn(client, headers, loose["id"], "the gate leaks above 6 V", "scripted:m1")
-        unfiled = bot.systems[-1]
-        assert unfiled == SYSTEM + "\n\n# The user's instructions for every conversation\nGLOBAL-RULE: fields in tesla."
-        assert "save_note" not in bot.tool_names[-1]
-        assert next(e for e in events if e["type"] == "tool_end")["is_error"]   # nowhere to save it
-        assert len(store.project(a["id"])["notes"]) == 1 and len(store.project(b["id"])["notes"]) == 1
+        # an unfiled chat: global memory only; it may keep a preference, not an experiment fact
+        stream_turn(client, headers, loose["id"], "I like fields in tesla", "scripted:m1")
+        unfiled = bot.systems[-2]
+        assert "GLOBAL-RULE" in unfiled and "ALPHA" not in unfiled and "BETA" not in unfiled
+        assert store.global_notes()[0]["text"] == "Give fields in tesla."
+        events = stream_turn(client, headers, in_a["id"], "what units for the field?", "scripted:m1")
+        recalled = next(e for e in events if e["type"] == "memory")["notes"]
+        assert [(n["scope"], n["text"]) for n in recalled] == [("global", "Give fields in tesla.")]  # new to this chat
+        assert "BETA-NOTE" not in json.dumps(bot.prompts) and "S7" not in json.dumps(bot.prompts)
 
         # a human sees and deletes every note
         note_id = notes[0]["id"]
         assert client.delete("/api/projects/%s/notes/%s" % (a["id"], note_id), headers=headers).json() == {"ok": True}
         assert client.delete("/api/projects/%s/notes/%s" % (a["id"], note_id), headers=headers).status_code == 404
-        assert client.delete("/api/projects/%s/notes/%s" % (b["id"], store.project(b["id"])["notes"][0]["id"]),
-                             headers=headers).status_code == 200
-        long = client.patch("/api/projects/" + a["id"], json={"instructions": "x" * 9000}, headers=headers).json()
-        assert len(long["instructions"]) == 4000 and long["name"] == "Alpha"
+        mem = client.get("/api/memory", headers=headers).json()
+        assert mem["learn"] is True and mem["instructions"] == "GLOBAL-RULE: fields in tesla."
+        assert client.delete("/api/memory/notes/" + mem["notes"][0]["id"], headers=headers).json() == {"ok": True}
+        assert client.get("/api/memory", headers=headers).json()["notes"] == []
 
         # deleting a project deletes its memory; its chats go on without it
         assert client.delete("/api/projects/" + a["id"], headers=headers).json() == {"ok": True}
-        assert "xxxx" not in (store.root / "_projects.json").read_text(encoding="utf-8")
-        stream_turn(client, headers, in_a["id"], "still there?", "scripted:m1")
-        assert bot.systems[-1] == unfiled
-        assert client.get("/api/settings", headers=headers).json()["settings"]["instructions"] == "GLOBAL-RULE: fields in tesla."
+        assert "ALPHA-RULE" not in (store.root / "_projects.json").read_text(encoding="utf-8")
 
 
-def test_notes_are_short_typed_and_bounded(tmp_path):
-    from labharness.web.store import MAX_NOTES
+def test_project_scope_is_refused_outside_a_project(parts):
+    _, _, store = parts
+    bot = Scripted([REMEMBER_QUIRK, DONE])
+    client, headers = client_for(parts, {"scripted": bot})
+    with client:
+        loose = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
+        events = stream_turn(client, headers, loose["id"], "the gate leaks above 6 V", "scripted:m1")
+        end = next(e for e in events if e["type"] == "tool_end")
+        assert end["is_error"] and "not in a project" in end["content"]
+        assert store.global_notes() == []
+
+
+def test_notes_are_short_typed_deduplicated_and_bounded(tmp_path):
+    from labharness.web.store import MAX_GLOBAL_NOTES, MAX_NOTES
     store = ChatStore(tmp_path)
     p = store.create_project("P")
     with pytest.raises(ValueError):
         store.add_note(p["id"], "what is the time constant?", "question")   # only decisions, procedures, quirks, results
+    with pytest.raises(ValueError):
+        store.remember("global", "Gate leaks above 6 V", "quirk")           # experiment facts are not global
     with pytest.raises(ValueError):
         store.add_note(p["id"], "x" * 301, "result")
     with pytest.raises(ValueError):
         store.add_note(p["id"], "   ", "result")
     first = store.add_note(p["id"], "T_c  = 4.2 K  (run r12)", "result")
     assert first["text"] == "T_c = 4.2 K (run r12)"
-    assert store.add_note(p["id"], "t_c = 4.2 k (run r12)", "result") == first        # no duplicates
-    for i in range(MAX_NOTES - 1):
-        store.add_note(p["id"], "fact %d" % i, "decision")
+    assert store.remember("project", "t_c = 4.2 k (run r12)", "result", project_id=p["id"]) == (first, "known")
+    assert store.remember("project", "Run r12 gave T_c = 4.2 K", "result", project_id=p["id"])[1] == "known"  # same fact
+    other, how = store.remember("project", "T_c = 4.5 K (run r12)", "result", project_id=p["id"])
+    assert how == "saved" and other["id"] != first["id"]          # a different number is a different fact
+    fixed, how = store.remember("project", "T_c = 4.3 K (run r12, refit)", "result", project_id=p["id"],
+                                replaces=first["id"])
+    assert how == "updated" and fixed["id"] == first["id"] and fixed["text"].startswith("T_c = 4.3 K")
+    for i in range(MAX_NOTES - 2):
+        store.add_note(p["id"], "fact number %d about something" % i, "decision")
     with pytest.raises(ValueError):
         store.add_note(p["id"], "one too many", "decision")
     with pytest.raises(KeyError):
         store.add_note("p00000000", "fact", "decision")
+    for i in range(MAX_GLOBAL_NOTES):
+        store.remember("global", "preference number %d" % i, "preference")
+    with pytest.raises(ValueError):
+        store.remember("global", "one more preference", "preference")
 
 
-def test_demo_saves_a_note_only_inside_a_project(parts):
+def test_big_projects_recall_only_what_bears_on_the_question():
+    from labharness.web import memory
+    notes = [{"id": "n%d" % i, "kind": "result", "text": "Sample S%d resistance is %d ohm at 4 K" % (i, i), "created": i}
+             for i in range(20)]
+    notes.append({"id": "nq", "kind": "quirk", "text": "The magnet power supply trips above 2 T/min", "created": 30})
+    project = {"name": "P", "notes": notes}
+    got = memory.recall([], project, "how fast can I ramp the magnet?")
+    assert [n["id"] for n in got] == ["nq"]                         # unrelated results stay out
+    got = memory.recall([], project, "what was the resistance of sample S7?")
+    assert "n7" in [n["id"] for n in got] and len(got) <= memory.RECALL_TOP
+    small = {"name": "Q", "notes": notes[:3]}
+    assert len(memory.recall([], small, "anything")) == 3              # a small project recalls everything
+    assert memory.recall([], small, "anything", already=["n0", "n1", "n2"]) == []
+    assert memory.similarity("gate leaks above 6 V", "gate leaks above 8 V") < memory.SAME
+
+
+def test_incognito_uses_and_keeps_no_memory(parts):
+    _, settings, store = parts
+    from labharness.web.agent import INCOGNITO, SYSTEM
+    p = store.create_project("Alpha")
+    store.add_note(p["id"], "ALPHA-NOTE: sample is fragile", "quirk")
+    store.remember("global", "Give fields in tesla", "preference")
+    settings.update({"instructions": "GLOBAL-RULE"})
+    bot = Scripted([DONE, REMEMBER_PREF, DONE])
+    client, headers = client_for(parts, {"scripted": bot})
+    with client:
+        assert client.post("/api/chats", json={"model": "scripted:m1", "incognito": True, "project": p["id"]},
+                           headers=headers).status_code == 400
+        chat = client.post("/api/chats", json={"model": "scripted:m1", "incognito": True}, headers=headers).json()
+        assert chat["incognito"] is True and chat["title"] == "Incognito chat"
+        events = stream_turn(client, headers, chat["id"], "what is a lock-in amplifier?", "scripted:m1")
+        assert bot.systems[-1] == SYSTEM + "\n\n" + INCOGNITO      # no instructions, no notes
+        assert "remember" not in bot.tool_names[-1] and "set_value" in bot.tool_names[-1]
+        assert not any(e["type"] == "memory" for e in events) and "<memory>" not in bot.prompts[-1][-1]
+        events = stream_turn(client, headers, chat["id"], "remember that I like tesla", "scripted:m1")
+        assert next(e for e in events if e["type"] == "tool_end")["is_error"]      # nowhere to keep it
+        assert len(store.global_notes()) == 1
+        assert chat["id"] not in [c["id"] for c in client.get("/api/chats", headers=headers).json()]
+        assert not (store.root / (chat["id"] + ".json")).exists()                  # never written to disk
+        assert client.get("/api/chats/" + chat["id"], headers=headers).json()["messages"][0]["text"].startswith("what")
+        assert client.patch("/api/chats/" + chat["id"], json={"project": p["id"]}, headers=headers).status_code == 400
+        assert client.delete("/api/chats/" + chat["id"], headers=headers).json() == {"ok": True}
+        assert client.get("/api/chats/" + chat["id"], headers=headers).status_code == 404
+
+
+def test_learning_can_be_switched_off(parts):
+    _, settings, store = parts
+    bot = Scripted([DONE])
+    client, headers = client_for(parts, {"scripted": bot})
+    with client:
+        r = client.post("/api/settings", json={"learn": "off"}, headers=headers).json()
+        assert r["settings"]["learn"] is False and settings.learning is False
+        chat = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
+        stream_turn(client, headers, chat["id"], "hello", "scripted:m1")
+        assert "remember" not in bot.tool_names[-1] and "remember tool" not in bot.systems[-1]
+        assert client.post("/api/settings", json={"learn": "on"}, headers=headers).json()["settings"]["learn"] is True
+
+
+def test_demo_keeps_preferences_globally_and_facts_per_project(parts):
     _, _, store = parts
     p = store.create_project("Hall bars")
     client, headers = client_for(parts, {"demo": DemoProvider()})
@@ -417,8 +507,10 @@ def test_demo_saves_a_note_only_inside_a_project(parts):
         filed = client.post("/api/chats", json={"model": "demo:demo", "project": p["id"]}, headers=headers).json()
         loose = client.post("/api/chats", json={"model": "demo:demo"}, headers=headers).json()
         events = stream_turn(client, headers, filed["id"], "Remember that the gate on D3 leaks above 6 V", "demo:demo")
-        assert next(e for e in events if e["type"] == "tool_end")["name"] == "save_note"
+        assert next(e for e in events if e["type"] == "tool_end")["name"] == "remember"
         assert [(n["kind"], n["text"]) for n in store.project(p["id"])["notes"]] == [("quirk", "The gate on D3 leaks above 6 V")]
         events = stream_turn(client, headers, loose["id"], "remember that the magnet quenches at 9 T", "demo:demo")
-        assert not any(e["type"] == "tool_start" for e in events)
+        assert not any(e["type"] == "tool_start" for e in events)      # no project to keep it in
+        stream_turn(client, headers, loose["id"], "remember that I prefer fields in tesla", "demo:demo")
+        assert [(n["kind"], n["text"]) for n in store.global_notes()] == [("preference", "I prefer fields in tesla")]
         assert len(store.project(p["id"])["notes"]) == 1

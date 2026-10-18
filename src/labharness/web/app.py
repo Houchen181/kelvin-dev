@@ -136,9 +136,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if request.method == "POST":
             body = await request.json()
             try:
-                return JSONResponse(store.create(str(body.get("model") or ""), body.get("project") or None))
+                return JSONResponse(store.create(str(body.get("model") or ""), body.get("project") or None,
+                                                 incognito=bool(body.get("incognito"))))
             except KeyError as e:
                 return error(404, e.args[0])
+            except ValueError as e:
+                return error(400, str(e))
         return JSONResponse(store.list())
 
     async def chat(request: Request) -> Response:
@@ -160,12 +163,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     store.save(data)
                 if "project" in body:  # file it under a project, or null to take it out
                     store.assign(chat_id, body["project"] or None)
-            for m in data["messages"]:  # the browser never needs provider-internal state
-                m.pop("raw", None)
-            data["project"] = store.project_of(chat_id)
-            return JSONResponse(data)
+            out = dict(data, messages=[{k: v for k, v in m.items() if k != "raw"} for m in data["messages"]])
+            out["project"] = store.project_of(chat_id)  # the browser never needs provider-internal state
+            return JSONResponse(out)
         except KeyError as e:
             return error(404, e.args[0])
+        except ValueError as e:
+            return error(400, str(e))
 
     async def projects(request: Request) -> Response:
         if request.method == "POST":
@@ -197,6 +201,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def note(request: Request) -> Response:
         try:
             store.delete_note(request.path_params["project_id"], request.path_params["note_id"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        return JSONResponse({"ok": True})
+
+    async def memory_view(request: Request) -> Response:
+        """The user's global memory: instructions, the notes Kelvin kept for every conversation, and whether it
+        may keep new ones. Project memory is under /api/projects/{id}."""
+        return JSONResponse({"instructions": settings.get("instructions") or "", "learn": settings.learning,
+                             "notes": store.global_notes()})
+
+    async def memory_note(request: Request) -> Response:
+        try:
+            store.delete_global_note(request.path_params["note_id"])
         except KeyError as e:
             return error(404, e.args[0])
         return JSONResponse({"ok": True})
@@ -325,6 +342,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/projects", projects, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}", project, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/projects/{project_id}/notes/{note_id}", note, methods=["DELETE"]),
+        Route("/api/memory", memory_view),
+        Route("/api/memory/notes/{note_id}", memory_note, methods=["DELETE"]),
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/state", state),

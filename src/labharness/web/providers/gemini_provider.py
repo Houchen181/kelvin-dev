@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 from google import genai
 from google.genai import types
 
-from .base import Emit, ModelInfo, Provider, TurnResult, text_of
+from .base import Emit, ModelInfo, Provider, TurnResult, text_of, user_text
 
 _SKIP = ("image", "tts", "embedding", "live", "audio", "aqa", "learnlm")
 _OWN_ID = "lh_call_"
@@ -16,7 +16,7 @@ def to_contents(history: List[Dict[str, Any]]) -> List[types.Content]:
     out: List[types.Content] = []
     for m in history:
         if m["role"] == "user":
-            out.append(types.Content(role="user", parts=[types.Part(text=m["text"])]))
+            out.append(types.Content(role="user", parts=[types.Part(text=user_text(m))]))
         elif m["role"] == "assistant":
             if m.get("provider") == "gemini" and m.get("raw"):
                 out.append(types.Content.model_validate(m["raw"]))  # keeps thought signatures

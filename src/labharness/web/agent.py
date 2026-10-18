@@ -3,8 +3,9 @@
 The model reaches the lab only through the same MCP tools external agents use
 (connected in-process), so the safety gate and the approval rules are identical.
 
-Memory has three levels that never mix: the user's global instructions (every chat), a project's instructions
-and notes (only the chats filed under that project), and the conversation itself.
+Memory has three levels that never mix: the user's global instructions and notes (every chat), a project's
+instructions and notes (only the chats filed under that project), and the conversation itself. Notes are recalled
+per message (memory.py); incognito chats use and keep no memory.
 """
 from __future__ import annotations
 
@@ -18,8 +19,9 @@ from mcp import Client
 from ..agent.runtime import LabRuntime
 from ..agent.server import INSTRUCTIONS
 from .providers.base import Emit, ModelInfo, Provider
+from . import memory
 from .settings import Settings
-from .store import MAX_NOTE, NOTE_KINDS, ChatStore
+from .store import MAX_NOTE, ChatStore
 
 SYSTEM = INSTRUCTIONS + """
 You are Kelvin, the lab assistant in this portal, working with an experimental physicist.
@@ -29,19 +31,38 @@ progress and plots live in a Runs pane beside the chat; when it finishes, the co
 assessment and the pane shows the key results, plots with fits and the data. So do not repeat them: add what
 they cannot (interpretation, anything suspicious, the next step)."""
 PROJECT = """# Project “{name}”
-This conversation is filed under the project “{name}”. The instructions and notes below apply to this project
-only; they come from the user and from earlier conversations in it."""
-SAVE_NOTE_HINT = """Use save_note for a fact later conversations in this project will need: a decision, a working procedure,
-an instrument quirk, or a key result (with units and run ID). Never save questions, chit-chat, one-off readings or
-anything already in the notes."""
-SAVE_NOTE = {
-    "name": "save_note",
-    "description": "Save one short, durable fact to this project's notes, so every later conversation in the project "
-                   "knows it. The user sees every note and can delete it.",
-    "schema": {"type": "object", "required": ["kind", "text"], "properties": {
-        "kind": {"type": "string", "enum": list(NOTE_KINDS)},
-        "text": {"type": "string", "description": "The fact in one sentence, at most %d characters." % MAX_NOTE}}},
-}
+This conversation is filed under the project “{name}”. The project's instructions below come from the user and
+apply to this project only."""
+MEMORY_RULES = """# Memory
+A user message may begin with a <memory> block: notes saved in earlier conversations. They are background, not part
+of this conversation. Use a note only if it bears on the question, and say so if one looks out of date."""
+LEARN_RULES = """Use the remember tool when something durable is settled. For the user (scope global): a lasting
+preference or convention, such as units or how cautious to be. For this project (scope project): a decision, a working
+procedure, an instrument quirk, or a key result with units and run ID. Never save questions, one-off requests,
+chit-chat, guesses, or anything already in the notes. To correct an outdated note, pass its id as replaces."""
+INCOGNITO = """# Incognito chat
+No saved notes or instructions are used here, nothing from this chat is remembered, and it is gone when the user
+leaves it. Answer from this conversation alone."""
+
+
+def remember_tool(in_project: bool) -> Dict[str, Any]:
+    scopes = ["global", "project"] if in_project else ["global"]
+    kinds = list(memory.GLOBAL_KINDS) + (list(memory.PROJECT_KINDS) if in_project else [])
+    return {
+        "name": "remember",
+        "description": "Keep one short, durable fact for later conversations. global: the user's lasting preferences "
+                       "and conventions (used in every conversation)." + (
+                           " project: a decision, procedure, instrument quirk or key result, used only in this "
+                           "project's conversations." if in_project else " This chat is in no project, so "
+                           "experiment facts cannot be kept.") + " The user sees every note and can delete it.",
+        "schema": {"type": "object", "required": ["scope", "kind", "text"], "properties": {
+            "scope": {"type": "string", "enum": scopes},
+            "kind": {"type": "string", "enum": kinds,
+                     "description": "global: preference, convention or profile; project: decision, procedure, quirk "
+                                    "or result"},
+            "text": {"type": "string", "description": "The fact in one sentence, at most %d characters." % MAX_NOTE},
+            "replaces": {"type": "string", "description": "id of an outdated note this one corrects (optional)"}}},
+    }
 MAX_STEPS = 25
 _RUN_ID = re.compile(r"run_id='([^']+)'")
 
@@ -107,39 +128,54 @@ class ChatAgent:
 
     # ------------------------------------------------------------------ memory
 
-    def context(self, chat_id: str) -> Dict[str, Any]:
-        """The system prompt and tools for one turn in this chat.
-
-        Stable parts come first, so a cached prompt prefix survives: Kelvin's instructions, then the user's
-        global instructions, then the project's instructions, then its notes (which change most often).
-        A chat outside every project sees no project memory and cannot save notes.
-        """
+    def context(self, chat: Dict[str, Any]) -> Dict[str, Any]:
+        """The system prompt and tools for one turn in this chat. Only stable text goes here (Kelvin's rules, the
+        user's instructions, the project's instructions), so the cached prompt prefix survives; notes are recalled
+        per message instead (see recall). A chat outside every project gets no project memory; an incognito chat
+        gets no memory at all and cannot save any."""
+        if chat.get("incognito"):
+            return {"system": SYSTEM + "\n\n" + INCOGNITO, "tools": self.tools, "project": None, "learn": False}
         parts = [SYSTEM]
         mine = self.settings.get("instructions") if self.settings else None
         if mine:
             parts.append("# The user's instructions for every conversation\n" + mine)
-        memory = self.store.memory_of(chat_id)
-        if not memory:
-            return {"system": "\n\n".join(parts), "tools": self.tools, "project": None}
-        parts.append(PROJECT.format(name=memory["name"]))
-        if memory["instructions"]:
-            parts.append("## Instructions\n" + memory["instructions"])
-        if memory["notes"]:
-            parts.append("## Notes, oldest first\n" + "\n".join("- [%s] %s" % (n["kind"], n["text"])
-                                                                for n in memory["notes"]))
-        parts.append(SAVE_NOTE_HINT)
-        return {"system": "\n\n".join(parts), "tools": self.tools + [SAVE_NOTE], "project": memory["id"]}
+        project = self.store.memory_of(chat["id"])
+        if project:
+            parts.append(PROJECT.format(name=project["name"]))
+            if project["instructions"]:
+                parts.append("## Instructions\n" + project["instructions"])
+        learn = self.settings.learning if self.settings else True
+        parts.append(MEMORY_RULES + ("\n" + LEARN_RULES if learn else ""))
+        return {"system": "\n\n".join(parts), "tools": self.tools + ([remember_tool(bool(project))] if learn else []),
+                "project": project["id"] if project else None, "learn": learn}
 
-    def _save_note(self, project_id: str, chat_id: str, args: Any) -> Tuple[str, bool]:
+    def recall(self, chat: Dict[str, Any], message: Dict[str, Any]) -> None:
+        """Attach the notes that bear on this message (and were not given earlier in the chat) to the message."""
+        if chat.get("incognito"):
+            return
+        project = self.store.memory_of(chat["id"])
+        notes = memory.recall(self.store.global_notes(), project, message["text"], chat.get("recalled", []))
+        if notes:
+            message["memory"] = notes
+            if project:
+                message["memory_project"] = project["name"]
+            chat["recalled"] = chat.get("recalled", []) + [n["id"] for n in notes]
+
+    def _remember(self, chat: Dict[str, Any], context: Dict[str, Any], args: Any) -> Tuple[str, bool]:
         if not isinstance(args, dict):
             return "the arguments were not valid JSON; send the call again", True
+        scope = str(args.get("scope") or "")
         try:
-            note = self.store.add_note(project_id, args.get("text"), str(args.get("kind") or ""), chat_id)
-        except KeyError:
-            return "not saved: the project no longer exists", True
+            note, what = self.store.remember(scope, args.get("text"), str(args.get("kind") or ""),
+                                             project_id=context["project"], chat_id=chat["id"],
+                                             replaces=str(args["replaces"]) if args.get("replaces") else None)
+        except KeyError as e:
+            return "not saved: %s" % (e.args[0] if e.args else "not found"), True
         except ValueError as e:
             return "not saved: %s" % e, True
-        return "in the project notes: [%s] %s" % (note["kind"], note["text"]), False
+        where = "your notes for every conversation" if scope == "global" else "this project's notes"
+        verb = {"saved": "kept in", "known": "already in", "updated": "updated in"}[what]
+        return "%s %s: [%s] %s (id %s)" % (verb, where, note["kind"], note["text"], note["id"]), False
 
     # ------------------------------------------------------------------ turns
 
@@ -172,14 +208,18 @@ class ChatAgent:
         model_id = model_key.partition(":")[2]
         try:
             chat = self.store.load(chat_id)
-            chat["messages"].append({"role": "user", "text": text})
+            message: Dict[str, Any] = {"role": "user", "text": text}
+            self.recall(chat, message)
+            chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
                 chat["title"] = first[:48] + ("…" if len(first) > 48 else "")
             chat["model"] = model_key
             self.store.save(chat)
-            context = self.context(chat_id)  # fixed for the whole turn, so every step reuses the cached prefix
+            context = self.context(chat)  # fixed for the whole turn, so every step reuses the cached prefix
             await emit({"type": "turn_start", "model": model_key, "title": chat["title"]})
+            if message.get("memory"):
+                await emit({"type": "memory", "notes": message["memory"]})
             for _ in range(MAX_STEPS):
                 if not await self._step(chat, provider, model_id, context, emit):
                     return
@@ -237,8 +277,8 @@ class ChatAgent:
                 content, is_error = "not run: the user pressed stop", True
             else:
                 await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
-                if call["name"] == SAVE_NOTE["name"] and context["project"]:
-                    content, is_error = self._save_note(context["project"], chat["id"], call["input"])
+                if call["name"] == "remember" and context["learn"]:
+                    content, is_error = self._remember(chat, context, call["input"])
                 else:
                     content, is_error = await self._call(call, emit)
                 await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,

@@ -1,7 +1,7 @@
 """What every model provider implements.
 
 History is provider-neutral and append-only:
-    {"role": "user", "text": "..."}
+    {"role": "user", "text": "...", "memory": [notes recalled for this message, optional]}
     {"role": "assistant", "provider": "anthropic", "model": "...", "blocks": [...], "raw": ...}
     {"role": "tool", "results": [{"id", "name", "content", "is_error"}]}
 Assistant blocks: {"type": "text", "text"}, {"type": "thinking", "text"},
@@ -57,6 +57,14 @@ def safe_id(value: Any, n: int) -> str:
     """A tool-call id every provider accepts."""
     text = re.sub(r"[^A-Za-z0-9_-]", "_", str(value or ""))
     return text or "lh_call_%d" % n
+
+
+def user_text(message: Dict[str, Any]) -> str:
+    """A user message as the model sees it: notes recalled for it (if any) in front of what the user wrote.
+    Stored with the message, so earlier turns replay unchanged and the prompt cache holds."""
+    from ..memory import block
+    notes = message.get("memory")
+    return block(notes, message.get("memory_project")) + "\n\n" + message["text"] if notes else message["text"]
 
 
 def text_of(blocks: List[Dict[str, Any]]) -> str:

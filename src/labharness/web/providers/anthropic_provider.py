@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import anthropic
 
-from .base import Emit, ModelInfo, Provider, TurnResult, safe_id
+from .base import Emit, ModelInfo, Provider, TurnResult, safe_id, user_text
 
 MODELS = [
     ("claude-opus-5-5", "Claude Opus 5.5"),
@@ -33,7 +33,7 @@ def to_messages(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     n = 0
     for m in history:
         if m["role"] == "user":
-            out.append({"role": "user", "content": [{"type": "text", "text": m["text"]}]})
+            out.append({"role": "user", "content": [{"type": "text", "text": user_text(m)}]})
         elif m["role"] == "assistant":
             if m.get("provider") == "anthropic" and m.get("raw"):
                 content = m["raw"]

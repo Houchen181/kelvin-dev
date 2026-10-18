@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -39,6 +40,7 @@ class EventLog:
         self.clock = clock
         self._memory: List[Dict[str, Any]] = []
         self._seq = 0
+        self._lock = threading.Lock()  # agent, plans and people write from different threads; keep every line
         if self.path:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.exists():
@@ -46,18 +48,19 @@ class EventLog:
                     self._seq = sum(1 for _ in f)
 
     def write(self, type_: str, **fields: Any) -> Dict[str, Any]:
-        self._seq += 1
-        event: Dict[str, Any] = {"seq": self._seq, "wall": _now(), "type": type_}
-        if self.clock is not None:
-            event["t"] = round(self.clock.now(), 6)
-        for k, v in fields.items():
-            if v is not None:
-                event[k] = _jsonable(v)
-        if self.path:
-            with open(self.path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(event, ensure_ascii=False) + "\n")
-        else:
-            self._memory.append(event)
+        with self._lock:
+            self._seq += 1
+            event: Dict[str, Any] = {"seq": self._seq, "wall": _now(), "type": type_}
+            if self.clock is not None:
+                event["t"] = round(self.clock.now(), 6)
+            for k, v in fields.items():
+                if v is not None:
+                    event[k] = _jsonable(v)
+            if self.path:
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            else:
+                self._memory.append(event)
         return event
 
     def events(self) -> List[Dict[str, Any]]:

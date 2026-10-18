@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import openai
 
-from .base import Emit, ModelInfo, Provider, TurnResult, safe_id, text_of
+from .base import Emit, ModelInfo, Provider, TurnResult, safe_id, text_of, user_text
 
 _SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
          "dall-e", "whisper", "davinci", "babbage")
@@ -20,7 +20,7 @@ def to_messages(system: str, history: List[Dict[str, Any]]) -> List[Dict[str, An
     n = 0
     for m in history:
         if m["role"] == "user":
-            out.append({"role": "user", "content": m["text"]})
+            out.append({"role": "user", "content": user_text(m)})
         elif m["role"] == "assistant":
             calls = []
             for b in m["blocks"]:

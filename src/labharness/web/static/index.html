@@ -43,6 +43,9 @@
       </button>
       <div id="chat-title" class="chat-title"></div>
       <div class="spacer"></div>
+      <button id="toggle-incognito" class="pill" type="button" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg><span class="incog-text">Incognito</span>
+      </button>
       <button id="toggle-runs" class="pill" type="button" aria-label="Show the runs pane" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg>Runs<span id="runs-dot" class="live-dot" hidden></span>
       </button>
@@ -171,9 +174,14 @@
       <select id="default-model" name="default_model"></select>
     </div>
     <div class="field">
+      <div class="field-row"><span class="field-label">Memory</span>
+        <label class="check"><input id="learn" type="checkbox"> Learn from conversations</label></div>
       <label for="global-instructions">Instructions for every conversation</label>
       <textarea id="global-instructions" rows="4" maxlength="4000" spellcheck="true" placeholder="e.g. Give fields in tesla and temperatures in kelvin. Ask me before any overnight run."></textarea>
       <span class="hint">Kelvin reads these in every chat. Keep what belongs to one experiment in that project's settings.</span>
+      <div class="field-row"><span class="field-label small">What Kelvin keeps about you</span><span id="global-notes-count" class="hint"></span></div>
+      <ul id="global-notes" class="memory-notes"></ul>
+      <span class="hint">Preferences and conventions Kelvin kept from your chats, used in every conversation. Facts about an experiment are kept per project. Incognito chats use none of this and add nothing.</span>
     </div>
     <footer class="dialog-foot">
       <button id="quit-app" class="btn" type="button" hidden>Quit Kelvin</button>

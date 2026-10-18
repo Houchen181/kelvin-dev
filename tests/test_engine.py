@@ -229,3 +229,16 @@ after: { tc.setpoint: 1.6 }
     assert report.ok and len(report.rows) == 1
     assert report.warnings and "did not settle" in report.warnings[0]
     assert any("did not settle" in i for i in report.analysis["issues"])
+
+
+def test_event_log_keeps_every_line_from_many_threads(tmp_path):
+    import threading
+    from labharness import EventLog
+    log = EventLog(tmp_path / "events.jsonl")
+    threads = [threading.Thread(target=lambda k=k: [log.write("t", k=k, i=i) for i in range(200)]) for k in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    lines = (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1600 and sorted(json.loads(l)["seq"] for l in lines) == list(range(1, 1601))

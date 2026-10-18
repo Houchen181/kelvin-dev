@@ -3,7 +3,7 @@
   const token = decodeURIComponent(location.hash.slice(1));
   const $ = (id) => document.getElementById(id);
   const SVGNS = "http://www.w3.org/2000/svg";
-  const S = { chats: [], projects: [], chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map() };
+  const S = { chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map() };
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -24,6 +24,8 @@
     x: '<path d="M6 6l12 12M18 6L6 18"/>',
     chev: '<path d="M9 6l6 6-6 6"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+    incognito: '<path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/>',
+    memory: '<path d="M7 3h10a1 1 0 0 1 1 1v17l-6-4-6 4V4a1 1 0 0 1 1-1z"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     dots: '<circle cx="5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="19" cy="12" r="1.1"/>',
     folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
@@ -729,7 +731,9 @@
       case "get_trace": return v("Reading", "Read") + " a trace from run " + code(a.run_id);
       case "recent_events": return v("Reading", "Read") + " the event log";
       case "wait": return v("Waiting", "Waited") + " " + esc(String(a.seconds)) + " s";
-      case "save_note": return v("Saving", "Saved") + " a note to the project";
+      case "save_note": return v("Saving", "Saved") + " a note to the project";  // older chats
+      case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat" : " for this project") +
+        (a.text ? ": " + esc(String(a.text)) : "");
       default: return code(name);
     }
   }
@@ -891,6 +895,14 @@
       if (step) { (step.last || step.el).after(el); step.last = el; } else this.el.append(el);
     }
     note(text) { this.endText(); this.el.append(h("div", { class: "note" }, text)); }
+    memory(notes) {  // the saved notes recalled for this message: what Kelvin knew from earlier work
+      if (!notes || !notes.length) return;
+      this.endText();
+      this.el.append(h("details", { class: "recall" },
+        h("summary", {}, icon("memory"), "Recalled " + notes.length + (notes.length === 1 ? " note" : " notes") + " from earlier work"),
+        h("ul", {}, ...notes.map((n) => h("li", {}, h("span", { class: "memory-kind" }, n.kind),
+          h("span", {}, n.text), h("span", { class: "memory-meta" }, n.scope === "global" ? "every chat" : "this project"))))));
+    }
     error(text) { this.endText(); this.el.append(h("div", { class: "callout" }, text)); }
     finish() {
       this.endText(); this.endThinking();
@@ -909,14 +921,20 @@
 
   function renderChat(chat) {
     thread.replaceChildren();
-    let reply = null;
+    let reply = null, recalled = null;
     for (const m of chat.messages) {
       if (m.role === "user") {
         if (reply) reply.finish();
         reply = null;
+        recalled = m.memory || null;
         thread.append(userBubble(m.text));
       } else if (m.role === "assistant") {
-        if (!reply) { reply = new Reply(m.provider + ":" + m.model); thread.append(reply.el); }
+        if (!reply) {
+          reply = new Reply(m.provider + ":" + m.model);
+          thread.append(reply.el);
+          reply.memory(recalled);
+          recalled = null;
+        }
         for (const b of m.blocks) {
           if (b.type === "text") { reply.addText(b.text); reply.endText(); }
           else if (b.type === "thinking") { reply.addThinking(b.text); reply.endThinking(); }
@@ -940,6 +958,10 @@
   const projectName = (id) => (S.projects.find((p) => p.id === id) || {}).name;
 
   function setTitle(title, projectId) {
+    if (S.incognito) {
+      $("chat-title").replaceChildren(h("span", { class: "crumb incog" }, icon("incognito"), h("span", {}, "Incognito chat")));
+      return;
+    }
     const name = projectName(projectId);
     const crumb = name ? [h("span", { class: "crumb" }, icon("folder"), h("span", {}, name)), title ? h("span", { class: "crumb-sep" }, "/") : null] : [];
     $("chat-title").replaceChildren(...crumb.filter(Boolean), title || "");
@@ -1228,10 +1250,40 @@
     renderChats();
     setTitle(currentTitle(), currentProject());
   }
+  // an incognito chat is forgotten as soon as you leave it
+  function leaveIncognito() {
+    if (S.incognito && S.chatId) api("/api/chats/" + S.chatId, { method: "DELETE" }).catch(() => {});
+    if (S.incognito) { S.incognito = false; applyIncognito(); }
+  }
+  function applyIncognito() {
+    document.body.classList.toggle("incognito", S.incognito);
+    const b = $("toggle-incognito");
+    b.setAttribute("aria-pressed", String(S.incognito));
+    b.classList.toggle("on", S.incognito);
+    b.hidden = !!S.chatId && !S.incognito;  // offered on a new chat, shown while in one
+    $("greeting").textContent = S.incognito ? "Incognito chat" : "What are we measuring today?";
+    $("empty-sub").textContent = S.incognito
+      ? "Kelvin uses no memory here, keeps nothing from this chat, and forgets it when you leave. Instrument commands and runs are still logged."
+      : S.labSub || "";
+    $("input").placeholder = S.incognito ? "Ask anything; nothing here is remembered" : "Ask Kelvin…";
+  }
+  function toggleIncognito() {
+    if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
+    if (S.incognito) { newChat(); return; }   // leaving: forget it and start a normal chat
+    if (S.chatId) newChat();
+    S.incognito = true;
+    SIDE.newProject = null;
+    applyIncognito();
+    setTitle("", null);
+    renderChats();
+    $("input").focus();
+  }
+
   async function openChat(id) {
     if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
     let chat;
     try { chat = await api("/api/chats/" + id); } catch (e) { toast(e.message); return; }
+    leaveIncognito();
     S.chatId = id;
     SIDE.newProject = null;
     renderChat(chat);
@@ -1242,6 +1294,7 @@
   }
   function newChat(projectId) {
     if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
+    leaveIncognito();
     S.chatId = null;
     SIDE.newProject = projectId || null;
     thread.replaceChildren();
@@ -1249,6 +1302,7 @@
     setTitle("", SIDE.newProject);
     renderChats();
     closeSidebar();
+    applyIncognito();
     $("input").focus();
   }
 
@@ -1272,7 +1326,8 @@
     if (!model) { openSettings(); return; }
     store("lh.model", model);
     if (!S.chatId) {
-      try { S.chatId = (await api("/api/chats", { body: { model, project: SIDE.newProject } })).id; } catch (e) { toast(e.message); return; }
+      try { S.chatId = (await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
+      applyIncognito();
     }
     $("input").value = ""; autosize();
     showEmpty(false);
@@ -1334,6 +1389,7 @@
       case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id); pollState(); break;
       case "run_progress": reply.runProgress(ev); break;
       case "note": reply.note(ev.text); break;
+      case "memory": reply.memory(ev.notes); break;
       case "error": reply.error(ev.message); break;
       default: break;
     }
@@ -1508,8 +1564,31 @@
     $("local-models").value = (S.settings && S.settings.local_models) || "";
     fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
+    $("learn").checked = !S.settings || S.settings.learn !== false;
     $("settings-msg").textContent = "";
+    renderGlobalNotes(null);
     $("settings-dialog").showModal();
+    api("/api/memory").then((m) => renderGlobalNotes(m.notes)).catch(() => renderGlobalNotes([]));
+  }
+  function renderGlobalNotes(notes) {
+    const list = $("global-notes");
+    $("global-notes-count").textContent = notes && notes.length ? notes.length + (notes.length === 1 ? " note" : " notes") : "";
+    if (!notes) { list.replaceChildren(h("li", { class: "memory-empty" }, "Loading…")); return; }
+    if (!notes.length) {
+      list.replaceChildren(h("li", { class: "memory-empty" },
+        "Nothing yet. When you state a lasting preference (units, how careful to be, how you like answers), Kelvin keeps it here."));
+      return;
+    }
+    list.replaceChildren(...notes.map((n) => {
+      const when = new Date(n.created * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+      const chat = S.chats.find((c) => c.id === n.chat);
+      return h("li", { class: "memory-note" }, h("span", { class: "memory-kind" }, n.kind),
+        h("div", { class: "memory-body" }, h("span", {}, n.text), h("span", { class: "memory-meta" }, when + (chat ? " · " + chat.title : ""))),
+        rowButton("trash", "Delete this note", async () => {
+          try { await api("/api/memory/notes/" + n.id, { method: "DELETE" }); } catch (e) { $("settings-msg").textContent = e.message; return; }
+          renderGlobalNotes(notes.filter((x) => x.id !== n.id));
+        }));
+    }));
   }
   async function saveSettings() {
     const body = {};
@@ -1521,6 +1600,7 @@
     body.local_models = $("local-models").value.trim();
     body.default_model = $("default-model").value;
     body.instructions = $("global-instructions").value;
+    body.learn = $("learn").checked ? "on" : "off";
     $("settings-msg").textContent = "Saving…";
     try {
       const r = await api("/api/settings", { body });
@@ -1569,7 +1649,13 @@
     S.projects = boot.projects || [];
     $("lab-name").textContent = boot.lab;
     $("sim-tag").hidden = !boot.simulated;
-    $("empty-sub").textContent = boot.lab + (boot.simulated ? " (simulated)" : "") + " · Claude, GPT, Gemini or a local model";
+    S.labSub = boot.lab + (boot.simulated ? " (simulated)" : "") + " · Claude, GPT, Gemini or a local model";
+    $("empty-sub").textContent = S.labSub;
+    $("toggle-incognito").addEventListener("click", toggleIncognito);
+    applyIncognito();
+    window.addEventListener("pagehide", () => {   // closing the page also forgets an incognito chat
+      if (S.incognito && S.chatId) fetch("/api/chats/" + S.chatId, { method: "DELETE", keepalive: true, headers: { "X-Kelvin-Token": token } });
+    });
     $("suggestions").replaceChildren(...SUGGESTIONS.map(([title, text]) => {
       const b = h("button", { class: "suggestion", type: "button" }, h("b", {}, title), h("span", {}, text));
       b.addEventListener("click", () => sendMessage(text));

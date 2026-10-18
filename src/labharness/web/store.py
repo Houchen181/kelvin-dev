@@ -5,6 +5,9 @@ Chat history is append-only: earlier turns are never edited. Project membership 
 
 Each project also keeps its memory in that index: the user's instructions and a short list of notes (durable
 facts). A chat sees only the memory of the project it is filed under, and deleting a project deletes its memory.
+Global notes (the user's preferences and conventions) live there too. See memory.py for how notes are recalled.
+
+Incognito chats live only in this process: never written to disk, never listed, never filed under a project.
 """
 from __future__ import annotations
 
@@ -15,15 +18,18 @@ import secrets
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from .memory import KINDS, PROJECT_KINDS, SAME, similarity
 
 _ID = re.compile(r"^[0-9a-f]{12}$")
 _PROJECT_ID = re.compile(r"^p[0-9a-f]{8}$")
 MAX_NAME = 60
 MAX_INSTRUCTIONS = 4000  # characters, for a project's instructions and for the global ones
 MAX_NOTE = 300
-MAX_NOTES = 50
-NOTE_KINDS = ("decision", "procedure", "quirk", "result")
+MAX_NOTES = 50          # per project
+MAX_GLOBAL_NOTES = 40
+NOTE_KINDS = PROJECT_KINDS
 
 
 def _name(name: Any) -> str:
@@ -43,6 +49,7 @@ class ChatStore:
         self.root.mkdir(parents=True, exist_ok=True)
         self._index_path = self.root / "_projects.json"
         self._lock = threading.Lock()
+        self._temp: Dict[str, Dict[str, Any]] = {}  # incognito chats: this process only
 
     def _path(self, chat_id: str) -> Path:
         if not _ID.match(chat_id or ""):
@@ -51,12 +58,16 @@ class ChatStore:
 
     # ------------------------------------------------------------------ chats
 
-    def create(self, model: str, project: Optional[str] = None) -> Dict[str, Any]:
+    def create(self, model: str, project: Optional[str] = None, incognito: bool = False) -> Dict[str, Any]:
+        if incognito and project:
+            raise ValueError("An incognito chat cannot belong to a project.")
         if project:
             self._find(self._read_index(), project)  # an unknown project creates nothing
         now = time.time()
-        chat = {"id": secrets.token_hex(6), "title": "New chat", "model": model,
+        chat = {"id": secrets.token_hex(6), "title": "Incognito chat" if incognito else "New chat", "model": model,
                 "created": now, "updated": now, "messages": []}
+        if incognito:
+            chat["incognito"] = True
         self.save(chat)
         if project:
             self.assign(chat["id"], project)
@@ -64,6 +75,8 @@ class ChatStore:
         return chat
 
     def load(self, chat_id: str) -> Dict[str, Any]:
+        if chat_id in self._temp:
+            return self._temp[chat_id]
         path = self._path(chat_id)
         if not path.exists():
             raise KeyError("no chat %r" % chat_id)
@@ -71,6 +84,10 @@ class ChatStore:
 
     def save(self, chat: Dict[str, Any]) -> None:
         chat["updated"] = time.time()
+        if chat.get("incognito"):
+            self._path(chat["id"])  # validates the id
+            self._temp[chat["id"]] = chat
+            return
         path = self._path(chat["id"])
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps({k: v for k, v in chat.items() if k != "project"}, ensure_ascii=False),
@@ -78,6 +95,8 @@ class ChatStore:
         os.replace(tmp, path)
 
     def delete(self, chat_id: str) -> None:
+        if self._temp.pop(chat_id, None) is not None:
+            return
         path = self._path(chat_id)
         if path.exists():
             path.unlink()
@@ -103,8 +122,13 @@ class ChatStore:
     def project_of(self, chat_id: str) -> Optional[str]:
         return self._read_index()["assign"].get(chat_id)
 
+    def is_incognito(self, chat_id: str) -> bool:
+        return chat_id in self._temp
+
     def memory_of(self, chat_id: str) -> Optional[Dict[str, Any]]:
-        """The memory of the project this chat is filed under; None for an unfiled chat."""
+        """The memory of the project this chat is filed under; None for an unfiled or incognito chat."""
+        if chat_id in self._temp:
+            return None
         index = self._read_index()
         project_id = index["assign"].get(chat_id)
         return self._find(index, project_id) if project_id else None
@@ -122,7 +146,8 @@ class ChatStore:
             p.setdefault("notes", [])
         known = {p["id"] for p in projects}
         assign = {c: p for c, p in (data.get("assign") or {}).items() if p in known}
-        return {"projects": projects, "assign": assign}
+        notes = [n for n in data.get("global_notes") or [] if isinstance(n, dict) and n.get("id") and n.get("text")]
+        return {"projects": projects, "assign": assign, "global_notes": notes}
 
     def _write_index(self, index: Dict[str, Any]) -> None:
         tmp = self._index_path.with_suffix(".tmp")
@@ -162,27 +187,60 @@ class ChatStore:
         return project
 
     def add_note(self, project_id: str, text: Any, kind: str, chat_id: Optional[str] = None) -> Dict[str, Any]:
-        """Save a short durable fact to a project. Saving the same text again returns the note already there."""
+        """Save a short durable fact to a project. Saving the same fact again returns the note already there."""
+        return self.remember("project", text, kind, project_id=project_id, chat_id=chat_id)[0]
+
+    def remember(self, scope: str, text: Any, kind: str, project_id: Optional[str] = None,
+                 chat_id: Optional[str] = None, replaces: Optional[str] = None) -> Tuple[Dict[str, Any], str]:
+        """Save a short, typed, durable fact. Returns (note, what happened): "saved", "known" (the same fact, in
+        the same or other words, is already there) or "updated" (it corrects the note `replaces`)."""
+        if scope not in KINDS:
+            raise ValueError("A note is kept for the user (global) or for a project.")
         text = " ".join(str(text or "").split())
         if not text:
             raise ValueError("A note needs some text.")
         if len(text) > MAX_NOTE:
             raise ValueError("A note is at most %d characters; shorten it to the fact itself." % MAX_NOTE)
-        if kind not in NOTE_KINDS:
-            raise ValueError("A note's kind is one of: %s." % ", ".join(NOTE_KINDS))
+        if kind not in KINDS[scope]:
+            raise ValueError("A %s note's kind is one of: %s." % (scope, ", ".join(KINDS[scope])))
+        if scope == "project" and not project_id:
+            raise ValueError("This conversation is not in a project, so there is no project to keep it for.")
         with self._lock:
             index = self._read_index()
-            project = self._find(index, project_id)
-            for note in project["notes"]:
-                if note["text"].lower() == text.lower():
-                    return note
-            if len(project["notes"]) >= MAX_NOTES:
-                raise ValueError("This project already has %d notes; the user can delete old ones in Project settings."
-                                 % MAX_NOTES)
+            if scope == "project":
+                notes, cap = self._find(index, project_id)["notes"], MAX_NOTES
+                where = "This project already has %d notes; the user can delete old ones in Project settings."
+            else:
+                notes, cap = index["global_notes"], MAX_GLOBAL_NOTES
+                where = "There are already %d global notes; the user can delete old ones in Settings."
+            if replaces:
+                old = next((n for n in notes if n.get("id") == replaces), None)
+                if old is None:
+                    raise KeyError("no note %r" % replaces)
+                old.update(text=text, kind=kind, updated=time.time(), chat=chat_id or old.get("chat"))
+                self._write_index(index)
+                return old, "updated"
+            for note in notes:
+                if note["text"].lower() == text.lower() or similarity(note["text"], text) >= SAME:
+                    return note, "known"
+            if len(notes) >= cap:
+                raise ValueError(where % cap)
             note = {"id": "n" + secrets.token_hex(4), "kind": kind, "text": text, "created": time.time(), "chat": chat_id}
-            project["notes"].append(note)
+            notes.append(note)
             self._write_index(index)
-        return note
+        return note, "saved"
+
+    def global_notes(self) -> List[Dict[str, Any]]:
+        return self._read_index()["global_notes"]
+
+    def delete_global_note(self, note_id: str) -> None:
+        with self._lock:
+            index = self._read_index()
+            kept = [n for n in index["global_notes"] if n.get("id") != note_id]
+            if len(kept) == len(index["global_notes"]):
+                raise KeyError("no note %r" % note_id)
+            index["global_notes"] = kept
+            self._write_index(index)
 
     def delete_note(self, project_id: str, note_id: str) -> None:
         with self._lock:
@@ -205,6 +263,10 @@ class ChatStore:
 
     def assign(self, chat_id: str, project_id: Optional[str]) -> None:
         """File a chat under a project, or take it out of its project (None)."""
+        if chat_id in self._temp:
+            if project_id:
+                raise ValueError("An incognito chat cannot be filed under a project.")
+            return
         if not self._path(chat_id).exists():
             raise KeyError("no chat %r" % chat_id)
         with self._lock:
