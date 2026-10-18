@@ -372,7 +372,7 @@
         <select id="lab-card" aria-label="Card"></select>
         <button id="lab-add" class="btn small" type="button">Add</button>
       </div>
-      <span class="hint">Instrument not in the list? <button id="open-cards" class="link" type="button">Make a card for it from its manual…</button></span>
+      <span class="hint">Instrument not in the list? <button id="open-cards" class="link" type="button">Make a card for it from its manual or example scripts…</button></span>
     </div>
     <div class="field">
       <label for="lab-yaml">Lab config</label>
@@ -410,23 +410,29 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">A card tells Kelvin how to talk to an instrument model. For one Kelvin doesn't know, paste the command reference from its manual and a model drafts the card for you to check. New cards are <b>drafts</b>: on real hardware their readings work, so you can try them, but their outputs stay simulation-only until you mark the card reviewed.</p>
+    <p class="muted small">A card tells Kelvin how to talk to an instrument model. For one Kelvin doesn't know, give the command reference from its manual, or the maker's example scripts, and a model drafts the card. Try it on the instrument, compare its readings with the front panel, and fix it until they agree. New cards are <b>drafts</b>: on real hardware their readings work, so you can try them, but their outputs stay simulation-only until you mark the card reviewed.</p>
     <ul id="card-list" class="memory-notes"></ul>
     <div class="field">
-      <span class="field-label">New card from a manual</span>
+      <span class="field-label">New card from a manual or example scripts</span>
       <div class="add-row">
         <input id="card-name" placeholder="Instrument, e.g. Cryomagnetics 4G magnet supply" aria-label="Instrument">
         <select id="card-model" aria-label="Model that drafts the card"></select>
         <button id="card-draft" class="btn small" type="button">Draft the card</button>
       </div>
-      <textarea id="card-manual" class="mono" rows="6" spellcheck="false" placeholder="Paste the manual's remote-programming chapter: the commands with their syntax, ranges and replies."></textarea>
-      <span class="hint">A PDF manual? Copy the command pages from your PDF viewer and paste them here, or <label class="link file-pick">load a text file<input id="card-file" type="file" accept=".txt,.md,.text,.csv,.html,.htm" hidden></label>. The manual goes to the model you pick.</span>
+      <textarea id="card-manual" class="mono" rows="6" spellcheck="false" placeholder="Paste the manual's remote-programming chapter, or the maker's example scripts (Python, MATLAB, C header): the commands or functions with their arguments, ranges and replies."></textarea>
+      <span class="hint">A PDF manual? Copy the command pages from your PDF viewer and paste them here. Example scripts? <label class="link file-pick">Load files<input id="card-file" type="file" multiple accept=".txt,.md,.text,.csv,.html,.htm,.py,.m,.h,.hpp,.c,.cpp,.cs,.vb,.ipynb,.json,.ini,.yaml,.yml" hidden></label>, several at once: the scripts, a DLL's header file, the README. What you give goes to the model you pick.</span>
     </div>
     <div id="card-edit" class="field" hidden>
       <div class="field-row"><label for="card-yaml">Card</label><span id="card-editing" class="hint"></span></div>
       <textarea id="card-yaml" class="mono" rows="16" spellcheck="false"></textarea>
       <ul id="card-problems" class="health-list"></ul>
       <p id="card-notes" class="hint"></p>
+      <div class="add-row">
+        <input id="card-try-address" placeholder="Try it on: GPIB0::12::INSTR, serial://COM3, or lib://COM4?python=…&amp;path=…" aria-label="Address to try the card on">
+        <button id="card-try" class="btn small" type="button">Try it</button>
+      </div>
+      <span class="hint">Trying only asks who the instrument is and reads every reading; it sets nothing.</span>
+      <ul id="card-try-results" class="health-list"></ul>
     </div>
     <footer class="dialog-foot">
       <span id="cards-msg" class="muted small"></span>

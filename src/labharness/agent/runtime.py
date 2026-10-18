@@ -135,6 +135,7 @@ class LabRuntime:
         self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
         self.scan_network = True                    # scans also look on the local network (a Settings switch)
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
+        self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
@@ -649,6 +650,7 @@ class LabRuntime:
             finally:
                 self.busy = None
         self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
+        self.last_found = [f.address for f in found]
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
         out = []
         for f in found:
@@ -760,6 +762,35 @@ class LabRuntime:
         lines = ["valid: %s (%s), %d parameters; drives: %s" % (card.id, card.model, len(card.params),
                                                               ", ".join(drives) or "none")]
         return "\n".join(lines + ["warning: " + w for w in warnings])
+
+    def read_examples(self, path: str) -> str:
+        try:
+            return carddraft.read_sources(path)
+        except (OSError, ValueError) as e:
+            return "not read: %s" % e
+
+    def try_card(self, text: str, instrument: str) -> str:
+        """Kelvin's own try: only on an instrument a person put in the lab, or one the last scan found."""
+        from .. import cardtry
+        from ..adapters import AdapterError
+        card, problems, _ = carddraft.check(text)
+        if card is None:
+            return "not valid:\n" + "\n".join("- " + p for p in problems)
+        targets = cardtry.addresses_for_agent(self.lab, self.last_found)
+        address = targets.get(instrument)
+        if address is None:
+            return ("Kelvin tries a card only on an instrument in the lab or one the last scan found (%s). A person can "
+                    "try it on any address in Lab, Cards." % (", ".join(sorted(targets)) or "none yet: scan first"))
+
+        def run() -> str:
+            try:
+                result = cardtry.try_card(card, address, self.lab)
+            except (AdapterError, OSError, ValueError) as e:
+                return "could not try it: %s" % e
+            self.gate.log.write("card_try", by="agent", card=card.id, address=address,
+                                answered=sum(1 for r in result["readings"] if "value" in r))
+            return cardtry.summary(result)
+        return self._do("trying card %s" % card.id, run)
 
     def save_card(self, text: str, by: str = "agent") -> str:
         if self.cards_dir is None:
@@ -963,6 +994,7 @@ class LabRuntime:
             except AdapterError as e:
                 return str(e)
             self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
+            self.last_found = [f.address for f in found]
             if not found:
                 return "\n".join([reason(found, looked)] + looked.lines())
             lines = [f.line() for f in found]

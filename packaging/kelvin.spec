@@ -51,6 +51,9 @@ for package, dist, skip in PACKAGES:
     except Exception:
         pass
 
+# the helper for a maker's library runs as a script, with this app or another Python (labharness/library.py)
+datas.append((str(ROOT / "src" / "labharness" / "data" / "bridge" / "kelvin_bridge.py"), "labharness/data/bridge"))
+
 a = Analysis(
     [str(ROOT / "packaging" / "kelvin_app.py")],
     pathex=[str(ROOT / "src")],

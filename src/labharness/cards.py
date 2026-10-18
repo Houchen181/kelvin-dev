@@ -241,6 +241,7 @@ class Card:
     vars: Dict[str, Dict[str, str]] = field(default_factory=dict)   # per-installation names: {name: {default, label}}
     bound: Dict[str, str] = field(default_factory=dict)             # the values this copy was made with
     data: Dict[str, Any] = field(default_factory=dict, repr=False)  # as written, to bind other values
+    library: Dict[str, Any] = field(default_factory=dict)            # the maker's module or DLL (library.py)
 
     def bind(self, values: Optional[Dict[str, Any]]) -> "Card":
         """This card with its variables set for one instrument (which sensor, channel or output it uses)."""
@@ -462,7 +463,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
             chosen[k] = str(v)
     if card_vars:
         data = _substitute({k: v for k, v in data.items() if k != "vars"}, chosen)
-    leftover = sorted(set(re.findall(r"\{([a-z_][a-z0-9_]*)\}", repr(data))) - {"value"})
+    leftover = sorted(set(re.findall(r"\{([a-z_][a-z0-9_]*)\}", repr(data))) - {"value", "address"})
     if leftover:
         err("vars", "the commands use %s, which the card does not declare under vars" % ", ".join(leftover))
     for key in ("id", "model", "kind"):
@@ -568,6 +569,9 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     headline = (data.get("display") or {}).get("headline")
     if headline is not None and (headline not in params or params[headline].get_cmd is None):
         err("display.headline", "%r is not a readable parameter" % headline)
+    library = _library(data.get("library"), params, identify, err)
+    if library and on_connect:
+        err("on_connect", "a card with a library connects with library.open")
 
     if errors:
         raise CardError(source, errors)
@@ -579,8 +583,118 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
         source=source, connection=connection, idn_query=str(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
-        on_connect=on_connect, vars=card_vars, bound=chosen, data=original,
+        on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library,
     )
+
+
+LIB_TYPES = ("int8", "uint8", "int16", "uint16", "int32", "int", "uint32", "int64", "uint64", "float", "double", "bool")
+LIB_DENY = ("os", "sys", "subprocess", "shutil", "builtins", "importlib", "runpy", "ctypes", "socket", "pathlib",
+            "pickle", "marshal", "multiprocessing", "code", "codeop", "webbrowser", "urllib", "http", "asyncio")
+LIB_CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*)\b")
+LIB_READS = re.compile(r"^(get|is|has|query|read|measure|fetch|status|current|actual)", re.I)   # names that only read
+LIB_ACTS = re.compile(r"^(toggle|start|stop|go|sweep|move|set|apply|run|reset|calibrat|upload|download|delete|"
+                      r"write|save|store|shutdown|home|zero|exchange|pump)", re.I)
+
+
+def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
+             err: Callable[[str, str], None]) -> Dict[str, Any]:
+    """The maker's library and how to call it; see library.py. Checked so that only the maker's own functions,
+    named here, can be called, and readings call only functions that read."""
+    if lib is None:
+        return {}
+    if not isinstance(lib, dict):
+        err("library", "must be a mapping")
+        return {}
+    name = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+    out = dict(lib)
+    if bool(lib.get("module")) == bool(lib.get("dll")):
+        err("library", "name either module (a Python module) or dll (a DLL file), not both")
+    if lib.get("module"):
+        mod = str(lib["module"])
+        if not all(name.match(p) for p in mod.split(".")) or mod.split(".")[0] in LIB_DENY:
+            err("library.module", "%r is not a maker's module" % mod)
+        if lib.get("object") is not None and not name.match(str(lib["object"])):
+            err("library.object", "must be a name")
+    functions: Dict[str, Any] = {}
+    if lib.get("dll"):
+        dll = str(lib["dll"])
+        if not re.match(r"^[A-Za-z0-9_.+-]+\.(dll|so|dylib)$", dll, re.I):
+            err("library.dll", "a DLL file name in the folder the address names, e.g. attoDRYLib.dll")
+        if lib.get("convention", "cdecl") not in ("cdecl", "stdcall"):
+            err("library.convention", "cdecl or stdcall")
+        if lib.get("returns", "error") not in ("error", "none") + LIB_TYPES:
+            err("library.returns", "error (an error code, 0 when fine), none, or a number type")
+        if not re.match(r"^[A-Za-z0-9_]*$", str(lib.get("prefix") or "")):
+            err("library.prefix", "letters, digits and _ only")
+        functions = lib.get("functions") or {}
+        if not isinstance(functions, dict) or not functions:
+            err("library.functions", "list each function the card calls, with its C arguments and output")
+            functions = {}
+        for fn, sig in functions.items():
+            path = "library.functions.%s" % fn
+            if not name.match(str(fn)):
+                err(path, "not a function name")
+            sig = sig or {}
+            if not isinstance(sig, dict):
+                err(path, "a mapping with args, out and ret")
+                continue
+            for a in sig.get("args") or []:
+                if a not in LIB_TYPES + ("str",):
+                    err(path + ".args", "%r is not one of %s, str" % (a, ", ".join(LIB_TYPES)))
+            if sig.get("out") is not None and sig["out"] not in LIB_TYPES + ("str",):
+                err(path + ".out", "%r is not one of %s, str" % (sig["out"], ", ".join(LIB_TYPES)))
+            if sig.get("ret") is not None and sig["ret"] not in ("error", "none") + LIB_TYPES:
+                err(path + ".ret", "error, none, or a number type")
+    known = set(functions) if lib.get("dll") else None
+
+    def check_call(path: str, text: Any) -> None:
+        parts = [p for p in re.split(r"[\s,]+", str(text).strip()) if p]
+        if not parts or not name.match(parts[0]):
+            err(path, "%r is not a function and its arguments" % text)
+        elif parts[0] != "wait" and known is not None and parts[0] not in known:
+            err(path, "%s is not under library.functions" % parts[0])
+        elif parts[0] == "wait" and (len(parts) != 2 or not re.match(r"^[0-9.]+$", parts[1])):
+            err(path, "wait takes seconds, e.g. wait 10")
+
+    for key in ("open", "close"):
+        for i, step in enumerate(lib.get(key) or []):
+            check_call("library.%s[%d]" % (key, i), step)
+    toggles = lib.get("toggles") or {}
+    if not isinstance(toggles, dict):
+        err("library.toggles", "a mapping of name: {toggle, state}")
+        toggles = {}
+    for t, spec in toggles.items():
+        if not isinstance(spec, dict) or not spec.get("toggle") or not spec.get("state"):
+            err("library.toggles.%s" % t, "needs toggle (the function that flips it) and state (the one that reads it)")
+            continue
+        for key in ("toggle", "state"):
+            check_call("library.toggles.%s.%s" % (t, key), spec[key])
+        if not LIB_READS.match(str(spec["state"])):
+            err("library.toggles.%s.state" % t, "%s does not look like a function that only reads" % spec["state"])
+    for p in params.values():
+        for tmpl, verb in ((p.set_cmd, "SET"), (p.get_cmd, "GET")):
+            if tmpl is None:
+                continue
+            m = LIB_CALL.match(tmpl.text)
+            path = "parameters.%s.%s" % (p.name, verb.lower())
+            if not m or m.group(1).upper() != verb:
+                err(path, "with a library, write %s <function> [arguments]" % verb)
+                continue
+            fn = m.group(2)
+            if fn in toggles:
+                continue
+            if known is not None and fn not in known:
+                err(path, "%s is not under library.functions" % fn)
+            if verb == "GET" and (not LIB_READS.match(fn) or LIB_ACTS.match(fn)):
+                err(path, "%s does not look like a function that only reads (get..., is..., query...); a reading must "
+                    "never start anything" % fn)
+    query = str(identify.get("query") or "")
+    if query and query != "*IDN?":
+        m = LIB_CALL.match(query)
+        if not m or m.group(1).upper() != "GET" or not LIB_READS.match(m.group(2)):
+            err("identify.query", "with a library, GET <a function that reads the model or serial number>")
+    out["toggles"] = toggles
+    return out
 
 
 def load_card(path: Any) -> Card:

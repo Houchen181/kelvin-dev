@@ -782,6 +782,8 @@
       case "instrument_info": return v("Reading", "Read") + " the folder of " + code(a.instrument);
       case "search_manual": return v("Searching", "Searched") + " the " + esc(a.instrument || "") + " manual for " + code(a.query || "");
       case "show_sequence": return v("Drawing", "Drew") + " the " + code(a.protocol || "") + " pulse sequence";
+      case "read_examples": return v("Reading", "Read") + " the maker's examples in " + code(a.path || "");
+      case "try_card": return v("Trying", "Tried") + " the card on " + code(a.instrument || "");
       case "get_value": return v("Reading", "Read") + " " + code(a.instrument + "." + a.parameter);
       case "set_value": return v("Setting", "Set") + " " + code(a.instrument + "." + a.parameter) + " → " + esc(String(a.value));
       case "send_raw": return v("Sending", "Sent") + " " + code(a.command) + " to " + esc(a.instrument);
@@ -2187,6 +2189,7 @@
     $("card-editing").textContent = editing ? "editing " + editing : "new card";
     showCardProblems(problems || [], warnings || []);
     $("card-notes").textContent = notes || "";
+    $("card-try-results").replaceChildren();
     $("card-yaml").focus();
   }
   function showCardProblems(problems, warnings) {
@@ -2195,9 +2198,37 @@
       ...warnings.map((w) => h("li", { class: "bad" }, icon("warn"), h("span", { class: "muted" }, w))),
       ...(problems.length ? [] : [h("li", { class: "good" }, icon("check"), h("span", {}, "The card is valid."))]));
   }
+  async function tryCard() {
+    const address = $("card-try-address").value.trim();
+    if (!address) { $("cards-msg").textContent = "Give the address to try it on, as in the lab config."; return; }
+    const btn = $("card-try");
+    btn.disabled = true;
+    $("cards-msg").textContent = "Trying it on " + address + "…";
+    $("card-try-results").replaceChildren();
+    try {
+      const r = await api("/api/cards/try", { body: { yaml: $("card-yaml").value, address } });
+      const rows = [];
+      const idOk = r.matches !== false && !r.identity_error;
+      rows.push(h("li", { class: idOk ? "good" : "bad" }, icon(idOk ? "check" : "warn"),
+        h("span", {}, r.identity_error ? "Identity: " + r.identity_error
+          : "Identity: " + (r.identity || "(empty)") + (r.matches === false ? " (does not match the card)" : ""))));
+      for (const x of r.readings) {
+        const text = x.error ? x.name + ": " + x.error : x.skipped ? x.name + ": skipped, " + x.skipped
+          : x.name + " = " + x.value + (x.unit ? " " + x.unit : "");
+        rows.push(h("li", { class: x.error ? "bad" : "good" }, icon(x.error ? "warn" : "check"),
+          h("span", { class: x.skipped ? "muted" : "" }, text)));
+      }
+      if (r.instrument_error) rows.push(h("li", { class: "bad" }, icon("warn"), h("span", {}, "Error queue: " + r.instrument_error)));
+      $("card-try-results").replaceChildren(...rows);
+      const bad = r.readings.filter((x) => x.error).length;
+      $("cards-msg").textContent = bad ? bad + " readings failed: fix them in the card and try again."
+        : "Every reading answered. Compare the values with the front panel.";
+    } catch (e) { $("cards-msg").textContent = e.message; }
+    finally { btn.disabled = false; }
+  }
   async function draftCard() {
     const manual = $("card-manual").value.trim();
-    if (manual.length < 200) { $("cards-msg").textContent = "Paste the manual's command reference first."; return; }
+    if (manual.length < 200) { $("cards-msg").textContent = "Paste the manual's command reference or the maker's example scripts first."; return; }
     const btn = $("card-draft");
     btn.disabled = true;
     $("cards-msg").textContent = "Drafting with " + (S.labels[$("card-model").value] || "the model") + "… this can take a minute.";
@@ -3113,14 +3144,22 @@
     $("card-draft").addEventListener("click", draftCard);
     $("card-check").addEventListener("click", checkCard);
     $("card-save").addEventListener("click", saveCard);
+    $("card-try").addEventListener("click", tryCard);
     $("card-file").addEventListener("change", async (e) => {
-      const f = e.target.files[0];
-      if (!f) return;
-      if (f.size > 2e6) { $("cards-msg").textContent = "That file is large; paste only the command reference."; return; }
-      let text = await f.text();
-      if (/\.html?$/i.test(f.name)) text = new DOMParser().parseFromString(text, "text/html").body.innerText;
-      $("card-manual").value = text;
-      if (!$("card-name").value) $("card-name").value = f.name.replace(/\.[^.]+$/, "");
+      const files = [...e.target.files];
+      if (!files.length) return;
+      if (files.reduce((n, f) => n + f.size, 0) > 4e6) { $("cards-msg").textContent = "Those files are large; choose the command reference, the examples and the header only."; return; }
+      const parts = [];
+      for (const f of files) {
+        let text = await f.text();
+        if (/\.html?$/i.test(f.name)) text = new DOMParser().parseFromString(text, "text/html").body.innerText;
+        if (/\.ipynb$/i.test(f.name)) {   // a notebook: its code and notes, not its outputs
+          try { text = (JSON.parse(text).cells || []).filter((c) => c.cell_type !== "raw").map((c) => [].concat(c.source || []).join("")).join("\n\n"); } catch (err) { /* keep the raw text */ }
+        }
+        parts.push(files.length > 1 ? "=== " + f.name + " ===\n" + text : text);
+      }
+      $("card-manual").value = parts.join("\n\n");
+      if (!$("card-name").value) $("card-name").value = files[0].name.replace(/\.[^.]+$/, "");
     });
     $("open-report").addEventListener("click", openReport);
     $("make-report").addEventListener("click", makeReport);

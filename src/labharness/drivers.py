@@ -11,6 +11,7 @@ like a SCPI instrument. The address names the driver:
     toptica://10.0.0.9                    TOPTICA DLC pro: its command line (decop.py)
     qick://10.0.0.50:8888/myqick          RFSoC boards running QICK, through its Pyro4 server (rfsoc.py)
     http://10.0.0.7:20022/v1              instruments with a web API, e.g. a PHAROS laser (webapi.py)
+    lib://COM4?python=...&path=...        the maker's Python module or DLL, as its example scripts use it (library.py)
 
 The vendor libraries are optional: `pip install zhinst-core` or `pip install MultiPyVu` on the computer that runs
 Kelvin. Without them Kelvin says what to install."""
@@ -25,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .adapters import AdapterError
 from .cards import Card
 
-SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick")
+SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib")
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -651,7 +652,8 @@ from .webapi import HttpInstrument   # noqa: E402  (instruments with a web API: 
 DRIVERS = {"zhinst": Zhinst, "qd": MultiVu, "pulsestreamer": PulseStreamer, "pulseblaster": PulseBlaster,
            "timetagger": TimeTagger, "http": HttpInstrument, "https": HttpInstrument}
 MODULES: Dict[str, Any] = {}   # tests put fake vendor libraries here
-LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc", "Qick")}   # they import this module
+LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc", "Qick"),
+         "lib": ("library", "LibraryInstrument")}   # they import this module
 
 
 def open_driver(name: str, card: Card, address: str) -> DriverBackend:

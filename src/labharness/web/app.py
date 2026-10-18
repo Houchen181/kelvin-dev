@@ -497,12 +497,31 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             runtime.lab.registry.remove(card_id)
         return JSONResponse({"ok": True})
 
+    async def card_try(request: Request) -> Response:
+        """Try a card on an address a person typed: who it is, and every reading; nothing is set."""
+        from .. import cardtry
+        body = await request.json()
+        card, problems, _ = carddraft.check(str(body.get("yaml") or ""))
+        if card is None:
+            return error(400, "Fix the card first: " + "; ".join(problems[:3]))
+        address = str(body.get("address") or "").strip()
+        if not address:
+            return error(400, "Give the address to try it on, as in the lab config.")
+        try:
+            result = await asyncio.to_thread(cardtry.try_card, card, address, runtime.lab)
+        except Exception as e:
+            return error(400, "Could not try it: %s" % (str(e).splitlines()[0][:300] if str(e) else type(e).__name__))
+        runtime.gate.log.write("card_try", by="human", card=card.id, address=address,
+                               answered=sum(1 for r in result["readings"] if "value" in r))
+        return JSONResponse(dict(result, summary=cardtry.summary(result)))
+
     async def card_draft(request: Request) -> Response:
         """Draft a card from manual text with a model (the default one unless named); checked, repaired once."""
         body = await request.json()
         manual = str(body.get("manual") or "").strip()
         if len(manual) < 200:
-            return error(400, "Paste the manual's command reference (at least a few commands with their syntax).")
+            return error(400, "Paste the manual's command reference or the maker's example scripts (at least a few "
+                              "commands or functions with their arguments).")
         key = str(body.get("model") or settings.get("default_model") or "")
         if not key:
             groups = (await agent.models())["groups"]
@@ -1130,6 +1149,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/cards/status", card_status, methods=["POST"]),
         Route("/api/cards/delete", card_delete, methods=["POST"]),
         Route("/api/cards/draft", card_draft, methods=["POST"]),
+        Route("/api/cards/try", card_try, methods=["POST"]),
         Route("/api/devices", devices, methods=["POST"]),
         Route("/api/devices/pairing/{code}", pairing),
         Route("/api/devices/{device_id}", device, methods=["DELETE"]),

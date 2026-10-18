@@ -13,7 +13,7 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
   - `settings.json`: every setting and reading it had (ranges, time constants, sensitivities...), refreshed on every start.
   - `manual.pdf`: the maker's own manual, fetched once from the address on the card, and `manual.txt` with its text by page.
 - **Manuals for involved scans.** Before a scan that uses buffers, triggers, sweep or list modes, fast acquisition, ranges or filters, Kelvin reads the instrument's manual with `instrument_info` and `search_manual`. It works from the passages it finds and cites the page. Search weighs rare words most, so a mnemonic such as `OFLT` or a SCPI path such as `SOURce:CURRent:LIMit` finds its own entry.
-- **Manuals you add yourself.** 27 of the 36 cards carry the maker's link. Keysight hands out some manuals only after a sign-in, the Oxford Mercury iTC manual is no longer public, SpinCore's is behind its support pages, and M Squared, Light Conversion and TOPTICA give their protocol documents to owners. QICK's documentation is on its project site. For these, or for any other instrument, choose the PDF in **Set up…** (**Choose PDF…**) or put it in the folder as `manual.pdf`.
+- **Manuals you add yourself.** 27 of the 37 cards carry the maker's link. Keysight hands out some manuals only after a sign-in, the Oxford Mercury iTC manual is no longer public, SpinCore's is behind its support pages, and M Squared, Light Conversion and TOPTICA give their protocol documents to owners. QICK's documentation is on its project site. For these, or for any other instrument, choose the PDF in **Set up…** (**Choose PDF…**) or put it in the folder as `manual.pdf`.
 - **Switching it off.** Settings has **Set them up when Kelvin starts**, **Fetch their manuals from the makers** and **Look on the local network too**. Fetching a manual sends only its address to the maker's site. An existing `lab.yaml` is never rewritten. Instruments it doesn't list are only reported.
 
 **Where a scan looks.** No vendor driver is needed for the network or USB.
@@ -53,7 +53,7 @@ The scan only asks each instrument who it is (`*IDN?`, or the card's own identit
 | Source-meters and sources | Keithley 2400-series, Keithley 2450/2460/2461/2470, Keysight B2900, Yokogawa GS200/GS210 |
 | Lock-ins | SRS SR830/SR810, SRS SR860/SR865, Zurich Instruments MFLI (through LabOne) |
 | Temperature controllers (cryostats) | Lake Shore 335/336, Lake Shore 350, Oxford Instruments Mercury iTC |
-| Cryostat systems | Quantum Design PPMS, DynaCool, VersaLab, MPMS3 (through MultiVu) |
+| Cryostat systems | Quantum Design PPMS, DynaCool, VersaLab, MPMS3 (through MultiVu), attocube attoDRY1100/2100/800 (through attoDRYLib, draft) |
 | Magnet supplies | Lake Shore 625, AMI 430 |
 | Lasers and optics | Coherent OBIS, Thorlabs ITC4000 laser/TEC controller, Thorlabs PM100/PM400 power meter |
 | Amplifiers | SRS SR560 voltage preamp, SRS SR570 current preamp (listen-only: Kelvin shows what it last set) |
@@ -149,12 +149,26 @@ For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pu
 
 What leaves the computer: the maker and model name, and the manual's command pages, go to your model; the manual's address goes to the maker's site. The serial number never leaves. Switch this off with **Write cards for instruments Kelvin doesn't know** in Settings. If Kelvin can't find the manual (some makers want a sign-in) or there is no model, it says so; then draft the card from a PDF yourself:
 
-For an instrument Kelvin doesn't know, open **Lab → Set up → Make a card for it from its manual…**.
-- **Drafting:** paste the manual's remote-programming chapter (copy it from your PDF viewer, or load a text file). Pick a model and press **Draft the card**. The model writes the card from that text only, and Kelvin checks it against the card format, asking the model to fix any problems once.
+For an instrument Kelvin doesn't know, open **Lab → Set up → Make a card for it from its manual or example scripts…**.
+- **Drafting:** paste the manual's remote-programming chapter (copy it from your PDF viewer), or load the maker's example scripts: **Load files** takes several at once, such as the Python or MATLAB examples, a DLL's header file and the README. Pick a model and press **Draft the card**. The model writes the card from that text only, and Kelvin checks it against the card format, asking the model to fix any problems once.
+- **Trying:** type the instrument's address under the card and press **Try it**. Kelvin asks the instrument who it is and reads every reading, and shows each value or the error it gave. It sets nothing. To a text instrument it sends only queries, and it skips reads that could start a measurement or a self-test. Compare the values with the front panel, fix the card and try again until they agree. An instrument already connected in the lab is asked through that connection.
 - **Checking:** read the draft against the manual, edit it, press **Check**, then **Save card**. It is kept in `~/Kelvin/cards/` and appears in the card list for your lab config.
-- **In a chat:** "here is the command reference of my magnet supply, make a card". Kelvin uses `card_guide`, `check_card` and `save_card`.
+- **In a chat:** "here is the command reference of my magnet supply, make a card", or "the attoDRY examples are in C:\attocube\examples, make a card for it". Kelvin reads them (`read_examples`), writes the card (`card_guide`, `check_card`), tries it on an instrument in the lab or one the scan found (`try_card`, readings only), fixes it with you, and saves it (`save_card`).
 - **Drafts are safe to try:** a new card is a **draft**. On real hardware its readings work, so you can try it, but its outputs stay simulation-only, and changing any of its settings asks you first (nobody has yet checked which of its parameters only configure).
 - **Reviewing:** when you have checked the commands, limits and safe values, press **Mark reviewed**. Only a person can do that, and Kelvin never overwrites a card a person has reviewed.
+
+**Instruments driven through the maker's library.** Many instruments come with example scripts that call the maker's Python module or DLL instead of sending text commands: cryostats such as the attoDRY, piezo controllers, cameras, spectrometers. A card for one of them has a `library` section that names the module or the DLL (with each function's C arguments, taken from its header file), the calls that connect and disconnect, and switches the library can only toggle. Each parameter calls one function: `get: "GET getSampleTemperature"`, `set: "SET setUserTemperature {value}"`. Its address says where the library is:
+
+```yaml
+cryo: { card: attocube/attodry, address: "lib://COM4?python=C:/Python38-32/python.exe&path=C:/attocube/attoDRYLib",
+        vars: { device: "1" } }
+```
+
+- `COM4` is what the library connects to (`{address}` in the card's connect calls).
+- `python` is a Python that can load the library: a 32-bit Python for a 32-bit DLL, or the Python that has the maker's package. Without it, Kelvin uses its own (64-bit).
+- `path` is the folder with the maker's module or DLL.
+
+Kelvin runs the library in a helper process, so a crash or a 32-bit DLL never takes Kelvin down. The helper loads only the module or DLL the card names, from that folder (or an installed package of the maker's), never part of Python itself or a system DLL. It calls only the functions on the card. Readings must call functions that only read (`get…`, `is…`, `query…`), and a switch that only toggles is read before it is toggled. The included attoDRY card is a draft written from attocube's header: try it, compare it with the touch screen, and mark it reviewed when it agrees.
 
 ## Writing a card
 

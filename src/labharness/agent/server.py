@@ -46,8 +46,10 @@ You are connected to a physics lab through Kelvin.
   t_pi, Ramsey (T2*), Hahn echo (T2) and T1. Before running a sequence, show it with show_sequence and say its
   period and duty cycles. Start with low MW and laser power and raise them within the limits. Playing a sequence
   (the generator's running) pulses light and microwaves onto the sample: it is a drive.
-- For an instrument Kelvin has no card for, ask for its manual's command reference (pasted text), read card_guide,
-  write the card from that text only, check_card until it is valid, then save_card. A person adds it to the lab.
+- For an instrument Kelvin has no card for: get its manual's command reference or the maker's example scripts
+  (pasted, or read_examples on a file or folder the person names), read card_guide, and write the card from that
+  text only. check_card until it is valid; try_card on the instrument (it only reads) and compare the readings with
+  what the person sees; fix and try again; then save_card. A person adds it to the lab and reviews it.
 - Reply to the user briefly: the result first, then the next step."""
 
 READ = ToolAnnotations(readOnlyHint=True)
@@ -147,6 +149,20 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def check_card(card: str) -> str:
         """Check a card (YAML text) without saving it: what is wrong, or what it offers and what to improve."""
         return rt.check_card(card)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def read_examples(path: str) -> str:
+        """Read an instrument maker's example scripts, SDK header files and READMEs (Python, MATLAB, C/C#, notebooks,
+        text) from a file or folder on this computer that the person named, to write a card from how the maker's
+        own scripts talk to the instrument."""
+        return rt.read_examples(path)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def try_card(card: str, instrument: str) -> str:
+        """Try a card (YAML text) before saving it: on an instrument in the lab (its name) or an address the last
+        scan found, ask who it is and read every reading. It sets nothing and skips reads that could start something.
+        Compare the values with what the person sees, fix the card, and try again."""
+        return rt.try_card(card, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
     def save_card(card: str) -> str:

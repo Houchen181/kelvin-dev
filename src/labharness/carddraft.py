@@ -1,10 +1,12 @@
-"""Cards for instruments Kelvin does not know yet: drafted from the manual, checked, kept in ~/Kelvin/cards.
+"""Cards for instruments Kelvin does not know yet: drafted from the manual or the maker's example scripts, checked,
+tried on the instrument, kept in ~/Kelvin/cards.
 
 A card Kelvin writes is always a draft. On real hardware a draft card's readings work, so it can be tried against
 the instrument, but its drives stay simulation-only until a person reviews the card and marks it lab-verified.
 Only a person can do that, and Kelvin never overwrites a card a person has reviewed."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -53,6 +55,29 @@ method, the path and, for writes, a JSON body with {value} in it: get: "GET /v1/
 reply is the value; "GET /v1/Status#laser.state" takes one field), set: "PUT /v1/Basic/TargetAttenuatorPercentage
 {value}" or "PUT /v1/Shutter {\"open\": {value}}". For an action per state, a bool with bool_text: [EnableOutput,
 CloseOutput] and set: "POST /v1/Basic/{value}". identify: {query: "GET /v1/...", idn: a regex for its reply}.
+
+Instruments the maker controls through a library (its example scripts in Python, MATLAB or C call a module or a
+DLL instead of sending text): the card gets a library section, and each command calls one function.
+- library: module: <the Python module the examples import> (object: <the class or object the functions hang on>;
+  create: true if the examples make an instance first). Or dll: <its file name>, prefix: <the part of the exported
+  names before the function name>, convention: cdecl or stdcall, returns: error when every function returns an error
+  code (0 = fine), and functions: for each function the card calls, its C arguments (args: [float]) and the one value
+  it writes back through a pointer (out: float; out: str for a char buffer followed by its length). Types: int8 uint8
+  int16 uint16 int32 int uint32 int64 uint64 float double bool str. Take them from the header file; never guess.
+- library.open: the calls the examples make to connect, in order ({address} is what the lab's address names, such as
+  a COM port or an IP address; add "wait 10" where the examples sleep before the instrument answers). library.close:
+  the calls they end with.
+- set: "SET setUserTemperature {value}", get: "GET getSampleTemperature"; fixed arguments may follow the name
+  ("GET getChannelTemperature 2"). A get must call a function that only reads (get..., is..., query...).
+- A switch the library can only toggle (toggleFullTemperatureControl), with a function that reads its state
+  (isControllingTemperature): library.toggles: {setTemperatureControl: {toggle: toggleFullTemperatureControl, state:
+  isControllingTemperature}}, then set: "SET setTemperatureControl {value}" and get: "GET isControllingTemperature".
+  Kelvin reads the state before it toggles.
+- Leave out what the maker's own program or touch screen should do (sample exchange, pumping, valves, calibration
+  curves, firmware): Kelvin can call only the functions the card names.
+- Say in notes how to address it: lib://<port or IP>?python=<a Python that can load the library, 32-bit for a 32-bit
+  DLL>&path=<the folder with the maker's files>.
+Example scripts that send text (inst.write("SOUR:VOLT 1"), inst.query("MEAS:VOLT?")) give ordinary command templates.
 
 Instruments whose commands start with the value ("ON,1" / "OFF,1"): set: "{value},{ch}" with bool_text: ["ON", "OFF"]
 (quote the words: YAML reads a bare ON as true). Settings with no read-back: leave out get; Kelvin remembers what
@@ -178,7 +203,7 @@ def delete(cards_dir: Path, card_id: str) -> None:
 
 DRAFT_SYSTEM = GUIDE + """
 
-You write one card for the instrument the user names, from the manual text they give you. Answer with the card in
+You write one card for the instrument the user names, from the manual text or example scripts they give you. Answer with the card in
 one ```yaml block, then at most five short lines on what you left out or are unsure of. Status: draft."""
 
 
@@ -186,8 +211,69 @@ def draft_prompt(manual: str, name: str) -> str:
     manual = manual.strip()
     clipped = manual[:MAX_MANUAL]
     note = "" if len(manual) <= MAX_MANUAL else "\n(The manual text was cut at %d characters.)" % MAX_MANUAL
-    return ("Instrument: %s\n\nAn example of a finished card, for the format:\n%s\n\nThe manual (or its "
-            "command reference):\n%s%s" % (name or "(see the manual)", example(), clipped, note))
+    return ("Instrument: %s\n\nAn example of a finished card, for the format:\n%s\n\nThe manual, its command "
+            "reference, or the maker's example scripts:\n%s%s" % (name or "(see the manual)", example(), clipped, note))
+
+
+SOURCE_TYPES = {".py", ".m", ".h", ".hpp", ".c", ".cpp", ".cs", ".vb", ".bas", ".jl", ".tcl", ".ipynb", ".txt", ".md",
+                ".rst", ".ini", ".json", ".yaml", ".yml", ".htm", ".html"}
+SKIP_DIRS = {".git", "__pycache__", "node_modules", "venv", ".venv", "build", "dist"}
+
+
+def _source_text(path: Path) -> str:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if path.suffix.lower() == ".ipynb":   # a notebook: its code and notes, not its outputs
+        try:
+            cells = json.loads(text).get("cells") or []
+            text = "\n\n".join("".join(c.get("source") or []) for c in cells if c.get("cell_type") in ("code", "markdown"))
+        except (ValueError, AttributeError):
+            pass
+    elif path.suffix.lower() in (".htm", ".html"):
+        text = re.sub(r"<[^>]+>", " ", re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text))
+    return text
+
+
+def read_sources(path: str, limit: int = MAX_MANUAL) -> str:
+    """A maker's example scripts, headers and READMEs from a file or folder, as one text with each file's name: what
+    a card is drafted from when the maker gives code rather than a command reference."""
+    root = Path(path).expanduser()
+    if not root.exists():
+        raise ValueError("no file or folder %s" % path)
+    if root.is_file():
+        files = [root]
+    else:
+        files = []
+        for p in sorted(root.rglob("*")):
+            if len(files) >= 400:
+                break
+            if any(part in SKIP_DIRS for part in p.relative_to(root).parts[:-1]):
+                continue
+            if p.is_file() and p.suffix.lower() in SOURCE_TYPES and p.stat().st_size < 2_000_000:
+                files.append(p)
+    if not files:
+        raise ValueError("no scripts, headers or text files in %s" % path)
+
+    def rank(p: Path) -> Tuple[int, int]:
+        name = p.name.lower()
+        first = 0 if name.startswith("readme") else 1 if p.suffix.lower() in (".h", ".hpp") else \
+            2 if "example" in str(p).lower() or "demo" in name else 3
+        return first, len(p.parts)
+
+    out, used, left = [], 0, []
+    for p in sorted(files, key=rank):
+        text = _source_text(p).strip()
+        if not text:
+            continue
+        label = p.name if root.is_file() else str(p.relative_to(root))
+        piece = "=== %s ===\n%s\n" % (label, text)
+        if used + len(piece) > limit:
+            left.append(label)
+            continue
+        out.append(piece)
+        used += len(piece)
+    if left:
+        out.append("(Left out, over the length limit: %s)" % ", ".join(left[:40]))
+    return "\n".join(out)
 
 
 def repair_prompt(text: str, problems: List[str]) -> str:

@@ -1,0 +1,143 @@
+card: 1
+id: attocube/attodry
+model: attocube attoDRY1100 / 2100 / 800 cryostat (attoDRYLib)
+vendor: attocube
+kind: cryostat
+status: draft
+manual: "attocube attoDRYLib (attoDRYLib.h, the DLL built from the attoDRY LabVIEW interface) and its example scripts"
+notes:
+  - "Through attocube's attoDRYLib.dll, as in attocube's example scripts. Address lib://COM4?python=<python.exe>&path=<folder with attoDRYLib.dll>: the attoDRY's COM port, a Python that can load the DLL, and the DLL's folder. The DLL needs the LabVIEW run-time engine it was built with (2016 for older releases), and a 32-bit DLL needs a 32-bit Python."
+  - "Set the var device: 0 attoDRY1100, 1 attoDRY2100, 2 attoDRY800. After connecting, the attoDRY takes about 10 s to initialise before it answers."
+  - "Temperature and field act only while their control is on (the thermometer and magnet icons on the touch screen). Kelvin reads each control's state before toggling it, so it never flips one the wrong way."
+  - "Switching field control off first ramps the field set point to zero and waits for the field. Make safe sets the temperature set point to the lowest limit and switches temperature control off. Check that this is how your system should be left before marking the card reviewed."
+  - "Draft, from attocube's header: outputs stay simulation-only until someone checks the card on the cryostat. Base temperature, sample exchange, pumping, valves and persistent mode are left out: run them from the touch screen."
+identify:
+  idn: "^attocube"
+  example: "attocube,attocube attoDRY1100 / 2100 / 800 cryostat (attoDRYLib),COM4"
+connection: { timeout_ms: 15000 }
+vars:
+  device: { default: "1", label: "0 attoDRY1100, 1 attoDRY2100, 2 attoDRY800" }
+
+library:
+  dll: attoDRYLib.dll
+  prefix: AttoDRY_Interface_
+  convention: cdecl
+  returns: error
+  functions:
+    begin: { args: [uint16] }
+    Connect: { args: [str] }
+    Disconnect: {}
+    end: {}
+    isDeviceConnected: { out: int }
+    isDeviceInitialised: { out: int }
+    getSampleTemperature: { out: float }
+    getUserTemperature: { out: float }
+    setUserTemperature: { args: [float] }
+    isControllingTemperature: { out: int }
+    toggleFullTemperatureControl: {}
+    getMagneticField: { out: float }
+    getMagneticFieldSetPoint: { out: float }
+    setUserMagneticField: { args: [float] }
+    isControllingField: { out: int }
+    toggleMagneticFieldControl: {}
+    get4KStageTemperature: { out: float }
+    getVtiTemperature: { out: float }
+    getSampleHeaterPower: { out: float }
+    getPressure: { out: float }
+    getAttodryErrorStatus: { out: uint8 }
+    getAttodryErrorMessage: { out: str }
+  open: ["begin {device}", "Connect {address}", "wait 10"]
+  close: ["Disconnect", "end"]
+  toggles:
+    setTemperatureControl: { toggle: toggleFullTemperatureControl, state: isControllingTemperature }
+    setFieldControl: { toggle: toggleMagneticFieldControl, state: isControllingField }
+
+parameters:
+  T:
+    label: Sample temperature
+    kind: measure
+    unit: K
+    get: "GET getSampleTemperature"
+  temperature_control:
+    label: Temperature control
+    kind: drive
+    type: bool
+    set: "SET setTemperatureControl {value}"
+    get: "GET isControllingTemperature"
+    safe: off
+    description: The thermometer icon on the touch screen; the sample goes to T_set while it is on
+  T_set:
+    label: Temperature set point
+    applies_when: temperature_control
+    kind: drive
+    unit: K
+    set: "SET setUserTemperature {value}"
+    get: "GET getUserTemperature"
+    limits: [1.65, 300]
+    safe: 1.65
+    ramp: instrument
+    readback: T
+    tol: 0.05
+    timeout: 14400
+  B:
+    label: Field
+    kind: measure
+    unit: T
+    get: "GET getMagneticField"
+  field_control:
+    label: Field control
+    kind: drive
+    type: bool
+    set: "SET setFieldControl {value}"
+    get: "GET isControllingField"
+    safe: off
+    enables: [B_set]
+    description: The magnet icon on the touch screen; the magnet goes to B_set while it is on
+  B_set:
+    label: Field set point
+    applies_when: field_control
+    kind: drive
+    unit: T
+    set: "SET setUserMagneticField {value}"
+    get: "GET getMagneticFieldSetPoint"
+    limits: [-9, 9]
+    safe: 0
+    ramp: instrument
+    readback: B
+    tol: 0.001
+    timeout: 7200
+    description: The vendor limits cover the 9 T attoDRY2100 magnet; set your system's own
+  T_4K:
+    label: 4 K stage
+    kind: measure
+    unit: K
+    get: "GET get4KStageTemperature"
+  T_vti:
+    label: VTI temperature
+    kind: measure
+    unit: K
+    get: "GET getVtiTemperature"
+  heater_power:
+    label: Sample heater power
+    kind: measure
+    unit: W
+    get: "GET getSampleHeaterPower"
+  pressure:
+    label: Pressure
+    kind: measure
+    unit: mbar
+    get: "GET getPressure"
+  error_status:
+    label: Error status
+    kind: measure
+    type: int
+    get: "GET getAttodryErrorStatus"
+  error_message:
+    label: Error message
+    kind: measure
+    type: str
+    get: "GET getAttodryErrorMessage"
+
+safe_sequence: [B_set, field_control, T_set, temperature_control]
+display:
+  headline: T

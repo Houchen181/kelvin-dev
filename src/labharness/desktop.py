@@ -83,6 +83,9 @@ def _self_test(port: int, key: str) -> int:
         hardware = False
     if getattr(sys, "frozen", False):   # the app must bring them; a source checkout may be installed without them
         page_ok = page_ok and hardware
+    from . import library
+    bridge_ok = library.self_test()   # the helper for makers' libraries starts (Kelvin.exe --bridge) and answers
+    page_ok = page_ok and bridge_ok
     ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
     message = "Kelvin self-test: %s (lab %r)" % ("ok" if ok else "FAILED", boot.get("lab"))
     log.info(message)
