@@ -480,6 +480,10 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .found { display: grid; grid-template-columns: 18px 110px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 7px 10px;
   border-top: 1px solid var(--line); font-size: 13.5px; cursor: pointer; }
 .found:first-child { border-top: 0; }
+.found-wrap { border-top: 1px solid var(--line); }
+.found-wrap:first-child { border-top: 0; }
+.found-wrap .found { border-top: 0; }
+.found-write { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; padding: 0 10px 8px 38px; font-size: 13px; }
 .found.in-lab { grid-template-columns: 128px minmax(0, 1fr) auto; color: var(--muted); cursor: default; }
 .found-input { border: 1px solid var(--line-strong); border-radius: 7px; padding: 4px 7px; font: 12.5px ui-monospace, Consolas, monospace; background: var(--raised); color: var(--text); min-width: 0; }
 .found select { min-width: 0; border: 1px solid var(--line-strong); border-radius: 7px; padding: 4px 6px; background: var(--raised); color: var(--text); font-size: 13px; }

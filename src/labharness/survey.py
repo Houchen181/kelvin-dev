@@ -282,7 +282,7 @@ def reason(found: List[Any], s: Optional[Survey]) -> str:
     if s is None:
         return "Kelvin has not looked for instruments yet"
     if unknown:
-        return ("%s answered, but Kelvin has no card for %s yet: make one from its manual in Lab setup"
+        return ("%s answered, but Kelvin has no card for %s yet: press Find its manual and write its card"
                 % (_count(len(unknown), "instrument", "", "instruments"), "it" if len(unknown) == 1 else "them"))
     if s.problems:
         return "No instrument Kelvin can open was found. " + s.problems[0]

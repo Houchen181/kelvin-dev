@@ -343,6 +343,15 @@ class SafetyGate:
         try:
             current = self._current(inst, spec)
             if not spec.is_drive:
+                if inst.card.status == "draft" and not inst.simulated and not _same(spec, current, target):
+                    # nobody has checked this card's measure/drive tags yet: a "setting" might reach the sample
+                    request = ApprovalRequest("Change a setting on %s?" % inst.name, [
+                        "%s: %s → %s. Its card is a draft no one has reviewed yet, so Kelvin can't be sure this "
+                        "only configures the instrument" % (key, spec.show(current), spec.show(target))])
+                    if not self.ask(request):
+                        note = " (%s)" % request.note if request.note else ""
+                        return self._done(Result(False, "declined", key, value=target, message="declined: %s stays %s%s"
+                                                 % (key, spec.show(current), note)), "set", by)
                 res = self._move(inst, spec, current, target, away=False, wait=wait, how=None)
             elif _same(spec, current, target):
                 res = Result(True, "no-change", key, value=target, message="%s already %s" % (key, spec.show(target)))

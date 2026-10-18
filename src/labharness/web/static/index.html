@@ -281,8 +281,9 @@
         <label class="check"><input id="auto-setup" type="checkbox"> Set them up when Kelvin starts</label>
         <label class="check"><input id="manuals" type="checkbox"> Fetch their manuals from the makers</label>
         <label class="check"><input id="scan-network" type="checkbox"> Look on the local network too</label>
+        <label class="check"><input id="auto-cards" type="checkbox"> Write cards for instruments Kelvin doesn't know</label>
       </div>
-      <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows, with their outputs locked at safe until you review them. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website. Looking on the local network finds instruments that announce themselves (LXI); the first time, Windows may ask whether Kelvin may use the network: allow private networks.</span>
+      <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows, with their outputs locked at safe until you review them. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website. Looking on the local network finds instruments that announce themselves (LXI); the first time, Windows may ask whether Kelvin may use the network: allow private networks. For an instrument it doesn't know, Kelvin finds the maker's manual and writes a draft card with your default model (it sends the maker, the model and the manual's command pages, never the serial number). A draft's outputs stay simulation-only and its setting changes ask you until you review it.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Literature search</span>

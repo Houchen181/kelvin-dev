@@ -52,11 +52,16 @@ class AutoSetup:
     """Runs in the background so the portal opens at once. `status` says where it is, for the Lab setup panel."""
 
     def __init__(self, runtime: Any, settings: Any, home: Path, fetch: Optional[Callable[[str], bytes]] = None,
-                 scan: Optional[Callable[[], List[Dict[str, Any]]]] = None, can_switch: Callable[[], bool] = lambda: True):
+                 scan: Optional[Callable[[], List[Dict[str, Any]]]] = None, can_switch: Callable[[], bool] = lambda: True,
+                 make_card: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None):
         self.runtime, self.settings, self.home = runtime, settings, Path(home)
         self.fetch = fetch or profiles.http_get
         self.scan = scan or runtime.scan_found
         self.can_switch = can_switch
+        self.make_card = make_card          # autocard.make_card with the app's model, for instruments with no card
+        self._manuals: Dict[str, Dict[str, Any]] = {}   # address -> the manual found while writing its card
+        self._written: List[str] = []                    # models Kelvin wrote cards for in this run
+        self._card_problems: List[str] = []              # why a card could not be written
         self.status: Dict[str, Any] = {"state": "idle"}
         self._thread: Optional[threading.Thread] = None
 
@@ -107,9 +112,15 @@ class AutoSetup:
                 looked = rt.last_survey or {}
                 found_by_address = {f["address"]: f for f in found}
                 matched = [f for f in found if f.get("card_id") and not f.get("in_lab")]
-                unknown = [f for f in found if f.get("idn") and not f.get("card_id")]
+                unknown = [f for f in found if f.get("idn") and not f.get("card_id") and not f.get("in_lab")]
+                written, card_problems = self._write_cards(unknown, matched)
+                matched += written
+                unknown = [f for f in unknown if f["address"] not in {w["address"] for w in written}]
                 for f in found:
                     log.info("  %s: %s", f["address"], f.get("idn") or f.get("how") or "no answer")
+                if not matched and card_problems:
+                    return self._done(" ".join(card_problems), found=0, unknown=len(unknown),
+                                      lines=looked.get("lines") or [])
                 if not matched:
                     return self._done(looked.get("reason") or (
                         "%d instrument%s answered but Kelvin has no card for %s yet; make one in Lab setup"
@@ -126,14 +137,25 @@ class AutoSetup:
             names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated)
             self._set("reading", message="Reading the settings of %s" % ", ".join(names),
                       instruments=names, observe_only=rt.lab.config.observe_only)
+            for name, ic in rt.lab.config.instruments.items():   # manuals found while writing cards: no second download
+                m = self._manuals.pop(ic.address, None)
+                if m and name in rt.lab.instruments:
+                    try:
+                        profiles.store_manual(self.home, name, rt.lab.instruments[name].card, m["data"], m["url"])
+                    except Exception as e:
+                        log.info("  could not keep the %s manual: %s", name, profiles._first_line(e))
             report = profiles.prepare(self.home, rt.lab, rt.lock, found_by_address,
                                       manuals=manuals, fetch=self.fetch)
             fetched = [n for n, r in report.items() if "pages" in str(r.get("manual", ""))]
             missing = [n for n, r in report.items() if str(r.get("manual", "")).startswith("not fetched")]
             log.info("Instrument setup: %s; %s", ", ".join(names), report)
             self._set("done", instruments=names, report=report, observe_only=rt.lab.config.observe_only,
-                      message="%d instrument%s set up%s%s" % (
+                      written=list(self._written),
+                      message="%d instrument%s set up%s%s%s%s" % (
                           len(names), "" if len(names) == 1 else "s",
+                          "; " + " ".join(self._card_problems).rstrip(".") if self._card_problems else "",
+                          "; Kelvin wrote draft cards for %s: review them in Lab setup" % ", ".join(self._written)
+                          if self._written else "",
                           "; manuals for %s" % ", ".join(fetched) if fetched else "",
                           "; no manual yet for %s" % ", ".join(missing) if missing else ""))
             return self.status
@@ -141,6 +163,39 @@ class AutoSetup:
             log.exception("Instrument setup failed")
             self._set("failed", message="Setting up instruments failed: %s" % profiles._first_line(e))
             return self.status
+
+    def _write_cards(self, unknown: List[Dict[str, Any]], matched: List[Dict[str, Any]]) -> Any:
+        """For instruments that answered but match no card: find the manual and write a draft card (autocard.py)."""
+        if not unknown or self.make_card is None or self.settings.get("auto_cards") == "off":
+            return [], []
+        from .autocard import maker_model
+        from .discovery import Found
+        written, problems = [], self._card_problems
+        taken = [f.get("suggested") for f in matched if f.get("suggested")]
+        for f in unknown:
+            maker, model = maker_model(str(f.get("idn") or ""))
+            self._set("drafting", message="Finding the %s %s manual and writing its card (a minute or two)"
+                      % (maker or "unknown", model or "instrument"))
+            log.info("  writing a card for %s at %s", f.get("idn"), f["address"])
+            try:
+                r = self.make_card(f)
+            except Exception as e:
+                r = {"error": "Kelvin could not write the card for %s: %s" % (f["address"], profiles._first_line(e))}
+            if r.get("error"):
+                problems.append(r["error"] + ".")
+                log.info("  %s", r["error"])
+                continue
+            name = Found(f["address"], kind=r["kind"]).suggest_name(taken)
+            taken.append(name)
+            self._written.append(r["model"])
+            written.append(dict(f, card_id=r["card_id"], model=r["model"], kind=r["kind"], suggested=name,
+                                how="card written by Kelvin"))
+            if r.get("manual"):
+                self._manuals[f["address"]] = r["manual"]
+            self.runtime.notifier("setup", "Kelvin wrote a card for the %s" % r["model"],
+                                  "From its manual (%s). It is a draft: its outputs stay simulation-only and setting "
+                                  "changes ask you until you review it in Lab setup." % r["manual"]["url"])
+        return written, problems
 
     def _connect(self, matched: List[Dict[str, Any]]) -> bool:
         """Write the observed lab and connect to it. False (and a status saying why) if that is not possible now."""

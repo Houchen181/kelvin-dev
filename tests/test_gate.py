@@ -191,13 +191,18 @@ def test_every_command_is_logged(make_gate, tmp_path):
 
 
 def test_draft_card_on_real_hardware_keeps_drives_off(lab, make_gate):
-    gate, approver = make_gate([])
+    gate, approver = make_gate([False, True])
     inst = lab.instruments["smu"]
     inst.backend.simulated = False
     inst.card.status = "draft"
     r = gate.set("smu", "V", 1)
     assert r.action == "refused" and "draft card" in r.message
-    assert gate.set("smu", "nplc", 2).ok   # measurement still free
+    assert gate.get("smu", "nplc").ok                       # reading is free
+    # nobody has checked a draft's measure/drive tags: even a "setting" asks a person first
+    r = gate.set("smu", "nplc", 2)
+    assert r.action == "declined" and "draft" in approver.requests[0].items[0]
+    assert gate.set("smu", "nplc", 2).ok and len(approver.requests) == 2
+    assert gate.set("smu", "nplc", 2).ok and len(approver.requests) == 2   # the value it has already: no question
 
 
 def test_simulation_approver_is_refused_on_real_hardware(lab):

@@ -119,14 +119,15 @@ def write_settings(home: Any, name: str, card: Any, values: Dict[str, Any]) -> D
 
 # ------------------------------------------------------------------ manuals
 
-def pdf_pages(path: Path) -> List[str]:
-    """The text of each page (needs pypdf, which comes with Kelvin's hardware support)."""
+def pdf_pages(path: Any) -> List[str]:
+    """The text of each page of a PDF file (or of its bytes). Needs pypdf, which comes with Kelvin's hardware support."""
     try:
         from pypdf import PdfReader
     except ImportError:
         raise RuntimeError("reading PDF manuals needs pypdf: pip install pypdf")
+    import io
     logging.getLogger("pypdf").setLevel(logging.ERROR)   # font warnings about makers' PDFs are not the user's concern
-    reader = PdfReader(str(path))
+    reader = PdfReader(io.BytesIO(path) if isinstance(path, (bytes, bytearray)) else str(path))
     if reader.is_encrypted:   # makers often lock printing or editing, not reading (decrypting needs cryptography)
         reader.decrypt("")
     pages = []
@@ -182,6 +183,11 @@ def fetch_manual(home: Any, name: str, card: Any, fetch: Fetch = http_get, force
     if not is_pdf and b"<html" not in data[:4096].lower():
         raise ValueError("%s did not return a PDF or a web page" % url)
     return _store(home, name, card, data, "manual.pdf" if is_pdf else "manual.html", url=url)
+
+
+def store_manual(home: Any, name: str, card: Any, data: bytes, url: str) -> Dict[str, Any]:
+    """Keep a manual already downloaded (while Kelvin wrote the instrument's card)."""
+    return _store(home, name, card, data, "manual.pdf" if data[:5] == b"%PDF-" else "manual.html", url=url)
 
 
 def save_manual(home: Any, name: str, card: Any, data: bytes) -> Dict[str, Any]:

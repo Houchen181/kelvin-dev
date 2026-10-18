@@ -17,6 +17,7 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 - A plan is dry-run on twins first, approved once as a range, and then run.
 - Stopping a plan (the Stop button, or the agent's own abort) runs its `on_abort` steps. By default, every drive the plan touched goes back to safe, or holds where the lab config's `safe_actions` says to hold. A guard trip sends that drive back to safe.
 - Approvals come from an `Approver`, a human-facing object the agent never sees.
+- An instrument whose card is a draft (no one has reviewed it yet) keeps its outputs simulation-only on real hardware, and every change to its settings asks a person, since its measure and drive tags are unchecked. Reading it is free.
 
 ### Auto mode
 

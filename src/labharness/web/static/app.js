@@ -2262,7 +2262,7 @@
   }
 
   // ------------------------------------------------------------------ setting up connected instruments
-  const SETUP_BUSY = new Set(["scanning", "connecting", "reading"]);
+  const SETUP_BUSY = new Set(["scanning", "drafting", "connecting", "reading"]);
   function showSetup(setup, observe) {
     const busy = setup && SETUP_BUSY.has(setup.state);
     const text = observe
@@ -2398,8 +2398,31 @@
         if (card && !name.value) name.value = KIND_NAME[card.kind] || "instr";
       });
       f.ui = { check, name, model };
-      return h("label", { class: "found" }, check, name, model, h("code", { class: "found-addr", title: f.settings || "" }, f.address));
+      const row = h("label", { class: "found" }, check, name, model, h("code", { class: "found-addr", title: f.settings || "" }, f.address));
+      if (f.card_id || !f.idn) return row;
+      // it said who it is, but Kelvin has no card: Kelvin can find its manual and write one (a draft)
+      const write = h("button", { class: "link", type: "button" }, "Find its manual and write its card");
+      write.addEventListener("click", (e) => { e.preventDefault(); writeCardFor(f, write); });
+      return h("div", { class: "found-wrap" }, row, h("div", { class: "found-write" }, write,
+        h("span", { class: "muted small" }, f.idn.split(",").slice(0, 2).join(" "))));
     }));
+  }
+  async function writeCardFor(f, btn) {
+    btn.disabled = true;
+    btn.textContent = "Finding its manual and writing the card (a minute or two)…";
+    try {
+      const r = await api("/api/instruments/card", { body: { address: f.address, idn: f.idn } });
+      LAB.cards = (await api("/api/lab")).cards;
+      Object.assign(f, { card_id: r.card_id, model: r.model, kind: r.kind, how: "card written by Kelvin" });
+      if (!f.suggested) f.suggested = KIND_NAME[r.kind] || "instr";
+      renderFound();
+      $("lab-msg").textContent = "Kelvin wrote " + r.card_id + " from " + r.manual_url + ". It is a draft: its outputs " +
+        "stay simulation-only and setting changes ask you until you review it under Your instrument cards.";
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "Find its manual and write its card";
+      $("lab-msg").textContent = e.message;
+    }
   }
   async function addToConfig(items) {
     if (!items.length) { $("lab-msg").textContent = "Nothing chosen."; return; }
@@ -2936,6 +2959,7 @@
     $("literature").checked = !S.settings || S.settings.literature !== false;
     $("auto-setup").checked = !S.settings || S.settings.auto_setup !== false;
     $("scan-network").checked = !S.settings || S.settings.scan_network !== false;
+    $("auto-cards").checked = !S.settings || S.settings.auto_cards !== false;
     $("manuals").checked = !S.settings || S.settings.manuals !== false;
     $("pair-box").hidden = true;
     loadPhone();
@@ -2985,6 +3009,7 @@
     body.literature = $("literature").checked ? "on" : "off";
     body.auto_setup = $("auto-setup").checked ? "on" : "off";
     body.scan_network = $("scan-network").checked ? "on" : "off";
+    body.auto_cards = $("auto-cards").checked ? "on" : "off";
     body.manuals = $("manuals").checked ? "on" : "off";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     $("settings-msg").textContent = "Saving…";

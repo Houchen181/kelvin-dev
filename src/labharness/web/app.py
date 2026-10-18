@@ -27,7 +27,8 @@ from ..agent.approval import WebApprover
 from ..agent.runtime import LabRuntime
 from ..agent.server import build_server
 from ..adapters import AdapterError
-from ..autosetup import AutoSetup, unlock as unlock_lab
+from ..autosetup import AutoSetup, log as setup_log, unlock as unlock_lab
+from .. import autocard
 from .. import profiles
 from ..clock import ScaledClock, SimClock
 from ..discovery import add_to_config
@@ -164,7 +165,43 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
     default_data = home / "virtual-lab"                   # runs, record and reports unless the user chose a folder
-    setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem() is None)
+    loop_ref: Dict[str, Any] = {}
+
+    async def card_model() -> str:
+        """The model that writes cards: the default one, else the first real (not demo) model there is."""
+        key = settings.get("default_model") or ""
+        if key and not key.startswith("demo:"):
+            try:
+                agent.provider_for(key)
+                return key
+            except ValueError:
+                pass
+        for g in (await agent.models())["groups"]:
+            if g["provider"] != "demo" and g["models"]:
+                return g["models"][0]["key"]
+        raise ValueError("no model to write the card with: add an API key in Settings")
+
+    def ask_model(system: str, prompt: str) -> Any:
+        """Ask the card model from a worker thread (the providers live on the server's event loop)."""
+        loop = loop_ref.get("loop")
+        if loop is None:
+            raise RuntimeError("Kelvin is still starting")
+
+        async def go() -> Any:
+            key = await card_model()
+            provider, model_id = agent.provider_for(key)
+            return await asyncio.wait_for(review.ask(provider, model_id, system, prompt), 300), key
+        return asyncio.run_coroutine_threadsafe(go(), loop).result(timeout=330)
+
+    def write_card(found: Dict[str, Any]) -> Dict[str, Any]:
+        r = autocard.make_card(found, runtime.cards_dir, ask_model, builtin_ids=builtin_ids(),
+                               log=lambda m: setup_log.info("  %s", m))
+        if r.get("path"):   # usable at once in Lab setup, like a card a person saves
+            from ..cards import load_card
+            runtime.lab.registry.put(load_card(r["path"]))
+        return r
+
+    setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem() is None, make_card=write_card)
     tasks: List[asyncio.Task] = []
 
     def configure_literature() -> None:
@@ -180,6 +217,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
+        loop_ref["loop"] = asyncio.get_running_loop()
         await agent.start()
         configure_notifications()
         configure_literature()
@@ -852,6 +890,18 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except AdapterError as e:
             return error(503, str(e))
 
+    async def card_for_found(request: Request) -> Response:
+        """A person asks Kelvin to write the card for an instrument a scan found: {address, idn}."""
+        body = await request.json()
+        found = {"address": str(body.get("address") or ""), "idn": str(body.get("idn") or "")}
+        if not found["idn"]:
+            return error(400, "That instrument did not say who it is, so Kelvin can't look up its manual.")
+        r = await asyncio.to_thread(write_card, found)
+        if r.get("error"):
+            return error(400, r["error"])
+        return JSONResponse({k: r.get(k) for k in ("card_id", "model", "kind", "changed", "by")} |
+                            {"manual_url": (r.get("manual") or {}).get("url")})
+
     async def draft_view(request: Request) -> Response:
         """Add chosen instruments [{name, card, address}] to a lab config text (`base`), keeping what is there."""
         body = await request.json()
@@ -1115,6 +1165,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/instruments/{name}/manual", instrument_manual, methods=["POST", "PUT"]),
         Route("/api/instruments/{name}/open", instrument_open, methods=["POST"]),
         Route("/api/instruments/draft", draft_view, methods=["POST"]),
+        Route("/api/instruments/card", card_for_found, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
         Route("/api/quit", quit_app, methods=["POST"]),
         Route("/api/live", live),

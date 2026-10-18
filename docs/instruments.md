@@ -89,11 +89,24 @@ instruments:
 
 ## Cards for new instruments
 
+**Kelvin writes the card itself.** When a scan finds an instrument that says who it is but matches no card, Kelvin writes one. It does this at start-up, and when you press **Find its manual and write its card** on that instrument in **Set up…**.
+1. **It finds the manual.** Your default model suggests where the maker publishes it, and Kelvin also tries known addresses for some makers. A product or support page is followed one step to the PDFs it links, on the maker's own site only. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
+2. **It drafts the card.** The model writes the card from the manual's command pages, the card checker reviews it, and the model fixes what the checker found, once.
+3. **It makes the card safe to try, whatever the model wrote:**
+   - The card is a draft. On real hardware its outputs stay simulation-only, and every setting change asks you.
+   - No commands are sent on connect.
+   - Reads that start something are left out (`MEASure?`, `READ?`, `INITiate`, `*TST?`, `*CAL?`), because on some instruments they switch an output on or run a self-test.
+   - Calibration and firmware commands are blocked.
+   - The identity pattern is checked against the instrument's own reply.
+4. **It sets the instrument up.** At start-up, the instrument joins the watching-only lab with the others, and its folder gets the manual Kelvin downloaded. The card's first lines say where it came from and which model wrote it.
+
+What leaves the computer: the maker and model name, and the manual's command pages, go to your model; the manual's address goes to the maker's site. The serial number never leaves. Switch this off with **Write cards for instruments Kelvin doesn't know** in Settings. If Kelvin can't find the manual (some makers want a sign-in) or there is no model, it says so; then draft the card from a PDF yourself:
+
 For an instrument Kelvin doesn't know, open **Lab → Set up → Make a card for it from its manual…**.
 - **Drafting:** paste the manual's remote-programming chapter (copy it from your PDF viewer, or load a text file). Pick a model and press **Draft the card**. The model writes the card from that text only, and Kelvin checks it against the card format, asking the model to fix any problems once.
 - **Checking:** read the draft against the manual, edit it, press **Check**, then **Save card**. It is kept in `~/Kelvin/cards/` and appears in the card list for your lab config.
 - **In a chat:** "here is the command reference of my magnet supply, make a card". Kelvin uses `card_guide`, `check_card` and `save_card`.
-- **Drafts are safe to try:** a new card is a **draft**. On real hardware its readings work, so you can try it, but its outputs stay simulation-only.
+- **Drafts are safe to try:** a new card is a **draft**. On real hardware its readings work, so you can try it, but its outputs stay simulation-only, and changing any of its settings asks you first (nobody has yet checked which of its parameters only configure).
 - **Reviewing:** when you have checked the commands, limits and safe values, press **Mark reviewed**. Only a person can do that, and Kelvin never overwrites a card a person has reviewed.
 
 ## Writing a card
