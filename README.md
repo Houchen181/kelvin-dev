@@ -24,7 +24,7 @@ Get the latest version from **[Releases](https://github.com/Houchen181/kelvin/re
 
 Kelvin opens in its own window. It starts with a simulated lab and a scripted demo model; add an API key under Settings to talk to Claude, GPT or Gemini. Everything it keeps (settings, keys, chats, lab logs and runs) stays in `~/Kelvin` on your computer. Kelvin runs one copy at a time; opening it again brings up the running one in your browser.
 
-To publish a new version: bump `src/labharness/_version.py`, then push a tag such as `v0.3.2`. GitHub builds both apps, tests them, and publishes the release.
+To publish a new version: bump `src/labharness/_version.py`, then push a tag such as `v0.3.3`. GitHub builds both apps, tests them, and publishes the release.
 
 ## The portal from source
 
