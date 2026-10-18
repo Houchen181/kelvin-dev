@@ -1,0 +1,51 @@
+card: 1
+id: coherent/obis
+model: Coherent OBIS laser (LX / LS)
+vendor: Coherent
+kind: laser
+status: community
+manual: "OBIS LX/LS operator's manual, Host command reference"
+identify:
+  idn: "Coherent, Inc - OBIS"
+  example: "Coherent, Inc - OBIS 488nm LX 100mW - V1.0.1 - Mar 4 2014"
+connection: { baud_rate: 115200, read_termination: "\r\n", write_termination: "\r\n", ack: "OK", timeout_ms: 3000 }
+safe_sequence: [power, emission]
+
+parameters:
+  power:
+    label: Power setpoint
+    applies_when: emission
+    kind: drive
+    unit: W
+    set: "SOURce:POWer:LEVel:IMMediate:AMPLitude {value}"
+    get: "SOURce:POWer:LEVel:IMMediate:AMPLitude?"
+    limits: [0, 0.1]
+    safe: 0
+    description: Output power setpoint. Set lab limits to the model's rated power or less.
+  emission:
+    label: Emission
+    kind: drive
+    type: bool
+    set: "SOURce:AM:STATe {value}"
+    get: "SOURce:AM:STATe?"
+    bool_text: ["ON", "OFF"]
+    safe: off
+    enables: [power]
+  power_out:
+    label: Output power
+    kind: measure
+    unit: W
+    get: "SOURce:POWer:LEVel?"
+
+display:
+  headline: power_out
+
+health:
+  - query: "*IDN?"
+    expect: "OBIS"
+raw:
+  blocked: ["SYSTem:CDRH", "SYSTem:AUTostart", "SOURce:POWer:NOMinal"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - The laser answers OK after every command; the connection checks it.
+  - "Lab configs should usually say `auto: never` for lasers, so a person approves every change."

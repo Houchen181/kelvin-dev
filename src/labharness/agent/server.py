@@ -74,6 +74,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.undo()
 
     @server.tool(annotations=READ, structured_output=False)
+    def scan_instruments() -> str:
+        """Find instruments connected to this computer (GPIB, USB, LAN, serial) and match them to cards. It only
+        asks each instrument who it is. Adding one to the lab is the user's decision."""
+        return rt.scan()
+
+    @server.tool(annotations=READ, structured_output=False)
     def health_check(instruments: Optional[List[str]] = None) -> str:
         """Identity, error queue, sanity readings and drives inside limits, for all or some instruments."""
         return rt.health(instruments)

@@ -1,0 +1,86 @@
+card: 1
+id: keithley/2400
+model: Keithley 2400-series SourceMeter (2400, 2401, 2410, 2420, 2425, 2430, 2440)
+vendor: Keithley / Tektronix
+kind: source-meter
+status: community
+manual: "Keithley Series 2400 SourceMeter User's Manual, SCPI command reference"
+identify:
+  idn: "KEITHLEY INSTRUMENTS INC\\.?,MODEL 24(00|01|10|20|25|30|40)"
+  example: "KEITHLEY INSTRUMENTS INC.,MODEL 2400,1234567,C30   Mar 17 2006 09:29:29/A02  /K/J"
+connection: { timeout_ms: 5000 }
+error_query: ":SYSTem:ERRor[:NEXT]?"
+safe_sequence: [V, output, compliance_I]
+
+parameters:
+  V:
+    label: Source voltage
+    applies_when: output
+    kind: drive
+    unit: V
+    set: ":SOURce:VOLTage[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: ":SOURce:VOLTage[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-210, 210]
+    safe: 0
+    ramp: gate
+    max_rate: 10
+    ramp_step: 0.05
+    description: Source voltage (voltage-source mode). The 2401 is limited to ±21 V; set lab limits.
+  compliance_I:
+    label: Current compliance
+    applies_when: output
+    kind: drive
+    unit: A
+    set: ":SENSe:CURRent[:DC]:PROTection[:LEVel] {value}"
+    get: ":SENSe:CURRent[:DC]:PROTection[:LEVel]?"
+    limits: [1.0e-9, 1.05]
+    safe: 1.0e-9
+    default: 1.0e-4
+    description: Largest current the source lets flow; raising it is a drive change
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: ":OUTPut[:STATe] {value}"
+    get: ":OUTPut[:STATe]?"
+    safe: off
+    enables: [V, compliance_I]
+    description: Connects the source to the device
+  I:
+    label: Current
+    kind: measure
+    unit: A
+    get: ":READ?"
+    field: 1
+    read_when: output
+    description: Measured current. :READ? turns the output on, so Kelvin only reads while the output is already on.
+  V_meas:
+    label: Measured voltage
+    kind: measure
+    unit: V
+    get: ":READ?"
+    field: 0
+    read_when: output
+  nplc:
+    label: Integration (NPLC)
+    kind: measure
+    unit: PLC
+    set: ":SENSe:CURRent[:DC]:NPLCycles {value}"
+    get: ":SENSe:CURRent[:DC]:NPLCycles?"
+    limits: [0.01, 10]
+    default: 1
+
+display:
+  headline: I
+
+health:
+  - query: "*IDN?"
+    expect: "KEITHLEY"
+  - query: ":SYSTem:ERRor?"
+    expect: "^[+]?0,"
+raw:
+  reset: ["*RST", ":SYSTem:PRESet"]
+  blocked: [":CALibration", ":SYSTem:PASSword"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - Readings assume the default :FORMat:ELEMents (voltage, current, resistance, time, status).

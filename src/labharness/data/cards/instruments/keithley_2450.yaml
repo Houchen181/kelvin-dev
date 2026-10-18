@@ -1,0 +1,73 @@
+card: 1
+id: keithley/2450
+model: Keithley 2450 / 2460 / 2461 / 2470 SourceMeter (SCPI command set)
+vendor: Keithley / Tektronix
+kind: source-meter
+status: community
+manual: "Keithley 2450 Reference Manual, SCPI command reference"
+identify:
+  idn: "KEITHLEY INSTRUMENTS,MODEL 24(50|60|61|70)"
+  example: "KEITHLEY INSTRUMENTS,MODEL 2450,04412345,1.7.3b"
+connection: { timeout_ms: 5000 }
+error_query: ":SYSTem:ERRor[:NEXT]?"
+safe_sequence: [V, output, compliance_I]
+
+parameters:
+  V:
+    label: Source voltage
+    applies_when: output
+    kind: drive
+    unit: V
+    set: ":SOURce:VOLTage[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: ":SOURce:VOLTage[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-200, 200]
+    safe: 0
+    ramp: gate
+    max_rate: 10
+    ramp_step: 0.05
+    description: Source voltage. The 2460/2461 reach ±100 V and the 2470 ±1100 V; set lab limits.
+  compliance_I:
+    label: Current limit
+    applies_when: output
+    kind: drive
+    unit: A
+    set: ":SOURce:VOLTage:ILIMit[:LEVel] {value}"
+    get: ":SOURce:VOLTage:ILIMit[:LEVel]?"
+    limits: [1.0e-9, 1.05]
+    safe: 1.0e-9
+    default: 1.0e-4
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: ":OUTPut[:STATe] {value}"
+    get: ":OUTPut[:STATe]?"
+    safe: off
+    enables: [V, compliance_I]
+  I:
+    label: Current
+    kind: measure
+    unit: A
+    get: ":MEASure:CURRent[:DC]?"
+    read_when: output
+  nplc:
+    label: Integration (NPLC)
+    kind: measure
+    unit: PLC
+    set: ":SENSe:CURRent[:DC]:NPLCycles {value}"
+    get: ":SENSe:CURRent[:DC]:NPLCycles?"
+    limits: [0.01, 10]
+    default: 1
+
+display:
+  headline: I
+
+health:
+  - query: "*IDN?"
+    expect: "KEITHLEY"
+raw:
+  reset: ["*RST"]
+  blocked: [":CALibration"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - The instrument must use the SCPI command set (not TSP) - Menu > System > Settings > Command Set.

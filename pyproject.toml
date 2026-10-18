@@ -13,12 +13,14 @@ dependencies = ["PyYAML>=5.4"]
 [project.optional-dependencies]
 agent = ["mcp>=2.3"]           # the MCP server needs Python >= 3.10
 web = ["mcp>=2.3", "starlette", "uvicorn", "anthropic>=1.15", "openai>=3", "google-genai>=2"]
-desktop = ["kelvin-lab[web]", "pywebview>=5"]
+hardware = ["pyvisa>=1.13", "pyvisa-py>=0.7", "pyserial>=3.5"]   # real instruments (VISA, serial)
+desktop = ["kelvin-lab[web,hardware]", "pywebview>=5"]
 dev = ["pytest>=6", "httpx"]
 
 [project.scripts]
 kelvin = "labharness.web.app:main"
 kelvin-mcp = "labharness.agent.server:main"
+kelvin-scan = "labharness.discovery:main"
 
 [project.gui-scripts]
 kelvin-app = "labharness.desktop:main"
@@ -27,7 +29,7 @@ kelvin-app = "labharness.desktop:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-labharness = ["data/*.yaml", "data/cards/*.yaml", "agent/ui.html", "web/static/*"]
+labharness = ["data/*.yaml", "data/cards/*.yaml", "data/cards/*/*.yaml", "agent/ui.html", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -488,6 +488,27 @@ class LabRuntime:
                         "headline": headline, "readings": readings, "drives": drives, "settings": settings})
         return out
 
+    # ------------------------------------------------------------------ instruments on this computer
+
+    def scan(self) -> str:
+        """Which instruments are connected, matched to cards. Read-only: it only asks who they are."""
+        def run() -> str:
+            from ..adapters import AdapterError
+            from ..discovery import scan
+            in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
+                      if not ic.address.startswith("sim://")}
+            try:
+                found = scan(self.lab.registry, in_lab=in_lab)
+            except AdapterError as e:
+                return str(e)
+            if not found:
+                return ("no instruments found (is VISA installed - NI-VISA or Keysight IO Libraries - and are they on "
+                        "and connected?)")
+            lines = [f.line() for f in found]
+            lines.append("Only a person can add an instrument to the lab (lab config); suggest it, do not assume it.")
+            return "\n".join(lines)
+        return self._do("scanning for instruments", run)
+
     # ------------------------------------------------------------------ approval mode (people only)
 
     def approval_mode(self) -> Dict[str, Any]:

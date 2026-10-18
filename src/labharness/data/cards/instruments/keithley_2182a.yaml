@@ -1,0 +1,39 @@
+card: 1
+id: keithley/2182a
+model: Keithley 2182 / 2182A nanovoltmeter
+vendor: Keithley / Tektronix
+kind: nanovoltmeter
+status: community
+manual: "Keithley Model 2182A Nanovoltmeter User's Manual, SCPI reference"
+identify:
+  idn: "KEITHLEY INSTRUMENTS INC\\.?,MODEL 2182"
+  example: "KEITHLEY INSTRUMENTS INC.,MODEL 2182A,1234567,C02  /A02"
+connection: { timeout_ms: 10000 }
+error_query: ":SYSTem:ERRor?"
+
+parameters:
+  V:
+    label: Voltage
+    kind: measure
+    unit: V
+    get: ":READ?"
+  nplc:
+    label: Integration (NPLC)
+    kind: measure
+    unit: PLC
+    set: ":SENSe:VOLTage:NPLCycles {value}"
+    get: ":SENSe:VOLTage:NPLCycles?"
+    limits: [0.01, 60]
+    default: 5
+
+display:
+  headline: V
+
+health:
+  - query: "*IDN?"
+    expect: "2182"
+raw:
+  reset: ["*RST"]
+  blocked: [":CALibration"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.

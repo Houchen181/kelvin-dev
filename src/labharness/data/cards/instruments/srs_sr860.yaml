@@ -1,0 +1,103 @@
+card: 1
+id: srs/sr860
+model: Stanford Research SR860 / SR865 lock-in amplifier
+vendor: Stanford Research Systems
+kind: lock-in
+status: community
+manual: "SR860 Lock-In Amplifier manual, Remote operation"
+identify:
+  idn: "Stanford_Research_Systems,SR86[05]"
+  example: "Stanford_Research_Systems,SR860,003101,v1.47"
+connection: { timeout_ms: 3000, baud_rate: 115200 }
+
+parameters:
+  amplitude:
+    label: Sine out amplitude
+    kind: drive
+    unit: V
+    set: "SLVL {value}"
+    get: "SLVL?"
+    limits: [1.0e-9, 2.0]
+    safe: 1.0e-9
+  offset:
+    label: Sine out DC offset
+    kind: drive
+    unit: V
+    set: "SOFF {value}"
+    get: "SOFF?"
+    limits: [-5.0, 5.0]
+    safe: 0
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "FREQ {value}"
+    get: "FREQ?"
+    limits: [0.001, 500000]
+  phase:
+    label: Phase
+    kind: measure
+    unit: deg
+    set: "PHAS {value}"
+    get: "PHAS?"
+    limits: [-360000, 360000]
+  harmonic:
+    label: Harmonic
+    kind: measure
+    type: int
+    set: "HARM {value}"
+    get: "HARM?"
+    limits: [1, 99]
+    default: 1
+  time_constant:
+    label: Time constant
+    kind: measure
+    type: enum
+    set: "OFLT {value}"
+    get: "OFLT?"
+    values: { "1 µs": 0, "3 µs": 1, "10 µs": 2, "30 µs": 3, "100 µs": 4, "300 µs": 5, "1 ms": 6, "3 ms": 7,
+              "10 ms": 8, "30 ms": 9, "100 ms": 10, "300 ms": 11, "1 s": 12, "3 s": 13, "10 s": 14, "30 s": 15,
+              "100 s": 16, "300 s": 17, "1 ks": 18, "3 ks": 19, "10 ks": 20, "30 ks": 21 }
+    default: "100 ms"
+  sensitivity:
+    label: Sensitivity
+    kind: measure
+    type: enum
+    set: "SCAL {value}"
+    get: "SCAL?"
+    values: { "1 V": 0, "500 mV": 1, "200 mV": 2, "100 mV": 3, "50 mV": 4, "20 mV": 5, "10 mV": 6, "5 mV": 7,
+              "2 mV": 8, "1 mV": 9, "500 µV": 10, "200 µV": 11, "100 µV": 12, "50 µV": 13, "20 µV": 14,
+              "10 µV": 15, "5 µV": 16, "2 µV": 17, "1 µV": 18, "500 nV": 19, "200 nV": 20, "100 nV": 21,
+              "50 nV": 22, "20 nV": 23, "10 nV": 24, "5 nV": 25, "2 nV": 26, "1 nV": 27 }
+    default: "1 V"
+  X:
+    label: X
+    kind: measure
+    unit: V
+    get: "OUTP? 0"
+  Y:
+    label: Y
+    kind: measure
+    unit: V
+    get: "OUTP? 1"
+  R:
+    label: R
+    kind: measure
+    unit: V
+    get: "OUTP? 2"
+  theta:
+    label: Phase θ
+    kind: measure
+    unit: deg
+    get: "OUTP? 3"
+
+display:
+  headline: R
+
+health:
+  - query: "*IDN?"
+    expect: "SR86[05]"
+raw:
+  reset: ["*RST"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.

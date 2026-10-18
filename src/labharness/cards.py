@@ -8,6 +8,7 @@ guards moves away from it.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -19,6 +20,9 @@ KINDS = ("measure", "drive")
 TYPES = ("float", "int", "bool", "enum", "str", "trace")
 RAMPS = ("gate", "instrument", "none")
 STATUSES = ("community", "lab-verified", "draft")
+CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate": int, "data_bits": int,
+                   "stop_bits": float, "parity": str, "timeout_ms": int, "query_delay": float, "write_only": bool,
+                   "ack": str}  # ack: the line an instrument sends after every command (e.g. "OK"), read and checked
 _TRUE = {"1", "on", "true", "yes", "open"}
 _FALSE = {"0", "off", "false", "no", "closed", "close"}
 
@@ -84,6 +88,9 @@ class ParamSpec:
     applies_when: Optional[str] = None             # drive that must be on for this one to reach the sample
     label: str = ""                                # human name, e.g. "Compliance"
     words: Optional[Tuple[str, str]] = None        # how a bool reads, e.g. ("open", "closed")
+    field: Optional[int] = None                    # reply is comma-separated: take this element (0-based)
+    parse: Optional[str] = None                    # regex whose first group is the value in a verbose reply
+    read_when: Optional[str] = None                # only query while this switch is on (some reads turn outputs on)
     description: str = ""
 
     @property
@@ -153,6 +160,14 @@ class ParamSpec:
 
     def from_wire(self, text: str) -> Any:
         text = text.strip()
+        if self.parse:
+            m = re.search(self.parse, text)
+            if m:
+                text = (m.group(1) if m.groups() else m.group(0)).strip()
+        if self.field is not None and self.type != "trace":
+            parts = [x.strip() for x in text.split(",")]
+            if len(parts) > self.field:
+                text = parts[self.field]
         if self.type == "trace":
             return [float(x) for x in text.split(",") if x.strip()]
         if self.type == "str":
@@ -209,6 +224,10 @@ class Card:
     notes: List[str] = field(default_factory=list)
     manual: str = ""
     source: str = ""
+    connection: Dict[str, Any] = field(default_factory=dict)   # terminations, serial settings, timeouts
+    idn_query: str = "*IDN?"                                    # what discovery asks to identify the model
+    usb_ids: List[str] = field(default_factory=list)            # "VID:PID" in hex, for serial-over-USB devices
+    on_connect: List[str] = field(default_factory=list)         # configuration commands sent when connecting
 
     def param(self, name: str) -> ParamSpec:
         try:
@@ -219,6 +238,16 @@ class Card:
     @property
     def drives(self) -> List[ParamSpec]:
         return [p for p in self.params.values() if p.is_drive]
+
+    @property
+    def setters(self) -> List[ParamSpec]:
+        """Parameters with a set command, most specific command first (OUTPut2 before OUTPut), so a command
+        that could fit two templates goes to the one written for it."""
+        return sorted((p for p in self.params.values() if p.set_cmd is not None), key=lambda p: -len(p.set_cmd.text))
+
+    @property
+    def getters(self) -> List[ParamSpec]:
+        return sorted((p for p in self.params.values() if p.get_cmd is not None), key=lambda p: -len(p.get_cmd.text))
 
 
 def _is_number(x: Any) -> bool:
@@ -297,6 +326,19 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
         applies_when=p.get("applies_when"),
         description=str(p.get("description", "")),
     )
+    if p.get("field") is not None:
+        if not isinstance(p["field"], int) or isinstance(p["field"], bool) or p["field"] < 0:
+            err(path + ".field", "must be a 0-based element index")
+        else:
+            spec.field = p["field"]
+    if p.get("read_when") is not None:
+        spec.read_when = str(p["read_when"])
+    if p.get("parse") is not None:
+        try:
+            re.compile(str(p["parse"]))
+            spec.parse = str(p["parse"])
+        except re.error as e:
+            err(path + ".parse", "not a valid regex: %s" % e)
     words = p.get("words")
     if words is not None:
         if typ != "bool" or not (isinstance(words, (list, tuple)) and len(words) == 2):
@@ -388,6 +430,8 @@ def parse_card(data: Any, source: str = "card") -> Card:
         if spec.applies_when is not None and (spec.applies_when not in params or not params[spec.applies_when].is_drive
                                               or params[spec.applies_when].get_cmd is None):
             err(path + ".applies_when", "%r is not a readable drive on this card" % spec.applies_when)
+        if spec.read_when is not None and (spec.read_when not in params or params[spec.read_when].type != "bool"):
+            err(path + ".read_when", "%r is not an on/off parameter on this card" % spec.read_when)
         for ax in spec.axis or ():
             if ax not in params or params[ax].get_cmd is None or not params[ax].numeric:
                 err(path + ".axis", "%r is not a readable numeric parameter" % ax)
@@ -420,6 +464,31 @@ def parse_card(data: Any, source: str = "card") -> Card:
     blocked = [t for t in (_template(x, err, "raw.blocked", True) for x in raw.get("blocked") or []) if t]
     error_query = _template(data["error_query"], err, "error_query") if data.get("error_query") else None
     identify = data.get("identify") or {}
+    if identify.get("idn"):
+        try:
+            re.compile(str(identify["idn"]))
+        except re.error as e:
+            err("identify.idn", "not a valid regex: %s" % e)
+    usb_ids = [str(u).lower() for u in identify.get("usb") or []]
+    for u in usb_ids:
+        if not re.match(r"^[0-9a-f]{4}:[0-9a-f]{4}$", u):
+            err("identify.usb", "%r is not VID:PID in hex" % u)
+    connection: Dict[str, Any] = {}
+    for key, value in (data.get("connection") or {}).items():
+        kind = CONNECTION_KEYS.get(key)
+        if kind is None:
+            err("connection." + str(key), "unknown setting (known: %s)" % ", ".join(sorted(CONNECTION_KEYS)))
+        elif kind is bool and not isinstance(value, bool):
+            err("connection." + key, "must be true or false")
+        elif kind in (int, float) and not _is_number(value):
+            err("connection." + key, "must be a number")
+        else:
+            connection[key] = kind(value)
+    on_connect = [str(c) for c in data.get("on_connect") or []]
+    for c in on_connect:  # connecting must never move a drive
+        for spec in params.values():
+            if spec.is_drive and spec.set_cmd is not None and spec.set_cmd.header_prefix().match(c) is not None:
+                err("on_connect", "%r would set the drive %s; connecting may only configure" % (c, spec.name))
     headline = (data.get("display") or {}).get("headline")
     if headline is not None and (headline not in params or params[headline].get_cmd is None):
         err("display.headline", "%r is not a readable parameter" % headline)
@@ -433,7 +502,8 @@ def parse_card(data: Any, source: str = "card") -> Card:
         error_query=error_query, safe_sequence=seq, health=health,
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")),
-        source=source,
+        source=source, connection=connection, idn_query=str(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
+        on_connect=on_connect,
     )
 
 
@@ -455,7 +525,7 @@ class CardRegistry:
         self._cards[card.id] = card
 
     def load_dir(self, directory: Any) -> None:
-        for path in sorted(Path(directory).glob("*.yaml")):
+        for path in sorted(Path(directory).rglob("*.yaml")):
             self.add(load_card(path))
 
     def get(self, card_id: str) -> Card:

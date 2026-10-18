@@ -1,0 +1,63 @@
+card: 1
+id: lakeshore/625
+model: Lake Shore 625 superconducting magnet power supply
+vendor: Lake Shore Cryotronics
+kind: magnet-supply
+status: community
+manual: "Model 625 Superconducting Magnet Power Supply user's manual, Remote operation"
+identify:
+  idn: "LSCI,MODEL625"
+  example: "LSCI,MODEL625,1234567,1.3"
+connection: { baud_rate: 9600, data_bits: 7, parity: odd, stop_bits: 1, read_termination: "\r\n",
+              write_termination: "\r\n", timeout_ms: 3000 }
+error_query: "ERST?"
+
+parameters:
+  I_target:
+    label: Current target
+    kind: drive
+    unit: A
+    set: "SETI {value}"
+    get: "SETI?"
+    limits: [-60.1, 60.1]
+    safe: 0
+    ramp: instrument
+    readback: I_out
+    tol: 0.002
+    rate_param: rate
+    rate_per: s
+    timeout: 7200
+    description: Output current target; the supply ramps to it at `rate`. Lab limits should match the magnet.
+  rate:
+    label: Ramp rate
+    kind: drive
+    unit: A/s
+    set: "RATE {value}"
+    get: "RATE?"
+    limits: [0.0001, 99.999]
+    safe: 0.0001
+    default: 0.01
+    description: Faster ramps risk a quench; keep the lab limit at the magnet's rated rate
+  I_out:
+    label: Output current
+    kind: measure
+    unit: A
+    get: "RDGI?"
+  V_out:
+    label: Output voltage
+    kind: measure
+    unit: V
+    get: "RDGV?"
+
+display:
+  headline: I_out
+
+health:
+  - query: "*IDN?"
+    expect: "LSCI,MODEL625"
+raw:
+  reset: ["*RST"]
+  blocked: ["PSH", "LIMIT", "QNCH", "FLDS"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - The persistent switch heater (PSH), current limits and quench settings are blocked; set them on the front panel.

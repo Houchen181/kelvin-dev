@@ -1,0 +1,67 @@
+card: 1
+id: ami/430
+model: American Magnetics Model 430 power supply programmer
+vendor: American Magnetics
+kind: magnet-supply
+status: community
+manual: "AMI Model 430 Power Supply Programmer installation, operation and maintenance instructions, Remote interface"
+identify:
+  idn: "AMERICAN MAGNETICS INC\\.?,MODEL 430"
+  example: "AMERICAN MAGNETICS INC.,MODEL 430,2.01"
+connection: { baud_rate: 115200, read_termination: "\r\n", write_termination: "\r\n", timeout_ms: 3000 }
+error_query: "SYSTem:ERRor?"
+
+parameters:
+  B_target:
+    label: Field target
+    kind: drive
+    unit: T
+    set: "CONFigure:FIELD:TARGet {value};RAMP"
+    get: "FIELD:TARGet?"
+    limits: [-9, 9]
+    safe: 0
+    ramp: instrument
+    readback: B
+    tol: 0.0005
+    timeout: 7200
+    description: Sets the target and starts ramping at the rate programmed in the 430. Assumes field units are tesla.
+  B:
+    label: Field
+    kind: measure
+    unit: T
+    get: "FIELD:MAGnet?"
+  I:
+    label: Magnet current
+    kind: measure
+    unit: A
+    get: "CURRent:MAGnet?"
+  state:
+    label: Ramp state
+    kind: measure
+    type: enum
+    get: "STATE?"
+    values: { "ramping": 1, "holding": 2, "paused": 3, "manual up": 4, "manual down": 5, "zeroing": 6,
+              "quench": 7, "at zero": 8, "heating switch": 9, "cooling switch": 10 }
+  field_units:
+    label: Field units
+    kind: measure
+    type: enum
+    get: "FIELD:UNITS?"
+    values: { "kG": 0, "T": 1 }
+
+display:
+  headline: B
+
+health:
+  - query: "*IDN?"
+    expect: "AMERICAN MAGNETICS"
+  - query: "FIELD:UNITS?"
+    expect: "^1"
+raw:
+  reset: ["*RST"]
+  blocked: ["PSwitch", "CONFigure:COILconst", "CONFigure:CURRent:LIMit", "CONFigure:STABility", "CONFigure:QUench",
+            "CONFigure:RAMP:RATE", "CONFigure:VOLTage:LIMit"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - Ramp rates, limits, the coil constant, quench detection and the persistent switch are set on the 430 itself.
+  - Send PAUSE (raw) to stop a ramp where it is.

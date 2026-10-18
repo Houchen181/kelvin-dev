@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
-from .cards import Card, CardRegistry, ParamSpec, num
+from .cards import CONNECTION_KEYS, Card, CardRegistry, ParamSpec, num
 from .conditions import Condition, parse_condition
 from .yamlio import load_yaml
 
@@ -89,6 +89,7 @@ class InstrumentConfig:
     rates: Dict[str, float] = field(default_factory=dict)
     guards: Dict[str, List[Guard]] = field(default_factory=dict)
     auto: Dict[str, Any] = field(default_factory=dict)  # "*" or param -> "never" | Allowed (its own auto range)
+    connection: Dict[str, Any] = field(default_factory=dict)  # overrides the card's (e.g. RS-232 terminators)
 
 
 @dataclass
@@ -201,9 +202,21 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
                         err(apath, str(e))
         elif raw_auto is not None:
             err(path + ".auto", "must be never or a mapping of parameter: never | [low, high]")
+        connection: Dict[str, Any] = {}
+        for key, value in (d.get("connection") or {}).items():
+            kind = CONNECTION_KEYS.get(key)
+            if kind is None:
+                err("%s.connection.%s" % (path, key), "unknown setting (known: %s)" % ", ".join(sorted(CONNECTION_KEYS)))
+            elif kind is bool and not isinstance(value, bool):
+                err("%s.connection.%s" % (path, key), "must be true or false")
+            else:
+                try:
+                    connection[key] = kind(value)
+                except (TypeError, ValueError):
+                    err("%s.connection.%s" % (path, key), "must be a %s" % kind.__name__)
         instruments[name] = InstrumentConfig(
             name=name, card=card.id, address=str(d.get("address", "sim://" + name)),
-            trust=trust, limits=limits, rates=rates, auto=auto)
+            trust=trust, limits=limits, rates=rates, auto=auto, connection=connection)
 
     def readable(key: str, path: str) -> bool:
         spec = _lookup(cards, key)

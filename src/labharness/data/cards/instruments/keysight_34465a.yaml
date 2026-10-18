@@ -1,0 +1,47 @@
+card: 1
+id: keysight/34465a
+model: Keysight / Agilent / HP digital multimeter (34401A, 34410A, 34411A, 34460A, 34461A, 34465A, 34470A), DC volts and amps
+vendor: Keysight (Agilent, HP)
+kind: multimeter
+status: community
+manual: "Keysight Truevolt Series Operating and Service Guide, SCPI programming reference"
+identify:
+  idn: "(Keysight Technologies|Agilent Technologies|HEWLETT-PACKARD),344(01|10|11|60|61|65|70)A"
+  example: "Keysight Technologies,34465A,MY57501234,A.02.17-02.40-02.17-00.52-04-01"
+connection: { timeout_ms: 10000 }
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  V_dc:
+    label: DC voltage
+    kind: measure
+    unit: V
+    get: "MEASure:VOLTage:DC?"
+  I_dc:
+    label: DC current
+    kind: measure
+    unit: A
+    get: "MEASure:CURRent:DC?"
+    description: Uses the current input terminals
+  nplc:
+    label: Integration (NPLC)
+    kind: measure
+    unit: PLC
+    set: "VOLTage:DC:NPLC {value}"
+    get: "VOLTage:DC:NPLC?"
+    limits: [0.001, 100]
+
+display:
+  headline: V_dc
+
+health:
+  - query: "*IDN?"
+    expect: "344"
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "MEASure:RESistance", "MEASure:FRESistance", "CONFigure:RESistance",
+            "CONFigure:FRESistance", "MEASure:CONTinuity", "MEASure:DIODe", "MEASure:TEMPerature"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - Resistance, continuity, diode and RTD modes push a test current into whatever is connected, so they are blocked
+    here; a fragile device should only see the voltage input.

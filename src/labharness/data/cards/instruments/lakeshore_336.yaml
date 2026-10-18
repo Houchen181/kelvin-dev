@@ -1,0 +1,61 @@
+card: 1
+id: lakeshore/336
+model: Lake Shore 335 / 336 cryogenic temperature controller (loop 1)
+vendor: Lake Shore Cryotronics
+kind: temperature-controller
+status: community
+manual: "Model 336 Temperature Controller user's manual, chapter 6 (Computer interface)"
+identify:
+  idn: "LSCI,MODEL33[56]"
+  example: "LSCI,MODEL336,LSA1234/#######,1.9"
+connection: { baud_rate: 57600, data_bits: 7, parity: odd, stop_bits: 1, read_termination: "\r\n",
+              write_termination: "\r\n", timeout_ms: 3000 }
+safe_sequence: [heater_range, setpoint]
+
+parameters:
+  setpoint:
+    label: Setpoint (loop 1)
+    kind: drive
+    unit: K
+    set: "SETP 1,{value}"
+    get: "SETP? 1"
+    limits: [0, 400]
+    safe: 0
+    description: Control setpoint of loop 1; heats only while the heater range is on
+  heater_range:
+    label: Heater range (output 1)
+    kind: drive
+    type: enum
+    set: "RANGE 1,{value}"
+    get: "RANGE? 1"
+    values: { "off": 0, "low": 1, "medium": 2, "high": 3 }
+    safe: "off"
+  T_A:
+    label: Temperature A
+    kind: measure
+    unit: K
+    get: "KRDG? A"
+  T_B:
+    label: Temperature B
+    kind: measure
+    unit: K
+    get: "KRDG? B"
+  heater:
+    label: Heater output
+    kind: measure
+    unit: "%"
+    get: "HTR? 1"
+
+display:
+  headline: T_A
+
+health:
+  - query: "*IDN?"
+    expect: "LSCI"
+raw:
+  reset: ["*RST"]
+  blocked: ["CRVHDR", "CRVPT", "CRVDEL", "INTYPE"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - Sensor curves and input types are blocked here; they change what every temperature reading means.
+  - "Plans can wait for the temperature with stabilize: {read: tc.T_A, within: 0.02, for: 60}."

@@ -1,0 +1,57 @@
+card: 1
+id: srs/sr560
+model: Stanford Research SR560 low-noise voltage preamplifier
+vendor: Stanford Research Systems
+kind: preamp
+status: community
+manual: "SR560 Low-Noise Preamplifier manual, Remote programming (RS-232, listen only)"
+connection: { baud_rate: 9600, data_bits: 8, stop_bits: 2, write_termination: "\r\n", write_only: true }
+on_connect: ["LALL"]
+
+parameters:
+  gain:
+    label: Gain
+    kind: measure
+    type: enum
+    set: "GAIN {value}"
+    values: { "1": 0, "2": 1, "5": 2, "10": 3, "20": 4, "50": 5, "100": 6, "200": 7, "500": 8, "1000": 9,
+              "2000": 10, "5000": 11, "10000": 12, "20000": 13, "50000": 14 }
+    default: "1"
+  filter:
+    label: Filter mode
+    kind: measure
+    type: enum
+    set: "FLTM {value}"
+    values: { "bypass": 0, "6 dB/oct low-pass": 1, "12 dB/oct low-pass": 2, "6 dB/oct high-pass": 3,
+              "12 dB/oct high-pass": 4, "band-pass": 5 }
+    default: "bypass"
+  lowpass:
+    label: Low-pass corner
+    kind: measure
+    type: enum
+    set: "LFRQ {value}"
+    values: { "0.03 Hz": 0, "0.1 Hz": 1, "0.3 Hz": 2, "1 Hz": 3, "3 Hz": 4, "10 Hz": 5, "30 Hz": 6, "100 Hz": 7,
+              "300 Hz": 8, "1 kHz": 9, "3 kHz": 10, "10 kHz": 11, "30 kHz": 12, "100 kHz": 13, "300 kHz": 14,
+              "1 MHz": 15 }
+    default: "1 MHz"
+  highpass:
+    label: High-pass corner
+    kind: measure
+    type: enum
+    set: "HFRQ {value}"
+    values: { "0.03 Hz": 0, "0.1 Hz": 1, "0.3 Hz": 2, "1 Hz": 3, "3 Hz": 4, "10 Hz": 5, "30 Hz": 6, "100 Hz": 7,
+              "300 Hz": 8, "1 kHz": 9, "3 kHz": 10, "10 kHz": 11 }
+    default: "0.03 Hz"
+  coupling:
+    label: Input coupling
+    kind: measure
+    type: enum
+    set: "CPLG {value}"
+    values: { "ground": 0, "DC": 1, "AC": 2 }
+    default: "DC"
+
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - The SR560 only listens, so Kelvin cannot read its settings back. It shows the last values it set; after power-up
+    these are the defaults above until Kelvin sets them.
+  - It cannot be found by a scan; add it by hand with its serial port.

@@ -1,0 +1,60 @@
+card: 1
+id: srs/sr570
+model: Stanford Research SR570 low-noise current preamplifier
+vendor: Stanford Research Systems
+kind: preamp
+status: community
+manual: "SR570 Low-Noise Current Preamplifier manual, Remote programming (RS-232, listen only)"
+connection: { baud_rate: 9600, data_bits: 8, stop_bits: 2, write_termination: "\r\n", write_only: true }
+safe_sequence: [bias, bias_on]
+
+parameters:
+  sensitivity:
+    label: Sensitivity
+    kind: measure
+    type: enum
+    set: "SENS {value}"
+    values: { "1 pA/V": 0, "2 pA/V": 1, "5 pA/V": 2, "10 pA/V": 3, "20 pA/V": 4, "50 pA/V": 5, "100 pA/V": 6,
+              "200 pA/V": 7, "500 pA/V": 8, "1 nA/V": 9, "2 nA/V": 10, "5 nA/V": 11, "10 nA/V": 12, "20 nA/V": 13,
+              "50 nA/V": 14, "100 nA/V": 15, "200 nA/V": 16, "500 nA/V": 17, "1 µA/V": 18, "2 µA/V": 19,
+              "5 µA/V": 20, "10 µA/V": 21, "20 µA/V": 22, "50 µA/V": 23, "100 µA/V": 24, "200 µA/V": 25,
+              "500 µA/V": 26, "1 mA/V": 27 }
+    default: "1 mA/V"
+  gain_mode:
+    label: Gain mode
+    kind: measure
+    type: enum
+    set: "GNMD {value}"
+    values: { "low noise": 0, "high bandwidth": 1, "low drift": 2 }
+    default: "low noise"
+  lowpass:
+    label: Low-pass corner
+    kind: measure
+    type: enum
+    set: "LFRQ {value}"
+    values: { "0.03 Hz": 0, "0.1 Hz": 1, "0.3 Hz": 2, "1 Hz": 3, "3 Hz": 4, "10 Hz": 5, "30 Hz": 6, "100 Hz": 7,
+              "300 Hz": 8, "1 kHz": 9, "3 kHz": 10, "10 kHz": 11, "30 kHz": 12, "100 kHz": 13, "300 kHz": 14,
+              "1 MHz": 15 }
+    default: "1 MHz"
+  bias:
+    label: Bias voltage
+    kind: drive
+    type: int
+    unit: mV
+    set: "BSLV {value}"
+    limits: [-5000, 5000]
+    safe: 0
+    default: 0
+    description: Voltage applied to the input, i.e. across the sample; a drive
+  bias_on:
+    label: Bias
+    kind: drive
+    type: bool
+    set: "BSON {value}"
+    safe: off
+    enables: [bias]
+
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - The SR570 only listens; Kelvin shows the last values it set.
+  - The bias voltage reaches the sample, so changing it away from 0 asks for approval.

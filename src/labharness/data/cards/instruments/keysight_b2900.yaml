@@ -1,0 +1,65 @@
+card: 1
+id: keysight/b2900
+model: Keysight B2900 Precision Source/Measure Unit (B2901/2/11/12, channel 1)
+vendor: Keysight (Agilent)
+kind: source-meter
+status: community
+manual: "Keysight B2900 Series SCPI Command Reference"
+identify:
+  idn: "(Keysight|Agilent) Technologies,B29[01][12][AB]"
+  example: "Keysight Technologies,B2902A,MY51141234,3.4.2011.5100"
+connection: { timeout_ms: 5000 }
+error_query: ":SYSTem:ERRor[:NEXT]?"
+safe_sequence: [V, output, compliance_I]
+
+parameters:
+  V:
+    label: Source voltage
+    applies_when: output
+    kind: drive
+    unit: V
+    set: ":SOURce1:VOLTage[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: ":SOURce1:VOLTage[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-210, 210]
+    safe: 0
+    ramp: gate
+    max_rate: 10
+    ramp_step: 0.05
+  compliance_I:
+    label: Current compliance
+    applies_when: output
+    kind: drive
+    unit: A
+    set: ":SENSe1:CURRent[:DC]:PROTection[:LEVel] {value}"
+    get: ":SENSe1:CURRent[:DC]:PROTection[:LEVel]?"
+    limits: [1.0e-9, 1.5]
+    safe: 1.0e-9
+    default: 1.0e-4
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: ":OUTPut1[:STATe] {value}"
+    get: ":OUTPut1[:STATe]?"
+    safe: off
+    enables: [V, compliance_I]
+  I:
+    label: Current
+    kind: measure
+    unit: A
+    get: ":MEASure:CURRent[:DC]? (@1)"
+    read_when: output
+    description: A measure command can switch the output on, so Kelvin only reads while it is already on.
+
+display:
+  headline: I
+
+health:
+  - query: "*IDN?"
+    expect: "B29"
+raw:
+  reset: ["*RST"]
+  blocked: [":CALibration"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - Channel 2 of a two-channel unit needs its own card (copy this one and change 1 to 2).

@@ -1,0 +1,60 @@
+card: 1
+id: keysight/33500b
+model: Keysight 33500B / 33600A waveform generator (channel 1)
+vendor: Keysight (Agilent)
+kind: function-generator
+status: community
+manual: "Keysight 33500B Series Operating and Service Guide, SCPI programming reference"
+identify:
+  idn: "(Keysight|Agilent) Technologies,33[56]\\d\\d[AB]"
+  example: "Keysight Technologies,33522B,MY52401234,4.00-1.19-2.00-58-00"
+error_query: "SYSTem:ERRor[:NEXT]?"
+safe_sequence: [amplitude, offset, output]
+
+parameters:
+  amplitude:
+    label: Amplitude (Vpp)
+    applies_when: output
+    kind: drive
+    unit: V
+    set: "SOURce1:VOLTage {value}"
+    get: "SOURce1:VOLTage?"
+    limits: [0.001, 10]
+    safe: 0.001
+  offset:
+    label: DC offset
+    applies_when: output
+    kind: drive
+    unit: V
+    set: "SOURce1:VOLTage:OFFSet {value}"
+    get: "SOURce1:VOLTage:OFFSet?"
+    limits: [-5, 5]
+    safe: 0
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "SOURce1:FREQuency {value}"
+    get: "SOURce1:FREQuency?"
+    limits: [1.0e-6, 3.0e7]
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: "OUTPut1[:STATe] {value}"
+    get: "OUTPut1[:STATe]?"
+    safe: off
+    enables: [amplitude, offset]
+
+display:
+  headline: amplitude
+
+health:
+  - query: "*IDN?"
+    expect: "33[56]"
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "OUTPut1:LOAD", "SOURce1:VOLTage:LIMit"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - Amplitudes assume the output load setting on the instrument (50 Ω by default); the load is set on the front panel.

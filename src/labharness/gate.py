@@ -535,6 +535,8 @@ class SafetyGate:
     def _guard_trip(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[Guard, float]]:
         for g in inst.guards(spec.name):
             val = self.lab.read(g.instr, g.param)
+            if val is None:  # not readable now (its switch is off), so nothing flows to trip on
+                continue
             if abs(val) > g.max_abs:
                 return g, val
         return None
@@ -595,9 +597,7 @@ class SafetyGate:
                 resp = inst.query_raw(cmd).strip()
                 shown = resp if len(resp) <= 80 else resp[:77] + "..."
                 return done(Result(True, "read", target, value=resp, message="%s %s → %s" % (inst.name, cmd, shown)))
-            for spec in card.params.values():
-                if spec.set_cmd is None:
-                    continue
+            for spec in card.setters:
                 text = spec.set_cmd.match(cmd)
                 if text is None:
                     continue

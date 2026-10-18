@@ -24,9 +24,9 @@ class HealthResult:
 
 
 def real_backend_factory(name: str, card: Card, address: str) -> Any:
-    raise NotImplementedError(
-        "%s: real instrument adapters (VISA, serial, vendor SDKs, LabVIEW, MATLAB) arrive in Phase 1; "
-        "use a sim:// address for now" % name)
+    """A real instrument over VISA (GPIB, USB, LAN, serial); see adapters.py."""
+    from .adapters import open_backend
+    return open_backend(name, card, address)
 
 
 class Lab:
@@ -112,7 +112,8 @@ class Lab:
         state = getattr(inst.backend, "state", None)
         if isinstance(state, dict):
             return dict(state)
-        return {k: v for k, v in self.snapshot()[inst.name].items() if not (isinstance(v, str) and v.startswith("ERROR"))}
+        return {k: v for k, v in self.snapshot()[inst.name].items()
+                if v is not None and not (isinstance(v, str) and v.startswith("ERROR"))}
 
     def make_twin(self, seed: int = 0) -> "Lab":
         """A simulated copy of this lab in its current state, for dry runs."""

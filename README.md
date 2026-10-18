@@ -112,6 +112,48 @@ Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points
 
 After a run, Kelvin classifies each measured curve and fits it: a peak or dip (Lorentzian or Gaussian: center, FWHM, height, Q for frequency axes), a straight line (slope, and resistance for I–V), an exponential relaxation (τ), a steady value or no signal. Every number has a one-standard-error uncertainty. It also tracks how the fitted feature changes along an outer loop, and it flags clipping, under-resolved or cut-off features, hysteresis, unsettled readings and stopped runs. The result is saved as `analysis.json` in the run folder; `analyze_run` re-fits a run with a chosen model.
 
+## Real instruments
+
+Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-serial. It uses the VISA library you already have (NI-VISA or Keysight IO Libraries), or a pure-Python one if there is none. Install the extra with `pip install "kelvin-lab[hardware]"`; the desktop app includes it.
+
+**Find what is connected:**
+
+```bash
+kelvin-scan --write lab.yaml
+```
+
+The scan only asks each instrument who it is (`*IDN?`, or the card's own identity query); it never sets anything. Serial ports are tried with each known card's framing; for example, the Lake Shore 336 needs 57600 baud, 7 data bits and odd parity. The command matches each instrument to a card and drafts a lab config for you to review. The agent can run the same scan (`scan_instruments`), but only a person adds an instrument to the lab.
+
+**Cards included** (written from the manuals; marked `community` until a lab verifies them on hardware):
+
+| Kind | Models |
+|---|---|
+| Source-meters and sources | Keithley 2400-series, Keithley 2450/2460/2461/2470, Keysight B2900, Yokogawa GS200/GS210 |
+| Lock-ins | SRS SR830/SR810, SRS SR860/SR865 |
+| Temperature controllers (cryostats) | Lake Shore 335/336, Lake Shore 350 |
+| Magnet supplies | Lake Shore 625, AMI 430 |
+| Lasers and optics | Coherent OBIS, Thorlabs ITC4000 laser/TEC controller, Thorlabs PM100/PM400 power meter |
+| Amplifiers | SRS SR560 voltage preamp, SRS SR570 current preamp (listen-only: Kelvin shows what it last set) |
+| Meters and generators | Keysight/Agilent 344xxA DMMs, Keithley 2182A nanovoltmeter, Keysight 33500B/33600A generators |
+
+Real hardware gets the same gate as the virtual lab, and a few protections of its own:
+- **Measuring never powers anything up.** On some source-meters a reading command switches the output on, so those readings are only taken while the output is already on (`read_when`).
+- **No speed-up on real time.** A lab with any real instrument runs on real time, so ramps keep their rates.
+- **Risky commands stay locked.** Commands that change what readings mean, or that bypass the instrument's own protection, are blocked in the card: sensor curves, coil constants, persistent-switch heaters, current limits, and DMM resistance modes that push current into a device.
+- **Connecting only configures.** A card's `on_connect` commands are checked never to touch a drive.
+
+A lab can mix real and simulated instruments, and override a card's connection settings per instrument:
+
+```yaml
+lab: Cryostat 2
+instruments:
+  smu:    { card: keithley/2400, address: "GPIB0::24::INSTR", limits: { V: [-5, 5] }, rates: { V: 0.2 },
+            guards: { V: [{ read: I, max_abs: 1.0e-9 }] } }
+  lockin: { card: srs/sr830, address: "serial://COM3", connection: { read_termination: "\r" } }
+  tc:     { card: lakeshore/336, address: "ASRL5::INSTR" }
+  laser:  { card: coherent/obis, address: "serial://COM7", auto: never }
+```
+
 ## Try the core without an agent
 
 Requires Python ≥ 3.9 and PyYAML. No hardware is needed.

@@ -1,0 +1,99 @@
+card: 1
+id: srs/sr830
+model: Stanford Research SR830 / SR810 lock-in amplifier
+vendor: Stanford Research Systems
+kind: lock-in
+status: community
+manual: "SR830 DSP Lock-In Amplifier manual, chapter 5 (Remote programming)"
+identify:
+  idn: "Stanford_Research_Systems,SR8[13]0"
+  example: "Stanford_Research_Systems,SR830,s/n12345,ver1.07"
+connection: { timeout_ms: 3000, baud_rate: 9600 }
+
+parameters:
+  amplitude:
+    label: Sine out amplitude
+    kind: drive
+    unit: V
+    set: "SLVL {value}"
+    get: "SLVL?"
+    limits: [0.004, 5.0]
+    safe: 0.004
+    description: Reference sine output (rms), usually the excitation of the sample
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "FREQ {value}"
+    get: "FREQ?"
+    limits: [0.001, 102000]
+    description: Internal reference frequency
+  phase:
+    label: Phase
+    kind: measure
+    unit: deg
+    set: "PHAS {value}"
+    get: "PHAS?"
+    limits: [-360, 729.99]
+  harmonic:
+    label: Harmonic
+    kind: measure
+    type: int
+    set: "HARM {value}"
+    get: "HARM?"
+    limits: [1, 19999]
+    default: 1
+  time_constant:
+    label: Time constant
+    kind: measure
+    type: enum
+    set: "OFLT {value}"
+    get: "OFLT?"
+    values: { "10 µs": 0, "30 µs": 1, "100 µs": 2, "300 µs": 3, "1 ms": 4, "3 ms": 5, "10 ms": 6, "30 ms": 7,
+              "100 ms": 8, "300 ms": 9, "1 s": 10, "3 s": 11, "10 s": 12, "30 s": 13, "100 s": 14, "300 s": 15,
+              "1 ks": 16, "3 ks": 17, "10 ks": 18, "30 ks": 19 }
+    default: "100 ms"
+  sensitivity:
+    label: Sensitivity
+    kind: measure
+    type: enum
+    set: "SENS {value}"
+    get: "SENS?"
+    values: { "2 nV": 0, "5 nV": 1, "10 nV": 2, "20 nV": 3, "50 nV": 4, "100 nV": 5, "200 nV": 6, "500 nV": 7,
+              "1 µV": 8, "2 µV": 9, "5 µV": 10, "10 µV": 11, "20 µV": 12, "50 µV": 13, "100 µV": 14, "200 µV": 15,
+              "500 µV": 16, "1 mV": 17, "2 mV": 18, "5 mV": 19, "10 mV": 20, "20 mV": 21, "50 mV": 22, "100 mV": 23,
+              "200 mV": 24, "500 mV": 25, "1 V": 26 }
+    default: "1 V"
+    description: Full scale (current input reads in µA instead of V)
+  X:
+    label: X
+    kind: measure
+    unit: V
+    get: "OUTP? 1"
+  Y:
+    label: Y
+    kind: measure
+    unit: V
+    get: "OUTP? 2"
+  R:
+    label: R
+    kind: measure
+    unit: V
+    get: "OUTP? 3"
+  theta:
+    label: Phase θ
+    kind: measure
+    unit: deg
+    get: "OUTP? 4"
+
+display:
+  headline: R
+
+health:
+  - query: "*IDN?"
+    expect: "SR8[13]0"
+raw:
+  reset: ["*RST"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - Over RS-232 the SR830 ends replies with a carriage return; set connection read_termination to "\r" in the lab config.

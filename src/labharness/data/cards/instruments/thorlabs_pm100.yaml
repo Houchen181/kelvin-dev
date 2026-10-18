@@ -1,0 +1,43 @@
+card: 1
+id: thorlabs/pm100
+model: Thorlabs PM100 / PM101 / PM400 optical power meter
+vendor: Thorlabs
+kind: power-meter
+status: community
+manual: "PM100D / PM100USB operation manual, SCPI commands"
+identify:
+  idn: "Thorlabs,PM(100[A-Z]*|101[A-Z]*|400)"
+  example: "Thorlabs,PM100D,P0012345,2.7.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  power:
+    label: Power
+    kind: measure
+    unit: W
+    get: "MEASure:POWer?"
+  wavelength:
+    label: Wavelength
+    kind: measure
+    unit: nm
+    set: "[SENSe]:CORRection:WAVelength {value}"
+    get: "[SENSe]:CORRection:WAVelength?"
+    limits: [185, 25000]
+    description: Correction wavelength; the valid range depends on the sensor head
+  averages:
+    label: Averages
+    kind: measure
+    type: int
+    set: "[SENSe]:AVERage[:COUNt] {value}"
+    get: "[SENSe]:AVERage[:COUNt]?"
+    limits: [1, 10000]
+    default: 1
+
+display:
+  headline: power
+
+health:
+  - query: "*IDN?"
+    expect: "Thorlabs"
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.

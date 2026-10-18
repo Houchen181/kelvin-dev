@@ -69,7 +69,8 @@ class Template:
         self.has_value = "{value}" in rest
         self.is_query = rest.lstrip().startswith("?")
         self.prefix = prefix
-        pattern = r"^\s*:?" + _header(head)
+        # a header never runs into a letter: VOLT must not match the start of VOLTage:ILIMit (but SLVL5 is SLVL 5)
+        pattern = r"^\s*:?" + _header(head) + r"(?![A-Za-z])"
         pattern += r"(?=$|[\s:?;])" if prefix else _rest(rest) + r"\s*$"
         self._re = re.compile(pattern, re.IGNORECASE | re.S)
 

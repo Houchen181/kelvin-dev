@@ -1,0 +1,68 @@
+card: 1
+id: thorlabs/itc4000
+model: Thorlabs ITC4000-series laser diode and TEC controller (ITC4001/4002/4005/4020)
+vendor: Thorlabs
+kind: laser-driver
+status: community
+manual: "ITC4000 Series operation manual, SCPI commands"
+identify:
+  idn: "Thorlabs,ITC40\\d\\d"
+  example: "Thorlabs,ITC4001,M00123456,1.8.0/1.5.4/2.1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+safe_sequence: [laser_current, output, tec]
+
+parameters:
+  laser_current:
+    label: Laser current
+    applies_when: output
+    kind: drive
+    unit: A
+    set: "SOURce:CURRent[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: "SOURce:CURRent[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [0, 1]
+    safe: 0
+    ramp: gate
+    max_rate: 0.02
+    ramp_step: 0.001
+    description: Laser diode current; ramped slowly. Set lab limits to the diode's rating.
+  output:
+    label: Laser output
+    kind: drive
+    type: bool
+    set: "OUTPut[:STATe] {value}"
+    get: "OUTPut[:STATe]?"
+    safe: off
+    enables: [laser_current]
+  tec:
+    label: TEC output
+    kind: drive
+    type: bool
+    set: "OUTPut2[:STATe] {value}"
+    get: "OUTPut2[:STATe]?"
+    safe: off
+    description: Thermoelectric cooler; switch it on before the laser
+  current_out:
+    label: Measured laser current
+    kind: measure
+    unit: A
+    get: "MEASure:CURRent?"
+  voltage_out:
+    label: Laser voltage
+    kind: measure
+    unit: V
+    get: "MEASure:VOLTage?"
+
+display:
+  headline: current_out
+
+health:
+  - query: "*IDN?"
+    expect: "ITC40"
+  - query: "SYSTem:ERRor?"
+    expect: "^[+]?0,"
+raw:
+  reset: ["*RST"]
+  blocked: ["SOURce:CURRent:LIMit", "SOURce:VOLTage:PROTection", "CALibration"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - The current limit (LD protection) is set on the controller and blocked here.

@@ -124,6 +124,10 @@ class Twin:
     def write(self, command: str) -> None:
         self._check_fault()
         self.world.update()
+        for spec in self.card.params.values():  # a card command that is itself compound, e.g. "TARG {value};RAMP"
+            if spec.set_cmd is not None and ";" in spec.set_cmd.text and spec.set_cmd.match(command) is not None:
+                self._write_one(command)
+                return
         for part in split_compound(command):
             self._write_one(part)
 
@@ -171,9 +175,7 @@ class Twin:
         if re.match(r"^\s*\*CLS\s*$", cmd, re.I):
             self.errors.clear()
             return
-        for spec in self.card.params.values():
-            if spec.set_cmd is None:
-                continue
+        for spec in self.card.setters:
             text = spec.set_cmd.match(cmd)
             if text is None:
                 continue
@@ -196,9 +198,16 @@ class Twin:
             return "1"
         if self.card.error_query is not None and self.card.error_query.match(cmd) is not None:
             return self.errors.pop(0) if self.errors else '0,"No error"'
-        for spec in self.card.params.values():
-            if spec.get_cmd is not None and spec.get_cmd.match(cmd) is not None:
-                return spec.to_wire(self.read(spec.name))
+        if cmd.strip().lower() == self.card.idn_query.strip().lower():
+            return self.idn()
+        hits = [s for s in self.card.getters if s.get_cmd.match(cmd) is not None]
+        if any(s.field is not None for s in hits):  # one query, several values: answer like the instrument
+            reply = ["0"] * (max(s.field or 0 for s in hits) + 1)
+            for s in hits:
+                reply[s.field or 0] = s.to_wire(self.read(s.name))
+            return ",".join(reply)
+        if hits:
+            return hits[0].to_wire(self.read(hits[0].name))
         self.errors.append('-113,"Undefined header"')
         raise TimeoutError("%s: no response to %r" % (self.name, cmd))
 

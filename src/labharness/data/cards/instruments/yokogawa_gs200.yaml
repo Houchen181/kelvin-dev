@@ -1,0 +1,68 @@
+card: 1
+id: yokogawa/gs200
+model: Yokogawa GS200 / GS210 DC voltage source (voltage mode)
+vendor: Yokogawa
+kind: voltage-source
+status: community
+manual: "Yokogawa GS200 User's Manual, communication commands"
+identify:
+  idn: "YOKOGAWA,GS2[01]0"
+  example: "YOKOGAWA,GS210,91T123456,2.02"
+error_query: ":SYSTem:ERRor?"
+safe_sequence: [level, output, current_limit]
+
+parameters:
+  level:
+    label: Voltage
+    applies_when: output
+    kind: drive
+    unit: V
+    set: ":SOURce:LEVel[:AUTO] {value}"
+    get: ":SOURce:LEVel?"
+    limits: [-32, 32]
+    safe: 0
+    ramp: gate
+    max_rate: 5
+    ramp_step: 0.01
+    description: Output level. This card assumes voltage mode (see function).
+  current_limit:
+    label: Current limit
+    applies_when: output
+    kind: drive
+    unit: A
+    set: ":SOURce:PROTection:CURRent {value}"
+    get: ":SOURce:PROTection:CURRent?"
+    limits: [0.001, 0.2]
+    safe: 0.001
+    default: 0.001
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: ":OUTPut[:STATe] {value}"
+    get: ":OUTPut[:STATe]?"
+    safe: off
+    enables: [level, current_limit]
+  function:
+    label: Function
+    kind: measure
+    type: enum
+    get: ":SOURce:FUNCtion?"
+    values: { voltage: VOLT, current: CURR }
+    default: voltage
+    description: Must read voltage for this card; switch modes on the front panel with the output off.
+
+display:
+  headline: level
+
+health:
+  - query: "*IDN?"
+    expect: "YOKOGAWA"
+  - query: ":SOURce:FUNCtion?"
+    expect: "VOLT"
+raw:
+  reset: ["*RST"]
+  blocked: [":SOURce:FUNCtion", ":CALibration"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.
+  - Changing between voltage and current mode is blocked here; do it on the front panel with the output off.

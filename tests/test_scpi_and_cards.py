@@ -53,3 +53,11 @@ def test_card_errors_are_specific():
     msg = str(e.value)
     assert "parameters.V.safe" in msg and "parameters.V.limits" in msg
     assert "parameters.P.max_rate" in msg and "parameters.Q.get" in msg
+
+
+def test_a_header_does_not_split_a_word():
+    from labharness.scpi import Template
+    v = Template(":SOURce:VOLTage[:LEVel][:IMMediate][:AMPLitude] {value}")
+    assert v.match(":SOURce:VOLTage:ILIMit 1e-09") is None       # not "VOLT" + "age:ILIMit ..."
+    assert v.match(":SOUR:VOLT 1.5") == "1.5" and v.match(":SOURce:VOLTage:LEVel 2") == "2"
+    assert Template("SLVL {value}").match("SLVL5") == "5"           # no space is still the same setting

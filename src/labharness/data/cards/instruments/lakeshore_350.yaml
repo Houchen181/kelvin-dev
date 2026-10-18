@@ -1,0 +1,68 @@
+card: 1
+id: lakeshore/350
+model: Lake Shore 350 cryogenic temperature controller (loop 1)
+vendor: Lake Shore Cryotronics
+kind: temperature-controller
+status: community
+manual: "Model 350 Temperature Controller user's manual, Remote operation"
+identify:
+  idn: "LSCI,MODEL350"
+  example: "LSCI,MODEL350,LSA2B5C/#######,1.4"
+connection: { baud_rate: 57600, data_bits: 7, parity: odd, stop_bits: 1, read_termination: "\r\n",
+              write_termination: "\r\n", timeout_ms: 3000 }
+safe_sequence: [heater_range, setpoint]
+
+parameters:
+  setpoint:
+    label: Setpoint (loop 1)
+    kind: drive
+    unit: K
+    set: "SETP 1,{value}"
+    get: "SETP? 1"
+    limits: [0, 400]
+    safe: 0
+  heater_range:
+    label: Heater range (output 1)
+    kind: drive
+    type: enum
+    set: "RANGE 1,{value}"
+    get: "RANGE? 1"
+    values: { "off": 0, "range 1": 1, "range 2": 2, "range 3": 3, "range 4": 4, "range 5": 5 }
+    safe: "off"
+  T_A:
+    label: Temperature A
+    kind: measure
+    unit: K
+    get: "KRDG? A"
+  T_B:
+    label: Temperature B
+    kind: measure
+    unit: K
+    get: "KRDG? B"
+  T_C:
+    label: Temperature C
+    kind: measure
+    unit: K
+    get: "KRDG? C"
+  T_D:
+    label: Temperature D
+    kind: measure
+    unit: K
+    get: "KRDG? D"
+  heater:
+    label: Heater output
+    kind: measure
+    unit: "%"
+    get: "HTR? 1"
+
+display:
+  headline: T_A
+
+health:
+  - query: "*IDN?"
+    expect: "LSCI"
+raw:
+  reset: ["*RST"]
+  blocked: ["CRVHDR", "CRVPT", "CRVDEL", "INTYPE"]
+notes:
+  - Written from the manual; verify on your unit before trusting it with a sample.

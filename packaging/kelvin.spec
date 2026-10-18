@@ -23,6 +23,9 @@ PACKAGES = [
     ("openai", "openai", ()),
     ("google.genai", "google-genai", ()),
     ("yaml", "PyYAML", ()),
+    ("pyvisa", "PyVISA", ()),                      # real instruments
+    ("pyvisa_py", "PyVISA-py", ()),                # loaded by name when no vendor VISA is installed
+    ("serial", "pyserial", ()),
 ]
 if sys.platform == "win32":
     PACKAGES += [("clr_loader", "clr_loader", ()), ("pythonnet", "pythonnet", ())]

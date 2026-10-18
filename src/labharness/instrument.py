@@ -32,7 +32,10 @@ class Instrument:
         return self.card.param(param)
 
     def read(self, param: str) -> Any:
+        """The parameter's value; None if the card says to read it only while a switch is on and it is off."""
         spec = self.spec(param)
+        if spec.read_when is not None and not self.read(spec.read_when):
+            return None
         if spec.get_cmd is None:
             if param in self._last:
                 return self._last[param]
