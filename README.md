@@ -9,73 +9,72 @@
 
 ---
 
-Kelvin connects Claude, GPT, Gemini or a local model to your instruments through a safety gate. Measuring runs freely. Anything that pushes more power, voltage, current, field or temperature into the sample is checked against your limits, approved by a person, then ramped and watched.
+You ask in plain words. Kelvin turns the request into a measurement plan for your instruments, rehearses it on simulated copies of them, asks you before anything drives the sample harder, runs it, and fits the result. Every command and approval is logged.
 
-## Get started
+```text
+You     Sweep the gate from 0 to 5 V and record the lock-in signal.
+Kelvin  Plan gate_sweep: smu.V from 0 to 5 V in 0.1 V steps; read lockin.X and smu.I; back to 0 V after.
+        Dry run on the simulated instruments: fine, 51 points, about 40 s.
+        Approve?  smu.output off → on,  smu.V 0 → 5 V (your limit ±10 V), ramped.
+You     Approve
+Kelvin  Done. lockin.X has a peak at 2.41 ± 0.02 V, FWHM 0.38 ± 0.05 V.
+        Plot, data and fit in runs/20261018-153012-gate_sweep/
+```
 
-No Python needed.
+It works with Claude, GPT, Gemini, your ChatGPT plan or a local model, and keeps everything on your computer.
 
-- **Windows 10/11:** [download `Kelvin-Setup.exe`](https://github.com/Houchen181/kelvin/releases/latest/download/Kelvin-Setup.exe) and run it. No admin rights are needed. The installer isn't code-signed yet, so if Windows says it protected your PC, choose **More info → Run anyway**.
-- **macOS (Apple silicon):** from the [latest release](https://github.com/Houchen181/kelvin/releases/latest), unzip `Kelvin-<version>-macOS.zip` and move `Kelvin.app` to Applications. The first time, right-click it and choose **Open**.
+## Instruments
 
-Kelvin starts with a simulated lab and a scripted demo model. To talk to a real model, add an API key in Settings or sign in with ChatGPT. If instruments are connected, Kelvin finds them and connects them, with their outputs locked until you review the limits. Everything it keeps stays in `~/Kelvin` on your computer.
+Kelvin talks to instruments over GPIB, USB, LAN, RS-232, web APIs and the makers' own libraries. On start it finds what is connected and sets it up, outputs locked until you review the limits.
 
-Uninstalling Kelvin also deletes its own data: settings, API keys, chats, memory, the lab config and instrument folders. It keeps your measurements: runs, the lab record and reports.
+| Kind | Included |
+|---|---|
+| Sources and meters | Keithley 2400 series, 2450–2470, 2182A; Keysight B2900, 344xxA; Yokogawa GS200 |
+| Lock-ins and preamps | SRS SR830, SR860, SR560, SR570; Zurich Instruments MFLI |
+| Cryostats and magnets | Quantum Design PPMS, DynaCool, MPMS3; attocube attoDRY; Lake Shore 335, 336, 350, 625; Oxford Mercury iTC; AMI 430 |
+| Lasers and optics | Coherent OBIS; M Squared SolsTiS; Light Conversion PHAROS; TOPTICA DLC pro; Thorlabs ITC4000, PM100 |
+| Microwave, RF and pulses | SRS SG384, DG645; R&S SMB100A; Keysight N5183B, 33500B; Rigol DG1000Z; Windfreak SynthHD; MOGLabs XRF; Novatech 409B; Swabian Pulse Streamer and Time Tagger; SpinCore PulseBlaster; RFSoC boards with QICK |
 
-## What it does
+Cards follow the makers' manuals and most are not yet checked on hardware. The attoDRY, DLC pro and SynthHD cards are drafts: their outputs stay simulated until someone checks them.
 
-- **Runs measurements from a chat.** Ask in plain words. Kelvin reads the instruments, writes a measurement plan, dry-runs it, runs it, and fits the data with uncertainties.
-- **Works with your instruments.** It talks to instruments over VISA, serial, a web API, or the maker's software and libraries. Cards are included for common source-meters, lock-ins, cryostats, magnet supplies, lasers and amplifiers. Each instrument gets a folder with its settings and its maker's manual.
-- **Learns new instruments.** For one it doesn't know, Kelvin writes the card from the manual or from the maker's example scripts, tries it on the instrument (readings only), and fixes it with you until the readings match the front panel.
-- **Runs AMO and spin experiments.** Cards cover microwave sources, AOM drivers, pulse and delay generators, photon counters, RFSoC boards and networked lasers (M Squared, PHAROS, TOPTICA). Kelvin builds and checks pulse sequences for CW and pulsed ODMR, Rabi, Ramsey, echo and T1 on NV centers.
-- **Uses the model you choose.** Claude, GPT, Gemini, your ChatGPT plan, OpenRouter and other services, or a local model for confidential work. You can compare models side by side or ask one for a second opinion.
-- **Remembers without leaking.** It keeps notes for you and for each project, and they never mix. Incognito chats keep nothing.
-- **Reads the literature.** It searches arXiv and journals, and cites what it used.
-- **Keeps your data and a record.** One folder per run, plus a record of every command and approval, in a folder you choose. It writes PDF and PowerPoint reports.
-- **Has a terminal.** Type to Kelvin, or send an instrument its own commands, through the same safety gate.
-- **Watches the lab.** It raises alarms when a reading leaves its range. You can approve a request or stop a run from your phone.
-- **Works with other agents.** Claude Code, Codex or Gemini CLI can drive the lab over MCP under the same rules.
+**Anything else:** Kelvin writes the instrument's card from its manual or from the maker's example scripts, then tries it on the instrument with you, reading only, until the readings match the front panel.
+
+For spin experiments it builds and checks the pulse sequences itself: CW and pulsed ODMR, Rabi, Ramsey, Hahn echo and T1.
 
 ## Safety
 
-Every command goes through one gate, whoever sends it: Kelvin, another agent, or you in the terminal.
+Every command goes through one gate, whether it comes from Kelvin, another AI agent, or you in the terminal.
 
 | Command | What happens |
 |---|---|
-| Measure or configure | Runs at once, and is logged |
+| Measure or configure | Runs, and is logged |
 | Drive toward safe | Runs, ramped |
-| Drive away from safe | Limits and interlocks are checked, then a person approves. The change is ramped while guard readings are watched |
-| Beyond the limits, or a blocked command | Refused |
+| Drive away from safe | Checked against your limits, approved by a person, ramped and watched |
+| Beyond the limits, or blocked | Refused |
 
 Only people can change the lab config, the approval mode or which lab Kelvin controls.
 
+## Get started
+
+- **Windows 10/11:** run [`Kelvin-Setup.exe`](https://github.com/Houchen181/kelvin/releases/latest/download/Kelvin-Setup.exe); no admin rights needed. It isn't code-signed yet: if Windows warns you, choose **More info → Run anyway**.
+- **macOS (Apple silicon):** move `Kelvin.app` from the [latest release](https://github.com/Houchen181/kelvin/releases/latest)'s zip to Applications. The first time, right-click it and choose **Open**.
+
+Kelvin opens on a simulated lab with a demo model, so you can try it right away. Add an API key in Settings, or sign in with ChatGPT, to use a real model.
+
+Also included: project memory and incognito chats, literature search with citations, PDF and PowerPoint reports, a terminal, alarms and approvals from your phone, and MCP access for Claude Code, Codex or Gemini CLI.
+
 ## Documentation
 
-| Page | Covers |
-|---|---|
-| [Using Kelvin](docs/portal.md) | Models and services, projects, memory, incognito, literature, comparing models, the Runs and Lab panels, the terminal, phone access |
-| [Instruments](docs/instruments.md) | Automatic setup, instrument folders and manuals, supported instruments, lab configs, writing cards |
-| [Plans, data and reports](docs/data.md) | Measurement plans and automatic analysis, the data folder, reports |
-| [Safety](docs/safety.md) | The rules in full, auto mode, watches and notifications |
-| [Other AI agents](docs/agents.md) | Connecting Claude Code, Codex or Gemini CLI over MCP |
-| [Development](docs/development.md) | Running from source, tests, code layout, releases |
+- [Using Kelvin](docs/portal.md): models, projects, memory, the terminal, phone access
+- [Instruments](docs/instruments.md): setup, supported instruments, writing and trying cards
+- [Plans, data and reports](docs/data.md): plans, analysis, the data folder, reports, uninstalling
+- [Safety](docs/safety.md): the rules in full, auto mode, watches
+- [Other AI agents](docs/agents.md): Claude Code, Codex or Gemini CLI over MCP
+- [Development](docs/development.md): running from source, tests, releases
+- [Vision](VISION.md) and [architecture](ARCHITECTURE.md): the goals and the design
 
-[VISION.md](VISION.md) sets out the goals and [ARCHITECTURE.md](ARCHITECTURE.md) the design.
-
-## Development
-
-Needs Python 3.10 or later (the core alone runs on 3.9).
+To run from source (Python 3.10 or later):
 
 ```bash
-python -m venv .venv
+python -m venv .venv && .venv/Scripts/python -m pip install -e ".[web,dev]" && .venv/Scripts/kelvin --demo
 ```
-
-```bash
-.venv/Scripts/python -m pip install -e ".[web,dev]"
-```
-
-```bash
-.venv/Scripts/python -m pytest
-```
-
-`.venv/Scripts/kelvin --demo` opens the portal on the virtual lab with a scripted model. Read [Development](docs/development.md) before you open a pull request.
