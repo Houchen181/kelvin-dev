@@ -1,8 +1,7 @@
 """What the agent can do, as short plain-text answers (feature #9: concise).
 
 All instrument access goes through the safety gate and one lock, so an
-agent call, a plan and the kill switch never talk to an instrument at the
-same time. The approval page reads cached state and never waits on the lock.
+agent call and a plan never talk to an instrument at the same time. The approval page reads cached state and never waits on the lock.
 """
 from __future__ import annotations
 
@@ -66,8 +65,11 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "preflight":
         text = "preflight ok" if e.get("ok") else "preflight FAILED: " + "; ".join(
             r for r in e.get("results", []) if "FAIL" in r)
-    elif kind == "safe_state":
+    elif kind == "safe_state":  # older logs
         text = "SAFE STATE: " + ("; ".join(e.get("results") or []) or "all drives already safe")
+    elif kind == "stop":
+        text = "stopped the current ramp or plan" + (
+            "; declined %d open request(s)" % e["declined"] if e.get("declined") else "")
     elif kind == "approval_mode":
         text = "approvals: " + ("auto mode on (low-risk changes run without asking)" if e.get("mode") == "auto"
                                 else "ask before every drive increase")
@@ -228,19 +230,14 @@ class LabRuntime:
     def undo(self) -> str:
         return self._do("undo", lambda: self.gate.undo().message)
 
-    def safe_state(self, by: str = "agent") -> str:
-        def run() -> str:
-            results = self.gate.safe_state(by=by)
-            return "\n".join(r.message for r in results) or "all drives already at safe values"
-        return self._do("safe state", run)
-
-    def kill(self, by: str = "human") -> List[str]:
-        """The page's kill switch: decline open requests, stop ramps and plans, then go safe."""
+    def stop(self, by: str = "human") -> int:
+        """A person's stop: decline open requests and stop the current ramp or plan. Drives stay where they are
+        (a stopped plan still runs its own on_abort steps). Returns how many requests were declined."""
         decline_all = getattr(self.approver, "decline_all", None)
-        if decline_all:
-            decline_all("kill switch")
+        declined = decline_all("stop button") if decline_all else 0
         self.gate.request_abort()
-        return self.safe_state(by=by).splitlines()
+        self.gate.log.write("stop", by=by, declined=declined)
+        return declined
 
     def health(self, instruments: Optional[List[str]] = None) -> str:
         return self._do("health check", lambda: "\n".join(str(r) for r in self.engine.preflight(instruments)))

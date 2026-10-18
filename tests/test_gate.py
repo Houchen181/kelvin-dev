@@ -176,26 +176,7 @@ def test_compound_raw_checks_each_part(lab, make_gate):
     assert not r.ok and read(lab, "smu.nplc") == 2 and read(lab, "smu.V") == 0
 
 
-# --- kill switch, logging, misc -------------------------------------------------------------
-
-def test_safe_state_brings_everything_down_without_asking(lab, make_gate):
-    gate, approver = make_gate([True] * 7)
-    gate.set("smu", "output", True)
-    gate.set("smu", "V", 5)
-    gate.set("laser", "emission", True)
-    gate.set("laser", "power", 10)
-    gate.set("laser", "shutter", True)
-    gate.set("magnet", "B", 0.5, wait=False)
-    lab.clock.sleep(30)                      # magnet still ramping
-    n_asks = len(approver.requests)
-    results = gate.safe_state()
-    assert all(r.ok for r in results) and len(approver.requests) == n_asks
-    assert read(lab, "smu.V") == 0 and read(lab, "smu.output") is False
-    assert read(lab, "laser.shutter") is False and read(lab, "laser.power") == 0
-    held = [r for r in results if r.action == "held"]
-    assert held and held[0].target == "magnet.B"   # the lab says hold, not ramp to zero
-    assert 0 < read(lab, "magnet.B") < 0.5
-
+# --- logging, misc -------------------------------------------------------------------------
 
 def test_every_command_is_logged(make_gate, tmp_path):
     gate, _ = make_gate([True])

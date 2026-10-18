@@ -98,7 +98,7 @@ class WebApprover(Approver):
             self._cv.notify_all()
             return True
 
-    def decline_all(self, by: str = "kill switch") -> int:
+    def decline_all(self, by: str = "stop button") -> int:
         with self._cv:
             n = 0
             for entry in self._pending.values():
@@ -227,8 +227,8 @@ class ApprovalServer:
                                                                                "human (approval page)"))
                     except ValueError as e:
                         return self._json(400, {"error": str(e)})
-                if self.path == "/api/safe_state":
-                    return self._json(200, {"ok": True, "results": server.runtime.kill(by="human (approval page)")})
+                if self.path == "/api/stop":
+                    return self._json(200, {"ok": True, "declined": server.runtime.stop(by="human (approval page)")})
                 self._json(404, {"error": "not found"})
 
         return Handler

@@ -49,7 +49,7 @@ The last command opens `http://127.0.0.1:8770` in your browser. Bookmark that li
 - **Memory:** Kelvin's memory has three levels that never mix. *Instructions for every conversation* (Settings) apply everywhere. Each project's **⋯ → Project settings** holds that project's instructions and its notes: short facts (decisions, procedures, instrument quirks, results) that Kelvin saves from the project's conversations. Only chats in that project see them, and you can delete any note there. A conversation outside every project gets no project memory. Deleting a project deletes its memory.
 - **Conversation:** Answers stream in Markdown. Each tool call is a step you can expand, and anything that drives the sample harder appears as an **Approve / Decline** card inside the conversation.
 - **Runs pane:** Measurements get their own pane beside the chat, like a terminal pane, with one tab per run. It opens when a plan starts, including plans started by another agent. While the plan runs, the pane shows a progress bar, the points done, the time left and plots that grow point by point, plus a Stop button. When the run ends, Kelvin analyses the data. The conversation gets a short card with the assessment and the next step. The pane shows the key results with uncertainties, the plots with their fits (hover for values), the table and the plan. Drag the pane's edge to resize it; open earlier runs from its clock button.
-- **Lab panel:** Shows live instrument values (drives away from safe are highlighted) and the activity log. **All drives to safe** is always in the top bar.
+- **Lab panel:** Shows live instrument values (drives away from safe are highlighted) and the activity log.
 - **Safety:** Kelvin uses the same MCP tools and safety gate as external agents, so it has the same rules and no extra power. Only one conversation drives the lab at a time; Stop ends the current answer and any ramp.
 
 ## Connect another AI agent (MCP)
@@ -67,7 +67,7 @@ By default the server starts the virtual lab in instant simulated time. Use `--s
 On the approval page you can:
 - **Approve or decline** what the agent asks for. An unanswered request is declined after 120 s (`--approval-timeout`). No MCP tool can answer approvals.
 - **Watch** every instrument (drives away from safe are highlighted) and the activity log.
-- **Press "All drives to safe."** This declines open requests, stops the current ramp or plan, and sends every drive to safe.
+- **Press Stop.** This declines open requests and stops the agent's current ramp or plan. Drives stay where they are; a stopped plan runs its own `on_abort` steps.
 
 Client setup. Use the full path to the venv's `kelvin-mcp` (or its Python with `-m labharness.agent`):
 
@@ -81,7 +81,7 @@ Client setup. Use the full path to the venv's `kelvin-mcp` (or its Python with `
 
 A drive change blocks its tool call until a person answers. Set the client's tool timeout above the approval timeout: `MCP_TOOL_TIMEOUT` (ms) for Claude Code, `tool_timeout_sec` for Codex, `timeout` (ms) for Gemini CLI.
 
-Tools: `lab_status`, `describe_instrument`, `get_value`, `set_value`, `send_raw`, `undo_last`, `safe_state`, `health_check`, `validate_plan`, `simulate_plan`, `run_plan`, `analyze_run`, `list_runs`, `get_run_data`, `get_trace`, `recent_events`, `wait`.
+Tools: `lab_status`, `describe_instrument`, `get_value`, `set_value`, `send_raw`, `undo_last`, `health_check`, `validate_plan`, `simulate_plan`, `run_plan`, `analyze_run`, `list_runs`, `get_run_data`, `get_trace`, `recent_events`, `wait`.
 
 **Security limit:** the access key keeps the model from approving its own requests through its tools. An agent that also has a shell on the same PC could still reach the page. For real hardware, run Kelvin on a machine where the agent has no shell.
 
@@ -133,7 +133,7 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 
 - Raw strings are matched against the card. A raw string that sets a drive is treated as a drive. One that touches a drive's command family but can't be parsed is sent to a human. Blocked and reset families come from the card.
 - A plan is dry-run on twins first, approved once as a range, and then run.
-- `safe_state()` is the kill switch. It sends every drive to safe in card order, or holds it where the lab config says to hold.
+- Stopping a plan (the Stop button, or the agent's own abort) runs its `on_abort` steps. By default, every drive the plan touched goes back to safe, or holds where the lab config's `safe_actions` says to hold. A guard trip sends that drive back to safe.
 - Approvals come from an `Approver`, a human-facing object the agent never sees.
 
 ### Auto mode
@@ -146,7 +146,7 @@ In auto mode, a drive change or a run goes ahead without asking when all of thes
 - For a run, the dry run finishes cleanly.
 - The lab config doesn't exclude the instrument.
 
-Anything else asks as usual, and the request says why auto mode didn't cover it. Each auto-approval shows in the conversation with its reasons and is written to the event log. Limits, interlocks, guard readings and **All drives to safe** work the same in both modes.
+Anything else asks as usual, and the request says why auto mode didn't cover it. Each auto-approval shows in the conversation with its reasons and is written to the event log. Limits, interlocks, guard readings and Stop work the same in both modes.
 
 The lab owner sets the rule in the lab config:
 

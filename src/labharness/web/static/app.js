@@ -719,7 +719,7 @@
       case "set_value": return v("Setting", "Set") + " " + code(a.instrument + "." + a.parameter) + " → " + esc(String(a.value));
       case "send_raw": return v("Sending", "Sent") + " " + code(a.command) + " to " + esc(a.instrument);
       case "undo_last": return v("Undoing", "Undid") + " the last change";
-      case "safe_state": return v("Sending", "Sent") + " every drive to safe";
+      case "safe_state": return v("Sending", "Sent") + " every drive to safe";  // older chats
       case "health_check": return v("Running", "Ran") + " health checks";
       case "validate_plan": return v("Checking", "Checked") + " plan " + code(planName(a));
       case "simulate_plan": return v("Dry-running", "Dry-ran") + " plan " + code(planName(a));
@@ -1454,7 +1454,7 @@
   async function changeMode(mode) {
     if (mode === "auto" && !confirm("Turn on auto mode?\n\nKelvin then approves low-risk changes for you: " +
         (S.approvalRule || "drives that stay well inside the lab limits, after a clean dry run.") +
-        "\n\nEverything else still waits for you, and \u201cAll drives to safe\u201d always works. " +
+        "\n\nEverything else still waits for you. " +
         "Auto mode switches off when Kelvin restarts.")) {
       showMode("ask");
       return;
@@ -1619,14 +1619,6 @@
         input.value = ""; input.dataset.clear = "1"; input.placeholder = "Will be removed when you save";
       });
     }
-    $("kill").addEventListener("click", async () => {
-      if (!confirm("Send every drive to its safe value? This stops the assistant and declines open requests.")) return;
-      try {
-        const r = await api("/api/safe_state", { body: {} });
-        toast(r.results.length ? "Safe state: " + r.results.length + " change(s) made." : "Everything was already safe.");
-      } catch (e) { toast("Kill switch failed: " + e.message); }
-      pollState();
-    });
     window.addEventListener("resize", syncScrim);
     setInterval(() => { if (S.labOpen || S.streaming || !$("lab-badge").hidden) pollState(); }, 1500);
     setInterval(pollState, 10000);

@@ -31,7 +31,7 @@ You are connected to a physics lab through Kelvin.
 - For sweeps, write a plan and call simulate_plan, then run_plan: one approval, dry run first, everything logged.
   run_plan analyses the data itself; report its assessment and key numbers (with uncertainties) rather than raw rows.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
-- If something looks wrong, call safe_state.
+- If something looks wrong, stop and tell the user. Moving a drive back toward safe runs without asking.
 - Reply to the user briefly: the result first, then the next step."""
 
 READ = ToolAnnotations(readOnlyHint=True)
@@ -72,12 +72,6 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def undo_last() -> str:
         """Undo the last successful set_value (through the same safety rules)."""
         return rt.undo()
-
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True),
-                 structured_output=False)
-    def safe_state() -> str:
-        """Kill switch: send every drive to its safe value (or hold, where the lab says so)."""
-        return rt.safe_state()
 
     @server.tool(annotations=READ, structured_output=False)
     def health_check(instruments: Optional[List[str]] = None) -> str:

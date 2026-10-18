@@ -171,18 +171,6 @@ class SafetyGate:
         r.message = "undo: " + r.message
         return r
 
-    def safe_state(self, by: Optional[str] = None) -> List[Result]:
-        """Kill switch: every drive goes to its safe state (or holds, if the lab says so)."""
-        self._stop_gen += 1
-        results: List[Result] = []
-        for inst in self.lab.instruments.values():
-            try:
-                results += self._to_safe(inst, wait=False)
-            except Exception as e:
-                results.append(Result(False, "error", inst.name, message="%s: %s" % (inst.name, e)))
-        self.log.write("safe_state", by=by or self.operator, results=[r.message for r in results])
-        return results
-
     def describe(self, instr: str) -> str:
         inst = self.lab.instrument(instr)
         card = inst.card

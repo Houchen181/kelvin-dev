@@ -39,4 +39,4 @@ interlocks:
     require: "tc.T_sample < 10"
 
 safe_actions:
-  magnet.B: hold     # the kill switch holds the field instead of ramping it to zero
+  magnet.B: hold     # when a run is stopped, hold the field instead of ramping it to zero

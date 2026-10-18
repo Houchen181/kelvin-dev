@@ -50,7 +50,7 @@ One harness core can connect to many lab runtimes (several setups or rooms). Eac
 | **Procedures** | A lab's existing scripts (VIs, .m files, Python) registered with declared inputs and limits, so the agent can call them as safe tools. This is the main adoption path |
 | **Simulator** | Each card ships a twin; plans dry-run there first and return the predicted trajectory, duration and data shape. A fully simulated **virtual lab** lets anyone try the system with no hardware |
 | **Safety gate** | Sits in front of every command, direct or planned. Lets measurement through; for drive changes, enforces limits and ramp rates, checks interlocks, roles and locks, watches guard readings, and asks a human when needed. Confirmations come only from a human action in the approval UI |
-| **Run engine** | Runs approved plans; preflight health checks; abort sends every instrument to its safe state |
+| **Run engine** | Runs approved plans; preflight health checks; abort sends the drives the plan touched back to safe (or holds them where the lab says so) |
 | **Data store** | Append-only event log. Each run stores a full instrument snapshot, the plan, the code version, the operator, and the sample/device/session IDs |
 | **Monitor daemon** | Rule-based alarms (threshold, rate of change, stale data) independent of the LLM; the LLM adds a diagnosis *after* the alert is sent |
 | **Domain packs** | Per field: plan templates (e.g. gate sweep, field sweep, pump–probe delay scan, frequency sweep), safety rules (laser interlocks, magnet quench, high voltage, vacuum), reviewer rubrics |
@@ -68,7 +68,7 @@ One harness core can connect to many lab runtimes (several setups or rooms). Eac
 | Drive away from safe | Raising RF or laser power; raising gate or bias voltage, current, field, temperature or HV; output on; a reset that would make a drive jump | Checks limits → one-line preview (current → target) → asks you unless a signed envelope covers it → ramps while watching guard readings (leakage, compliance, temperature) and stops if one trips |
 | Beyond limits | Above lab or vendor limits; firmware or calibration changes | Refused; only the instrument owner can unlock |
 
-Raw commands are matched by command header, so a raw string that hits a drive is treated as a drive. A plan's drives are approved once as a range (e.g. V_gate 0 → 10 V at 0.5 V/s), not point by point. The lab sets limits, safe directions and guard readings per instrument, and the model cannot change them. A kill switch sends every drive to its safe state.
+Raw commands are matched by command header, so a raw string that hits a drive is treated as a drive. A plan's drives are approved once as a range (e.g. V_gate 0 → 10 V at 0.5 V/s), not point by point. The lab sets limits, safe directions and guard readings per instrument, and the model cannot change them.
 
 **Plan format.** Plans use the same shape in every field:
 
@@ -82,7 +82,7 @@ measure: [lockin.X, lockin.Y, smu.I]
 on_abort: { smu.V: { ramp_to: 0, rate_V_per_s: 1 } }
 ```
 
-**MCP tools:** `instr.get`, `instr.set`, `instr.raw`, `instr.undo`, `lab.safe_state`, `lab.status`, `lab.describe`, `lab.health_check`, `plan.validate`, `plan.simulate`, `plan.submit` (waits for human approval), `run.status`, `run.abort`, `data.query`, `data.plot`, `notebook.append`, `procedure.call`.
+**MCP tools:** `instr.get`, `instr.set`, `instr.raw`, `instr.undo`, `lab.status`, `lab.describe`, `lab.health_check`, `plan.validate`, `plan.simulate`, `plan.submit` (waits for human approval), `run.status`, `run.abort`, `data.query`, `data.plot`, `notebook.append`, `procedure.call`.
 
 **Onboarding a new lab (no code):** install the runtime → it scans VISA, serial and USB → matches instruments to cards in the registry → for an unmatched instrument, the agent drafts a card and adapter from its manual (status: draft; its drives are simulation-only until the owner reviews it) → the owner sets lab limits and safe states → health check → ready.
 
@@ -98,7 +98,7 @@ on_abort: { smu.V: { ramp_to: 0, rate_V_per_s: 1 } }
 |---|---|---|
 | 1 | Fast instrument access | Direct commands over persistent connections; long loops run as plans in the run engine (not as LLM turns); status read from the monitor cache |
 | 2 | Confidential | Deployment modes, per-project model policy, raw data stays in the runtime, alias map for sample names, outbound log |
-| 3 | Caution + trust | Measure/drive tags per parameter; measurement runs freely; drive changes away from safe are limit-checked, previewed, confirmed and ramped while guard readings are watched; per-instrument trust; kill switch; open-source gate |
+| 3 | Caution + trust | Measure/drive tags per parameter; measurement runs freely; drive changes away from safe are limit-checked, previewed, confirmed and ramped while guard readings are watched; per-instrument trust; a stop button; open-source gate |
 | 4 | Custom instruments | Adapters + card format + procedures; the agent drafts cards from manuals; a draft's drives stay simulation-only until the owner reviews it |
 | 5 | Literature-based plans | Advisor + literature service + domain-pack templates output a plan with rationale and expected signal |
 | 6 | Know and test instruments | Cards (correct operating conditions); preflight health checks block runs on failure |
@@ -119,7 +119,7 @@ on_abort: { smu.V: { ramp_to: 0, rate_V_per_s: 1 } }
 |---|---|---|
 | 0 | Card and plan schemas, safety gate (measure/drive classes, ramping, guard readings), run engine, simulator, event log, plus a **virtual lab** of common instruments (source-meter, lock-in, temperature controller, magnet supply, VNA, laser + shutter, motor stage) | An agent runs the virtual lab by direct commands and by plans; measurement runs freely; drive increases are confirmed or refused; everything is logged. **Built 2026-10-17** (Python ≥ 3.9 + PyYAML; 41 tests); the agent-side MCP wrapper comes in Phase 2. **Experiment workflow added 2026-10-17:** nested, log, there-and-back, repeat and time loops with per-axis settle and stabilize; live progress events; automatic analysis (curve classification, fits with uncertainties, trends along outer loops, quality flags, a short assessment and next step) |
 | 1 | Adapters (VISA/SCPI, serial, Python frameworks, LabVIEW, MATLAB), auto-discovery onboarding, procedures, cards for the ~20 most common instruments | A new lab gets from install to a health-checked setup without writing code |
-| 2 | MCP server usable from any MCP client; approval UI; roles and locks; monitor + notifications; concise contract | 3–5 pilot labs in different fields run supervised experiments. **MCP server, approval page (with kill switch and browser notifications) and concise tool answers built 2026-10-17**; roles, locks and the monitor remain |
+| 2 | MCP server usable from any MCP client; approval UI; roles and locks; monitor + notifications; concise contract | 3–5 pilot labs in different fields run supervised experiments. **MCP server, approval page (with a stop button and browser notifications) and concise tool answers built 2026-10-17**; roles, locks and the monitor remain |
 | 3 | Literature service, reviewer, report generator, scoped memory, multi-model router, first domain packs | Pilots use it end to end: plan → run → report → review. **Scoped memory started 2026-10-17** in the portal: global instructions; per-project instructions and typed notes (decision, procedure, quirk, result) that the agent saves and the user can see and delete; a chat sees only its own project's memory, and deleting a project deletes it |
 | 4 | Own desktop/web/mobile app, self-hosted server, community registry, local-model path | Public release. **Early portal built 2026-10-17**: a chat web app (Claude/GPT/Gemini/local), inline approvals, run plots, lab panel; one lab per portal, local only. **Desktop app built 2026-10-17**: native window, Windows installer and macOS app, built and self-tested by GitHub Actions on each version tag; unsigned for now. A hosted website comes later, as remote/phone access to the desktop app, since instruments are always reached through a local install |
 

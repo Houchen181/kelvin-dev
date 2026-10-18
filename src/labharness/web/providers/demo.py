@@ -75,13 +75,11 @@ class DemoProvider(Provider):
         elif "sweep" in ask:
             name, args = "run_plan", {"plan": GATE_SWEEP}
             intro = "I'll sweep the gate from 0 to 5 V and record the lock-in signal."
-        elif any(w in ask for w in ("safe state", "go to safe", "all drives to safe", "kill")):
-            name, args, intro = "safe_state", {}, "Sending every drive to safe."
         elif any(w in ask for w in ("status", "check", "what is on", "what's on", "state")):
             name, args, intro = "lab_status", {}, "Checking the lab."
         else:
             text = ("I'm the scripted demo, not an AI. Try *check the lab status*, *sweep the gate*, "
-                    "*map gate against field*, *go to safe state*, or, in a project, *remember that …*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
+                    "*map gate against field*, or, in a project, *remember that …*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
             return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
         blocks = await self._say(intro, emit)
         blocks.append({"type": "tool_call", "id": "lh_call_%d" % len(history), "name": name, "input": args})

@@ -64,7 +64,7 @@ def test_tools_are_listed_and_none_can_approve(runtime):
         async with Client(build_server(runtime)) as client:
             return (await client.list_tools()).tools
     tools = {t.name: t for t in anyio.run(main)}
-    assert {"lab_status", "describe_instrument", "get_value", "set_value", "send_raw", "safe_state",
+    assert {"lab_status", "describe_instrument", "get_value", "set_value", "send_raw",
             "validate_plan", "simulate_plan", "run_plan", "analyze_run", "get_run_data", "get_trace",
             "recent_events"} <= set(tools)
     assert not [n for n in tools if "approve" in n or "answer" in n]   # approvals only come from the page
@@ -174,7 +174,7 @@ def test_page_needs_the_access_key(page):
     assert http(page, "/api/state", token=False)[0] == 401
     assert http(page, "/api/answer", {"id": "r1", "approve": True}, token=False)[0] == 401
     assert http(page, "/api/state", host="evil.example:80")[0] == 403
-    assert http(page, "/api/safe_state", {}, origin="http://evil.example")[0] == 403
+    assert http(page, "/api/stop", {}, origin="http://evil.example")[0] == 403
 
 
 def test_human_approves_through_the_page(runtime, page):
@@ -192,15 +192,25 @@ def test_human_approves_through_the_page(runtime, page):
     assert v == {"name": "V", "value": "2 V", "away": True}
 
 
-def test_kill_switch_declines_waiting_requests_and_goes_safe(runtime, page):
+def test_stop_declines_waiting_requests_and_leaves_drives_alone(runtime, page):
     human(runtime.approver, [True])
     runtime.set("smu", "output", True)
     result = {}
     t = threading.Thread(target=lambda: result.setdefault("r", runtime.set("smu", "V", 2)))
     t.start()
     runtime.approver.wait_for_pending(timeout=5)
-    status, body = http(page, "/api/safe_state", {})
+    status, body = http(page, "/api/stop", {})
     t.join(5)
-    assert status == 200 and "smu.output on → off (safe state)" in json.loads(body)["results"]
-    assert result["r"] == "declined: smu.V stays 0 V (declined by kill switch)"
-    assert runtime.lab.read("smu", "output") is False
+    assert status == 200 and json.loads(body) == {"ok": True, "declined": 1}
+    assert result["r"] == "declined: smu.V stays 0 V (declined by stop button)"
+    assert runtime.lab.read("smu", "output") is True          # nothing is sent to safe
+    assert http(page, "/api/safe_state", {})[0] == 404
+    assert any("stopped the current ramp or plan; declined 1 open request(s)" in e
+               for e in json.loads(http(page, "/api/state")[1])["events"])
+
+
+def test_no_tool_sends_every_drive_to_safe(runtime):
+    async def main():
+        async with Client(build_server(runtime)) as client:
+            return [t.name for t in (await client.list_tools()).tools]
+    assert "safe_state" not in anyio.run(main)

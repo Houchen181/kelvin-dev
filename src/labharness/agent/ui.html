@@ -72,7 +72,7 @@
     <select id="mode"><option value="ask">Ask me every time</option><option value="auto">Auto for low-risk changes</option></select>
   </label>
   <button id="notify" hidden>Enable notifications</button>
-  <button id="kill" class="danger" title="Send every drive to its safe state and stop the agent's current action">All drives to safe</button>
+  <button id="stop" class="danger" title="Stop the agent's current ramp or plan and decline open requests. Drives stay where they are.">Stop</button>
 </header>
 <main>
   <section id="nokey">
@@ -190,9 +190,9 @@ $("mode").addEventListener("change", async (e) => {
   refresh();
 });
 
-$("kill").addEventListener("click", async () => {
-  if (!confirm("Send every drive to its safe state? This also declines open requests and stops the agent's current ramp or plan.")) return;
-  try { await api("/api/safe_state", {}); } catch (e) { alert("Kill switch failed: " + e.message); }
+$("stop").addEventListener("click", async () => {
+  if (!confirm("Stop the agent's current ramp or plan and decline open requests? Drives stay where they are.")) return;
+  try { await api("/api/stop", {}); } catch (e) { alert("Stop failed: " + e.message); }
   refresh();
 });
 

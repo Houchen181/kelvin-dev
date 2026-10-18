@@ -1,7 +1,7 @@
 """Kelvin: a safe interface between AI agents and lab instruments.
 
-The agent-facing surface is SafetyGate (get, set, raw, undo, safe_state,
-describe, status) and RunEngine (validate, simulate, run). Everything else
+The agent-facing surface is SafetyGate (get, set, raw, undo, describe,
+status) and RunEngine (validate, simulate, run). Everything else
 is plumbing the agent never touches.
 """
 from ._version import __version__

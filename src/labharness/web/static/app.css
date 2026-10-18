@@ -196,8 +196,6 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 }
 .pill:hover { background: var(--hover); }
 .pill svg { width: 16px; height: 16px; }
-.pill.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
-.pill.danger:hover { background: var(--danger-soft); }
 .badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--warn-line); color: #1c1b19; font-size: 12px; font-weight: 700; display: inline-grid; place-items: center; }
 
 /* ---------- thread ---------- */
@@ -536,7 +534,6 @@ body.resizing .plot-svg { pointer-events: none; }
   .sidebar { position: fixed; left: 0; top: 0; bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
   .app.side-open .sidebar { transform: none; }
   #toggle-sidebar { display: grid; }
-  .kill-text { display: none; }
   .thread, .empty { padding-left: 16px; padding-right: 16px; }
   .composer-wrap { padding: 0 12px 10px; }
   .suggestions { grid-template-columns: 1fr; }

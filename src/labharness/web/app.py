@@ -258,11 +258,6 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 return error(400, str(e))
         return JSONResponse(runtime.approval_mode())
 
-    async def safe_state(request: Request) -> Response:
-        agent.stop()
-        results = await asyncio.to_thread(runtime.kill, "human (portal)")
-        return JSONResponse({"ok": True, "results": results})
-
     async def settings_view(request: Request) -> Response:
         if request.method == "POST":
             settings.update(await request.json())
@@ -333,7 +328,6 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/state", state),
-        Route("/api/safe_state", safe_state, methods=["POST"]),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
         Route("/api/quit", quit_app, methods=["POST"]),

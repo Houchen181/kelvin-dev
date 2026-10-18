@@ -84,10 +84,9 @@ def _window(url: str, agent: Any, runtime: Any, home: Path) -> None:
     def on_closing() -> bool:
         if agent.active:
             if not window.create_confirmation_dialog(
-                    "Quit Kelvin?", "Kelvin is still working on a request. Quitting stops it and sends every "
-                                    "drive to its safe value."):
+                    "Quit Kelvin?", "Kelvin is still working on a request. Quitting stops it where it is."):
                 return False
-            runtime.kill(by="human (closed the app)")
+            runtime.stop(by="human (closed the app)")
         return True
 
     window.events.closing += on_closing

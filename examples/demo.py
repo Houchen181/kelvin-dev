@@ -83,10 +83,6 @@ def main() -> None:
         print("peak lockin.X = %.3g V at smu.V = %.2f V" % (peak["lockin.X"], peak["smu.V"]))
         print("saved to", report.path)
 
-    step("Kill switch")
-    for r in gate.safe_state():
-        print(r)
-
     print("\n%d events in %s" % (len(gate.log.events()), out / "events.jsonl"))
 
 
