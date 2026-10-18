@@ -5,6 +5,7 @@ vendor: Coherent
 kind: laser
 status: community
 manual: "OBIS LX/LS operator's manual, Host command reference"
+manual_url: "https://www.coherent.com/content/dam/coherent/site/en/resources/manuals/lasers/obis-lx-ls-operators-manual.pdf"
 identify:
   idn: "Coherent, Inc - OBIS"
   example: "Coherent, Inc - OBIS 488nm LX 100mW - V1.0.1 - Mar 4 2014"

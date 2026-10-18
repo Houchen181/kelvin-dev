@@ -384,6 +384,9 @@ class SafetyGate:
         key = "%s.%s" % (inst.name, spec.name)
         if inst.card.status == "draft" and not inst.simulated:
             return "%s: draft card; its drives stay simulation-only until the owner reviews it" % key
+        if self.lab.config.observe_only and not inst.simulated:
+            return ("%s: Kelvin set this lab up on its own, so drives stay at safe until a person reviews the limits "
+                    "in Lab setup and unlocks them" % key)
         for lock in self.lab.config.interlocks:
             if lock.drive != key:
                 continue

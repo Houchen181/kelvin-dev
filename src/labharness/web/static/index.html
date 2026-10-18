@@ -135,6 +135,12 @@
     <div class="lab-scroll">
       <div id="lab-pending"></div>
       <div id="lab-problem" class="callout small" hidden></div>
+      <div id="lab-setting-up" class="callout small calm" role="status" hidden></div>
+      <div id="lab-observe" class="callout small calm" hidden>
+        <b>Watching only.</b> Kelvin set up these instruments itself. Readings and settings work; outputs stay at
+        safe until you check the limits and unlock them.
+        <button id="lab-observe-review" class="link" type="button">Review and unlock…</button>
+      </div>
       <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span>
         <button id="open-lab-setup" class="link soft" type="button">Set up…</button></div>
       <div class="inst-tools">
@@ -238,6 +244,14 @@
       <span class="hint">Away from the lab, install <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on this computer and the phone; Kelvin then shows its Tailscale address too, and the connection is encrypted. Plain Wi-Fi traffic is not, so on a shared network prefer Tailscale.</span>
     </div>
     <div class="field">
+      <div class="field-row"><span class="field-label">Connected instruments</span></div>
+      <div class="checks">
+        <label class="check"><input id="auto-setup" type="checkbox"> Set them up when Kelvin starts</label>
+        <label class="check"><input id="manuals" type="checkbox"> Fetch their manuals from the makers</label>
+      </div>
+      <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows, with their outputs locked at safe until you review them. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website.</span>
+    </div>
+    <div class="field">
       <div class="field-row"><span class="field-label">Literature search</span>
         <label class="check"><input id="literature" type="checkbox"> On</label></div>
       <span class="hint">Kelvin searches arXiv and journals (through OpenAlex) and reads papers to plan experiments and check results. Only the search words go to those public services, never your data or chats. Switch it off for confidential work.</span>
@@ -299,6 +313,19 @@
       <div id="lab-seg" class="seg" role="group" aria-label="Which lab Kelvin controls">
         <button type="button" data-use="virtual">Virtual lab</button><button type="button" data-use="mine">My instruments</button>
       </div>
+    </div>
+    <div id="lab-setup-box" class="setup-box" hidden>
+      <span id="lab-setup-msg"></span>
+      <div class="setup-actions">
+        <button id="lab-unlock" class="btn small primary" type="button" hidden>Unlock outputs…</button>
+        <button id="lab-setup-again" class="btn small" type="button">Set up again</button>
+      </div>
+    </div>
+    <div id="lab-folders-field" class="field" hidden>
+      <span class="field-label">Instrument folders</span>
+      <span class="hint">Who each instrument is, its settings, and its manual. Kelvin reads the manual before it plans an involved scan.</span>
+      <ul id="lab-folders" class="folder-list"></ul>
+      <input id="lab-pdf" type="file" accept="application/pdf,.pdf" hidden>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Find instruments</span><button id="lab-scan" class="btn small" type="button">Scan</button></div>

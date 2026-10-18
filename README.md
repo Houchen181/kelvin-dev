@@ -114,7 +114,7 @@ Client setup. Use the full path to the venv's `kelvin-mcp` (or its Python with `
 
 A drive change blocks its tool call until a person answers. Set the client's tool timeout above the approval timeout: `MCP_TOOL_TIMEOUT` (ms) for Claude Code, `tool_timeout_sec` for Codex, `timeout` (ms) for Gemini CLI.
 
-Tools: `lab_status`, `describe_instrument`, `get_value`, `set_value`, `send_raw`, `undo_last`, `health_check`, `validate_plan`, `simulate_plan`, `run_plan`, `analyze_run`, `list_runs`, `get_run_data`, `get_trace`, `recent_events`, `wait`.
+Tools: `lab_status`, `describe_instrument`, `instrument_info`, `search_manual`, `get_value`, `set_value`, `send_raw`, `undo_last`, `health_check`, `validate_plan`, `simulate_plan`, `run_plan`, `analyze_run`, `list_runs`, `get_run_data`, `get_trace`, `recent_events`, `wait`.
 
 **Security limit:** the access key keeps the model from approving its own requests through its tools. An agent that also has a shell on the same PC could still reach the page. For real hardware, run Kelvin on a machine where the agent has no shell.
 
@@ -142,6 +142,16 @@ After a run, Kelvin classifies each measured curve and fits it: a peak or dip (L
 ## Real instruments
 
 Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-serial. It uses the VISA library you already have (NI-VISA or Keysight IO Libraries), or a pure-Python one if there is none. Install the extra with `pip install "kelvin-lab[hardware]"`; the desktop app includes it.
+
+**Kelvin sets up what it finds.** The first time the desktop app starts (and on every start until you have a lab of your own), Kelvin asks each connected instrument who it is. If any match a card, it connects them right away:
+- **Watching only.** Kelvin writes `~/Kelvin/lab.yaml` with the instruments it found, marked `observe_only: true`. Readings and measurement settings work at once. Every output (voltage, current, field, temperature, laser power) stays at its safe value until you check the limits in **Set up…** and press **Unlock outputs**. Until then, Kelvin refuses to drive anything away from safe and says why.
+- **A folder for each instrument** in `~/Kelvin/instruments/<name>/`:
+  - `instrument.json`: who it is (maker, model, serial number and firmware from its identity reply), its address, the connection settings it answered with (such as 57600 baud, 7 data bits, odd parity), and where its manual came from.
+  - `settings.json`: every setting and reading it had (ranges, time constants, sensitivities...), refreshed on every start.
+  - `manual.pdf`: the maker's own manual, fetched once from the address on the card, and `manual.txt` with its text by page.
+- **Manuals for involved scans.** Before a scan that uses buffers, triggers, sweep or list modes, fast acquisition, ranges or filters, Kelvin reads the instrument's manual with `instrument_info` and `search_manual`. It works from the passages it finds and cites the page. Search weighs rare words most, so a mnemonic such as `OFLT` or a SCPI path such as `SOURce:CURRent:LIMit` finds its own entry.
+- **Manuals you add yourself.** 17 of the 21 cards carry the maker's link. Keysight hands out its manuals only after a sign-in, and the Oxford Mercury iTC manual is no longer public. For these, or for any other instrument, choose the PDF in **Set up…** (**Choose PDF…**) or put it in the folder as `manual.pdf`.
+- **Switching it off.** Settings has **Set them up when Kelvin starts** and **Fetch their manuals from the makers**. Fetching a manual sends only its address to the maker's site. An existing `lab.yaml` is never rewritten. Instruments it doesn't list are only reported.
 
 **Set up your instruments in the app:** open the Lab panel and press **Set up…**. In the setup:
 1. **Scan** finds the connected instruments. You can also add one by address, such as `GPIB0::24::INSTR` or `serial://COM3`, and pick its card.
@@ -383,6 +393,8 @@ id: acme/sm-2000
 model: ACME SM-2000 Source-Meter
 kind: source-meter
 status: draft                 # draft cards keep their drives simulation-only on real hardware
+manual: "ACME SM-2000 Reference Manual, SCPI commands"
+manual_url: "https://www.acme.example/manuals/sm-2000.pdf"   # the maker's own copy, fetched once per instrument
 identify: { idn: "^ACME,SM-2000" }
 error_query: "SYSTem:ERRor?"
 parameters:

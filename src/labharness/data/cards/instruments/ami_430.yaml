@@ -5,6 +5,7 @@ vendor: American Magnetics
 kind: magnet-supply
 status: community
 manual: "AMI Model 430 Power Supply Programmer installation, operation and maintenance instructions, Remote interface"
+manual_url: "https://www.americanmagnetics.com/support/manuals/mn-430-rev14.pdf"
 identify:
   idn: "AMERICAN MAGNETICS INC\\.?,MODEL 430"
   example: "AMERICAN MAGNETICS INC.,MODEL 430,2.01"

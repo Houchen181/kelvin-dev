@@ -5,6 +5,7 @@ vendor: Thorlabs
 kind: power-meter
 status: community
 manual: "PM100D / PM100USB operation manual, SCPI commands"
+manual_url: "https://media.thorlabs.com/globalassets/items/p/pm/pm1/pm100d/17654-d02.pdf"
 identify:
   idn: "Thorlabs,PM(100[A-Z]*|101[A-Z]*|400)"
   example: "Thorlabs,PM100D,P0012345,2.7.0"

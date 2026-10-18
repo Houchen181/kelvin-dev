@@ -5,6 +5,7 @@ vendor: Stanford Research Systems
 kind: lock-in
 status: community
 manual: "SR830 DSP Lock-In Amplifier manual, chapter 5 (Remote programming)"
+manual_url: "https://www.thinksrs.com/downloads/pdfs/manuals/SR830m.pdf"
 identify:
   idn: "Stanford_Research_Systems,SR8[13]0"
   example: "Stanford_Research_Systems,SR830,s/n12345,ver1.07"

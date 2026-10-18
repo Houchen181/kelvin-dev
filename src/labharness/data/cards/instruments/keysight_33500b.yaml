@@ -5,6 +5,7 @@ vendor: Keysight (Agilent)
 kind: function-generator
 status: community
 manual: "Keysight 33500B Series Operating and Service Guide, SCPI programming reference"
+# manual_url: none: Keysight hands out its manuals after a sign-in; choose the PDF in Lab setup
 identify:
   idn: "(Keysight|Agilent) Technologies,33[56]\\d\\d[AB]"
   example: "Keysight Technologies,33522B,MY52401234,4.00-1.19-2.00-58-00"

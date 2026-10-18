@@ -4,7 +4,8 @@ model: Thorlabs ITC4000-series laser diode and TEC controller (ITC4001/4002/4005
 vendor: Thorlabs
 kind: laser-driver
 status: community
-manual: "ITC4000 Series operation manual, SCPI commands"
+manual: "Thorlabs Series 4000 SCPI Programmers Reference (ITC4000, LDC4000, TED4000)"
+manual_url: "https://media.thorlabs.com/globalassets/items/t/te/ted/ted4015/16407-d03.pdf"
 identify:
   idn: "Thorlabs,ITC40\\d\\d"
   example: "Thorlabs,ITC4001,M00123456,1.8.0/1.5.4/2.1.0"

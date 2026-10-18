@@ -27,6 +27,8 @@ from ..agent.approval import WebApprover
 from ..agent.runtime import LabRuntime
 from ..agent.server import build_server
 from ..adapters import AdapterError
+from ..autosetup import AutoSetup, unlock as unlock_lab
+from .. import profiles
 from ..clock import ScaledClock, SimClock
 from ..discovery import add_to_config
 from ..labconfig import ConfigError, load_lab_config
@@ -151,13 +153,17 @@ def open_path(path: Path) -> None:
 
 def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
-               providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None) -> Any:
+               providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None,
+               auto_setup: bool = False) -> Any:
     signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo, signin), settings)
     remote = Remote(settings)
     guard: Any = None
     runtime.cards_dir = Path(settings.path).parent / "cards"
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
+    home = lab_file.parent
+    runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
+    setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem() is None)
     tasks: List[asyncio.Task] = []
 
     def configure_literature() -> None:
@@ -177,6 +183,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_literature()
         await start_phone()
         runtime.monitor.start()
+        if auto_setup and settings.get("auto_setup") != "off":   # find and set up connected instruments
+            setup.start("start")
         try:
             yield
         finally:
@@ -676,12 +684,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                       "identifies": bool(c.idn_pattern)}
                      for c in sorted(runtime.lab.registry, key=lambda c: (c.kind, c.id)) if not c.id.startswith("virtual/")]
             return JSONResponse({"name": runtime.lab.config.name, "info": runtime.lab_info, "cards": cards,
-                                 "yaml": lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""})
+                                 "yaml": lab_file.read_text(encoding="utf-8") if lab_file.exists() else "",
+                                 "observe_only": runtime.lab.config.observe_only, "setup": setup.status,
+                                 "folders": instrument_folders()})
         body = await request.json()
         problem = busy_problem()
         if problem:
             return error(409, problem)
         use = body.get("use")
+        by = "human (portal)"
+        if body.get("unlock"):   # a person reviewed the limits Kelvin wrote and lifts the observe-only lock
+            if not lab_file.exists():
+                return error(400, "There is no lab config to unlock.")
+            body, use, by = {"yaml": unlock_lab(lab_file.read_text(encoding="utf-8"))}, None, "human (portal, unlocked)"
         try:
             if use == "virtual":
                 lab, envelope, info = await asyncio.to_thread(open_home_lab, lab_file.parent, "virtual")
@@ -703,12 +718,91 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except (AdapterError, OSError, ValueError) as e:
             return error(400, str(e).splitlines()[0] if str(e) else type(e).__name__)
         try:
-            health = await asyncio.to_thread(runtime.switch_lab, lab, envelope, info, "human (portal)")
+            health = await asyncio.to_thread(runtime.switch_lab, lab, envelope, info, by)
         except RuntimeError as e:
             lab.close()
             return error(409, str(e))
         settings.update({"lab": "virtual" if use == "virtual" else "mine"})
-        return JSONResponse({"ok": True, "name": lab.config.name, "info": runtime.lab_info, "health": health})
+        if use != "virtual" and auto_setup:   # give new instruments their folders, settings and manuals
+            setup.start("lab changed")
+        return JSONResponse({"ok": True, "name": lab.config.name, "info": runtime.lab_info, "health": health,
+                             "observe_only": lab.config.observe_only})
+
+    def instrument_folders() -> List[Dict[str, Any]]:
+        out = []
+        for name, inst in runtime.lab.instruments.items():
+            if inst.simulated:
+                continue
+            p = profiles.info(home, name)
+            m = p.get("manual") or {}
+            out.append({"name": name, "model": inst.card.model, "folder": p["folder"], "identity": p.get("identity"),
+                        "parsed": p.get("parsed") or {}, "address": inst.config.address,
+                        "answered_with": p.get("answered_with"), "manual": p.get("has_manual"),
+                        "manual_pages": m.get("pages"), "manual_file": m.get("file"), "manual_from": m.get("url"),
+                        "manual_title": inst.card.manual, "manual_url": inst.card.manual_url,
+                        "settings_at": p.get("settings_read_at")})
+        return out
+
+    def real_instrument(name: str) -> Any:
+        inst = runtime.lab.instruments.get(name)
+        if inst is None or inst.simulated:
+            raise KeyError("no instrument %r on this computer" % name)
+        return inst
+
+    async def setup_view(request: Request) -> Response:
+        """GET: where setting up the connected instruments is. POST: a person asks Kelvin to set them up again."""
+        if request.method == "POST":
+            problem = busy_problem()
+            if problem:
+                return error(409, problem)
+            setup.start("asked")
+        return JSONResponse(dict(setup.status, folders=instrument_folders()))
+
+    async def instrument_manual(request: Request) -> Response:
+        """POST: fetch the manual from the maker ({force: true} fetches it again). PUT with a PDF body: use this one."""
+        name = request.path_params["name"]
+        try:
+            inst = real_instrument(name)
+        except KeyError as e:
+            return error(404, e.args[0])
+        try:
+            if request.method == "PUT":
+                data = await request.body()
+                if data[:5] != b"%PDF-":
+                    return error(400, "That is not a PDF.")
+                if len(data) > profiles.MAX_MANUAL:
+                    return error(400, "The PDF is too large.")
+                manual = await asyncio.to_thread(profiles.save_manual, home, name, inst.card, data)
+            else:
+                raw = await request.body()
+                force = bool(json.loads(raw).get("force")) if raw.strip() else False
+                manual = await asyncio.to_thread(profiles.fetch_manual, home, name, inst.card, profiles.http_get, force)
+        except (LookupError, ValueError, OSError, RuntimeError) as e:
+            return error(400, str(e).splitlines()[0] if str(e) else type(e).__name__)
+        return JSONResponse({"ok": True, "manual": manual, "folders": instrument_folders()})
+
+    async def instrument_open(request: Request) -> Response:
+        """Open an instrument's folder, or its manual, on this computer."""
+        name = request.path_params["name"]
+        try:
+            real_instrument(name)
+            base = profiles.folder(home, name)
+        except KeyError as e:
+            return error(404, e.args[0])
+        what = (await request.json()).get("what")
+        if what == "manual":
+            files = [base / n for n in ("manual.pdf", "manual.html") if (base / n).exists()]
+            if not files:
+                return error(404, "No manual for %s yet." % name)
+            target = files[0]
+        else:
+            base.mkdir(parents=True, exist_ok=True)
+            target = base
+        try:
+            open_path(target)
+        except OSError as e:
+            return error(500, "Could not open it: %s" % e)
+        return JSONResponse({"ok": True})
 
     async def scan_view(request: Request) -> Response:
         """Find connected instruments. Only asks each instrument who it is."""
@@ -977,6 +1071,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/alarms/{alarm_id}/ack", alarm_ack, methods=["POST"]),
         Route("/api/notify/test", notify_test, methods=["POST"]),
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
+        Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
+        Route("/api/instruments/{name}/manual", instrument_manual, methods=["POST", "PUT"]),
+        Route("/api/instruments/{name}/open", instrument_open, methods=["POST"]),
         Route("/api/instruments/draft", draft_view, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
         Route("/api/quit", quit_app, methods=["POST"]),
@@ -1008,6 +1105,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--demo", action="store_true", help="add a scripted model so the portal works without an API key")
     ap.add_argument("--lab", help="lab config YAML using sim:// instruments (default: the built-in virtual lab)")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--no-setup", action="store_true", help="do not look for connected instruments on start")
     args = ap.parse_args(argv)
 
     settings = Settings(args.settings)
@@ -1024,7 +1122,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         runtime.lab_info = info
     store = ChatStore(Path(args.data_dir) / "chats")
     hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)
-    app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts)
+    app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts, auto_setup=not (args.no_setup or args.lab))
     url = "http://127.0.0.1:%d/#%s" % (args.port, settings.access_key)
     print("Kelvin portal: %s" % url, file=sys.stderr, flush=True)
     if not args.no_browser:

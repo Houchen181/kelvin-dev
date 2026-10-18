@@ -2049,6 +2049,12 @@
     const problem = s.lab_info && s.lab_info.error;
     $("lab-problem").hidden = !problem;
     if (problem) $("lab-problem").textContent = problem + " Kelvin is using the virtual lab meanwhile.";
+    $("lab-observe").hidden = !s.observe_only;
+    const busySetup = s.setup && SETUP_BUSY.has(s.setup.state);
+    $("lab-setting-up").hidden = !busySetup;
+    if (busySetup) $("lab-setting-up").textContent = "Setting up instruments: " + (s.setup.message || "") + "…";
+    if (S.setupState && SETUP_BUSY.has(S.setupState) && s.setup && !busySetup && $("lab-dialog").open) refreshLabSetup();
+    S.setupState = s.setup && s.setup.state;
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
@@ -2215,11 +2221,99 @@
     loadCards();
   }
 
+  // ------------------------------------------------------------------ setting up connected instruments
+  const SETUP_BUSY = new Set(["scanning", "connecting", "reading"]);
+  function showSetup(setup, observe) {
+    const busy = setup && SETUP_BUSY.has(setup.state);
+    const text = observe
+      ? "Kelvin set up this lab from what it found. Check each instrument's limits in the lab config below: outputs stay at safe until you unlock them."
+      : (setup && setup.message ? setup.message + (busy ? "…" : "") : "");
+    $("lab-setup-box").hidden = !text;
+    $("lab-setup-box").classList.toggle("locked", !!observe);
+    $("lab-setup-msg").textContent = text;
+    $("lab-unlock").hidden = !observe;
+    $("lab-setup-again").disabled = !!busy;
+  }
+  function renderFolders(folders) {
+    $("lab-folders-field").hidden = !folders.length;
+    $("lab-folders").replaceChildren(...folders.map((f) => {
+      const serial = f.parsed.serial && (/^s\/?n/i.test(f.parsed.serial) ? f.parsed.serial : "s/n " + f.parsed.serial);
+      const who = [serial, f.parsed.firmware && "firmware " + f.parsed.firmware,
+        f.answered_with].filter(Boolean).join(" · ");
+      const manual = f.manual
+        ? h("span", { title: f.manual_from || "added by hand" }, "Manual, " + (f.manual_pages || "?") + " pages")
+        : h("span", { class: "muted" }, f.manual_url ? "No manual yet" : "Its card names no manual address");
+      const acts = [];
+      const act = (label, fn) => { const b = h("button", { class: "link soft", type: "button" }, label); b.addEventListener("click", fn); acts.push(b); };
+      if (f.manual) act("Open", () => openInstrument(f.name, "manual"));
+      else if (f.manual_url) act("Fetch from the maker", () => fetchManual(f.name));
+      act(f.manual ? "Use another PDF…" : "Choose PDF…", () => choosePdf(f.name));
+      act("Folder", () => openInstrument(f.name, "folder"));
+      return h("li", { class: "folder-row" },
+        h("div", { class: "folder-who" }, h("b", {}, f.name), h("span", {}, f.model), who ? h("span", { class: "muted small" }, who) : null),
+        h("div", { class: "folder-manual" }, manual, ...acts));
+    }));
+  }
+  async function openInstrument(name, what) {
+    try { await api("/api/instruments/" + encodeURIComponent(name) + "/open", { body: { what } }); } catch (e) { $("lab-msg").textContent = e.message; }
+  }
+  async function fetchManual(name) {
+    $("lab-msg").textContent = "Fetching the " + name + " manual from its maker…";
+    try {
+      const r = await api("/api/instruments/" + encodeURIComponent(name) + "/manual", { body: {} });
+      renderFolders(r.folders);
+      $("lab-msg").textContent = "Got the " + name + " manual (" + (r.manual.pages || "?") + " pages).";
+    } catch (e) { $("lab-msg").textContent = e.message; }
+  }
+  function choosePdf(name) {
+    const input = $("lab-pdf");
+    input.value = "";
+    input.onchange = async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      $("lab-msg").textContent = "Reading " + file.name + "…";
+      try {
+        const res = await fetch("/api/instruments/" + encodeURIComponent(name) + "/manual",
+          { method: "PUT", headers: { "X-Kelvin-Token": token, "Content-Type": "application/pdf" }, body: file });
+        const r = await res.json();
+        if (!res.ok) throw new Error(r.error || "HTTP " + res.status);
+        renderFolders(r.folders);
+        $("lab-msg").textContent = "Kelvin will use " + file.name + " as the " + name + " manual (" + (r.manual.pages || "?") + " pages).";
+      } catch (e) { $("lab-msg").textContent = e.message; }
+    };
+    input.click();
+  }
+  async function setupAgain() {
+    try {
+      const r = await api("/api/instruments/setup", { body: {} });
+      showSetup(r, false);
+      pollState();
+    } catch (e) { $("lab-msg").textContent = e.message; }
+  }
+  async function unlockLab() {
+    if (!confirm("Unlock the outputs?\n\nYou have checked the limits in the lab config: what each output may reach " +
+        "(voltage, current, field, temperature, power) is what your sample and setup can take. Kelvin still asks " +
+        "before driving harder, unless auto mode is on.")) return;
+    await connectLab({ unlock: true });
+    refreshLabSetup();
+  }
+  // what setting up changed (status, lock, folders, the lab config Kelvin wrote), without touching the rest
+  async function refreshLabSetup() {
+    let r;
+    try { r = await api("/api/lab"); } catch (e) { return; }
+    showLabState(r.info, r.name);
+    showSetup(r.setup, r.observe_only);
+    renderFolders(r.folders || []);
+    if (document.activeElement !== $("lab-yaml")) $("lab-yaml").value = r.yaml || "";
+  }
+
   async function openLabSetup() {
     let r;
     try { r = await api("/api/lab"); } catch (e) { toast(e.message); return; }
     LAB.cards = r.cards;
     showLabState(r.info, r.name);
+    showSetup(r.setup, r.observe_only);
+    renderFolders(r.folders || []);
     $("lab-card").replaceWith(Object.assign(cardSelect("", "Card…"), { id: "lab-card" }));
     $("lab-yaml").value = r.yaml || "";
     $("lab-found").hidden = $("lab-add-found").hidden = true;
@@ -2374,6 +2468,8 @@
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
     $("literature").checked = !S.settings || S.settings.literature !== false;
+    $("auto-setup").checked = !S.settings || S.settings.auto_setup !== false;
+    $("manuals").checked = !S.settings || S.settings.manuals !== false;
     $("pair-box").hidden = true;
     loadPhone();
     loadServices();
@@ -2419,6 +2515,8 @@
     body.instructions = $("global-instructions").value;
     body.learn = $("learn").checked ? "on" : "off";
     body.literature = $("literature").checked ? "on" : "off";
+    body.auto_setup = $("auto-setup").checked ? "on" : "off";
+    body.manuals = $("manuals").checked ? "on" : "off";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     $("settings-msg").textContent = "Saving…";
     try {
@@ -2541,6 +2639,9 @@
     $("lab-add-found").addEventListener("click", addFound);
     $("lab-add").addEventListener("click", addByAddress);
     $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value }));
+    $("lab-unlock").addEventListener("click", unlockLab);
+    $("lab-setup-again").addEventListener("click", setupAgain);
+    $("lab-observe-review").addEventListener("click", openLabSetup);
     for (const b of document.querySelectorAll("#lab-seg button")) {
       b.addEventListener("click", () => {
         if (b.classList.contains("on")) return;

@@ -5,6 +5,7 @@ vendor: Yokogawa
 kind: voltage-source
 status: community
 manual: "Yokogawa GS200 User's Manual, communication commands"
+manual_url: "https://web-material3.yokogawa.com/IMGS210-01EN.pdf"
 identify:
   idn: "YOKOGAWA,GS2[01]0"
   example: "YOKOGAWA,GS210,91T123456,2.02"

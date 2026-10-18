@@ -5,6 +5,7 @@ vendor: Keithley / Tektronix
 kind: nanovoltmeter
 status: community
 manual: "Keithley Model 2182A Nanovoltmeter User's Manual, SCPI reference"
+manual_url: "https://download.tek.com/manual/2182A-900-01C_July_2022_User.pdf"
 identify:
   idn: "KEITHLEY INSTRUMENTS INC\\.?,MODEL 2182"
   example: "KEITHLEY INSTRUMENTS INC.,MODEL 2182A,1234567,C02  /A02"

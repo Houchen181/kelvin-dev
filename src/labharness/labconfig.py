@@ -108,6 +108,8 @@ class LabConfig:
     source: str = ""
     auto_fraction: float = AUTO_FRACTION
     watches: List[Dict[str, Any]] = field(default_factory=list)  # the lab owner's watches (see monitor.py)
+    observe_only: bool = False   # written by auto-setup: read and configure, but no drive leaves safe until a person
+                                 # has reviewed the limits and removed the line
 
 
 def _pair(x: Any) -> bool:
@@ -328,9 +330,15 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
         err("auto_fraction", "must be a number from 0 to 1")
         fraction = AUTO_FRACTION
 
+    observe = data.get("observe_only", False)
+    if not isinstance(observe, bool):
+        err("observe_only", "must be true or false")
+        observe = True
+
     if errors:
         raise ConfigError(src, errors)
-    return LabConfig(str(data.get("lab", "Lab")), instruments, interlocks, safe_actions, src, float(fraction), watches)
+    return LabConfig(str(data.get("lab", "Lab")), instruments, interlocks, safe_actions, src, float(fraction), watches,
+                     observe)
 
 
 @dataclass

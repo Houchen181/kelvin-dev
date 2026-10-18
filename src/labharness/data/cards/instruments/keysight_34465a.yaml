@@ -5,6 +5,7 @@ vendor: Keysight (Agilent, HP)
 kind: multimeter
 status: community
 manual: "Keysight Truevolt Series Operating and Service Guide, SCPI programming reference"
+# manual_url: none: Keysight hands out its manuals after a sign-in; choose the PDF in Lab setup
 identify:
   idn: "(Keysight Technologies|Agilent Technologies|HEWLETT-PACKARD),344(01|10|11|60|61|65|70)A"
   example: "Keysight Technologies,34465A,MY57501234,A.02.17-02.40-02.17-00.52-04-01"

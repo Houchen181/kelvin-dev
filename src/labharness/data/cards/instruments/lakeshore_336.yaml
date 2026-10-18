@@ -5,6 +5,7 @@ vendor: Lake Shore Cryotronics
 kind: temperature-controller
 status: community
 manual: "Model 336 Temperature Controller user's manual, chapter 6 (Computer interface)"
+manual_url: "https://www.lakeshore.com/docs/default-source/product-downloads/336manual.pdf?sfvrsn=fa4e3a80_12"
 identify:
   idn: "LSCI,MODEL33[56]"
   example: "LSCI,MODEL336,LSA1234/#######,1.9"

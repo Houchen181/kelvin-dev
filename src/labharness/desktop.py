@@ -72,8 +72,10 @@ def _self_test(port: int, key: str) -> int:
         page_ok = page_ok and b"Pair this phone" in r.read()
     with urllib.request.urlopen(base + "/static/mobile.js", timeout=10) as r:
         page_ok = page_ok and r.status == 200
-    from . import carddraft, drivers  # noqa: F401  (loaded on demand at run time; make sure the build has them)
+    from . import autosetup, carddraft, drivers, profiles  # noqa: F401  (loaded on demand; make sure the build has them)
     page_ok = page_ok and "card: 1" in carddraft.example()
+    from pypdf._crypt_providers import crypt_provider   # manuals: pypdf, and cryptography for the locked ones
+    page_ok = page_ok and crypt_provider[0] == "cryptography"
     ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
     message = "Kelvin self-test: %s (lab %r)" % ("ok" if ok else "FAILED", boot.get("lab"))
     log.info(message)
@@ -109,6 +111,7 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--no-demo", action="store_true", help="hide the scripted demo model")
     ap.add_argument("--browser", action="store_true", help="open in the default browser instead of a window")
     ap.add_argument("--self-test", action="store_true", help="start, check the portal, exit")
+    ap.add_argument("--no-setup", action="store_true", help="do not look for connected instruments on start")
     ap.add_argument("--port", type=int, default=0, help="portal port (default: any free port)")
     args = ap.parse_args(argv)
 
@@ -147,6 +150,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     runtime.lab_info = info
     quit_event = threading.Event()
     app = create_app(runtime, settings, ChatStore(home / "virtual-lab" / "chats"), demo=not args.no_demo,
+                     auto_setup=not (args.self_test or args.no_setup),   # set up connected instruments on start
                      hosts=("127.0.0.1:%d" % port, "localhost:%d" % port),
                      on_quit=quit_event.set if args.browser else None)
     agent = app.app.state.agent

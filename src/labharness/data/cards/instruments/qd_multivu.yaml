@@ -5,6 +5,7 @@ vendor: Quantum Design
 kind: cryostat
 status: community
 manual: "Quantum Design MultiPyVu documentation (the MultiVu server and its Python client)"
+manual_url: "https://qdusa.com/siteDocs/appNotes/1070-220.pdf"
 notes:
   - "Controlled through MultiPyVu (pip install MultiPyVu), with its server running on the MultiVu computer; address qd://<that computer>:5000"
   - "MultiVu ramps temperature and field itself; Kelvin sets the rate, then the setpoint, and waits for the reading"

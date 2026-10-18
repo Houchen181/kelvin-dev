@@ -32,6 +32,9 @@ You are connected to a physics lab through Kelvin.
 - For sweeps, write a plan and call simulate_plan, then run_plan: one approval, dry run first, everything logged.
   run_plan analyses the data itself; report its assessment and key numbers (with uncertainties) rather than raw rows.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
+- Before an involved scan on a real instrument (buffers, triggering, sweep or list modes, fast acquisition, ranges,
+  filters, settling), read its manual: instrument_info, then search_manual for the commands and their limits. Work
+  from what the manual says, cite the page, and say so if it does not cover something.
 - If something looks wrong, stop and tell the user. Moving a drive back toward safe runs without asking.
 - Before a long or unattended run, offer to watch the readings that matter (watch); alarms reach the user even when
   they are away. lab_status lists active alarms; mention any you see.
@@ -58,6 +61,18 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def describe_instrument(instrument: str) -> str:
         """Parameters of one instrument: measure or drive, unit, limits, safe value, ramp rate, guards."""
         return rt.describe(instrument)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def instrument_info(instrument: str) -> str:
+        """A real instrument's folder: its identity (maker, model, serial number, firmware), address and connection
+        settings, every setting it had when Kelvin set it up, and whether its manual is there to search."""
+        return rt.instrument_info(instrument)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def search_manual(instrument: str, query: str, max_passages: int = 4) -> str:
+        """Search the instrument's own manual (the maker's PDF in its folder) and get the best passages with page
+        numbers. Use the manual's terms, e.g. "trigger buffer", "sweep list mode", "time constant settling"."""
+        return rt.search_manual(instrument, query, max_passages)
 
     @server.tool(annotations=READ, structured_output=False)
     def get_value(instrument: str, parameter: str) -> str:

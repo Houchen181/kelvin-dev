@@ -5,6 +5,7 @@ vendor: Stanford Research Systems
 kind: lock-in
 status: community
 manual: "SR860 Lock-In Amplifier manual, Remote operation"
+manual_url: "https://www.thinksrs.com/downloads/pdfs/manuals/SR860m.pdf"
 identify:
   idn: "Stanford_Research_Systems,SR86[05]"
   example: "Stanford_Research_Systems,SR860,003101,v1.47"

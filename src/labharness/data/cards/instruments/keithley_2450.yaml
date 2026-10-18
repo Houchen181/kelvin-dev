@@ -5,6 +5,7 @@ vendor: Keithley / Tektronix
 kind: source-meter
 status: community
 manual: "Keithley 2450 Reference Manual, SCPI command reference"
+manual_url: "https://download.tek.com/manual/2450-901-01E_Sept_2019_Ref.pdf"
 identify:
   idn: "KEITHLEY INSTRUMENTS,MODEL 24(50|60|61|70)"
   example: "KEITHLEY INSTRUMENTS,MODEL 2450,04412345,1.7.3b"

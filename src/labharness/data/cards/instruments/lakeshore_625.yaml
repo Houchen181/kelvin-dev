@@ -5,6 +5,7 @@ vendor: Lake Shore Cryotronics
 kind: magnet-supply
 status: community
 manual: "Model 625 Superconducting Magnet Power Supply user's manual, Remote operation"
+manual_url: "https://www.lakeshore.com/docs/default-source/product-downloads/manuals/625_manual.pdf?sfvrsn=2d9f6b7_1"
 identify:
   idn: "LSCI,MODEL625"
   example: "LSCI,MODEL625,1234567,1.3"

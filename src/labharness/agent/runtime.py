@@ -130,6 +130,8 @@ class LabRuntime:
         self.notifier = Notifier()
         self.literature = Literature()
         self.cards_dir: Optional[Path] = None   # the user's own cards (~/Kelvin/cards); set by the app
+        self.home: Optional[Path] = None        # ~/Kelvin, where each instrument has its folder; set by the app
+        self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
@@ -547,6 +549,73 @@ class LabRuntime:
             out.append(dict(vars(f), suggested=name))
         return out
 
+    # ------------------------------------------------------------------ instrument folders and manuals
+
+    def _real(self, instrument: str) -> Any:
+        inst = self.lab.instruments.get(instrument)
+        if inst is None:
+            raise KeyError("no instrument %r (have: %s)" % (instrument, ", ".join(self.lab.instruments)))
+        return inst
+
+    def instrument_info(self, instrument: str) -> str:
+        """An instrument's folder: who it is, how Kelvin talks to it, its settings at setup and its manual."""
+        from .. import profiles
+        try:
+            inst = self._real(instrument)
+        except KeyError as e:
+            return e.args[0]
+        if inst.simulated:
+            return ("%s is simulated (%s): it has no folder or manual; describe_instrument lists its parameters"
+                    % (instrument, inst.card.model))
+        if self.home is None:
+            return "instrument folders are not kept in this Kelvin"
+        p = profiles.info(self.home, instrument)
+        if not p.get("card"):
+            return ("%s has no folder yet; Kelvin makes it when it connects (a person can press Set up again in Lab "
+                    "setup)" % instrument)
+        lines = ["%s: %s (%s), card %s" % (instrument, p.get("model"), p.get("kind"), p.get("card"))]
+        parsed = p.get("parsed") or {}
+        if p.get("identity"):
+            lines.append("identity: %s%s" % (p["identity"], " (%s)" % ", ".join("%s %s" % kv for kv in parsed.items())
+                                             if parsed else ""))
+        conn = ", ".join("%s %r" % kv for kv in (p.get("connection") or {}).items())
+        lines.append("address: %s%s%s" % (p.get("address"), "; connection: " + conn if conn else "",
+                                          "; answered with " + p["answered_with"] if p.get("answered_with") else ""))
+        lines.append("folder: %s" % p["folder"])
+        m = p.get("manual") or {}
+        if p.get("has_manual"):
+            lines.append("manual: %s, %s pages%s; search it with search_manual" % (
+                m.get("title") or p.get("card_manual") or "manual", m.get("pages", "?"),
+                " (from %s)" % m["url"] if m.get("url") else " (put there by hand)"))
+        else:
+            lines.append("manual: none yet (%s). A person can fetch it in Lab setup or put the PDF in the folder as "
+                         "manual.pdf" % (p.get("card_manual") or "the card names no manual"))
+        st = profiles.settings_of(self.home, instrument)
+        if st.get("settings"):
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(st.get("read_at") or 0))
+            vals = ", ".join("%s = %s" % (k, v.get("shown", v.get("value"))) for k, v in st["settings"].items())
+            lines.append("settings read at %s (get_value for the current value): %s" % (when, vals))
+        return "\n".join(lines)
+
+    def search_manual(self, instrument: str, query: str, max_passages: int = 4) -> str:
+        from .. import profiles
+        try:
+            inst = self._real(instrument)
+        except KeyError as e:
+            return e.args[0]
+        if inst.simulated or self.home is None:
+            return "%s is simulated: it has no manual; describe_instrument lists its parameters" % instrument
+        try:
+            hits = profiles.search_manual(self.home, instrument, query, max(1, min(int(max_passages), 8)))
+        except FileNotFoundError:
+            return ("no manual for %s yet: a person can fetch it in Lab setup, or put the maker's PDF in %s as "
+                    "manual.pdf" % (instrument, profiles.folder(self.home, instrument)))
+        except (ValueError, RuntimeError) as e:
+            return str(e)
+        if not hits:
+            return "nothing in the %s manual matches %r; try other words (the manual's own terms)" % (instrument, query)
+        return "\n\n".join("[%s manual, p. %d]\n%s" % (instrument, h["page"], h["text"]) for h in hits)
+
     # ------------------------------------------------------------------ cards for new instruments
 
     def check_card(self, text: str) -> str:
@@ -822,6 +891,7 @@ class LabRuntime:
                 "busy": self.busy, "pending": pending, "history": history, "status": status,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
+                "observe_only": self.lab.config.observe_only, "setup": self.setup_status,
                 "watches": self.monitor.list(),
                 "alarms": [a.view() for a in self.monitor.alarms[:10]],
                 "notices": list(self.notifier.notices)[-20:],

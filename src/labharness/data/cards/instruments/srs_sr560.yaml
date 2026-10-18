@@ -5,6 +5,7 @@ vendor: Stanford Research Systems
 kind: preamp
 status: community
 manual: "SR560 Low-Noise Preamplifier manual, Remote programming (RS-232, listen only)"
+manual_url: "https://www.thinksrs.com/downloads/pdfs/manuals/SR560m.pdf"
 connection: { baud_rate: 9600, data_bits: 8, stop_bits: 2, write_termination: "\r\n", write_only: true }
 on_connect: ["LALL"]
 

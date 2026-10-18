@@ -226,6 +226,7 @@ class Card:
     headline: Optional[str] = None                 # the reading to feature in the lab panel
     notes: List[str] = field(default_factory=list)
     manual: str = ""
+    manual_url: str = ""                                        # where the maker publishes that manual (https)
     source: str = ""
     connection: Dict[str, Any] = field(default_factory=dict)   # terminations, serial settings, timeouts
     idn_query: str = "*IDN?"                                    # what discovery asks to identify the model
@@ -546,6 +547,9 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         for spec in params.values():
             if spec.is_drive and spec.set_cmd is not None and spec.set_cmd.header_prefix().match(c) is not None:
                 err("on_connect", "%r would set the drive %s; connecting may only configure" % (c, spec.name))
+    manual_url = str(data.get("manual_url") or "").strip()
+    if manual_url and not re.match(r"^https://[^\s/]+\.[^\s/]+/\S*$", manual_url):
+        err("manual_url", "must be an https:// address of the maker's manual")
     headline = (data.get("display") or {}).get("headline")
     if headline is not None and (headline not in params or params[headline].get_cmd is None):
         err("display.headline", "%r is not a readable parameter" % headline)
@@ -558,7 +562,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         idn_pattern=identify.get("idn"), idn_example=identify.get("example"),
         error_query=error_query, safe_sequence=seq, health=health,
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
-        notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")),
+        notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
         source=source, connection=connection, idn_query=str(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
         on_connect=on_connect, vars=card_vars, bound=chosen, data=original,
     )

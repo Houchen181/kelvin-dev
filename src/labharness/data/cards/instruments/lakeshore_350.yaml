@@ -5,6 +5,7 @@ vendor: Lake Shore Cryotronics
 kind: temperature-controller
 status: community
 manual: "Model 350 Temperature Controller user's manual, Remote operation"
+manual_url: "https://www.lakeshore.com/docs/default-source/software/manuals/350_manual.pdf?sfvrsn=501e9331_5"
 identify:
   idn: "LSCI,MODEL350"
   example: "LSCI,MODEL350,LSA2B5C/#######,1.4"

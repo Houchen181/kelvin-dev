@@ -5,6 +5,7 @@ vendor: Oxford Instruments
 kind: temperature-controller
 status: community
 manual: "Mercury iTC operation manual, remote interface (SCPI) command reference"
+# manual_url: none: Oxford Instruments (now Quantum Design Oxford) publishes no public copy; choose the PDF in Lab setup
 notes:
   - "Over Ethernet use TCPIP0::<address>::7020::SOCKET; also USB or RS-232"
   - "Each sensor has its own UID (MB1.T1 on the motherboard, DB6.T1 and so on on daughter boards): set vars.sensor to the one on your sample"

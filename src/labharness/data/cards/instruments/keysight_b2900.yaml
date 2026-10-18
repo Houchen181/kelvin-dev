@@ -5,6 +5,7 @@ vendor: Keysight (Agilent)
 kind: source-meter
 status: community
 manual: "Keysight B2900 Series SCPI Command Reference"
+# manual_url: none: Keysight hands out its manuals after a sign-in; choose the PDF in Lab setup
 identify:
   idn: "(Keysight|Agilent) Technologies,B29[01][12][AB]"
   example: "Keysight Technologies,B2902A,MY51141234,3.4.2011.5100"
