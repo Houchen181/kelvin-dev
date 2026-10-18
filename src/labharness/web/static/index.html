@@ -81,6 +81,14 @@
             <span class="sr-only">Model</span>
             <select id="model"></select>
           </label>
+          <div class="pane-menu-wrap compare-wrap">
+            <button id="compare-btn" class="compare-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-pressed="false"
+                    title="Ask two or three models at once and compare their answers side by side">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7.5" height="16" rx="1.5"/><rect x="13.5" y="4" width="7.5" height="16" rx="1.5"/></svg>
+              <span id="compare-label">Compare</span>
+            </button>
+            <div id="compare-menu" class="pane-menu compare-menu" hidden></div>
+          </div>
           <div class="spacer"></div>
           <button id="send" class="send" type="submit" aria-label="Send">
             <svg class="i-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
@@ -186,6 +194,11 @@
     <div class="field">
       <label for="default-model">Default model for new chats</label>
       <select id="default-model" name="default_model"></select>
+    </div>
+    <div class="field">
+      <label for="reviewer">Second opinion on plans</label>
+      <select id="reviewer" name="reviewer"></select>
+      <span class="hint">Another model reviews every plan before it runs. If it advises stopping, Kelvin asks you first. Pick a model from a different company for a more independent view. Any answer can also get a second opinion from its button.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Notifications</span>

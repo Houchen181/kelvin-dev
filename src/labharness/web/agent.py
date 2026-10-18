@@ -10,7 +10,9 @@ per message (memory.py); incognito chats use and keep no memory.
 from __future__ import annotations
 
 import asyncio
+import copy
 import re
+import time
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,8 +20,9 @@ from mcp import Client
 
 from ..agent.runtime import LabRuntime
 from ..agent.server import INSTRUCTIONS
+from ..gate import ApprovalRequest
 from .providers.base import Emit, ModelInfo, Provider
-from . import memory
+from . import memory, review
 from .settings import Settings
 from .store import MAX_NOTE, ChatStore
 
@@ -29,7 +32,16 @@ Write in Markdown. Lead with the result in one or two sentences, then only what 
 Use units. Prefer a short list or small table over paragraphs. While a plan runs, the portal shows its
 progress and plots live in a Runs pane beside the chat; when it finishes, the conversation shows the automatic
 assessment and the pane shows the key results, plots with fits and the data. So do not repeat them: add what
-they cannot (interpretation, anything suspicious, the next step)."""
+they cannot (interpretation, anything suspicious, the next step).
+A user message may begin with a <second_opinion> block: another model's review of your previous answer, asked for by
+the user. Weigh it on its merits and say briefly where you agree or not. A run_plan result may start with a second
+opinion on the plan; mention its concerns if they matter."""
+COMPARE = """# Comparing models
+The user is asking several models this same message and will compare the answers side by side. In this answer you
+may read the lab (status, values, runs, dry runs) but not change it. If something should be set or run, say exactly
+what you would do; the user picks one answer to continue with."""
+COMPARE_STEPS = 8
+MAX_LANES = 3
 PROJECT = """# Project “{name}”
 This conversation is filed under the project “{name}”. The project's instructions below come from the user and
 apply to this project only."""
@@ -69,6 +81,11 @@ _RUN_ID = re.compile(r"run_id='([^']+)'")
 
 class Busy(Exception):
     pass
+
+
+def plan_name(args: Any) -> str:
+    m = re.search(r"plan:\s*([^\n]+)", str((args or {}).get("plan") or "") if isinstance(args, dict) else "")
+    return m.group(1).strip() if m else "(unnamed)"
 
 
 def run_id_of(text: str) -> Optional[str]:
@@ -119,10 +136,13 @@ class ChatAgent:
         self._stream_task: Optional[asyncio.Future] = None
         self._exit = AsyncExitStack()
         self.client: Any = None
+        self.read_only: set = set()
+        self._lanes: List[asyncio.Future] = []
 
     async def start(self) -> None:
         self.client = await self._exit.enter_async_context(Client(self.mcp_server))
         listed = (await self.client.list_tools()).tools
+        self.read_only = {t.name for t in listed if t.annotations is not None and t.annotations.read_only_hint}
         self.tools = [{"name": t.name, "description": (t.description or "") + (REPORT_SCOPE if t.name == "make_report"
                                                                              else ""), "schema": t.input_schema}
                       for t in listed]
@@ -235,13 +255,21 @@ class ChatAgent:
 
     # ------------------------------------------------------------------ turns
 
-    def claim(self, chat_id: str, model_key: str) -> Provider:
-        if self.active:
-            raise Busy("Another conversation is still running.")
-        provider_name, _, model_id = model_key.partition(":")
+    def provider_for(self, model_key: str) -> Tuple[Provider, str]:
+        provider_name, _, model_id = str(model_key or "").partition(":")
         provider = self.providers.get(provider_name)
         if provider is None or not provider.available() or not model_id:
             raise ValueError("That model is not available. Add its API key in Settings.")
+        return provider, model_id
+
+    def label(self, model_key: str) -> str:
+        provider = self.providers.get(str(model_key).partition(":")[0])
+        return "%s %s" % (provider.label, model_key.partition(":")[2]) if provider else model_key
+
+    def claim(self, chat_id: str, model_key: str) -> Provider:
+        if self.active:
+            raise Busy("Another conversation is still running.")
+        provider, _ = self.provider_for(model_key)
         self.store.load(chat_id)  # raises KeyError for an unknown chat
         self.active = {"chat_id": chat_id, "model": model_key}
         self._stop = False
@@ -257,6 +285,8 @@ class ChatAgent:
         self.runtime.gate.request_abort()
         if self._stream_task is not None:
             self._stream_task.cancel()
+        for lane in self._lanes:
+            lane.cancel()
         return True
 
     async def run_turn(self, chat_id: str, text: str, model_key: str, provider: Provider, emit: Emit) -> None:
@@ -266,6 +296,7 @@ class ChatAgent:
             chat = self.store.load(chat_id)
             message: Dict[str, Any] = {"role": "user", "text": text}
             self.recall(chat, message)
+            self._attach_review(chat, message)
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
@@ -329,6 +360,7 @@ class ChatAgent:
 
         results = []
         for call in result.tool_calls:  # one at a time: the lab has one set of instruments
+            opinion: Optional[Dict[str, Any]] = None
             if self._stop:
                 content, is_error = "not run: the user pressed stop", True
             else:
@@ -337,17 +369,260 @@ class ChatAgent:
                     content, is_error = self._remember(chat, context, call["input"])
                 elif call["name"] == "make_report":
                     content, is_error = await self._report(chat, call["input"])
+                elif call["name"] == "run_plan" and self.settings and self.settings.get("reviewer"):
+                    content, is_error, opinion = await self._reviewed_run(chat, call, emit)
                 else:
                     content, is_error = await self._call(call, emit)
                 await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
                             "is_error": is_error, "run_id": run_id_of(content) if call["name"] == "run_plan" else None})
-            results.append({"id": call["id"], "name": call["name"], "content": content, "is_error": is_error})
+            entry = {"id": call["id"], "name": call["name"], "content": content, "is_error": is_error}
+            if opinion:
+                entry["review"] = opinion   # shown again when the chat is reopened
+            results.append(entry)
         chat["messages"].append({"role": "tool", "results": results})
         self.store.save(chat)
         if self._stop:
             await emit({"type": "turn_end", "reason": "stopped"})
             return False
         return True
+
+    # ------------------------------------------------------------------ second opinions
+
+    def _attach_review(self, chat: Dict[str, Any], message: Dict[str, Any]) -> None:
+        """A second opinion the user asked for on the previous answer goes to the model with the next message."""
+        for m in reversed(chat["messages"]):
+            if m.get("role") == "user":
+                return
+            r = m.get("review") if m.get("role") == "assistant" else None
+            if r and not r.get("given"):
+                message["review"] = {k: r[k] for k in ("model", "label", "verdict", "text") if k in r}
+                r["given"] = True
+                return
+
+    async def _reviewed_run(self, chat: Dict[str, Any], call: Dict[str, Any],
+                            emit: Emit) -> Tuple[str, bool, Optional[Dict[str, Any]]]:
+        """run_plan with a second opinion first. The reviewer only advises: a "stop" asks the user, who decides."""
+        opinion = await self._review_plan(chat, call, emit)
+        if opinion and opinion["verdict"] == "stop":
+            reasons = [line.lstrip("-• ").strip() for line in opinion["text"].splitlines() if line.strip()][:5]
+            go = await self._ask_human(call["id"], emit, ApprovalRequest(
+                "Second opinion: %s advises not to run plan %s. Run it anyway?" % (
+                    opinion["label"], plan_name(call["input"])), reasons or ["(no reasons given)"]))
+            if not go:
+                return ("not run: the second opinion (%s) advised stopping and the user agreed.\n%s"
+                        % (opinion["label"], opinion["text"])), True, opinion
+        content, is_error = await self._call(call, emit)
+        if opinion:
+            content = review.as_text(opinion, opinion["label"]) + "\n\n" + content
+        return content, is_error, opinion
+
+    async def _review_plan(self, chat: Dict[str, Any], call: Dict[str, Any], emit: Emit) -> Optional[Dict[str, Any]]:
+        key = self.settings.get("reviewer") if self.settings else ""
+        if not key or not isinstance(call["input"], dict):
+            return None
+        plan = str(call["input"].get("plan") or "")
+        await emit({"type": "review_start", "call_id": call["id"], "kind": "plan", "model": key})
+        try:
+            provider, model_id = self.provider_for(key)
+            status = await asyncio.to_thread(self.runtime.lab_status)
+            checks = await asyncio.to_thread(self.runtime.validate, plan)
+            prompt = review.plan_prompt(review.last_request(chat["messages"]), status, checks, plan)
+            text = await asyncio.wait_for(review.ask(provider, model_id, review.PLAN_SYSTEM, prompt), 180)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            reason = describe_error(self.providers[key.partition(":")[0]], e) if key.partition(":")[0] in self.providers \
+                else str(e)
+            await emit({"type": "review", "call_id": call["id"], "kind": "plan", "model": key, "label": self.label(key),
+                        "verdict": "", "text": "No second opinion: %s" % reason})
+            return None
+        verdict, body = review.parse(text, "plan")
+        opinion = {"kind": "plan", "model": key, "label": self.label(key), "verdict": verdict, "text": body,
+                   "at": time.time()}
+        self.runtime.gate.log.write("review", by=key, plan=plan_name(call["input"]), verdict=verdict, text=body[:500])
+        await emit(dict(opinion, type="review", call_id=call["id"]))
+        return opinion
+
+    async def review_answer(self, chat_id: str, model_key: str) -> Dict[str, Any]:
+        """A second opinion on the chat's latest answer, kept with it; the main model sees it with the next message."""
+        if self.active:
+            raise Busy("Wait until Kelvin has finished answering.")
+        provider, model_id = self.provider_for(model_key)
+        chat = self.store.load(chat_id)
+        prompt = review.answer_context(chat["messages"])   # ValueError when there is nothing to review
+        text = await asyncio.wait_for(review.ask(provider, model_id, review.ANSWER_SYSTEM, prompt), 180)
+        verdict, body = review.parse(text, "answer")
+        opinion = {"kind": "answer", "model": model_key, "label": self.label(model_key), "verdict": verdict,
+                   "text": body, "at": time.time()}
+        chat = self.store.load(chat_id)   # it may have been saved meanwhile
+        target = next((m for m in reversed(chat["messages"]) if m.get("role") == "assistant"
+                       and any(b.get("type") == "text" and b.get("text", "").strip() for b in m.get("blocks") or [])), None)
+        if target is not None:
+            target["review"] = opinion
+            self.store.save(chat)
+        return opinion
+
+    async def _ask_human(self, call_id: str, emit: Emit, request: ApprovalRequest) -> bool:
+        """Ask the user through the approver (inline in the chat), outside any tool call."""
+        loop = asyncio.get_running_loop()
+        requests: asyncio.Queue = asyncio.Queue()
+        subscribe = getattr(self.runtime.approver, "subscribe", None)
+        unsubscribe = subscribe(lambda r: loop.call_soon_threadsafe(requests.put_nowait, r)) if subscribe else None
+        task = asyncio.ensure_future(asyncio.to_thread(self.runtime.approver.approve, request))
+        shown: List[str] = []
+        try:
+            while not task.done():
+                getter = asyncio.ensure_future(requests.get())
+                done, _ = await asyncio.wait({task, getter}, timeout=0.4, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    r = getter.result()
+                    shown.append(r["id"])
+                    await emit(dict(r, type="approval", call_id=call_id))
+                else:
+                    getter.cancel()
+            await asyncio.sleep(0)
+            while not requests.empty():
+                r = requests.get_nowait()
+                shown.append(r["id"])
+                await emit(dict(r, type="approval", call_id=call_id))
+        finally:
+            if unsubscribe:
+                unsubscribe()
+        for request_id in shown:
+            await emit({"type": "approval_closed", "id": request_id})
+        return bool(task.result())
+
+    # ------------------------------------------------------------------ several models at once
+
+    def claim_compare(self, chat_id: str, model_keys: List[str]) -> List[Tuple[str, Provider, str]]:
+        if self.active:
+            raise Busy("Another conversation is still running.")
+        keys = list(dict.fromkeys(str(k) for k in model_keys if k))
+        if not 2 <= len(keys) <= MAX_LANES:
+            raise ValueError("Pick two or three different models to compare.")
+        lanes = [(k,) + self.provider_for(k) for k in keys]
+        self.store.load(chat_id)  # raises KeyError for an unknown chat
+        self.active = {"chat_id": chat_id, "model": keys[0], "compare": keys}
+        self._stop = False
+        return lanes
+
+    async def run_compare(self, chat_id: str, text: str, lanes: List[Tuple[str, Provider, str]], emit: Emit) -> None:
+        """Every model answers the same message at once, able to read the lab but not change it. The first answer
+        continues the chat unless the user picks another (choose)."""
+        keys = [k for k, _, _ in lanes]
+        try:
+            chat = self.store.load(chat_id)
+            message: Dict[str, Any] = {"role": "user", "text": text,
+                                       "compare": {"models": keys, "lanes": [], "chosen": 0}}
+            self.recall(chat, message)
+            self._attach_review(chat, message)
+            chat["messages"].append(message)
+            if chat.get("title", "New chat") == "New chat":
+                first = text.strip().splitlines()[0]
+                chat["title"] = first[:48] + ("…" if len(first) > 48 else "")
+            self.store.save(chat)
+            context = self.context(chat)
+            tools = [t for t in context["tools"] if t["name"] in self.read_only]
+            system = context["system"] + "\n\n" + COMPARE
+            base = list(chat["messages"])
+            await emit({"type": "compare_start", "models": keys, "labels": [self.label(k) for k in keys],
+                        "title": chat["title"]})
+            if message.get("memory"):
+                await emit({"type": "memory", "notes": message["memory"]})
+            self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit))
+                           for i, (key, provider, model_id) in enumerate(lanes)]
+            done = await asyncio.gather(*self._lanes, return_exceptions=True)
+            results = []
+            for i, r in enumerate(done):
+                if isinstance(r, dict):
+                    results.append(r)
+                else:
+                    stopped = {"role": "assistant", "provider": lanes[i][1].name, "model": lanes[i][2], "raw": None,
+                               "blocks": [{"type": "text", "text": "(stopped)"}]}
+                    results.append({"model": keys[i], "messages": [stopped], "error": "stopped"})
+            chosen = next((i for i, r in enumerate(results) if not r.get("error")), 0)
+            chat = self.store.load(chat_id)
+            last = chat["messages"][-1]
+            last["compare"] = {"models": keys, "lanes": results, "chosen": chosen}
+            chat["messages"] += copy.deepcopy(results[chosen]["messages"])
+            chat["model"] = keys[chosen]
+            self.store.save(chat)
+            await emit({"type": "compare_end", "chosen": chosen})
+            await emit({"type": "turn_end", "reason": "stopped" if self._stop else "end"})
+        except Exception as e:
+            await emit({"type": "error", "message": "Could not compare: %s" % e})
+            await emit({"type": "turn_end", "reason": "error"})
+        finally:
+            self._lanes = []
+            self.active = None
+
+    async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
+                    base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit) -> Dict[str, Any]:
+        out: List[Dict[str, Any]] = []
+
+        async def lane_emit(event: Dict[str, Any]) -> None:
+            await emit(dict(event, lane=i))
+
+        try:
+            for _ in range(COMPARE_STEPS):
+                result = await provider.stream(model_id, system, base + out, tools, lane_emit)
+                out.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
+                            "blocks": result.blocks, "raw": result.raw})
+                if result.stop_reason != "tool_calls":
+                    break
+                results = []
+                for call in result.tool_calls:
+                    await lane_emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
+                    if call["name"] not in self.read_only:
+                        content, is_error = ("not available while comparing models: only tools that read the lab are. "
+                                             "Say what you would do instead."), True
+                    elif call["input"] is None:
+                        content, is_error = "the arguments were not valid JSON; send the call again", True
+                    else:
+                        try:
+                            r = await self.client.call_tool(call["name"], call["input"])
+                            content = "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text")
+                            is_error = bool(r.is_error)
+                        except Exception as e:
+                            content, is_error = "tool failed: %s" % e, True
+                    await lane_emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
+                                     "is_error": is_error})
+                    results.append({"id": call["id"], "name": call["name"], "content": content, "is_error": is_error})
+                out.append({"role": "tool", "results": results})
+            else:
+                out.append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
+                            "blocks": [{"type": "text", "text": "(paused after %d steps)" % COMPARE_STEPS}]})
+            await lane_emit({"type": "lane_end", "reason": "end"})
+            return {"model": key, "messages": out}
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            reason = describe_error(provider, e)
+            await lane_emit({"type": "error", "message": reason})
+            await lane_emit({"type": "lane_end", "reason": "error"})
+            out.append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
+                        "blocks": [{"type": "text", "text": "(no answer: %s)" % reason}]})
+            return {"model": key, "messages": out, "error": reason}
+
+    def choose(self, chat_id: str, index: int) -> Dict[str, Any]:
+        """Continue the chat with another model's answer from the last comparison."""
+        if self.active:
+            raise Busy("Wait until the answers are finished.")
+        chat = self.store.load(chat_id)
+        at = max((i for i, m in enumerate(chat["messages"]) if m.get("role") == "user"), default=-1)
+        comp = chat["messages"][at].get("compare") if at >= 0 else None
+        if not comp or not comp.get("lanes"):
+            raise ValueError("The last message was not a comparison.")
+        lanes = comp["lanes"]
+        if not 0 <= index < len(lanes):
+            raise ValueError("No such answer.")
+        if len(chat["messages"]) != at + 1 + len(lanes[comp["chosen"]]["messages"]):
+            raise ValueError("The conversation has moved on; pick an answer before replying.")
+        chat["messages"] = chat["messages"][:at + 1] + copy.deepcopy(lanes[index]["messages"])
+        comp["chosen"] = index
+        chat["model"] = comp["models"][index]
+        self.store.save(chat)
+        return {"chosen": index, "model": chat["model"]}
 
     async def _call(self, call: Dict[str, Any], emit: Emit) -> Tuple[str, bool]:
         """Run one tool; while it waits for a human, show its approval requests inline."""

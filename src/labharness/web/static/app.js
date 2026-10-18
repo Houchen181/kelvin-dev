@@ -3,7 +3,7 @@
   const token = decodeURIComponent(location.hash.slice(1));
   const $ = (id) => document.getElementById(id);
   const SVGNS = "http://www.w3.org/2000/svg";
-  const S = { chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map() };
+  const S = { compare: [], lastReply: null, chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map() };
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -967,11 +967,28 @@
     memory(notes) {  // the saved notes recalled for this message: what Kelvin knew from earlier work
       if (!notes || !notes.length) return;
       this.endText();
-      this.el.append(h("details", { class: "recall" },
-        h("summary", {}, icon("memory"), "Recalled " + notes.length + (notes.length === 1 ? " note" : " notes") + " from earlier work"),
-        h("ul", {}, ...notes.map((n) => h("li", {}, h("span", { class: "memory-kind" }, n.kind),
-          h("span", {}, n.text), h("span", { class: "memory-meta" }, n.scope === "global" ? "every chat" : "this project"))))));
+      this.el.append(recallBox(notes));
     }
+    place(callId, el) {
+      const step = this.steps.get(callId);
+      if (step) { (step.last || step.el).after(el); step.last = el; } else this.el.append(el);
+    }
+    reviewStart(ev) {
+      this.pendingReview = h("div", { class: "review pending" }, h("span", { class: "spinner" }),
+        h("span", {}, "Asking " + (S.labels[ev.model] || ev.model) + " for a second opinion on this plan…"));
+      this.place(ev.call_id, this.pendingReview);
+    }
+    review(ev) {  // a second opinion on a plan, under its run_plan step
+      const card = reviewCard(ev);
+      const pending = this.pendingReview;
+      this.pendingReview = null;
+      if (pending && pending.isConnected) {
+        pending.replaceWith(card);
+        const step = this.steps.get(ev.call_id);
+        if (step && step.last === pending) step.last = card;
+      } else this.place(ev.call_id, card);
+    }
+    answerReview(r) { this.endText(); this.el.append(reviewCard(r)); }
     error(text) { this.endText(); this.el.append(h("div", { class: "callout" }, text)); }
     finish() {
       this.endText(); this.endThinking();
@@ -988,35 +1005,61 @@
   function userBubble(text) { return h("div", { class: "msg user" }, h("div", { class: "bubble" }, text)); }
   function showEmpty(show) { $("empty").hidden = !show; thread.hidden = show; }
 
+  function replayMessage(reply, m) {
+    if (m.role === "assistant") {
+      for (const b of m.blocks) {
+        if (b.type === "text") { reply.addText(b.text); reply.endText(); }
+        else if (b.type === "thinking") { reply.addThinking(b.text); reply.endThinking(); }
+        else if (b.type === "tool_call") reply.toolStart(b.id, b.name, b.input);
+      }
+      if (m.review) reply.answerReview(m.review);
+    } else if (m.role === "tool") {
+      for (const r of m.results) {
+        if (r.review) reply.review(Object.assign({ call_id: r.id }, r.review));
+        const run = r.name === "run_plan" ? (String(r.content).match(/run_id='([^']+)'/) || [])[1] : null;
+        reply.toolEnd(r.id, r.content, r.is_error, run);
+      }
+    }
+  }
   function renderChat(chat) {
     thread.replaceChildren();
-    let reply = null, recalled = null;
-    for (const m of chat.messages) {
+    let reply = null, recalled = null, skip = 0;
+    const lastUser = chat.messages.map((m) => m.role).lastIndexOf("user");
+    S.lastReply = null;
+    chat.messages.forEach((m, at) => {
+      if (skip > 0) { skip--; return; }
       if (m.role === "user") {
         if (reply) reply.finish();
         reply = null;
         recalled = m.memory || null;
         thread.append(userBubble(m.text));
-      } else if (m.role === "assistant") {
-        if (!reply) {
-          reply = new Reply(m.provider + ":" + m.model);
-          thread.append(reply.el);
-          reply.memory(recalled);
-          recalled = null;
+        const comp = m.compare;
+        if (comp && comp.lanes && comp.lanes.length) {   // several models answered this message side by side
+          if (recalled) { thread.append(recallBox(recalled)); recalled = null; }
+          const view = new CompareView(comp.models);
+          thread.append(view.el);
+          const n = comp.lanes[comp.chosen].messages.length;
+          comp.lanes.forEach((lane, i) => {   // the chosen answer from the chat itself: it carries any second opinion
+            const msgs = i === comp.chosen ? chat.messages.slice(at + 1, at + 1 + n) : lane.messages;
+            for (const lm of msgs) replayMessage(view.lanes[i].reply, lm);
+            view.lanes[i].reply.finish();
+          });
+          view.setChosen(comp.chosen, at === lastUser);
+          skip = comp.lanes[comp.chosen].messages.length;
+          S.lastReply = view.lanes[comp.chosen].reply;
         }
-        for (const b of m.blocks) {
-          if (b.type === "text") { reply.addText(b.text); reply.endText(); }
-          else if (b.type === "thinking") { reply.addThinking(b.text); reply.endThinking(); }
-          else if (b.type === "tool_call") reply.toolStart(b.id, b.name, b.input);
-        }
-      } else if (m.role === "tool" && reply) {
-        for (const r of m.results) {
-          const run = r.name === "run_plan" ? (String(r.content).match(/run_id='([^']+)'/) || [])[1] : null;
-          reply.toolEnd(r.id, r.content, r.is_error, run);
-        }
+        return;
       }
-    }
+      if (!reply && m.role === "assistant") {
+        reply = new Reply(m.provider + ":" + m.model);
+        thread.append(reply.el);
+        reply.memory(recalled);
+        recalled = null;
+      }
+      if (reply) { replayMessage(reply, m); S.lastReply = reply; }
+    });
     if (reply) reply.finish();
+    offerReview(S.lastReply);
     showEmpty(!chat.messages.length);
     requestAnimationFrame(toBottom);
   }
@@ -1393,12 +1436,15 @@
     if (!text || S.streaming) return;
     const model = $("model").value;
     if (!model) { openSettings(); return; }
+    const extra = S.compare.filter((k) => k !== model);
+    if (extra.length) return sendCompare(text, [model, ...extra]);
     store("lh.model", model);
     if (!S.chatId) {
       try { S.chatId = (await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
       applyIncognito();
     }
     $("input").value = ""; autosize();
+    $("input").placeholder = "Ask Kelvin…";
     showEmpty(false);
     thread.append(userBubble(text));
     const reply = new Reply(model);
@@ -1438,6 +1484,190 @@
       setStreaming(false);
       refreshChats();
       pollState();
+      offerReview(reply);
+    }
+  }
+
+  // ------------------------------------------------------------------ several models at once
+  async function readEvents(res, onEvent) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.trim()) onEvent(JSON.parse(line));
+      }
+    }
+  }
+  class CompareView {
+    constructor(keys) {
+      this.lanes = keys.map((key, i) => {
+        const reply = new Reply(key);
+        const pick = h("button", { class: "btn small", type: "button" }, "Continue with this answer");
+        pick.addEventListener("click", () => chooseLane(i));
+        const el = h("div", { class: "lane" }, reply.el, h("div", { class: "lane-foot" }, pick));
+        return { reply, el, pick };
+      });
+      this.el = h("div", { class: "compare", style: "--lanes:" + keys.length }, ...this.lanes.map((l) => l.el));
+      this.setChosen(0, false);
+    }
+    setChosen(index, open) {
+      this.lanes.forEach((l, k) => {
+        l.el.classList.toggle("chosen", k === index);
+        l.pick.textContent = k === index ? "Continuing with this" : "Continue with this answer";
+        l.pick.disabled = k === index || !open;
+      });
+    }
+  }
+  async function chooseLane(index) {
+    if (S.streaming) return;
+    try {
+      const r = await api("/api/chats/" + S.chatId + "/choose", { body: { index } });
+      if (S.labels[r.model]) { $("model").value = r.model; store("lh.model", r.model); }
+      const chat = await api("/api/chats/" + S.chatId);
+      renderChat(chat);
+      const last = [...chat.messages].reverse().find((m) => m.role === "user");
+      if (last && last.compare) { S.compare = last.compare.models.filter((k) => k !== r.model).slice(0, 2); compareLabel(); }
+      toast("Continuing with " + (S.labels[r.model] || r.model) + ".");
+    } catch (e) { toast(e.message); }
+  }
+  async function sendCompare(text, models) {
+    if (!S.chatId) {
+      try { S.chatId = (await api("/api/chats", { body: { model: models[0], project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
+      applyIncognito();
+    }
+    $("input").value = ""; autosize();
+    $("input").placeholder = "Ask Kelvin…";
+    showEmpty(false);
+    for (const el of document.querySelectorAll(".msg-actions")) el.remove();
+    thread.append(userBubble(text));
+    const view = new CompareView(models);
+    thread.append(view.el);
+    toBottom();
+    setStreaming(true);
+    try {
+      const res = await fetch("/api/chats/" + S.chatId + "/compare", {
+        method: "POST",
+        headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify({ text, models }),
+      });
+      if (!res.ok) {
+        let msg = "HTTP " + res.status;
+        try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
+        view.lanes[0].reply.error(msg);
+        return;
+      }
+      await readEvents(res, (ev) => {
+        const stick = nearBottom();
+        if (ev.lane !== undefined) {
+          const lane = view.lanes[ev.lane];
+          if (lane && ev.type === "lane_end") lane.reply.finish();
+          else if (lane) handle(lane.reply, ev);
+        } else if (ev.type === "compare_start") { setTitle(ev.title, currentProject()); refreshChats(); }
+        else if (ev.type === "memory") view.el.before(recallBox(ev.notes));
+        else if (ev.type === "compare_end") { view.setChosen(ev.chosen, true); S.lastReply = view.lanes[ev.chosen].reply; }
+        else if (ev.type === "error") view.lanes[0].reply.error(ev.message);
+        if (stick) toBottom();
+      });
+    } catch (e) {
+      view.lanes[0].reply.error("Lost the connection to the portal (" + e.message + ").");
+    } finally {
+      for (const l of view.lanes) l.reply.finish();
+      setStreaming(false);
+      refreshChats();
+      pollState();
+      offerReview(S.lastReply);
+    }
+  }
+  function compareLabel() {
+    const n = S.compare.length;
+    $("compare-label").textContent = n ? "Compare " + (n + 1) : "Compare";
+    $("compare-btn").classList.toggle("on", n > 0);
+    $("compare-btn").setAttribute("aria-pressed", String(n > 0));
+  }
+  function toggleCompareMenu() {
+    const menu = $("compare-menu");
+    if (!menu.hidden) { menu.hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); return; }
+    const main = $("model").value;
+    const others = (S.groups || []).flatMap((g) => g.models.map((m) => ({ key: m.key, label: m.label, provider: g.label })))
+      .filter((m) => m.key !== main);
+    const items = others.map((m) => {
+      const box = h("input", { type: "checkbox" });
+      box.checked = S.compare.includes(m.key);
+      box.addEventListener("change", () => {
+        if (box.checked && S.compare.length >= 2) { box.checked = false; toast("Up to three models at once."); return; }
+        S.compare = box.checked ? [...S.compare, m.key] : S.compare.filter((k) => k !== m.key);
+        compareLabel();
+      });
+      return h("label", { class: "pane-menu-item" }, box, h("span", { class: "pm-name" }, m.label), h("span", { class: "pm-meta" }, m.provider));
+    });
+    const off = h("button", { class: "link soft", type: "button" }, "Ask one model");
+    off.addEventListener("click", () => { S.compare = []; compareLabel(); menu.hidden = true; });
+    menu.replaceChildren(
+      h("div", { class: "pane-menu-note" }, (S.labels[main] || "The chosen model") + " answers, and so do the ones you tick here (up to two)."),
+      ...(items.length ? items : [h("div", { class: "pane-menu-note" }, "Add another provider's API key in Settings to compare models.")]),
+      h("div", { class: "pane-menu-note" }, "While comparing, models can read the lab but not change it. Pick one answer to continue with. ", off));
+    menu.hidden = false;
+    $("compare-btn").setAttribute("aria-expanded", "true");
+  }
+
+  // ------------------------------------------------------------------ second opinions
+  const VERDICTS = { go: ["ok", "Go"], caution: ["warn", "Caution"], stop: ["bad", "Stop"],
+    agree: ["ok", "Agrees"], partly: ["warn", "Partly agrees"], disagree: ["bad", "Disagrees"] };
+  function reviewCard(r) {
+    const [tone, word] = VERDICTS[r.verdict] || ["muted", "No verdict"];
+    const who = S.labels[r.model] || r.label || r.model;
+    return h("div", { class: "review " + tone },
+      h("div", { class: "review-head" }, h("span", { class: "verdict-chip" }, word),
+        h("span", { class: "review-who" }, "Second opinion" + (r.kind === "plan" ? " on the plan" : "") + " · " + who)),
+      h("div", { class: "md", html: md(r.text || "") }));
+  }
+  function recallBox(notes) {
+    return h("details", { class: "recall" },
+      h("summary", {}, icon("memory"), "Recalled " + notes.length + (notes.length === 1 ? " note" : " notes") + " from earlier work"),
+      h("ul", {}, ...notes.map((n) => h("li", {}, h("span", { class: "memory-kind" }, n.kind),
+        h("span", {}, n.text), h("span", { class: "memory-meta" }, n.scope === "global" ? "every chat" : "this project")))));
+  }
+  function offerReview(reply) {  // the latest answer can get a second opinion from another model
+    for (const el of document.querySelectorAll(".msg-actions")) el.remove();
+    if (!reply || !S.chatId || !reply.el.querySelector(".md")) return;
+    const btn = h("button", { class: "link soft", type: "button", "aria-haspopup": "true" }, icon("check"), "Second opinion");
+    const menu = h("div", { class: "pane-menu review-menu", hidden: true });
+    const wrap = h("div", { class: "msg-actions pane-menu-wrap" }, btn, menu);
+    btn.addEventListener("click", () => {
+      if (!menu.hidden) { menu.hidden = true; return; }
+      const preferred = (S.settings && S.settings.reviewer) || "";
+      const models = (S.groups || []).flatMap((g) => g.models.map((m) => ({ key: m.key, label: m.label, provider: g.label })));
+      models.sort((a, b) => (b.key === preferred) - (a.key === preferred));
+      menu.replaceChildren(h("div", { class: "pane-menu-note" }, "Which model should check this answer?"),
+        ...models.map((m) => {
+          const item = h("button", { class: "pane-menu-item", type: "button" }, h("span", {}),
+            h("span", { class: "pm-name" }, m.label), h("span", { class: "pm-meta" }, m.key === preferred ? "your reviewer" : m.provider));
+          item.addEventListener("click", () => { menu.hidden = true; askReview(reply, wrap, m.key); });
+          return item;
+        }));
+      menu.hidden = false;
+    });
+    reply.el.append(wrap);
+  }
+  async function askReview(reply, wrap, model) {
+    const pending = h("div", { class: "review pending" }, h("span", { class: "spinner" }),
+      h("span", {}, "Asking " + (S.labels[model] || model) + " for a second opinion…"));
+    wrap.before(pending);
+    wrap.hidden = true;
+    try {
+      const r = await api("/api/chats/" + S.chatId + "/review", { body: { model } });
+      pending.replaceWith(reviewCard(r));
+      $("input").placeholder = "Reply — Kelvin will see the second opinion";
+    } catch (e) {
+      pending.replaceWith(h("div", { class: "callout" }, e.message));
+      wrap.hidden = false;
     }
   }
 
@@ -1459,6 +1689,8 @@
       case "run_progress": reply.runProgress(ev); break;
       case "note": reply.note(ev.text); break;
       case "memory": reply.memory(ev.notes); break;
+      case "review_start": reply.reviewStart(ev); break;
+      case "review": reply.review(ev); break;
       case "error": reply.error(ev.message); break;
       default: break;
     }
@@ -1807,6 +2039,8 @@
     $("local-url").value = (S.settings && S.settings.local_base_url) || "";
     $("local-models").value = (S.settings && S.settings.local_models) || "";
     fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
+    fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
+    $("reviewer").options[0].textContent = "Off";
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
@@ -1846,6 +2080,7 @@
     body.local_base_url = $("local-url").value.trim();
     body.local_models = $("local-models").value.trim();
     body.default_model = $("default-model").value;
+    body.reviewer = $("reviewer").value;
     body.instructions = $("global-instructions").value;
     body.learn = $("learn").checked ? "on" : "off";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
@@ -1923,7 +2158,15 @@
     $("input").addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!S.streaming) sendMessage($("input").value); }
     });
-    $("model").addEventListener("change", () => { store("lh.model", $("model").value); updateSend(); });
+    $("model").addEventListener("change", () => {
+      store("lh.model", $("model").value); updateSend();
+      S.compare = S.compare.filter((k) => k !== $("model").value); compareLabel();
+    });
+    $("compare-btn").addEventListener("click", toggleCompareMenu);
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }
+      if (!e.target.closest(".msg-actions")) for (const m of document.querySelectorAll(".review-menu")) m.hidden = true;
+    });
     $("approval-mode").addEventListener("change", (e) => changeMode(e.target.value));
     $("open-lab-setup").addEventListener("click", openLabSetup);
     $("open-report").addEventListener("click", openReport);

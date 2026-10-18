@@ -453,6 +453,74 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return StreamingResponse(events(), media_type="application/x-ndjson",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    def stream_events(work: Any) -> Response:
+        """Run `work(emit)` to the end even if the browser goes away; stream its events as NDJSON."""
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def run() -> None:
+            try:
+                await work(queue.put)
+            finally:
+                await queue.put(None)
+
+        task = asyncio.ensure_future(run())
+        tasks.append(task)
+        task.add_done_callback(lambda t: tasks.remove(t) if t in tasks else None)
+
+        async def events():
+            while True:
+                event = await queue.get()
+                if event is None:
+                    return
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(events(), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    async def compare(request: Request) -> Response:
+        """Several models answer one message side by side (reading the lab only)."""
+        chat_id = request.path_params["chat_id"]
+        body = await request.json()
+        text = str(body.get("text") or "").strip()
+        if not text:
+            return error(400, "Say something first.")
+        models = body.get("models") if isinstance(body.get("models"), list) else []
+        try:
+            lanes = agent.claim_compare(chat_id, models)
+        except Busy as e:
+            return error(409, str(e))
+        except (KeyError, ValueError) as e:
+            return error(400, e.args[0])
+        return stream_events(lambda emit: agent.run_compare(chat_id, text, lanes, emit))
+
+    async def choose(request: Request) -> Response:
+        body = await request.json()
+        try:
+            return JSONResponse(agent.choose(request.path_params["chat_id"], int(body.get("index", -1))))
+        except Busy as e:
+            return error(409, str(e))
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else "no such chat")
+        except (TypeError, ValueError) as e:
+            return error(400, str(e))
+
+    async def second_opinion(request: Request) -> Response:
+        """Another model reviews the chat's latest answer."""
+        body = await request.json()
+        try:
+            opinion = await agent.review_answer(request.path_params["chat_id"], str(body.get("model") or ""))
+        except Busy as e:
+            return error(409, str(e))
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else "no such chat")
+        except ValueError as e:
+            return error(400, str(e))
+        except asyncio.TimeoutError:
+            return error(504, "The reviewer did not answer within 3 minutes.")
+        except Exception as e:
+            return error(502, "The reviewer could not answer: %s" % str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
+        return JSONResponse(opinion)
+
     async def stop(request: Request) -> Response:
         return JSONResponse({"ok": agent.stop()})
 
@@ -543,6 +611,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/chats", chats, methods=["GET", "POST"]),
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
+        Route("/api/chats/{chat_id}/compare", compare, methods=["POST"]),
+        Route("/api/chats/{chat_id}/choose", choose, methods=["POST"]),
+        Route("/api/chats/{chat_id}/review", second_opinion, methods=["POST"]),
         Route("/api/projects", projects, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}", project, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/projects/{project_id}/notes/{note_id}", note, methods=["DELETE"]),

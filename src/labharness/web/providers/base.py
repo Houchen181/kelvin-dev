@@ -64,7 +64,12 @@ def user_text(message: Dict[str, Any]) -> str:
     Stored with the message, so earlier turns replay unchanged and the prompt cache holds."""
     from ..memory import block
     notes = message.get("memory")
-    return block(notes, message.get("memory_project")) + "\n\n" + message["text"] if notes else message["text"]
+    text = block(notes, message.get("memory_project")) + "\n\n" + message["text"] if notes else message["text"]
+    review = message.get("review")
+    if review:   # a second opinion on the previous answer, asked for by the user
+        text = '<second_opinion model="%s" verdict="%s">\n%s\n</second_opinion>\n\n%s' % (
+            review.get("label") or review.get("model"), review.get("verdict"), review.get("text", ""), text)
+    return text
 
 
 def text_of(blocks: List[Dict[str, Any]]) -> str:

@@ -19,7 +19,8 @@ ENV = {
     "gemini_api_key": "GEMINI_API_KEY",
 }
 SECRET = set(ENV) | {"local_api_key", "webhook"}   # a webhook URL is a credential too
-EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds"}
+EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
+                     "reviewer"}
 
 
 class Settings:
@@ -85,6 +86,7 @@ class Settings:
             "instructions": self._data.get("instructions", ""),
             "learn": self.learning,
             "notify_kinds": self.notify_kinds,
+            "reviewer": self._data.get("reviewer", ""),
         }
 
     @property

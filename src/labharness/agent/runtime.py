@@ -81,6 +81,8 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "cleared: %s" % e.get("text")
     elif kind == "watch":
         text = "%s watch %s: %s" % (e.get("change"), e.get("watch"), e.get("rule"))
+    elif kind == "review":
+        text = "second opinion on %s: %s" % (e.get("plan"), e.get("verdict"))
     elif kind == "report":
         text = "report %s (%s run%s)" % (e.get("name"), e.get("runs"), "" if e.get("runs") == 1 else "s")
     elif kind == "lab_changed":
