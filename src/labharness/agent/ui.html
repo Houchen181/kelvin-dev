@@ -3,17 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lab Harness approvals</title>
+<title>Kelvin approvals</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%23e8f2fc'/%3E%3Cg transform='translate(9.8 4.9) scale(0.82)'%3E%3Cpath d='M24 20V38M16 24.5L32 33.5M16 33.5L32 24.5' stroke='%238cc4f2' stroke-width='2.6' stroke-linecap='round' fill='none'/%3E%3Cpath d='M18 66Q16 86 40 86Q60 86 68 76' fill='none' stroke='%232f6fb0' stroke-width='7' stroke-linecap='round'/%3E%3Cellipse cx='46' cy='62' rx='30' ry='19' fill='%232f6fb0'/%3E%3Cpath d='M60 43L62 30L69 38ZM82 43L80 30L73 38Z' fill='%232f6fb0'/%3E%3Ccircle cx='71' cy='50' r='14' fill='%232f6fb0'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5f6b7a; --line: #e2e6ea;
-    --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --warn-bg: #fff8e6; --warn-line: #e3b341;
+    --bg: #f6f8fb; --panel: #ffffff; --text: #14202c; --muted: #66768a; --line: #dde5ee;
+    --accent: #2f6fb0; --accent-text: #ffffff; --ok: #1a7f37; --warn-bg: #fff8e6; --warn-line: #e3b341;
     --danger: #c62828; --danger-text: #ffffff; --away: #9a6700; --away-bg: #fff4d6;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0f1216; --panel: #171b21; --text: #e6e9ed; --muted: #9aa5b1; --line: #2a313a;
-      --accent: #4c8dff; --accent-text: #0b0d10; --ok: #3fb950; --warn-bg: #2a2410; --warn-line: #9e7a1d;
+      --bg: #0f151c; --panel: #141c25; --text: #e6edf4; --muted: #8d9aa8; --line: #24303c;
+      --accent: #5aa2e6; --accent-text: #08111a; --ok: #3fb950; --warn-bg: #2a2410; --warn-line: #9e7a1d;
       --danger: #ef5350; --danger-text: #0b0d10; --away: #e3b341; --away-bg: #2a2410;
     }
   }
@@ -58,7 +59,7 @@
 </head>
 <body>
 <header>
-  <h1>Lab Harness</h1>
+  <h1>Kelvin</h1>
   <span id="lab" class="muted"></span>
   <span id="sim" class="badge" hidden>simulated</span>
   <span class="muted"><span id="conn" class="dot"></span><span id="conntext">connecting…</span></span>
@@ -70,7 +71,7 @@
 <main>
   <section id="nokey">
     <h2>Access key missing</h2>
-    <p>Open the link printed by the Lab Harness server. It ends in <code>#</code> plus an access key.</p>
+    <p>Open the link printed by the Kelvin server. It ends in <code>#</code> plus an access key.</p>
   </section>
   <section>
     <h2>Waiting for you</h2>
@@ -107,7 +108,7 @@ function el(tag, attrs, ...children) {
 async function api(path, body) {
   const res = await fetch(path, {
     method: body ? "POST" : "GET",
-    headers: { "X-LabHarness-Token": token, "Content-Type": "application/json" },
+    headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) throw new Error(res.status);
@@ -136,7 +137,7 @@ function renderPending(list) {
     if (!seen.has(r.id)) {
       seen.add(r.id);
       if (!firstLoad && "Notification" in window && Notification.permission === "granted") {
-        new Notification("Lab Harness: approval needed", { body: r.title + "\n" + (r.items[0] || "") });
+        new Notification("Kelvin: approval needed", { body: r.title + "\n" + (r.items[0] || "") });
       }
     }
   }
@@ -147,7 +148,7 @@ function render(s) {
   $("sim").hidden = !s.simulated;
   $("busy").textContent = s.busy ? "agent: " + s.busy : "agent: idle";
   renderPending(s.pending);
-  document.title = (s.pending.length ? "(" + s.pending.length + ") Approve? · " : "") + "Lab Harness";
+  document.title = (s.pending.length ? "(" + s.pending.length + ") Approve? · " : "") + "Kelvin";
   $("history").replaceChildren(...s.history.slice(0, 5).map((h) =>
     el("li", {}, h.at + " " + h.answer + (h.by && h.by !== "human" ? " (" + h.by + ")" : "") + ": " + (h.items[0] || h.title))));
   $("status").replaceChildren(...Object.entries(s.status).map(([name, params]) =>

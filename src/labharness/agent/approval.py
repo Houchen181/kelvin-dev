@@ -168,7 +168,7 @@ class ApprovalServer:
                 return self.headers.get("Host", "") in {h % server.port for h in hosts}
 
             def _authorized(self) -> bool:
-                return hmac.compare_digest(self.headers.get("X-LabHarness-Token", ""), server.token)
+                return hmac.compare_digest(self.headers.get("X-Kelvin-Token", ""), server.token)
 
             def do_GET(self) -> None:
                 if not self._host_ok():

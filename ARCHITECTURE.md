@@ -1,4 +1,4 @@
-# Lab Harness — Architecture v0.4
+# Kelvin — Architecture v0.4
 
 Draft 2026-10-17. Spec: [VISION.md](VISION.md).
 **Audience: every experimental physicist, in any lab, with any instruments and any control software.** This is not a tool for one lab.

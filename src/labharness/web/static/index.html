@@ -3,14 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Lab Harness</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M12 7h8M14 7v7l-6 10a2 2 0 0 0 2 3h12a2 2 0 0 0 2-3l-6-10V7' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<title>Kelvin</title>
+<link rel="icon" type="image/svg+xml" href="/static/kelvin.svg">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
 <div id="nokey" class="nokey" hidden>
-  <h1>Open the portal link</h1>
-  <p>This page needs the access key from the link the server printed when it started (it ends in <code>#</code> and a key).</p>
+  <img src="/static/kelvin.svg" width="72" height="72" alt="">
+  <h1>Open your Kelvin link</h1>
+  <p>This page needs the access key from the link Kelvin printed when it started (it ends in <code>#</code> and a key).</p>
 </div>
 
 <div id="app" class="app" hidden>
@@ -19,8 +20,8 @@
   <aside id="sidebar" class="sidebar" aria-label="Conversations">
     <div class="side-top">
       <div class="brand">
-        <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M9 3h6M10.5 3v6.2L5.2 18.3A1.8 1.8 0 0 0 6.8 21h10.4a1.8 1.8 0 0 0 1.6-2.7L13.5 9.2V3"/><path d="M7.5 15h9"/></svg></span>
-        <span>Lab Harness</span>
+        <span class="logo" aria-hidden="true" data-mark></span>
+        <span class="brand-text"><span>Kelvin</span><small>The coolest cat in the lab</small></span>
       </div>
       <button id="new-chat" class="side-btn" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat
@@ -53,6 +54,7 @@
 
     <div id="scroller" class="scroller">
       <section id="empty" class="empty">
+        <img class="hero-mark" src="/static/kelvin.svg" width="72" height="72" alt="Kelvin">
         <h1 id="greeting">What are we measuring today?</h1>
         <p id="empty-sub" class="muted"></p>
         <div id="suggestions" class="suggestions"></div>
@@ -62,7 +64,7 @@
 
     <div class="composer-wrap">
       <form id="composer" class="composer">
-        <textarea id="input" rows="1" placeholder="Ask the lab assistant…" aria-label="Message"></textarea>
+        <textarea id="input" rows="1" placeholder="Ask Kelvin…" aria-label="Message"></textarea>
         <div class="composer-row">
           <label class="model-picker">
             <span class="sr-only">Model</span>

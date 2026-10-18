@@ -1,7 +1,7 @@
 card: 1
 id: virtual/lock-in
 model: Virtual Lock-in Amplifier
-vendor: Lab Harness (simulated)
+vendor: Kelvin (simulated)
 kind: lock-in
 status: community
 twin: labharness.sim.twins:LockInTwin

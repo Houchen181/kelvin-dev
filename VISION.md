@@ -1,4 +1,4 @@
-# Lab Harness — Vision (user's original prompt, verbatim)
+# Kelvin — Vision (user's original prompt, verbatim)
 
 Saved 2026-10-17. Authoritative spec for this project; re-read before any design or implementation work.
 

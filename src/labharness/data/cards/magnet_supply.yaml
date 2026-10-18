@@ -1,7 +1,7 @@
 card: 1
 id: virtual/magnet-supply
 model: Virtual Superconducting Magnet Supply
-vendor: Lab Harness (simulated)
+vendor: Kelvin (simulated)
 kind: magnet-supply
 status: community
 twin: labharness.sim.twins:MagnetSupplyTwin

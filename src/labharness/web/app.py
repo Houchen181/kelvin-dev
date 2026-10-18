@@ -1,4 +1,4 @@
-"""The Lab Harness portal: a chat web app (like the Claude or ChatGPT website) wired to the lab.
+"""The Kelvin portal: a chat web app (like the Claude or ChatGPT website) wired to the lab.
 
     python -m labharness.web            # virtual lab, opens http://127.0.0.1:8770
     python -m labharness.web --demo     # adds a scripted model so it works without an API key
@@ -73,7 +73,7 @@ class Guard:
             elif origin and origin.split("://", 1)[-1] not in self.hosts:
                 problem = (403, "bad origin")
             elif scope["path"].startswith("/api/") and not hmac.compare_digest(
-                    headers.get("x-labharness-token", ""), self.token):
+                    headers.get("x-kelvin-token", ""), self.token):
                 problem = (401, "missing or wrong access key")
             if problem:
                 await JSONResponse({"error": problem[1]}, status_code=problem[0])(scope, receive, send)
@@ -109,7 +109,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def static(request: Request) -> Response:
         name = request.path_params["name"]
-        if name not in ("app.js", "app.css"):
+        if name not in ("app.js", "app.css", "kelvin.svg"):
             return error(404, "not found")
         return FileResponse(STATIC / name, headers={"Cache-Control": "no-cache"})
 
@@ -275,8 +275,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     ap = argparse.ArgumentParser(prog="python -m labharness.web", description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=8770)
-    ap.add_argument("--data-dir", default=str(Path.home() / "LabHarness" / "virtual-lab"))
-    ap.add_argument("--settings", default=str(Path.home() / "LabHarness" / "settings.json"))
+    ap.add_argument("--data-dir", default=str(Path.home() / "Kelvin" / "virtual-lab"))
+    ap.add_argument("--settings", default=str(Path.home() / "Kelvin" / "settings.json"))
     ap.add_argument("--speed", type=float, default=0, help="0 = instant simulated time (default); N = N× real time")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--approval-timeout", type=float, default=300)
@@ -291,7 +291,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)
     app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts)
     url = "http://127.0.0.1:%d/#%s" % (args.port, settings.access_key)
-    print("Lab Harness portal: %s" % url, file=sys.stderr, flush=True)
+    print("Kelvin portal: %s" % url, file=sys.stderr, flush=True)
     if not args.no_browser:
         webbrowser.open(url)
     uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")

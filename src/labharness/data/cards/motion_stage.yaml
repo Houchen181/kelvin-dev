@@ -1,7 +1,7 @@
 card: 1
 id: virtual/motion-stage
 model: Virtual Linear Stage (delay line)
-vendor: Lab Harness (simulated)
+vendor: Kelvin (simulated)
 kind: motion-stage
 status: community
 twin: labharness.sim.twins:MotionStageTwin

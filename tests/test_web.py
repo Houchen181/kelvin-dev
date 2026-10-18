@@ -75,7 +75,7 @@ def human(approver, answers):
 def client_for(parts, providers):
     runtime, settings, store = parts
     app = create_app(runtime, settings, store, hosts=["testserver"], providers=providers)
-    return TestClient(app), {"X-LabHarness-Token": settings.access_key}
+    return TestClient(app), {"X-Kelvin-Token": settings.access_key}
 
 
 def stream_turn(client, headers, chat_id, text, model):
@@ -140,7 +140,7 @@ def test_api_needs_the_access_key_and_local_host(parts):
     with client:
         assert client.get("/").status_code == 200
         assert client.get("/api/bootstrap").status_code == 401
-        assert client.get("/api/bootstrap", headers={"X-LabHarness-Token": "wrong"}).status_code == 401
+        assert client.get("/api/bootstrap", headers={"X-Kelvin-Token": "wrong"}).status_code == 401
         assert client.get("/api/bootstrap", headers=dict(headers, Host="evil.example")).status_code == 403
         assert client.post("/api/stop", json={}, headers=dict(headers, Origin="http://evil.example")).status_code == 403
         boot = client.get("/api/bootstrap", headers=headers).json()

@@ -1,7 +1,7 @@
 card: 1
 id: virtual/vna
 model: Virtual Vector Network Analyzer
-vendor: Lab Harness (simulated)
+vendor: Kelvin (simulated)
 kind: vna
 status: community
 twin: labharness.sim.twins:VNATwin

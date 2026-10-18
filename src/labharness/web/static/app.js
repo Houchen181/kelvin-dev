@@ -25,8 +25,20 @@
     chev: '<path d="M9 6l6 6-6 6"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
-    flask: '<path d="M9 3h6M10.5 3v6.2L5.2 18.3A1.8 1.8 0 0 0 6.8 21h10.4a1.8 1.8 0 0 0 1.6-2.7L13.5 9.2V3"/><path d="M7.5 15h9"/>',
   };
+  // Kelvin's mark: a sleeping cat and a snowflake, white on the ice-blue tile
+  const MARK = '<svg viewBox="0 0 100 100" aria-hidden="true"><g transform="translate(9.8 4.9) scale(0.82)">' +
+    '<path d="M24 20V38M16 24.5L32 33.5M16 33.5L32 24.5" stroke="#bfe0fb" stroke-width="3.4" stroke-linecap="round" fill="none"/>' +
+    '<path d="M18 66Q16 86 40 86Q60 86 68 76" fill="none" stroke="#f4f9fe" stroke-width="7" stroke-linecap="round"/>' +
+    '<ellipse cx="46" cy="62" rx="30" ry="19" fill="#f4f9fe" stroke="none"/>' +
+    '<path d="M60 43L62 30L69 38ZM82 43L80 30L73 38Z" fill="#f4f9fe" stroke="none"/>' +
+    '<circle cx="71" cy="50" r="14" fill="#f4f9fe" stroke="none"/>' +
+    '<path d="M63 51q3 2.6 6 0M73 51q3 2.6 6 0" stroke="#2f6fb0" stroke-width="2.4" stroke-linecap="round" fill="none"/></g></svg>';
+  function mark() {
+    const s = h("span", { class: "logo", "aria-hidden": "true" });
+    s.innerHTML = MARK;
+    return s;
+  }
   function icon(name) {
     const s = document.createElementNS(SVGNS, "svg");
     s.setAttribute("viewBox", "0 0 24 24");
@@ -47,7 +59,7 @@
   async function api(path, opts = {}) {
     const res = await fetch(path, {
       method: opts.method || (opts.body ? "POST" : "GET"),
-      headers: { "X-LabHarness-Token": token, "Content-Type": "application/json" },
+      headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
     if (!res.ok) {
@@ -425,19 +437,19 @@
   }
   function refreshTitle() {
     const n = S.approvals.size;
-    document.title = (n ? "(" + n + ") Approval needed · " : "") + "Lab Harness";
+    document.title = (n ? "(" + n + ") Approval needed · " : "") + "Kelvin";
   }
 
   // ------------------------------------------------------------------ one assistant reply
   class Reply {
     constructor(modelKey) {
       this.el = h("div", { class: "msg assistant" });
-      this.who = h("span", {}, "Lab assistant");
-      this.el.append(h("div", { class: "who" }, h("span", { class: "logo" }, icon("flask")), this.who));
+      this.who = h("span", {}, "Kelvin");
+      this.el.append(h("div", { class: "who" }, mark(), this.who));
       this.text = null; this.buf = ""; this.raf = 0; this.thinking = null; this.steps = new Map();
       this.setModel(modelKey);
     }
-    setModel(key) { if (key) this.who.textContent = "Lab assistant · " + (S.labels[key] || key.split(":").pop()); }
+    setModel(key) { if (key) this.who.textContent = "Kelvin · " + (S.labels[key] || key.split(":").pop()); }
     addText(delta) {
       if (!this.text) { this.endThinking(); this.text = h("div", { class: "md cursor" }); this.buf = ""; this.el.append(this.text); }
       this.buf += delta;
@@ -600,7 +612,7 @@
     try {
       const res = await fetch("/api/chats/" + S.chatId + "/turn", {
         method: "POST",
-        headers: { "X-LabHarness-Token": token, "Content-Type": "application/json" },
+        headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
         body: JSON.stringify({ text, model }),
       });
       if (!res.ok) {
@@ -695,7 +707,7 @@
     for (const g of groups) for (const m of g.models) S.labels[m.key] = m.label;
     fillModels($("model"), groups, store("lh.model") || preferred);
     if (!$("model").value) $("input").placeholder = "Add an API key in Settings to start";
-    else $("input").placeholder = "Ask the lab assistant…";
+    else $("input").placeholder = "Ask Kelvin…";
     updateSend();
   }
   function openSettings() {
@@ -759,10 +771,11 @@
     let boot;
     try { boot = await api("/api/bootstrap"); } catch (e) {
       $("nokey").hidden = false;
-      $("nokey").querySelector("p").textContent = "The portal did not accept this link (" + e.message + "). Open the link the server printed.";
+      $("nokey").querySelector("p").textContent = "Kelvin did not accept this link (" + e.message + "). Open the link Kelvin printed when it started.";
       return;
     }
     $("app").hidden = false;
+    for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
     S.settings = boot.settings;
     S.chats = boot.chats;
     $("lab-name").textContent = boot.lab;

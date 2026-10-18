@@ -22,9 +22,9 @@ from .approval import ApprovalServer, WebApprover
 from .runtime import LabRuntime
 
 INSTRUCTIONS = """\
-You are connected to a physics lab through Lab Harness.
+You are connected to a physics lab through Kelvin.
 - Measurement and configuration (reading values, time constants, averaging, spans, moving a delay stage...) run immediately.
-- Changes that drive the sample harder (more power, voltage, current, field, temperature, outputs on) wait for a human to approve them on the Lab Harness approval page, unless the project envelope covers them. Your call blocks until they answer or the request times out. You cannot approve requests yourself; do not try.
+- Changes that drive the sample harder (more power, voltage, current, field, temperature, outputs on) wait for a human to approve them on the Kelvin approval page, unless the project envelope covers them. Your call blocks until they answer or the request times out. You cannot approve requests yourself; do not try.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. Do not try to work around a refusal; tell the user.
 - For sweeps, write a plan and call simulate_plan, then run_plan: one approval, dry run first, everything logged.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
@@ -36,7 +36,7 @@ ACT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=
 
 
 def build_server(rt: LabRuntime) -> MCPServer:
-    server = MCPServer("lab-harness", instructions=INSTRUCTIONS, version=__version__)
+    server = MCPServer("kelvin", instructions=INSTRUCTIONS, version=__version__)
 
     @server.tool(annotations=READ, structured_output=False)
     def lab_status() -> str:
@@ -130,8 +130,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
 def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m labharness.agent", description=__doc__.splitlines()[0])
-    ap.add_argument("--data-dir", default=str(Path.home() / "LabHarness" / "virtual-lab"),
-                    help="event log and run folders (default: ~/LabHarness/virtual-lab)")
+    ap.add_argument("--data-dir", default=str(Path.home() / "Kelvin" / "virtual-lab"),
+                    help="event log and run folders (default: ~/Kelvin/virtual-lab)")
     ap.add_argument("--envelope", help="project envelope YAML (default: the demo envelope)")
     ap.add_argument("--no-envelope", action="store_true", help="ask for every drive increase")
     ap.add_argument("--speed", type=float, default=0, help="0 = instant simulated time (default); N = N× real time")
@@ -152,8 +152,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     runtime = LabRuntime(lab, approver, args.data_dir, envelope)
     ui = ApprovalServer(runtime, port=args.ui_port).start()
 
-    print("Lab Harness: approval page %s" % ui.url, file=sys.stderr, flush=True)
-    print("Lab Harness: data in %s" % runtime.data_dir, file=sys.stderr, flush=True)
+    print("Kelvin: approval page %s" % ui.url, file=sys.stderr, flush=True)
+    print("Kelvin: data in %s" % runtime.data_dir, file=sys.stderr, flush=True)
     if args.ui_url_file:
         Path(args.ui_url_file).write_text(ui.url, encoding="utf-8")
     if not args.no_browser:

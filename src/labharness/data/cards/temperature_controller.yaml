@@ -1,7 +1,7 @@
 card: 1
 id: virtual/temperature-controller
 model: Virtual Temperature Controller
-vendor: Lab Harness (simulated)
+vendor: Kelvin (simulated)
 kind: temperature-controller
 status: community
 twin: labharness.sim.twins:TemperatureControllerTwin

@@ -139,7 +139,7 @@ def http(page, path, body=None, token=True, host=None, origin=None):
     req = urllib.request.Request("http://127.0.0.1:%d%s" % (page.port, path),
                                  data=json.dumps(body).encode() if body is not None else None)
     if token:
-        req.add_header("X-LabHarness-Token", page.token)
+        req.add_header("X-Kelvin-Token", page.token)
     if host:
         req.add_header("Host", host)
     if origin:

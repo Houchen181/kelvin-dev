@@ -1,21 +1,25 @@
 :root {
   color-scheme: light;
-  --bg: #faf9f6;
-  --sidebar: #f2f1ec;
+  /* Kelvin brand: navy, ice, frost */
+  --brand-navy: #1b3a5c;
+  --brand-ice: #2f6fb0;
+  --brand-frost: #e8f2fc;
+  --bg: #f6f8fb;
+  --sidebar: #edf2f7;
   --panel: #ffffff;
   --raised: #ffffff;
-  --text: #1c1b19;
-  --text-2: #4d4c47;
-  --muted: #77756e;
-  --line: #e5e3dc;
-  --line-strong: #d6d3ca;
-  --hover: rgba(28, 27, 25, 0.05);
-  --active: rgba(28, 27, 25, 0.08);
-  --accent: #2a78d6;
+  --text: #14202c;
+  --text-2: #3c4a58;
+  --muted: #66768a;
+  --line: #dde5ee;
+  --line-strong: #cbd6e2;
+  --hover: rgba(20, 32, 44, 0.05);
+  --active: rgba(20, 32, 44, 0.08);
+  --accent: #2f6fb0;
   --accent-ink: #ffffff;
-  --accent-soft: rgba(42, 120, 214, 0.10);
-  --user: #eeece6;
-  --code: #f2f1ec;
+  --accent-soft: rgba(47, 111, 176, 0.10);
+  --user: #e4edf7;
+  --code: #edf2f7;
   --ok: #1a7f37;
   --warn: #9a6700;
   --warn-bg: #fff7e3;
@@ -24,7 +28,7 @@
   --danger-soft: rgba(198, 40, 40, 0.08);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 6px 24px rgba(0, 0, 0, 0.06);
   /* chart roles (reference palette) */
-  --surface-1: #fcfcfb;
+  --surface-1: #fcfdfe;
   --series-1: #2a78d6;
   --grid: #e1e0d9;
   --axis: #c3c2b7;
@@ -35,22 +39,22 @@
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
-    --bg: #1d1c1a;
-    --sidebar: #161614;
-    --panel: #232220;
-    --raised: #2a2926;
-    --text: #ecebe6;
-    --text-2: #c9c7bf;
-    --muted: #9c9a92;
-    --line: #34332f;
-    --line-strong: #45433e;
+    --bg: #0f151c;
+    --sidebar: #0b1016;
+    --panel: #141c25;
+    --raised: #19232e;
+    --text: #e6edf4;
+    --text-2: #c2ccd6;
+    --muted: #8d9aa8;
+    --line: #24303c;
+    --line-strong: #33414f;
     --hover: rgba(255, 255, 255, 0.05);
     --active: rgba(255, 255, 255, 0.09);
-    --accent: #3987e5;
-    --accent-ink: #0c0c0b;
-    --accent-soft: rgba(57, 135, 229, 0.16);
-    --user: #2e2d29;
-    --code: #171715;
+    --accent: #5aa2e6;
+    --accent-ink: #08111a;
+    --accent-soft: rgba(90, 162, 230, 0.16);
+    --user: #1c2836;
+    --code: #0b1016;
     --ok: #3fb950;
     --warn: #e3b341;
     --warn-bg: #2b2412;
@@ -58,7 +62,7 @@
     --danger: #ef5350;
     --danger-soft: rgba(239, 83, 80, 0.12);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 28px rgba(0, 0, 0, 0.35);
-    --surface-1: #1a1a19;
+    --surface-1: #141c25;
     --series-1: #3987e5;
     --grid: #2c2c2a;
     --axis: #383835;
@@ -87,6 +91,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .nokey { max-width: 520px; margin: 18vh auto; padding: 0 16px; text-align: center; }
+.nokey img { display: block; margin: 0 auto 12px; }
 
 /* ---------- layout ---------- */
 .app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
@@ -103,9 +108,13 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 
 /* ---------- sidebar ---------- */
 .side-top { padding: 14px 12px 8px; display: grid; gap: 10px; }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 16px; padding: 2px 6px; }
-.logo { width: 28px; height: 28px; border-radius: 8px; background: var(--accent); color: #fff; display: grid; place-items: center; }
-.logo svg { width: 18px; height: 18px; stroke-width: 2; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px; }
+.brand .logo { width: 34px; height: 34px; border-radius: 10px; }
+.brand-text { display: grid; line-height: 1.15; }
+.brand-text span { font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
+.brand-text small { font-size: 11.5px; color: var(--muted); }
+.logo { width: 28px; height: 28px; border-radius: 8px; background: var(--brand-ice); display: grid; place-items: center; overflow: hidden; flex: none; }
+.logo svg { width: 100%; height: 100%; }
 .side-btn {
   display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px;
   border: 1px solid var(--line-strong); border-radius: 10px; background: var(--raised);
@@ -152,6 +161,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .scroller { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
 .thread { max-width: 780px; margin: 0 auto; padding: 8px 20px 32px; }
 .empty { max-width: 780px; margin: 0 auto; padding: 14vh 20px 20px; text-align: center; }
+.hero-mark { display: block; margin: 0 auto 18px; border-radius: 18px; }
 .empty h1 { font-size: 30px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 8px; }
 .suggestions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 28px; text-align: left; }
 .suggestion { border: 1px solid var(--line); background: var(--panel); border-radius: 14px; padding: 12px 14px; cursor: pointer; text-align: left; }
@@ -164,8 +174,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .bubble { background: var(--user); border-radius: 18px; padding: 10px 16px; max-width: 82%; white-space: pre-wrap; overflow-wrap: anywhere; }
 .msg.assistant { display: grid; gap: 10px; }
 .who { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
-.who .logo { width: 22px; height: 22px; border-radius: 7px; }
-.who .logo svg { width: 14px; height: 14px; }
+.who .logo { width: 24px; height: 24px; border-radius: 7px; }
 
 /* markdown */
 .md { line-height: 1.65; overflow-wrap: anywhere; }
