@@ -74,11 +74,15 @@ def _self_test(port: int, key: str) -> int:
         page_ok = page_ok and r.status == 200
     from . import autosetup, carddraft, drivers, profiles  # noqa: F401  (loaded on demand; make sure the build has them)
     page_ok = page_ok and "card: 1" in carddraft.example()
-    from pypdf._crypt_providers import crypt_provider   # manuals: pypdf, and cryptography for the locked ones
-    page_ok = page_ok and crypt_provider[0] == "cryptography"
-    from . import survey   # finding instruments: Kelvin's own libusb, and the network lookups
-    import psutil, zeroconf  # noqa: E401,F401
-    page_ok = page_ok and survey.use_bundled_libusb()
+    try:   # the hardware extra: manuals (pypdf, cryptography), USB (Kelvin's own libusb), the network lookups
+        from pypdf._crypt_providers import crypt_provider
+        import psutil, zeroconf  # noqa: E401,F401
+        from . import survey
+        hardware = crypt_provider[0] == "cryptography" and survey.use_bundled_libusb()
+    except ImportError:
+        hardware = False
+    if getattr(sys, "frozen", False):   # the app must bring them; a source checkout may be installed without them
+        page_ok = page_ok and hardware
     ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
     message = "Kelvin self-test: %s (lab %r)" % ("ok" if ok else "FAILED", boot.get("lab"))
     log.info(message)
