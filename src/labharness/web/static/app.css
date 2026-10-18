@@ -494,6 +494,15 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .health-list li.good svg { color: var(--ok); }
 .health-list li.bad { color: var(--text); }
 .health-list li.bad svg { color: var(--warn); }
+.btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+.btn.ghost:hover { background: var(--hover); color: var(--text); }
+.report-files { display: grid; gap: 6px; margin: 6px 0; }
+.report-file { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--panel); padding: 8px 12px; font-size: 14px; }
+.report-file > svg { width: 20px; height: 20px; flex: none; color: var(--accent); }
+.report-folder { margin: 2px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.rf-name { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.rf-name span { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
 .alerts { display: grid; gap: 6px; padding: 8px 16px 0; }
 .alert { display: flex; align-items: center; gap: 10px; border: 1px solid var(--danger); background: var(--danger-soft);
   border-radius: 12px; padding: 9px 12px; max-width: 780px; margin: 0 auto; width: 100%; }

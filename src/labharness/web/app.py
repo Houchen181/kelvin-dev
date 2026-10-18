@@ -9,6 +9,8 @@ import argparse
 import asyncio
 import hmac
 import json
+import os
+import subprocess
 import sys
 import webbrowser
 from contextlib import asynccontextmanager
@@ -28,7 +30,7 @@ from ..clock import ScaledClock, SimClock
 from ..discovery import add_to_config
 from ..labconfig import ConfigError, load_lab_config
 from ..virtual_lab import build_lab, builtin_registry, is_simulated, open_home_lab
-from .agent import Busy, ChatAgent
+from .agent import Busy, ChatAgent, runs_in
 from .providers.base import Provider
 from .settings import Settings
 from .store import ChatStore
@@ -81,6 +83,16 @@ class Guard:
                 await JSONResponse({"error": problem[1]}, status_code=problem[0])(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+def open_path(path: Path) -> None:
+    """Open a file with the program the user has for it."""
+    if sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
 
 
 def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
@@ -229,6 +241,67 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             store.delete_global_note(request.path_params["note_id"])
         except KeyError as e:
             return error(404, e.args[0])
+        return JSONResponse({"ok": True})
+
+    # ------------------------------------------------------------------ reports
+
+    async def reports_view(request: Request) -> Response:
+        """GET: recent reports. POST {scope: chat|project|today|last|run, chat_id, project_id, run, last, title,
+        summary, format}: write one."""
+        if request.method == "GET":
+            return JSONResponse({"reports": runtime.reports_index(), "folder": str(runtime.reports_dir)})
+        body = await request.json()
+        scope = str(body.get("scope") or "")
+        notes: List[Any] = []
+        title = str(body.get("title") or "")
+        try:
+            if scope in ("chat", "project"):
+                chat = store.load(str(body.get("chat_id") or ""))
+                chats, project = agent.chats_for_report(chat) if scope == "project" else ([chat], None)
+                runs = [r for r in runs_in(chats) if (runtime.data_dir / "runs" / r).is_dir()]
+                notes = agent.report_notes(project)
+                title = title or ("%s report" % project["name"] if project else chat.get("title") or "")
+            elif scope == "today":
+                runs = runtime.pick_runs(day="today")
+            elif scope == "last":
+                runs = runtime.pick_runs(last=max(1, min(50, int(body.get("last") or 5))))
+            elif scope == "run":
+                runs = runtime.pick_runs([str(body.get("run") or "")])
+            else:
+                return error(400, "scope must be chat, project, today, last or run")
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else "not found")
+        except (TypeError, ValueError) as e:
+            return error(400, str(e))
+        if not runs:
+            return error(400, "There are no runs to report here yet.")
+        try:
+            files = await asyncio.to_thread(runtime.report, runs, title, str(body.get("summary") or ""),
+                                            str(body.get("format") or "pdf"), notes, "human")
+        except ValueError as e:
+            return error(400, str(e))
+        return JSONResponse({"files": [{k: v for k, v in f.items() if k != "path"} for f in files],
+                             "runs": len(runs), "folder": str(runtime.reports_dir)})
+
+    async def report_file(request: Request) -> Response:
+        try:
+            path = runtime.report_path(request.path_params["name"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        media = "application/pdf" if path.suffix == ".pdf" else \
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        return FileResponse(path, media_type=media, filename=path.name)
+
+    async def report_open(request: Request) -> Response:
+        """Open a report in this computer's PDF viewer or PowerPoint (Kelvin runs on the user's own computer)."""
+        try:
+            path = runtime.report_path(request.path_params["name"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        try:
+            open_path(path)
+        except OSError as e:
+            return error(500, "Could not open it: %s" % e)
         return JSONResponse({"ok": True})
 
     # ------------------------------------------------------------------ watches, alarms, notifications
@@ -480,6 +553,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/state", state),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/lab", lab_view, methods=["GET", "POST"]),
+        Route("/api/reports", reports_view, methods=["GET", "POST"]),
+        Route("/api/reports/{name}", report_file),
+        Route("/api/reports/{name}/open", report_open, methods=["POST"]),
         Route("/api/watches", watches_view, methods=["GET", "POST"]),
         Route("/api/watches/{watch_id}", watch_view, methods=["DELETE"]),
         Route("/api/alarms/{alarm_id}/ack", alarm_ack, methods=["POST"]),

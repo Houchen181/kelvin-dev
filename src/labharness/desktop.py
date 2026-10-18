@@ -90,6 +90,10 @@ def _window(url: str, agent: Any, runtime: Any, home: Path) -> None:
         return True
 
     window.events.closing += on_closing
+    try:
+        webview.settings["ALLOW_DOWNLOADS"] = True   # reports can be saved from the window too
+    except (AttributeError, TypeError):
+        pass
     webview.start(private_mode=False, storage_path=str(home / "webview"))
 
 

@@ -6,8 +6,10 @@ agent call and a plan never talk to an instrument at the same time. The approval
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -22,6 +24,7 @@ from ..labconfig import Allowed, Envelope
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
 from ..plans import Plan, PlanError, load_plan
+from ..reports import Collector, pick_runs, write_pdf, write_pptx
 from ..yamlio import load_yaml
 
 MAX_WAIT_S = 3600
@@ -78,6 +81,8 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "cleared: %s" % e.get("text")
     elif kind == "watch":
         text = "%s watch %s: %s" % (e.get("change"), e.get("watch"), e.get("rule"))
+    elif kind == "report":
+        text = "report %s (%s run%s)" % (e.get("name"), e.get("runs"), "" if e.get("runs") == 1 else "s")
     elif kind == "lab_changed":
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
     elif kind == "approval_mode":
@@ -533,6 +538,92 @@ class LabRuntime:
                 taken.append(name)
             out.append(dict(vars(f), suggested=name))
         return out
+
+    # ------------------------------------------------------------------ reports
+
+    @property
+    def reports_dir(self) -> Path:
+        return self.data_dir / "reports"
+
+    def pick_runs(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0) -> List[str]:
+        return pick_runs(self.data_dir / "runs", runs, day, last)
+
+    def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
+               notes: Any = (), by: str = "human") -> List[Dict[str, Any]]:
+        """Write a report of these runs (oldest first) as PDF and/or PowerPoint into reports/. Reads only files:
+        it never talks to an instrument, so it can run while a plan runs."""
+        if not run_ids:
+            raise ValueError("no runs to report")
+        fmts = ["pdf", "pptx"] if fmt == "both" else [fmt]
+        if any(f not in ("pdf", "pptx") for f in fmts):
+            raise ValueError("format must be pdf, pptx or both")
+
+        def columns(run_id: str) -> Optional[Dict[str, List[Dict[str, str]]]]:
+            try:
+                return self.engine.columns(self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8")))
+            except Exception:   # the run's instruments are not in this lab any more
+                return None
+
+        metas = [self._run_meta(r) for r in run_ids]
+        labs = sorted({m["lab"] for m in metas if m.get("lab")})
+        lab_name = ", ".join(labs) if labs else self.lab.config.name
+        simulated = all(m.get("simulated", True) for m in metas) if labs else \
+            all(i.simulated for i in self.lab.instruments.values())
+        report = Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line).report(
+            run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated)
+        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        base = "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"),
+                          re.sub(r"[^\w-]+", "_", report.title).strip("_")[:48] or "report")
+        out = []
+        for f in fmts:
+            path = self.reports_dir / ("%s.%s" % (base, f))
+            n = write_pdf(report, path) if f == "pdf" else write_pptx(report, path)
+            out.append({"name": path.name, "path": str(path), "size": path.stat().st_size, "format": f,
+                        "pages" if f == "pdf" else "slides": n})
+            self.gate.log.write("report", by=by, name=path.name, runs=len(run_ids))
+        return out
+
+    def _run_meta(self, run_id: str) -> Dict[str, Any]:
+        try:
+            return json.loads((self._run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
+        except (KeyError, OSError, ValueError):
+            return {}
+
+    def make_report(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
+                    summary: str = "", fmt: str = "pdf", notes: Any = (), by: str = "agent") -> str:
+        """The make_report tool's answer. With nothing chosen: today's runs, or else the latest run."""
+        try:
+            ids = self.pick_runs(runs, day, last)
+            if not (runs or day or last):
+                ids = self.pick_runs(day="today") or self.pick_runs(last=1)
+        except (KeyError, ValueError) as e:
+            return "no report: %s" % (e.args[0] if e.args else e)
+        if not ids:
+            return "no report: no runs %s" % ("on %s" % day if day else "yet")
+        try:
+            files = self.report(ids, title, summary, fmt, notes, by)
+        except (ValueError, OSError) as e:
+            return "no report: %s" % e
+        lines = ["report: %s (%d run%s, %s)" % (f["name"], len(ids), "" if len(ids) == 1 else "s",
+                                                "%d pages" % f["pages"] if "pages" in f else "%d slides" % f["slides"])
+                 for f in files]
+        lines.append("saved in %s; the user can open it from the chat" % self.reports_dir)
+        return "\n".join(lines)
+
+    def reports_index(self, limit: int = 30) -> List[Dict[str, Any]]:
+        d = self.reports_dir
+        files = sorted((p for p in d.iterdir() if p.suffix in (".pdf", ".pptx")), key=lambda p: p.name, reverse=True) \
+            if d.exists() else []
+        return [{"name": p.name, "size": p.stat().st_size, "format": p.suffix[1:]} for p in files[:limit]]
+
+    def report_path(self, name: str) -> Path:
+        """A report file by name; KeyError for anything that is not one."""
+        if not re.fullmatch(r"[\w.-]+\.(pdf|pptx)", name or "") or ".." in name:
+            raise KeyError("no report %r" % name)
+        path = self.reports_dir / name
+        if not path.is_file():
+            raise KeyError("no report %r" % name)
+        return path
 
     # ------------------------------------------------------------------ watching instruments
 

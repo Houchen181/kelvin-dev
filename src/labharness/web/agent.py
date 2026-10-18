@@ -76,6 +76,23 @@ def run_id_of(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
+    """Run ids that run_plan started in these chats, in the order they ran."""
+    ids: List[str] = []
+    for chat in chats:
+        for m in chat.get("messages", []):
+            for r in m.get("results", []) if m.get("role") == "tool" else []:
+                rid = run_id_of(r.get("content") or "") if r.get("name") == "run_plan" else None
+                if rid and rid not in ids:
+                    ids.append(rid)
+    return sorted(ids)
+
+
+REPORT_SCOPE = (" In this portal, with no runs, day or last chosen, the report covers the runs started in this "
+                "conversation, or in all of this project's conversations if it is in a project, and includes the "
+                "project's notes.")
+
+
 def describe_error(provider: Provider, e: Exception) -> str:
     status = getattr(e, "status_code", None)
     if status == 401 or "Authentication" in type(e).__name__:
@@ -106,7 +123,9 @@ class ChatAgent:
     async def start(self) -> None:
         self.client = await self._exit.enter_async_context(Client(self.mcp_server))
         listed = (await self.client.list_tools()).tools
-        self.tools = [{"name": t.name, "description": t.description or "", "schema": t.input_schema} for t in listed]
+        self.tools = [{"name": t.name, "description": (t.description or "") + (REPORT_SCOPE if t.name == "make_report"
+                                                                             else ""), "schema": t.input_schema}
+                      for t in listed]
 
     async def close(self) -> None:
         await self._exit.aclose()
@@ -176,6 +195,43 @@ class ChatAgent:
         where = "your notes for every conversation" if scope == "global" else "this project's notes"
         verb = {"saved": "kept in", "known": "already in", "updated": "updated in"}[what]
         return "%s %s: [%s] %s (id %s)" % (verb, where, note["kind"], note["text"], note["id"]), False
+
+    # ------------------------------------------------------------------ reports
+
+    def chats_for_report(self, chat: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """This chat, or every chat of its project; and the project (None for an unfiled or incognito chat)."""
+        project = self.store.memory_of(chat["id"])
+        if not project:
+            return [chat], None
+        chats = []
+        for c in self.store.list():
+            if c["project"] == project["id"]:
+                try:
+                    chats.append(chat if c["id"] == chat["id"] else self.store.load(c["id"]))
+                except KeyError:
+                    pass
+        return chats, project
+
+    def report_notes(self, project: Optional[Dict[str, Any]]) -> List[Tuple[str, str]]:
+        return [(n.get("kind") or "note", n["text"]) for n in (project or {}).get("notes", [])
+                if n.get("kind") in memory.PROJECT_KINDS]
+
+    async def _report(self, chat: Dict[str, Any], args: Any) -> Tuple[str, bool]:
+        if not isinstance(args, dict):
+            return "the arguments were not valid JSON; send the call again", True
+        try:
+            last = int(args.get("last") or 0)
+        except (TypeError, ValueError):
+            return "no report: last must be a whole number", True
+        runs = [str(r) for r in args.get("runs") or []] or None
+        day = str(args.get("day") or "")
+        chats, project = self.chats_for_report(chat)
+        if not (runs or day or last):
+            runs = [r for r in runs_in(chats) if (self.runtime.data_dir / "runs" / r).is_dir()] or None
+        title = str(args.get("title") or "") or ("%s report" % project["name"] if project else "")
+        text = await asyncio.to_thread(self.runtime.make_report, runs, day, last, title, str(args.get("summary") or ""),
+                                       str(args.get("format") or "pdf"), self.report_notes(project), "agent")
+        return text, text.startswith("no report")
 
     # ------------------------------------------------------------------ turns
 
@@ -279,6 +335,8 @@ class ChatAgent:
                 await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
                 if call["name"] == "remember" and context["learn"]:
                     content, is_error = self._remember(chat, context, call["input"])
+                elif call["name"] == "make_report":
+                    content, is_error = await self._report(chat, call["input"])
                 else:
                     content, is_error = await self._call(call, emit)
                 await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,

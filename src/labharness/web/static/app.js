@@ -26,6 +26,7 @@
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     incognito: '<path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/>',
     memory: '<path d="M7 3h10a1 1 0 0 1 1 1v17l-6-4-6 4V4a1 1 0 0 1 1-1z"/>',
+    doc: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     dots: '<circle cx="5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="19" cy="12" r="1.1"/>',
     folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
@@ -705,6 +706,67 @@
     return h("table", {}, h("thead", {}, head), h("tbody", {}, ...rows));
   }
 
+  // ------------------------------------------------------------------ reports
+  function reportNames(content) {
+    return [...String(content || "").matchAll(/^report: ([\w.-]+\.(?:pdf|pptx))/gm)].map((m) => m[1]);
+  }
+  async function downloadReport(name) {
+    try {
+      const res = await fetch("/api/reports/" + encodeURIComponent(name), { headers: { "X-Kelvin-Token": token } });
+      if (!res.ok) throw new Error(res.status === 404 ? "it is no longer in the reports folder" : "HTTP " + res.status);
+      const url = URL.createObjectURL(await res.blob());
+      const a = h("a", { href: url, download: name });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (e) { toast("Could not download the report: " + e.message); }
+  }
+  function reportFiles(names) {
+    return h("div", { class: "report-files" }, ...names.map((name) => {
+      const open = h("button", { class: "btn small", type: "button" }, "Open");
+      open.addEventListener("click", async () => {
+        try { await api("/api/reports/" + encodeURIComponent(name) + "/open", { body: {} }); toast("Opening " + name + "…"); }
+        catch (e) { toast(e.message); }
+      });
+      const save = h("button", { class: "link soft", type: "button" }, "Download");
+      save.addEventListener("click", () => downloadReport(name));
+      return h("div", { class: "report-file" }, icon("doc"),
+        h("span", { class: "rf-name" }, h("b", {}, name.endsWith(".pdf") ? "PDF" : "Slides"), h("span", {}, name)), open, save);
+    }));
+  }
+  function openReport() {
+    const sel = $("report-scope");
+    const chat = S.chats.find((c) => c.id === S.chatId);
+    const opts = [];
+    const active = RUNS.active && RUNS.tabs.get(RUNS.active);
+    if (active && active.status !== "running") opts.push(["run", "This run: " + (active.plan || RUNS.active)]);
+    if (chat && chat.project) opts.push(["project", "Runs in project " + (projectName(chat.project) || "")]);
+    if (S.chatId && !S.incognito) opts.push(["chat", "Runs in this chat"]);
+    opts.push(["today", "Today's runs"], ["last", "The last 5 runs"]);
+    sel.replaceChildren(...opts.map(([v, label]) => new Option(label, v)));
+    $("report-files").hidden = true;
+    $("report-msg").textContent = "";
+    $("report-dialog").showModal();
+  }
+  async function makeReport() {
+    const fmt = (document.querySelector('input[name="report-format"]:checked') || {}).value || "pdf";
+    const body = { scope: $("report-scope").value, chat_id: S.chatId, run: RUNS.active, last: 5,
+      title: $("report-title").value.trim(), summary: $("report-summary").value.trim(), format: fmt };
+    $("make-report").disabled = true;
+    $("report-msg").textContent = "Writing…";
+    try {
+      const r = await api("/api/reports", { body });
+      $("report-msg").textContent = r.runs + (r.runs === 1 ? " run" : " runs") + " · done";
+      const box = $("report-files");
+      box.replaceChildren(...reportFiles(r.files.map((f) => f.name)).childNodes,
+        h("p", { class: "report-folder" }, "Saved in " + r.folder));
+      box.hidden = false;
+    } catch (e) {
+      $("report-msg").textContent = e.message;
+    } finally {
+      $("make-report").disabled = false;
+    }
+  }
+
   // ------------------------------------------------------------------ tool steps
   function planName(input) {
     const m = String((input && input.plan) || "").match(/plan:\s*([^\n]+)/);
@@ -732,6 +794,7 @@
       case "recent_events": return v("Reading", "Read") + " the event log";
       case "wait": return v("Waiting", "Waited") + " " + esc(String(a.seconds)) + " s";
       case "save_note": return v("Saving", "Saved") + " a note to the project";  // older chats
+      case "make_report": return v("Writing", "Wrote") + " a report" + (a.title ? ": " + esc(String(a.title)) : "");
       case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat" : " for this project") +
         (a.text ? ": " + esc(String(a.text)) : "");
       default: return code(name);
@@ -876,6 +939,12 @@
       if (!step) return;
       step.finish(content, isError);
       step.done = true;
+      const files = reportNames(content);
+      if (files.length && !step.files) {
+        step.files = reportFiles(files);
+        (step.last || step.el).after(step.files);
+        step.last = step.files;
+      }
       if (!runId) return;
       if (!step.card) { step.card = runCard(); (step.last || step.el).after(step.card.el); }
       step.card.finish(runId);
@@ -1857,6 +1926,8 @@
     $("model").addEventListener("change", () => { store("lh.model", $("model").value); updateSend(); });
     $("approval-mode").addEventListener("change", (e) => changeMode(e.target.value));
     $("open-lab-setup").addEventListener("click", openLabSetup);
+    $("open-report").addEventListener("click", openReport);
+    $("make-report").addEventListener("click", makeReport);
     $("watch-add-toggle").addEventListener("click", () => { $("watch-form").hidden = !$("watch-form").hidden; });
     $("watch-form").addEventListener("submit", addWatch);
     $("allow-notify").addEventListener("click", async () => {

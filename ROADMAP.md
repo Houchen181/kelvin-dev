@@ -11,7 +11,7 @@ Updated as work lands. "Done" means built, tested and on `main`; "partial" says 
 | 5 | Literature research to propose an experiment plan | todo | **Next: literature search tools (arXiv, Crossref/Semantic Scholar) and a plan-proposal flow** |
 | 6 | Understand and test each instrument before use | done | Cards describe every parameter (measure/drive, units, limits, safe value); `describe_instrument`; health check on connect and before every plan: identity matches the card (catches a swapped address), error queue, every reading answers, card sanity checks, drives inside limits |
 | 7 | Track all intermediate data and conditions | done | Event log, run folders (plan, data, snapshots before/after, analysis), live view |
-| 8 | Experiment summary/log as PDF or PPT | todo | **Next: report generator (run/day/project → PDF and PPTX)** |
+| 8 | Experiment summary/log as PDF or PPT | done | `make_report` in chats and **Report…** in the Runs pane: a run, a chat's or project's runs, a day or the last N, as PDF and/or editable 16:9 slides. Summary in the user's or Kelvin's words; plots with fits, results with uncertainties, assessment, conditions, plan, approvals and alarms, lab log, project notes. Written without extra software; open or download from the portal |
 | 9 | Concise, accurate responses | done | Short tool answers, assessments with uncertainties, prompt rules, plots instead of numbers |
 | 10 | Mobile access, remote control | todo | **Next: phone-friendly remote access to the desktop app (paired device, token, LAN/tunnel)** |
 | 11 | Better literature review | todo | **Next: read and summarize papers with citations; project reading list** |

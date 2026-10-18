@@ -100,6 +100,16 @@ def build_server(rt: LabRuntime) -> MCPServer:
             return "not removed: %s" % (e.args[0] if e.args else e)
         return "no longer watching (%s)" % watch_id
 
+    @server.tool(annotations=ACT, structured_output=False)
+    def make_report(runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
+                    summary: str = "", format: str = "pdf") -> str:
+        """Write a report to share or discuss (format pdf, pptx or both): for each run the plots with fits, results
+        with uncertainties, assessment, conditions, plan, approvals and alarms, plus a lab log. Choose runs by id,
+        by day (YYYY-MM-DD, today, yesterday) or the last N; with none chosen, today's runs. summary: 2-5 short
+        sentences in your own words (the goal, what was done, what was found, what next); it opens the report.
+        Only facts from the runs and the conversation; no speculation."""
+        return rt.make_report(runs, day, last, title, summary, format)
+
     @server.tool(annotations=READ, structured_output=False)
     def scan_instruments() -> str:
         """Find instruments connected to this computer (GPIB, USB, LAN, serial) and match them to cards. It only

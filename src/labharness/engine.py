@@ -238,6 +238,8 @@ class RunEngine:
         gate, lab, clock = self.gate, self.lab, self.lab.clock
         gen = gate.stop_generation
         rec = self.store.create(plan.name, plan.source, gate.operator)
+        rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
+        rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
         rec.snapshot("start", lab.snapshot())
         gate.log.write("run_start", by=gate.operator, run=rec.run_id, plan=plan.name, points=plan.points)
         cols = self.columns(plan)

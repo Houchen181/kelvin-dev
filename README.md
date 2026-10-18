@@ -241,6 +241,24 @@ watch:
 - **Allow on this computer** turns on system notifications in your browser: alarms always, and approvals waiting and finished runs while Kelvin is in the background.
 - **Also send to** takes a webhook: an [ntfy](https://ntfy.sh) topic (push to your phone with the ntfy app), or a Slack, Teams or Discord incoming webhook. Tick which notices go there (alarms and finished runs by default), then press **Send a test**. The address is kept like an API key and never shown again. Nothing leaves the computer unless you set one; when you do, the notices carry lab details, so use a private topic or channel.
 
+## Reports
+
+Kelvin writes up runs as a **PDF** or as **PowerPoint slides**, to look back on, review with your advisor, or bring to group meeting. A report has:
+- an opening summary in your words (or Kelvin's, when you ask it in a chat);
+- each run's plots, with the fitted curves dashed;
+- the results with uncertainties, and Kelvin's assessment and suggested next step;
+- what was swept and set up, and every instrument's state at the start;
+- drives the run left away from safe, the plan itself, and the approvals and alarms during the run;
+- a lab log of the period;
+- for a project, the project's notes (decisions, procedures, instrument quirks, results).
+
+Kelvin builds the report from what it already keeps (run folders and the event log), so it never touches an instrument and can run while a plan runs.
+
+- **In a chat:** "make a report of today's runs for my advisor". Kelvin's `make_report` tool covers the runs started in this conversation, or in all of the project's conversations, unless you name runs, a day, or the last N. The reply shows the files with **Open** and **Download**.
+- **In the Runs pane:** **Report…** picks this run, the project's or chat's runs, today's runs, or the last five.
+
+Reports are saved in the `reports` folder next to the run folders (`~/Kelvin/virtual-lab/reports/` in the desktop app). Slides are 16:9; the plots are native shapes and the results native tables, so you can edit them in PowerPoint, Keynote or Google Slides. Neither format needs extra software to write. Characters that the standard PDF fonts can't show are spelled out (Ω becomes "Ohm").
+
 ## Layout
 
 The Python package is still called `labharness` (`import labharness`); the product, commands and repo are Kelvin.
@@ -252,6 +270,7 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/labconfig.py` | Lab config (lab limits, rates, guards, interlocks, trust) and project envelopes |
 | `src/labharness/gate.py` | The safety gate |
 | `src/labharness/plans.py`, `engine.py` | Plan format; validate → preflight → dry run → approve → run → log |
+| `src/labharness/reports/` | Reports: gathering runs and the log (`collect.py`), shared plot layout (`chart.py`), the PDF and PowerPoint writers |
 | `src/labharness/monitor.py`, `notify.py` | Watches and alarms on a background thread; in-app notices and the optional webhook |
 | `src/labharness/adapters.py`, `discovery.py` | VISA/serial connections for real instruments; the read-only scan that matches instruments to cards |
 | `src/labharness/eventlog.py` | Append-only event log; one folder per run (plan, snapshots, data, meta) |
