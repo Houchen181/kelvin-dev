@@ -116,8 +116,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
 
     from .agent.approval import WebApprover
     from .agent.runtime import LabRuntime
-    from .clock import ScaledClock
-    from .virtual_lab import build_virtual_lab, demo_envelope
+    from .virtual_lab import open_home_lab
     from .web.app import create_app
     from .web.settings import Settings
     from .web.store import ChatStore
@@ -132,8 +131,10 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     import uvicorn
 
     port = args.port or _free_port()
-    lab = build_virtual_lab(clock=ScaledClock(10))  # 10× real time: runs are quick but can be watched
-    runtime = LabRuntime(lab, WebApprover(timeout=300), home / "virtual-lab", demo_envelope(lab))
+    # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time
+    lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10)
+    runtime = LabRuntime(lab, WebApprover(timeout=300), home / "virtual-lab", envelope)
+    runtime.lab_info = info
     quit_event = threading.Event()
     app = create_app(runtime, settings, ChatStore(home / "virtual-lab" / "chats"), demo=not args.no_demo,
                      hosts=("127.0.0.1:%d" % port, "localhost:%d" % port),

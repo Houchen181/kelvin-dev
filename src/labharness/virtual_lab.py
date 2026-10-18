@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .cards import CardRegistry
-from .clock import RealClock, SimClock
+from .clock import RealClock, ScaledClock, SimClock
 from .lab import Lab
 from .labconfig import Envelope, LabConfig, load_envelope, load_lab_config
 from .sim.twin import World, sim_backend_factory
@@ -46,14 +46,38 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
     world = World(clock, seed)
     sim = sim_backend_factory(world)
 
+    opened = []
+
     def factory(name: str, card: Any, address: str) -> Any:
         if address.startswith("sim://"):
             return sim(name, card, address)
         from .adapters import open_backend
-        return open_backend(name, card, address, overrides=cfg.instruments[name].connection)
+        backend = open_backend(name, card, address, overrides=cfg.instruments[name].connection)
+        opened.append(backend)
+        return backend
 
-    return Lab(cfg, registry, factory, clock, world)
+    try:
+        return Lab(cfg, registry, factory, clock, world)
+    except Exception:
+        for backend in opened:  # one instrument failed: let go of the ones already opened
+            backend.close()
+        raise
 
 
 def demo_envelope(lab: Lab) -> Envelope:
     return load_envelope(DATA / "demo_project.yaml", lab.config, lab.registry)
+
+
+def open_home_lab(home: Any, choice: str = "auto", speed: float = 10) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
+    """The lab an installed Kelvin controls: the user's own lab.yaml in `home` if there is one (unless they chose
+    the virtual lab), otherwise the virtual lab at `speed`x real time. If the user's lab cannot be connected, Kelvin
+    still starts, on the virtual lab, and says why."""
+    path = Path(home) / "lab.yaml"
+    info: Dict[str, Any] = {"kind": "virtual", "path": str(path), "error": None, "has_file": path.exists()}
+    if choice != "virtual" and path.exists():
+        try:
+            return build_lab(path), None, dict(info, kind="file")
+        except Exception as e:
+            info["error"] = "Your lab (%s) could not be connected: %s" % (path.name, str(e).splitlines()[0])
+    lab = build_virtual_lab(clock=ScaledClock(speed) if speed else SimClock())
+    return lab, demo_envelope(lab), info

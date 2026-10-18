@@ -184,25 +184,66 @@ def scan(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]
 def draft_lab_config(found: Sequence[Found], registry: CardRegistry, lab_name: str = "My lab") -> str:
     """A lab config to review: every identified instrument, with its drives' vendor limits as placeholders that the
     instrument owner should tighten to what the sample can take."""
-    lines = ["# Drafted by `kelvin-scan`. Review before use: set limits for what your sample can take,",
-             "# rates for gate-ramped drives, and guards (e.g. stop a gate ramp if the leakage current rises).",
-             "lab: %s" % lab_name, "", "instruments:"]
-    taken: List[str] = []
+    items, taken = [], []
     for f in found:
         if not f.card_id or f.in_lab:
             continue
-        card = registry.get(f.card_id)
         name = f.suggest_name(taken)
         taken.append(name)
-        lines.append("  %s:" % name)
-        lines.append("    card: %s        # %s" % (card.id, f.idn[:60] if f.idn else f.how))
-        lines.append("    address: \"%s\"" % f.address)
-        lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives if p.numeric and p.limits]
-        if lim:
-            lines.append("    limits: { %s }   # vendor limits: tighten these" % ", ".join(lim))
-    if not taken:
-        lines.append("  {}   # nothing identified")
+        items.append({"name": name, "card": f.card_id, "address": f.address, "note": f.idn[:60] if f.idn else f.how})
+    return draft_from(items, registry, lab_name)
+
+
+def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
+    """One instrument entry of a lab config, with its drives' vendor limits to tighten."""
+    card = registry.get(item["card"])
+    note = item.get("note") or card.model.split(" (")[0]
+    lines = ["  %s:" % item["name"], "    card: %s        # %s" % (card.id, note), "    address: \"%s\"" % item["address"]]
+    lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives if p.numeric and p.limits]
+    if lim:
+        lines.append("    limits: { %s }   # vendor limits: tighten to what your sample can take" % ", ".join(lim))
+    if card.kind in ("laser", "laser-driver"):
+        lines.append("    auto: never        # a person approves every laser change")
+    return lines
+
+
+def draft_from(items: Sequence[Dict[str, Any]], registry: CardRegistry, lab_name: str = "My lab") -> str:
+    """A lab config from chosen instruments: [{name, card, address, note?}]."""
+    lines = ["# Review before use: set limits for what your sample can take, rates for gate-ramped drives,",
+             "# and guards (e.g. stop a gate ramp if the leakage current rises).",
+             "lab: %s" % lab_name, "", "instruments:"]
+    for item in items:
+        lines += instrument_block(item, registry)
+    if not items:
+        lines.append("  {}   # nothing chosen yet")
     return "\n".join(lines) + "\n"
+
+
+def add_to_config(text: str, items: Sequence[Dict[str, Any]], registry: CardRegistry) -> str:
+    """Add instruments to an existing lab config text, keeping what is there (and its comments)."""
+    from .yamlio import load_yaml
+    data = load_yaml(text) if text.strip() else None
+    if not isinstance(data, dict) or not isinstance(data.get("instruments"), dict) or not data["instruments"]:
+        name = data.get("lab", "My lab") if isinstance(data, dict) else "My lab"
+        return draft_from(items, registry, name)
+    taken = set(data["instruments"])
+    blocks: List[str] = []
+    for item in items:
+        item = dict(item)
+        if item["name"] in taken:
+            base, i = item["name"], 2
+            while "%s%d" % (base, i) in taken:
+                i += 1
+            item["name"] = "%s%d" % (base, i)
+        taken.add(item["name"])
+        blocks += instrument_block(item, registry)
+    lines = text.rstrip("\n").split("\n")
+    start = next(i for i, l in enumerate(lines) if re.match(r"^instruments\s*:", l))
+    end = next((i for i in range(start + 1, len(lines)) if lines[i] and not lines[i][0].isspace()
+                and not lines[i].startswith("#")), len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[:end] + blocks + lines[end:]) + "\n"
 
 
 def main(argv: Optional[List[str]] = None) -> int:

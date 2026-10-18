@@ -122,7 +122,9 @@
     </header>
     <div class="lab-scroll">
       <div id="lab-pending"></div>
-      <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span></div>
+      <div id="lab-problem" class="callout small" hidden></div>
+      <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span>
+        <button id="open-lab-setup" class="link soft" type="button">Set up…</button></div>
       <div class="inst-tools">
         <input id="inst-filter" type="search" placeholder="Filter instruments" aria-label="Filter instruments" spellcheck="false" autocomplete="off">
         <div id="inst-seg" class="seg" role="group" aria-label="Which instruments to show">
@@ -189,6 +191,46 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Cancel</button>
       <button id="save-settings" class="btn primary" type="button">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="lab-dialog" class="dialog wide" aria-labelledby="lab-dialog-title">
+  <form id="lab-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="lab-dialog-title">Instruments</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="field-row lab-which">
+      <span id="lab-now" class="muted small"></span>
+      <div id="lab-seg" class="seg" role="group" aria-label="Which lab Kelvin controls">
+        <button type="button" data-use="virtual">Virtual lab</button><button type="button" data-use="mine">My instruments</button>
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Find instruments</span><button id="lab-scan" class="btn small" type="button">Scan</button></div>
+      <span class="hint">Asks each connected instrument (GPIB, USB, LAN, serial) who it is. Nothing is set.</span>
+      <div id="lab-found" class="found-list" hidden></div>
+      <button id="lab-add-found" class="btn small" type="button" hidden>Add the checked ones to the lab config</button>
+      <div class="add-row">
+        <input id="lab-addr" placeholder="Or add by address: GPIB0::24::INSTR, serial://COM3 …" spellcheck="false" aria-label="Instrument address">
+        <select id="lab-card" aria-label="Card"></select>
+        <button id="lab-add" class="btn small" type="button">Add</button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="lab-yaml">Lab config</label>
+      <textarea id="lab-yaml" class="mono" rows="12" spellcheck="false" placeholder="Scan, or add an instrument by address, to start a lab config."></textarea>
+      <span class="hint">Set limits to what your sample can take: Kelvin refuses anything beyond them and asks before driving harder. Lasers default to always asking.</span>
+    </div>
+    <ul id="lab-health" class="health-list" hidden></ul>
+    <footer class="dialog-foot">
+      <span id="lab-msg" class="muted small"></span>
+      <div class="spacer"></div>
+      <button class="btn" value="cancel" type="submit">Close</button>
+      <button id="lab-save" class="btn primary" type="button">Save and connect</button>
     </footer>
   </form>
 </dialog>

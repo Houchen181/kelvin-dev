@@ -70,6 +70,8 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "stop":
         text = "stopped the current ramp or plan" + (
             "; declined %d open request(s)" % e["declined"] if e.get("declined") else "")
+    elif kind == "lab_changed":
+        text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
     elif kind == "approval_mode":
         text = "approvals: " + ("auto mode on (low-risk changes run without asking)" if e.get("mode") == "auto"
                                 else "ask before every drive increase")
@@ -104,6 +106,8 @@ class LabRuntime:
         self._status_at = 0.0
         self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
         self._live_lock = threading.Lock()
+        self.lab_info: Dict[str, Any] = {"kind": "virtual" if all(i.simulated for i in lab.instruments.values()) else "file",
+                                         "path": None, "error": None, "has_file": False}
         with self.lock:
             self._refresh()
 
@@ -490,6 +494,47 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ instruments on this computer
 
+    def scan_found(self) -> List[Dict[str, Any]]:
+        """Connected instruments as data, each with a suggested name. Raises AdapterError without VISA."""
+        from ..discovery import scan
+        in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
+                  if not ic.address.startswith("sim://")}
+        with self.lock:
+            self.busy = "scanning for instruments"
+            try:
+                found = scan(self.lab.registry, in_lab=in_lab)
+            finally:
+                self.busy = None
+        taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
+        out = []
+        for f in found:
+            name = f.suggest_name(taken) if f.card_id and not f.in_lab else None
+            if name:
+                taken.append(name)
+            out.append(dict(vars(f), suggested=name))
+        return out
+
+    def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human") -> List[str]:
+        """Control another lab (the user's instruments, or the virtual lab). Refused while a plan runs. The approval
+        mode goes back to asking, and the new lab is health-checked right away."""
+        with self.lock:
+            if self.live and self.live.get("status") == "running":
+                raise RuntimeError("a plan is running; wait for it to finish or stop it first")
+            old = self.lab
+            self.lab = lab
+            self.gate = SafetyGate(lab, self.approver, EventLog(self.events_path, lab.clock), envelope, operator="agent")
+            self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
+            self.engine.progress = self._on_progress
+            self.lab_info = dict(info)
+            self._status = {}
+            self._refresh()
+            self.gate.log.write("lab_changed", by=by, lab=lab.config.name, instruments=sorted(lab.instruments),
+                                kind=info.get("kind"))
+            results = [str(r) for r in self.engine.preflight()]
+        if old is not lab:
+            old.close()
+        return results
+
     def scan(self) -> str:
         """Which instruments are connected, matched to cards. Read-only: it only asks who they are."""
         def run() -> str:
@@ -564,6 +609,7 @@ class LabRuntime:
                 "simulated": all(i.simulated for i in self.lab.instruments.values()),
                 "busy": self.busy, "pending": pending, "history": history, "status": status,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
+                "lab_info": self.lab_info,
                 "instruments": self.instruments(),
                 "live": {k: v for k, v in (self.live_view(10 ** 9) or {}).items()
                          if k in ("run_id", "plan", "done", "total", "eta_s", "status")} or None,

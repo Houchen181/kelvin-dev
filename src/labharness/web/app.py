@@ -23,8 +23,11 @@ from starlette.routing import Route
 from ..agent.approval import WebApprover
 from ..agent.runtime import LabRuntime
 from ..agent.server import build_server
+from ..adapters import AdapterError
 from ..clock import ScaledClock, SimClock
-from ..virtual_lab import build_virtual_lab, demo_envelope
+from ..discovery import add_to_config
+from ..labconfig import ConfigError, load_lab_config
+from ..virtual_lab import build_lab, builtin_registry, is_simulated, open_home_lab
 from .agent import Busy, ChatAgent
 from .providers.base import Provider
 from .settings import Settings
@@ -84,6 +87,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None) -> Any:
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo), settings)
+    lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     tasks: List[asyncio.Task] = []
 
     @asynccontextmanager
@@ -218,6 +222,84 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(404, e.args[0])
         return JSONResponse({"ok": True})
 
+    # ------------------------------------------------------------------ the lab Kelvin controls (people only)
+
+    def busy_problem() -> Optional[str]:
+        if agent.active:
+            return "Kelvin is answering; wait for it or press stop first."
+        live = runtime.live
+        if live and live.get("status") == "running":
+            return "A plan is running; wait for it to finish or stop it first."
+        return None
+
+    async def lab_view(request: Request) -> Response:
+        """GET: which lab Kelvin controls, the user's lab config and the instrument cards.
+        POST {yaml}: check, save and connect the user's lab. POST {use: "virtual" | "mine"}: switch."""
+        if request.method == "GET":
+            cards = [{"id": c.id, "model": c.model, "kind": c.kind, "vendor": c.vendor, "status": c.status,
+                      "identifies": bool(c.idn_pattern)}
+                     for c in sorted(runtime.lab.registry, key=lambda c: (c.kind, c.id)) if not c.id.startswith("virtual/")]
+            return JSONResponse({"name": runtime.lab.config.name, "info": runtime.lab_info, "cards": cards,
+                                 "yaml": lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""})
+        body = await request.json()
+        problem = busy_problem()
+        if problem:
+            return error(409, problem)
+        use = body.get("use")
+        try:
+            if use == "virtual":
+                lab, envelope, info = await asyncio.to_thread(open_home_lab, lab_file.parent, "virtual")
+            else:
+                text = str(body.get("yaml") or "") if use != "mine" else (
+                    lab_file.read_text(encoding="utf-8") if lab_file.exists() else "")
+                if not text.strip():
+                    return error(400, "There is no lab config yet; scan for instruments or write one first.")
+                load_lab_config(text, runtime.lab.registry)   # check it before touching any instrument
+                lab = await asyncio.to_thread(build_lab, text)
+                envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
+                if use != "mine":
+                    tmp = lab_file.with_suffix(".tmp")
+                    tmp.write_text(text, encoding="utf-8")
+                    tmp.replace(lab_file)
+        except ConfigError as e:
+            return error(400, "The lab config has problems: " + "; ".join(e.errors[:6]))
+        except (AdapterError, OSError, ValueError) as e:
+            return error(400, str(e).splitlines()[0] if str(e) else type(e).__name__)
+        try:
+            health = await asyncio.to_thread(runtime.switch_lab, lab, envelope, info, "human (portal)")
+        except RuntimeError as e:
+            lab.close()
+            return error(409, str(e))
+        settings.update({"lab": "virtual" if use == "virtual" else "mine"})
+        return JSONResponse({"ok": True, "name": lab.config.name, "info": runtime.lab_info, "health": health})
+
+    async def scan_view(request: Request) -> Response:
+        """Find connected instruments. Only asks each instrument who it is."""
+        problem = busy_problem()
+        if problem:
+            return error(409, problem)
+        try:
+            return JSONResponse({"found": await asyncio.to_thread(runtime.scan_found)})
+        except AdapterError as e:
+            return error(503, str(e))
+
+    async def draft_view(request: Request) -> Response:
+        """Add chosen instruments [{name, card, address}] to a lab config text (`base`), keeping what is there."""
+        body = await request.json()
+        items = []
+        for it in body.get("items") or []:
+            name, card, address = str(it.get("name") or "").strip(), str(it.get("card") or ""), str(it.get("address") or "").strip()
+            if not name.isidentifier():
+                return error(400, "%r is not a usable name (letters, digits and _ only)" % name)
+            if not address:
+                return error(400, "%s needs an address" % name)
+            try:
+                runtime.lab.registry.get(card)
+            except KeyError:
+                return error(400, "%s: choose a card" % name)
+            items.append({"name": name, "card": card, "address": address, "note": str(it.get("note") or "")[:60]})
+        return JSONResponse({"yaml": add_to_config(str(body.get("base") or ""), items, runtime.lab.registry)})
+
     async def turn(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
         body = await request.json()
@@ -348,6 +430,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/state", state),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
+        Route("/api/lab", lab_view, methods=["GET", "POST"]),
+        Route("/api/instruments/scan", scan_view, methods=["POST"]),
+        Route("/api/instruments/draft", draft_view, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
         Route("/api/quit", quit_app, methods=["POST"]),
         Route("/api/live", live),
@@ -377,11 +462,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args(argv)
 
-    lab = build_virtual_lab(clock=SimClock() if args.speed == 0 else ScaledClock(args.speed), seed=args.seed,
-                            config=args.lab)
-    envelope = None if args.lab else demo_envelope(lab)  # the demo envelope names the built-in lab's instruments
-    runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), args.data_dir, envelope)
     settings = Settings(args.settings)
+    info = None
+    if args.lab:  # an explicit lab config: simulated ones run at --speed, real ones on real time
+        simulated = is_simulated(load_lab_config(args.lab, builtin_registry()))
+        lab = build_lab(args.lab, clock=(SimClock() if args.speed == 0 else ScaledClock(args.speed)) if simulated else None,
+                        seed=args.seed)
+        envelope = None
+    else:   # the user's lab.yaml next to the settings, if they have one; otherwise the virtual lab
+        lab, envelope, info = open_home_lab(Path(args.settings).parent, settings.get("lab") or "auto", args.speed)
+    runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), args.data_dir, envelope)
+    if info:
+        runtime.lab_info = info
     store = ChatStore(Path(args.data_dir) / "chats")
     hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)
     app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts)

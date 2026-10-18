@@ -473,6 +473,34 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .field input, .field select, .field textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: 10px; padding: 8px 10px; background: var(--raised); }
 .field textarea { resize: vertical; min-height: 84px; max-height: 50vh; line-height: 1.45; }
 .field-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.dialog.wide { width: min(760px, calc(100vw - 32px)); }
+.mono { font: 12.5px/1.5 ui-monospace, Consolas, monospace !important; }
+.lab-which { align-items: center; }
+.found-list { border: 1px solid var(--line); border-radius: 10px; max-height: 260px; overflow: auto; }
+.found { display: grid; grid-template-columns: 18px 110px minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 7px 10px;
+  border-top: 1px solid var(--line); font-size: 13.5px; cursor: pointer; }
+.found:first-child { border-top: 0; }
+.found.in-lab { grid-template-columns: 128px minmax(0, 1fr) auto; color: var(--muted); cursor: default; }
+.found-input { border: 1px solid var(--line-strong); border-radius: 7px; padding: 4px 7px; font: 12.5px ui-monospace, Consolas, monospace; background: var(--raised); color: var(--text); min-width: 0; }
+.found select { min-width: 0; border: 1px solid var(--line-strong); border-radius: 7px; padding: 4px 6px; background: var(--raised); color: var(--text); font-size: 13px; }
+.found-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.found-name { font: 600 12.5px ui-monospace, Consolas, monospace; }
+.found-addr { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.add-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px) auto; gap: 8px; }
+.add-row input, .add-row select { border: 1px solid var(--line-strong); border-radius: 10px; padding: 7px 10px; background: var(--raised); color: var(--text); min-width: 0; }
+.health-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
+.health-list li { display: flex; gap: 8px; align-items: flex-start; }
+.health-list li svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }
+.health-list li.good svg { color: var(--ok); }
+.health-list li.bad { color: var(--text); }
+.health-list li.bad svg { color: var(--warn); }
+.callout.small { font-size: 13px; padding: 8px 10px; margin-bottom: 8px; }
+.inst-head-row .link { margin-left: auto; }
+@media (max-width: 640px) {
+  .found { grid-template-columns: 18px 90px minmax(0, 1fr); }
+  .found .found-addr { grid-column: 2 / -1; }
+  .add-row { grid-template-columns: 1fr; }
+}
 /* project notes: short facts, each deletable */
 .memory-notes { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; max-height: 240px; overflow: auto; }
 .memory-note { display: flex; align-items: flex-start; gap: 8px; padding: 8px 6px 8px 10px; border-top: 1px solid var(--line); font-size: 14px; }
@@ -489,6 +517,8 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .local summary { cursor: pointer; font-weight: 550; font-size: 14px; margin-bottom: 6px; }
 .local label { font-weight: 500; font-size: 13.5px; margin-top: 6px; }
 .dialog-foot { display: flex; align-items: center; gap: 8px; }
+.dialog-foot > span { flex: 1; min-width: 0; }
+.dialog-foot .btn { white-space: nowrap; }
 
 /* ---------- runs pane: beside the chat, like a terminal pane ---------- */
 .runpane { position: relative; flex: none; width: 560px; min-width: 0; display: flex; flex-direction: column;

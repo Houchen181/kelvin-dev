@@ -116,7 +116,14 @@ After a run, Kelvin classifies each measured curve and fits it: a peak or dip (L
 
 Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-serial. It uses the VISA library you already have (NI-VISA or Keysight IO Libraries), or a pure-Python one if there is none. Install the extra with `pip install "kelvin-lab[hardware]"`; the desktop app includes it.
 
-**Find what is connected:**
+**Set up your instruments in the app:** open the Lab panel and press **Set up…**. In the setup:
+1. **Scan** finds the connected instruments. You can also add one by address, such as `GPIB0::24::INSTR` or `serial://COM3`, and pick its card.
+2. Review the drafted lab config, mainly the limits.
+3. **Save and connect** saves it as `~/Kelvin/lab.yaml` and health-checks every instrument. It checks that each one is the model its card says, so a changed address can't send commands to the wrong instrument. It also reads every reading once and checks that drives sit inside your limits.
+
+Kelvin opens on your lab from then on. You can switch back to the virtual lab at any time. If your lab can't be connected at start-up, Kelvin opens the virtual lab and says why. Kelvin only switches labs while it is idle, and approvals go back to asking.
+
+From a terminal:
 
 ```bash
 kelvin-scan --write lab.yaml

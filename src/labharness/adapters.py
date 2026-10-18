@@ -112,6 +112,9 @@ class VisaBackend:
         except AdapterError:
             raise
         except Exception as e:
+            if "LIBRARY_NFOUND" in str(e):
+                raise AdapterError("%s: this computer's VISA cannot reach %s: its interface driver is missing (for GPIB, "
+                                   "install NI-488.2 or your GPIB adapter's driver)." % (name, self.resource)) from e
             raise AdapterError("%s: cannot open %s (%s). Check the cable, the address and that no other program "
                                "holds the instrument." % (name, self.resource, e)) from e
         self.res.timeout = int(conn.get("timeout_ms", 3000))

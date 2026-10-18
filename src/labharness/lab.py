@@ -73,7 +73,9 @@ class Lab:
         return snap
 
     def health_check(self, names: Optional[List[str]] = None) -> List[HealthResult]:
-        """Identity, error queue, sanity reads, and drives inside lab limits."""
+        """Before an instrument is used: is it the model its card says (a swapped address would send commands to
+        the wrong instrument), does its error queue look clean, does every reading work, are the card's sanity
+        checks fine, and are its drives inside the lab's limits? Only reads; never sets anything."""
         out = []
         for name in names or list(self.instruments):
             inst = self.instruments.get(name)
@@ -84,9 +86,25 @@ class Lab:
             try:
                 card = inst.card
                 if card.idn_pattern:
-                    idn = inst.query_raw("*IDN?").strip()
-                    if not re.search(card.idn_pattern, idn):
-                        problems.append("identity %r does not match card %s" % (idn, card.id))
+                    idn = inst.query_raw(card.idn_query).strip()
+                    if not re.search(card.idn_pattern, idn, re.I):
+                        problems.append("identity %r does not match card %s (wrong address or instrument?)"
+                                        % (idn[:80], card.id))
+                        out.append(HealthResult(name, False, problems))
+                        continue  # nothing else is meaningful on the wrong instrument
+                err = inst.instrument_error()
+                if err:
+                    problems.append("instrument reports %s" % err)
+                dead = []
+                for spec in card.params.values():  # every reading once (traces are slow; skipped)
+                    if spec.kind != "measure" or spec.get_cmd is None or spec.type == "trace":
+                        continue
+                    try:
+                        inst.read(spec.name)
+                    except Exception as e:
+                        dead.append("%s (%s)" % (spec.name, str(e).splitlines()[0][:60] if str(e) else type(e).__name__))
+                if dead:
+                    problems.append("cannot read " + ", ".join(dead))
                 for chk in card.health:
                     if chk.query:
                         resp = inst.query_raw(chk.query).strip()
@@ -95,13 +113,13 @@ class Lab:
                     else:
                         v = inst.read(chk.read)
                         lo, hi = chk.range
-                        if not lo <= v <= hi:
+                        if v is not None and not lo <= v <= hi:
                             problems.append("%s = %s, expected %s to %s" % (chk.read, inst.spec(chk.read).show(v), num(lo), num(hi)))
                 for spec in card.drives:
                     lim = inst.limits(spec.name)
                     if spec.numeric and lim and spec.get_cmd is not None:
                         v = inst.read(spec.name)
-                        if not lim[0] <= v <= lim[1]:
+                        if v is not None and not lim[0] <= v <= lim[1]:
                             problems.append("%s = %s is outside %s limits" % (spec.name, spec.show(v), inst.limits_source(spec.name)))
             except Exception as e:
                 problems.append("no response (%s)" % e)

@@ -19,7 +19,7 @@ ENV = {
     "gemini_api_key": "GEMINI_API_KEY",
 }
 SECRET = set(ENV) | {"local_api_key"}
-EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn"}
+EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab"}
 
 
 class Settings:
@@ -62,6 +62,8 @@ class Settings:
                 value = value[:MAX_INSTRUCTIONS]
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "lab":  # which lab to open: the user's lab.yaml ("mine") or the virtual lab
+                value = value if value in ("mine", "virtual") else ""
             if value:
                 self._data[name] = value
             else:

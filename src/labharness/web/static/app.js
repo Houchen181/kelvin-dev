@@ -1493,8 +1493,120 @@
     badge.hidden = !s.pending.length;
     if (loose.length && !S.labOpen) toggleLab(true);
     showMode(s.approval_mode, s.approval_rule);
+    $("lab-name").textContent = s.lab;
+    $("sim-tag").hidden = !s.simulated;
+    const problem = s.lab_info && s.lab_info.error;
+    $("lab-problem").hidden = !problem;
+    if (problem) $("lab-problem").textContent = problem + " Kelvin is using the virtual lab meanwhile.";
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
   }
+  // ------------------------------------------------------------------ the lab Kelvin controls (people only)
+  const KIND_NAME = { "source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
+    "laser": "laser", "laser-driver": "laser", "power-meter": "pm", "preamp": "preamp", "multimeter": "dmm",
+    "nanovoltmeter": "nvm", "function-generator": "fg", "voltage-source": "vsrc", "vna": "vna" };
+  const LAB = { cards: [], found: [] };
+
+  function cardSelect(selected, placeholder) {
+    const sel = h("select", { "aria-label": "Card" });
+    sel.append(new Option(placeholder || "Choose its card…", ""));
+    const kinds = new Map();
+    for (const c of LAB.cards) {
+      if (!kinds.has(c.kind)) { const g = document.createElement("optgroup"); g.label = c.kind; kinds.set(c.kind, g); sel.append(g); }
+      kinds.get(c.kind).append(new Option(c.model, c.id));
+    }
+    sel.value = selected || "";
+    return sel;
+  }
+  function showLabState(info, name) {
+    const mine = info && info.kind === "file";
+    for (const b of document.querySelectorAll("#lab-seg button")) b.classList.toggle("on", (b.dataset.use === "mine") === mine);
+    $("lab-now").textContent = "Kelvin now controls " + (name || "the lab") + (mine ? "" : " (simulated)") + ".";
+  }
+  async function openLabSetup() {
+    let r;
+    try { r = await api("/api/lab"); } catch (e) { toast(e.message); return; }
+    LAB.cards = r.cards;
+    showLabState(r.info, r.name);
+    $("lab-card").replaceWith(Object.assign(cardSelect("", "Card…"), { id: "lab-card" }));
+    $("lab-yaml").value = r.yaml || "";
+    $("lab-found").hidden = $("lab-add-found").hidden = true;
+    $("lab-health").hidden = true;
+    $("lab-msg").textContent = r.info && r.info.error ? r.info.error : "";
+    $("lab-dialog").showModal();
+  }
+  async function scanLab() {
+    const btn = $("lab-scan");
+    btn.disabled = true; btn.textContent = "Scanning…";
+    $("lab-msg").textContent = "Asking each instrument who it is (a few seconds per port)…";
+    let r;
+    try { r = await api("/api/instruments/scan", { body: {} }); } catch (e) { $("lab-msg").textContent = e.message; return; }
+    finally { btn.disabled = false; btn.textContent = "Scan again"; }
+    LAB.found = r.found;
+    $("lab-msg").textContent = r.found.length ? "" : "Nothing found. Is VISA installed, and are the instruments on and connected?";
+    renderFound();
+  }
+  function renderFound() {
+    const box = $("lab-found");
+    box.hidden = !LAB.found.length;
+    $("lab-add-found").hidden = !LAB.found.some((f) => !f.in_lab);
+    box.replaceChildren(...LAB.found.map((f) => {
+      if (f.in_lab) {
+        return h("div", { class: "found in-lab" }, h("span", { class: "found-name" }, f.in_lab), h("span", { class: "found-model" }, "already in this lab"),
+          h("code", { class: "found-addr" }, f.address));
+      }
+      const check = h("input", { type: "checkbox", "aria-label": "Add " + f.address });
+      check.checked = !!f.card_id;
+      const name = h("input", { class: "found-input", value: f.suggested || "", placeholder: "name", spellcheck: "false", "aria-label": "Name" });
+      const model = f.card_id ? h("span", { class: "found-model", title: f.idn || f.how }, f.model)
+        : cardSelect("", f.idn ? "Answered, but no card matches: choose one…" : "No answer: choose its card…");
+      if (!f.card_id) model.addEventListener("change", () => {
+        check.checked = !!model.value;
+        const card = LAB.cards.find((c) => c.id === model.value);
+        if (card && !name.value) name.value = KIND_NAME[card.kind] || "instr";
+      });
+      f.ui = { check, name, model };
+      return h("label", { class: "found" }, check, name, model, h("code", { class: "found-addr", title: f.settings || "" }, f.address));
+    }));
+  }
+  async function addToConfig(items) {
+    if (!items.length) { $("lab-msg").textContent = "Nothing chosen."; return; }
+    try {
+      const r = await api("/api/instruments/draft", { body: { items, base: $("lab-yaml").value } });
+      $("lab-yaml").value = r.yaml;
+      $("lab-msg").textContent = "Added " + items.map((i) => i.name).join(", ") + ". Review the limits, then save and connect.";
+    } catch (e) { $("lab-msg").textContent = e.message; }
+  }
+  function addFound() {
+    addToConfig(LAB.found.filter((f) => f.ui && f.ui.check.checked).map((f) => ({
+      name: f.ui.name.value.trim() || "instr", card: f.card_id || f.ui.model.value, address: f.address,
+      note: (f.idn || "").slice(0, 60) })));
+  }
+  function addByAddress() {
+    const address = $("lab-addr").value.trim(), cardId = $("lab-card").value;
+    if (!address || !cardId) { $("lab-msg").textContent = "Give an address and choose its card."; return; }
+    const card = LAB.cards.find((c) => c.id === cardId);
+    addToConfig([{ name: KIND_NAME[card.kind] || "instr", card: cardId, address }]).then(() => { $("lab-addr").value = ""; });
+  }
+  async function connectLab(body) {
+    const save = $("lab-save");
+    save.disabled = true;
+    $("lab-msg").textContent = body.use === "virtual" ? "Switching to the virtual lab…" : "Connecting and checking every instrument…";
+    $("lab-health").hidden = true;
+    try {
+      const r = await api("/api/lab", { body });
+      showLabState(r.info, r.name);
+      const bad = r.health.filter((line) => /FAIL/.test(line));
+      $("lab-health").replaceChildren(...r.health.map((line) => h("li", { class: /FAIL/.test(line) ? "bad" : "good" },
+        icon(/FAIL/.test(line) ? "warn" : "check"), h("span", {}, line))));
+      $("lab-health").hidden = !r.health.length;
+      $("lab-msg").textContent = bad.length ? bad.length + " instrument(s) need attention before use."
+        : "Connected to " + r.name + ". Every instrument answered as expected.";
+      pollState();
+    } catch (e) {
+      $("lab-msg").textContent = e.message;
+    } finally { save.disabled = false; }
+  }
+
   // ------------------------------------------------------------------ approval mode (a person's choice)
   function showMode(mode, rule) {
     const select = $("approval-mode");
@@ -1677,6 +1789,18 @@
     });
     $("model").addEventListener("change", () => { store("lh.model", $("model").value); updateSend(); });
     $("approval-mode").addEventListener("change", (e) => changeMode(e.target.value));
+    $("open-lab-setup").addEventListener("click", openLabSetup);
+    $("lab-scan").addEventListener("click", scanLab);
+    $("lab-add-found").addEventListener("click", addFound);
+    $("lab-add").addEventListener("click", addByAddress);
+    $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value }));
+    for (const b of document.querySelectorAll("#lab-seg button")) {
+      b.addEventListener("click", () => {
+        if (b.classList.contains("on")) return;
+        if (b.dataset.use === "mine" && !$("lab-yaml").value.trim()) { $("lab-msg").textContent = "Set up your instruments first: scan, or add one by address."; return; }
+        connectLab({ use: b.dataset.use });
+      });
+    }
     $("new-chat").addEventListener("click", () => newChat());
     $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });
     $("scrim").addEventListener("click", () => { closeSidebar(); if (S.labOpen) toggleLab(false); if (RUNS.open) toggleRuns(false); });
