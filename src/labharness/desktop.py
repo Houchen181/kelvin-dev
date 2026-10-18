@@ -120,9 +120,20 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--self-test", action="store_true", help="start, check the portal, exit")
     ap.add_argument("--no-setup", action="store_true", help="do not look for connected instruments on start")
     ap.add_argument("--port", type=int, default=0, help="portal port (default: any free port)")
+    ap.add_argument("--remove-data", action="store_true",
+                    help="delete Kelvin's own data (settings, keys, chats, memory, lab config, cards, instrument "
+                         "folders) and keep every measurement (runs, the lab record, reports); the uninstaller runs it")
     args = ap.parse_args(argv)
 
     home = Path(args.home)
+    if args.remove_data:
+        if _running_copy(home / "app.json"):
+            print("Kelvin is running; quit it first, then remove its data.", flush=True)
+            return 1
+        from .uninstall import remove_data
+        report = remove_data(home)
+        print(json.dumps(report, indent=1), flush=True)
+        return 1 if report["failed"] else 0
     home.mkdir(parents=True, exist_ok=True)
     close_log = _log_to_file(home)
     try:
@@ -131,8 +142,22 @@ def main(argv: Optional[list] = None) -> int:
         close_log()
 
 
+APP_MUTEX = "Kelvin-8C0F6E5A"   # the installer and uninstaller wait while Kelvin runs (AppMutex in kelvin.iss)
+
+
+def _hold_app_mutex() -> Any:
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        return ctypes.windll.kernel32.CreateMutexW(None, False, APP_MUTEX)
+    except Exception:
+        return None
+
+
 def _run(args: argparse.Namespace, home: Path) -> int:
     lock = home / "app.json"
+    mutex = _hold_app_mutex()  # noqa: F841  (held until Kelvin exits)
 
     from .agent.approval import WebApprover
     from .agent.runtime import LabRuntime

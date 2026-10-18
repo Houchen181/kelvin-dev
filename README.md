@@ -20,6 +20,8 @@ No Python needed.
 
 Kelvin starts with a simulated lab and a scripted demo model. To talk to a real model, add an API key in Settings or sign in with ChatGPT. If instruments are connected, Kelvin finds them and connects them, with their outputs locked until you review the limits. Everything it keeps stays in `~/Kelvin` on your computer.
 
+Uninstalling Kelvin also deletes its own data: settings, API keys, chats, memory, the lab config and instrument folders. It keeps your measurements: runs, the lab record and reports.
+
 ## What it does
 
 - **Runs measurements from a chat.** Ask in plain words. Kelvin reads the instruments, writes a measurement plan, dry-runs it, runs it, and fits the data with uncertainties.

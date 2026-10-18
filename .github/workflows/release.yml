@@ -42,6 +42,23 @@ jobs:
           $p = Start-Process "$env:LOCALAPPDATA\Programs\Kelvin\Kelvin.exe" -ArgumentList "--self-test","--home","$env:RUNNER_TEMP\kelvin-b" -Wait -PassThru
           Get-Content "$env:RUNNER_TEMP\kelvin-b\kelvin.log"
           if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Uninstall it; Kelvin's own data go, measurements stay
+        shell: pwsh
+        run: |
+          $k = "$env:USERPROFILE\Kelvin"
+          New-Item -ItemType Directory -Force "$k\virtual-lab\runs\r1", "$k\virtual-lab\chats", "$k\instruments\smu" | Out-Null
+          Set-Content "$k\settings.json" "{}"
+          Set-Content "$k\virtual-lab\chats\abc.json" "{}"
+          Set-Content "$k\instruments\smu\instrument.json" "{}"
+          Set-Content "$k\virtual-lab\runs\r1\data.jsonl" "{}"
+          Set-Content "$k\virtual-lab\events.jsonl" "{}"
+          $app = "$env:LOCALAPPDATA\Programs\Kelvin"
+          Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
+          for ($i = 0; $i -lt 60 -and (Test-Path "$app\Kelvin.exe"); $i++) { Start-Sleep -Seconds 1 }   # it finishes in a copy of itself
+          Get-ChildItem -Recurse $k | ForEach-Object { $_.FullName }
+          if (Test-Path "$app\Kelvin.exe") { throw "the app is still installed" }
+          foreach ($gone in "settings.json", "virtual-lab\chats", "instruments") { if (Test-Path "$k\$gone") { throw "$gone was not removed" } }
+          foreach ($kept in "virtual-lab\runs\r1\data.jsonl", "virtual-lab\events.jsonl", "About this folder.txt") { if (-not (Test-Path "$k\$kept")) { throw "$kept is missing" } }
       - uses: actions/upload-artifact@v4
         with:
           name: kelvin-windows
