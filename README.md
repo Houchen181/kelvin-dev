@@ -150,8 +150,9 @@ The scan only asks each instrument who it is (`*IDN?`, or the card's own identit
 | Kind | Models |
 |---|---|
 | Source-meters and sources | Keithley 2400-series, Keithley 2450/2460/2461/2470, Keysight B2900, Yokogawa GS200/GS210 |
-| Lock-ins | SRS SR830/SR810, SRS SR860/SR865 |
-| Temperature controllers (cryostats) | Lake Shore 335/336, Lake Shore 350 |
+| Lock-ins | SRS SR830/SR810, SRS SR860/SR865, Zurich Instruments MFLI (through LabOne) |
+| Temperature controllers (cryostats) | Lake Shore 335/336, Lake Shore 350, Oxford Instruments Mercury iTC |
+| Cryostat systems | Quantum Design PPMS, DynaCool, VersaLab, MPMS3 (through MultiVu) |
 | Magnet supplies | Lake Shore 625, AMI 430 |
 | Lasers and optics | Coherent OBIS, Thorlabs ITC4000 laser/TEC controller, Thorlabs PM100/PM400 power meter |
 | Amplifiers | SRS SR560 voltage preamp, SRS SR570 current preamp (listen-only: Kelvin shows what it last set) |
@@ -163,6 +164,14 @@ Real hardware gets the same gate as the virtual lab, and a few protections of it
 - **Risky commands stay locked.** Commands that change what readings mean, or that bypass the instrument's own protection, are blocked in the card: sensor curves, coil constants, persistent-switch heaters, current limits, and DMM resistance modes that push current into a device.
 - **Connecting only configures.** A card's `on_connect` commands are checked never to touch a drive.
 
+**Instruments behind vendor software.** Some instruments are not driven with text commands but through their maker's library. Kelvin has drivers for two of them; the address says which:
+- `zhinst://dev1234` for a Zurich Instruments lock-in, through LabOne's Python API (`pip install zhinst-core`). Add `?host=...&port=8004&interface=1GbE` if the data server runs elsewhere. A scan finds these devices through LabOne.
+- `qd://<computer>:5000` for a Quantum Design system, through MultiPyVu (`pip install MultiPyVu`, with its server running next to MultiVu). MultiVu ramps temperature and field itself; Kelvin sets the rate and setpoint, then waits for the reading.
+
+Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app; install Kelvin from source to use them (`pip install "kelvin-lab[desktop,zhinst]"` or `[desktop,qd]`). These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.
+
+**Names that differ between installations.** A card can declare variables, such as a Mercury iTC's sensor UID or a lock-in's demodulator. Set them per instrument with `vars`. The draft lab config lists them with their defaults so you can check them, and values may only contain letters, digits and `. _ + -`, so nothing can be slipped into a command.
+
 A lab can mix real and simulated instruments, and override a card's connection settings per instrument:
 
 ```yaml
@@ -173,6 +182,8 @@ instruments:
   lockin: { card: srs/sr830, address: "serial://COM3", connection: { read_termination: "\r" } }
   tc:     { card: lakeshore/336, address: "ASRL5::INSTR" }
   laser:  { card: coherent/obis, address: "serial://COM7", auto: never }
+  itc:    { card: oxford/mercury-itc, address: "TCPIP0::10.0.0.9::7020::SOCKET", vars: { sensor: DB6.T1 } }
+  li:     { card: zhinst/mfli, address: "zhinst://dev5678", limits: { amplitude: [0, 0.5] } }
 ```
 
 ## Try the core without an agent

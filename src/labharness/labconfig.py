@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
-from .cards import CONNECTION_KEYS, Card, CardRegistry, ParamSpec, num
+from .cards import CONNECTION_KEYS, Card, CardError, CardRegistry, ParamSpec, num
 from .conditions import Condition, parse_condition
 from .yamlio import load_yaml
 
@@ -90,6 +90,7 @@ class InstrumentConfig:
     guards: Dict[str, List[Guard]] = field(default_factory=dict)
     auto: Dict[str, Any] = field(default_factory=dict)  # "*" or param -> "never" | Allowed (its own auto range)
     connection: Dict[str, Any] = field(default_factory=dict)  # overrides the card's (e.g. RS-232 terminators)
+    vars: Dict[str, str] = field(default_factory=dict)        # the card's per-installation names (sensor, channel)
 
 
 @dataclass
@@ -215,9 +216,20 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
                     connection[key] = kind(value)
                 except (TypeError, ValueError):
                     err("%s.connection.%s" % (path, key), "must be a %s" % kind.__name__)
+        card_vars: Dict[str, str] = {}
+        raw_vars = d.get("vars") or {}
+        if not isinstance(raw_vars, dict):
+            err(path + ".vars", "must be a mapping, e.g. {sensor: MB1.T1}")
+        elif raw_vars:
+            card_vars = {str(k): str(v) for k, v in raw_vars.items()}
+            try:
+                card.bind(card_vars)
+            except CardError as e:
+                for problem in e.errors:
+                    err(path + "." + problem.split(":", 1)[0], problem.split(":", 1)[-1].strip())
         instruments[name] = InstrumentConfig(
             name=name, card=card.id, address=str(d.get("address", "sim://" + name)),
-            trust=trust, limits=limits, rates=rates, auto=auto, connection=connection)
+            trust=trust, limits=limits, rates=rates, auto=auto, connection=connection, vars=card_vars)
 
     def readable(key: str, path: str) -> bool:
         spec = _lookup(cards, key)

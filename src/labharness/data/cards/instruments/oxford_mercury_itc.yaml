@@ -1,0 +1,62 @@
+card: 1
+id: oxford/mercury-itc
+model: Oxford Instruments Mercury iTC temperature controller
+vendor: Oxford Instruments
+kind: temperature-controller
+status: community
+manual: "Mercury iTC operation manual, remote interface (SCPI) command reference"
+notes:
+  - "Over Ethernet use TCPIP0::<address>::7020::SOCKET; also USB or RS-232"
+  - "Each sensor has its own UID (MB1.T1 on the motherboard, DB6.T1 and so on on daughter boards): set vars.sensor to the one on your sample"
+identify:
+  idn: "OXFORD INSTRUMENTS:MERCURY ITC"
+  example: "IDN:OXFORD INSTRUMENTS:MERCURY ITC:123456:2.6.04.000"
+connection: { read_termination: "\n", write_termination: "\n", timeout_ms: 3000, set_reply: ":VALID$" }
+vars:
+  sensor: { default: "MB1.T1", label: "UID of the temperature sensor whose loop Kelvin uses" }
+
+parameters:
+  T:
+    label: Temperature
+    kind: measure
+    unit: K
+    get: "READ:DEV:{sensor}:TEMP:SIG:TEMP"
+    parse: ":SIG:TEMP:([-+0-9.eE]+)K"
+  setpoint:
+    label: Setpoint
+    kind: drive
+    unit: K
+    set: "SET:DEV:{sensor}:TEMP:LOOP:TSET:{value}"
+    get: "READ:DEV:{sensor}:TEMP:LOOP:TSET"
+    parse: ":LOOP:TSET:([-+0-9.eE]+)K"
+    limits: [0, 300]
+    safe: 0
+    applies_when: control
+    description: Control setpoint of this sensor's loop; it heats only while heater control is on
+  control:
+    label: Heater control
+    kind: drive
+    type: bool
+    bool_text: ["ON", "OFF"]
+    set: "SET:DEV:{sensor}:TEMP:LOOP:ENAB:{value}"
+    get: "READ:DEV:{sensor}:TEMP:LOOP:ENAB"
+    parse: ":LOOP:ENAB:(ON|OFF)"
+    safe: off
+    enables: [setpoint]
+  heater:
+    label: Heater output
+    kind: measure
+    unit: "%"
+    get: "READ:DEV:{sensor}:TEMP:LOOP:HSET"
+    parse: ":LOOP:HSET:([-+0-9.eE]+)"
+  ramp_rate:
+    label: Ramp rate
+    kind: measure
+    unit: K/min
+    set: "SET:DEV:{sensor}:TEMP:LOOP:RSET:{value}"
+    get: "READ:DEV:{sensor}:TEMP:LOOP:RSET"
+    parse: ":LOOP:RSET:([-+0-9.eE]+)"
+    limits: [0, 50]
+display: { headline: T }
+raw:
+  blocked: ["SET:DEV:{sensor}:TEMP:CAL", "SET:SYS"]

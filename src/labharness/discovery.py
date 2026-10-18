@@ -178,6 +178,14 @@ def scan(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]
             out.append(Found(name, how="already in this lab", in_lab=in_lab[name]))
             continue
         out.append(identify(name, registry, rm, timeout_ms, usb))
+    from .drivers import MODULES, discover_zhinst
+    for address, idn in discover_zhinst(MODULES.get("zhinst")):   # instruments behind vendor software
+        if address in in_lab:
+            out.append(Found(address, how="already in this lab", in_lab=in_lab[address]))
+            continue
+        card = match_card(idn, registry)
+        out.append(Found(address, idn, card.id if card else None, card.model if card else "", card.kind if card else "",
+                         "LabOne discovery" if card else "no card for this model yet"))
     return out
 
 
@@ -204,6 +212,10 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
         lines.append("    limits: { %s }   # vendor limits: tighten to what your sample can take" % ", ".join(lim))
     if card.kind in ("laser", "laser-driver"):
         lines.append("    auto: never        # a person approves every laser change")
+    if card.vars:   # names that differ between installations: say which to check
+        lines.append("    vars: { %s }   # %s: check these on your instrument" % (
+            ", ".join("%s: %s" % (k, v["default"]) for k, v in card.vars.items()),
+            "; ".join(v["label"] for v in card.vars.values())))
     return lines
 
 

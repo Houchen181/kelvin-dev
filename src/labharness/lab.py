@@ -38,7 +38,7 @@ class Lab:
         self.world = world
         self.instruments: Dict[str, Instrument] = {}
         for name, ic in config.instruments.items():
-            card = registry.get(ic.card)
+            card = registry.get(ic.card).bind(ic.vars)   # with this installation's sensor or channel names
             self.instruments[name] = Instrument(name, card, backend_factory(name, card, ic.address), ic)
 
     def instrument(self, name: str) -> Instrument:

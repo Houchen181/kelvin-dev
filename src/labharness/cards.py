@@ -22,7 +22,10 @@ RAMPS = ("gate", "instrument", "none")
 STATUSES = ("community", "lab-verified", "draft")
 CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate": int, "data_bits": int,
                    "stop_bits": float, "parity": str, "timeout_ms": int, "query_delay": float, "write_only": bool,
-                   "ack": str}  # ack: the line an instrument sends after every command (e.g. "OK"), read and checked
+                   "ack": str,   # ack: the line an instrument sends after every command (e.g. "OK"), read and checked
+                   "set_reply": str}   # a regex every set command's reply must match (e.g. ":VALID$"); read after each set
+VAR_NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
+VAR_VALUE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")   # never spaces, separators or line ends: no command can hide in it
 _TRUE = {"1", "on", "true", "yes", "open"}
 _FALSE = {"0", "off", "false", "no", "closed", "close"}
 
@@ -228,6 +231,15 @@ class Card:
     idn_query: str = "*IDN?"                                    # what discovery asks to identify the model
     usb_ids: List[str] = field(default_factory=list)            # "VID:PID" in hex, for serial-over-USB devices
     on_connect: List[str] = field(default_factory=list)         # configuration commands sent when connecting
+    vars: Dict[str, Dict[str, str]] = field(default_factory=dict)   # per-installation names: {name: {default, label}}
+    bound: Dict[str, str] = field(default_factory=dict)             # the values this copy was made with
+    data: Dict[str, Any] = field(default_factory=dict, repr=False)  # as written, to bind other values
+
+    def bind(self, values: Optional[Dict[str, Any]]) -> "Card":
+        """This card with its variables set for one instrument (which sensor, channel or output it uses)."""
+        if not self.vars or not values:
+            return self
+        return parse_card(self.data, self.source, values)
 
     def param(self, name: str) -> ParamSpec:
         try:
@@ -389,7 +401,37 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
     return spec
 
 
-def parse_card(data: Any, source: str = "card") -> Card:
+def _card_vars(data: Dict[str, Any], err: Callable[[str, str], None]) -> Dict[str, Dict[str, str]]:
+    out: Dict[str, Dict[str, str]] = {}
+    raw = data.get("vars") or {}
+    if not isinstance(raw, dict):
+        err("vars", "must be a mapping of name: default (or {default, label})")
+        return out
+    for name, v in raw.items():
+        spec = v if isinstance(v, dict) else {"default": v}
+        default = str(spec.get("default", ""))
+        if not VAR_NAME.match(str(name)) or name == "value":
+            err("vars." + str(name), "a name is lowercase letters, digits and _ (and not value)")
+        elif not VAR_VALUE.match(default):
+            err("vars." + str(name), "the default %r must be letters, digits and . _ + - only" % default)
+        else:
+            out[str(name)] = {"default": default, "label": str(spec.get("label") or name)}
+    return out
+
+
+def _substitute(obj: Any, values: Dict[str, str]) -> Any:
+    if isinstance(obj, str):
+        for k, v in values.items():
+            obj = obj.replace("{%s}" % k, v)
+        return obj
+    if isinstance(obj, list):
+        return [_substitute(x, values) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _substitute(v, values) for k, v in obj.items()}
+    return obj
+
+
+def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]] = None) -> Card:
     errors: List[str] = []
 
     def err(path: str, msg: str) -> None:
@@ -399,6 +441,21 @@ def parse_card(data: Any, source: str = "card") -> Card:
         raise CardError(source, ["a card must be a mapping"])
     if data.get("card") != 1:
         err("card", "schema version must be 1")
+    original = data
+    card_vars = _card_vars(data, err)
+    chosen = {k: v["default"] for k, v in card_vars.items()}
+    for k, v in (values or {}).items():
+        if k not in card_vars:
+            err("vars." + str(k), "the card has no variable %r (it has: %s)" % (k, ", ".join(card_vars) or "none"))
+        elif not VAR_VALUE.match(str(v)):
+            err("vars." + str(k), "%r: letters, digits and . _ + - only" % v)
+        else:
+            chosen[k] = str(v)
+    if card_vars:
+        data = _substitute({k: v for k, v in data.items() if k != "vars"}, chosen)
+    leftover = sorted(set(re.findall(r"\{([a-z_][a-z0-9_]*)\}", repr(data))) - {"value"})
+    if leftover:
+        err("vars", "the commands use %s, which the card does not declare under vars" % ", ".join(leftover))
     for key in ("id", "model", "kind"):
         if not data.get(key):
             err(key, "required")
@@ -503,7 +560,7 @@ def parse_card(data: Any, source: str = "card") -> Card:
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")),
         source=source, connection=connection, idn_query=str(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
-        on_connect=on_connect,
+        on_connect=on_connect, vars=card_vars, bound=chosen, data=original,
     )
 
 

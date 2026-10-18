@@ -14,6 +14,8 @@ dependencies = ["PyYAML>=5.4"]
 agent = ["mcp>=2.3"]           # the MCP server needs Python >= 3.10
 web = ["mcp>=2.3", "starlette", "uvicorn", "anthropic>=1.15", "openai>=3", "google-genai>=2"]
 hardware = ["pyvisa>=1.13", "pyvisa-py>=0.7", "pyserial>=3.5"]   # real instruments (VISA, serial)
+zhinst = ["zhinst-core"]        # Zurich Instruments lock-ins through LabOne
+qd = ["MultiPyVu"]              # Quantum Design PPMS, DynaCool, VersaLab, MPMS3 through MultiVu
 desktop = ["kelvin-lab[web,hardware]", "pywebview>=5"]
 dev = ["pytest>=6", "httpx"]
 

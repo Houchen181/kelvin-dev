@@ -104,6 +104,7 @@ class VisaBackend:
         self.resource = resource_name(address)
         conn = dict(card.connection, **(overrides or {}))
         self.ack = conn.get("ack")
+        self.set_reply = re.compile(conn["set_reply"]) if conn.get("set_reply") else None
         self.write_only = bool(conn.get("write_only"))
         self.query_delay = float(conn.get("query_delay", 0.0))
         self.lock = threading.RLock()
@@ -135,6 +136,10 @@ class VisaBackend:
             self.res.write(command)
             if self.ack:
                 self._check_ack(command)
+            elif self.set_reply is not None:   # instruments that answer every set (e.g. Oxford Mercury: ...:VALID)
+                reply = str(self.res.read()).strip()
+                if not self.set_reply.search(reply):
+                    raise AdapterError("%s refused %r: %s" % (self.name, command, reply))
 
     def query(self, command: str) -> str:
         if self.write_only:
@@ -157,5 +162,9 @@ class VisaBackend:
 
 
 def open_backend(name: str, card: Card, address: str, rm: Optional[Any] = None,
-                 overrides: Optional[Dict[str, Any]] = None) -> VisaBackend:
+                 overrides: Optional[Dict[str, Any]] = None) -> Any:
+    """VISA for addresses like GPIB0::24::INSTR or serial://COM3; a vendor driver for zhinst:// or qd://."""
+    from .drivers import is_driver_address, open_driver
+    if is_driver_address(address):
+        return open_driver(name, card, address)
     return VisaBackend(name, card, address, rm, overrides)

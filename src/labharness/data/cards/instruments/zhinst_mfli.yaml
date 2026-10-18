@@ -1,0 +1,74 @@
+card: 1
+id: zhinst/mfli
+model: Zurich Instruments MFLI lock-in amplifier (LabOne)
+vendor: Zurich Instruments
+kind: lock-in
+status: community
+manual: "LabOne User Manual MFLI, Node Doc: /DEV/OSCS, /DEV/DEMODS, /DEV/SIGOUTS"
+notes:
+  - "Controlled through LabOne's Python API (pip install zhinst-core); address zhinst://dev1234, or with ?host=...&port=8004&interface=1GbE when the data server runs elsewhere"
+identify:
+  idn: "^Zurich Instruments,MF"
+  example: "Zurich Instruments,MFLI,dev5678"
+vars:
+  demod: { default: "0", label: "Demodulator (0-3)" }
+  osc: { default: "0", label: "Oscillator the demodulator uses" }
+  out: { default: "1", label: "Signal output mixer channel (1 on the MFLI)" }
+
+parameters:
+  amplitude:
+    label: Output amplitude
+    kind: drive
+    unit: V
+    set: "SET /SIGOUTS/0/AMPLITUDES/{out} {value}"
+    get: "GET /SIGOUTS/0/AMPLITUDES/{out}"
+    limits: [0, 10]
+    safe: 0
+    ramp: gate
+    max_rate: 0.5
+    applies_when: output
+    description: Peak amplitude of the sine at Signal Output (it cannot exceed the output range)
+  output:
+    label: Signal output
+    kind: drive
+    type: bool
+    set: "SET /SIGOUTS/0/ON {value}"
+    get: "GET /SIGOUTS/0/ON"
+    safe: off
+    enables: [amplitude]
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "SET /OSCS/{osc}/FREQ {value}"
+    get: "GET /OSCS/{osc}/FREQ"
+    limits: [0, 5000000]
+    description: Oscillator frequency (500 kHz standard, 5 MHz with the MF-5M option)
+  time_constant:
+    label: Time constant
+    kind: measure
+    unit: s
+    set: "SET /DEMODS/{demod}/TIMECONSTANT {value}"
+    get: "GET /DEMODS/{demod}/TIMECONSTANT"
+    limits: [1.0e-6, 500]
+  X:
+    label: X
+    kind: measure
+    unit: V
+    get: "GET /DEMODS/{demod}/SAMPLE.X"
+  Y:
+    label: Y
+    kind: measure
+    unit: V
+    get: "GET /DEMODS/{demod}/SAMPLE.Y"
+  R:
+    label: R
+    kind: measure
+    unit: V
+    get: "GET /DEMODS/{demod}/SAMPLE.R"
+  theta:
+    label: Phase
+    kind: measure
+    unit: deg
+    get: "GET /DEMODS/{demod}/SAMPLE.THETA"
+display: { headline: R }

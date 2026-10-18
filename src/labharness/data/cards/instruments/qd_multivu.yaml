@@ -1,0 +1,73 @@
+card: 1
+id: qd/multivu
+model: Quantum Design PPMS / DynaCool / VersaLab / MPMS3 (MultiVu)
+vendor: Quantum Design
+kind: cryostat
+status: community
+manual: "Quantum Design MultiPyVu documentation (the MultiVu server and its Python client)"
+notes:
+  - "Controlled through MultiPyVu (pip install MultiPyVu), with its server running on the MultiVu computer; address qd://<that computer>:5000"
+  - "MultiVu ramps temperature and field itself; Kelvin sets the rate, then the setpoint, and waits for the reading"
+identify:
+  idn: "^Quantum Design,MultiVu"
+  example: "Quantum Design,MultiVu,192.168.1.20:5000"
+
+parameters:
+  T:
+    label: Temperature
+    kind: measure
+    unit: K
+    get: "GET TEMPERATURE"
+  T_set:
+    label: Temperature setpoint
+    kind: drive
+    unit: K
+    set: "SET TEMPERATURE/SETPOINT {value}"
+    get: "GET TEMPERATURE/SETPOINT"
+    limits: [1.8, 400]
+    safe: 1.8
+    ramp: instrument
+    readback: T
+    tol: 0.05
+    timeout: 14400
+    description: The approach (fast settle) runs at T_rate
+  T_rate:
+    label: Temperature rate
+    kind: measure
+    unit: K/min
+    set: "SET TEMPERATURE/RATE {value}"
+    get: "GET TEMPERATURE/RATE"
+    limits: [0.01, 50]
+    default: 1
+  B:
+    label: Field
+    kind: measure
+    unit: T
+    get: "GET FIELD"
+  B_set:
+    label: Field setpoint
+    kind: drive
+    unit: T
+    set: "SET FIELD/SETPOINT {value}"
+    get: "GET FIELD/SETPOINT"
+    limits: [-16, 16]
+    safe: 0
+    ramp: instrument
+    readback: B
+    tol: 0.001
+    timeout: 14400
+    description: Linear approach at B_rate; the vendor limits cover the 16 T PPMS, so set your system's own
+  B_rate:
+    label: Field rate
+    kind: measure
+    unit: T/s
+    set: "SET FIELD/RATE {value}"
+    get: "GET FIELD/RATE"
+    limits: [1.0e-5, 0.02]
+    default: 0.001
+  chamber:
+    label: Chamber
+    kind: measure
+    type: str
+    get: "GET CHAMBER"
+display: { headline: T }

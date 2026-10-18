@@ -19,13 +19,14 @@ from labharness.virtual_lab import build_lab
 class Device:
     """One instrument on the fake bus."""
 
-    def __init__(self, card_id=None, idn=None, serial=None, ack=None, silent=False, name="dev"):
+    def __init__(self, card_id=None, idn=None, serial=None, ack=None, silent=False, name="dev", replies=None):
         reg = builtin_registry()
         self.card = reg.get(card_id) if card_id else None
         self.twin = make_twin_backend(self.card, World(SimClock()), name) if self.card else None
         self.idn = idn
         self.serial = serial or {}      # settings it insists on, e.g. {"baud_rate": 57600, "parity": "odd"}
         self.ack = ack
+        self.replies = replies        # answers every set with replies(command), e.g. Oxford Mercury's ...:VALID
         self.silent = silent
         self.sent = []
 
@@ -53,6 +54,8 @@ class Resource:
             self.dev.twin.write(cmd)
         if self.dev.ack:
             self.pending.append(self.dev.ack)
+        elif self.dev.replies:
+            self.pending.append(self.dev.replies(cmd))
 
     def query(self, cmd, delay=None):
         if not self.dev.answers(self):
