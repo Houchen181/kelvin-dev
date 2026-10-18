@@ -794,6 +794,9 @@
       case "recent_events": return v("Reading", "Read") + " the event log";
       case "wait": return v("Waiting", "Waited") + " " + esc(String(a.seconds)) + " s";
       case "save_note": return v("Saving", "Saved") + " a note to the project";  // older chats
+      case "search_papers": return v("Searching", "Searched") + " the literature for " + code(a.query || "");
+      case "read_paper": return v("Reading", "Read") + " " + code(a.paper || "") + (a.start ? " from character " + esc(String(a.start)) : "");
+      case "save_paper": return v("Adding", "Added") + " " + code(a.paper || "") + " to the reading list";
       case "make_report": return v("Writing", "Wrote") + " a report" + (a.title ? ": " + esc(String(a.title)) : "");
       case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat" : " for this project") +
         (a.text ? ": " + esc(String(a.text)) : "");
@@ -1267,6 +1270,7 @@
     $("project-instructions").value = p.instructions || "";
     $("project-msg").textContent = "";
     renderNotes(p);
+    renderPapers(p);
     $("project-dialog").showModal();
   }
   function renderNotes(p) {
@@ -1284,6 +1288,29 @@
         h("div", { class: "memory-body" }, h("span", {}, n.text), h("span", { class: "memory-meta" }, when + (chat ? " · " + chat.title : ""))),
         rowButton("trash", "Delete this note", () => deleteNote(p, n)));
     }));
+  }
+  function renderPapers(p) {
+    const papers = p.papers || [];
+    $("papers-count").textContent = papers.length ? papers.length + (papers.length === 1 ? " paper" : " papers") : "";
+    if (!papers.length) {
+      $("project-papers").replaceChildren(h("li", { class: "memory-empty" },
+        "No papers yet. Ask Kelvin to look up the literature, then to keep the papers that matter."));
+      return;
+    }
+    $("project-papers").replaceChildren(...papers.map((e) => {
+      const names = e.authors || [];
+      const who = names.length ? names[0] + (names.length > 2 ? " et al." : names.length === 2 ? " and " + names[1] : "") : "";
+      const title = e.url ? h("a", { href: e.url, target: "_blank", rel: "noopener noreferrer" }, e.title) : h("span", {}, e.title);
+      return h("li", { class: "memory-note" }, h("span", { class: "memory-kind" }, e.year ? String(e.year) : "paper"),
+        h("div", { class: "memory-body" }, title,
+          h("span", { class: "memory-meta" }, [who, e.venue].filter(Boolean).join(" · ") + (e.why ? " — " + e.why : ""))),
+        rowButton("trash", "Remove from the reading list", () => deletePaper(p, e)));
+    }));
+  }
+  async function deletePaper(p, e) {
+    try { await api("/api/projects/" + p.id + "/papers/" + e.id, { method: "DELETE" }); } catch (err) { $("project-msg").textContent = err.message; return; }
+    p.papers = p.papers.filter((x) => x.id !== e.id);
+    renderPapers(p);
   }
   async function deleteNote(p, n) {
     try { await api("/api/projects/" + p.id + "/notes/" + n.id, { method: "DELETE" }); } catch (e) { $("project-msg").textContent = e.message; return; }
@@ -2043,6 +2070,7 @@
     $("reviewer").options[0].textContent = "Off";
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
+    $("literature").checked = !S.settings || S.settings.literature !== false;
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
     for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
     $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
@@ -2083,6 +2111,7 @@
     body.reviewer = $("reviewer").value;
     body.instructions = $("global-instructions").value;
     body.learn = $("learn").checked ? "on" : "off";
+    body.literature = $("literature").checked ? "on" : "off";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     $("settings-msg").textContent = "Saving…";
     try {

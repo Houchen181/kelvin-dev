@@ -29,6 +29,7 @@ MAX_INSTRUCTIONS = 4000  # characters, for a project's instructions and for the 
 MAX_NOTE = 300
 MAX_NOTES = 50          # per project
 MAX_GLOBAL_NOTES = 40
+MAX_PAPERS = 200        # on a project's reading list
 NOTE_KINDS = PROJECT_KINDS
 
 
@@ -144,6 +145,7 @@ class ChatStore:
         for p in projects:
             p.setdefault("instructions", "")
             p.setdefault("notes", [])
+            p.setdefault("papers", [])
         known = {p["id"] for p in projects}
         assign = {c: p for c, p in (data.get("assign") or {}).items() if p in known}
         notes = [n for n in data.get("global_notes") or [] if isinstance(n, dict) and n.get("id") and n.get("text")]
@@ -163,7 +165,7 @@ class ChatStore:
 
     def create_project(self, name: Any) -> Dict[str, Any]:
         project = {"id": "p" + secrets.token_hex(4), "name": _name(name), "created": time.time(),
-                   "instructions": "", "notes": []}
+                   "instructions": "", "notes": [], "papers": []}
         with self._lock:
             index = self._read_index()
             index["projects"].append(project)
@@ -250,6 +252,39 @@ class ChatStore:
             if len(kept) == len(project["notes"]):
                 raise KeyError("no note %r" % note_id)
             project["notes"] = kept
+            self._write_index(index)
+
+    def add_paper(self, project_id: str, paper: Dict[str, Any], why: str = "",
+                  chat_id: Optional[str] = None) -> Tuple[Dict[str, Any], str]:
+        """Put a paper on the project's reading list. Returns (entry, "saved" or "known")."""
+        why = " ".join(str(why or "").split())[:300]
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            for entry in project["papers"]:
+                if entry["paper"].lower() == str(paper["id"]).lower():
+                    if why:
+                        entry["why"] = why
+                        self._write_index(index)
+                    return entry, "known"
+            if len(project["papers"]) >= MAX_PAPERS:
+                raise ValueError("the reading list is full (%d papers); remove some first" % MAX_PAPERS)
+            entry = {"id": "r" + secrets.token_hex(4), "paper": str(paper["id"]), "title": str(paper.get("title", ""))[:300],
+                     "authors": [str(a) for a in (paper.get("authors") or [])[:8]], "year": paper.get("year"),
+                     "venue": str(paper.get("venue") or "")[:120], "url": str(paper.get("url") or ""),
+                     "why": why, "chat": chat_id, "added": time.time()}
+            project["papers"].append(entry)
+            self._write_index(index)
+        return entry, "saved"
+
+    def delete_paper(self, project_id: str, entry_id: str) -> None:
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            kept = [e for e in project["papers"] if e.get("id") != entry_id]
+            if len(kept) == len(project["papers"]):
+                raise KeyError("no paper %r on the reading list" % entry_id)
+            project["papers"] = kept
             self._write_index(index)
 
     def delete_project(self, project_id: str) -> None:

@@ -18,9 +18,9 @@ ENV = {
     "openai_api_key": "OPENAI_API_KEY",
     "gemini_api_key": "GEMINI_API_KEY",
 }
-SECRET = set(ENV) | {"local_api_key", "webhook"}   # a webhook URL is a credential too
+SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
-                     "reviewer"}
+                     "reviewer", "literature"}
 
 
 class Settings:
@@ -61,6 +61,8 @@ class Settings:
             value = str(value).strip()
             if name == "instructions":  # read by Kelvin in every conversation
                 value = value[:MAX_INSTRUCTIONS]
+            if name == "literature":  # literature search sends queries to arXiv and OpenAlex; only "off" is stored
+                value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "lab":  # which lab to open: the user's lab.yaml ("mine") or the virtual lab
@@ -87,6 +89,7 @@ class Settings:
             "learn": self.learning,
             "notify_kinds": self.notify_kinds,
             "reviewer": self._data.get("reviewer", ""),
+            "literature": self._data.get("literature") != "off",
         }
 
     @property

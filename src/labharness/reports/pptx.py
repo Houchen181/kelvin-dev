@@ -471,6 +471,13 @@ def write_pptx(report: Report, path: Path) -> int:
     for run in report.runs:
         slides += _run_slides(run, footer, len(slides) + 1)
 
+    if report.references:
+        s = Slide()
+        y = _frame(s, "References", "the project's reading list", len(slides) + 1, footer)
+        s.text(M, y, SLIDE_W - 2 * M, SLIDE_H - y - 40,
+               [[("[%d] " % i, {"bold": True, "color": MUTED}), (_clip(r, 220), {})]
+                for i, r in enumerate(report.references[:14], 1)], 12, space=4, shrink=True, name="References")
+        slides.append(s)
     if report.log:
         s = Slide()
         y = _frame(s, "Lab log", "approvals, runs and alarms", len(slides) + 1, footer)

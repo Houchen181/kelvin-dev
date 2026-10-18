@@ -277,7 +277,7 @@ class Collector:
     # ------------------------------------------------------------------ the whole report
 
     def report(self, run_ids: Sequence[str], title: str = "", summary: str = "", notes: Iterable[Tuple[str, str]] = (),
-               lab_name: str = "", simulated: bool = False) -> Report:
+               lab_name: str = "", simulated: bool = False, references: Iterable[str] = ()) -> Report:
         events = self.events()
         runs = [self.run(r, events) for r in run_ids]
         days = sorted({r[:8] for r in run_ids if re.match(r"\d{8}-", r)})
@@ -315,7 +315,7 @@ class Collector:
         return Report(title=title or "Experiment report", subtitle=subtitle,
                       created=datetime.now().strftime("%b %d %Y, %H:%M").replace(" 0", " "),
                       lab=lab_name, simulated=simulated, summary=[p.strip() for p in summary.split("\n\n") if p.strip()],
-                      runs=runs, log=log[-200:], notes=list(notes))
+                      runs=runs, log=log[-200:], notes=list(notes), references=list(references))
 
 
 def pick_runs(runs_dir: Path, runs: Optional[Sequence[str]] = None, day: str = "", last: int = 0) -> List[str]:

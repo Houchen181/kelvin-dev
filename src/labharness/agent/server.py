@@ -34,9 +34,12 @@ You are connected to a physics lab through Kelvin.
 - If something looks wrong, stop and tell the user. Moving a drive back toward safe runs without asking.
 - Before a long or unattended run, offer to watch the readings that matter (watch); alarms reach the user even when
   they are away. lab_status lists active alarms; mention any you see.
+- To plan an experiment, first look at what is known: search_papers, read the most relevant one or two, then
+  propose parameters with reasons and cite them as [Author Year](url). Never invent a reference or a number.
 - Reply to the user briefly: the result first, then the next step."""
 
 READ = ToolAnnotations(readOnlyHint=True)
+WEB = ToolAnnotations(readOnlyHint=True, openWorldHint=True)   # reads the public literature, never the lab
 ACT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 
 
@@ -99,6 +102,21 @@ def build_server(rt: LabRuntime) -> MCPServer:
         except (KeyError, PermissionError) as e:
             return "not removed: %s" % (e.args[0] if e.args else e)
         return "no longer watching (%s)" % watch_id
+
+    @server.tool(annotations=WEB, structured_output=False)
+    def search_papers(query: str, limit: int = 8, since_year: Optional[int] = None) -> str:
+        """Search the literature: arXiv preprints and journal papers (OpenAlex). Each result has authors, year,
+        venue, citations, a short abstract and an id for read_paper. Use it to plan an experiment from what is known
+        (typical parameters, signal sizes, pitfalls) and to check a result against published work. The query goes to
+        public services: describe the physics, never confidential sample or project details."""
+        return rt.search_papers(query, limit, since_year)
+
+    @server.tool(annotations=WEB, structured_output=False)
+    def read_paper(paper: str, start: int = 0, max_chars: int = 12000) -> str:
+        """Read a paper by its id from search_papers (arXiv:2401.01234, or doi:10.1103/...): title, authors, and for
+        arXiv papers with an HTML version the full text by section with equations as LaTeX (otherwise the abstract).
+        Long papers come in parts: pass start to read on."""
+        return rt.read_paper(paper, start, max_chars)
 
     @server.tool(annotations=ACT, structured_output=False)
     def make_report(runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",

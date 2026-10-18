@@ -102,6 +102,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     tasks: List[asyncio.Task] = []
 
+    def configure_literature() -> None:
+        runtime.literature.enabled = settings.get("literature") != "off"
+        runtime.literature.openalex_key = settings.get("openalex_api_key") or ""
+
     def configure_notifications() -> None:
         try:
             runtime.notifier.configure(settings.get("webhook"), settings.notify_kinds)
@@ -112,6 +116,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def lifespan(app: Starlette):
         await agent.start()
         configure_notifications()
+        configure_literature()
         runtime.monitor.start()
         try:
             yield
@@ -223,6 +228,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except ValueError as e:
             return error(400, str(e))
 
+    async def paper(request: Request) -> Response:
+        try:
+            store.delete_paper(request.path_params["project_id"], request.path_params["paper_id"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        return JSONResponse({"ok": True})
+
     async def note(request: Request) -> Response:
         try:
             store.delete_note(request.path_params["project_id"], request.path_params["note_id"])
@@ -253,6 +265,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         body = await request.json()
         scope = str(body.get("scope") or "")
         notes: List[Any] = []
+        references: List[str] = []
         title = str(body.get("title") or "")
         try:
             if scope in ("chat", "project"):
@@ -260,6 +273,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 chats, project = agent.chats_for_report(chat) if scope == "project" else ([chat], None)
                 runs = [r for r in runs_in(chats) if (runtime.data_dir / "runs" / r).is_dir()]
                 notes = agent.report_notes(project)
+                references = agent.report_references(project)
                 title = title or ("%s report" % project["name"] if project else chat.get("title") or "")
             elif scope == "today":
                 runs = runtime.pick_runs(day="today")
@@ -277,7 +291,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, "There are no runs to report here yet.")
         try:
             files = await asyncio.to_thread(runtime.report, runs, title, str(body.get("summary") or ""),
-                                            str(body.get("format") or "pdf"), notes, "human")
+                                            str(body.get("format") or "pdf"), notes, "human", references)
         except ValueError as e:
             return error(400, str(e))
         return JSONResponse({"files": [{k: v for k, v in f.items() if k != "path"} for f in files],
@@ -550,6 +564,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             except ValueError as e:
                 return error(400, str(e))
             configure_notifications()
+            configure_literature()
             agent.providers = make_providers(settings, demo) if providers is None else providers
         return JSONResponse({"settings": settings.public(), "models": await agent.models()})
 
@@ -617,6 +632,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/projects", projects, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}", project, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/projects/{project_id}/notes/{note_id}", note, methods=["DELETE"]),
+        Route("/api/projects/{project_id}/papers/{paper_id}", paper, methods=["DELETE"]),
         Route("/api/memory", memory_view),
         Route("/api/memory/notes/{note_id}", memory_note, methods=["DELETE"]),
         Route("/api/stop", stop, methods=["POST"]),

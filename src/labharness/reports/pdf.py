@@ -428,6 +428,11 @@ def write_pdf(report: Report, path: Path) -> int:
     for i, run in enumerate(report.runs, 1):
         flow.rule()
         _run(flow, run, i)
+    if report.references:
+        flow.rule()
+        flow.heading("References", 12, before=6)
+        for i, ref in enumerate(report.references, 1):
+            flow.para(ref, 9, bullet="[%d]" % i, gap=2, indent=0)
     if report.log:
         flow.rule()
         flow.heading("Lab log", 12, before=6)

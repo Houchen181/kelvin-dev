@@ -33,6 +33,9 @@ Use units. Prefer a short list or small table over paragraphs. While a plan runs
 progress and plots live in a Runs pane beside the chat; when it finishes, the conversation shows the automatic
 assessment and the pane shows the key results, plots with fits and the data. So do not repeat them: add what
 they cannot (interpretation, anything suspicious, the next step).
+When you cite a paper, link it: [Author Year](url), using only papers you found with search_papers or the
+project's reading list; never invent a reference. Queries to search_papers leave the computer: describe the
+physics, not confidential sample or project details.
 A user message may begin with a <second_opinion> block: another model's review of your previous answer, asked for by
 the user. Weigh it on its merits and say briefly where you agree or not. A run_plan result may start with a second
 opinion on the plan; mention its concerns if they matter."""
@@ -103,6 +106,25 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
                 if rid and rid not in ids:
                     ids.append(rid)
     return sorted(ids)
+
+
+SAVE_PAPER = {
+    "name": "save_paper",
+    "description": "Put a paper on this project's reading list (the user sees it in the project's settings, and it is "
+                   "listed as references in the project's reports). Use the id that search_papers gave. Save papers "
+                   "the project will rely on, not every search result.",
+    "schema": {"type": "object", "required": ["paper"], "properties": {
+        "paper": {"type": "string", "description": "arXiv:... or doi:... as search_papers lists it"},
+        "why": {"type": "string", "description": "One line: what the project uses it for (optional)"}}},
+}
+
+
+def reference(entry: Dict[str, Any]) -> str:
+    """A reading-list entry as a reference line."""
+    names = entry.get("authors") or []
+    who = names[0] + (" et al." if len(names) > 2 else " and " + names[1] if len(names) == 2 else "") if names else "?"
+    return "%s (%s). %s. %s%s" % (who, entry.get("year") or "n.d.", entry.get("title", ""),
+                                  entry.get("venue") + ". " if entry.get("venue") else "", entry.get("url", ""))
 
 
 REPORT_SCOPE = (" In this portal, with no runs, day or last chosen, the report covers the runs started in this "
@@ -183,9 +205,15 @@ class ChatAgent:
             parts.append(PROJECT.format(name=project["name"]))
             if project["instructions"]:
                 parts.append("## Instructions\n" + project["instructions"])
+            papers = project.get("papers") or []
+            if papers:   # changes only when a paper is added, so the cached prefix mostly holds
+                parts.append("## Reading list (read_paper takes the id)\n" + "\n".join(
+                    "- %s [id %s]%s" % (reference(e), e["paper"], " — " + e["why"] if e.get("why") else "")
+                    for e in papers[-40:]))
         learn = self.settings.learning if self.settings else True
         parts.append(MEMORY_RULES + ("\n" + LEARN_RULES if learn else ""))
-        return {"system": "\n\n".join(parts), "tools": self.tools + ([remember_tool(bool(project))] if learn else []),
+        return {"system": "\n\n".join(parts),
+                "tools": self.tools + ([remember_tool(bool(project))] if learn else []) + ([SAVE_PAPER] if project else []),
                 "project": project["id"] if project else None, "learn": learn}
 
     def recall(self, chat: Dict[str, Any], message: Dict[str, Any]) -> None:
@@ -236,6 +264,23 @@ class ChatAgent:
         return [(n.get("kind") or "note", n["text"]) for n in (project or {}).get("notes", [])
                 if n.get("kind") in memory.PROJECT_KINDS]
 
+    async def _save_paper(self, chat: Dict[str, Any], context: Dict[str, Any], args: Any) -> Tuple[str, bool]:
+        if not isinstance(args, dict) or not args.get("paper"):
+            return "say which paper (its id from search_papers)", True
+        if not self.runtime.literature.enabled:
+            return "literature search is switched off in Settings", True
+        try:
+            paper = await asyncio.to_thread(self.runtime.literature.lookup, str(args["paper"]))
+            entry, what = self.store.add_paper(context["project"], paper.as_dict(), str(args.get("why") or ""), chat["id"])
+        except KeyError as e:
+            return "not saved: %s" % (e.args[0] if e.args else e), True
+        except Exception as e:
+            return "not saved: %s" % e, True
+        return "%s the reading list: %s" % ("already on" if what == "known" else "added to", reference(entry)), False
+
+    def report_references(self, project: Optional[Dict[str, Any]]) -> List[str]:
+        return [reference(e) for e in (project or {}).get("papers", [])]
+
     async def _report(self, chat: Dict[str, Any], args: Any) -> Tuple[str, bool]:
         if not isinstance(args, dict):
             return "the arguments were not valid JSON; send the call again", True
@@ -250,7 +295,8 @@ class ChatAgent:
             runs = [r for r in runs_in(chats) if (self.runtime.data_dir / "runs" / r).is_dir()] or None
         title = str(args.get("title") or "") or ("%s report" % project["name"] if project else "")
         text = await asyncio.to_thread(self.runtime.make_report, runs, day, last, title, str(args.get("summary") or ""),
-                                       str(args.get("format") or "pdf"), self.report_notes(project), "agent")
+                                       str(args.get("format") or "pdf"), self.report_notes(project), "agent",
+                                       self.report_references(project))
         return text, text.startswith("no report")
 
     # ------------------------------------------------------------------ turns
@@ -367,6 +413,8 @@ class ChatAgent:
                 await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
                 if call["name"] == "remember" and context["learn"]:
                     content, is_error = self._remember(chat, context, call["input"])
+                elif call["name"] == "save_paper" and context["project"]:
+                    content, is_error = await self._save_paper(chat, context, call["input"])
                 elif call["name"] == "make_report":
                     content, is_error = await self._report(chat, call["input"])
                 elif call["name"] == "run_plan" and self.settings and self.settings.get("reviewer"):

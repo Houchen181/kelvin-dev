@@ -21,6 +21,7 @@ from ..eventlog import EventLog, RunStore
 from ..gate import Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, Envelope
+from ..literature import Literature
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
 from ..plans import Plan, PlanError, load_plan
@@ -124,6 +125,7 @@ class LabRuntime:
         self.lab_info: Dict[str, Any] = {"kind": "virtual" if all(i.simulated for i in lab.instruments.values()) else "file",
                                          "path": None, "error": None, "has_file": False}
         self.notifier = Notifier()
+        self.literature = Literature()
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
@@ -541,6 +543,31 @@ class LabRuntime:
             out.append(dict(vars(f), suggested=name))
         return out
 
+    # ------------------------------------------------------------------ literature
+
+    def search_papers(self, query: str, limit: int = 8, since_year: Optional[int] = None) -> str:
+        if not self.literature.enabled:
+            return "literature search is switched off in Settings"
+        try:
+            papers, problems = self.literature.search(query, limit, since_year)
+        except ValueError as e:
+            return "not searched: %s" % e
+        lines = [p.line(i) for i, p in enumerate(papers, 1)] or ["no papers found for %r" % query]
+        lines += ["note: " + p for p in problems]
+        if papers:
+            lines.append("read one with read_paper(paper=<id>); cite as [Author Year](url)")
+        return "\n".join(lines)
+
+    def read_paper(self, paper: str, start: int = 0, max_chars: int = 12000) -> str:
+        if not self.literature.enabled:
+            return "literature search is switched off in Settings"
+        try:
+            return self.literature.read(paper, start, max_chars)
+        except KeyError as e:
+            return "not found: %s" % (e.args[0] if e.args else e)
+        except Exception as e:
+            return "could not read it: %s" % (str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
+
     # ------------------------------------------------------------------ reports
 
     @property
@@ -551,7 +578,7 @@ class LabRuntime:
         return pick_runs(self.data_dir / "runs", runs, day, last)
 
     def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
-               notes: Any = (), by: str = "human") -> List[Dict[str, Any]]:
+               notes: Any = (), by: str = "human", references: Any = ()) -> List[Dict[str, Any]]:
         """Write a report of these runs (oldest first) as PDF and/or PowerPoint into reports/. Reads only files:
         it never talks to an instrument, so it can run while a plan runs."""
         if not run_ids:
@@ -572,7 +599,7 @@ class LabRuntime:
         simulated = all(m.get("simulated", True) for m in metas) if labs else \
             all(i.simulated for i in self.lab.instruments.values())
         report = Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line).report(
-            run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated)
+            run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated, references)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         base = "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"),
                           re.sub(r"[^\w-]+", "_", report.title).strip("_")[:48] or "report")
@@ -592,7 +619,8 @@ class LabRuntime:
             return {}
 
     def make_report(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
-                    summary: str = "", fmt: str = "pdf", notes: Any = (), by: str = "agent") -> str:
+                    summary: str = "", fmt: str = "pdf", notes: Any = (), by: str = "agent",
+                    references: Any = ()) -> str:
         """The make_report tool's answer. With nothing chosen: today's runs, or else the latest run."""
         try:
             ids = self.pick_runs(runs, day, last)
@@ -603,7 +631,7 @@ class LabRuntime:
         if not ids:
             return "no report: no runs %s" % ("on %s" % day if day else "yet")
         try:
-            files = self.report(ids, title, summary, fmt, notes, by)
+            files = self.report(ids, title, summary, fmt, notes, by, references)
         except (ValueError, OSError) as e:
             return "no report: %s" % e
         lines = ["report: %s (%d run%s, %s)" % (f["name"], len(ids), "" if len(ids) == 1 else "s",

@@ -196,6 +196,14 @@
       <select id="default-model" name="default_model"></select>
     </div>
     <div class="field">
+      <div class="field-row"><span class="field-label">Literature search</span>
+        <label class="check"><input id="literature" type="checkbox"> On</label></div>
+      <span class="hint">Kelvin searches arXiv and journals (through OpenAlex) and reads papers to plan experiments and check results. Only the search words go to those public services, never your data or chats. Switch it off for confidential work.</span>
+      <label for="k-openalex">OpenAlex API key <span class="muted">(optional; a free key raises the daily search allowance)</span></label>
+      <div class="key-row"><input id="k-openalex" name="openalex_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="openalex_api_key">Remove</button></div>
+      <span class="hint" data-hint="openalex_api_key"></span>
+    </div>
+    <div class="field">
       <label for="reviewer">Second opinion on plans</label>
       <select id="reviewer" name="reviewer"></select>
       <span class="hint">Another model reviews every plan before it runs. If it advises stopping, Kelvin asks you first. Pick a model from a different company for a more independent view. Any answer can also get a second opinion from its button.</span>
@@ -333,6 +341,11 @@
       <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>
       <ul id="project-notes" class="memory-notes"></ul>
       <span class="hint">Short facts Kelvin saved from this project's conversations. Delete any that are wrong or out of date; a deleted note is gone at once.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Reading list</span><span id="papers-count" class="hint"></span></div>
+      <ul id="project-papers" class="memory-notes"></ul>
+      <span class="hint">Papers this project relies on. Kelvin adds them when you ask ("keep that paper"); they are listed as references in the project's reports.</span>
     </div>
     <footer class="dialog-foot">
       <span id="project-msg" class="muted small"></span>

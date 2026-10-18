@@ -42,6 +42,7 @@ class Report:
     runs: List[RunPart] = field(default_factory=list)
     log: List[Tuple[str, str]] = field(default_factory=list)
     notes: List[Tuple[str, str]] = field(default_factory=list)   # project notes: kind, text
+    references: List[str] = field(default_factory=list)          # the project's reading list, formatted
     folder: str = ""
 
     @property
