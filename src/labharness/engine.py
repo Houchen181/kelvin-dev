@@ -193,7 +193,12 @@ class RunEngine:
             if sim is not None:
                 title += ", ~%s" % _dur(sim.duration_s) if sim.ok else "; %s" % sim.message
             request = ApprovalRequest(title, items)
-            if not self.gate.ask(request):
+            auto, why = self.gate.auto_plan(grants, sim)
+            if auto:
+                self.gate.auto_approve(request, why)
+            elif why:
+                request.items.append("Auto mode does not cover this run: " + "; ".join(why))
+            if not auto and not self.gate.ask(request):
                 why = " (%s)" % request.note if request.note else ""
                 report = RunReport("declined", plan.name, "declined: plan %s not run%s" % (plan.name, why), dry_run=sim)
                 self.gate.log.write("run_declined", by=self.gate.operator, plan=plan.name)

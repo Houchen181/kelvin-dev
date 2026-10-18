@@ -773,6 +773,15 @@
   }
 
   // ------------------------------------------------------------------ approvals
+  // auto mode approved this without asking: show what ran and why, like an answered request
+  function autoApproval(ev) {
+    return h("div", { class: "approval done auto", role: "group", "aria-label": ev.title },
+      h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title)),
+      h("ul", {}, ...ev.items.map((i) => h("li", {}, i))),
+      h("div", { class: "approval-actions" }, h("span", { class: "verdict auto" }, "Auto-approved"),
+        h("span", { class: "muted small" }, (ev.reasons || []).join("; "))));
+  }
+
   function makeApproval(ev) {
     const verdict = h("span", { class: "verdict" });
     const count = h("span", { class: "muted small" });
@@ -875,9 +884,9 @@
       if (ev.status === "running") noticeRun(ev.run_id, ev.plan);
     }
     approval(ev) {
-      const card = makeApproval(ev);
+      const el = ev.auto ? autoApproval(ev) : makeApproval(ev).el;
       const step = this.steps.get(ev.call_id);
-      if (step) { (step.last || step.el).after(card.el); step.last = card.el; } else this.el.append(card.el);
+      if (step) { (step.last || step.el).after(el); step.last = el; } else this.el.append(el);
     }
     note(text) { this.endText(); this.el.append(h("div", { class: "note" }, text)); }
     error(text) { this.endText(); this.el.append(h("div", { class: "callout" }, text)); }
@@ -1380,8 +1389,36 @@
     badge.textContent = String(s.pending.length);
     badge.hidden = !s.pending.length;
     if (loose.length && !S.labOpen) toggleLab(true);
+    showMode(s.approval_mode, s.approval_rule);
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
   }
+  // ------------------------------------------------------------------ approval mode (a person's choice)
+  function showMode(mode, rule) {
+    const select = $("approval-mode");
+    if (rule) S.approvalRule = rule;
+    if (document.activeElement !== select) select.value = mode === "auto" ? "auto" : "ask";
+    $("mode-box").classList.toggle("auto", mode === "auto");
+    $("fineprint").textContent = mode === "auto"
+      ? "Auto mode: low-risk changes run without asking; everything else waits for your approval."
+      : "Measurements run right away. Anything that drives the sample harder waits for your approval.";
+    $("mode-box").title = mode === "auto" ? "Auto mode: " + (S.approvalRule || "low-risk changes run without asking")
+      : "Kelvin asks you before anything drives the sample harder";
+  }
+  async function changeMode(mode) {
+    if (mode === "auto" && !confirm("Turn on auto mode?\n\nKelvin then approves low-risk changes for you: " +
+        (S.approvalRule || "drives that stay well inside the lab limits, after a clean dry run.") +
+        "\n\nEverything else still waits for you, and \u201cAll drives to safe\u201d always works. " +
+        "Auto mode switches off when Kelvin restarts.")) {
+      showMode("ask");
+      return;
+    }
+    try {
+      const r = await api("/api/mode", { body: { mode } });
+      showMode(r.mode, r.rule);
+      toast(r.mode === "auto" ? "Auto mode on: low-risk changes run without asking." : "Kelvin will ask before every drive change.");
+    } catch (e) { toast(e.message); pollState(); }
+  }
+
   function toggleLab(open) {
     S.labOpen = open === undefined ? !S.labOpen : open;
     $("labpanel").hidden = !S.labOpen;
@@ -1504,6 +1541,7 @@
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!S.streaming) sendMessage($("input").value); }
     });
     $("model").addEventListener("change", () => { store("lh.model", $("model").value); updateSend(); });
+    $("approval-mode").addEventListener("change", (e) => changeMode(e.target.value));
     $("new-chat").addEventListener("click", () => newChat());
     $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });
     $("scrim").addEventListener("click", () => { closeSidebar(); if (S.labOpen) toggleLab(false); if (RUNS.open) toggleRuns(false); });
