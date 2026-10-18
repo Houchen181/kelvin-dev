@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -127,6 +128,21 @@ class SafetyGate:
         self._undo: List[Tuple[str, str, Any]] = []
         self._stop_gen = 0
         self._prefixes: Dict[int, Template] = {}
+        self._acting = threading.local()   # a person's own command (the portal's terminal), on this thread only
+
+    @contextmanager
+    def acting_as(self, by: str) -> Iterator[None]:
+        """Commands on this thread are a person's, not the agent's: logged as theirs and kept off the agent's undo
+        list. Every check still applies: limits, interlocks, blocked commands, approvals."""
+        old = getattr(self._acting, "by", None)
+        self._acting.by = by
+        try:
+            yield
+        finally:
+            self._acting.by = old
+
+    def _who(self) -> str:
+        return getattr(self._acting, "by", None) or self.operator
 
     # ------------------------------------------------------------------ agent-facing
 
@@ -143,7 +159,7 @@ class SafetyGate:
         return self._done(Result(True, "read", key, value=value, message="%s = %s" % (key, spec.show(value))), "get")
 
     def set(self, instr: str, param: str, value: Any, wait: bool = True) -> Result:
-        return self._set(instr, param, value, wait, self.operator)
+        return self._set(instr, param, value, wait, self._who())
 
     def raw(self, instr: str, command: str) -> Result:
         try:
@@ -167,7 +183,7 @@ class SafetyGate:
         if not self._undo:
             return Result(False, "refused", "", message="nothing to undo")
         instr, param, before = self._undo.pop()
-        r = self._set(instr, param, before, True, self.operator, record_undo=False)
+        r = self._set(instr, param, before, True, self._who(), record_undo=False)
         r.message = "undo: " + r.message
         return r
 
@@ -255,7 +271,7 @@ class SafetyGate:
     def auto_approve(self, request: ApprovalRequest, reasons: List[str]) -> None:
         """Approve without asking, and say so: in the event log and to the human's screen."""
         request.note = "auto mode: " + "; ".join(reasons)
-        self.log.write("ask", by=self.operator, request=str(request), answer="auto-approved", note=request.note)
+        self.log.write("ask", by=self._who(), request=str(request), answer="auto-approved", note=request.note)
         try:
             self.approver.inform(request, reasons)
         except Exception:
@@ -265,7 +281,7 @@ class SafetyGate:
 
     def ask(self, request: ApprovalRequest) -> bool:
         answer = bool(self.approver.approve(request))
-        self.log.write("ask", by=self.operator, request=str(request), answer="approved" if answer else "declined",
+        self.log.write("ask", by=self._who(), request=str(request), answer="approved" if answer else "declined",
                        note=request.note or None)
         return answer
 
@@ -357,12 +373,12 @@ class SafetyGate:
         except Exception as e:
             res = Result(False, "error", key, message="%s: instrument error: %s" % (key, e))
             current = None
-        if res.ok and record_undo and res.action != "no-change":
+        if res.ok and record_undo and res.action != "no-change" and getattr(self._acting, "by", None) is None:
             self._undo.append((instr, param, current))
         return self._done(res, "set", by)
 
     def _done(self, res: Result, method: str, by: Optional[str] = None, **extra: Any) -> Result:
-        self.log.write("command", by=by or self.operator, method=method, target=res.target, action=res.action,
+        self.log.write("command", by=by or self._who(), method=method, target=res.target, action=res.action,
                        ok=res.ok, value=res.value if not isinstance(res.value, list) else "trace(%d)" % len(res.value),
                        before=res.before, message=res.message, **extra)
         return res
@@ -557,7 +573,7 @@ class SafetyGate:
             r = self._move(inst, spec, at, spec.safe, away=False, wait=False, how=None)
             end = "back to %s" % spec.show(spec.safe) if r.ok else "could not return to safe: " + r.message
         msg = "%s tripped at %s: %s; %s" % (key, spec.show(at), detail, end)
-        self.log.write("trip", by=self.operator, target=key, at=at, guard=g.key, reading=val, message=msg)
+        self.log.write("trip", by=self._who(), target=key, at=at, guard=g.key, reading=val, message=msg)
         return Result(False, "tripped", key, value=at, message=msg)
 
     def _to_safe(self, inst: Instrument, wait: bool) -> List[Result]:
@@ -608,7 +624,7 @@ class SafetyGate:
                     value = spec.from_wire(text)
                 except ValueError as e:
                     return done(Result(False, "refused", target, message="refused: %s" % e))
-                res = self._set(inst.name, spec.name, value, True, self.operator)
+                res = self._set(inst.name, spec.name, value, True, self._who())
                 res.message = "raw %r → %s" % (cmd, res.message)
                 return res
             for r in card.reset:

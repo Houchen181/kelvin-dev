@@ -132,6 +132,7 @@ class LabRuntime:
         self.cards_dir: Optional[Path] = None   # the user's own cards (~/Kelvin/cards); set by the app
         self.home: Optional[Path] = None        # ~/Kelvin, where each instrument has its folder; set by the app
         self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
+        self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
@@ -264,6 +265,109 @@ class LabRuntime:
 
     def undo(self) -> str:
         return self._do("undo", lambda: self.gate.undo().message)
+
+    # ------------------------------------------------------------------ where the data go (people only)
+
+    DATA = ("runs", "reports", "events.jsonl")   # what a data folder holds; chats and settings stay with Kelvin
+
+    def data_summary(self) -> Dict[str, Any]:
+        runs = self.data_dir / "runs"
+        return {"path": str(self.data_dir), "runs": sum(1 for d in runs.iterdir() if d.is_dir()) if runs.exists() else 0,
+                "reports": sum(1 for f in (self.data_dir / "reports").glob("*") if f.is_file())
+                if (self.data_dir / "reports").exists() else 0}
+
+    def set_data_dir(self, path: Any, move: bool = False, by: str = "human") -> Dict[str, Any]:
+        """Keep runs, the lab record (events.jsonl) and reports in another folder: a person's choice, from Settings.
+        Refused while Kelvin is busy. With move, what is saved now goes along, but nothing there is overwritten:
+        a run or report whose name is taken, or a record the new folder already has, stays where it was."""
+        import shutil
+        new = Path(str(path)).expanduser()
+        if not new.is_absolute():
+            raise ValueError("give the folder's full path, such as D:\\Data\\Kelvin or /Users/me/Data/Kelvin")
+        if not self.lock.acquire(blocking=False):
+            raise RuntimeError("Kelvin is busy (%s); try again when it is idle" % (self.busy or "working"))
+        try:
+            if self.live and self.live.get("status") == "running":
+                raise RuntimeError("a plan is running; change the data folder after it finishes")
+            try:
+                new.mkdir(parents=True, exist_ok=True)
+                probe = new / ".kelvin-write-test"
+                probe.write_text("ok", encoding="utf-8")
+                probe.unlink()
+            except OSError as e:
+                raise ValueError("Kelvin cannot write to %s: %s" % (new, e.strerror or e))
+            old = self.data_dir
+            if new.resolve() == old.resolve():
+                return dict(self.data_summary(), moved=0, kept=[])
+            moved, kept = 0, []
+            if move:
+                for sub in ("runs", "reports"):
+                    src = old / sub
+                    if not src.is_dir():
+                        continue
+                    (new / sub).mkdir(exist_ok=True)
+                    for item in sorted(src.iterdir()):
+                        target = new / sub / item.name
+                        if target.exists():
+                            kept.append("%s/%s" % (sub, item.name))
+                            continue
+                        shutil.move(str(item), str(target))
+                        moved += 1
+                if (old / "events.jsonl").exists():
+                    if (new / "events.jsonl").exists():
+                        kept.append("events.jsonl")
+                    else:
+                        shutil.move(str(old / "events.jsonl"), str(new / "events.jsonl"))
+                        moved += 1
+            if not move or kept:
+                self.gate.log.write("data_folder", by=by, moved_to=str(new),
+                                    note="what stays here was not moved" if move else "earlier data stay here")
+            self.data_dir = new
+            self.events_path = new / "events.jsonl"
+            self.gate.log = EventLog(self.events_path, self.lab.clock)
+            self.engine.store = RunStore(new / "runs")
+            self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept))
+            return dict(self.data_summary(), moved=moved, kept=kept, previous=str(old))
+        finally:
+            self.lock.release()
+
+    # ------------------------------------------------------------------ a person's terminal (people only)
+
+    def terminal(self, instrument: str, op: str, arg: str = "", value: Any = None,
+                 by: str = "human (terminal)") -> Dict[str, Any]:
+        """A command a person typed in the portal's terminal. It goes through the same gate as everything Kelvin
+        does (limits, interlocks, blocked commands, approvals) and is logged as theirs. op: raw (a command for the
+        instrument, e.g. SCPI), get, set, describe or manual (search its manual). Refused, not queued, while Kelvin
+        is busy, so a typed command never lands in the middle of a run."""
+        if instrument not in self.lab.instruments:
+            return {"ok": False, "action": "refused", "message": "no instrument %r (have: %s)"
+                    % (instrument, ", ".join(self.lab.instruments))}
+        if op == "manual":
+            return {"ok": True, "action": "read", "message": self.search_manual(instrument, arg)}
+        if op == "describe":
+            return {"ok": True, "action": "read", "message": self.gate.describe(instrument)}
+        if op not in ("raw", "get", "set"):
+            return {"ok": False, "action": "refused", "message": "unknown terminal operation %r" % op}
+        if not arg.strip():
+            return {"ok": False, "action": "refused", "message": "nothing to send"}
+        if not self.lock.acquire(blocking=False):
+            return {"ok": False, "action": "busy",
+                    "message": "Kelvin is busy (%s); wait for it, or stop it first" % (self.busy or "working")}
+        try:
+            self.busy = "terminal: %s %s" % (instrument, arg)
+            with self.gate.acting_as(by):
+                if op == "raw":
+                    r = self.gate.raw(instrument, arg.strip())
+                elif op == "get":
+                    r = self.gate.get(instrument, arg.strip())
+                else:
+                    r = self.gate.set(instrument, arg.strip(), value)
+            shown = r.value if r.value is None or isinstance(r.value, (str, int, float, bool)) else str(r.value)[:200]
+            return {"ok": r.ok, "action": r.action, "message": r.message, "value": shown}
+        finally:
+            self.busy = None
+            self._refresh()
+            self.lock.release()
 
     def stop(self, by: str = "human") -> int:
         """A person's stop: decline open requests and stop the current ramp or plan. Drives stay where they are

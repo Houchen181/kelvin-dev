@@ -46,6 +46,9 @@
       <button id="toggle-incognito" class="pill" type="button" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg><span class="incog-text">Incognito</span>
       </button>
+      <button id="toggle-term" class="pill" type="button" aria-label="Show the terminal" aria-pressed="false" title="Terminal: type to Kelvin, or send instruments their own commands (Ctrl+`)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg><span class="term-text">Terminal</span>
+      </button>
       <button id="toggle-runs" class="pill" type="button" aria-label="Show the runs pane" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg>Runs<span id="runs-dot" class="live-dot" hidden></span>
       </button>
@@ -100,6 +103,23 @@
       </form>
       <p id="fineprint" class="fineprint">Measurements run right away. Anything that drives the sample harder waits for your approval.</p>
     </div>
+
+    <section id="termpane" class="termpane" aria-label="Terminal" hidden>
+      <div id="term-resize" class="term-resize" role="separator" aria-orientation="horizontal" aria-label="Resize the terminal" tabindex="0"></div>
+      <header class="term-head">
+        <span class="term-title">Terminal</span>
+        <span id="term-target" class="term-target"></span>
+        <div class="spacer"></div>
+        <button id="term-clear" class="icon-btn" type="button" aria-label="Clear the terminal" title="Clear (Ctrl+L)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 12.5h9l1-12.5"/></svg>
+        </button>
+        <button id="close-term" class="icon-btn" type="button" aria-label="Close the terminal">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </header>
+      <div id="term-out" class="term-out" role="log" aria-live="polite"></div>
+      <label class="term-in"><span id="term-prompt" class="term-prompt">kelvin&gt;</span><input id="term-input" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Terminal input"></label>
+    </section>
   </main>
 
   <section id="runpane" class="runpane" aria-label="Runs" hidden>
@@ -242,6 +262,13 @@
       <div id="pair-box" class="pair-box" hidden></div>
       <ul id="device-list" class="memory-notes"></ul>
       <span class="hint">Away from the lab, install <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on this computer and the phone; Kelvin then shows its Tailscale address too, and the connection is encrypted. Plain Wi-Fi traffic is not, so on a shared network prefer Tailscale.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Data folder</span><button id="data-open" class="link" type="button">Open</button></div>
+      <div class="key-row"><input id="data-path" spellcheck="false" autocomplete="off" aria-label="Data folder"><button id="data-use" class="btn small" type="button" disabled>Use this folder</button></div>
+      <div id="data-move-row" class="checks" hidden><label class="check wrap"><input id="data-move" type="checkbox" checked> <span id="data-move-text">Move what is saved now</span></label></div>
+      <span id="data-msg" class="hint"></span>
+      <span class="hint">Where Kelvin saves runs (each in its own dated folder with its data, the instrument settings and the analysis), the lab record of every command and approval, and reports. A lab server or a synced drive works. Chats, settings and API keys stay in ~/Kelvin.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Connected instruments</span></div>

@@ -163,6 +163,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
+    default_data = home / "virtual-lab"                   # runs, record and reports unless the user chose a folder
     setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem() is None)
     tasks: List[asyncio.Task] = []
 
@@ -781,6 +782,41 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, str(e).splitlines()[0] if str(e) else type(e).__name__)
         return JSONResponse({"ok": True, "manual": manual, "folders": instrument_folders()})
 
+    async def data_folder(request: Request) -> Response:
+        """GET: where runs, the lab record and reports are kept. POST {path, move}: keep them somewhere else.
+        POST {open: true}: show the folder on this computer."""
+        if request.method == "POST":
+            body = await request.json()
+            if body.get("open"):
+                try:
+                    open_path(runtime.data_dir)
+                except OSError as e:
+                    return error(500, "Could not open it: %s" % e)
+                return JSONResponse({"ok": True})
+            problem = busy_problem()
+            if problem:
+                return error(409, problem)
+            try:
+                result = await asyncio.to_thread(runtime.set_data_dir, str(body.get("path") or "").strip(),
+                                                 bool(body.get("move")), "human (portal)")
+            except (ValueError, RuntimeError, OSError) as e:
+                return error(400, str(e))
+            settings.set_data_dir(result["path"])
+            return JSONResponse(dict(result, default=str(default_data), problem=None))
+        return JSONResponse(dict(runtime.data_summary(), default=str(default_data),
+                                 problem=getattr(runtime, "data_problem", None)))
+
+    async def terminal(request: Request) -> Response:
+        """A command a person typed in the terminal pane: {instrument, op: raw|get|set|describe|manual, arg, value}.
+        Same gate as Kelvin's own commands; waits (like them) while an approval is open."""
+        body = await request.json()
+        instrument, op = str(body.get("instrument") or ""), str(body.get("op") or "raw")
+        arg = str(body.get("arg") or "")
+        if len(arg) > 2000:
+            return error(400, "That command is too long.")
+        result = await asyncio.to_thread(runtime.terminal, instrument, op, arg, body.get("value"))
+        return JSONResponse(result)
+
     async def instrument_open(request: Request) -> Response:
         """Open an instrument's folder, or its manual, on this computer."""
         name = request.path_params["name"]
@@ -1072,6 +1108,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/notify/test", notify_test, methods=["POST"]),
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
+        Route("/api/terminal", terminal, methods=["POST"]),
+        Route("/api/data-folder", data_folder, methods=["GET", "POST"]),
         Route("/api/instruments/{name}/manual", instrument_manual, methods=["POST", "PUT"]),
         Route("/api/instruments/{name}/open", instrument_open, methods=["POST"]),
         Route("/api/instruments/draft", draft_view, methods=["POST"]),
@@ -1091,12 +1129,30 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     return guard
 
 
+def data_folder_for(settings: Settings, home: Path) -> Any:
+    """The data folder the user chose in Settings, if Kelvin can write there now; otherwise the default, and why."""
+    default = home / "virtual-lab"
+    chosen = settings.get("data_dir")
+    if not chosen:
+        return default, None
+    try:
+        Path(chosen).mkdir(parents=True, exist_ok=True)
+        probe = Path(chosen) / ".kelvin-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return Path(chosen), None
+    except OSError as e:
+        return default, ("Your data folder %s can't be written to now (%s), so Kelvin saves to %s until it can."
+                         % (chosen, e.strerror or e, default))
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     import uvicorn
 
     ap = argparse.ArgumentParser(prog="python -m labharness.web", description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=8770)
-    ap.add_argument("--data-dir", default=str(Path.home() / "Kelvin" / "virtual-lab"))
+    ap.add_argument("--data-dir", help="runs, the lab record and reports (default: the folder chosen in Settings, "
+                                       "else ~/Kelvin/virtual-lab)")
     ap.add_argument("--settings", default=str(Path.home() / "Kelvin" / "settings.json"))
     ap.add_argument("--speed", type=float, default=10,
                     help="virtual lab time: N× real time (default 10, so runs can be watched); 0 = instant")
@@ -1117,10 +1173,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         envelope = None
     else:   # the user's lab.yaml next to the settings, if they have one; otherwise the virtual lab
         lab, envelope, info = open_home_lab(Path(args.settings).parent, settings.get("lab") or "auto", args.speed)
-    runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), args.data_dir, envelope)
+    home = Path(args.settings).parent
+    data_dir, problem = (Path(args.data_dir), None) if args.data_dir else data_folder_for(settings, home)
+    runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), data_dir, envelope)
+    runtime.data_problem = problem
     if info:
         runtime.lab_info = info
-    store = ChatStore(Path(args.data_dir) / "chats")
+    store = ChatStore(Path(args.data_dir or home / "virtual-lab") / "chats")
     hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)
     app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts, auto_setup=not (args.no_setup or args.lab))
     url = "http://127.0.0.1:%d/#%s" % (args.port, settings.access_key)

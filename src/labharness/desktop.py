@@ -146,7 +146,10 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     port = args.port or _free_port()
     # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time
     lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10)
-    runtime = LabRuntime(lab, WebApprover(timeout=300), home / "virtual-lab", envelope)
+    from .web.app import data_folder_for
+    data_dir, problem = data_folder_for(settings, home)   # the folder chosen in Settings, else ~/Kelvin/virtual-lab
+    runtime = LabRuntime(lab, WebApprover(timeout=300), data_dir, envelope)
+    runtime.data_problem = problem
     runtime.lab_info = info
     quit_event = threading.Event()
     app = create_app(runtime, settings, ChatStore(home / "virtual-lab" / "chats"), demo=not args.no_demo,

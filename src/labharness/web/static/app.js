@@ -779,6 +779,8 @@
     switch (name) {
       case "lab_status": return v("Checking", "Checked") + " the lab status";
       case "describe_instrument": return v("Reading", "Read") + " the card of " + code(a.instrument);
+      case "instrument_info": return v("Reading", "Read") + " the folder of " + code(a.instrument);
+      case "search_manual": return v("Searching", "Searched") + " the " + esc(a.instrument || "") + " manual for " + code(a.query || "");
       case "get_value": return v("Reading", "Read") + " " + code(a.instrument + "." + a.parameter);
       case "set_value": return v("Setting", "Set") + " " + code(a.instrument + "." + a.parameter) + " → " + esc(String(a.value));
       case "send_raw": return v("Sending", "Sent") + " " + code(a.command) + " to " + esc(a.instrument);
@@ -2037,8 +2039,9 @@
       const m = e.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
       return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, m[2])) : h("li", {}, e);
     }));
+    termState(s);   // the terminal first: an approval its own command needs is asked there
     // requests not already shown in a conversation (e.g. after a page reload)
-    const loose = s.pending.filter((p) => !S.approvals.has(p.id));
+    const loose = s.pending.filter((p) => !S.approvals.has(p.id) && !TERM.asked.has(p.id));
     $("lab-pending").replaceChildren(...loose.map((p) => makeApproval(p).el));
     const badge = $("lab-badge");
     badge.textContent = String(s.pending.length);
@@ -2432,6 +2435,426 @@
     if (S.labOpen) pollState();
   }
 
+  // ------------------------------------------------------------------ terminal pane: a person's own commands
+  // Type to Kelvin in text, or switch to an instrument and send it its own commands (SCPI...). They go through the
+  // same safety gate as Kelvin's: limits, interlocks and blocked commands apply, and a drive change waits for an
+  // approval, answered here with y/n. The server logs them as the person's, never as Kelvin's.
+  const TERM = { open: false, target: null, chatId: null, history: [], hi: 0, busy: false, ask: null, askAt: 0,
+                 asked: new Set(), reply: null, progress: new Map() };
+  const TERM_HELP = [
+    "Type to Kelvin, or switch to an instrument and type its own commands (*IDN?, SENS?, :SOUR:VOLT 1 ...).",
+    "Instrument commands go through the safety gate: limits, interlocks and blocked commands apply,",
+    "and a change that drives the sample harder asks you first (y/n).",
+    "",
+    "  /use <instrument>    send what you type to that instrument (or just /<instrument>)",
+    "  /kelvin              talk to Kelvin again",
+    "  /ls                  the instruments",
+    "  /status [name]       readings, outputs and settings",
+    "  /get <param>         read one, e.g. /get X or /get lockin.X",
+    "  /set <param> <val>   set one, e.g. /set time_constant 300 ms or /set smu.V 0.5",
+    "  /describe [name]     parameters, units, limits and safe values",
+    "  /manual <words>      search the instrument's manual",
+    "  /new                 start a new conversation with Kelvin",
+    "  /stop                stop Kelvin's answer and any run",
+    "  /clear               clear the screen (Ctrl+L)",
+    "",
+    "Up/Down: history  ·  Tab: complete  ·  Esc: stop Kelvin's answer  ·  Ctrl+`: show or hide the terminal",
+  ];
+  const TERM_CMDS = ["/use", "/kelvin", "/ls", "/status", "/get", "/set", "/describe", "/manual", "/new", "/stop",
+                     "/clear", "/help"];
+  const termOut = () => $("term-out");
+  const instNames = () => (PANEL.instruments || []).map((i) => i.name);
+  const paramsOf = (name) => {
+    const i = (PANEL.instruments || []).find((x) => x.name === name);
+    return i ? [...i.readings, ...i.drives, ...i.settings] : [];
+  };
+  const plain = (html) => { const t = document.createElement("span"); t.innerHTML = html; return t.textContent; };
+
+  function termLine(text, cls) {
+    const out = termOut();
+    const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+    const el = h("div", { class: "term-line" + (cls ? " " + cls.split(" ").map((c) => "t-" + c).join(" ") : "") }, text);
+    out.append(el);
+    while (out.childElementCount > 3000) out.firstElementChild.remove();
+    if (stick) out.scrollTop = out.scrollHeight;
+    return el;
+  }
+  function termPrompt() { return TERM.ask ? "approve? [y/N]" : (TERM.target || "kelvin") + ">"; }
+  function termSync() {
+    $("term-prompt").textContent = termPrompt();
+    $("term-prompt").classList.toggle("asking", !!TERM.ask);
+    $("term-input").placeholder = TERM.ask ? "y approves; anything else declines"
+      : TERM.target ? "a command for " + TERM.target + ", or /help" : "ask Kelvin, or /help";
+    const model = $("model").selectedOptions[0];
+    $("term-target").textContent = TERM.target ? TERM.target + " · through the safety gate"
+      : "Kelvin" + (model ? " · " + model.textContent : "");
+  }
+  function toggleTerm(open) {
+    TERM.open = open === undefined ? !TERM.open : open;
+    $("termpane").hidden = !TERM.open;
+    $("toggle-term").setAttribute("aria-pressed", String(TERM.open));
+    $("toggle-term").classList.toggle("on", TERM.open);
+    store("lh.term", TERM.open ? "1" : "0");
+    if (!TERM.open) return;
+    if (!termOut().childElementCount) termLine("Kelvin terminal. Type to Kelvin, or /help for instrument commands.", "dim");
+    termSync();
+    $("term-input").focus();
+  }
+  function setTermHeight(px) {
+    const max = Math.max(160, window.innerHeight - 220);
+    const hgt = Math.round(Math.min(max, Math.max(120, px)));
+    $("termpane").style.height = hgt + "px";
+    return hgt;
+  }
+  function initTerminal() {
+    try { TERM.history = JSON.parse(store("lh.termHistory") || "[]").filter((x) => typeof x === "string"); } catch (e) { TERM.history = []; }
+    TERM.hi = TERM.history.length;
+    const saved = Number(store("lh.termHeight"));
+    setTermHeight(saved > 0 ? saved : Math.round(window.innerHeight * 0.36));
+    const handle = $("term-resize");
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const bottom = $("termpane").getBoundingClientRect().bottom;
+      handle.setPointerCapture(e.pointerId);
+      document.body.classList.add("resizing-v");
+      const move = (ev) => setTermHeight(bottom - ev.clientY);
+      const up = () => {
+        handle.removeEventListener("pointermove", move);
+        document.body.classList.remove("resizing-v");
+        store("lh.termHeight", String(parseInt($("termpane").style.height, 10)));
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", up, { once: true });
+    });
+    handle.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      e.preventDefault();
+      const cur = $("termpane").getBoundingClientRect().height;
+      store("lh.termHeight", String(setTermHeight(cur + (e.key === "ArrowUp" ? 32 : -32))));
+    });
+    $("toggle-term").addEventListener("click", () => toggleTerm());
+    $("close-term").addEventListener("click", () => toggleTerm(false));
+    $("term-clear").addEventListener("click", () => { termOut().replaceChildren(); $("term-input").focus(); });
+    $("term-input").addEventListener("keydown", termKey);
+    termOut().addEventListener("mouseup", () => { if (!window.getSelection().toString()) $("term-input").focus(); });
+    $("model").addEventListener("change", termSync);
+    document.addEventListener("keydown", (e) => {
+      if (e.ctrlKey && (e.key === "`" || e.code === "Backquote")) { e.preventDefault(); toggleTerm(); }
+    });
+    if (store("lh.term") === "1") toggleTerm(true);
+  }
+
+  function termKey(e) {
+    const input = $("term-input");
+    if (e.key === "Enter" && !e.isComposing) {
+      e.preventDefault();
+      const v = input.value;
+      input.value = "";
+      termRun(v);
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      if (!TERM.history.length || TERM.ask) return;
+      e.preventDefault();
+      TERM.hi = Math.max(0, Math.min(TERM.history.length, TERM.hi + (e.key === "ArrowUp" ? -1 : 1)));
+      input.value = TERM.history[TERM.hi] || "";
+    } else if (e.key === "Tab") {
+      e.preventDefault();
+      termComplete();
+    } else if (e.ctrlKey && (e.key === "l" || e.key === "L")) {
+      e.preventDefault();
+      termOut().replaceChildren();
+    } else if (e.key === "Escape" || (e.ctrlKey && (e.key === "c" || e.key === "C") &&
+               input.selectionStart === input.selectionEnd && !window.getSelection().toString())) {
+      if (e.key !== "Escape") e.preventDefault();
+      if (TERM.busy && !TERM.ask) { api("/api/stop", { body: {} }).catch(() => {}); termLine("^C stopping Kelvin's answer", "dim"); }
+      else if (e.key !== "Escape") { termLine(termPrompt() + " " + input.value + "^C", "cmd"); input.value = ""; }
+    }
+  }
+  function termComplete() {
+    const input = $("term-input");
+    const words = input.value.split(" ");
+    const last = words[words.length - 1];
+    let options = [];
+    if (words.length === 1 && last.startsWith("/")) options = [...TERM_CMDS, ...instNames().map((n) => "/" + n)];
+    else if (words.length === 2 && ["/use", "/status", "/describe"].includes(words[0])) options = instNames();
+    else if (words.length === 2 && ["/get", "/set"].includes(words[0])) {
+      options = TERM.target ? paramsOf(TERM.target).map((p) => p.name) : [];
+      for (const n of instNames()) options.push(...paramsOf(n).map((p) => n + "." + p.name));
+    }
+    const hits = [...new Set(options)].filter((o) => o.startsWith(last));
+    if (!hits.length) return;
+    let common = hits[0];
+    for (const o of hits) while (!o.startsWith(common)) common = common.slice(0, -1);
+    if (common.length > last.length || hits.length === 1) {
+      words[words.length - 1] = common + (hits.length === 1 ? " " : "");
+      input.value = words.join(" ");
+    } else termLine(hits.join("   "), "dim");
+  }
+
+  async function termRun(raw) {
+    const line = raw.trim();
+    if (TERM.ask) { await termAnswer(line); return; }
+    if (!line) { termLine(termPrompt(), "cmd"); return; }
+    if (TERM.history[TERM.history.length - 1] !== line) TERM.history.push(line);
+    TERM.history = TERM.history.slice(-200);
+    TERM.hi = TERM.history.length;
+    store("lh.termHistory", JSON.stringify(TERM.history.slice(-100)));
+    termLine(termPrompt() + " " + line, "cmd");
+    const cmd = line.split(/\s+/)[0];
+    if (TERM.busy && !["/stop", "/clear", "/help", "/ls", "/status"].includes(cmd)) {
+      termLine("still working on the last one; wait, or press Esc (or /stop) to stop it", "warn");
+      return;
+    }
+    if (line.startsWith("/")) return termSlash(line);
+    if (TERM.target) return termCall({ instrument: TERM.target, op: "raw", arg: line });
+    return termChat(line);
+  }
+  function termUse(name) {
+    if (!name) { termLine("instruments: " + (instNames().join(", ") || "none"), "dim"); return; }
+    if (!instNames().includes(name)) { termLine("no instrument " + name + " (have: " + instNames().join(", ") + ")", "warn"); return; }
+    TERM.target = name;
+    termSync();
+    termLine("typing to " + name + " now, through the safety gate; /kelvin to talk to Kelvin", "dim");
+  }
+  function splitKey(word) {   // "lockin.X", or "X" on the instrument in use
+    const dot = word.indexOf(".");
+    if (dot > 0 && instNames().includes(word.slice(0, dot))) return [word.slice(0, dot), word.slice(dot + 1)];
+    return [TERM.target, word];
+  }
+  async function termSlash(line) {
+    const [cmd, ...rest] = line.split(/\s+/);
+    const arg = rest.join(" ");
+    let inst = null;
+    switch (cmd) {
+      case "/help": case "/?": TERM_HELP.forEach((l) => termLine(l, "dim")); return;
+      case "/clear": termOut().replaceChildren(); return;
+      case "/kelvin": case "/chat": TERM.target = null; termSync(); termLine("talking to Kelvin", "dim"); return;
+      case "/use": return termUse(arg);
+      case "/ls": {
+        const list = PANEL.instruments || [];
+        if (!list.length) termLine("no instruments", "dim");
+        for (const i of list) termLine(i.name.padEnd(10) + " " + i.model + "   [" + i.state + "]");
+        return;
+      }
+      case "/status": {
+        for (const n of arg ? [arg] : TERM.target ? [TERM.target] : instNames()) {
+          const i = (PANEL.instruments || []).find((x) => x.name === n);
+          if (!i) { termLine("no instrument " + n, "warn"); continue; }
+          termLine(i.name + " · " + i.model, "step");
+          for (const p of paramsOf(n)) {
+            termLine("  " + p.name.padEnd(18) + " " + p.value + (p.away ? "   (away from safe " + p.safe + ")" : ""),
+              p.error ? "err" : p.away ? "warn" : "");
+          }
+        }
+        return;
+      }
+      case "/describe":
+        inst = arg || TERM.target;
+        if (inst) return termCall({ instrument: inst, op: "describe" });
+        break;
+      case "/manual":
+        if (!arg) { termLine("say what to look for, e.g. /manual trigger buffer", "warn"); return; }
+        if (TERM.target) return termCall({ instrument: TERM.target, op: "manual", arg });
+        break;
+      case "/get": case "/set": {
+        if (!rest.length || (cmd === "/set" && rest.length < 2)) {
+          termLine(cmd === "/get" ? "which parameter? e.g. /get X or /get lockin.X"
+            : "e.g. /set time_constant 300 ms, or /set smu.V 0.5", "warn");
+          return;
+        }
+        const [n, p] = splitKey(rest[0]);
+        if (!n) break;
+        if (cmd === "/get") return termCall({ instrument: n, op: "get", arg: p });
+        const v = rest.slice(1).join(" ");
+        return termCall({ instrument: n, op: "set", arg: p, value: /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(v) ? Number(v) : v });
+      }
+      case "/new": TERM.chatId = null; termLine("your next message starts a new conversation with Kelvin", "dim"); return;
+      case "/stop":
+        try { await api("/api/stop", { body: {} }); await api("/api/runs/stop", { body: {} }); termLine("stopped", "dim"); }
+        catch (e) { termLine(e.message, "err"); }
+        return;
+      default:
+        if (instNames().includes(cmd.slice(1))) return termUse(cmd.slice(1));
+        termLine("unknown command " + cmd + "; /help lists them", "warn");
+        return;
+    }
+    termLine("which instrument? /use <name> first, or e.g. " + cmd + " lockin", "warn");
+  }
+
+  async function termCall(body) {
+    TERM.busy = true;
+    const wait = termLine("…", "dim");
+    const fast = setInterval(pollState, 700);   // an approval this command needs is asked here at once
+    try {
+      const r = await api("/api/terminal", { body });
+      wait.remove();
+      for (const l of String(r.message || "").split("\n")) termLine(l, r.ok ? "" : r.action === "error" ? "err" : "warn");
+    } catch (e) {
+      wait.remove();
+      termLine(e.message, "err");
+    } finally {
+      clearInterval(fast);
+      TERM.busy = false;
+      termEndAsk();
+      pollState();
+    }
+  }
+  async function termChat(text) {
+    const model = $("model").value;
+    if (!model) { termLine("choose a model first (add a key in Settings)", "warn"); return; }
+    TERM.busy = true;
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (!TERM.chatId) TERM.chatId = (await api("/api/chats", { body: { model } })).id;
+        const res = await fetch("/api/chats/" + TERM.chatId + "/turn", {
+          method: "POST", headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
+          body: JSON.stringify({ text, model }),
+        });
+        if (res.status === 404) { TERM.chatId = null; continue; }   // the conversation was deleted: a new one
+        if (!res.ok) {
+          let msg = "HTTP " + res.status;
+          try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
+          termLine(msg, "warn");
+          return;
+        }
+        await readEvents(res, termEvent);
+        return;
+      }
+    } catch (e) {
+      termLine("lost the connection to Kelvin (" + e.message + ")", "err");
+    } finally {
+      termCloseReply();
+      TERM.busy = false;
+      TERM.progress.clear();
+      termEndAsk();
+      refreshChats();
+      pollState();
+    }
+  }
+  function termCloseReply() {   // a finished answer: Markdown bold read as plain text
+    if (TERM.reply) TERM.reply.textContent = TERM.reply.textContent.replace(/\*\*([^*\n]+)\*\*/g, "$1");
+    TERM.reply = null;
+  }
+  function termText(delta) {
+    if (!TERM.reply) TERM.reply = termLine("", "reply");
+    const out = termOut();
+    const stick = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+    TERM.reply.textContent += delta;
+    if (stick) out.scrollTop = out.scrollHeight;
+  }
+  function termEvent(ev) {
+    const cls = { ok: "ok", warn: "warn", err: "err" };
+    switch (ev.type) {
+      case "text": termText(ev.delta); break;
+      case "reset": if (TERM.reply) TERM.reply.textContent = ""; break;
+      case "tool_start": termCloseReply(); termLine("● " + plain(stepLabel(ev.name, ev.input, false)), "step"); break;
+      case "tool_end":
+        termCloseReply();
+        termLine("  ⎿ " + (summaryOf(ev.content) || "done"), "step " + cls[outcome(ev.content, ev.is_error)]);
+        break;
+      case "run_progress": {
+        let el = TERM.progress.get(ev.call_id);
+        if (!el) { termCloseReply(); el = termLine("", "step"); TERM.progress.set(ev.call_id, el); }
+        el.textContent = "  ⎿ " + (ev.plan || "run") + ": " + ev.done + " / " + ev.total + " points" +
+          (ev.status && ev.status !== "running" ? " (" + ev.status + ")" : "");
+        if (ev.status === "running") noticeRun(ev.run_id, ev.plan);   // its data show live in the Runs pane
+        break;
+      }
+      case "approval":
+        termCloseReply();
+        if (ev.auto) termLine("  auto mode approved: " + ev.title, "dim");
+        else termAsk(ev);
+        break;
+      case "approval_closed": if (TERM.ask && TERM.ask.id === ev.id) termEndAsk(); break;
+      case "note": termCloseReply(); termLine(ev.text, "dim"); break;
+      case "memory":
+        if (ev.notes && ev.notes.length) termLine("recalled " + ev.notes.length + " note" + (ev.notes.length === 1 ? "" : "s") + " from earlier work", "dim");
+        break;
+      case "error": termCloseReply(); termLine(ev.message, "err"); break;
+      default: break;
+    }
+  }
+  function termAsk(p) {
+    if (TERM.asked.has(p.id)) return;
+    TERM.asked.add(p.id);
+    TERM.ask = p;
+    TERM.askAt = Date.now();
+    termLine(p.title, "ask");
+    for (const i of p.items || []) termLine("  - " + i, "ask");
+    termSync();
+    if (!TERM.open) toggleTerm(true);
+    $("term-input").focus();
+  }
+  function termEndAsk(note) {
+    if (!TERM.ask) return;
+    if (note) termLine(note, "dim");
+    TERM.ask = null;
+    termSync();
+  }
+  async function termAnswer(text) {
+    const p = TERM.ask;
+    const approve = /^y(es)?$/i.test(text);
+    termLine(termPrompt() + " " + text, "cmd");
+    TERM.ask = null;
+    termSync();
+    try {
+      await api("/api/approvals/" + encodeURIComponent(p.id), { body: { approve } });
+      termLine(approve ? "approved" : "declined", approve ? "ok" : "warn");
+    } catch (e) { termLine(e.message, "err"); }
+  }
+  function termState(s) {   // each poll: ask here for what the terminal is waiting on; notice answers given elsewhere
+    if (TERM.ask && Date.now() - TERM.askAt > 2500 && !s.pending.some((p) => p.id === TERM.ask.id)) {
+      termEndAsk("(answered elsewhere)");
+    }
+    if (TERM.busy && !TERM.ask) {
+      const p = s.pending.find((x) => !TERM.asked.has(x.id) && !S.approvals.has(x.id));
+      if (p) termAsk(p);
+    }
+    if (TERM.open) termSync();
+  }
+
+  // ------------------------------------------------------------------ the data folder (Settings)
+  const DATA = { now: null };
+  async function loadDataFolder() {
+    let r;
+    try { r = await api("/api/data-folder"); } catch (e) { $("data-msg").textContent = e.message; return; }
+    DATA.now = r;
+    $("data-path").value = r.path;
+    showDataFolder(r.problem || (r.runs + " run" + (r.runs === 1 ? "" : "s") + " and " + r.reports + " report" +
+      (r.reports === 1 ? "" : "s") + " in this folder."), !!r.problem);
+    dataPathChanged();
+  }
+  function showDataFolder(text, bad) {
+    $("data-msg").textContent = text;
+    $("data-msg").classList.toggle("bad", !!bad);
+  }
+  function dataPathChanged() {
+    const now = DATA.now;
+    const path = $("data-path").value.trim();
+    const changed = !!now && !!path && path !== now.path;
+    $("data-use").disabled = !changed;
+    $("data-move-row").hidden = !changed || !(now.runs || now.reports);
+    if (now) $("data-move-text").textContent = "Move what is saved now (" + now.runs + " run" + (now.runs === 1 ? "" : "s") +
+      ", " + now.reports + " report" + (now.reports === 1 ? "" : "s") + ") to the new folder";
+  }
+  async function useDataFolder() {
+    const path = $("data-path").value.trim();
+    const move = !$("data-move-row").hidden && $("data-move").checked;
+    $("data-use").disabled = true;
+    showDataFolder(move ? "Moving the data…" : "Switching…");
+    try {
+      const r = await api("/api/data-folder", { body: { path, move } });
+      const parts = ["Kelvin now saves to " + r.path + "."];
+      if (r.moved) parts.push("Moved " + r.moved + " item" + (r.moved === 1 ? "" : "s") + ".");
+      if (r.kept && r.kept.length) parts.push("Left in " + r.previous + " because the name is taken here: " + r.kept.join(", ") + ".");
+      else if (!move && r.previous && (DATA.now.runs || DATA.now.reports)) parts.push("Earlier runs stay in " + r.previous + ".");
+      DATA.now = r;
+      $("data-path").value = r.path;
+      showDataFolder(parts.join(" "));
+      dataPathChanged();
+      pollState();
+    } catch (e) { showDataFolder(e.message, true); dataPathChanged(); }
+  }
+
   // ------------------------------------------------------------------ settings
   function fillModels(select, groups, selected, allowEmpty) {
     select.replaceChildren();
@@ -2477,6 +2900,7 @@
     $("pair-box").hidden = true;
     loadPhone();
     loadServices();
+    loadDataFolder();
     loadChatGPT();
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
     for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
@@ -2584,6 +3008,7 @@
     }));
     applyModels(boot.models.groups, boot.default_model);
     initRunsPane();
+    initTerminal();
     renderChats();
     showEmpty(true);
 
@@ -2606,6 +3031,10 @@
     $("chatgpt-signin").addEventListener("click", signInChatGPT);
     $("chatgpt-signout").addEventListener("click", signOutChatGPT);
     $("svc-add").addEventListener("click", addService);
+    $("data-path").addEventListener("input", dataPathChanged);
+    $("data-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("data-use").disabled) useDataFolder(); } });
+    $("data-use").addEventListener("click", useDataFolder);
+    $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));
     $("pair-start").addEventListener("click", startPairing);
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }

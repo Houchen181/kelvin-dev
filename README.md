@@ -321,7 +321,42 @@ Kelvin builds the report from what it already keeps (run folders and the event l
 - **In a chat:** "make a report of today's runs for my advisor". Kelvin's `make_report` tool covers the runs started in this conversation, or in all of the project's conversations, unless you name runs, a day, or the last N. The reply shows the files with **Open** and **Download**.
 - **In the Runs pane:** **Report…** picks this run, the project's or chat's runs, today's runs, or the last five.
 
-Reports are saved in the `reports` folder next to the run folders (`~/Kelvin/virtual-lab/reports/` in the desktop app). Slides are 16:9; the plots are native shapes and the results native tables, so you can edit them in PowerPoint, Keynote or Google Slides. Neither format needs extra software to write. Characters that the standard PDF fonts can't show are spelled out (Ω becomes "Ohm").
+Reports are saved in the `reports` folder of your data folder, next to the run folders. Slides are 16:9; the plots are native shapes and the results native tables, so you can edit them in PowerPoint, Keynote or Google Slides. Neither format needs extra software to write. Characters that the standard PDF fonts can't show are spelled out (Ω becomes "Ohm").
+
+## Your data
+
+Every run gets its own folder, named by date, time and plan, such as `runs/20261018-015328-gate_sweep/`. Each folder holds:
+- `plan.yaml`: what was asked for.
+- `snapshot_start.json` and `snapshot_end.json`: every instrument setting at the start and at the end.
+- `data.jsonl`: every point, traces included.
+- `meta.json`: status, points, duration and warnings.
+- `analysis.json`: the automatic fit and assessment.
+
+Next to the run folders sit `events.jsonl`, the lab record of every command, reading, approval, refusal and alarm with who did it, and `reports/`.
+
+**Choosing the data folder:** these live in `~/Kelvin/virtual-lab` until you choose another folder under **Settings → Data folder**. A lab server or a synced drive works:
+- **Use this folder** switches at once. Kelvin checks first that it can write there.
+- **Move what is saved now** takes the existing runs, reports and record along. Nothing there is overwritten: a run whose name is taken stays where it was, and Kelvin says so.
+- **If the folder can't be written to at start-up** (a network drive that is offline, say), Kelvin saves to `~/Kelvin/virtual-lab` meanwhile and tells you in Settings.
+- **What stays in `~/Kelvin`:** chats, settings, API keys and instrument folders.
+- **From a terminal:** `kelvin --data-dir <folder>` overrides the setting.
+
+## Terminal
+
+The **Terminal** button in the top bar (or Ctrl+`) opens a console at the foot of the window. There you can type to Kelvin, or send an instrument its own commands.
+- **Talking to Kelvin:** type as in a chat. Kelvin's steps show as `●` lines with their results below, a run's progress counts up, and its data appear live in the Runs pane. The conversation is saved like any other chat.
+- **An instrument's own commands:** `/use lockin` (or just `/lockin`) sends what you type to that instrument, such as `*IDN?`, `SENS?` or `:SOUR:VOLT 1`. Queries show the reply; anything else shows what it did. `/kelvin` goes back to talking to Kelvin.
+- **The same safety gate:** limits, interlocks and blocked commands apply as for Kelvin. A change that drives the sample harder asks **approve? [y/N]** right in the terminal. Moving back toward safe doesn't ask. A terminal command never lands in the middle of a run: while Kelvin is busy it is refused, not queued. Every command is in the lab record as yours (`human (terminal)`), and Kelvin's **undo** never undoes it.
+- **Other commands:**
+  - `/ls`: the instruments.
+  - `/status [name]`: readings, outputs and settings.
+  - `/get X`, `/set time_constant 300 ms`, `/set smu.V 0.5`: read or set by name.
+  - `/describe [name]`: units, limits and safe values.
+  - `/manual <words>`: search the instrument's manual.
+  - `/new`: start a new conversation with Kelvin.
+  - `/stop`: stop Kelvin's answer and any run.
+  - `/clear`: clear the screen.
+- **Keys:** Up and Down recall what you typed. Tab completes commands, instrument names and parameters. Esc stops Kelvin's answer.
 
 ## Layout
 

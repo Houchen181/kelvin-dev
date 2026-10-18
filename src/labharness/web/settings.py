@@ -81,6 +81,14 @@ class Settings:
                 self._data.pop(name, None)
         self._save()
 
+    def set_data_dir(self, path: Optional[str]) -> None:
+        """The data folder is changed through the runtime (which checks and switches it), never by a plain update."""
+        if path:
+            self._data["data_dir"] = str(path)
+        else:
+            self._data.pop("data_dir", None)
+        self._save()
+
     def public(self) -> Dict[str, Any]:
         """What the browser may see: which keys exist and where from, never the keys."""
         return {
