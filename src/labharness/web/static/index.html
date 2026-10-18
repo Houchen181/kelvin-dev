@@ -84,7 +84,7 @@
   <aside id="labpanel" class="labpanel" aria-label="Lab" hidden>
     <header class="lab-head">
       <h2>Lab</h2>
-      <span id="agent-state" class="muted"></span>
+      <span id="agent-state" class="agent-chip"></span>
       <div class="spacer"></div>
       <button id="close-lab" class="icon-btn" type="button" aria-label="Close the lab panel">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -92,8 +92,8 @@
     </header>
     <div class="lab-scroll">
       <div id="lab-pending"></div>
-      <h3>Instruments <span class="muted small">· highlighted = away from safe</span></h3>
-      <div id="lab-status" class="lab-status"></div>
+      <h3>Instruments</h3>
+      <div id="lab-status" class="inst-list"></div>
       <h3>Activity</h3>
       <ol id="lab-events" class="lab-events"></ol>
     </div>

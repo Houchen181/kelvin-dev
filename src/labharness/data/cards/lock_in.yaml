@@ -12,6 +12,7 @@ error_query: "SYSTem:ERRor[:NEXT]?"
 
 parameters:
   amplitude:
+    label: Excitation
     kind: drive
     unit: V
     set: "SOURce:VOLTage[:AMPLitude] {value}"
@@ -23,6 +24,7 @@ parameters:
     ramp_step: 0.01
     description: Sine output amplitude (excitation through the sample)
   frequency:
+    label: Frequency
     kind: measure
     unit: Hz
     set: "SOURce:FREQuency {value}"
@@ -30,6 +32,7 @@ parameters:
     limits: [0.001, 102000]
     default: 17.777
   tc:
+    label: Time constant
     kind: measure
     unit: s
     set: "SENSe:TCONstant {value}"
@@ -38,6 +41,7 @@ parameters:
     default: 0.1
     description: Time constant
   sensitivity:
+    label: Sensitivity
     kind: measure
     unit: V
     set: "SENSe:SENSitivity {value}"
@@ -45,17 +49,23 @@ parameters:
     limits: [2.0e-9, 1]
     default: 1
   X:
+    label: X
     kind: measure
     unit: V
     get: "MEASure:X?"
   Y:
+    label: Y
     kind: measure
     unit: V
     get: "MEASure:Y?"
   R:
+    label: Magnitude R
     kind: measure
     unit: V
     get: "MEASure:R?"
+
+display:
+  headline: R
 
 health:
   - query: "SYSTem:ERRor?"

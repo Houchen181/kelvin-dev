@@ -12,6 +12,7 @@ error_query: "SYSTem:ERRor[:NEXT]?"
 
 parameters:
   heater_range:
+    label: Heater range
     kind: drive
     type: enum
     values: ["off", "low", "medium", "high"]
@@ -20,6 +21,8 @@ parameters:
     safe: "off"
     description: Heater power range; higher ranges can heat further
   setpoint:
+    label: Setpoint
+    applies_when: heater_range
     kind: drive
     unit: K
     set: "CONTrol:SETPoint {value}"
@@ -32,12 +35,16 @@ parameters:
     tol: 0.05
     timeout: 1800
   T_sample:
+    label: Sample temperature
     kind: measure
     unit: K
     get: "MEASure:TEMPerature?"
     default: 1.6
 
 safe_sequence: [heater_range, setpoint]
+display:
+  headline: T_sample
+
 health:
   - query: "SYSTem:ERRor?"
     expect: "^\\+?0,"

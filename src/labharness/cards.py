@@ -33,12 +33,15 @@ def num(x: float) -> str:
     return "%.4g" % x
 
 
-SI_UNITS = {"V", "A", "Hz", "W", "s", "Ω", "T", "K", "F", "H", "S"}
+SI_UNITS = {"V", "A", "Hz", "W", "s", "Ω", "T", "K", "F", "H", "S", "m"}
 _PREFIXES = [(1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, ""), (1e-3, "m"), (1e-6, "µ"), (1e-9, "n"), (1e-12, "p"), (1e-15, "f")]
+_PREFIX_OF = {p: f for f, p in _PREFIXES if p}
 
 
 def si(x: float, unit: str) -> str:
-    """3.99e9 Hz -> '3.99 GHz', -8.83e-9 V -> '-8.83 nV'; non-SI units keep plain numbers."""
+    """3.99e9 Hz -> '3.99 GHz', -8.83e-9 V -> '-8.83 nV', -0.0013 mW -> '-1.3 µW'; other units stay plain."""
+    if x != 0 and unit not in SI_UNITS and len(unit) > 1 and unit[0] in _PREFIX_OF and unit[1:] in SI_UNITS:
+        x, unit = x * _PREFIX_OF[unit[0]], unit[1:]  # an already-prefixed unit such as mW or mm
     if unit not in SI_UNITS or x == 0 or not math.isfinite(x):
         return num(x) + (" " + unit if unit else "")
     for factor, prefix in _PREFIXES:
@@ -70,7 +73,14 @@ class ParamSpec:
     enables: Tuple[str, ...] = ()                  # drives this switch applies to the sample
     bool_text: Tuple[str, str] = ("1", "0")
     axis: Optional[Tuple[str, str]] = None         # trace x-axis: (start param, stop param)
+    applies_when: Optional[str] = None             # drive that must be on for this one to reach the sample
+    label: str = ""                                # human name, e.g. "Compliance"
+    words: Optional[Tuple[str, str]] = None        # how a bool reads, e.g. ("open", "closed")
     description: str = ""
+
+    @property
+    def title(self) -> str:
+        return self.label or self.name.replace("_", " ")
 
     @property
     def is_drive(self) -> bool:
@@ -145,7 +155,8 @@ class ParamSpec:
         if value is None:
             return "?"
         if self.type == "bool":
-            return "on" if value else "off"
+            on, off = self.words or ("on", "off")
+            return on if value else off
         if self.type == "trace":
             return "trace (%d points)" % len(value)
         if self.numeric and isinstance(value, (int, float)):
@@ -186,6 +197,7 @@ class Card:
     reset: List[Template] = field(default_factory=list)
     blocked: List[Template] = field(default_factory=list)
     twin: Optional[str] = None
+    headline: Optional[str] = None                 # the reading to feature in the lab panel
     notes: List[str] = field(default_factory=list)
     manual: str = ""
     source: str = ""
@@ -273,8 +285,16 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
         rate_param=p.get("rate_param"), rate_per=p.get("rate_per", "s"),
         enables=tuple(p.get("enables") or ()),
         bool_text=tuple(str(x) for x in p.get("bool_text", ("1", "0"))),
+        label=str(p.get("label", "")),
+        applies_when=p.get("applies_when"),
         description=str(p.get("description", "")),
     )
+    words = p.get("words")
+    if words is not None:
+        if typ != "bool" or not (isinstance(words, (list, tuple)) and len(words) == 2):
+            err(path + ".words", "only bools have words: [on_word, off_word]")
+        else:
+            spec.words = (str(words[0]), str(words[1]))
     axis = p.get("axis")
     if axis is not None:
         if typ != "trace" or not isinstance(axis, dict) or not axis.get("start") or not axis.get("stop"):
@@ -357,6 +377,9 @@ def parse_card(data: Any, source: str = "card") -> Card:
         for dep in spec.enables:
             if dep not in params or not params[dep].is_drive:
                 err(path + ".enables", "%r is not a drive on this card" % dep)
+        if spec.applies_when is not None and (spec.applies_when not in params or not params[spec.applies_when].is_drive
+                                              or params[spec.applies_when].get_cmd is None):
+            err(path + ".applies_when", "%r is not a readable drive on this card" % spec.applies_when)
         for ax in spec.axis or ():
             if ax not in params or params[ax].get_cmd is None or not params[ax].numeric:
                 err(path + ".axis", "%r is not a readable numeric parameter" % ax)
@@ -389,6 +412,9 @@ def parse_card(data: Any, source: str = "card") -> Card:
     blocked = [t for t in (_template(x, err, "raw.blocked", True) for x in raw.get("blocked") or []) if t]
     error_query = _template(data["error_query"], err, "error_query") if data.get("error_query") else None
     identify = data.get("identify") or {}
+    headline = (data.get("display") or {}).get("headline")
+    if headline is not None and (headline not in params or params[headline].get_cmd is None):
+        err("display.headline", "%r is not a readable parameter" % headline)
 
     if errors:
         raise CardError(source, errors)
@@ -397,7 +423,7 @@ def parse_card(data: Any, source: str = "card") -> Card:
         params=params, vendor=str(data.get("vendor", "")),
         idn_pattern=identify.get("idn"), idn_example=identify.get("example"),
         error_query=error_query, safe_sequence=seq, health=health,
-        reset=reset, blocked=blocked, twin=data.get("twin"),
+        reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")),
         source=source,
     )

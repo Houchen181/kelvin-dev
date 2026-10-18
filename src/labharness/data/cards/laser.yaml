@@ -12,6 +12,7 @@ error_query: "SYSTem:ERRor[:NEXT]?"
 
 parameters:
   emission:
+    label: Emission
     kind: drive
     type: bool
     set: "OUTPut[:STATe] {value}"
@@ -19,6 +20,8 @@ parameters:
     safe: off
     enables: [power]
   power:
+    label: Power
+    applies_when: emission
     kind: drive
     unit: mW
     set: "SOURce:POWer[:LEVel] {value}"
@@ -29,6 +32,9 @@ parameters:
     max_rate: 20
     ramp_step: 0.5
   shutter:
+    label: Shutter
+    applies_when: emission
+    words: [open, closed]
     kind: drive
     type: bool
     set: "SHUTter[:STATe] {value}"
@@ -37,11 +43,15 @@ parameters:
     safe: off
     description: on = open (light reaches the sample)
   P_detected:
+    label: Detected power
     kind: measure
     unit: mW
     get: "MEASure:POWer?"
 
 safe_sequence: [shutter, power, emission]
+display:
+  headline: P_detected
+
 health:
   - query: "SYSTem:ERRor?"
     expect: "^\\+?0,"

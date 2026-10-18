@@ -12,6 +12,7 @@ error_query: "SYSTem:ERRor[:NEXT]?"
 
 parameters:
   B:
+    label: Field target
     kind: drive
     unit: T
     set: "FIELd:TARGet {value}"
@@ -26,6 +27,8 @@ parameters:
     timeout: 7200
     description: Field target; the supply ramps at `rate`
   rate:
+    label: Ramp rate
+    applies_when: B
     kind: drive
     unit: T/min
     set: "FIELd:RATE {value}"
@@ -35,10 +38,14 @@ parameters:
     default: 0.2
     description: Ramp rate; fast ramps risk a quench
   B_actual:
+    label: Field
     kind: measure
     unit: T
     get: "FIELd:MEASure?"
     default: 0
+
+display:
+  headline: B_actual
 
 health:
   - query: "SYSTem:ERRor?"

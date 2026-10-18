@@ -12,6 +12,7 @@ error_query: "SYSTem:ERRor[:NEXT]?"
 
 parameters:
   position:
+    label: Target position
     kind: measure
     unit: mm
     set: "MOVE:ABSolute {value}"
@@ -24,6 +25,7 @@ parameters:
     rate_param: velocity
     description: Delay-line position; moving it is part of the measurement
   velocity:
+    label: Velocity
     kind: measure
     unit: mm/s
     set: "MOVE:VELocity {value}"
@@ -31,10 +33,14 @@ parameters:
     limits: [0.01, 50]
     default: 10
   position_actual:
+    label: Position
     kind: measure
     unit: mm
     get: "POSition?"
     default: 0
+
+display:
+  headline: position_actual
 
 health:
   - query: "SYSTem:ERRor?"

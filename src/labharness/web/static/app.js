@@ -25,6 +25,15 @@
     chev: '<path d="M9 6l6 6-6 6"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
+    // instrument kinds
+    "source-meter": '<path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/>',
+    "lock-in": '<path d="M2 12c2-6 4-6 6 0s4 6 6 0 4-6 6 0"/><path d="M2 20h20"/>',
+    "temperature-controller": '<path d="M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z"/><path d="M12 9v8"/>',
+    "magnet-supply": '<path d="M6 3v8a6 6 0 0 0 12 0V3h-4v8a2 2 0 0 1-4 0V3z"/><path d="M6 7h4M14 7h4"/>',
+    vna: '<path d="M5 13a7 7 0 0 1 14 0"/><path d="M8.5 13a3.5 3.5 0 0 1 7 0"/><path d="M12 13v8"/>',
+    laser: '<rect x="2" y="9" width="9" height="6" rx="1.5"/><path d="M11 12h11"/><path d="M16 7l1.5 2M16 17l1.5-2"/>',
+    "motion-stage": '<path d="M3 12h18M6 9l-3 3 3 3M18 9l3 3-3 3"/><path d="M9 16h6v4H9z"/>',
+    instrument: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15h4M15 10h2"/>',
   };
   // Kelvin's mark: a sleeping cat and a snowflake, white on the ice-blue tile
   const MARK = '<svg viewBox="0 0 100 100" aria-hidden="true"><g transform="translate(9.8 4.9) scale(0.82)">' +
@@ -421,6 +430,7 @@
       },
     };
     async function answer(approve) {
+      card.choice = approve;  // the server's "closed" notice can arrive before this request returns
       yes.disabled = no.disabled = true;
       try {
         await api("/api/approvals/" + encodeURIComponent(ev.id), { body: { approve } });
@@ -654,7 +664,11 @@
       case "reset": reply.resetText(); break;
       case "tool_start": reply.toolStart(ev.id, ev.name, ev.input); break;
       case "approval": reply.approval(ev); break;
-      case "approval_closed": { const card = S.approvals.get(ev.id); if (card) card.close("Closed", false); break; }
+      case "approval_closed": {
+        const card = S.approvals.get(ev.id);
+        if (card) card.close(card.choice === undefined ? "Closed" : card.choice ? "Approved" : "Declined", !!card.choice);
+        break;
+      }
       case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id); pollState(); break;
       case "note": reply.note(ev.text); break;
       case "error": reply.error(ev.message); break;
@@ -664,14 +678,67 @@
   }
 
   // ------------------------------------------------------------------ lab panel
+  const OPEN = new Set(), CLOSED = new Set(), SHOW_SETTINGS = new Set();
+
+  function splitValue(text) {  // "9.42 fA" -> ["9.42", "fA"]; words stay whole
+    const m = String(text).match(/^(-?[\d.]+(?:e[-+]?\d+)?)\s+(\S+)$/i);
+    return m ? [m[1], m[2]] : [String(text), ""];
+  }
+  function kv(item) {
+    let title = item.safe !== undefined ? "Safe value: " + item.safe : null;
+    if (item.armed) title = "Set, but not reaching the sample while " + item.switch + " is off. Safe value: " + item.safe;
+    return h("div", { class: "kv" + (item.away ? " away" : "") + (item.armed ? " armed" : "") + (item.error ? " err" : ""), title },
+      h("span", { class: "k" }, item.label),
+      h("span", { class: "v" }, item.armed ? h("span", { class: "tag-armed" }, "armed") : null, item.value));
+  }
+  function instrumentCard(inst) {
+    const open = OPEN.has(inst.name) ? true : CLOSED.has(inst.name) ? false : inst.state !== "safe";
+    const head = inst.readings.find((r) => r.name === inst.headline);
+    const [hv, hu] = head ? splitValue(head.value) : ["", ""];
+    const pillText = inst.state === "error" ? "No response" : inst.state === "active" ? inst.active + " active" : "Safe";
+    const chev = icon("chev"); chev.classList.add("chev");
+    const kindIcon = icon(ICONS[inst.kind] ? inst.kind : "instrument");
+    const button = h("button", { class: "inst-head", type: "button", "aria-expanded": String(open) },
+      h("span", { class: "inst-icon" }, kindIcon),
+      h("span", { class: "inst-name", title: inst.model }, h("b", {}, inst.model.replace(/^Virtual\s+/, "")), h("small", {}, inst.name)),
+      h("span", { class: "inst-headline", title: head ? head.label : "" }, h("span", { class: "hv" }, hv), h("span", { class: "hu" }, hu)),
+      h("span", { class: "pill-state " + inst.state }, pillText), chev);
+    button.addEventListener("click", () => {
+      if (open) { CLOSED.add(inst.name); OPEN.delete(inst.name); } else { OPEN.add(inst.name); CLOSED.delete(inst.name); }
+      pollState();
+    });
+    const card = h("div", { class: "inst-card " + inst.state + (open ? " open" : "") }, button);
+    if (!open) return card;
+    const body = h("div", { class: "inst-body" });
+    const others = inst.readings.filter((r) => r.name !== inst.headline);
+    if (others.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Readings"), ...others.map((r) => kv(r))));
+    if (inst.drives.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Outputs"), ...inst.drives.map((d) => kv(d))));
+    if (inst.settings.length) {
+      const shown = SHOW_SETTINGS.has(inst.name);
+      const toggle = h("button", { class: "link settings-toggle", type: "button" },
+        (shown ? "Hide settings" : "Show settings") + " (" + inst.settings.length + ")");
+      toggle.addEventListener("click", () => {
+        if (shown) SHOW_SETTINGS.delete(inst.name); else SHOW_SETTINGS.add(inst.name);
+        pollState();
+      });
+      const group = h("div", { class: "group settings" }, toggle);
+      if (shown) group.append(...inst.settings.map((x) => kv(x)));
+      body.append(group);
+    }
+    card.append(body);
+    return card;
+  }
+
   async function pollState() {
     let s;
     try { s = await api("/api/state"); } catch (e) { return; }
-    $("agent-state").textContent = s.busy ? "· " + s.busy : "· idle";
-    $("lab-status").replaceChildren(...Object.entries(s.status).map(([name, params]) =>
-      h("div", { class: "inst" }, h("div", { class: "inst-name" }, name),
-        h("div", { class: "chips" }, ...params.map((p) => h("span", { class: "chip" + (p.away ? " away" : "") }, p.name + " " + p.value))))));
-    $("lab-events").replaceChildren(...s.events.map((e) => h("li", {}, e)));
+    $("agent-state").textContent = s.busy ? "Kelvin is " + s.busy : "Kelvin is idle";
+    $("agent-state").classList.toggle("busy", !!s.busy);
+    $("lab-status").replaceChildren(...s.instruments.map(instrumentCard));
+    $("lab-events").replaceChildren(...s.events.map((e) => {
+      const m = e.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
+      return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, m[2])) : h("li", {}, e);
+    }));
     // requests not already shown in a conversation (e.g. after a page reload)
     const loose = s.pending.filter((p) => !S.approvals.has(p.id));
     $("lab-pending").replaceChildren(...loose.map((p) => makeApproval(p).el));

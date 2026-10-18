@@ -12,6 +12,8 @@ error_query: "SYSTem:ERRor[:NEXT]?"
 
 parameters:
   V:
+    label: Voltage
+    applies_when: output
     kind: drive
     unit: V
     set: "SOURce:VOLTage[:LEVel][:IMMediate][:AMPLitude] {value}"
@@ -23,6 +25,8 @@ parameters:
     ramp_step: 0.05
     description: Source voltage, e.g. a gate
   compliance_I:
+    label: Compliance
+    applies_when: output
     kind: drive
     unit: A
     set: "SENSe:CURRent[:DC]:PROTection[:LEVel] {value}"
@@ -32,6 +36,7 @@ parameters:
     default: 1.0e-4
     description: Current compliance; raising it lets more current flow
   output:
+    label: Output
     kind: drive
     type: bool
     set: "OUTPut[:STATe] {value}"
@@ -40,10 +45,12 @@ parameters:
     enables: [V]
     description: Connects the source to the device
   I:
+    label: Current
     kind: measure
     unit: A
     get: "MEASure:CURRent[:DC]?"
   nplc:
+    label: Integration (NPLC)
     kind: measure
     unit: PLC
     set: "SENSe:CURRent[:DC]:NPLCycles {value}"
@@ -52,6 +59,9 @@ parameters:
     default: 1
 
 safe_sequence: [V, output, compliance_I]
+display:
+  headline: I
+
 health:
   - query: "SYSTem:ERRor?"
     expect: "^\\+?0,"

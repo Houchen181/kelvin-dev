@@ -12,6 +12,7 @@ error_query: "SYSTem:ERRor[:NEXT]?"
 
 parameters:
   f_start:
+    label: Start frequency
     kind: measure
     unit: Hz
     set: "SENSe:FREQuency:STARt {value}"
@@ -19,6 +20,7 @@ parameters:
     limits: [1.0e7, 2.65e10]
     default: 3.99e9
   f_stop:
+    label: Stop frequency
     kind: measure
     unit: Hz
     set: "SENSe:FREQuency:STOP {value}"
@@ -26,6 +28,7 @@ parameters:
     limits: [1.0e7, 2.65e10]
     default: 4.01e9
   points:
+    label: Points
     kind: measure
     type: int
     set: "SENSe:SWEep:POINts {value}"
@@ -33,6 +36,7 @@ parameters:
     limits: [2, 100001]
     default: 401
   ifbw:
+    label: IF bandwidth
     kind: measure
     unit: Hz
     set: "SENSe:BANDwidth[:RESolution] {value}"
@@ -40,6 +44,7 @@ parameters:
     limits: [1, 1.5e7]
     default: 1000
   averages:
+    label: Averages
     kind: measure
     type: int
     set: "SENSe:AVERage:COUNt {value}"
@@ -47,6 +52,8 @@ parameters:
     limits: [1, 65536]
     default: 1
   power:
+    label: Power
+    applies_when: rf
     kind: drive
     unit: dBm
     set: "SOURce:POWer[:LEVel][:IMMediate][:AMPLitude] {value}"
@@ -59,12 +66,14 @@ parameters:
     ramp_step: 1
     description: Source power delivered to the device
   rf:
+    label: RF output
     kind: drive
     type: bool
     set: "OUTPut[:STATe] {value}"
     get: "OUTPut[:STATe]?"
     safe: off
   S21:
+    label: S21
     kind: measure
     type: trace
     unit: dB

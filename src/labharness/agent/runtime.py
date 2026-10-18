@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -94,6 +95,7 @@ class LabRuntime:
         self.lock = threading.RLock()
         self.busy: Optional[str] = None
         self._status: Dict[str, Dict[str, Any]] = {}
+        self._status_at = 0.0
         with self.lock:
             self._refresh()
 
@@ -102,6 +104,7 @@ class LabRuntime:
     def _refresh(self) -> None:
         try:
             self._status = self.lab.snapshot()
+            self._status_at = time.time()
         except Exception:
             pass
 
@@ -352,7 +355,49 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ for the approval page
 
+    def instruments(self) -> List[Dict[str, Any]]:
+        """Each instrument for the lab panel: its readings, outputs (drives) and settings, and a state."""
+        out = []
+        for name, values in dict(self._status).items():
+            card = self.lab.instruments[name].card
+            readings, drives, settings = [], [], []
+            errors = away = 0
+            for pname, value in values.items():
+                spec = card.params[pname]
+                bad = isinstance(value, str) and value.startswith("ERROR")
+                errors += bad
+                item = {"name": pname, "label": spec.title, "value": "no response" if bad else spec.show(value),
+                        "error": bad}
+                if spec.is_drive:
+                    off_safe = (not bad) and spec.distance(value) > 0
+                    applied = True
+                    if spec.applies_when:  # e.g. a voltage only reaches the sample while the output is on
+                        switch, gspec = values.get(spec.applies_when), card.params[spec.applies_when]
+                        applied = switch is not None and not isinstance(switch, str) and gspec.distance(switch) > 0
+                        item["switch"] = gspec.title
+                    item["away"] = off_safe and applied
+                    item["armed"] = off_safe and not applied
+                    item["safe"] = spec.show(spec.safe)
+                    away += item["away"]
+                    drives.append(item)
+                elif spec.set_cmd is None:
+                    readings.append(item)
+                else:
+                    settings.append(item)
+            headline = card.headline if card.headline in values else (readings[0]["name"] if readings else None)
+            readings.sort(key=lambda r: r["name"] != headline)
+            out.append({"name": name, "model": card.model, "kind": card.kind,
+                        "state": "error" if errors else "active" if away else "safe", "active": away,
+                        "headline": headline, "readings": readings, "drives": drives, "settings": settings})
+        return out
+
     def ui_state(self) -> Dict[str, Any]:
+        # keep the panel live while Kelvin is idle; never wait for a running command
+        if time.time() - self._status_at > 2.0 and self.lock.acquire(blocking=False):
+            try:
+                self._refresh()
+            finally:
+                self.lock.release()
         status = {}
         for name, values in dict(self._status).items():
             card = self.lab.instruments[name].card
@@ -368,4 +413,5 @@ class LabRuntime:
         return {"lab": self.lab.config.name,
                 "simulated": all(i.simulated for i in self.lab.instruments.values()),
                 "busy": self.busy, "pending": pending, "history": history, "status": status,
+                "instruments": self.instruments(),
                 "events": [event_line(e) for e in reversed(tail_events(self.events_path, 25))]}

@@ -173,6 +173,7 @@ identify: { idn: "^ACME,SM-2000" }
 error_query: "SYSTem:ERRor?"
 parameters:
   V:
+    label: Voltage            # what the lab panel shows
     kind: drive
     unit: V
     set: "SOURce:VOLTage[:LEVel] {value}"
@@ -181,10 +182,21 @@ parameters:
     safe: 0
     ramp: gate
     max_rate: 10              # V/s
+    applies_when: output      # only reaches the sample while the output is on ("armed" otherwise)
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: "OUTPut {value}"
+    get: "OUTPut?"
+    safe: off
+    enables: [V]
   I:
+    label: Current
     kind: measure
     unit: A
     get: "MEASure:CURRent?"
+display: { headline: I }      # the reading shown large in the lab panel
 raw:
   blocked: ["CALibration", "SYSTem:FIRMware"]
   reset: ["*RST"]

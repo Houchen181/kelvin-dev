@@ -203,7 +203,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
     async def state(request: Request) -> Response:
-        data = runtime.ui_state()
+        data = await asyncio.to_thread(runtime.ui_state)  # may read instruments; keep the server responsive
         data["active"] = agent.active
         return JSONResponse(data)
 
