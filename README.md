@@ -45,6 +45,12 @@ python -m venv .venv
 The last command opens `http://127.0.0.1:8770` in your browser. Bookmark that link: the access key after `#` stays the same between restarts. To try the portal without an API key, add `--demo`; this gives you a scripted model that is not AI (try *sweep the gate* or *map gate against field*). The virtual lab runs at 10× real time so you can watch runs; `--speed 0` makes it instant. Add `--lab my_lab.yaml` to load a different simulated lab (for example many instruments at once); the format is `src/labharness/data/virtual_lab.yaml`.
 
 - **Models:** Add keys under Settings for Claude, GPT or Gemini, or point it at a local OpenAI-compatible server (Ollama, vLLM, LM Studio) for confidential work. Keys stay in `~/Kelvin/settings.json` and go only to their own provider.
+- **ChatGPT plan:** Instead of an OpenAI API key, you can use your ChatGPT plan. In Settings press **Continue with ChatGPT** and sign in on OpenAI's page in your browser.
+  - **What Kelvin gets:** it never sees your password and gets no access to your ChatGPT conversations.
+  - **Where it shows:** ChatGPT models then appear as **ChatGPT plan** in the model picker, and **Using ChatGPT plan** shows by the picker while one is selected.
+  - **Tokens:** they're kept in `~/Kelvin/chatgpt.json`, renewed automatically, and revoked when you sign out.
+  - **Limits:** use **Manage usage** to set them; project rules can allow or exclude ChatGPT plan by name.
+  - **Basis:** this follows OpenAI's Sign in with ChatGPT for open-source and personal local apps.
 - **Other model services:** Under Settings → **Other model services**, add any service that speaks the OpenAI Chat Completions API.
   - **Ready-made:** OpenRouter (models from many companies with one key), OpenCode, DeepSeek, Groq, Mistral and xAI. Pick one and paste its key.
   - **Anything else:** choose **Other** and give its address (for example Together, Fireworks, or a LiteLLM gateway).

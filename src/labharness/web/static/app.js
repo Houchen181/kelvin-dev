@@ -1378,6 +1378,7 @@
     }
     S.compare = S.compare.filter((k) => modelAllowed(k, rules));
     compareLabel();
+    showPlanChip();
     const text = rulesText(rules);
     $("rules-chip").hidden = !text;
     $("rules-chip").title = text ? "This chat's rules: " + text : "";
@@ -1706,6 +1707,47 @@
       h("div", { class: "pane-menu-note" }, "While comparing, models can read the lab but not change it. Pick one answer to continue with. ", off));
     menu.hidden = false;
     $("compare-btn").setAttribute("aria-expanded", "true");
+  }
+
+  // ------------------------------------------------------------------ Sign in with ChatGPT
+  const GPT = { timer: 0 };
+  function showChatGPT(st) {
+    $("chatgpt-status").textContent = st.signed_in ? "Signed in as " + (st.email || "you") + (st.plan ? "" : " (plan usage not allowed)") : "Not signed in";
+    $("chatgpt-signin").hidden = st.signed_in && st.plan;
+    $("chatgpt-usage").hidden = $("chatgpt-signout").hidden = !st.signed_in;
+  }
+  async function loadChatGPT() {
+    try { showChatGPT(await api("/api/chatgpt")); } catch (e) { $("chatgpt-status").textContent = e.message; }
+  }
+  async function signInChatGPT() {
+    try { await api("/api/chatgpt/signin", { body: {} }); }
+    catch (e) { $("chatgpt-status").textContent = e.message; return; }
+    $("chatgpt-status").textContent = "Finish signing in in your browser…";
+    clearInterval(GPT.timer);
+    const until = Date.now() + 10 * 60 * 1000;
+    GPT.timer = setInterval(async () => {
+      if (Date.now() > until) { clearInterval(GPT.timer); loadChatGPT(); return; }
+      let st;
+      try { st = await api("/api/chatgpt"); } catch (e) { return; }
+      if (!st.signed_in) return;
+      clearInterval(GPT.timer);
+      showChatGPT(st);
+      try { const b = await api("/api/bootstrap"); applyModels(b.models.groups, b.default_model); } catch (e) { /* the list updates on reload */ }
+      if (st.plan && !st.welcomed) { $("chatgpt-dialog").showModal(); api("/api/chatgpt/welcomed", { body: {} }).catch(() => {}); }
+    }, 2000);
+  }
+  async function signOutChatGPT() {
+    if (!confirm("Sign out of ChatGPT in Kelvin? ChatGPT models will no longer be available here.")) return;
+    try {
+      const st = await api("/api/chatgpt/signout", { body: {} });
+      showChatGPT(st);
+      toast(st.revoked ? "Signed out of ChatGPT." : "Signed out here; OpenAI did not confirm the sign-out, so you can also disconnect Kelvin in ChatGPT's settings.");
+      const b = await api("/api/bootstrap");
+      applyModels(b.models.groups, b.default_model);
+    } catch (e) { $("chatgpt-status").textContent = e.message; }
+  }
+  function showPlanChip() {   // OpenAI asks apps to say when a request uses the ChatGPT plan
+    $("plan-chip").hidden = !String($("model").value || "").startsWith("chatgpt:");
   }
 
   // ------------------------------------------------------------------ other model services
@@ -2335,6 +2377,7 @@
     $("pair-box").hidden = true;
     loadPhone();
     loadServices();
+    loadChatGPT();
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
     for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
     $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
@@ -2452,12 +2495,14 @@
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!S.streaming) sendMessage($("input").value); }
     });
     $("model").addEventListener("change", () => {
-      store("lh.model", $("model").value); updateSend();
+      store("lh.model", $("model").value); updateSend(); showPlanChip();
       S.compare = S.compare.filter((k) => k !== $("model").value); compareLabel();
     });
     $("compare-btn").addEventListener("click", toggleCompareMenu);
     $("phone-on").addEventListener("change", switchPhone);
     $("svc-preset").addEventListener("change", servicePreset);
+    $("chatgpt-signin").addEventListener("click", signInChatGPT);
+    $("chatgpt-signout").addEventListener("click", signOutChatGPT);
     $("svc-add").addEventListener("click", addService);
     $("pair-start").addEventListener("click", startPairing);
     document.addEventListener("click", (e) => {

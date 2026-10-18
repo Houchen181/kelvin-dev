@@ -20,7 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from ..agent.approval import WebApprover
@@ -34,6 +34,7 @@ from .. import carddraft
 from ..virtual_lab import build_lab, builtin_ids, builtin_registry, is_simulated, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in
 from . import review, rules as rulebook
+from .chatgpt import SignIn, SignInError
 from .qr import QR
 from .remote import ROLES, Remote, addresses, allowed, remote_host_ok
 from .providers.base import Provider
@@ -44,7 +45,7 @@ STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
 
 
-def make_providers(settings: Settings, demo: bool = False) -> Dict[str, Provider]:
+def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
     from .providers.anthropic_provider import AnthropicProvider
     from .providers.gemini_provider import GeminiProvider
     from .providers.openai_provider import OpenAIProvider
@@ -65,10 +66,26 @@ def make_providers(settings: Settings, demo: bool = False) -> Dict[str, Provider
             s["id"], s["name"], settings.service_key(s), base_url=s["base_url"],
             models=[m.strip() for m in (s.get("models") or "").split(",")], models_url=p.get("models_url"),
             exclude=p.get("exclude", ()), tools_only=p.get("tools_only", False), headers=p.get("headers"))
+    if signin is not None and signin.status()["plan"]:   # ChatGPT models on the user's ChatGPT plan
+        from .providers.chatgpt_provider import ChatGPTProvider
+        providers["chatgpt"] = ChatGPTProvider(signin)
     if demo:
         from .providers.demo import DemoProvider
         providers["demo"] = DemoProvider()
     return providers
+
+
+def open_url(url: str) -> None:
+    """Open a page in the user's own browser (OpenAI's sign-in page)."""
+    webbrowser.open(url)
+
+
+def _page(title: str, text: str) -> str:
+    from html import escape
+    return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
+            'content="width=device-width, initial-scale=1"><title>Kelvin</title><style>body{font:16px/1.5 system-ui,'
+            'sans-serif;max-width:34rem;margin:15vh auto;padding:0 1rem;color:#1f2328}h1{font-size:1.4rem}</style>'
+            '</head><body><h1>%s</h1><p>%s</p></body></html>' % (escape(title), escape(text)))
 
 
 class Guard:
@@ -95,6 +112,8 @@ class Guard:
                     problem = (403, "bad host")
                 elif origin and origin.split("://", 1)[-1] != host:
                     problem = (403, "bad origin")
+                elif path == "/auth/callback":
+                    problem = (403, "sign in from the Kelvin computer")
                 elif path.startswith("/api/") and not (path == "/api/pair" and method == "POST"):
                     device = self.remote.device_for(headers.get("x-kelvin-token", ""))
                     if device is None:
@@ -133,7 +152,8 @@ def open_path(path: Path) -> None:
 def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None) -> Any:
-    agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo), settings)
+    signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
+    agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo, signin), settings)
     remote = Remote(settings)
     guard: Any = None
     runtime.cards_dir = Path(settings.path).parent / "cards"
@@ -268,7 +288,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     store.set_instructions(project_id, body["instructions"])
                 if "rules" in body:
                     named = (body["rules"] or {}).get("providers") if isinstance(body["rules"], dict) else None
-                    known = set(rulebook.PROVIDERS) | {s["id"] for s in settings.services}
+                    known = set(rulebook.PROVIDERS) | {s["id"] for s in settings.services} | {"chatgpt"}
                     strange = [p for p in named or [] if p not in known]
                     if strange:
                         return error(400, "no model service called %s" % ", ".join(map(str, strange)))
@@ -306,6 +326,48 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(404, e.args[0])
         return JSONResponse({"ok": True})
 
+    # ------------------------------------------------------------------ Sign in with ChatGPT
+
+    def rebuild_providers() -> None:
+        if providers is None:
+            agent.providers = make_providers(settings, demo, signin)
+
+    async def chatgpt_view(request: Request) -> Response:
+        return JSONResponse(signin.status())
+
+    async def chatgpt_signin(request: Request) -> Response:
+        """Open OpenAI's sign-in page in the user's browser; it comes back to /auth/callback on this address."""
+        port = request.url.port or 80
+        try:
+            url = signin.begin("http://127.0.0.1:%d/auth/callback" % port)
+        except SignInError as e:
+            return error(400, str(e))
+        await asyncio.to_thread(open_url, url)
+        return JSONResponse({"url": url})
+
+    async def chatgpt_signout(request: Request) -> Response:
+        confirmed = await asyncio.to_thread(signin.sign_out)
+        rebuild_providers()
+        return JSONResponse(dict(signin.status(), revoked=confirmed))
+
+    async def chatgpt_welcomed(request: Request) -> Response:
+        signin.mark_welcomed()
+        return JSONResponse(signin.status())
+
+    async def auth_callback(request: Request) -> Response:
+        try:
+            st = await asyncio.to_thread(signin.finish, dict(request.query_params))
+        except SignInError as e:
+            return HTMLResponse(_page("Kelvin could not sign in with ChatGPT", str(e)), status_code=400)
+        rebuild_providers()
+        if st["plan"]:
+            text = "Signed in as %s. ChatGPT models in Kelvin now use your ChatGPT plan." % (st["email"] or "you")
+        else:
+            text = ("Signed in as %s, but plan usage was not allowed, so ChatGPT models are not available. Sign in "
+                    "again from Kelvin's Settings and allow it." % (st["email"] or "you"))
+        return HTMLResponse(_page("You're signed in to Kelvin with ChatGPT", text + " You can close this tab and go "
+                                  "back to Kelvin."))
+
     # ------------------------------------------------------------------ other model services
 
     async def services_view(request: Request) -> Response:
@@ -317,7 +379,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             except ValueError as e:
                 return error(400, str(e))
             if providers is None:
-                agent.providers = make_providers(settings, demo)
+                agent.providers = make_providers(settings, demo, signin)
         return JSONResponse({"services": settings.service_views(), "presets": presets_view(),
                              "models": await agent.models()})
 
@@ -327,7 +389,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except KeyError as e:
             return error(404, e.args[0])
         if providers is None:
-            agent.providers = make_providers(settings, demo)
+            agent.providers = make_providers(settings, demo, signin)
         return JSONResponse({"services": settings.service_views(), "models": await agent.models()})
 
     async def service_test(request: Request) -> Response:
@@ -810,7 +872,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 return error(400, str(e))
             configure_notifications()
             configure_literature()
-            agent.providers = make_providers(settings, demo) if providers is None else providers
+            agent.providers = make_providers(settings, demo, signin) if providers is None else providers
         return JSONResponse({"settings": settings.public(), "models": await agent.models()})
 
     async def run_data(request: Request) -> Response:
@@ -873,6 +935,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/me/forget", forget_me, methods=["POST"]),
         Route("/api/pair", pair, methods=["POST"]),
         Route("/api/phone", phone, methods=["GET", "POST"]),
+        Route("/auth/callback", auth_callback),
+        Route("/api/chatgpt", chatgpt_view),
+        Route("/api/chatgpt/signin", chatgpt_signin, methods=["POST"]),
+        Route("/api/chatgpt/signout", chatgpt_signout, methods=["POST"]),
+        Route("/api/chatgpt/welcomed", chatgpt_welcomed, methods=["POST"]),
         Route("/api/services", services_view, methods=["GET", "POST"]),
         Route("/api/services/{service_id}", service_view, methods=["DELETE"]),
         Route("/api/services/{service_id}/test", service_test, methods=["POST"]),
@@ -922,6 +989,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.agent = agent
     app.state.remote = remote
+    app.state.signin = signin
     guard = Guard(app, settings.access_key, hosts, remote)
     return guard
 

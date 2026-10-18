@@ -81,6 +81,7 @@
             <span class="sr-only">Model</span>
             <select id="model"></select>
           </label>
+          <span id="plan-chip" class="plan-chip" hidden title="Requests from this model count toward your ChatGPT plan">Using ChatGPT plan</span>
           <span id="rules-chip" class="rules-chip" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span id="rules-chip-text"></span></span>
           <div class="pane-menu-wrap compare-wrap">
             <button id="compare-btn" class="compare-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-pressed="false"
@@ -177,6 +178,15 @@
       <label for="k-openai">GPT — OpenAI API key</label>
       <div class="key-row"><input id="k-openai" name="openai_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="openai_api_key">Remove</button></div>
       <span class="hint" data-hint="openai_api_key"></span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">ChatGPT plan</span><span id="chatgpt-status" class="hint"></span></div>
+      <span class="hint">Use your ChatGPT plan for ChatGPT models instead of an API key. Kelvin opens ChatGPT's sign-in page in your browser and never sees your password; it gets no access to your ChatGPT conversations.</span>
+      <div class="chatgpt-row">
+        <button id="chatgpt-signin" class="chatgpt-btn" type="button">Continue with ChatGPT</button>
+        <a id="chatgpt-usage" class="link soft" href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer" hidden>Manage usage</a>
+        <button id="chatgpt-signout" class="link soft" type="button" hidden>Sign out</button>
+      </div>
     </div>
     <div class="field">
       <label for="k-gemini">Gemini — Google AI API key</label>
@@ -313,6 +323,19 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Close</button>
       <button id="lab-save" class="btn primary" type="button">Save and connect</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="chatgpt-dialog" class="dialog" aria-labelledby="chatgpt-dialog-title">
+  <form method="dialog">
+    <header class="dialog-head"><h2 id="chatgpt-dialog-title">Kelvin can now use your ChatGPT plan</h2></header>
+    <p>When you pick a ChatGPT model, Kelvin's requests use your ChatGPT plan instead of an API key, and count toward its limits. The composer says <b>Using ChatGPT plan</b> while that is so.</p>
+    <p class="muted small">Kelvin gets no access to your ChatGPT conversations. You can set limits for Kelvin, or disconnect it, in ChatGPT's settings, and sign out here in Settings.</p>
+    <footer class="dialog-foot">
+      <div class="spacer"></div>
+      <button class="btn" value="ok" type="submit">Continue</button>
+      <a class="btn primary" href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">Manage usage</a>
     </footer>
   </form>
 </dialog>
