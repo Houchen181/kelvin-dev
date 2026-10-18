@@ -807,6 +807,12 @@
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
     $("save-settings").addEventListener("click", saveSettings);
+    $("quit-app").hidden = !boot.can_quit;
+    $("quit-app").addEventListener("click", async () => {
+      if (!confirm("Quit Kelvin? The lab keeps its current settings.")) return;
+      try { await api("/api/quit", { body: {} }); } catch (e) { /* already gone */ }
+      document.body.replaceChildren(h("div", { class: "nokey" }, h("h1", {}, "Kelvin has quit"), h("p", {}, "You can close this tab.")));
+    });
     for (const b of document.querySelectorAll("[data-clear]")) {
       b.addEventListener("click", () => {
         const input = document.querySelector('#settings-form input[name="' + b.dataset.clear + '"]');

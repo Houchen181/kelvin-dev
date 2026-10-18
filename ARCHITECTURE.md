@@ -121,7 +121,7 @@ on_abort: { smu.V: { ramp_to: 0, rate_V_per_s: 1 } }
 | 1 | Adapters (VISA/SCPI, serial, Python frameworks, LabVIEW, MATLAB), auto-discovery onboarding, procedures, cards for the ~20 most common instruments | A new lab gets from install to a health-checked setup without writing code |
 | 2 | MCP server usable from any MCP client; approval UI; roles and locks; monitor + notifications; concise contract | 3–5 pilot labs in different fields run supervised experiments. **MCP server, approval page (with kill switch and browser notifications) and concise tool answers built 2026-10-17**; roles, locks and the monitor remain |
 | 3 | Literature service, reviewer, report generator, scoped memory, multi-model router, first domain packs | Pilots use it end to end: plan → run → report → review |
-| 4 | Own desktop/web/mobile app, self-hosted server, community registry, local-model path | Public release. **Early portal built 2026-10-17**: a chat web app (Claude/GPT/Gemini/local), inline approvals, run plots, lab panel; one lab per portal, local only |
+| 4 | Own desktop/web/mobile app, self-hosted server, community registry, local-model path | Public release. **Early portal built 2026-10-17**: a chat web app (Claude/GPT/Gemini/local), inline approvals, run plots, lab panel; one lab per portal, local only. **Desktop app built 2026-10-17**: native window, Windows installer and macOS app, built and self-tested by GitHub Actions on each version tag; unsigned for now. A hosted website comes later, as remote/phone access to the desktop app, since instruments are always reached through a local install |
 
 ## Decisions needed
 

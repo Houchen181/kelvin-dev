@@ -11,11 +11,24 @@ Kelvin connects Claude, GPT, Gemini or a local model to your instruments through
 
 See [VISION.md](VISION.md) for the goals and [ARCHITECTURE.md](ARCHITECTURE.md) for the design.
 
-**Status:** The core rules, formats and a fully simulated lab are done (Phase 0). The MCP server, the approval page and the chat portal are done, so any AI agent can drive the virtual lab. Real-instrument adapters, roles and locks, and monitoring come later.
+**Status:** The core rules, formats and a fully simulated lab are done (Phase 0). The MCP server, the approval page, the chat portal and the desktop app are done, so anyone can install Kelvin and drive the virtual lab. Real-instrument adapters, roles and locks, and monitoring come later.
 
-## The portal: chat with Kelvin in your browser
+## Download Kelvin
 
-This is a chat site like the Claude or ChatGPT website, wired to the lab. It needs Python ≥ 3.10:
+Get the latest version from **[Releases](https://github.com/Houchen181/kelvin/releases/latest)**. No Python needed.
+
+| | |
+|---|---|
+| **Windows 10/11** | Run `Kelvin-Setup-<version>.exe`. It installs for your user only, so no admin rights are needed, and adds Kelvin to the Start menu. The installer isn't code-signed yet, so Windows may say "Windows protected your PC": choose **More info → Run anyway**. |
+| **macOS (Apple silicon)** | Unzip `Kelvin-<version>-macOS.zip` and move `Kelvin.app` to Applications. It isn't signed yet, so the first time, right-click it and choose **Open**. |
+
+Kelvin opens in its own window. It starts with a simulated lab and a scripted demo model; add an API key under Settings to talk to Claude, GPT or Gemini. Everything it keeps (settings, keys, chats, lab logs and runs) stays in `~/Kelvin` on your computer. Kelvin runs one copy at a time; opening it again brings up the running one in your browser.
+
+To publish a new version: bump `src/labharness/_version.py`, then push a tag such as `v0.2.0`. GitHub builds both apps, tests them, and publishes the release.
+
+## The portal from source
+
+The same chat site runs from a checkout, which is handy for development. It needs Python ≥ 3.10:
 
 ```bash
 python -m venv .venv
@@ -115,6 +128,8 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/agent/` | MCP server (`server.py`), plain-text tool answers (`runtime.py`), approval page (`approval.py`, `ui.html`) |
 | `src/labharness/web/` | The portal: web API (`app.py`), chat loop (`agent.py`), one module per model provider (`providers/`), chats and settings, browser UI and the logo (`static/`) |
 | `src/labharness/data/` | Cards for the virtual lab, its lab config and a demo envelope |
+| `src/labharness/desktop.py` | The desktop app: the portal in a native window, one copy at a time, `--self-test` |
+| `packaging/` | PyInstaller recipe (`kelvin.spec`), Windows installer (`kelvin.iss`), app icons (`make_icons.py`, `icons/`) |
 
 ## Working together
 

@@ -83,7 +83,7 @@ class Guard:
 
 def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
-               providers: Optional[Dict[str, Provider]] = None) -> Any:
+               providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None) -> Any:
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo))
     tasks: List[asyncio.Task] = []
 
@@ -123,8 +123,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             "lab": runtime.lab.config.name,
             "simulated": all(i.simulated for i in runtime.lab.instruments.values()),
             "chats": store.list(), "models": models, "default_model": default,
-            "settings": settings.public(), "active": agent.active,
+            "settings": settings.public(), "active": agent.active, "can_quit": on_quit is not None,
         })
+
+    async def quit_app(request: Request) -> Response:
+        if on_quit is None:
+            return error(404, "not found")
+        agent.stop()
+        on_quit()
+        return JSONResponse({"ok": True})
 
     async def chats(request: Request) -> Response:
         if request.method == "POST":
@@ -262,6 +269,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/state", state),
         Route("/api/safe_state", safe_state, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
+        Route("/api/quit", quit_app, methods=["POST"]),
         Route("/api/runs/{run_id}", run_data),
         Route("/static/{name}", static),
     ]

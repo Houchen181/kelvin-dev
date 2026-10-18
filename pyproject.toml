@@ -13,11 +13,15 @@ dependencies = ["PyYAML>=5.4"]
 [project.optional-dependencies]
 agent = ["mcp>=2.3"]           # the MCP server needs Python >= 3.10
 web = ["mcp>=2.3", "starlette", "uvicorn", "anthropic>=1.15", "openai>=3", "google-genai>=2"]
+desktop = ["kelvin-lab[web]", "pywebview>=5"]
 dev = ["pytest>=6", "httpx"]
 
 [project.scripts]
 kelvin = "labharness.web.app:main"
 kelvin-mcp = "labharness.agent.server:main"
+
+[project.gui-scripts]
+kelvin-app = "labharness.desktop:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

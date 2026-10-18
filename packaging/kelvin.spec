@@ -1,0 +1,74 @@
+# PyInstaller recipe for the Kelvin desktop app.
+#   pyinstaller packaging/kelvin.spec --noconfirm
+# Windows: dist/Kelvin/Kelvin.exe (folder app; the installer wraps it)
+# macOS:   dist/Kelvin.app
+import sys
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, copy_metadata
+
+ROOT = Path(SPECPATH).parent
+ICONS = ROOT / "packaging" / "icons"
+sys.path.insert(0, str(ROOT / "src"))
+from labharness._version import __version__  # noqa: E402
+
+# (import name, distribution name, submodule prefixes to leave out)
+PACKAGES = [
+    ("labharness", "kelvin-lab", ()),
+    ("webview", "pywebview", ("webview.platforms.android",)),
+    ("uvicorn", "uvicorn", ()),
+    ("starlette", "starlette", ()),
+    ("mcp", "mcp", ("mcp.cli",)),                  # the CLI needs typer, which Kelvin does not use
+    ("anthropic", "anthropic", ("anthropic._vendor.httpx_aiohttp",)),
+    ("openai", "openai", ()),
+    ("google.genai", "google-genai", ()),
+    ("yaml", "PyYAML", ()),
+]
+if sys.platform == "win32":
+    PACKAGES += [("clr_loader", "clr_loader", ()), ("pythonnet", "pythonnet", ())]
+
+datas, binaries, hiddenimports = [], [], []
+for package, dist, skip in PACKAGES:
+    keep = lambda name, skip=skip: ".tests" not in name and not name.startswith(skip)  # noqa: E731
+    try:
+        hiddenimports += collect_submodules(package, filter=keep, on_error="ignore")
+        datas += collect_data_files(package, excludes=["**/tests/**"])
+        binaries += collect_dynamic_libs(package)
+    except Exception as e:  # a platform-specific package that is not installed here
+        print("skipping", package, e)
+        continue
+    try:
+        datas += copy_metadata(dist)
+    except Exception:
+        pass
+
+a = Analysis(
+    [str(ROOT / "packaging" / "kelvin_app.py")],
+    pathex=[str(ROOT / "src")],
+    datas=datas,
+    binaries=binaries,
+    hiddenimports=hiddenimports,
+    excludes=["tkinter", "pytest", "PyInstaller"],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="Kelvin",
+    console=False,
+    icon=str(ICONS / ("kelvin.icns" if sys.platform == "darwin" else "kelvin.ico")),
+)
+coll = COLLECT(exe, a.binaries, a.datas, name="Kelvin")
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="Kelvin.app",
+        icon=str(ICONS / "kelvin.icns"),
+        bundle_identifier="io.github.houchen181.kelvin",
+        version=__version__,
+        info_plist={"CFBundleDisplayName": "Kelvin", "NSHighResolutionCapable": True,
+                    "LSMinimumSystemVersion": "11.0"},
+    )
