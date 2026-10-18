@@ -214,6 +214,33 @@ instruments:
     auto: never                     # a person approves every change on this instrument
 ```
 
+## Watches and notifications
+
+Kelvin keeps an eye on the lab between runs and during them. A **watch** reads one value every few seconds and raises an alarm when the value leaves its range for longer than the hold time. Durations are in lab time, so the virtual lab at 10x behaves like the real one. The alarm clears itself when the value comes back. Kelvin also raises an alarm when an instrument stops answering (three failed reads in a row) and when a real instrument reports an error in its own error queue (checked once a minute).
+
+Who can add a watch, and what it may do:
+
+| Watch | Added by | On alarm |
+|---|---|---|
+| Lab watch | The lab owner, in the lab config | Tells people; can stop the running plan and send named drives to their **safe** values (the config refuses any other value) |
+| Your watch | You, in the Lab panel (**Watches → Add…**) | Tells people |
+| Kelvin's watch | The agent (`watch`, `watches`, `unwatch`), e.g. "tell me if the sample warms above 4 K while this runs" | Tells people |
+
+Lab watches can't be removed from the portal or by the agent; they change only in the lab config.
+
+```yaml
+watch:
+  - read: tc.T_sample
+    above: 20
+    for: 10                          # seconds it must stay above before the alarm
+    then: { laser.emission: off }    # only ever toward safe; also stops the running plan
+    note: The sample must stay cold; the laser is the usual culprit.
+```
+
+**How Kelvin tells you.** Alarms show as a banner above the chat until you press **Got it**, and the window title starts with (!). In Settings → Notifications:
+- **Allow on this computer** turns on system notifications in your browser: alarms always, and approvals waiting and finished runs while Kelvin is in the background.
+- **Also send to** takes a webhook: an [ntfy](https://ntfy.sh) topic (push to your phone with the ntfy app), or a Slack, Teams or Discord incoming webhook. Tick which notices go there (alarms and finished runs by default), then press **Send a test**. The address is kept like an API key and never shown again. Nothing leaves the computer unless you set one; when you do, the notices carry lab details, so use a private topic or channel.
+
 ## Layout
 
 The Python package is still called `labharness` (`import labharness`); the product, commands and repo are Kelvin.
@@ -225,6 +252,8 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/labconfig.py` | Lab config (lab limits, rates, guards, interlocks, trust) and project envelopes |
 | `src/labharness/gate.py` | The safety gate |
 | `src/labharness/plans.py`, `engine.py` | Plan format; validate → preflight → dry run → approve → run → log |
+| `src/labharness/monitor.py`, `notify.py` | Watches and alarms on a background thread; in-app notices and the optional webhook |
+| `src/labharness/adapters.py`, `discovery.py` | VISA/serial connections for real instruments; the read-only scan that matches instruments to cards |
 | `src/labharness/eventlog.py` | Append-only event log; one folder per run (plan, snapshots, data, meta) |
 | `src/labharness/sim/` | Twins that answer the card's own commands, plus a toy sample |
 | `src/labharness/agent/` | MCP server (`server.py`), plain-text tool answers (`runtime.py`), approval page (`approval.py`, `ui.html`) |

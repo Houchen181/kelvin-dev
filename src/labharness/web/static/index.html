@@ -54,6 +54,7 @@
       </button>
     </header>
 
+    <div id="alerts" class="alerts" role="alert" hidden></div>
     <div id="scroller" class="scroller">
       <section id="empty" class="empty">
         <img class="hero-mark" src="/static/kelvin.svg" width="72" height="72" alt="Kelvin">
@@ -132,6 +133,16 @@
         </div>
       </div>
       <div id="lab-status" class="inst-list"></div>
+      <div class="inst-head-row"><h3>Watches</h3><span id="watch-summary" class="inst-summary"></span>
+        <button id="watch-add-toggle" class="link soft" type="button">Add…</button></div>
+      <form id="watch-form" class="watch-form" hidden>
+        <select id="watch-key" aria-label="Reading to watch"></select>
+        <input id="watch-above" type="number" step="any" placeholder="above" title="Alarm when the reading goes above this" aria-label="Alarm above">
+        <input id="watch-below" type="number" step="any" placeholder="below" title="Alarm when the reading goes below this" aria-label="Alarm below">
+        <input id="watch-for" type="number" step="any" min="0" placeholder="for (s)" title="Only if it stays there this many seconds" aria-label="For how many seconds">
+        <button class="btn small" type="submit">Watch</button>
+      </form>
+      <ul id="watch-list" class="watch-list"></ul>
       <h3>Activity</h3>
       <ol id="lab-events" class="lab-events"></ol>
     </div>
@@ -174,6 +185,22 @@
     <div class="field">
       <label for="default-model">Default model for new chats</label>
       <select id="default-model" name="default_model"></select>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Notifications</span>
+        <button id="allow-notify" class="btn small" type="button">Allow on this computer</button></div>
+      <span class="hint">Alarms, approvals that wait for you, and finished runs show here; allow system notifications to see them when Kelvin is in the background.</span>
+      <label for="k-webhook">Also send to (an ntfy topic for your phone, or a Slack, Teams or Discord webhook)</label>
+      <div class="key-row"><input id="k-webhook" name="webhook" type="password" autocomplete="off" spellcheck="false" placeholder="https://ntfy.sh/your-own-secret-topic"><button type="button" class="link" data-clear="webhook">Remove</button></div>
+      <span class="hint" data-hint="webhook"></span>
+      <div class="checks" id="notify-kinds">
+        <label class="check"><input type="checkbox" value="alarm"> Alarms</label>
+        <label class="check"><input type="checkbox" value="alarm_cleared"> Alarms cleared</label>
+        <label class="check"><input type="checkbox" value="approval"> Approvals waiting</label>
+        <label class="check"><input type="checkbox" value="run"> Finished runs</label>
+        <button id="notify-test" class="link soft" type="button">Send a test</button>
+      </div>
+      <span class="hint">Only what you tick goes to that address, which then holds lab details; use a private topic or channel.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Memory</span>

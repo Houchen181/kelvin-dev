@@ -18,8 +18,8 @@ ENV = {
     "openai_api_key": "OPENAI_API_KEY",
     "gemini_api_key": "GEMINI_API_KEY",
 }
-SECRET = set(ENV) | {"local_api_key"}
-EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab"}
+SECRET = set(ENV) | {"local_api_key", "webhook"}   # a webhook URL is a credential too
+EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds"}
 
 
 class Settings:
@@ -64,6 +64,11 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "lab":  # which lab to open: the user's lab.yaml ("mine") or the virtual lab
                 value = value if value in ("mine", "virtual") else ""
+            if name == "webhook" and value and not value.startswith(("https://", "http://")):
+                raise ValueError("The notification webhook must be an http(s) URL.")
+            if name == "notify_kinds":  # which notices also go to the webhook
+                from ..notify import KINDS
+                value = ",".join(k for k in value.split(",") if k in KINDS) or "none"
             if value:
                 self._data[name] = value
             else:
@@ -79,7 +84,14 @@ class Settings:
             "default_model": self._data.get("default_model", ""),
             "instructions": self._data.get("instructions", ""),
             "learn": self.learning,
+            "notify_kinds": self.notify_kinds,
         }
+
+    @property
+    def notify_kinds(self) -> list:
+        from ..notify import DEFAULT_KINDS
+        raw = self._data.get("notify_kinds")
+        return list(DEFAULT_KINDS) if raw is None else [k for k in raw.split(",") if k and k != "none"]
 
     @property
     def learning(self) -> bool:

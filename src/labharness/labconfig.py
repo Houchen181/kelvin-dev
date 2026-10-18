@@ -106,6 +106,7 @@ class LabConfig:
     safe_actions: Dict[str, str] = field(default_factory=dict)
     source: str = ""
     auto_fraction: float = AUTO_FRACTION
+    watches: List[Dict[str, Any]] = field(default_factory=list)  # the lab owner's watches (see monitor.py)
 
 
 def _pair(x: Any) -> bool:
@@ -271,6 +272,45 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
         else:
             safe_actions[str(key)] = action
 
+    watches: List[Dict[str, Any]] = []
+    for i, w in enumerate(data.get("watch") or []):
+        path = "watch[%d]" % i
+        if not isinstance(w, dict):
+            err(path, "must be a mapping: {read, above, below, for, every, then}")
+            continue
+        spec = _lookup(cards, str(w.get("read")))
+        if spec is None or spec.get_cmd is None or not spec.numeric:
+            err(path + ".read", "%r is not a numeric reading in this lab" % w.get("read"))
+            continue
+        nums = {}
+        for k in ("above", "below", "for", "every"):
+            if w.get(k) is not None:
+                if isinstance(w[k], bool) or not isinstance(w[k], (int, float)):
+                    err("%s.%s" % (path, k), "must be a number")
+                else:
+                    nums[k] = float(w[k])
+        if "above" not in nums and "below" not in nums:
+            err(path, "needs above, below or both")
+        then = []
+        for key, value in (w.get("then") or {}).items():
+            dspec = _lookup(cards, str(key))
+            if dspec is None or not dspec.is_drive:
+                err("%s.then.%s" % (path, key), "not a drive")
+                continue
+            try:
+                v = dspec.coerce(value)
+            except ValueError as e:
+                err("%s.then.%s" % (path, key), str(e))
+                continue
+            if v != dspec.safe:  # a watch may only make things safer
+                err("%s.then.%s" % (path, key), "a watch may only send a drive to its safe value (%s)" % dspec.show(dspec.safe))
+                continue
+            instr, _, param = str(key).partition(".")
+            then.append((instr, param, v))
+        watches.append({"read": str(w["read"]), "above": nums.get("above"), "below": nums.get("below"),
+                        "for": nums.get("for", 0.0), "every": nums.get("every", 10.0), "then": then,
+                        "stop_run": bool(w.get("stop_run", bool(then))), "note": str(w.get("note") or "")})
+
     fraction = data.get("auto_fraction", AUTO_FRACTION)
     if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 <= fraction <= 1:
         err("auto_fraction", "must be a number from 0 to 1")
@@ -278,7 +318,7 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
 
     if errors:
         raise ConfigError(src, errors)
-    return LabConfig(str(data.get("lab", "Lab")), instruments, interlocks, safe_actions, src, float(fraction))
+    return LabConfig(str(data.get("lab", "Lab")), instruments, interlocks, safe_actions, src, float(fraction), watches)
 
 
 @dataclass

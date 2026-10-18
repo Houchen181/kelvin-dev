@@ -19,6 +19,8 @@ from ..eventlog import EventLog, RunStore
 from ..gate import Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, Envelope
+from ..monitor import Monitor, Watch
+from ..notify import Notifier
 from ..plans import Plan, PlanError, load_plan
 from ..yamlio import load_yaml
 
@@ -70,6 +72,12 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "stop":
         text = "stopped the current ramp or plan" + (
             "; declined %d open request(s)" % e["declined"] if e.get("declined") else "")
+    elif kind == "alarm":
+        text = "ALARM: %s%s" % (e.get("text"), " -> " + "; ".join(e["actions"]) if e.get("actions") else "")
+    elif kind == "alarm_cleared":
+        text = "cleared: %s" % e.get("text")
+    elif kind == "watch":
+        text = "%s watch %s: %s" % (e.get("change"), e.get("watch"), e.get("rule"))
     elif kind == "lab_changed":
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
     elif kind == "approval_mode":
@@ -108,6 +116,12 @@ class LabRuntime:
         self._live_lock = threading.Lock()
         self.lab_info: Dict[str, Any] = {"kind": "virtual" if all(i.simulated for i in lab.instruments.values()) else "file",
                                          "path": None, "error": None, "has_file": False}
+        self.notifier = Notifier()
+        self.monitor = self._new_monitor()
+        subscribe = getattr(approver, "subscribe", None)
+        if subscribe:  # a person is needed: tell them, wherever they are
+            subscribe(lambda r: None if r.get("auto") else self.notifier(
+                "approval", "Approval needed: " + r["title"], (r.get("items") or [""])[0]))
         with self.lock:
             self._refresh()
 
@@ -194,6 +208,8 @@ class LabRuntime:
             if self.gate.auto:
                 lines.append("approvals: auto mode (a person turned it on): low-risk drive changes and runs go ahead "
                              "without asking; the rest still wait for a human")
+            lines += ["ALARM: %s%s" % (a.text, " (%s)" % "; ".join(a.actions) if a.actions else "")
+                      for a in self.monitor.active()]
             lines += self._status_lines()
             lines.append("* = drive away from its safe value")
             return "\n".join(lines)
@@ -289,6 +305,10 @@ class LabRuntime:
             except PlanError as e:
                 return "invalid plan: %s" % e
             report = self.engine.run(plan)
+            if report.run_id:
+                summary = (report.analysis or {}).get("assessment") or report.message
+                self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
+                              summary[:300])
             lines = []
             if report.dry_run is not None and report.status in ("done", "aborted"):
                 lines.append(report.dry_run.message)
@@ -514,6 +534,43 @@ class LabRuntime:
             out.append(dict(vars(f), suggested=name))
         return out
 
+    # ------------------------------------------------------------------ watching instruments
+
+    def _new_monitor(self) -> Monitor:
+        monitor = Monitor(self.lab, self.gate, self.notifier)
+        for w in self.lab.config.watches:
+            monitor.add(Watch(w["read"], w["above"], w["below"], w["for"], w["every"], list(w["then"]),
+                              w["stop_run"], "lab", w["note"]))
+        return monitor
+
+    def add_watch(self, key: str, above: Optional[float] = None, below: Optional[float] = None, for_s: float = 0.0,
+                  note: str = "", source: str = "person") -> Dict[str, Any]:
+        """A notify-only watch (actions on alarm are for the lab owner's watches in the lab config)."""
+        spec = self._spec(key)
+        if spec is None:
+            raise KeyError("%r is not a parameter in this lab" % key)
+        if not spec.numeric or spec.get_cmd is None:
+            raise ValueError("%s is not a numeric reading, so it has no range to watch" % key)
+        w = self.monitor.add(Watch(key, above, below, max(0.0, float(for_s)), 10.0, [], False, source, note[:200]))
+        view = next(v for v in self.monitor.list() if v["id"] == w.id)
+        self.gate.log.write("watch", by=source, change="added", watch=w.id, rule=view["rule"])
+        return view
+
+    def remove_watch(self, watch_id: str, source: str = "person") -> None:
+        w = self.monitor.remove(watch_id, source)   # the lab owner's watches change only in the lab config
+        self.gate.log.write("watch", by=source, change="removed", watch=w.id, rule=w.rule())
+
+    def watches_text(self) -> str:
+        lines = []
+        for v in self.monitor.list():
+            state = "ALARM" if v["alarm"] else "ok"
+            value = "" if v["value"] is None else " (now %s)" % self._spec(v["key"]).show(v["value"])
+            lines.append("%s [%s, %s] %s%s%s" % (v["id"], v["source"], state, v["rule"], value,
+                                                 " -> " + "; ".join(v["then"]) if v["then"] else ""))
+        for a in self.monitor.active():
+            lines.append("active alarm %s: %s" % (a.id, a.text))
+        return "\n".join(lines) or "nothing is watched"
+
     def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human") -> List[str]:
         """Control another lab (the user's instruments, or the virtual lab). Refused while a plan runs. The approval
         mode goes back to asking, and the new lab is health-checked right away."""
@@ -526,6 +583,11 @@ class LabRuntime:
             self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
             self.engine.progress = self._on_progress
             self.lab_info = dict(info)
+            running = self.monitor._thread is not None
+            self.monitor.stop()
+            self.monitor = self._new_monitor()   # watches name instruments of the old lab; start again
+            if running:
+                self.monitor.start()
             self._status = {}
             self._refresh()
             self.gate.log.write("lab_changed", by=by, lab=lab.config.name, instruments=sorted(lab.instruments),
@@ -610,6 +672,9 @@ class LabRuntime:
                 "busy": self.busy, "pending": pending, "history": history, "status": status,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
+                "watches": self.monitor.list(),
+                "alarms": [a.view() for a in self.monitor.alarms[:10]],
+                "notices": list(self.notifier.notices)[-20:],
                 "instruments": self.instruments(),
                 "live": {k: v for k, v in (self.live_view(10 ** 9) or {}).items()
                          if k in ("run_id", "plan", "done", "total", "eta_s", "status")} or None,

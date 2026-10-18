@@ -38,5 +38,12 @@ interlocks:
   - drive: magnet.B
     require: "tc.T_sample < 10"
 
+watch:
+  - read: tc.T_sample
+    above: 20
+    for: 10
+    then: { laser.emission: off }   # a watch may only send drives to their safe values
+    note: The sample must stay cold; the laser is the usual culprit.
+
 safe_actions:
   magnet.B: hold     # when a run is stopped, hold the field instead of ramping it to zero

@@ -90,14 +90,23 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     tasks: List[asyncio.Task] = []
 
+    def configure_notifications() -> None:
+        try:
+            runtime.notifier.configure(settings.get("webhook"), settings.notify_kinds)
+        except ValueError:
+            runtime.notifier.configure(None, settings.notify_kinds)
+
     @asynccontextmanager
     async def lifespan(app: Starlette):
         await agent.start()
+        configure_notifications()
+        runtime.monitor.start()
         try:
             yield
         finally:
             for t in tasks:
                 t.cancel()
+            runtime.monitor.stop()
             await agent.close()
 
     def error(status: int, message: str) -> JSONResponse:
@@ -221,6 +230,42 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except KeyError as e:
             return error(404, e.args[0])
         return JSONResponse({"ok": True})
+
+    # ------------------------------------------------------------------ watches, alarms, notifications
+
+    async def watches_view(request: Request) -> Response:
+        """GET: watches and recent alarms. POST {key, above, below, for_s, note}: a person adds a watch."""
+        if request.method == "POST":
+            body = await request.json()
+
+            def num(name: str) -> Optional[float]:
+                v = body.get(name)
+                return None if v in (None, "") else float(v)
+            try:
+                view = runtime.add_watch(str(body.get("key") or ""), num("above"), num("below"), num("for_s") or 0.0,
+                                         str(body.get("note") or ""), source="person")
+            except KeyError as e:
+                return error(404, e.args[0] if e.args else "no such reading")
+            except (TypeError, ValueError) as e:
+                return error(400, str(e))
+            return JSONResponse(view)
+        return JSONResponse({"watches": runtime.monitor.list(), "alarms": [a.view() for a in runtime.monitor.alarms[:20]]})
+
+    async def watch_view(request: Request) -> Response:
+        try:
+            runtime.remove_watch(request.path_params["watch_id"], source="person")
+        except KeyError as e:
+            return error(404, e.args[0])
+        except PermissionError as e:
+            return error(403, str(e))
+        return JSONResponse({"ok": True})
+
+    async def alarm_ack(request: Request) -> Response:
+        ok = runtime.monitor.acknowledge(request.path_params["alarm_id"])
+        return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
+
+    async def notify_test(request: Request) -> Response:
+        return JSONResponse({"result": await asyncio.to_thread(runtime.notifier.test)})
 
     # ------------------------------------------------------------------ the lab Kelvin controls (people only)
 
@@ -359,7 +404,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def settings_view(request: Request) -> Response:
         if request.method == "POST":
-            settings.update(await request.json())
+            try:
+                settings.update(await request.json())
+            except ValueError as e:
+                return error(400, str(e))
+            configure_notifications()
             agent.providers = make_providers(settings, demo) if providers is None else providers
         return JSONResponse({"settings": settings.public(), "models": await agent.models()})
 
@@ -431,6 +480,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/state", state),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/lab", lab_view, methods=["GET", "POST"]),
+        Route("/api/watches", watches_view, methods=["GET", "POST"]),
+        Route("/api/watches/{watch_id}", watch_view, methods=["DELETE"]),
+        Route("/api/alarms/{alarm_id}/ack", alarm_ack, methods=["POST"]),
+        Route("/api/notify/test", notify_test, methods=["POST"]),
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
         Route("/api/instruments/draft", draft_view, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),

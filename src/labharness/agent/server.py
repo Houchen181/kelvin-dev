@@ -32,6 +32,8 @@ You are connected to a physics lab through Kelvin.
   run_plan analyses the data itself; report its assessment and key numbers (with uncertainties) rather than raw rows.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - If something looks wrong, stop and tell the user. Moving a drive back toward safe runs without asking.
+- Before a long or unattended run, offer to watch the readings that matter (watch); alarms reach the user even when
+  they are away. lab_status lists active alarms; mention any you see.
 - Reply to the user briefly: the result first, then the next step."""
 
 READ = ToolAnnotations(readOnlyHint=True)
@@ -72,6 +74,31 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def undo_last() -> str:
         """Undo the last successful set_value (through the same safety rules)."""
         return rt.undo()
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def watch(reading: str, above: Optional[float] = None, below: Optional[float] = None, for_seconds: float = 0,
+              note: str = "") -> str:
+        """Watch a reading (e.g. tc.T_A) and alert the user when it goes above/below a value for `for_seconds`.
+        Only reads and notifies; the lab owner's watches may also act. Returns the watch id."""
+        try:
+            v = rt.add_watch(reading, above, below, for_seconds, note, source="agent")
+        except (KeyError, ValueError) as e:
+            return "not watched: %s" % (e.args[0] if e.args else e)
+        return "watching %s (id %s)" % (v["rule"], v["id"])
+
+    @server.tool(annotations=READ, structured_output=False)
+    def watches() -> str:
+        """What is being watched, the readings now, and any active alarms."""
+        return rt.watches_text()
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def unwatch(watch_id: str) -> str:
+        """Stop a watch you or the user added (the lab owner's watches stay)."""
+        try:
+            rt.remove_watch(watch_id, source="agent")
+        except (KeyError, PermissionError) as e:
+            return "not removed: %s" % (e.args[0] if e.args else e)
+        return "no longer watching (%s)" % watch_id
 
     @server.tool(annotations=READ, structured_output=False)
     def scan_instruments() -> str:
@@ -163,6 +190,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         envelope = load_envelope(args.envelope, lab.config, lab.registry) if args.envelope else demo_envelope(lab)
     approver = WebApprover(timeout=args.approval_timeout)
     runtime = LabRuntime(lab, approver, args.data_dir, envelope)
+    runtime.monitor.start()
     ui = ApprovalServer(runtime, port=args.ui_port).start()
 
     print("Kelvin: approval page %s" % ui.url, file=sys.stderr, flush=True)

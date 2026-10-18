@@ -10,6 +10,7 @@ import importlib
 import math
 import random
 import re
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from ..cards import Card
@@ -27,6 +28,7 @@ class World:
         self.rng = random.Random(seed)
         self.twins: Dict[str, "Twin"] = {}
         self._t = clock.now()
+        self.lock = threading.RLock()  # the monitor reads from its own thread
 
     def add(self, name: str, twin: "Twin") -> None:
         self.twins[name] = twin
@@ -122,6 +124,10 @@ class Twin:
     # --- backend interface (same as a VISA resource) ---
 
     def write(self, command: str) -> None:
+        with self.world.lock:
+            self._write(command)
+
+    def _write(self, command: str) -> None:
         self._check_fault()
         self.world.update()
         for spec in self.card.params.values():  # a card command that is itself compound, e.g. "TARG {value};RAMP"
@@ -132,6 +138,10 @@ class Twin:
             self._write_one(part)
 
     def query(self, command: str) -> str:
+        with self.world.lock:
+            return self._query(command)
+
+    def _query(self, command: str) -> str:
         self._check_fault()
         self.world.update()
         parts = split_compound(command)

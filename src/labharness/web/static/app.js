@@ -1493,6 +1493,9 @@
     badge.hidden = !s.pending.length;
     if (loose.length && !S.labOpen) toggleLab(true);
     showMode(s.approval_mode, s.approval_rule);
+    renderAlerts(s.alarms);
+    renderWatches(s.watches || [], s.status);
+    notifySystem(s.notices);
     $("lab-name").textContent = s.lab;
     $("sim-tag").hidden = !s.simulated;
     const problem = s.lab_info && s.lab_info.error;
@@ -1500,6 +1503,66 @@
     if (problem) $("lab-problem").textContent = problem + " Kelvin is using the virtual lab meanwhile.";
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
   }
+  // ------------------------------------------------------------------ alarms, watches, notifications
+  function renderAlerts(alarms) {
+    const live = (alarms || []).filter((a) => !a.cleared && !a.acknowledged);
+    const box = $("alerts");
+    box.hidden = !live.length;
+    box.replaceChildren(...live.map((a) => {
+      const ok = h("button", { class: "btn small", type: "button" }, "Got it");
+      ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
+      return h("div", { class: "alert" }, icon("warn"), h("div", { class: "alert-body" }, h("b", {}, a.text),
+        a.actions.length ? h("span", {}, "Kelvin " + a.actions.join("; ")) : null), ok);
+    }));
+    document.title = (live.length ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
+  }
+  function notifySystem(notices) {
+    if (!notices || !notices.length) return;
+    const newest = notices[notices.length - 1].id;
+    if (S.noticeSeen === undefined) { S.noticeSeen = newest; return; }   // not the ones from before the page opened
+    for (const n of notices) {
+      if (n.id <= S.noticeSeen) continue;
+      const wanted = n.kind === "alarm" || document.hidden;
+      if (wanted && "Notification" in window && Notification.permission === "granted") {
+        try { new Notification(n.title, { body: n.text, tag: "kelvin-" + n.id }); } catch (e) { /* not supported here */ }
+      }
+    }
+    S.noticeSeen = newest;
+  }
+  function renderWatches(watches, status) {
+    $("watch-summary").textContent = watches.length ? watches.filter((w) => w.alarm).length + " alarm · " + watches.length + " watched" : "";
+    $("watch-list").replaceChildren(...(watches.length ? watches.map((w) => {
+      const remove = w.source === "lab" ? h("span", { class: "tag", title: "From the lab config; the lab owner changes it there" }, "lab")
+        : rowButton("x", "Stop watching", async () => { try { await api("/api/watches/" + w.id, { method: "DELETE" }); } catch (e) { toast(e.message); } pollState(); });
+      return h("li", { class: "watch" + (w.alarm ? " alarm" : "") }, h("span", { class: "dot" + (w.alarm ? " bad" : " on") }),
+        h("span", { class: "watch-rule" }, w.rule, w.then.length ? h("span", { class: "watch-then" }, " → " + w.then.join(", ")) : null),
+        h("span", { class: "watch-src" }, w.source === "agent" ? "Kelvin" : ""), remove);
+    }) : [h("li", { class: "inst-empty" }, "Nothing is watched. Add a reading to be told when it leaves its range.")]));
+    const sel = $("watch-key");
+    if (document.activeElement !== sel && status) {
+      const keep = sel.value;
+      const keys = [];
+      for (const [inst, params] of Object.entries(status)) {
+        for (const p of params) if (/^-?[\d.]/.test(String(p.value))) keys.push(inst + "." + p.name);
+      }
+      if (keys.join() !== S.watchKeys) {
+        S.watchKeys = keys.join();
+        sel.replaceChildren(...keys.map((k) => new Option(k, k)));
+        if (keys.includes(keep)) sel.value = keep;
+      }
+    }
+  }
+  async function addWatch(e) {
+    e.preventDefault();
+    const body = { key: $("watch-key").value, above: $("watch-above").value, below: $("watch-below").value, for_s: $("watch-for").value };
+    try {
+      await api("/api/watches", { body });
+      $("watch-form").reset(); $("watch-form").hidden = true;
+      toast("Watching " + body.key + ".");
+      pollState();
+    } catch (err) { toast(err.message); }
+  }
+
   // ------------------------------------------------------------------ the lab Kelvin controls (people only)
   const KIND_NAME = { "source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
     "laser": "laser", "laser-driver": "laser", "power-meter": "pm", "preamp": "preamp", "multimeter": "dmm",
@@ -1671,12 +1734,15 @@
       hint.textContent = src ? "Set (from " + src + ")" : "Not set";
       hint.classList.toggle("set", !!src);
     }
-    for (const input of document.querySelectorAll("#settings-form input")) { input.value = ""; delete input.dataset.clear; }
+    for (const input of document.querySelectorAll("#settings-form input:not([type=checkbox])")) { input.value = ""; delete input.dataset.clear; }
     $("local-url").value = (S.settings && S.settings.local_base_url) || "";
     $("local-models").value = (S.settings && S.settings.local_models) || "";
     fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
+    const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
+    for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
+    $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
     $("settings-msg").textContent = "";
     renderGlobalNotes(null);
     $("settings-dialog").showModal();
@@ -1713,6 +1779,7 @@
     body.default_model = $("default-model").value;
     body.instructions = $("global-instructions").value;
     body.learn = $("learn").checked ? "on" : "off";
+    body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     $("settings-msg").textContent = "Saving…";
     try {
       const r = await api("/api/settings", { body });
@@ -1790,6 +1857,17 @@
     $("model").addEventListener("change", () => { store("lh.model", $("model").value); updateSend(); });
     $("approval-mode").addEventListener("change", (e) => changeMode(e.target.value));
     $("open-lab-setup").addEventListener("click", openLabSetup);
+    $("watch-add-toggle").addEventListener("click", () => { $("watch-form").hidden = !$("watch-form").hidden; });
+    $("watch-form").addEventListener("submit", addWatch);
+    $("allow-notify").addEventListener("click", async () => {
+      try { await Notification.requestPermission(); } catch (e) { /* not supported */ }
+      $("allow-notify").hidden = Notification.permission !== "default";
+    });
+    $("notify-test").addEventListener("click", async () => {
+      $("settings-msg").textContent = "Save first if you changed the address. Sending…";
+      try { $("settings-msg").textContent = "Test: " + (await api("/api/notify/test", { body: {} })).result; }
+      catch (e) { $("settings-msg").textContent = e.message; }
+    });
     $("lab-scan").addEventListener("click", scanLab);
     $("lab-add-found").addEventListener("click", addFound);
     $("lab-add").addEventListener("click", addByAddress);
@@ -1831,7 +1909,7 @@
     }
     window.addEventListener("resize", syncScrim);
     setInterval(() => { if (S.labOpen || S.streaming || !$("lab-badge").hidden) pollState(); }, 1500);
-    setInterval(pollState, 10000);
+    setInterval(pollState, 4000);   // often enough that an alarm shows within seconds
     pollState();
     $("input").focus();
   }
