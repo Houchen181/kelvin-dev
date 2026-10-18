@@ -45,6 +45,13 @@ python -m venv .venv
 The last command opens `http://127.0.0.1:8770` in your browser. Bookmark that link: the access key after `#` stays the same between restarts. To try the portal without an API key, add `--demo`; this gives you a scripted model that is not AI (try *sweep the gate* or *map gate against field*). The virtual lab runs at 10× real time so you can watch runs; `--speed 0` makes it instant. Add `--lab my_lab.yaml` to load a different simulated lab (for example many instruments at once); the format is `src/labharness/data/virtual_lab.yaml`.
 
 - **Models:** Add keys under Settings for Claude, GPT or Gemini, or point it at a local OpenAI-compatible server (Ollama, vLLM, LM Studio) for confidential work. Keys stay in `~/Kelvin/settings.json` and go only to their own provider.
+- **Other model services:** Under Settings → **Other model services**, add any service that speaks the OpenAI Chat Completions API.
+  - **Ready-made:** OpenRouter (models from many companies with one key), OpenCode, DeepSeek, Groq, Mistral and xAI. Pick one and paste its key.
+  - **Anything else:** choose **Other** and give its address (for example Together, Fireworks, or a LiteLLM gateway).
+  - **How each appears:** each service shows under its own name in the model picker, so a cloud service is never counted as a local model. A project's rules can allow or exclude it by name.
+  - **Which models:** Kelvin lists the newest models that can call tools (it needs tools), or the ones you name.
+  - **OpenCode:** only its Chat Completions models are listed, because its Claude, GPT and Gemini models use other formats.
+  - **Security:** keys can also come from environment variables such as `OPENROUTER_API_KEY`. Services on the internet need https.
 - **Projects:** The sidebar groups conversations into projects, for example one per sample or experiment. Make a project with **+**, start a chat inside it with its **+**, and move a conversation with its **⋯** menu or by dragging it onto a project. Deleting a project keeps its conversations.
 - **Memory:** Kelvin learns from conversations, but keeps three levels that never mix:
   - **You, in every chat:** your instructions and the preferences and conventions Kelvin kept, such as units or how careful to be (Settings → Memory).

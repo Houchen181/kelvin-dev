@@ -5,6 +5,7 @@ moving it out of the project or deleting the project never lets another provider
 ever combine to the stricter of the two."""
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, Optional
 
 PROVIDERS = {"anthropic": "Claude", "openai": "GPT", "gemini": "Gemini", "local": "local models"}
@@ -19,12 +20,11 @@ def normalize(rules: Any) -> Dict[str, Any]:
     if providers is not None:
         if not isinstance(providers, (list, tuple)):
             raise ValueError("providers must be a list, or null for any")
-        unknown = [p for p in providers if p not in PROVIDERS]
+        unknown = [p for p in providers if not isinstance(p, str) or not re.match(r"^[a-z][a-z0-9-]{0,30}$", p)]
         if unknown:
             raise ValueError("unknown model provider %s" % ", ".join(map(str, unknown)))
-        providers = [p for p in PROVIDERS if p in providers]
-        if set(providers) == set(PROVIDERS):
-            providers = None
+        # a list is never widened to "any": with other services set up, the four built-in kinds are not all of them
+        providers = [p for p in PROVIDERS if p in providers] + sorted(set(providers) - set(PROVIDERS))
     return {"providers": providers, "literature": rules.get("literature", True) is not False}
 
 

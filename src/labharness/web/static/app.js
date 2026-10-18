@@ -1269,7 +1269,11 @@
     $("project-dialog-name").textContent = p.name;
     $("project-instructions").value = p.instructions || "";
     const rules = p.rules || { providers: null, literature: true };
-    for (const c of document.querySelectorAll("#project-providers input")) c.checked = !rules.providers || rules.providers.includes(c.value);
+    $("project-providers").replaceChildren(...providerChoices(rules.providers).map(([id, label]) => {
+      const box = h("input", { type: "checkbox", value: id });
+      box.checked = !rules.providers || rules.providers.includes(id);
+      return h("label", { class: "check" }, box, " " + label);
+    }));
     $("project-literature").checked = rules.literature !== false;
     $("rules-summary").textContent = rulesText(rules);
     $("project-msg").textContent = "";
@@ -1340,10 +1344,17 @@
 
   // ------------------------------------------------------------------ who may see a project
   const PROVIDER_NAMES = { anthropic: "Claude", openai: "GPT", gemini: "Gemini", local: "local models" };
+  const providerName = (id) => PROVIDER_NAMES[id] || ((S.groups || []).find((g) => g.provider === id) || {}).label || id;
+  function providerChoices(chosen) {   // the built-in kinds, every service set up, and any the rules still name
+    const ids = Object.keys(PROVIDER_NAMES);
+    for (const g of S.groups || []) if (g.provider !== "demo" && !ids.includes(g.provider)) ids.push(g.provider);
+    for (const p of chosen || []) if (!ids.includes(p)) ids.push(p);
+    return ids.map((id) => [id, id === "local" ? "Local models" : providerName(id)]);
+  }
   function rulesText(rules) {
     if (!rules) return "";
     const parts = [];
-    if (rules.providers) parts.push("only " + rules.providers.map((p) => PROVIDER_NAMES[p] || p).join(" and "));
+    if (rules.providers) parts.push("only " + rules.providers.map(providerName).join(" and "));
     if (rules.literature === false) parts.push("no literature search");
     return parts.join("; ");
   }
@@ -1695,6 +1706,69 @@
       h("div", { class: "pane-menu-note" }, "While comparing, models can read the lab but not change it. Pick one answer to continue with. ", off));
     menu.hidden = false;
     $("compare-btn").setAttribute("aria-expanded", "true");
+  }
+
+  // ------------------------------------------------------------------ other model services
+  const SVC = { presets: [] };
+  async function loadServices() {
+    let r;
+    try { r = await api("/api/services"); } catch (e) { $("svc-hint").textContent = e.message; return; }
+    if (!SVC.presets.length) {
+      SVC.presets = r.presets;
+      $("svc-preset").replaceChildren(...r.presets.map((p) => new Option(p.name, p.id)));
+    }
+    renderServices(r.services);
+    servicePreset();
+  }
+  function servicePreset() {
+    const p = SVC.presets.find((x) => x.id === $("svc-preset").value) || SVC.presets[0];
+    if (!p) return;
+    const custom = p.id === "custom";
+    $("svc-name").hidden = !custom;
+    $("svc-url").value = p.base_url;
+    $("svc-url").readOnly = !custom;
+    $("svc-hint").textContent = p.hint;
+  }
+  function renderServices(list) {
+    $("service-list").replaceChildren(...list.map((s) => {
+      const test = h("button", { class: "link soft", type: "button" }, "Test");
+      const out = h("span", { class: "memory-meta" }, s.base_url + (s.models ? " · " + s.models : "") +
+        (s.key ? "" : " · no API key"));
+      test.addEventListener("click", async () => {
+        out.textContent = "Asking " + s.name + "…";
+        try { const r = await api("/api/services/" + s.id + "/test", { body: {} }); out.textContent = (r.ok ? "Works: " : "Problem: ") + r.message; }
+        catch (e) { out.textContent = e.message; }
+      });
+      return h("li", { class: "memory-note" }, h("span", { class: "memory-kind" }, "service"),
+        h("div", { class: "memory-body" }, h("span", {}, s.name), out),
+        h("span", { class: "card-actions" }, test),
+        rowButton("trash", "Remove " + s.name, async () => {
+          if (!confirm("Remove " + s.name + " and its key from Kelvin?")) return;
+          try { const r = await api("/api/services/" + s.id, { method: "DELETE" }); renderServices(r.services); refreshModels(r.models); }
+          catch (e) { $("svc-hint").textContent = e.message; }
+        }));
+    }));
+  }
+  function refreshModels(models) {
+    applyModels(models.groups, (S.settings && S.settings.default_model) || "");
+    fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
+    fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
+    $("reviewer").options[0].textContent = "Off";
+  }
+  async function addService() {
+    const body = { preset: $("svc-preset").value, name: $("svc-name").value.trim(), base_url: $("svc-url").value.trim(),
+      api_key: $("svc-key").value.trim(), models: $("svc-models").value.trim() };
+    $("svc-hint").textContent = "Adding…";
+    try {
+      const r = await api("/api/services", { body });
+      $("svc-key").value = $("svc-models").value = $("svc-name").value = "";
+      renderServices(r.services);
+      refreshModels(r.models);
+      const added = r.services[r.services.length - 1];
+      const group = r.models.groups.find((g) => g.provider === added.id);
+      $("svc-hint").textContent = group && group.error ? "Added, but " + group.error
+        : "Added " + added.name + (group ? " with " + group.models.length + " models." : ".");
+    } catch (e) { $("svc-hint").textContent = e.message; }
   }
 
   // ------------------------------------------------------------------ phones
@@ -2260,6 +2334,7 @@
     $("literature").checked = !S.settings || S.settings.literature !== false;
     $("pair-box").hidden = true;
     loadPhone();
+    loadServices();
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
     for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
     $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
@@ -2290,7 +2365,7 @@
   }
   async function saveSettings() {
     const body = {};
-    for (const input of document.querySelectorAll("#settings-form input[type=password]")) {
+    for (const input of document.querySelectorAll("#settings-form input[type=password][name]")) {
       if (input.dataset.clear) body[input.name] = "";
       else if (input.value.trim()) body[input.name] = input.value.trim();
     }
@@ -2382,6 +2457,8 @@
     });
     $("compare-btn").addEventListener("click", toggleCompareMenu);
     $("phone-on").addEventListener("change", switchPhone);
+    $("svc-preset").addEventListener("change", servicePreset);
+    $("svc-add").addEventListener("click", addService);
     $("pair-start").addEventListener("click", startPairing);
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }

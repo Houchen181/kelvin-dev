@@ -193,6 +193,20 @@
       <input id="local-key" name="local_api_key" type="password" autocomplete="off">
     </details>
     <div class="field">
+      <span class="field-label">Other model services</span>
+      <span class="hint">Any service that speaks the OpenAI Chat Completions API: OpenRouter (models from many companies with one key), OpenCode, DeepSeek, Groq, Mistral, xAI, or your own gateway. Each shows under its own name in the model picker and in a project's rules. Kelvin needs models that can call tools.</span>
+      <ul id="service-list" class="memory-notes"></ul>
+      <div class="service-form">
+        <select id="svc-preset" aria-label="Service"></select>
+        <input id="svc-name" placeholder="Name" aria-label="Service name" hidden>
+        <input id="svc-url" placeholder="https://…/v1" spellcheck="false" aria-label="API address">
+        <input id="svc-key" type="password" autocomplete="off" placeholder="API key" aria-label="API key">
+        <input id="svc-models" placeholder="Models, comma-separated (optional)" spellcheck="false" aria-label="Models">
+        <button id="svc-add" class="btn small" type="button">Add</button>
+      </div>
+      <span id="svc-hint" class="hint"></span>
+    </div>
+    <div class="field">
       <label for="default-model">Default model for new chats</label>
       <select id="default-model" name="default_model"></select>
     </div>
@@ -393,12 +407,7 @@
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Who may see this project</span><span id="rules-summary" class="hint"></span></div>
-      <div class="checks" id="project-providers">
-        <label class="check"><input type="checkbox" value="anthropic"> Claude</label>
-        <label class="check"><input type="checkbox" value="openai"> GPT</label>
-        <label class="check"><input type="checkbox" value="gemini"> Gemini</label>
-        <label class="check"><input type="checkbox" value="local"> Local models</label>
-      </div>
+      <div class="checks" id="project-providers"></div>
       <div class="checks"><label class="check"><input id="project-literature" type="checkbox"> Literature search (the search words leave this computer)</label></div>
       <span class="hint">For confidential work, allow only local models and switch off literature search. A chat that ran under these rules keeps them, even if it is moved out of the project or the project is deleted.</span>
     </div>

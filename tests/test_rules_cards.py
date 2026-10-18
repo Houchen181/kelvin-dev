@@ -18,9 +18,10 @@ LOCAL_ONLY = {"providers": ["local"], "literature": False}
 def test_rule_sets_only_get_stricter():
     assert rules.normalize(None) == {"providers": None, "literature": True}
     assert rules.normalize({"providers": ["local", "anthropic"]})["providers"] == ["anthropic", "local"]
-    assert rules.normalize({"providers": list(rules.PROVIDERS)})["providers"] is None   # all of them is "any"
+    assert rules.normalize({"providers": list(rules.PROVIDERS)})["providers"] == list(rules.PROVIDERS)  # never widened
+    assert rules.normalize({"providers": ["openrouter", "local"]})["providers"] == ["local", "openrouter"]
     with pytest.raises(ValueError):
-        rules.normalize({"providers": ["skynet"]})
+        rules.normalize({"providers": ["Sky Net"]})
     merged = rules.merge({"providers": ["anthropic", "local"]}, {"providers": ["local", "gemini"], "literature": False})
     assert merged == {"providers": ["local"], "literature": False}
     assert rules.merge(None, {"providers": None}) == {"providers": None, "literature": True}

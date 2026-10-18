@@ -104,6 +104,38 @@ class Settings:
         """May Kelvin save notes from conversations? On unless the user switched it off."""
         return self._data.get("learn") != "off"
 
+    # ------------------------------------------------------------------ other model services (see services.py)
+
+    @property
+    def services(self) -> List[Dict[str, Any]]:
+        return [s for s in self._data.get("services") or [] if isinstance(s, dict) and s.get("id")]
+
+    def service_key(self, service: Dict[str, Any]) -> Optional[str]:
+        from .services import PRESETS
+        env = PRESETS.get(service.get("preset", ""), {}).get("env")
+        return service.get("api_key") or (os.environ.get(env) if env else None) or None
+
+    def service_views(self) -> List[Dict[str, Any]]:
+        from .services import view
+        return [view(s, "settings" if s.get("api_key") else ("environment" if self.service_key(s) else None))
+                for s in self.services]
+
+    def add_service(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        from .services import MAX_SERVICES, make
+        if len(self.services) >= MAX_SERVICES:
+            raise ValueError("at most %d services" % MAX_SERVICES)
+        service = make(entry, [s["id"] for s in self.services])
+        self._data["services"] = self.services + [service]
+        self._save()
+        return service
+
+    def remove_service(self, service_id: str) -> None:
+        kept = [s for s in self.services if s["id"] != service_id]
+        if len(kept) == len(self.services):
+            raise KeyError("no service %r" % service_id)
+        self._data["services"] = kept
+        self._save()
+
     # ------------------------------------------------------------------ paired phones (see remote.py)
 
     @property

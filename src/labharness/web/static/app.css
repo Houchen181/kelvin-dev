@@ -514,6 +514,13 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .memory-kind.ok { color: var(--ok); }
 .file-pick { cursor: pointer; }
 #card-yaml, #card-manual { width: 100%; font-size: 12.5px; }
+.service-form { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr) minmax(0, 1fr) auto; gap: 6px; margin: 4px 0; }
+.service-form #svc-name:not([hidden]) { grid-column: 1 / -1; }
+.service-form #svc-models { grid-column: 1 / -2; }
+.service-form input, .service-form select { min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 8px;
+  background: var(--raised); color: var(--text); font-size: 13.5px; }
+.service-form input[readonly] { color: var(--muted); }
+@media (max-width: 560px) { .service-form { grid-template-columns: 1fr; } .service-form > * { grid-column: auto !important; } }
 .rules-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--warn); padding: 3px 7px;
   border-radius: 999px; background: var(--warn-bg); white-space: nowrap; }
 .rules-chip svg { width: 13px; height: 13px; }

@@ -1,11 +1,14 @@
-"""GPT models, and local models behind any OpenAI-compatible server (Ollama, vLLM, LM Studio).
+"""GPT models, local models behind any OpenAI-compatible server (Ollama, vLLM, LM Studio), and other services that
+speak the same API (OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI, gateways; see services.py).
 
-Uses the Chat Completions API, which OpenAI and the local servers all speak.
+Uses the Chat Completions API, which all of them speak.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any, Dict, List, Optional
+import urllib.request
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import openai
 
@@ -41,14 +44,35 @@ def to_messages(system: str, history: List[Dict[str, Any]]) -> List[Dict[str, An
     return out
 
 
+MAX_LISTED = 60   # a gateway can list hundreds; the newest that fit are shown, and any can be named in Settings
+
+
+def _fetch_json(url: str, api_key: Optional[str]) -> Any:
+    from ..._version import __version__
+    headers = {"User-Agent": "Kelvin/%s" % __version__, "Accept": "application/json"}   # some refuse Python's own
+    if api_key:
+        headers["Authorization"] = "Bearer %s" % api_key
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read())
+
+
 class OpenAIProvider(Provider):
     def __init__(self, name: str, label: str, api_key: Optional[str], base_url: Optional[str] = None,
-                 models: Optional[List[str]] = None):
+                 models: Optional[List[str]] = None, models_url: Optional[str] = None, exclude: Iterable[str] = (),
+                 tools_only: bool = False, headers: Optional[Dict[str, str]] = None,
+                 fetch: Callable[[str, Optional[str]], Any] = _fetch_json):
         self.name, self.label = name, label
         self._static = [m for m in (models or []) if m]
+        self.models_url = models_url
+        self.exclude = tuple(e.lower() for e in exclude)
+        self.tools_only = tools_only
+        self._key = api_key
+        self._fetch = fetch
         self.client = None
         if api_key or base_url:
-            self.client = openai.AsyncOpenAI(api_key=api_key or "local", base_url=base_url or None)
+            self.client = openai.AsyncOpenAI(api_key=api_key or "local", base_url=base_url or None,
+                                             default_headers=headers or None)
         self._cache: Optional[List[ModelInfo]] = None
 
     def available(self) -> bool:
@@ -58,25 +82,37 @@ class OpenAIProvider(Provider):
         if self._static:
             return [ModelInfo(m, m, self.name) for m in self._static]
         if self._cache is None:
+            if self.models_url:   # some services list their models somewhere else than <base>/models
+                data = await asyncio.to_thread(self._fetch, self.models_url, self._key)
+                listed = [type("M", (), m) for m in (data.get("data") if isinstance(data, dict) else data) or []
+                          if isinstance(m, dict) and m.get("id")]
+            else:
+                listed = [m async for m in self.client.models.list()]
             found = []
-            async for m in self.client.models.list():
+            for m in listed:
                 mid = m.id
                 if self.name == "openai" and (not mid.startswith(("gpt-", "o1", "o3", "o4", "o5", "chatgpt"))
                                               or any(s in mid for s in _SKIP)):
                     continue
+                if self.exclude and mid.split("/")[-1].lower().startswith(self.exclude):
+                    continue
+                supported = getattr(m, "supported_parameters", None)
+                if self.tools_only and supported is not None and "tools" not in supported:
+                    continue   # Kelvin works through tools; a model that cannot call them is no use here
                 found.append((getattr(m, "created", 0) or 0, mid))
-            self._cache = [ModelInfo(mid, mid, self.name) for _, mid in sorted(found, reverse=True)]
+            ordered = sorted(found, reverse=True)
+            if self.name not in ("openai", "local"):
+                ordered = ordered[:MAX_LISTED]
+            self._cache = [ModelInfo(mid, mid, self.name) for _, mid in ordered]
         return self._cache
 
     async def stream(self, model: str, system: str, history: List[Dict[str, Any]],
                      tools: List[Dict[str, Any]], emit: Emit) -> TurnResult:
-        response = await self.client.chat.completions.create(
-            model=model,
-            messages=to_messages(system, history),
-            tools=[{"type": "function", "function": {"name": t["name"], "description": t["description"],
-                                                     "parameters": t["schema"]}} for t in tools],
-            stream=True,
-        )
+        request: Dict[str, Any] = {"model": model, "messages": to_messages(system, history), "stream": True}
+        if tools:   # an empty list is refused by OpenAI and others: leave it out (e.g. for a second opinion)
+            request["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
+                                                                  "parameters": t["schema"]}} for t in tools]
+        response = await self.client.chat.completions.create(**request)
         text: List[str] = []
         calls: Dict[int, Dict[str, str]] = {}
         finish = None

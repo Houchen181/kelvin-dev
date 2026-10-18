@@ -33,7 +33,7 @@ from ..labconfig import ConfigError, load_lab_config
 from .. import carddraft
 from ..virtual_lab import build_lab, builtin_ids, builtin_registry, is_simulated, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in
-from . import review
+from . import review, rules as rulebook
 from .qr import QR
 from .remote import ROLES, Remote, addresses, allowed, remote_host_ok
 from .providers.base import Provider
@@ -58,6 +58,13 @@ def make_providers(settings: Settings, demo: bool = False) -> Dict[str, Provider
         models = [m.strip() for m in (settings.get("local_models") or "").split(",")]
         providers["local"] = OpenAIProvider("local", "Local", settings.get("local_api_key"),
                                             base_url=settings.get("local_base_url"), models=models)
+    from .services import PRESETS
+    for s in settings.services:   # OpenRouter, OpenCode, DeepSeek... each under its own name
+        p = PRESETS.get(s.get("preset", "custom"), PRESETS["custom"])
+        providers[s["id"]] = OpenAIProvider(
+            s["id"], s["name"], settings.service_key(s), base_url=s["base_url"],
+            models=[m.strip() for m in (s.get("models") or "").split(",")], models_url=p.get("models_url"),
+            exclude=p.get("exclude", ()), tools_only=p.get("tools_only", False), headers=p.get("headers"))
     if demo:
         from .providers.demo import DemoProvider
         providers["demo"] = DemoProvider()
@@ -260,6 +267,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 if "instructions" in body:
                     store.set_instructions(project_id, body["instructions"])
                 if "rules" in body:
+                    named = (body["rules"] or {}).get("providers") if isinstance(body["rules"], dict) else None
+                    known = set(rulebook.PROVIDERS) | {s["id"] for s in settings.services}
+                    strange = [p for p in named or [] if p not in known]
+                    if strange:
+                        return error(400, "no model service called %s" % ", ".join(map(str, strange)))
                     store.set_rules(project_id, body["rules"])
             return JSONResponse(store.project(project_id))
         except KeyError as e:
@@ -293,6 +305,43 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except KeyError as e:
             return error(404, e.args[0])
         return JSONResponse({"ok": True})
+
+    # ------------------------------------------------------------------ other model services
+
+    async def services_view(request: Request) -> Response:
+        """GET: the services set up, and the ones Kelvin knows. POST {preset, name, base_url, api_key, models}: add."""
+        from .services import presets_view
+        if request.method == "POST":
+            try:
+                settings.add_service(await request.json())
+            except ValueError as e:
+                return error(400, str(e))
+            if providers is None:
+                agent.providers = make_providers(settings, demo)
+        return JSONResponse({"services": settings.service_views(), "presets": presets_view(),
+                             "models": await agent.models()})
+
+    async def service_view(request: Request) -> Response:
+        try:
+            settings.remove_service(request.path_params["service_id"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        if providers is None:
+            agent.providers = make_providers(settings, demo)
+        return JSONResponse({"services": settings.service_views(), "models": await agent.models()})
+
+    async def service_test(request: Request) -> Response:
+        """Ask the service for its models with the key it has."""
+        provider = agent.providers.get(request.path_params["service_id"])
+        if provider is None:
+            return error(404, "no service %r" % request.path_params["service_id"])
+        try:
+            models = await asyncio.wait_for(provider.models(), 30)
+        except Exception as e:
+            from .agent import describe_error
+            return JSONResponse({"ok": False, "message": describe_error(provider, e)})
+        return JSONResponse({"ok": bool(models), "message": "%d models that Kelvin can use" % len(models) if models
+                             else "it answered, but listed no model Kelvin can use; name them under Models"})
 
     # ------------------------------------------------------------------ the user's own instrument cards
 
@@ -824,6 +873,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/me/forget", forget_me, methods=["POST"]),
         Route("/api/pair", pair, methods=["POST"]),
         Route("/api/phone", phone, methods=["GET", "POST"]),
+        Route("/api/services", services_view, methods=["GET", "POST"]),
+        Route("/api/services/{service_id}", service_view, methods=["DELETE"]),
+        Route("/api/services/{service_id}/test", service_test, methods=["POST"]),
         Route("/api/cards", cards_view, methods=["GET", "POST"]),
         Route("/api/cards/check", card_check, methods=["POST"]),
         Route("/api/cards/status", card_status, methods=["POST"]),
