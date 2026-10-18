@@ -170,6 +170,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     def configure_literature() -> None:
         runtime.literature.enabled = settings.get("literature") != "off"
         runtime.literature.openalex_key = settings.get("openalex_api_key") or ""
+        runtime.scan_network = settings.get("scan_network") != "off"   # scans also look on the local network
 
     def configure_notifications() -> None:
         try:
@@ -184,7 +185,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_literature()
         await start_phone()
         runtime.monitor.start()
-        if auto_setup and settings.get("auto_setup") != "off":   # find and set up connected instruments
+        if auto_setup:   # find and set up connected instruments (or say why not: switched off, a lab chosen...)
             setup.start("start")
         try:
             yield
@@ -846,7 +847,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if problem:
             return error(409, problem)
         try:
-            return JSONResponse({"found": await asyncio.to_thread(runtime.scan_found)})
+            found = await asyncio.to_thread(runtime.scan_found)
+            return JSONResponse({"found": found, "survey": runtime.last_survey})
         except AdapterError as e:
             return error(503, str(e))
 

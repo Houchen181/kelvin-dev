@@ -2057,6 +2057,7 @@
     $("lab-problem").hidden = !problem;
     if (problem) $("lab-problem").textContent = problem + " Kelvin is using the virtual lab meanwhile.";
     $("lab-observe").hidden = !s.observe_only;
+    showWhy(s);
     const busySetup = s.setup && SETUP_BUSY.has(s.setup.state);
     $("lab-setting-up").hidden = !busySetup;
     if (busySetup) $("lab-setting-up").textContent = "Setting up instruments: " + (s.setup.message || "") + "…";
@@ -2228,6 +2229,38 @@
     loadCards();
   }
 
+  // ------------------------------------------------------------------ why Kelvin is on the virtual lab
+  function whyVirtual(s) {
+    if (!s.simulated) return null;
+    const setup = s.setup || {};
+    if (s.lab_info && s.lab_info.error) return null;   // the lab-problem callout says why
+    if (SETUP_BUSY.has(setup.state)) return null;        // "Setting up instruments…" shows instead
+    const lines = (setup.lines && setup.lines.length ? setup.lines : (s.survey && s.survey.lines)) || [];
+    const text = setup.state === "done" || setup.state === "failed" ? setup.message
+      : s.survey ? s.survey.reason : "Kelvin hasn't looked for instruments on this computer yet. Set up… scans for them.";
+    return { text, lines };
+  }
+  function showWhy(s) {
+    const why = whyVirtual(s);
+    $("lab-why").hidden = !why;
+    document.querySelector(".lab-chip").title = why ? "On the virtual lab: " + why.text : "The lab this portal controls";
+    if (!why) return;
+    $("lab-why-text").textContent = why.text;
+    $("lab-why-details").hidden = !why.lines.length;
+    const list = $("lab-why-lines");
+    const key = why.lines.join("\n");
+    if (list.dataset.key !== key) {   // redraw only when the lines change, so an open list stays put
+      list.dataset.key = key;
+      list.replaceChildren(...why.lines.map((l) => h("li", {}, l)));
+    }
+    if (!why.lines.length) list.hidden = true;
+  }
+  function toggleWhyDetails() {
+    const list = $("lab-why-lines");
+    list.hidden = !list.hidden;
+    $("lab-why-details").setAttribute("aria-expanded", String(!list.hidden));
+  }
+
   // ------------------------------------------------------------------ setting up connected instruments
   const SETUP_BUSY = new Set(["scanning", "connecting", "reading"]);
   function showSetup(setup, observe) {
@@ -2323,7 +2356,7 @@
     renderFolders(r.folders || []);
     $("lab-card").replaceWith(Object.assign(cardSelect("", "Card…"), { id: "lab-card" }));
     $("lab-yaml").value = r.yaml || "";
-    $("lab-found").hidden = $("lab-add-found").hidden = true;
+    $("lab-found").hidden = $("lab-add-found").hidden = $("lab-survey").hidden = true;
     $("lab-health").hidden = true;
     $("lab-msg").textContent = r.info && r.info.error ? r.info.error : "";
     $("lab-dialog").showModal();
@@ -2336,7 +2369,13 @@
     try { r = await api("/api/instruments/scan", { body: {} }); } catch (e) { $("lab-msg").textContent = e.message; return; }
     finally { btn.disabled = false; btn.textContent = "Scan again"; }
     LAB.found = r.found;
-    $("lab-msg").textContent = r.found.length ? "" : "Nothing found. Is VISA installed, and are the instruments on and connected?";
+    const known = r.found.some((f) => f.card_id && !f.in_lab);
+    const why = r.survey && r.survey.reason;
+    const lines = (r.survey && r.survey.lines) || [];
+    $("lab-msg").textContent = known || why ? "" : "Nothing found.";
+    $("lab-survey-why").textContent = why || "";
+    $("lab-survey-lines").replaceChildren(...lines.map((l) => h("li", {}, l)));
+    $("lab-survey").hidden = known || !(why || lines.length);
     renderFound();
   }
   function renderFound() {
@@ -2896,6 +2935,7 @@
     $("learn").checked = !S.settings || S.settings.learn !== false;
     $("literature").checked = !S.settings || S.settings.literature !== false;
     $("auto-setup").checked = !S.settings || S.settings.auto_setup !== false;
+    $("scan-network").checked = !S.settings || S.settings.scan_network !== false;
     $("manuals").checked = !S.settings || S.settings.manuals !== false;
     $("pair-box").hidden = true;
     loadPhone();
@@ -2944,6 +2984,7 @@
     body.learn = $("learn").checked ? "on" : "off";
     body.literature = $("literature").checked ? "on" : "off";
     body.auto_setup = $("auto-setup").checked ? "on" : "off";
+    body.scan_network = $("scan-network").checked ? "on" : "off";
     body.manuals = $("manuals").checked ? "on" : "off";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     $("settings-msg").textContent = "Saving…";
@@ -3075,6 +3116,9 @@
     $("lab-unlock").addEventListener("click", unlockLab);
     $("lab-setup-again").addEventListener("click", setupAgain);
     $("lab-observe-review").addEventListener("click", openLabSetup);
+    $("lab-why-details").addEventListener("click", toggleWhyDetails);
+    $("lab-why-setup").addEventListener("click", openLabSetup);
+    document.querySelector(".lab-chip").addEventListener("click", () => toggleLab(true));
     for (const b of document.querySelectorAll("#lab-seg button")) {
       b.addEventListener("click", () => {
         if (b.classList.contains("on")) return;

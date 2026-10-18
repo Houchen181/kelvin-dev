@@ -156,6 +156,11 @@
       <div id="lab-pending"></div>
       <div id="lab-problem" class="callout small" hidden></div>
       <div id="lab-setting-up" class="callout small calm" role="status" hidden></div>
+      <div id="lab-why" class="callout small calm" hidden>
+        <b>On the virtual lab.</b> <span id="lab-why-text"></span>
+        <div class="why-actions"><button id="lab-why-details" class="link" type="button" aria-expanded="false">What Kelvin looked through</button><button id="lab-why-setup" class="link" type="button">Set up…</button></div>
+        <ul id="lab-why-lines" class="why-lines" hidden></ul>
+      </div>
       <div id="lab-observe" class="callout small calm" hidden>
         <b>Watching only.</b> Kelvin set up these instruments itself. Readings and settings work; outputs stay at
         safe until you check the limits and unlock them.
@@ -275,8 +280,9 @@
       <div class="checks">
         <label class="check"><input id="auto-setup" type="checkbox"> Set them up when Kelvin starts</label>
         <label class="check"><input id="manuals" type="checkbox"> Fetch their manuals from the makers</label>
+        <label class="check"><input id="scan-network" type="checkbox"> Look on the local network too</label>
       </div>
-      <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows, with their outputs locked at safe until you review them. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website.</span>
+      <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows, with their outputs locked at safe until you review them. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website. Looking on the local network finds instruments that announce themselves (LXI); the first time, Windows may ask whether Kelvin may use the network: allow private networks.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Literature search</span>
@@ -357,6 +363,7 @@
     <div class="field">
       <div class="field-row"><span class="field-label">Find instruments</span><button id="lab-scan" class="btn small" type="button">Scan</button></div>
       <span class="hint">Asks each connected instrument (GPIB, USB, LAN, serial) who it is. Nothing is set.</span>
+      <div id="lab-survey" class="survey-box" hidden><p id="lab-survey-why"></p><ul id="lab-survey-lines" class="why-lines"></ul></div>
       <div id="lab-found" class="found-list" hidden></div>
       <button id="lab-add-found" class="btn small" type="button" hidden>Add the checked ones to the lab config</button>
       <div class="add-row">

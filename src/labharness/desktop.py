@@ -76,6 +76,9 @@ def _self_test(port: int, key: str) -> int:
     page_ok = page_ok and "card: 1" in carddraft.example()
     from pypdf._crypt_providers import crypt_provider   # manuals: pypdf, and cryptography for the locked ones
     page_ok = page_ok and crypt_provider[0] == "cryptography"
+    from . import survey   # finding instruments: Kelvin's own libusb, and the network lookups
+    import psutil, zeroconf  # noqa: E401,F401
+    page_ok = page_ok and survey.use_bundled_libusb()
     ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
     message = "Kelvin self-test: %s (lab %r)" % ("ok" if ok else "FAILED", boot.get("lab"))
     log.info(message)

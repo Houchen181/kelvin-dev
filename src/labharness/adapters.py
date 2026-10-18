@@ -40,6 +40,8 @@ def resource_manager() -> Any:
                 import pyvisa
             except ImportError as e:
                 raise AdapterError("talking to real instruments needs PyVISA: pip install \"kelvin-lab[hardware]\"") from e
+            from .survey import use_bundled_libusb
+            use_bundled_libusb()   # Kelvin's own libusb, for USB instruments without a vendor VISA
             choice = os.environ.get("KELVIN_VISA_BACKEND")
             if choice:
                 _rm = pyvisa.ResourceManager(choice)

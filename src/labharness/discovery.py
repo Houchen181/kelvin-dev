@@ -161,16 +161,21 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
 
 
 def scan(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]] = None,
-         timeout_ms: int = 800) -> List[Found]:
+         timeout_ms: int = 800, network: bool = True) -> List[Found]:
     """Every instrument VISA can see, identified. `in_lab` maps addresses already used by the lab to their names;
     those are not queried (they may be busy), only listed."""
+    return scan_survey(registry, rm, in_lab, timeout_ms, network)[0]
+
+
+def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]] = None,
+                timeout_ms: int = 800, network: bool = True, **survey_options: Any) -> Tuple[List[Found], Any]:
+    """The scan, and what it looked through (survey.py): VISA, the local network, USB, serial ports and GPIB."""
     from .adapters import resource_name
+    from .survey import survey
     rm = rm or resource_manager()
     in_lab = {resource_name(a): n for a, n in (in_lab or {}).items()}
-    try:
-        resources = list(rm.list_resources("?*::INSTR"))
-    except Exception:
-        resources = []
+    looked = survey(rm, network=network, **survey_options)
+    resources = list(looked.resources)
     usb = _usb_ids()
     out = []
     for name in sorted(set(resources)):
@@ -186,7 +191,7 @@ def scan(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]
         card = match_card(idn, registry)
         out.append(Found(address, idn, card.id if card else None, card.model if card else "", card.kind if card else "",
                          "LabOne discovery" if card else "no card for this model yet"))
-    return out
+    return out, looked
 
 
 def draft_lab_config(found: Sequence[Found], registry: CardRegistry, lab_name: str = "My lab") -> str:

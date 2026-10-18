@@ -21,7 +21,7 @@ ENV = {
 }
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
-                     "reviewer", "literature", "auto_setup", "manuals"}
+                     "reviewer", "literature", "auto_setup", "manuals", "scan_network"}
 
 
 class Settings:
@@ -64,7 +64,7 @@ class Settings:
                 value = value[:MAX_INSTRUCTIONS]
             if name == "literature":  # literature search sends queries to arXiv and OpenAlex; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
-            if name in ("auto_setup", "manuals"):  # set up found instruments on start; fetch their manuals
+            if name in ("auto_setup", "manuals", "scan_network"):  # set up found instruments; manuals; the LAN too
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
@@ -103,6 +103,7 @@ class Settings:
             "literature": self._data.get("literature") != "off",
             "auto_setup": self._data.get("auto_setup") != "off",
             "manuals": self._data.get("manuals") != "off",
+            "scan_network": self._data.get("scan_network") != "off",
         }
 
     @property

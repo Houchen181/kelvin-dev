@@ -642,6 +642,14 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
   outline: none; background: linear-gradient(to right, transparent 3px, var(--accent) 3px, var(--accent) 5px, transparent 5px); }
 body.resizing { cursor: col-resize; user-select: none; }
 .hint.bad { color: var(--danger); }
+.why-actions { display: flex; gap: 14px; margin-top: 4px; }
+.why-lines { margin: 6px 0 0; padding-left: 18px; font-size: 12.5px; color: var(--text-2); display: grid; gap: 2px; }
+.why-lines[hidden] { display: none; }
+.survey-box { margin: 2px 0 4px; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 10px;
+  background: var(--accent-soft); font-size: 13px; }
+.survey-box[hidden] { display: none; }
+.survey-box p { margin: 0; }
+.lab-chip { cursor: pointer; }
 .check.wrap { white-space: normal; }
 .check.wrap input { flex: none; width: auto; }
 .key-row .btn { white-space: nowrap; }

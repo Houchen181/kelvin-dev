@@ -26,6 +26,11 @@ PACKAGES = [
     ("pyvisa", "PyVISA", ()),                      # real instruments
     ("pyvisa_py", "PyVISA-py", ()),                # loaded by name when no vendor VISA is installed
     ("serial", "pyserial", ()),
+    ("usb", "pyusb", ()),                          # USB instruments without a vendor VISA ...
+    ("libusb_package", "libusb-package", ()),      # ... through Kelvin's own libusb
+    ("psutil", "psutil", ()),                      # network instruments: broadcast on every interface
+    ("zeroconf", "zeroconf", ()),                  # network instruments: mDNS (LXI) adverts
+    ("ifaddr", "ifaddr", ()),
     ("pypdf", "pypdf", ()),                        # reading instrument manuals
 ]
 if sys.platform == "win32":

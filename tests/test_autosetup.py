@@ -250,7 +250,7 @@ def test_nothing_to_set_up_leaves_the_virtual_lab(tmp_path):
 
     def no_visa():
         raise AdapterError("no VISA library")
-    assert "No instruments looked for" in AutoSetup(rt, FakeSettings(), tmp_path, scan=no_visa).run()["message"]
+    assert "could not look for instruments" in AutoSetup(rt, FakeSettings(), tmp_path, scan=no_visa).run()["message"]
     chose = AutoSetup(rt, FakeSettings(lab="virtual"), tmp_path, scan=lambda: pytest.fail("they chose the virtual lab"))
     assert chose.run()["state"] == "done" and rt.lab_info["kind"] == "virtual"
 

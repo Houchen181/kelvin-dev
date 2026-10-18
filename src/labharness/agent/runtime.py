@@ -133,6 +133,8 @@ class LabRuntime:
         self.home: Optional[Path] = None        # ~/Kelvin, where each instrument has its folder; set by the app
         self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
         self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
+        self.scan_network = True                    # scans also look on the local network (a Settings switch)
+        self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
@@ -634,16 +636,19 @@ class LabRuntime:
     # ------------------------------------------------------------------ instruments on this computer
 
     def scan_found(self) -> List[Dict[str, Any]]:
-        """Connected instruments as data, each with a suggested name. Raises AdapterError without VISA."""
-        from ..discovery import scan
+        """Connected instruments as data, each with a suggested name. Raises AdapterError without VISA.
+        What the scan looked through, and why it found what it did, goes to last_survey."""
+        from ..discovery import scan_survey
+        from ..survey import reason
         in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                   if not ic.address.startswith("sim://")}
         with self.lock:
             self.busy = "scanning for instruments"
             try:
-                found = scan(self.lab.registry, in_lab=in_lab)
+                found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network)
             finally:
                 self.busy = None
+        self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
         out = []
         for f in found:
@@ -924,16 +929,17 @@ class LabRuntime:
         """Which instruments are connected, matched to cards. Read-only: it only asks who they are."""
         def run() -> str:
             from ..adapters import AdapterError
-            from ..discovery import scan
+            from ..discovery import scan_survey
+            from ..survey import reason
             in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                       if not ic.address.startswith("sim://")}
             try:
-                found = scan(self.lab.registry, in_lab=in_lab)
+                found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network)
             except AdapterError as e:
                 return str(e)
+            self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
             if not found:
-                return ("no instruments found (is VISA installed - NI-VISA or Keysight IO Libraries - and are they on "
-                        "and connected?)")
+                return "\n".join([reason(found, looked)] + looked.lines())
             lines = [f.line() for f in found]
             lines.append("Only a person can add an instrument to the lab (lab config); suggest it, do not assume it.")
             return "\n".join(lines)
@@ -995,7 +1001,7 @@ class LabRuntime:
                 "busy": self.busy, "pending": pending, "history": history, "status": status,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
-                "observe_only": self.lab.config.observe_only, "setup": self.setup_status,
+                "observe_only": self.lab.config.observe_only, "setup": self.setup_status, "survey": self.last_survey,
                 "watches": self.monitor.list(),
                 "alarms": [a.view() for a in self.monitor.alarms[:10]],
                 "notices": list(self.notifier.notices)[-20:],

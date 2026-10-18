@@ -10,6 +10,7 @@
 A lab.yaml the user already has is never changed by this: instruments it does not list are only reported."""
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
@@ -18,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from . import profiles
 
+log = logging.getLogger("kelvin.setup")   # the desktop app writes this to ~/Kelvin/kelvin.log
 LOCK = "observe_only: true   # Kelvin wrote this lab from what it found; review the limits, then unlock in Lab setup"
 _LOCK_LINE = re.compile(r"^observe_only:.*(?:\r?\n|$)", re.M)
 
@@ -77,34 +79,50 @@ class AutoSetup:
         self.status = dict(more, state=state, at=time.time())
         self.runtime.setup_status = self.status
 
+    def _done(self, message: str, **more: Any) -> Dict[str, Any]:
+        """Finish, saying why (the Lab panel shows it while Kelvin is on the virtual lab), and log it."""
+        looked = self.runtime.last_survey if more.get("lines") is not None else None
+        if looked:
+            for line in looked.get("lines") or []:
+                log.info("  %s", line)
+        log.info("Instrument setup: %s", message)
+        self._set("done", message=message, **more)
+        return self.status
+
     def run(self, reason: str = "start") -> Dict[str, Any]:
         rt = self.runtime
         manuals = self.settings.get("manuals") != "off"
         found_by_address: Dict[str, Dict[str, Any]] = {}
         try:
             user_lab = rt.lab_info.get("kind") == "file"
+            if reason == "start" and self.settings.get("auto_setup") == "off":
+                return self._done("Looking for instruments when Kelvin starts is switched off in Settings")
             if not user_lab and not self.lab_file.exists() and self.settings.get("lab") != "virtual":
                 self._set("scanning", message="Looking for connected instruments (asking each who it is)")
+                log.info("Instrument scan (%s): looking for connected instruments", reason)
                 try:
                     found = self.scan()
                 except Exception as e:   # no VISA library: nothing to set up
-                    self._set("done", message="No instruments looked for: %s" % profiles._first_line(e), found=0)
-                    return self.status
+                    return self._done("Kelvin could not look for instruments: %s" % profiles._first_line(e), found=0)
+                looked = rt.last_survey or {}
                 found_by_address = {f["address"]: f for f in found}
-                matched = [f for f in found if f.get("card_id")]
+                matched = [f for f in found if f.get("card_id") and not f.get("in_lab")]
                 unknown = [f for f in found if f.get("idn") and not f.get("card_id")]
+                for f in found:
+                    log.info("  %s: %s", f["address"], f.get("idn") or f.get("how") or "no answer")
                 if not matched:
-                    self._set("done", found=0, unknown=len(unknown), message=(
-                        "%d instrument%s answered but Kelvin has no card for %s yet; draft one in Lab setup"
+                    return self._done(looked.get("reason") or (
+                        "%d instrument%s answered but Kelvin has no card for %s yet; make one in Lab setup"
                         % (len(unknown), "" if len(unknown) == 1 else "s", "it" if len(unknown) == 1 else "them")
-                        if unknown else "No instruments found"))
-                    return self.status
+                        if unknown else "No instruments found on this computer"),
+                        found=0, unknown=len(unknown), lines=looked.get("lines") or [])
                 if not self._connect(matched):
                     return self.status
                 user_lab = True
             if not user_lab:
-                self._set("done", message="Using the virtual lab; your own instruments are set up in Lab setup")
-                return self.status
+                why = rt.lab_info.get("error") or ("You chose the virtual lab in Lab setup" if self.lab_file.exists()
+                                                    or self.settings.get("lab") == "virtual" else "")
+                return self._done(why or "Using the virtual lab")
             names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated)
             self._set("reading", message="Reading the settings of %s" % ", ".join(names),
                       instruments=names, observe_only=rt.lab.config.observe_only)
@@ -112,6 +130,7 @@ class AutoSetup:
                                       manuals=manuals, fetch=self.fetch)
             fetched = [n for n, r in report.items() if "pages" in str(r.get("manual", ""))]
             missing = [n for n, r in report.items() if str(r.get("manual", "")).startswith("not fetched")]
+            log.info("Instrument setup: %s; %s", ", ".join(names), report)
             self._set("done", instruments=names, report=report, observe_only=rt.lab.config.observe_only,
                       message="%d instrument%s set up%s%s" % (
                           len(names), "" if len(names) == 1 else "s",
@@ -119,6 +138,7 @@ class AutoSetup:
                           "; no manual yet for %s" % ", ".join(missing) if missing else ""))
             return self.status
         except Exception as e:
+            log.exception("Instrument setup failed")
             self._set("failed", message="Setting up instruments failed: %s" % profiles._first_line(e))
             return self.status
 

@@ -14,7 +14,22 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
   - `manual.pdf`: the maker's own manual, fetched once from the address on the card, and `manual.txt` with its text by page.
 - **Manuals for involved scans.** Before a scan that uses buffers, triggers, sweep or list modes, fast acquisition, ranges or filters, Kelvin reads the instrument's manual with `instrument_info` and `search_manual`. It works from the passages it finds and cites the page. Search weighs rare words most, so a mnemonic such as `OFLT` or a SCPI path such as `SOURce:CURRent:LIMit` finds its own entry.
 - **Manuals you add yourself.** 17 of the 21 cards carry the maker's link. Keysight hands out its manuals only after a sign-in, and the Oxford Mercury iTC manual is no longer public. For these, or for any other instrument, choose the PDF in **Set up…** (**Choose PDF…**) or put it in the folder as `manual.pdf`.
-- **Switching it off.** Settings has **Set them up when Kelvin starts** and **Fetch their manuals from the makers**. Fetching a manual sends only its address to the maker's site. An existing `lab.yaml` is never rewritten. Instruments it doesn't list are only reported.
+- **Switching it off.** Settings has **Set them up when Kelvin starts**, **Fetch their manuals from the makers** and **Look on the local network too**. Fetching a manual sends only its address to the maker's site. An existing `lab.yaml` is never rewritten. Instruments it doesn't list are only reported.
+
+**Where a scan looks.** No vendor driver is needed for the network or USB.
+- **VISA:** the one you have (NI-VISA, Keysight IO Libraries, R&S VISA), or Kelvin's own if there is none.
+- **The local network:** instruments that announce themselves (LXI), through a VXI-11 broadcast and their mDNS adverts (VXI-11, HiSLIP, raw SCPI on port 5025). The first time, Windows may ask whether Kelvin may use the network: allow private networks.
+- **USB:** every device, through Kelvin's own libusb. An instrument is recognised by its USB test-and-measurement interface or its maker's ID. If no driver lets Kelvin open it, the scan names it and the driver to install.
+- **Serial ports and GPIB adapters.**
+
+**Why Kelvin is on the virtual lab.** While Kelvin is on the virtual lab, the Lab panel says why:
+- No instruments are connected to this computer (Kelvin has to run on the computer the instruments are plugged into).
+- An instrument answered, but Kelvin has no card for it yet.
+- A USB instrument needs a driver.
+- Looking at start-up is switched off.
+- You chose the virtual lab.
+
+**What Kelvin looked through** lists each place it searched, and so do **Scan** in **Set up…** and Kelvin's `scan_instruments` tool. Every start-up scan is also written to `~/Kelvin/kelvin.log`.
 
 **Set up your instruments in the app:** open the Lab panel and press **Set up…**. In the setup:
 1. **Scan** finds the connected instruments. You can also add one by address, such as `GPIB0::24::INSTR` or `serial://COM3`, and pick its card.
