@@ -1644,6 +1644,56 @@
     $("compare-btn").setAttribute("aria-expanded", "true");
   }
 
+  // ------------------------------------------------------------------ phones
+  const PHONE = { view: null, pairTimer: 0 };
+  async function loadPhone() {
+    try { renderPhone(await api("/api/phone")); }
+    catch (e) { $("phone-status").textContent = e.message; $("pair-start").disabled = true; }
+  }
+  function renderPhone(v) {
+    PHONE.view = v;
+    $("phone-on").checked = v.on;
+    const where = v.addresses.map((a) => a.url + (a.kind === "tailscale" ? " (Tailscale)" : a.kind === "network" ? " (this network)" : ""));
+    $("phone-status").textContent = v.error ? v.error
+      : v.listening ? "Phones can reach Kelvin at " + (where.join(", ") || "this computer's address, port " + v.port) + "."
+      : v.on ? "Starting…" : "Off: only this computer can use Kelvin.";
+    $("pair-start").disabled = !v.listening;
+    $("device-list").replaceChildren(...v.devices.map((d) => h("li", { class: "memory-note" },
+      h("span", { class: "memory-kind" }, d.role),
+      h("div", { class: "memory-body" }, h("span", {}, d.name),
+        h("span", { class: "memory-meta" }, d.last_seen ? "last seen " + new Date(d.last_seen * 1000).toLocaleString() : "not used yet")),
+      rowButton("trash", "Unpair " + d.name, async () => {
+        try { await api("/api/devices/" + d.id, { method: "DELETE" }); } catch (e) { toast(e.message); }
+        loadPhone();
+      }))));
+  }
+  async function switchPhone() {
+    $("phone-status").textContent = $("phone-on").checked ? "Starting…" : "Stopping…";
+    try { renderPhone(await api("/api/phone", { body: { on: $("phone-on").checked, port: PHONE.view ? PHONE.view.port : undefined } })); }
+    catch (e) { $("phone-status").textContent = e.message; }
+  }
+  async function startPairing() {
+    clearInterval(PHONE.pairTimer);
+    let r;
+    try { r = await api("/api/devices", { body: { name: $("pair-name").value.trim(), role: $("pair-role").value } }); }
+    catch (e) { $("phone-status").textContent = e.message; return; }
+    const state = h("p", { class: "pair-wait" }, "Waiting for the phone… the code works for 10 minutes, once.");
+    $("pair-box").replaceChildren(
+      r.qr ? h("div", { class: "qr", html: r.qr }) : null,
+      h("div", { class: "pair-text" },
+        h("p", {}, "On " + r.name + ", scan the code, or open"),
+        ...r.urls.map((u) => h("p", { class: "pair-url" }, u.split("#")[0])),
+        h("p", {}, "and type"), h("p", { class: "pair-code" }, r.code.slice(0, 3) + " " + r.code.slice(3)), state));
+    $("pair-box").hidden = false;
+    PHONE.pairTimer = setInterval(async () => {
+      if (!$("settings-dialog").open) { clearInterval(PHONE.pairTimer); return; }
+      let p;
+      try { p = await api("/api/devices/pairing/" + r.code); } catch (e) { clearInterval(PHONE.pairTimer); state.textContent = "The code expired. Make a new one."; return; }
+      if (p.device) { clearInterval(PHONE.pairTimer); state.textContent = "Paired. " + r.name + " can use Kelvin now."; loadPhone(); }
+      else if (!p.expires_in) { clearInterval(PHONE.pairTimer); state.textContent = "The code expired. Make a new one."; }
+    }, 2000);
+  }
+
   // ------------------------------------------------------------------ second opinions
   const VERDICTS = { go: ["ok", "Go"], caution: ["warn", "Caution"], stop: ["bad", "Stop"],
     agree: ["ok", "Agrees"], partly: ["warn", "Partly agrees"], disagree: ["bad", "Disagrees"] };
@@ -2071,6 +2121,8 @@
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
     $("literature").checked = !S.settings || S.settings.literature !== false;
+    $("pair-box").hidden = true;
+    loadPhone();
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
     for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
     $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
@@ -2192,6 +2244,8 @@
       S.compare = S.compare.filter((k) => k !== $("model").value); compareLabel();
     });
     $("compare-btn").addEventListener("click", toggleCompareMenu);
+    $("phone-on").addEventListener("change", switchPhone);
+    $("pair-start").addEventListener("click", startPairing);
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }
       if (!e.target.closest(".msg-actions")) for (const m of document.querySelectorAll(".review-menu")) m.hidden = true;

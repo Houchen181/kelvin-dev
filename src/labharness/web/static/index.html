@@ -196,6 +196,23 @@
       <select id="default-model" name="default_model"></select>
     </div>
     <div class="field">
+      <div class="field-row"><span class="field-label">Phone access</span>
+        <label class="check"><input id="phone-on" type="checkbox"> On</label></div>
+      <span class="hint">Paired phones can see the lab, runs and alarms, stop a run and decline requests; phones you allow to control can also chat and approve. Settings, instruments and the lab config stay on this computer.</span>
+      <span id="phone-status" class="hint phone-status"></span>
+      <div class="pair-row">
+        <input id="pair-name" type="text" maxlength="40" placeholder="Phone name" aria-label="Phone name">
+        <select id="pair-role" aria-label="What the phone may do">
+          <option value="watch">Watch: see, stop, decline</option>
+          <option value="control">Control: also chat and approve</option>
+        </select>
+        <button id="pair-start" class="btn small" type="button">Pair a phone</button>
+      </div>
+      <div id="pair-box" class="pair-box" hidden></div>
+      <ul id="device-list" class="memory-notes"></ul>
+      <span class="hint">Away from the lab, install <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on this computer and the phone; Kelvin then shows its Tailscale address too, and the connection is encrypted. Plain Wi-Fi traffic is not, so on a shared network prefer Tailscale.</span>
+    </div>
+    <div class="field">
       <div class="field-row"><span class="field-label">Literature search</span>
         <label class="check"><input id="literature" type="checkbox"> On</label></div>
       <span class="hint">Kelvin searches arXiv and journals (through OpenAlex) and reads papers to plan experiments and check results. Only the search words go to those public services, never your data or chats. Switch it off for confidential work.</span>

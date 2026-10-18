@@ -252,6 +252,22 @@ watch:
 - **Allow on this computer** turns on system notifications in your browser: alarms always, and approvals waiting and finished runs while Kelvin is in the background.
 - **Also send to** takes a webhook: an [ntfy](https://ntfy.sh) topic (push to your phone with the ntfy app), or a Slack, Teams or Discord incoming webhook. Tick which notices go there (alarms and finished runs by default), then press **Send a test**. The address is kept like an API key and never shown again. Nothing leaves the computer unless you set one; when you do, the notices carry lab details, so use a private topic or channel.
 
+## Phone and remote access
+
+Check on a run from the coffee room, or answer an approval from home. Phone access is **off** until you switch it on in Settings → **Phone access**. When it's on, Kelvin also listens on the network (port 8771 by default). Your desktop's access key never works there; only paired phones do.
+
+1. Switch on **Phone access**. Kelvin shows its addresses: on this network, and on Tailscale if you use it.
+2. Name the phone, choose what it may do, and press **Pair a phone**.
+   - **Watch:** see the lab, runs and alarms, stop a run, and decline requests.
+   - **Control:** also chat with Kelvin and approve requests.
+3. On the phone, scan the QR code, or open the address and type the 6-digit code. The code works once, for 10 minutes, and repeated wrong codes lock pairing for a while.
+
+The phone then opens Kelvin's phone page: alarms with **Got it**, requests with **Approve** (control) or **Decline**, the run in progress with its progress and **Stop**, the instruments, and recent notices. A control phone can also open the full portal.
+
+Settings, instruments, the lab config, the approval mode and pairing work only on the Kelvin computer. Remove a phone in Settings, or with **Forget this phone** on the phone itself.
+
+**Away from the lab:** install [Tailscale](https://tailscale.com) (a free, encrypted VPN) on the lab computer and on the phone, and pair the phone using the Tailscale address. On a plain Wi-Fi network traffic isn't encrypted, so on a shared network prefer Tailscale. Don't forward Kelvin's port to the internet. For push notifications to the phone, add an ntfy topic under Notifications.
+
 ## Reports
 
 Kelvin writes up runs as a **PDF** or as **PowerPoint slides**, to look back on, review with your advisor, or bring to group meeting. A report has:
@@ -282,6 +298,7 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/gate.py` | The safety gate |
 | `src/labharness/plans.py`, `engine.py` | Plan format; validate → preflight → dry run → approve → run → log |
 | `src/labharness/reports/` | Reports: gathering runs and the log (`collect.py`), shared plot layout (`chart.py`), the PDF and PowerPoint writers |
+| `src/labharness/web/remote.py`, `qr.py`, `static/mobile.*` | Phone access: pairing, device roles, the network listener, QR codes, the phone page |
 | `src/labharness/monitor.py`, `notify.py` | Watches and alarms on a background thread; in-app notices and the optional webhook |
 | `src/labharness/adapters.py`, `discovery.py` | VISA/serial connections for real instruments; the read-only scan that matches instruments to cards |
 | `src/labharness/eventlog.py` | Append-only event log; one folder per run (plan, snapshots, data, meta) |

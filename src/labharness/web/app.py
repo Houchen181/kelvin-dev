@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,6 +32,8 @@ from ..discovery import add_to_config
 from ..labconfig import ConfigError, load_lab_config
 from ..virtual_lab import build_lab, builtin_registry, is_simulated, open_home_lab
 from .agent import Busy, ChatAgent, runs_in
+from .qr import QR
+from .remote import ROLES, Remote, addresses, allowed, remote_host_ok
 from .providers.base import Provider
 from .settings import Settings
 from .store import ChatStore
@@ -60,29 +63,52 @@ def make_providers(settings: Settings, demo: bool = False) -> Dict[str, Provider
 
 
 class Guard:
-    """Only this machine's browser, holding the access key, may use the API."""
+    """On 127.0.0.1, only this machine's browser holding the access key may use the API. On the network listener
+    (phone access, see remote.py) only paired devices may, each within its role; the access key never works there."""
 
-    def __init__(self, app: Any, token: str, hosts: Iterable[str]):
+    def __init__(self, app: Any, token: str, hosts: Iterable[str], remote: Optional[Remote] = None):
         self.app = app
         self.token = token
         self.hosts = set(hosts)
+        self.remote = remote
 
     async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "http":
             headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}
             origin = headers.get("origin")
+            path, method = scope["path"], scope.get("method", "GET")
             problem = None
-            if headers.get("host") not in self.hosts:
-                problem = (403, "bad host")
-            elif origin and origin.split("://", 1)[-1] not in self.hosts:
-                problem = (403, "bad origin")
-            elif scope["path"].startswith("/api/") and not hmac.compare_digest(
-                    headers.get("x-kelvin-token", ""), self.token):
-                problem = (401, "missing or wrong access key")
+            port = self.remote.port if self.remote else None
+            if port is not None and (scope.get("server") or (None, None))[1] == port:   # from the network
+                host = headers.get("host", "")
+                device = None
+                if not remote_host_ok(host):
+                    problem = (403, "bad host")
+                elif origin and origin.split("://", 1)[-1] != host:
+                    problem = (403, "bad origin")
+                elif path.startswith("/api/") and not (path == "/api/pair" and method == "POST"):
+                    device = self.remote.device_for(headers.get("x-kelvin-token", ""))
+                    if device is None:
+                        problem = (401, "This device is not paired with Kelvin, or was removed. Pair it again.")
+                    elif not allowed(device["role"], method, path):
+                        problem = (403, "A %s device cannot do that. Use the Kelvin computer." % device["role"])
+                scope["kelvin"] = {"role": device["role"] if device else None, "device": device}
+            else:
+                if headers.get("host") not in self.hosts:
+                    problem = (403, "bad host")
+                elif origin and origin.split("://", 1)[-1] not in self.hosts:
+                    problem = (403, "bad origin")
+                elif path.startswith("/api/") and not hmac.compare_digest(headers.get("x-kelvin-token", ""), self.token):
+                    problem = (401, "missing or wrong access key")
+                scope["kelvin"] = {"role": "owner", "device": None}
             if problem:
                 await JSONResponse({"error": problem[1]}, status_code=problem[0])(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+def role_of(request: Request) -> str:
+    return (request.scope.get("kelvin") or {}).get("role") or "owner"
 
 
 def open_path(path: Path) -> None:
@@ -99,6 +125,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None) -> Any:
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo), settings)
+    remote = Remote(settings)
+    guard: Any = None
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     tasks: List[asyncio.Task] = []
 
@@ -117,6 +145,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         await agent.start()
         configure_notifications()
         configure_literature()
+        await start_phone()
         runtime.monitor.start()
         try:
             yield
@@ -124,6 +153,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             for t in tasks:
                 t.cancel()
             runtime.monitor.stop()
+            await remote.stop()
             await agent.close()
 
     def error(status: int, message: str) -> JSONResponse:
@@ -136,9 +166,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         page = page.replace("/static/app.js", "/static/app.js?v=" + version).replace("/static/app.css", "/static/app.css?v=" + version)
         return Response(page, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
+    async def mobile(request: Request) -> Response:
+        return FileResponse(STATIC / "mobile.html", headers={"Cache-Control": "no-store"})
+
     async def static(request: Request) -> Response:
         name = request.path_params["name"]
-        if name not in ("app.js", "app.css", "kelvin.svg"):
+        if name not in ("app.js", "app.css", "kelvin.svg", "mobile.js"):
             return error(404, "not found")
         return FileResponse(STATIC / name, headers={"Cache-Control": "no-cache"})
 
@@ -254,6 +287,84 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except KeyError as e:
             return error(404, e.args[0])
         return JSONResponse({"ok": True})
+
+    # ------------------------------------------------------------------ phones and remote access
+
+    def phone_view() -> Dict[str, Any]:
+        on, port = settings.phone
+        live = remote.port
+        return {"on": on, "port": port, "listening": live is not None, "error": remote.error,
+                "addresses": addresses(live or port), "devices": settings.device_views(), "roles": list(ROLES)}
+
+    async def start_phone() -> None:
+        on, port = settings.phone
+        if not on:
+            await remote.stop()
+            return
+        try:
+            await remote.start(guard, port)
+        except OSError as e:
+            remote.error = "Could not listen on port %d: %s" % (port, e.strerror or e)
+
+    async def phone(request: Request) -> Response:
+        """GET: phone access and paired devices. POST {on, port}: switch phone access (this computer only)."""
+        if request.method == "POST":
+            body = await request.json()
+            try:
+                settings.set_phone(bool(body.get("on")), int(body.get("port") or settings.phone[1]))
+            except (TypeError, ValueError) as e:
+                return error(400, str(e))
+            await start_phone()
+        return JSONResponse(phone_view())
+
+    async def devices(request: Request) -> Response:
+        """POST {name, role}: a one-time pairing code (and QR code) for a new phone."""
+        body = await request.json()
+        if remote.port is None:
+            return error(400, "Switch on phone access first.")
+        try:
+            p = remote.start_pairing(str(body.get("name") or ""), str(body.get("role") or "watch"))
+        except ValueError as e:
+            return error(400, str(e))
+        urls = [a["url"] + "/pair#" + p.code for a in addresses(remote.port)]
+        return JSONResponse({"code": p.code, "name": p.name, "role": p.role, "expires_in": int(p.expires - time.time()),
+                             "urls": urls, "qr": QR(urls[0]).svg(5) if urls else None})
+
+    async def pairing(request: Request) -> Response:
+        state = remote.pairing_state(request.path_params["code"])
+        return JSONResponse(state) if state else error(404, "no such pairing code")
+
+    async def device(request: Request) -> Response:
+        try:
+            settings.remove_device(request.path_params["device_id"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        return JSONResponse({"ok": True})
+
+    async def pair(request: Request) -> Response:
+        """A phone offers its pairing code (no token yet) and gets its own token."""
+        if (request.scope.get("kelvin") or {}).get("role") == "owner":
+            return error(404, "pair from the phone, through the address Kelvin shows")
+        body = await request.json()
+        try:
+            dev, token = remote.claim(str(body.get("code") or ""))
+        except PermissionError as e:
+            locked = "locked" in str(e)
+            return error(429 if locked else 403, str(e))
+        return JSONResponse({"token": token, "name": dev["name"], "role": dev["role"]})
+
+    async def forget_me(request: Request) -> Response:
+        """A paired phone unpairs itself."""
+        d = (request.scope.get("kelvin") or {}).get("device")
+        if not d:
+            return error(404, "this is not a paired device")
+        settings.remove_device(d["id"])
+        return JSONResponse({"ok": True})
+
+    async def me(request: Request) -> Response:
+        k = request.scope.get("kelvin") or {}
+        d = k.get("device") or {}
+        return JSONResponse({"role": k.get("role") or "owner", "name": d.get("name"), "lab": runtime.lab.config.name})
 
     # ------------------------------------------------------------------ reports
 
@@ -540,6 +651,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def approval(request: Request) -> Response:
         body = await request.json()
+        if body.get("approve") and role_of(request) == "watch":
+            return error(403, "This phone can watch and decline, not approve. Approve on the Kelvin computer.")
         ok = runtime.approver.answer(request.path_params["request_id"], bool(body.get("approve")))
         return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
@@ -622,6 +735,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     routes = [
         Route("/", index),
+        Route("/m", mobile),
+        Route("/pair", mobile),
+        Route("/api/me", me),
+        Route("/api/me/forget", forget_me, methods=["POST"]),
+        Route("/api/pair", pair, methods=["POST"]),
+        Route("/api/phone", phone, methods=["GET", "POST"]),
+        Route("/api/devices", devices, methods=["POST"]),
+        Route("/api/devices/pairing/{code}", pairing),
+        Route("/api/devices/{device_id}", device, methods=["DELETE"]),
         Route("/api/bootstrap", bootstrap),
         Route("/api/chats", chats, methods=["GET", "POST"]),
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
@@ -659,7 +781,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.agent = agent
-    return Guard(app, settings.access_key, hosts)
+    app.state.remote = remote
+    guard = Guard(app, settings.access_key, hosts, remote)
+    return guard
 
 
 def main(argv: Optional[List[str]] = None) -> None:

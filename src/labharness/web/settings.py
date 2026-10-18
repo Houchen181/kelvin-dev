@@ -8,8 +8,9 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .store import MAX_INSTRUCTIONS
 
@@ -102,6 +103,48 @@ class Settings:
     def learning(self) -> bool:
         """May Kelvin save notes from conversations? On unless the user switched it off."""
         return self._data.get("learn") != "off"
+
+    # ------------------------------------------------------------------ paired phones (see remote.py)
+
+    @property
+    def devices(self) -> List[Dict[str, Any]]:
+        return [d for d in self._data.get("devices") or [] if isinstance(d, dict) and d.get("hash")]
+
+    def device_views(self) -> List[Dict[str, Any]]:
+        return [{k: d.get(k) for k in ("id", "name", "role", "created", "last_seen")} for d in self.devices]
+
+    def add_device(self, name: str, role: str, token_hash: str) -> Dict[str, Any]:
+        device = {"id": "d" + secrets.token_hex(4), "name": name, "role": role, "hash": token_hash,
+                  "created": time.time(), "last_seen": None}
+        self._data["devices"] = self.devices + [device]
+        self._save()
+        return device
+
+    def remove_device(self, device_id: str) -> None:
+        kept = [d for d in self.devices if d["id"] != device_id]
+        if len(kept) == len(self.devices):
+            raise KeyError("no paired device %r" % device_id)
+        self._data["devices"] = kept
+        self._save()
+
+    def touch_device(self, device_id: str, when: float) -> None:
+        for d in self._data.get("devices") or []:
+            if d.get("id") == device_id:
+                d["last_seen"] = when
+                self._save()
+
+    @property
+    def phone(self) -> Tuple[bool, int]:
+        """Phone access on or off, and its port."""
+        from .remote import PHONE_PORT
+        return self._data.get("phone") == "on", int(self._data.get("phone_port") or PHONE_PORT)
+
+    def set_phone(self, on: bool, port: int) -> None:
+        if not 1024 <= int(port) <= 65535:
+            raise ValueError("the port must be between 1024 and 65535")
+        self._data["phone"] = "on" if on else "off"
+        self._data["phone_port"] = int(port)
+        self._save()
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

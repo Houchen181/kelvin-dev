@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2f6fb0">
+<title>Kelvin</title>
+<link rel="icon" href="/static/kelvin.svg">
+<style>
+:root { --bg: #f6f7f9; --panel: #ffffff; --text: #1f2328; --muted: #5f6b78; --line: #e3e7ec; --accent: #2f6fb0;
+  --accent-ink: #fff; --ok: #1a7f37; --danger: #b42318; --danger-soft: #fdeceb; --warn: #9a6700; --warn-bg: #fff7e3; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #15181c; --panel: #1d2126; --text: #e6e9ed; --muted: #9aa4ae; --line: #2c323a; --accent: #5aa2e6;
+    --accent-ink: #0b1017; --ok: #3fb950; --danger: #f47067; --danger-soft: #3a1f1f; --warn: #e3b341; --warn-bg: #33290f; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+.top { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+  background: var(--panel); border-bottom: 1px solid var(--line); }
+.top div { flex: 1; min-width: 0; display: grid; }
+.top b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.muted { color: var(--muted); font-size: 13px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.ok { background: var(--ok); }
+.dot.bad { background: var(--danger); }
+main { padding: 12px 16px 32px; max-width: 640px; margin: 0 auto; display: grid; gap: 12px; }
+h1 { font-size: 22px; margin: 18px 0 4px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
+.card.alarm { border-color: var(--danger); background: var(--danger-soft); }
+.card.ask { border-color: var(--warn); }
+.card ul { margin: 6px 0; padding-left: 18px; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.row .grow { flex: 1; min-width: 0; }
+button { font: inherit; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+  padding: 10px 14px; min-height: 44px; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button.danger { color: var(--danger); border-color: var(--danger); font-weight: 600; }
+button.link { border: 0; background: none; color: var(--accent); padding: 0; min-height: 0; font-size: 14px; }
+.bar { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; margin: 8px 0; }
+.bar i { display: block; height: 100%; background: var(--accent); }
+input { font: inherit; font-size: 28px; letter-spacing: 6px; text-align: center; width: 100%; padding: 10px;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+form { display: grid; gap: 10px; }
+.msg { min-height: 1.4em; color: var(--danger); }
+.inst { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 6px; }
+.inst li { font-size: 14px; }
+.inst .away { color: var(--warn); font-weight: 600; }
+.card .notices { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; font-size: 14px; }
+footer { color: var(--muted); font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: center; }
+a { color: var(--accent); }
+summary { cursor: pointer; font-weight: 600; font-size: 15px; }
+#dash:not([hidden]), #pair:not([hidden]) { display: grid; gap: 12px; }
+#alarms:empty, #approvals:empty { display: none !important; }
+</style>
+</head>
+<body>
+<header class="top">
+  <img src="/static/kelvin.svg" width="28" height="28" alt="">
+  <div><b id="lab">Kelvin</b><span id="sub" class="muted"></span></div>
+  <span id="conn" class="dot" title="Connection to Kelvin"></span>
+</header>
+<main>
+  <section id="pair" hidden>
+    <h1>Pair this phone</h1>
+    <p class="muted">On the Kelvin computer, open Settings → Phone access → Pair a phone, then type the 6-digit code it shows.</p>
+    <form id="pair-form">
+      <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" aria-label="Pairing code">
+      <button class="primary" type="submit">Pair</button>
+    </form>
+    <p id="pair-msg" class="msg" role="alert"></p>
+  </section>
+  <section id="dash" hidden>
+    <div id="alarms" style="display:grid;gap:12px"></div>
+    <div id="approvals" style="display:grid;gap:12px"></div>
+    <div id="run" class="card"></div>
+    <details class="card"><summary>Instruments</summary><ul id="instruments" class="inst"></ul></details>
+    <div class="card"><h2>Recent</h2><ul id="notices" class="notices"></ul></div>
+    <footer><span id="who"></span><a id="full" href="/" hidden>Open the full portal</a><button id="forget" class="link" type="button">Forget this phone</button></footer>
+  </section>
+</main>
+<script src="/static/mobile.js"></script>
+</body>
+</html>
