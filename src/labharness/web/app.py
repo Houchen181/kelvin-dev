@@ -289,11 +289,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--approval-timeout", type=float, default=300)
     ap.add_argument("--demo", action="store_true", help="add a scripted model so the portal works without an API key")
+    ap.add_argument("--lab", help="lab config YAML using sim:// instruments (default: the built-in virtual lab)")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args(argv)
 
-    lab = build_virtual_lab(clock=SimClock() if args.speed == 0 else ScaledClock(args.speed), seed=args.seed)
-    runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), args.data_dir, demo_envelope(lab))
+    lab = build_virtual_lab(clock=SimClock() if args.speed == 0 else ScaledClock(args.speed), seed=args.seed,
+                            config=args.lab)
+    envelope = None if args.lab else demo_envelope(lab)  # the demo envelope names the built-in lab's instruments
+    runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), args.data_dir, envelope)
     settings = Settings(args.settings)
     store = ChatStore(Path(args.data_dir) / "chats")
     hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)

@@ -92,7 +92,13 @@
     </header>
     <div class="lab-scroll">
       <div id="lab-pending"></div>
-      <h3>Instruments</h3>
+      <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span></div>
+      <div class="inst-tools">
+        <input id="inst-filter" type="search" placeholder="Filter instruments" aria-label="Filter instruments" spellcheck="false" autocomplete="off">
+        <div id="inst-seg" class="seg" role="group" aria-label="Which instruments to show">
+          <button type="button" data-v="all">All</button><button type="button" data-v="active" id="seg-active">Active</button>
+        </div>
+      </div>
       <div id="lab-status" class="inst-list"></div>
       <h3>Activity</h3>
       <ol id="lab-events" class="lab-events"></ol>

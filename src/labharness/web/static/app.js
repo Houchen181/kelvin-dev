@@ -678,7 +678,8 @@
   }
 
   // ------------------------------------------------------------------ lab panel
-  const OPEN = new Set(), CLOSED = new Set(), SHOW_SETTINGS = new Set();
+  const OPEN = new Set(), SHOW_SETTINGS = new Set();
+  const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [] };
 
   function splitValue(text) {  // "9.42 fA" -> ["9.42", "fA"]; words stay whole
     const m = String(text).match(/^(-?[\d.]+(?:e[-+]?\d+)?)\s+(\S+)$/i);
@@ -691,24 +692,31 @@
       h("span", { class: "k" }, item.label),
       h("span", { class: "v" }, item.armed ? h("span", { class: "tag-armed" }, "armed") : null, item.value));
   }
-  function instrumentCard(inst) {
-    const open = OPEN.has(inst.name) ? true : CLOSED.has(inst.name) ? false : inst.state !== "safe";
+  function instrumentRow(inst) {
+    const open = OPEN.has(inst.name);
     const head = inst.readings.find((r) => r.name === inst.headline);
     const [hv, hu] = head ? splitValue(head.value) : ["", ""];
-    const pillText = inst.state === "error" ? "No response" : inst.state === "active" ? inst.active + " active" : "Safe";
+    const stateText = inst.state === "error" ? "not responding" : inst.state === "active" ? inst.active + " active" : "safe";
     const chev = icon("chev"); chev.classList.add("chev");
-    const kindIcon = icon(ICONS[inst.kind] ? inst.kind : "instrument");
-    const button = h("button", { class: "inst-head", type: "button", "aria-expanded": String(open) },
-      h("span", { class: "inst-icon" }, kindIcon),
-      h("span", { class: "inst-name", title: inst.model }, h("b", {}, inst.model.replace(/^Virtual\s+/, "")), h("small", {}, inst.name)),
-      h("span", { class: "inst-headline", title: head ? head.label : "" }, h("span", { class: "hv" }, hv), h("span", { class: "hu" }, hu)),
-      h("span", { class: "pill-state " + inst.state }, pillText), chev);
-    button.addEventListener("click", () => {
-      if (open) { CLOSED.add(inst.name); OPEN.delete(inst.name); } else { OPEN.add(inst.name); CLOSED.delete(inst.name); }
-      pollState();
+    const count = inst.state === "active" ? h("span", { class: "inst-count" }, String(inst.active))
+      : inst.state === "error" ? h("span", { class: "inst-count err" }, "!") : h("span", { class: "inst-count none" });
+    const row = h("button", { class: "inst-row", type: "button", "aria-expanded": String(open),
+      title: inst.model + " · " + stateText + (head ? " · " + head.label + " " + head.value : "") },
+      h("span", { class: "inst-icon" }, icon(ICONS[inst.kind] ? inst.kind : "instrument")),
+      h("span", { class: "inst-id" }, inst.name),
+      h("span", { class: "inst-model" }, inst.model.replace(/^Virtual\s+/, "")),
+      h("span", { class: "inst-headline" }, hv, hu ? h("span", { class: "hu" }, hu) : null),
+      count, chev);
+    row.addEventListener("click", () => {
+      if (open) OPEN.delete(inst.name); else OPEN.add(inst.name);
+      renderInstruments();
     });
-    const card = h("div", { class: "inst-card " + inst.state + (open ? " open" : "") }, button);
-    if (!open) return card;
+    const item = h("div", { class: "inst " + inst.state + (open ? " open" : "") }, row);
+    const on = inst.drives.filter((d) => d.away);
+    if (inst.state === "error") item.append(h("div", { class: "inst-sub" }, "Not responding"));
+    else if (on.length && !open) item.append(h("div", { class: "inst-sub" }, on.map((d) => d.label + " " + d.value).join(" · ")));
+    if (!open) return item;
+    const card = item;
     const body = h("div", { class: "inst-body" });
     const others = inst.readings.filter((r) => r.name !== inst.headline);
     if (others.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Readings"), ...others.map((r) => kv(r))));
@@ -719,7 +727,7 @@
         (shown ? "Hide settings" : "Show settings") + " (" + inst.settings.length + ")");
       toggle.addEventListener("click", () => {
         if (shown) SHOW_SETTINGS.delete(inst.name); else SHOW_SETTINGS.add(inst.name);
-        pollState();
+        renderInstruments();
       });
       const group = h("div", { class: "group settings" }, toggle);
       if (shown) group.append(...inst.settings.map((x) => kv(x)));
@@ -729,12 +737,31 @@
     return card;
   }
 
+  function renderInstruments() {
+    const all = PANEL.instruments;
+    const q = PANEL.filter.trim().toLowerCase();
+    const shown = all.filter((i) => (!PANEL.activeOnly || i.state !== "safe") &&
+      (!q || (i.name + " " + i.model + " " + i.kind).toLowerCase().includes(q)));
+    const active = all.filter((i) => i.state === "active").length;
+    const errors = all.filter((i) => i.state === "error").length;
+    $("inst-summary").textContent = all.length + " · " + active + " active" + (errors ? " · " + errors + " not responding" : "");
+    $("seg-active").textContent = "Active" + (active + errors ? " (" + (active + errors) + ")" : "");
+    for (const b of document.querySelectorAll("#inst-seg button")) {
+      const on = (b.dataset.v === "active") === PANEL.activeOnly;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-pressed", String(on));
+    }
+    $("lab-status").replaceChildren(...(shown.length ? shown.map(instrumentRow)
+      : [h("div", { class: "inst-empty" }, PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.")]));
+  }
+
   async function pollState() {
     let s;
     try { s = await api("/api/state"); } catch (e) { return; }
     $("agent-state").textContent = s.busy ? "Kelvin is " + s.busy : "Kelvin is idle";
     $("agent-state").classList.toggle("busy", !!s.busy);
-    $("lab-status").replaceChildren(...s.instruments.map(instrumentCard));
+    PANEL.instruments = s.instruments;
+    renderInstruments();
     $("lab-events").replaceChildren(...s.events.map((e) => {
       const m = e.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
       return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, m[2])) : h("li", {}, e);
@@ -871,6 +898,14 @@
     $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });
     $("scrim").addEventListener("click", () => { closeSidebar(); if (S.labOpen) toggleLab(false); });
     $("toggle-lab").addEventListener("click", () => toggleLab());
+    $("inst-filter").addEventListener("input", (e) => { PANEL.filter = e.target.value; renderInstruments(); });
+    for (const b of document.querySelectorAll("#inst-seg button")) {
+      b.addEventListener("click", () => {
+        PANEL.activeOnly = b.dataset.v === "active";
+        store("lh.activeOnly", PANEL.activeOnly ? "1" : "0");
+        renderInstruments();
+      });
+    }
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
     $("save-settings").addEventListener("click", saveSettings);
