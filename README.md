@@ -5,16 +5,18 @@
 <h1 align="center">Kelvin</h1>
 <p align="center"><b>The coolest cat in the lab.</b><br>An AI lab assistant for experimental physicists that plans, measures and logs, and asks before it drives your sample harder.</p>
 
+<p align="center"><a href="https://github.com/Houchen181/kelvin/releases/latest/download/Kelvin-Setup.exe"><b>⬇ Download Kelvin for Windows</b></a> (latest version, Windows 10/11)<br><a href="https://github.com/Houchen181/kelvin/releases/latest">macOS, and what's new</a></p>
+
 ---
 
 Kelvin connects Claude, GPT, Gemini or a local model to your instruments through a safety gate. Measuring runs freely. Anything that pushes more power, voltage, current, field or temperature into the sample is checked against your limits, approved by a person, then ramped and watched.
 
 ## Get started
 
-Download the latest version from **[Releases](https://github.com/Houchen181/kelvin/releases/latest)**. No Python needed.
+No Python needed.
 
-- **Windows 10/11:** run `Kelvin-Setup-<version>.exe`. No admin rights are needed. The installer isn't code-signed yet, so if Windows says it protected your PC, choose **More info → Run anyway**.
-- **macOS (Apple silicon):** unzip `Kelvin-<version>-macOS.zip` and move `Kelvin.app` to Applications. The first time, right-click it and choose **Open**.
+- **Windows 10/11:** [download `Kelvin-Setup.exe`](https://github.com/Houchen181/kelvin/releases/latest/download/Kelvin-Setup.exe) and run it. No admin rights are needed. The installer isn't code-signed yet, so if Windows says it protected your PC, choose **More info → Run anyway**.
+- **macOS (Apple silicon):** from the [latest release](https://github.com/Houchen181/kelvin/releases/latest), unzip `Kelvin-<version>-macOS.zip` and move `Kelvin.app` to Applications. The first time, right-click it and choose **Open**.
 
 Kelvin starts with a simulated lab and a scripted demo model. To talk to a real model, add an API key in Settings or sign in with ChatGPT. If instruments are connected, Kelvin finds them and connects them, with their outputs locked until you review the limits. Everything it keeps stays in `~/Kelvin` on your computer.
 

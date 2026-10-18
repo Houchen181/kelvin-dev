@@ -84,6 +84,11 @@ jobs:
         with:
           path: out
           merge-multiple: true
+      - name: Copies with fixed names, for links to the latest version
+        run: |
+          # releases/latest/download/Kelvin-Setup.exe then always gives the newest installer (the README links it)
+          cp out/Kelvin-Setup-*.exe out/Kelvin-Setup.exe
+          cp out/Kelvin-*-macOS.zip out/Kelvin-macOS.zip
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
