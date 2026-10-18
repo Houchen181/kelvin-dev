@@ -457,6 +457,17 @@ def test_big_projects_recall_only_what_bears_on_the_question():
     assert memory.similarity("gate leaks above 6 V", "gate leaks above 8 V") < memory.SAME
 
 
+def test_incognito_is_offered_in_every_chat():
+    """The Incognito button stays in the top bar: it once vanished after a chat's first message."""
+    import re
+    from labharness.web.app import STATIC
+    assert 'id="toggle-incognito"' in (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("function applyIncognito"):js.index("function toggleIncognito")]
+    assert not re.search(r"\.hidden\s*=", body)
+    assert "if (S.chatId) newChat();" in js[js.index("function toggleIncognito"):]   # from a saved chat: a new one
+
+
 def test_incognito_uses_and_keeps_no_memory(parts):
     _, settings, store = parts
     from labharness.web.agent import INCOGNITO, SYSTEM

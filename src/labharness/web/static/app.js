@@ -1451,17 +1451,21 @@
     if (S.incognito && S.chatId) api("/api/chats/" + S.chatId, { method: "DELETE" }).catch(() => {});
     if (S.incognito) { S.incognito = false; applyIncognito(); }
   }
+  const askHint = () => S.incognito ? "Ask anything; nothing here is remembered" : "Ask Kelvin…";
   function applyIncognito() {
     document.body.classList.toggle("incognito", S.incognito);
     const b = $("toggle-incognito");
     b.setAttribute("aria-pressed", String(S.incognito));
     b.classList.toggle("on", S.incognito);
-    b.hidden = !!S.chatId && !S.incognito;  // offered on a new chat, shown while in one
+    // always there: from a saved chat it starts a new incognito one; in incognito it leaves (and forgets) it
+    b.title = S.incognito ? "Leave incognito: this chat is forgotten and a normal chat starts"
+      : S.chatId ? "New incognito chat: no memory is used or kept, and the chat is not saved"
+        : "Make this chat incognito: no memory is used or kept, and the chat is not saved";
     $("greeting").textContent = S.incognito ? "Incognito chat" : "What are we measuring today?";
     $("empty-sub").textContent = S.incognito
       ? "Kelvin uses no memory here, keeps nothing from this chat, and forgets it when you leave. Instrument commands and runs are still logged."
       : S.labSub || "";
-    $("input").placeholder = S.incognito ? "Ask anything; nothing here is remembered" : "Ask Kelvin…";
+    $("input").placeholder = askHint();
   }
   function toggleIncognito() {
     if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
@@ -1534,7 +1538,7 @@
       applyIncognito();
     }
     $("input").value = ""; autosize();
-    $("input").placeholder = "Ask Kelvin…";
+    $("input").placeholder = askHint();
     showEmpty(false);
     thread.append(userBubble(text));
     const reply = new Reply(model);
@@ -1635,7 +1639,7 @@
       applyIncognito();
     }
     $("input").value = ""; autosize();
-    $("input").placeholder = "Ask Kelvin…";
+    $("input").placeholder = askHint();
     showEmpty(false);
     for (const el of document.querySelectorAll(".msg-actions")) el.remove();
     thread.append(userBubble(text));
