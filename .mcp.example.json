@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "lab-harness": {
+      "command": "<full path to this repo>/.venv/Scripts/python.exe",
+      "args": ["-m", "labharness.agent"]
+    }
+  }
+}

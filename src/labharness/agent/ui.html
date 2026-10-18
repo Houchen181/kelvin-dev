@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lab Harness approvals</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5f6b7a; --line: #e2e6ea;
+    --accent: #1f6feb; --accent-text: #ffffff; --ok: #1a7f37; --warn-bg: #fff8e6; --warn-line: #e3b341;
+    --danger: #c62828; --danger-text: #ffffff; --away: #9a6700; --away-bg: #fff4d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #171b21; --text: #e6e9ed; --muted: #9aa5b1; --line: #2a313a;
+      --accent: #4c8dff; --accent-text: #0b0d10; --ok: #3fb950; --warn-bg: #2a2410; --warn-line: #9e7a1d;
+      --danger: #ef5350; --danger-text: #0b0d10; --away: #e3b341; --away-bg: #2a2410;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 12px 16px;
+           background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  .muted { color: var(--muted); }
+  .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; background: var(--muted); margin-right: 6px; }
+  .dot.on { background: var(--ok); }
+  .spacer { flex: 1; }
+  button { font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--panel);
+           color: var(--text); padding: 7px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.danger { background: var(--danger); color: var(--danger-text); border-color: var(--danger); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  .grid2 { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  .request { border: 1px solid var(--warn-line); background: var(--warn-bg); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; }
+  .request h3 { margin: 0 0 6px; font-size: 15px; }
+  .request ul { margin: 0 0 10px; padding-left: 18px; }
+  .request li { margin: 2px 0; overflow-wrap: anywhere; }
+  .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .empty { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 6px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+  td.name { font-weight: 600; white-space: nowrap; padding-right: 10px; }
+  .chip { display: inline-block; margin: 2px 6px 2px 0; padding: 1px 7px; border-radius: 6px; font-size: 13px;
+          border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  .chip.away { color: var(--away); background: var(--away-bg); border-color: var(--warn-line); font-weight: 600; }
+  ol.events { list-style: none; margin: 0; padding: 0; font: 13px/1.5 ui-monospace, Consolas, monospace; }
+  ol.events li { padding: 3px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+  .history li { font-size: 13px; }
+  #nokey { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lab Harness</h1>
+  <span id="lab" class="muted"></span>
+  <span id="sim" class="badge" hidden>simulated</span>
+  <span class="muted"><span id="conn" class="dot"></span><span id="conntext">connecting…</span></span>
+  <span id="busy" class="muted"></span>
+  <span class="spacer"></span>
+  <button id="notify" hidden>Enable notifications</button>
+  <button id="kill" class="danger" title="Send every drive to its safe state and stop the agent's current action">All drives to safe</button>
+</header>
+<main>
+  <section id="nokey">
+    <h2>Access key missing</h2>
+    <p>Open the link printed by the Lab Harness server. It ends in <code>#</code> plus an access key.</p>
+  </section>
+  <section>
+    <h2>Waiting for you</h2>
+    <div id="pending"><p class="empty">Nothing to approve.</p></div>
+    <ul id="history" class="history muted"></ul>
+  </section>
+  <div class="grid2">
+    <section>
+      <h2>Instruments <span class="muted" style="text-transform:none;letter-spacing:0">· highlighted = away from safe</span></h2>
+      <table><tbody id="status"></tbody></table>
+    </section>
+    <section>
+      <h2>Activity</h2>
+      <ol id="events" class="events"></ol>
+    </section>
+  </div>
+</main>
+<script>
+"use strict";
+const token = decodeURIComponent(location.hash.slice(1));
+const $ = (id) => document.getElementById(id);
+const seen = new Set();
+let firstLoad = true;
+
+function el(tag, attrs, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") node.className = v; else if (k.startsWith("on")) node.addEventListener(k.slice(2), v); else node.setAttribute(k, v);
+  }
+  for (const c of children) node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  return node;
+}
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: body ? "POST" : "GET",
+    headers: { "X-LabHarness-Token": token, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(res.status);
+  return res.json();
+}
+
+async function answer(id, approve, buttons) {
+  buttons.forEach((b) => (b.disabled = true));
+  try { await api("/api/answer", { id, approve }); } catch (e) { /* already answered or expired */ }
+  refresh();
+}
+
+function renderPending(list) {
+  const box = $("pending");
+  box.replaceChildren();
+  if (!list.length) { box.append(el("p", { class: "empty" }, "Nothing to approve.")); return; }
+  for (const r of list) {
+    const ok = el("button", { class: "primary" }, "Approve");
+    const no = el("button", {}, "Decline");
+    ok.addEventListener("click", () => answer(r.id, true, [ok, no]));
+    no.addEventListener("click", () => answer(r.id, false, [ok, no]));
+    box.append(el("div", { class: "request" },
+      el("h3", {}, r.title),
+      el("ul", {}, ...r.items.map((i) => el("li", {}, i))),
+      el("div", { class: "actions" }, ok, no, el("span", { class: "muted" }, "declines itself in " + r.seconds_left + " s"))));
+    if (!seen.has(r.id)) {
+      seen.add(r.id);
+      if (!firstLoad && "Notification" in window && Notification.permission === "granted") {
+        new Notification("Lab Harness: approval needed", { body: r.title + "\n" + (r.items[0] || "") });
+      }
+    }
+  }
+}
+
+function render(s) {
+  $("lab").textContent = s.lab;
+  $("sim").hidden = !s.simulated;
+  $("busy").textContent = s.busy ? "agent: " + s.busy : "agent: idle";
+  renderPending(s.pending);
+  document.title = (s.pending.length ? "(" + s.pending.length + ") Approve? · " : "") + "Lab Harness";
+  $("history").replaceChildren(...s.history.slice(0, 5).map((h) =>
+    el("li", {}, h.at + " " + h.answer + (h.by && h.by !== "human" ? " (" + h.by + ")" : "") + ": " + (h.items[0] || h.title))));
+  $("status").replaceChildren(...Object.entries(s.status).map(([name, params]) =>
+    el("tr", {}, el("td", { class: "name" }, name),
+      el("td", {}, ...params.map((p) => el("span", { class: "chip" + (p.away ? " away" : "") }, p.name + " " + p.value))))));
+  $("events").replaceChildren(...s.events.map((e) => el("li", {}, e)));
+  firstLoad = false;
+}
+
+async function refresh() {
+  if (!token) { $("nokey").style.display = "block"; return; }
+  try {
+    render(await api("/api/state"));
+    $("conn").className = "dot on"; $("conntext").textContent = "connected";
+  } catch (e) {
+    $("conn").className = "dot"; $("conntext").textContent = e.message === "401" ? "wrong access key" : "server not reachable";
+  }
+}
+
+$("kill").addEventListener("click", async () => {
+  if (!confirm("Send every drive to its safe state? This also declines open requests and stops the agent's current ramp or plan.")) return;
+  try { await api("/api/safe_state", {}); } catch (e) { alert("Kill switch failed: " + e.message); }
+  refresh();
+});
+
+if ("Notification" in window && Notification.permission === "default") {
+  $("notify").hidden = false;
+  $("notify").addEventListener("click", async () => { await Notification.requestPermission(); $("notify").hidden = true; });
+}
+
+refresh();
+setInterval(refresh, 1000);
+</script>
+</body>
+</html>

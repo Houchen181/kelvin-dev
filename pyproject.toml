@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "labharness"
+version = "0.1.0"
+description = "A safe interface between AI agents and lab instruments"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["PyYAML>=5.4"]
+
+[project.optional-dependencies]
+agent = ["mcp>=2.3"]           # the MCP server needs Python >= 3.10
+web = ["mcp>=2.3", "starlette", "uvicorn", "anthropic>=1.15", "openai>=3", "google-genai>=2"]
+dev = ["pytest>=6", "httpx"]
+
+[project.scripts]
+labharness-mcp = "labharness.agent.server:main"
+labharness-portal = "labharness.web.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+labharness = ["data/*.yaml", "data/cards/*.yaml", "agent/ui.html", "web/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

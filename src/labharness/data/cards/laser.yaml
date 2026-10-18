@@ -1,0 +1,50 @@
+card: 1
+id: virtual/laser
+model: Virtual CW Laser with Shutter
+vendor: Lab Harness (simulated)
+kind: laser
+status: community
+twin: labharness.sim.twins:LaserTwin
+identify:
+  idn: "^VIRTUAL,LASER"
+  example: "VIRTUAL,LASER,SN0006,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  emission:
+    kind: drive
+    type: bool
+    set: "OUTPut[:STATe] {value}"
+    get: "OUTPut[:STATe]?"
+    safe: off
+    enables: [power]
+  power:
+    kind: drive
+    unit: mW
+    set: "SOURce:POWer[:LEVel] {value}"
+    get: "SOURce:POWer[:LEVel]?"
+    limits: [0, 100]
+    safe: 0
+    ramp: gate
+    max_rate: 20
+    ramp_step: 0.5
+  shutter:
+    kind: drive
+    type: bool
+    set: "SHUTter[:STATe] {value}"
+    get: "SHUTter[:STATe]?"
+    bool_text: ["OPEN", "CLOSE"]
+    safe: off
+    description: on = open (light reaches the sample)
+  P_detected:
+    kind: measure
+    unit: mW
+    get: "MEASure:POWer?"
+
+safe_sequence: [shutter, power, emission]
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "SYSTem:FIRMware"]

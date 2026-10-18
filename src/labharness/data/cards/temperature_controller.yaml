@@ -1,0 +1,50 @@
+card: 1
+id: virtual/temperature-controller
+model: Virtual Temperature Controller
+vendor: Lab Harness (simulated)
+kind: temperature-controller
+status: community
+twin: labharness.sim.twins:TemperatureControllerTwin
+identify:
+  idn: "^VIRTUAL,TEMPERATURE"
+  example: "VIRTUAL,TEMPERATURE-CONTROLLER,SN0003,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  heater_range:
+    kind: drive
+    type: enum
+    values: ["off", "low", "medium", "high"]
+    set: "CONTrol:HEATer:RANGe {value}"
+    get: "CONTrol:HEATer:RANGe?"
+    safe: "off"
+    description: Heater power range; higher ranges can heat further
+  setpoint:
+    kind: drive
+    unit: K
+    set: "CONTrol:SETPoint {value}"
+    get: "CONTrol:SETPoint?"
+    limits: [0, 325]
+    safe: 0
+    default: 1.6
+    ramp: instrument
+    readback: T_sample
+    tol: 0.05
+    timeout: 1800
+  T_sample:
+    kind: measure
+    unit: K
+    get: "MEASure:TEMPerature?"
+    default: 1.6
+
+safe_sequence: [heater_range, setpoint]
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+  - read: T_sample
+    range: [0.01, 400]
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "SYSTem:FIRMware", "SENSor:CURVe"]
+notes:
+  - Overwriting a sensor calibration curve is blocked.

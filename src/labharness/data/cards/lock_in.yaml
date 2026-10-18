@@ -1,0 +1,65 @@
+card: 1
+id: virtual/lock-in
+model: Virtual Lock-in Amplifier
+vendor: Lab Harness (simulated)
+kind: lock-in
+status: community
+twin: labharness.sim.twins:LockInTwin
+identify:
+  idn: "^VIRTUAL,LOCK-IN"
+  example: "VIRTUAL,LOCK-IN,SN0002,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  amplitude:
+    kind: drive
+    unit: V
+    set: "SOURce:VOLTage[:AMPLitude] {value}"
+    get: "SOURce:VOLTage[:AMPLitude]?"
+    limits: [0, 5]
+    safe: 0
+    ramp: gate
+    max_rate: 1
+    ramp_step: 0.01
+    description: Sine output amplitude (excitation through the sample)
+  frequency:
+    kind: measure
+    unit: Hz
+    set: "SOURce:FREQuency {value}"
+    get: "SOURce:FREQuency?"
+    limits: [0.001, 102000]
+    default: 17.777
+  tc:
+    kind: measure
+    unit: s
+    set: "SENSe:TCONstant {value}"
+    get: "SENSe:TCONstant?"
+    limits: [1.0e-5, 30000]
+    default: 0.1
+    description: Time constant
+  sensitivity:
+    kind: measure
+    unit: V
+    set: "SENSe:SENSitivity {value}"
+    get: "SENSe:SENSitivity?"
+    limits: [2.0e-9, 1]
+    default: 1
+  X:
+    kind: measure
+    unit: V
+    get: "MEASure:X?"
+  Y:
+    kind: measure
+    unit: V
+    get: "MEASure:Y?"
+  R:
+    kind: measure
+    unit: V
+    get: "MEASure:R?"
+
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "SYSTem:FIRMware"]

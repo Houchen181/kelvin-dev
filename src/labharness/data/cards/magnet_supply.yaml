@@ -1,0 +1,50 @@
+card: 1
+id: virtual/magnet-supply
+model: Virtual Superconducting Magnet Supply
+vendor: Lab Harness (simulated)
+kind: magnet-supply
+status: community
+twin: labharness.sim.twins:MagnetSupplyTwin
+identify:
+  idn: "^VIRTUAL,MAGNET"
+  example: "VIRTUAL,MAGNET-SUPPLY,SN0004,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  B:
+    kind: drive
+    unit: T
+    set: "FIELd:TARGet {value}"
+    get: "FIELd:TARGet?"
+    limits: [-9, 9]
+    safe: 0
+    ramp: instrument
+    readback: B_actual
+    tol: 0.001
+    rate_param: rate
+    rate_per: min
+    timeout: 7200
+    description: Field target; the supply ramps at `rate`
+  rate:
+    kind: drive
+    unit: T/min
+    set: "FIELd:RATE {value}"
+    get: "FIELd:RATE?"
+    limits: [0, 2]
+    safe: 0
+    default: 0.2
+    description: Ramp rate; fast ramps risk a quench
+  B_actual:
+    kind: measure
+    unit: T
+    get: "FIELd:MEASure?"
+    default: 0
+
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "SYSTem:FIRMware", "MAGnet:CONStant"]
+notes:
+  - Changing the coil constant is blocked; it would make every field reading wrong.

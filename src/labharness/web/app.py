@@ -1,0 +1,301 @@
+"""The Lab Harness portal: a chat web app (like the Claude or ChatGPT website) wired to the lab.
+
+    python -m labharness.web            # virtual lab, opens http://127.0.0.1:8770
+    python -m labharness.web --demo     # adds a scripted model so it works without an API key
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hmac
+import json
+import sys
+import webbrowser
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+import yaml
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.routing import Route
+
+from ..agent.approval import WebApprover
+from ..agent.runtime import LabRuntime
+from ..agent.server import build_server
+from ..clock import ScaledClock, SimClock
+from ..virtual_lab import build_virtual_lab, demo_envelope
+from .agent import Busy, ChatAgent
+from .providers.base import Provider
+from .settings import Settings
+from .store import ChatStore
+
+STATIC = Path(__file__).parent / "static"
+TRACE_POINTS = 400
+
+
+def make_providers(settings: Settings, demo: bool = False) -> Dict[str, Provider]:
+    from .providers.anthropic_provider import AnthropicProvider
+    from .providers.gemini_provider import GeminiProvider
+    from .providers.openai_provider import OpenAIProvider
+
+    providers: Dict[str, Provider] = {
+        "anthropic": AnthropicProvider(settings.get("anthropic_api_key")),
+        "openai": OpenAIProvider("openai", "GPT", settings.get("openai_api_key")),
+        "gemini": GeminiProvider(settings.get("gemini_api_key")),
+    }
+    if settings.get("local_base_url"):
+        models = [m.strip() for m in (settings.get("local_models") or "").split(",")]
+        providers["local"] = OpenAIProvider("local", "Local", settings.get("local_api_key"),
+                                            base_url=settings.get("local_base_url"), models=models)
+    if demo:
+        from .providers.demo import DemoProvider
+        providers["demo"] = DemoProvider()
+    return providers
+
+
+class Guard:
+    """Only this machine's browser, holding the access key, may use the API."""
+
+    def __init__(self, app: Any, token: str, hosts: Iterable[str]):
+        self.app = app
+        self.token = token
+        self.hosts = set(hosts)
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}
+            origin = headers.get("origin")
+            problem = None
+            if headers.get("host") not in self.hosts:
+                problem = (403, "bad host")
+            elif origin and origin.split("://", 1)[-1] not in self.hosts:
+                problem = (403, "bad origin")
+            elif scope["path"].startswith("/api/") and not hmac.compare_digest(
+                    headers.get("x-labharness-token", ""), self.token):
+                problem = (401, "missing or wrong access key")
+            if problem:
+                await JSONResponse({"error": problem[1]}, status_code=problem[0])(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
+               hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
+               providers: Optional[Dict[str, Provider]] = None) -> Any:
+    agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo))
+    tasks: List[asyncio.Task] = []
+
+    @asynccontextmanager
+    async def lifespan(app: Starlette):
+        await agent.start()
+        try:
+            yield
+        finally:
+            for t in tasks:
+                t.cancel()
+            await agent.close()
+
+    def error(status: int, message: str) -> JSONResponse:
+        return JSONResponse({"error": message}, status_code=status)
+
+    async def index(request: Request) -> Response:
+        # version-stamp the assets so a browser never runs a stale copy after an update
+        version = str(int(max((STATIC / n).stat().st_mtime for n in ("app.js", "app.css"))))
+        page = (STATIC / "index.html").read_text(encoding="utf-8")
+        page = page.replace("/static/app.js", "/static/app.js?v=" + version).replace("/static/app.css", "/static/app.css?v=" + version)
+        return Response(page, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
+
+    async def static(request: Request) -> Response:
+        name = request.path_params["name"]
+        if name not in ("app.js", "app.css"):
+            return error(404, "not found")
+        return FileResponse(STATIC / name, headers={"Cache-Control": "no-cache"})
+
+    async def bootstrap(request: Request) -> Response:
+        models = await agent.models()
+        keys = [m["key"] for g in models["groups"] for m in g["models"]]
+        default = settings.get("default_model")
+        if default not in keys:
+            default = next((k for k in keys if k.startswith("anthropic:")), keys[0] if keys else None)
+        return JSONResponse({
+            "lab": runtime.lab.config.name,
+            "simulated": all(i.simulated for i in runtime.lab.instruments.values()),
+            "chats": store.list(), "models": models, "default_model": default,
+            "settings": settings.public(), "active": agent.active,
+        })
+
+    async def chats(request: Request) -> Response:
+        if request.method == "POST":
+            body = await request.json()
+            return JSONResponse(store.create(str(body.get("model") or "")))
+        return JSONResponse(store.list())
+
+    async def chat(request: Request) -> Response:
+        chat_id = request.path_params["chat_id"]
+        try:
+            if request.method == "DELETE":
+                if agent.active and agent.active["chat_id"] == chat_id:
+                    return error(409, "This conversation is still running.")
+                store.delete(chat_id)
+                return JSONResponse({"ok": True})
+            data = store.load(chat_id)
+            if request.method == "PATCH":
+                title = str((await request.json()).get("title") or "").strip()[:80]
+                if title:
+                    data["title"] = title
+                    store.save(data)
+            for m in data["messages"]:  # the browser never needs provider-internal state
+                m.pop("raw", None)
+            return JSONResponse(data)
+        except KeyError as e:
+            return error(404, e.args[0])
+
+    async def turn(request: Request) -> Response:
+        chat_id = request.path_params["chat_id"]
+        body = await request.json()
+        text = str(body.get("text") or "").strip()
+        if not text:
+            return error(400, "Say something first.")
+        model = str(body.get("model") or "")
+        try:
+            provider = agent.claim(chat_id, model)
+        except Busy as e:
+            return error(409, str(e))
+        except (KeyError, ValueError) as e:
+            return error(400, e.args[0])
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def run() -> None:
+            try:
+                await agent.run_turn(chat_id, text, model, provider, queue.put)
+            finally:
+                await queue.put(None)
+
+        task = asyncio.ensure_future(run())  # keeps going if the browser disconnects
+        tasks.append(task)
+        task.add_done_callback(lambda t: tasks.remove(t) if t in tasks else None)
+
+        async def events():
+            while True:
+                event = await queue.get()
+                if event is None:
+                    return
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+
+        return StreamingResponse(events(), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    async def stop(request: Request) -> Response:
+        return JSONResponse({"ok": agent.stop()})
+
+    async def approval(request: Request) -> Response:
+        body = await request.json()
+        ok = runtime.approver.answer(request.path_params["request_id"], bool(body.get("approve")))
+        return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
+
+    async def state(request: Request) -> Response:
+        data = runtime.ui_state()
+        data["active"] = agent.active
+        return JSONResponse(data)
+
+    async def safe_state(request: Request) -> Response:
+        agent.stop()
+        results = await asyncio.to_thread(runtime.kill, "human (portal)")
+        return JSONResponse({"ok": True, "results": results})
+
+    async def settings_view(request: Request) -> Response:
+        if request.method == "POST":
+            settings.update(await request.json())
+            agent.providers = make_providers(settings, demo) if providers is None else providers
+        return JSONResponse({"settings": settings.public(), "models": await agent.models()})
+
+    async def run_data(request: Request) -> Response:
+        """What the browser needs to plot a run: axes, scalar columns, last trace per trace column."""
+        run_id = request.path_params["run_id"]
+        try:
+            rows = runtime._rows(run_id)
+            plan = yaml.safe_load((runtime._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8")) or {}
+        except (KeyError, OSError) as e:
+            return error(404, str(e))
+        axes = [k for k in (plan.get("sweep") or {})]
+        measures = [str(k) for k in plan.get("measure") or []]
+
+        def unit(key: str) -> str:
+            try:
+                return runtime.lab.resolve(key)[1].unit
+            except KeyError:
+                return ""
+
+        scalars = [k for k in measures if rows and isinstance(rows[0].get(k), (int, float))
+                   and not isinstance(rows[0].get(k), bool)]
+        traces = []
+        for k in measures:
+            if rows and isinstance(rows[-1].get(k), list):
+                ys = rows[-1][k]
+                step = max(1, -(-len(ys) // TRACE_POINTS))
+                x0, x1 = rows[-1].get(k + ".axis") or (0, len(ys) - 1)
+                n = len(ys)
+                xs = [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(0, n, step)]
+                try:
+                    axis = runtime.lab.resolve(k)[1].axis
+                except KeyError:
+                    axis = None
+                axis_unit = unit("%s.%s" % (k.split(".")[0], axis[0])) if axis else ""
+                traces.append({"key": k, "unit": unit(k), "x": xs, "y": ys[::step], "x_unit": axis_unit,
+                               "row": len(rows) - 1})
+        return JSONResponse({
+            "run_id": run_id, "axes": [{"key": a, "unit": unit(a)} for a in axes],
+            "scalars": [{"key": k, "unit": unit(k)} for k in scalars],
+            "rows": [{k: r.get(k) for k in axes + scalars} for r in rows], "traces": traces,
+        })
+
+    routes = [
+        Route("/", index),
+        Route("/api/bootstrap", bootstrap),
+        Route("/api/chats", chats, methods=["GET", "POST"]),
+        Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
+        Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
+        Route("/api/stop", stop, methods=["POST"]),
+        Route("/api/approvals/{request_id}", approval, methods=["POST"]),
+        Route("/api/state", state),
+        Route("/api/safe_state", safe_state, methods=["POST"]),
+        Route("/api/settings", settings_view, methods=["GET", "POST"]),
+        Route("/api/runs/{run_id}", run_data),
+        Route("/static/{name}", static),
+    ]
+    app = Starlette(routes=routes, lifespan=lifespan)
+    app.state.agent = agent
+    return Guard(app, settings.access_key, hosts)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    import uvicorn
+
+    ap = argparse.ArgumentParser(prog="python -m labharness.web", description=__doc__.splitlines()[0])
+    ap.add_argument("--port", type=int, default=8770)
+    ap.add_argument("--data-dir", default=str(Path.home() / "LabHarness" / "virtual-lab"))
+    ap.add_argument("--settings", default=str(Path.home() / "LabHarness" / "settings.json"))
+    ap.add_argument("--speed", type=float, default=0, help="0 = instant simulated time (default); N = N× real time")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--approval-timeout", type=float, default=300)
+    ap.add_argument("--demo", action="store_true", help="add a scripted model so the portal works without an API key")
+    ap.add_argument("--no-browser", action="store_true")
+    args = ap.parse_args(argv)
+
+    lab = build_virtual_lab(clock=SimClock() if args.speed == 0 else ScaledClock(args.speed), seed=args.seed)
+    runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), args.data_dir, demo_envelope(lab))
+    settings = Settings(args.settings)
+    store = ChatStore(Path(args.data_dir) / "chats")
+    hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)
+    app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts)
+    url = "http://127.0.0.1:%d/#%s" % (args.port, settings.access_key)
+    print("Lab Harness portal: %s" % url, file=sys.stderr, flush=True)
+    if not args.no_browser:
+        webbrowser.open(url)
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

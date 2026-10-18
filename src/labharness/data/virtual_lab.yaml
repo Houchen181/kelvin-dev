@@ -1,0 +1,40 @@
+# Lab config for the virtual lab. In a real lab the instrument owner writes this.
+lab: Virtual Lab
+
+instruments:
+  smu:
+    card: virtual/source-meter
+    trust: ask
+    limits: { V: [-15, 15], compliance_I: [1.0e-9, 1.0e-4] }
+    rates: { V: 0.5 }
+    guards:
+      V: [{ read: I, max_abs: 1.0e-9 }]       # gate leakage above 1 nA stops the ramp
+  lockin:
+    card: virtual/lock-in
+    trust: envelope
+    limits: { amplitude: [0, 1] }
+  tc:
+    card: virtual/temperature-controller
+    limits: { setpoint: [0, 300] }
+  magnet:
+    card: virtual/magnet-supply
+    limits: { B: [-3, 3], rate: [0, 0.5] }
+  vna:
+    card: virtual/vna
+    trust: envelope
+    limits: { power: [-90, 0] }
+  laser:
+    card: virtual/laser
+    limits: { power: [0, 50] }
+    rates: { power: 5 }
+    guards:
+      power: [{ read: tc.T_sample, max_abs: 20 }]   # stop if the sample heats above 20 K
+  stage:
+    card: virtual/motion-stage
+
+interlocks:
+  - drive: magnet.B
+    require: "tc.T_sample < 10"
+
+safe_actions:
+  magnet.B: hold     # the kill switch holds the field instead of ramping it to zero

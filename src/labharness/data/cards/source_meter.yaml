@@ -1,0 +1,62 @@
+card: 1
+id: virtual/source-meter
+model: Virtual Source-Meter
+vendor: Lab Harness (simulated)
+kind: source-meter
+status: community
+twin: labharness.sim.twins:SourceMeterTwin
+identify:
+  idn: "^VIRTUAL,SOURCE-METER"
+  example: "VIRTUAL,SOURCE-METER,SN0001,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  V:
+    kind: drive
+    unit: V
+    set: "SOURce:VOLTage[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: "SOURce:VOLTage[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-210, 210]
+    safe: 0
+    ramp: gate
+    max_rate: 10
+    ramp_step: 0.05
+    description: Source voltage, e.g. a gate
+  compliance_I:
+    kind: drive
+    unit: A
+    set: "SENSe:CURRent[:DC]:PROTection[:LEVel] {value}"
+    get: "SENSe:CURRent[:DC]:PROTection[:LEVel]?"
+    limits: [1.0e-9, 1.05]
+    safe: 1.0e-9
+    default: 1.0e-4
+    description: Current compliance; raising it lets more current flow
+  output:
+    kind: drive
+    type: bool
+    set: "OUTPut[:STATe] {value}"
+    get: "OUTPut[:STATe]?"
+    safe: off
+    enables: [V]
+    description: Connects the source to the device
+  I:
+    kind: measure
+    unit: A
+    get: "MEASure:CURRent[:DC]?"
+  nplc:
+    kind: measure
+    unit: PLC
+    set: "SENSe:CURRent[:DC]:NPLCycles {value}"
+    get: "SENSe:CURRent[:DC]:NPLCycles?"
+    limits: [0.01, 10]
+    default: 1
+
+safe_sequence: [V, output, compliance_I]
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST", "SYSTem:PRESet"]
+  blocked: ["CALibration", "SYSTem:FIRMware", "DIAGnostic"]
+notes:
+  - Generic SCPI source-meter. In the toy sample, the gate dielectric breaks down above 12 V.

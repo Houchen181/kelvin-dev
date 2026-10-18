@@ -1,0 +1,7 @@
+# Project envelope, signed by the PI or instrument owner. Inside it, drive
+# increases on instruments with `trust: envelope` run without asking.
+project: demo
+envelope:
+  lockin.amplitude: [0, 0.1]
+  vna.power: [-90, -10]
+  vna.rf: [on, off]

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+demo_output/
+runs/
+
+# machine-specific or secret: never commit
+.mcp.json
+.env
+/settings.json
+*.local.json

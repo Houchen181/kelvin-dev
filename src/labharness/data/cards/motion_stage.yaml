@@ -1,0 +1,43 @@
+card: 1
+id: virtual/motion-stage
+model: Virtual Linear Stage (delay line)
+vendor: Lab Harness (simulated)
+kind: motion-stage
+status: community
+twin: labharness.sim.twins:MotionStageTwin
+identify:
+  idn: "^VIRTUAL,STAGE"
+  example: "VIRTUAL,STAGE,SN0007,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  position:
+    kind: measure
+    unit: mm
+    set: "MOVE:ABSolute {value}"
+    get: "MOVE:TARGet?"
+    limits: [0, 300]
+    default: 0
+    ramp: instrument
+    readback: position_actual
+    tol: 0.001
+    rate_param: velocity
+    description: Delay-line position; moving it is part of the measurement
+  velocity:
+    kind: measure
+    unit: mm/s
+    set: "MOVE:VELocity {value}"
+    get: "MOVE:VELocity?"
+    limits: [0.01, 50]
+    default: 10
+  position_actual:
+    kind: measure
+    unit: mm
+    get: "POSition?"
+    default: 0
+
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  blocked: ["SYSTem:FIRMware"]

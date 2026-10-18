@@ -1,0 +1,82 @@
+card: 1
+id: virtual/vna
+model: Virtual Vector Network Analyzer
+vendor: Lab Harness (simulated)
+kind: vna
+status: community
+twin: labharness.sim.twins:VNATwin
+identify:
+  idn: "^VIRTUAL,VNA"
+  example: "VIRTUAL,VNA,SN0005,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  f_start:
+    kind: measure
+    unit: Hz
+    set: "SENSe:FREQuency:STARt {value}"
+    get: "SENSe:FREQuency:STARt?"
+    limits: [1.0e7, 2.65e10]
+    default: 3.99e9
+  f_stop:
+    kind: measure
+    unit: Hz
+    set: "SENSe:FREQuency:STOP {value}"
+    get: "SENSe:FREQuency:STOP?"
+    limits: [1.0e7, 2.65e10]
+    default: 4.01e9
+  points:
+    kind: measure
+    type: int
+    set: "SENSe:SWEep:POINts {value}"
+    get: "SENSe:SWEep:POINts?"
+    limits: [2, 100001]
+    default: 401
+  ifbw:
+    kind: measure
+    unit: Hz
+    set: "SENSe:BANDwidth[:RESolution] {value}"
+    get: "SENSe:BANDwidth[:RESolution]?"
+    limits: [1, 1.5e7]
+    default: 1000
+  averages:
+    kind: measure
+    type: int
+    set: "SENSe:AVERage:COUNt {value}"
+    get: "SENSe:AVERage:COUNt?"
+    limits: [1, 65536]
+    default: 1
+  power:
+    kind: drive
+    unit: dBm
+    set: "SOURce:POWer[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: "SOURce:POWer[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-90, 10]
+    safe: -90
+    default: -30
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+    description: Source power delivered to the device
+  rf:
+    kind: drive
+    type: bool
+    set: "OUTPut[:STATe] {value}"
+    get: "OUTPut[:STATe]?"
+    safe: off
+  S21:
+    kind: measure
+    type: trace
+    unit: dB
+    get: "CALCulate:DATA? FDATA"
+    axis: { start: f_start, stop: f_stop }
+
+safe_sequence: [rf, power]
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST", "SYSTem:PRESet"]
+  blocked: ["CALibration", "SYSTem:FIRMware", "SENSe:CORRection:COLLect"]
+notes:
+  - Overwriting the stored calibration (CORRection:COLLect) is blocked.
