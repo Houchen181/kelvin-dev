@@ -148,6 +148,12 @@ class ParamSpec:
             return str(value)
         raise ValueError("%s is a trace and cannot be set" % self.name)
 
+    def family(self) -> Any:
+        """Every command that touches this parameter, listed or not (see Template.header_prefix)."""
+        words = list(self.bool_text) if self.type == "bool" else (
+            [str(v) for v in (self.values or {}).values()] if self.type == "enum" else None)
+        return self.set_cmd.header_prefix(words)
+
     def to_wire(self, value: Any) -> str:
         if self.type == "float":
             return "%.12g" % value
@@ -267,9 +273,9 @@ def _is_number(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
-def _template(text: Any, err: Callable[[str, str], None], path: str, prefix: bool = False) -> Optional[Template]:
+def _template(text: Any, err: Callable[[str, str], None], path: str, prefix: bool = False) -> Any:
     try:
-        return Template(str(text), prefix=prefix)
+        return Template(str(text)).header_prefix() if prefix else Template(str(text))   # PUT /x: not every PUT
     except ValueError as e:
         err(path, str(e))
         return None
@@ -371,6 +377,8 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
     if len(spec.bool_text) != 2:
         err(path + ".bool_text", "must be [on_text, off_text]")
         spec.bool_text = ("1", "0")
+    elif any(isinstance(x, bool) for x in p.get("bool_text") or ()):   # YAML reads a bare ON / OFF as true / false
+        err(path + ".bool_text", "quote the words, e.g. [\"ON\", \"OFF\"]")
 
     for key in ("safe", "default"):
         if p.get(key) is None:
@@ -543,10 +551,17 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         else:
             connection[key] = kind(value)
     on_connect = [str(c) for c in data.get("on_connect") or []]
-    for c in on_connect:  # connecting must never move a drive
+    for c in on_connect:  # connecting must never move a drive (except to its safe value: OFF,1)
         for spec in params.values():
-            if spec.is_drive and spec.set_cmd is not None and spec.set_cmd.header_prefix().match(c) is not None:
-                err("on_connect", "%r would set the drive %s; connecting may only configure" % (c, spec.name))
+            if spec.is_drive and spec.set_cmd is not None and spec.family().match(c) is not None:
+                text = spec.set_cmd.match(c)
+                try:
+                    to_safe = text is not None and spec.safe is not None and spec.distance(spec.from_wire(text)) == 0
+                except (ValueError, TypeError):
+                    to_safe = False
+                if not to_safe:
+                    err("on_connect", "%r would set the drive %s; connecting may only configure, or bring a drive to "
+                        "its safe value" % (c, spec.name))
     manual_url = str(data.get("manual_url") or "").strip()
     if manual_url and not re.match(r"^https://[^\s/]+\.[^\s/]+/\S*$", manual_url):
         err("manual_url", "must be an https:// address of the maker's manual")

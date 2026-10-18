@@ -1,0 +1,78 @@
+card: 1
+id: rs/smb100a
+model: Rohde & Schwarz SMB100A RF and microwave signal generator
+vendor: Rohde & Schwarz
+kind: microwave-source
+status: community
+manual: "R&S SMB100A Operating Manual 1407.0806.32, version 23, remote control commands (pp. 284-449)"
+manual_url: "https://scdn.rohde-schwarz.com/ur/pws/dl_downloads/dl_common_library/dl_manuals/dl_user_manual/SMB100A_OperatingManual_en_23.pdf"
+notes:
+  - "LAN: HiSLIP (TCPIP0::host::hislip0::INSTR), VXI-11 (TCPIP0::host::INSTR) or raw socket 5025; USB (USBTMC); GPIB optional. The range depends on the frequency option (B101-B106 to 6 GHz, B112-B140 microwave); set the lab limits to yours."
+  - "Pulse modulation needs option K21 or K22; the external pulse goes into the rear PULSE EXT input. There is no IQ modulator."
+  - "Set the RF power-on state to OFF on the instrument (:OUTPut:STATe:PON OFF): the factory setting brings the RF back on after a power cut."
+  - "Kelvin sends frequencies in Hz: 'M' would mean milli in this instrument's units."
+identify:
+  idn: "^Rohde&Schwarz,SMB"
+  example: "Rohde&Schwarz,SMB,1412.0000K02/000000,03.01.158"
+error_query: ":SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  output:
+    label: RF output
+    kind: drive
+    type: bool
+    set: ":OUTPut[:STATe] {value}"
+    get: ":OUTPut[:STATe]?"
+    safe: off
+    enables: [power]
+  power:
+    label: Power
+    applies_when: output
+    kind: drive
+    unit: dBm
+    set: "[:SOURce]:POWer[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: "[:SOURce]:POWer[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-145, 30]
+    safe: -145
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "[:SOURce]:FREQuency[:CW] {value}"
+    get: "[:SOURce]:FREQuency[:CW]?"
+    limits: [9.0e3, 4.0e10]
+  pulse_mod:
+    label: Pulse modulation
+    kind: measure
+    type: bool
+    set: "[:SOURce]:PULM:STATe {value}"
+    get: "[:SOURce]:PULM:STATe?"
+  pulse_source:
+    label: Pulse source
+    kind: measure
+    type: enum
+    set: "[:SOURce]:PULM:SOURce {value}"
+    get: "[:SOURce]:PULM:SOURce?"
+    values: { internal: INT, external: EXT }
+  pulse_polarity:
+    label: Pulse polarity
+    kind: measure
+    type: enum
+    set: "[:SOURce]:PULM:POLarity {value}"
+    get: "[:SOURce]:PULM:POLarity?"
+    values: { normal: NORM, inverted: INV }
+
+safe_sequence: [power, output]
+display:
+  headline: frequency
+health:
+  - query: ":SYSTem:ERRor[:NEXT]?"
+    expect: "^0,"
+raw:
+  reset: ["*RST", "*RCL", ":SYSTem:PRESet"]
+  blocked: [":SYSTem:FPReset", ":CALibration", "*SAV", ":MMEMory:STORe", ":SYSTem:COMMunicate", "[:SOURce]:POWer:LIMit",
+            "[:SOURce]:POWer:WIGNore", ":OUTPut:AMODe", "[:SOURce]:POWer[:LEVel][:IMMediate]:OFFSet",
+            "[:SOURce]:FREQuency:OFFSet", "[:SOURce]:FREQuency:MULTiplier"]

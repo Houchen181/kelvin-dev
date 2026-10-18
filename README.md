@@ -25,7 +25,8 @@ Uninstalling Kelvin also deletes its own data: settings, API keys, chats, memory
 ## What it does
 
 - **Runs measurements from a chat.** Ask in plain words. Kelvin reads the instruments, writes a measurement plan, dry-runs it, runs it, and fits the data with uncertainties.
-- **Works with your instruments.** It talks to instruments over VISA, serial, or the maker's software. Cards are included for common source-meters, lock-ins, cryostats, magnet supplies, lasers and amplifiers. Each instrument gets a folder with its settings and its maker's manual.
+- **Works with your instruments.** It talks to instruments over VISA, serial, a web API, or the maker's software. Cards are included for common source-meters, lock-ins, cryostats, magnet supplies, lasers and amplifiers. Each instrument gets a folder with its settings and its maker's manual.
+- **Runs AMO and spin experiments.** Cards cover microwave sources, AOM drivers, pulse and delay generators, photon counters, RFSoC boards and networked lasers (M Squared, PHAROS, TOPTICA). Kelvin builds and checks pulse sequences for CW and pulsed ODMR, Rabi, Ramsey, echo and T1 on NV centers.
 - **Uses the model you choose.** Claude, GPT, Gemini, your ChatGPT plan, OpenRouter and other services, or a local model for confidential work. You can compare models side by side or ask one for a second opinion.
 - **Remembers without leaking.** It keeps notes for you and for each project, and they never mix. Incognito chats keep nothing.
 - **Reads the literature.** It searches arXiv and journals, and cites what it used.

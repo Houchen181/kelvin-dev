@@ -33,6 +33,16 @@ instruments:
       power: [{ read: tc.T_sample, max_abs: 20 }]   # stop if the sample heats above 20 K
   stage:
     card: virtual/motion-stage
+  # an NV centre set-up: a pulse generator gates the laser (AOM), the microwave (switch) and the counter
+  pg:
+    card: virtual/pulse-generator
+  mw:
+    card: virtual/microwave-source
+    limits: { power: [-60, 10] }                # dBm into the antenna
+    auto: { power: [-60, -10] }
+  counter:
+    card: virtual/photon-counter
+    trust: envelope
 
 interlocks:
   - drive: magnet.B

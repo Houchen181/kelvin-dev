@@ -781,6 +781,7 @@
       case "describe_instrument": return v("Reading", "Read") + " the card of " + code(a.instrument);
       case "instrument_info": return v("Reading", "Read") + " the folder of " + code(a.instrument);
       case "search_manual": return v("Searching", "Searched") + " the " + esc(a.instrument || "") + " manual for " + code(a.query || "");
+      case "show_sequence": return v("Drawing", "Drew") + " the " + code(a.protocol || "") + " pulse sequence";
       case "get_value": return v("Reading", "Read") + " " + code(a.instrument + "." + a.parameter);
       case "set_value": return v("Setting", "Set") + " " + code(a.instrument + "." + a.parameter) + " → " + esc(String(a.value));
       case "send_raw": return v("Sending", "Sent") + " " + code(a.command) + " to " + esc(a.instrument);
@@ -3040,7 +3041,7 @@
   const SUGGESTIONS = [
     ["Check the lab", "What is on, and is anything away from safe?"],
     ["Sweep the gate", "Sweep the gate from 0 to 5 V, record the lock-in signal, and tell me where it peaks."],
-    ["Take an RF trace", "Turn on the VNA at −20 dBm and record S21 around 4 GHz."],
+    ["Measure Rabi oscillations", "Find the NV resonance with CW ODMR, then measure Rabi oscillations to get the π time."],
     ["Plan an experiment", "Plan how to measure the field dependence of the resistance at base temperature."],
   ];
 

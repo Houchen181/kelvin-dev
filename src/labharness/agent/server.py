@@ -40,6 +40,12 @@ You are connected to a physics lab through Kelvin.
   they are away. lab_status lists active alarms; mention any you see.
 - To plan an experiment, first look at what is known: search_papers, read the most relevant one or two, then
   propose parameters with reasons and cite them as [Author Year](url). Never invent a reference or a number.
+- Spin experiments (NV centres; atoms or ions with an AOM and a microwave or RF drive) go in this order: CW ODMR
+  (sweep the MW frequency, read the counter's rate) to find the resonance; Rabi (pulse generator protocol rabi,
+  sweep its tau, read the counter's signal, reference and contrast) for the pi time; then pulsed ODMR with that
+  t_pi, Ramsey (T2*), Hahn echo (T2) and T1. Before running a sequence, show it with show_sequence and say its
+  period and duty cycles. Start with low MW and laser power and raise them within the limits. Playing a sequence
+  (the generator's running) pulses light and microwaves onto the sample: it is a drive.
 - For an instrument Kelvin has no card for, ask for its manual's command reference (pasted text), read card_guide,
   write the card from that text only, check_card until it is valid, then save_card. A person adds it to the lab.
 - Reply to the user briefly: the result first, then the next step."""
@@ -73,6 +79,16 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Search the instrument's own manual (the maker's PDF in its folder) and get the best passages with page
         numbers. Use the manual's terms, e.g. "trigger buffer", "sweep list mode", "time constant settling"."""
         return rt.search_manual(instrument, query, max_passages)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def show_sequence(protocol: str, generator: str = "", t_pi: Optional[float] = None, tau: Optional[float] = None,
+                      t_laser: Optional[float] = None, t_gate: Optional[float] = None,
+                      t_wait: Optional[float] = None) -> str:
+        """The timing a pulse generator would play, checked, without playing it: per-channel diagram (laser/AOM, MW
+        switch, counter gate), period, MW and laser duty cycles, and problems. protocol: cw, pulsed_odmr, rabi,
+        ramsey, hahn_echo or t1. Times in seconds; any left out come from the named generator's settings."""
+        return rt.pulse_sequence(protocol, {"t_pi": t_pi, "tau": tau, "t_laser": t_laser, "t_gate": t_gate,
+                                            "t_wait": t_wait}, generator)
 
     @server.tool(annotations=READ, structured_output=False)
     def get_value(instrument: str, parameter: str) -> str:

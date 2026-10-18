@@ -91,10 +91,18 @@ def _exponential(u: float, p: Sequence[float]) -> float:
     return b + a * math.exp(max(-700.0, arg))
 
 
+def _oscillation(u: float, p: Sequence[float]) -> float:
+    """A damped cosine (Rabi, Ramsey): offset, amplitude, frequency (cycles per unit), phase, decay time."""
+    b, a, f, ph, tau = p
+    s = u + 1   # runs from 0 at the first point
+    return b + a * math.exp(max(-700.0, -s / (abs(tau) + 1e-12))) * math.cos(2 * math.pi * f * s + ph)
+
+
 MODELS: Dict[str, Tuple[Callable[[float, Sequence[float]], float], Tuple[str, ...]]] = {
     "lorentzian": (_lorentzian, ("background", "amplitude", "center", "FWHM")),
     "gaussian": (_gaussian, ("background", "amplitude", "center", "FWHM")),
     "exponential": (_exponential, ("final value", "amplitude", "time constant")),
+    "oscillation": (_oscillation, ("offset", "amplitude", "frequency", "phase", "decay time")),
 }
 
 
@@ -168,6 +176,10 @@ def fit(model: str, xs: Sequence[float], ys: Sequence[float], p0: Optional[Seque
         b, a, c, w = p
         vals = [yc + b * ys_, a * ys_, xc + c * xs_, abs(w) * xs_]
         errv = [errs[0] * ys_, errs[1] * ys_, errs[2] * xs_, errs[3] * xs_]
+    elif model == "oscillation":
+        b, a, fr, ph, tau = p
+        vals = [yc + b * ys_, abs(a) * ys_, abs(fr) / xs_, ph, abs(tau) * xs_]
+        errv = [errs[0] * ys_, errs[1] * ys_, errs[2] / xs_, errs[3], errs[4] * xs_]
     else:
         b, a, tau = p
         vals = [yc + b * ys_, a * ys_, abs(tau) * xs_]
@@ -182,6 +194,19 @@ def fit(model: str, xs: Sequence[float], ys: Sequence[float], p0: Optional[Seque
 def _guess(model: str, us: List[float], vs: List[float]) -> List[float]:
     n = len(us)
     edge = max(2, n // 7)
+    if model == "oscillation":   # the frequency whose cosine and sine explain most of the curve
+        mean = sum(vs) / n
+        best = (0.0, 0.5, 0.0, 0.0)
+        for k in range(1, 4 * n):
+            f = k / 8.0                     # cycles per unit; the record spans 2 units
+            if f > n / 4:
+                break
+            c = sum((v - mean) * math.cos(2 * math.pi * f * (u + 1)) for u, v in zip(us, vs))
+            s = sum((v - mean) * math.sin(2 * math.pi * f * (u + 1)) for u, v in zip(us, vs))
+            if c * c + s * s > best[0]:
+                best = (c * c + s * s, f, c, s)
+        _, f, c, s = best
+        return [mean, 2 * math.hypot(c, s) / n, f, math.atan2(-s, c), 4.0]
     if model == "exponential":
         return [median(vs[-edge:]), vs[0] - median(vs[-edge:]), 0.6]
     base = median(vs[:edge] + vs[-edge:])
@@ -278,7 +303,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
         return constant(sigma or _mad_sigma(ys_s))
 
     candidates: Dict[str, Dict[str, Any]] = {"linear": lin} if lin else {}
-    for model in ([force] if force else ["lorentzian", "gaussian", "exponential"]):
+    for model in ([force] if force else ["lorentzian", "gaussian", "exponential", "oscillation"]):
         f = candidates.get(model) or fit(model, xs_s, ys_s)
         if f and math.isfinite(f["r2"]):
             candidates[model] = f
@@ -288,11 +313,16 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
     k_ext = max(range(len(ys_s)), key=lambda i: abs(ys_s[i] - median(ys_s)))
     interior = 1 <= k_ext <= len(ys_s) - 2
 
+    osc = candidates.get("oscillation")
+    osc_ok = bool(osc) and (osc["r2"] >= 0.8 or adequate(osc)) and osc["values"][2] * (xs_s[-1] - xs_s[0]) >= 1.0 \
+        and osc["values"][1] > 4 * osc["errors"][1] and osc["values"][4] > 0.3 / max(osc["values"][2], 1e-300)
     chosen = None
     if force:
         chosen = candidates.get(force)
     elif lin and (lin["r2"] >= 0.995 or adequate(lin)):
         chosen = lin
+    elif osc_ok and osc["r2"] > max([best_peak["r2"] if best_peak else 0.0, expo["r2"] if expo else 0.0]) + 0.03:
+        chosen = osc   # at least one full cycle, clearly better than a peak or a relaxation
     elif best_peak and (best_peak["r2"] >= 0.9 or (adequate(best_peak) and best_peak["r2"] >= 0.75
                                                     and abs(best_peak["values"][1]) > 5 * best_peak["errors"][1])) \
             and interior and best_peak["values"][1] != 0 and xs_s[0] < best_peak["values"][2] < xs_s[-1]:
@@ -384,6 +414,25 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
                                    si(c - 2 * w, x_unit), si(c + 2 * w, x_unit)))
         if c - w / 2 < xs_s[0] or c + w / 2 > xs_s[-1]:
             out["flags"].append("the %s reaches the edge of the sweep; widen the range to see its full shape" % out["kind"])
+    elif chosen["model"] == "oscillation":
+        b, a, fr, ph, tau = v
+        eb, ea, ef, eph, etau = e
+        out["kind"] = "oscillation"
+        out["summary"] = "%s oscillates with %s at %s (period %s), decaying with τ = %s (R² %.3f)" % (
+            y_name, x_name, _fmt_pm(fr, ef, "1/" + x_unit if x_unit != "s" else "Hz"),
+            si(1 / fr, x_unit), _fmt_pm(tau, etau, x_unit), chosen["r2"])
+        res("frequency", fr, ef, "Hz" if x_unit == "s" else "1/" + (x_unit or "1"))
+        res("period", 1 / fr, ef / fr ** 2, x_unit)
+        if x_unit == "s":   # driven spins: half a period is the pi pulse
+            res("half period (π time for Rabi)", 0.5 / fr, 0.5 * ef / fr ** 2, x_unit)
+            out["summary"] += "; half period (π time) %s" % _fmt_pm(0.5 / fr, 0.5 * ef / fr ** 2, x_unit)
+        res("decay time τ", tau, etau, x_unit)
+        res("amplitude", a, ea, y_unit)
+        res("offset", b, eb, y_unit)
+        out["params"] = {"frequency": [fr, ef, "Hz" if x_unit == "s" else ""], "τ": [tau, etau, x_unit],
+                         "amplitude": [a, ea, y_unit]}
+        if step and step > 0.25 / fr:
+            out["flags"].append("fewer than 4 points per period; use a step ≤ %s" % si(0.125 / fr, x_unit))
     else:
         b, a, tau = v
         out["kind"] = "relaxation"
@@ -487,7 +536,9 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
     for s in series:
         issues += ["%s%s: %s" % (s["y"], " (" + s["group"] + ")" if s.get("group") else "", f) for f in s["flags"]]
 
-    primary = series[0] if series else None
+    # the most telling curve leads: a resonance or an oscillation, then a relaxation, then a line, then the rest
+    rank = {"peak": 3, "dip": 3, "oscillation": 3, "relaxation": 2, "linear": 1}
+    primary = max(enumerate(series), key=lambda kv: (rank.get(kv[1]["kind"], 0), -kv[0]))[1] if series else None
     sentences = []
     if primary:
         sentences.append(_cap(primary["summary"]) + ("" if primary["summary"].endswith(".") else "."))
@@ -595,4 +646,9 @@ def _next_step(primary: Optional[Dict[str, Any]], issues: List[str], trends: Seq
         return "The response is linear; extend the range to look for where it stops being linear."
     if kind == "relaxation":
         return "Use the fitted τ to set the wait time (about 5 τ) before each point of the next sweep."
+    if kind == "oscillation":
+        if primary["x"].endswith("tau") or "half period" in " ".join(r["name"] for r in primary["results"]):
+            return ("Use the half period as the π pulse (and half of it for π/2), then run pulsed ODMR or Ramsey "
+                    "with it.")
+        return "The oscillation is resolved; next, see how its frequency changes with a second parameter."
     return "Look at the plot for structure the simple fits miss, then decide on a finer sweep."

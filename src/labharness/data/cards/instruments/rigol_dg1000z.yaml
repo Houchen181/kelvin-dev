@@ -1,0 +1,114 @@
+card: 1
+id: rigol/dg1000z
+model: Rigol DG1000Z function / arbitrary waveform generator (DG1022Z, DG1032Z, DG1062Z)
+vendor: Rigol
+kind: awg
+status: community
+manual: "RIGOL DG1000Z Series Programming Guide PGB09106-1110 (Oct 2016)"
+manual_url: "https://beyondmeasure.rigoltech.com/acton/attachment/1579/f-0493/1/-/-/-/-/DG1000Z%20Programming%20Guide.pdf"
+notes:
+  - "USB (USBTMC) or LAN (LXI). Two channels: choose one with the ch variable (a second instrument entry with ch 2 controls the other)."
+  - "Frequency, amplitude and offset beyond the limits are clamped without an error, so Kelvin reads them back. The amplitude and offset assume the output load set on the instrument (50 ohm by default; HighZ doubles the real voltage): check it matches the real load."
+  - "*RST restores 5 Vpp, so Kelvin brings the output to safe first."
+identify:
+  idn: "^Rigol Technologies,DG10[2-6]2Z"
+  example: "Rigol Technologies,DG1062Z,DG1ZA000000001,00.01.03"
+error_query: ":SYSTem:ERRor?"
+vars:
+  ch: { default: "1", label: "Output channel (1 or 2)" }
+
+parameters:
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: ":OUTPut{ch}[:STATe] {value}"
+    get: ":OUTPut{ch}[:STATe]?"
+    safe: off
+    enables: [amplitude, offset]
+  amplitude:
+    label: Amplitude
+    applies_when: output
+    kind: drive
+    unit: V
+    set: "[:SOURce{ch}]:VOLTage[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: "[:SOURce{ch}]:VOLTage[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [0.002, 10]
+    safe: 0.002
+    ramp: gate
+    max_rate: 1
+    description: Peak-to-peak, into the load set on the instrument
+  offset:
+    label: Offset
+    applies_when: output
+    kind: drive
+    unit: V
+    set: "[:SOURce{ch}]:VOLTage[:LEVel][:IMMediate]:OFFSet {value}"
+    get: "[:SOURce{ch}]:VOLTage[:LEVel][:IMMediate]:OFFSet?"
+    limits: [-5, 5]
+    safe: 0
+    ramp: gate
+    max_rate: 1
+  function:
+    label: Waveform
+    kind: measure
+    type: enum
+    set: "[:SOURce{ch}]:FUNCtion[:SHAPe] {value}"
+    get: "[:SOURce{ch}]:FUNCtion[:SHAPe]?"
+    values: { sine: SIN, square: SQU, ramp: RAMP, pulse: PULS, noise: NOIS, dc: DC, arbitrary: USER, harmonic: HARM }
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "[:SOURce{ch}]:FREQuency[:FIXed] {value}"
+    get: "[:SOURce{ch}]:FREQuency[:FIXed]?"
+    limits: [1.0e-6, 6.0e7]
+  square_duty:
+    label: Square duty cycle
+    kind: measure
+    unit: "%"
+    set: "[:SOURce{ch}]:FUNCtion:SQUare:DCYCle {value}"
+    get: "[:SOURce{ch}]:FUNCtion:SQUare:DCYCle?"
+    limits: [0.01, 99.99]
+  pulse_duty:
+    label: Pulse duty cycle
+    kind: measure
+    unit: "%"
+    set: "[:SOURce{ch}]:FUNCtion:PULSe:DCYCle {value}"
+    get: "[:SOURce{ch}]:FUNCtion:PULSe:DCYCle?"
+    limits: [0.001, 99.999]
+  burst:
+    label: Burst
+    kind: measure
+    type: bool
+    set: "[:SOURce{ch}]:BURSt[:STATe] {value}"
+    get: "[:SOURce{ch}]:BURSt[:STATe]?"
+  burst_mode:
+    label: Burst mode
+    kind: measure
+    type: enum
+    set: "[:SOURce{ch}]:BURSt:MODE {value}"
+    get: "[:SOURce{ch}]:BURSt:MODE?"
+    values: { triggered: TRIG, infinite: INF, gated: GAT }
+  burst_cycles:
+    label: Burst cycles
+    kind: measure
+    type: int
+    set: "[:SOURce{ch}]:BURSt:NCYCles {value}"
+    get: "[:SOURce{ch}]:BURSt:NCYCles?"
+    limits: [1, 1000000]
+  burst_trigger:
+    label: Burst trigger
+    kind: measure
+    type: enum
+    set: "[:SOURce{ch}]:BURSt:TRIGger:SOURce {value}"
+    get: "[:SOURce{ch}]:BURSt:TRIGger:SOURce?"
+    values: { internal: INT, external: EXT, manual: MAN }
+
+safe_sequence: [amplitude, offset, output]
+display:
+  headline: frequency
+raw:
+  reset: ["*RST", "*RCL"]
+  blocked: [":SYSTem:SECurity", "*SAV", ":MEMory:STATe:STORe", ":SYSTem:POWeron", ":COUPling", "[:SOURce{ch}]:TRACK", ":PA",
+            ":SYSTem:COMMunicate", ":OUTPut{ch}:LOAD", ":OUTPut{ch}:IMPedance"]

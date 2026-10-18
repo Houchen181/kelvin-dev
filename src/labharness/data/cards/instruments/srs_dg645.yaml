@@ -1,0 +1,160 @@
+card: 1
+id: srs/dg645
+model: Stanford Research Systems DG645 digital delay generator
+vendor: Stanford Research Systems
+kind: delay-generator
+status: community
+manual: "DG645 Digital Delay Generator User Manual, Rev 1.1, Remote programming (pp. 44-63)"
+manual_url: "https://www.thinksrs.com/downloads/pdfs/manuals/DG645m.pdf"
+notes:
+  - "Delays are relative to T0 (A, C, E, G) and pulse widths are B after A, D after C, F after E, H after G, as the front panel links them by default; a read gives the time relative to whatever channel it is linked to. LAN: raw socket 5025, telnet 5024, VXI-11; RS-232 9600 baud with RTS/CTS."
+  - "There is no output switch: the outputs pulse on every trigger. Internal (or line) triggering starts continuous pulses on every output, so set the delays and levels first. *RST sets single-shot triggering."
+identify:
+  idn: "^Stanford Research Systems,DG645"
+  example: "Stanford Research Systems,DG645,s/n004025,ver1.00.00E"
+error_query: "LERR?"
+connection:
+  read_termination: "\r\n"
+  write_termination: "\n"
+
+parameters:
+  delay_A:
+    label: A delay (after T0)
+    kind: measure
+    unit: s
+    set: "DLAY 2,0,{value}"
+    get: "DLAY?2"
+    field: 1
+    limits: [0, 2000]
+  width_AB:
+    label: AB width (B after A)
+    kind: measure
+    unit: s
+    set: "DLAY 3,2,{value}"
+    get: "DLAY?3"
+    field: 1
+    limits: [0, 2000]
+  delay_C:
+    label: C delay (after T0)
+    kind: measure
+    unit: s
+    set: "DLAY 4,0,{value}"
+    get: "DLAY?4"
+    field: 1
+    limits: [0, 2000]
+  width_CD:
+    label: CD width (D after C)
+    kind: measure
+    unit: s
+    set: "DLAY 5,4,{value}"
+    get: "DLAY?5"
+    field: 1
+    limits: [0, 2000]
+  delay_E:
+    label: E delay (after T0)
+    kind: measure
+    unit: s
+    set: "DLAY 6,0,{value}"
+    get: "DLAY?6"
+    field: 1
+    limits: [0, 2000]
+  width_EF:
+    label: EF width (F after E)
+    kind: measure
+    unit: s
+    set: "DLAY 7,6,{value}"
+    get: "DLAY?7"
+    field: 1
+    limits: [0, 2000]
+  delay_G:
+    label: G delay (after T0)
+    kind: measure
+    unit: s
+    set: "DLAY 8,0,{value}"
+    get: "DLAY?8"
+    field: 1
+    limits: [0, 2000]
+  width_GH:
+    label: GH width (H after G)
+    kind: measure
+    unit: s
+    set: "DLAY 9,8,{value}"
+    get: "DLAY?9"
+    field: 1
+    limits: [0, 2000]
+  trigger_source:
+    label: Trigger source
+    kind: measure
+    type: enum
+    set: "TSRC {value}"
+    get: "TSRC?"
+    values: { internal: 0, external_rising: 1, external_falling: 2, single_external_rising: 3, single_external_falling: 4, single_shot: 5, line: 6 }
+    description: Internal and line triggering start pulses on every output
+  trigger_rate:
+    label: Internal trigger rate
+    kind: measure
+    unit: Hz
+    set: "TRAT {value}"
+    get: "TRAT?"
+    limits: [1.0e-4, 1.0e7]
+  trigger_level:
+    label: External trigger threshold
+    kind: measure
+    unit: V
+    set: "TLVL {value}"
+    get: "TLVL?"
+    limits: [-3.5, 3.5]
+  burst:
+    label: Burst mode
+    kind: measure
+    type: bool
+    set: "BURM {value}"
+    get: "BURM?"
+  burst_count:
+    label: Burst count
+    kind: measure
+    type: int
+    set: "BURC {value}"
+    get: "BURC?"
+    limits: [1, 4294967295]
+  burst_period:
+    label: Burst period
+    kind: measure
+    unit: s
+    set: "BURP {value}"
+    get: "BURP?"
+    limits: [1.0e-7, 42.9]
+  amplitude_AB:
+    label: AB output level
+    kind: measure
+    unit: V
+    set: "LAMP 1,{value}"
+    get: "LAMP?1"
+    limits: [0.5, 5.0]
+  amplitude_CD:
+    label: CD output level
+    kind: measure
+    unit: V
+    set: "LAMP 2,{value}"
+    get: "LAMP?2"
+    limits: [0.5, 5.0]
+  amplitude_EF:
+    label: EF output level
+    kind: measure
+    unit: V
+    set: "LAMP 3,{value}"
+    get: "LAMP?3"
+    limits: [0.5, 5.0]
+  amplitude_GH:
+    label: GH output level
+    kind: measure
+    unit: V
+    set: "LAMP 4,{value}"
+    get: "LAMP?4"
+    limits: [0.5, 5.0]
+
+display:
+  headline: trigger_rate
+raw:
+  reset: ["*RST", "*RCL"]
+  blocked: ["*CAL", "CALT", "CALL", "*SAV", "*PSC", "IFCF", "IFRS", "EPHY", "XTRM", "LOCK", "REMT", "LOFF"]

@@ -1,0 +1,57 @@
+card: 1
+id: novatech/409b
+model: Novatech Instruments 409B 4-channel DDS signal generator (AOM driver source)
+vendor: Novatech Instruments
+kind: aom-driver
+status: community
+manual: "Model 409B Instruction Manual, Rev 2.05b (firmware 2.1 or later), serial commands (pp. 4-7)"
+manual_url: "https://www.novatechsales.com/docs/409b_man.pdf"
+notes:
+  - "RS-232 (or the USB option's virtual COM port) at 19200 baud, 8N1. Each command answers OK or an error (?0-?S), which Kelvin checks. It ignores commands for about 500 ms after power-up."
+  - "Four sine outputs (0-3), up to 171 MHz, about 1 Vpp (+4 dBm) into 50 ohm at full scale; amplitude is 0-1023 of full scale, 0 is off. Kelvin sets the amplitude to 0 when it connects, so it knows the output is off."
+  - "The 409B has no read-back of single values in plain numbers, so Kelvin remembers what it last set."
+identify:
+  query: "Q"
+connection:
+  baud_rate: 19200
+  data_bits: 8
+  parity: none
+  stop_bits: 1
+  read_termination: "\r\n"
+  write_termination: "\r\n"
+  set_reply: "^OK"
+vars:
+  ch: { default: "0", label: "Output (0-3)" }
+on_connect: ["V{ch} 0"]
+
+parameters:
+  amplitude:
+    label: Amplitude
+    kind: drive
+    type: int
+    unit: "/1023"
+    set: "V{ch} {value}"
+    limits: [0, 1023]
+    safe: 0
+    ramp: gate
+    max_rate: 200
+    ramp_step: 10
+    description: Fraction of full scale in 1023 steps (1023 is about +4 dBm into 50 ohm); 0 is off
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: MHz
+    set: "F{ch} {value}"
+    limits: [0, 171.1276031]
+  phase:
+    label: Phase
+    kind: measure
+    type: int
+    unit: "/16384 turn"
+    set: "P{ch} {value}"
+    limits: [0, 16383]
+
+safe_sequence: [amplitude]
+raw:
+  reset: ["R"]
+  blocked: ["S", "CLR", "Kp", "B", "C", "Vs", "ZCal0", "ZCal9", "E"]

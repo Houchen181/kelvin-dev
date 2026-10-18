@@ -19,9 +19,9 @@ from labharness.virtual_lab import build_lab
 class Device:
     """One instrument on the fake bus."""
 
-    def __init__(self, card_id=None, idn=None, serial=None, ack=None, silent=False, name="dev", replies=None):
+    def __init__(self, card_id=None, idn=None, serial=None, ack=None, silent=False, name="dev", replies=None, vars=None):
         reg = builtin_registry()
-        self.card = reg.get(card_id) if card_id else None
+        self.card = reg.get(card_id).bind(vars) if card_id else None   # vars: the channel it is set up for
         self.twin = make_twin_backend(self.card, World(SimClock()), name) if self.card else None
         self.idn = idn
         self.serial = serial or {}      # settings it insists on, e.g. {"baud_rate": 57600, "parity": "odd"}

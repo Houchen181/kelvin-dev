@@ -1,0 +1,83 @@
+card: 1
+id: lightcon/pharos
+model: Light Conversion PHAROS femtosecond laser (REST API)
+vendor: Light Conversion
+kind: laser
+status: community
+manual: "PHAROS Supervisor REST API documentation v0 (the help page of the laser's REST server) and Light Conversion's lightcon Python package 1.7"
+notes:
+  - "Address http://<laser ip>:20022/v1. Older systems use /v0, or the PC running the PHAROS app (with 'Run REST server at startup'); lightcon 1.5 used port 20020. Open the REST help page on your unit to confirm the port and version."
+  - "The REST API has no login: anyone who can reach the port controls the laser. Keep it on the lab network, behind a firewall."
+  - "Kelvin opens the output (EnableOutput) only after approval and closes it (CloseOutput) to make safe. It does not send the other actions under /Basic (TurnOn, TurnOff, GoToStandby, ApplySelectedPreset): starting, stopping and presets stay with people, on the laser. Preset edits, interlock resets, the stretcher-compressor and external control are blocked."
+  - "Kelvin reads the pulse-picker divider but does not change it: lowering it raises the average power. Change it on the laser, or add it to a lab copy of this card as a drive with your own safe value."
+  - "The power and pulse-energy readings are calculated by the laser, not measured. A 403 reply means the value is out of range or the laser's state forbids it."
+connection: { timeout_ms: 10000 }
+
+parameters:
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: "POST /Basic/{value}"
+    get: "GET /Basic/IsOutputEnabled"
+    bool_text: ["EnableOutput", "CloseOutput"]
+    safe: off
+    enables: [attenuator]
+    description: Opening the output also depends on the shutter key, triggering and interlocks
+  attenuator:
+    label: Attenuator
+    applies_when: output
+    kind: drive
+    unit: "%"
+    set: "PUT /Basic/TargetAttenuatorPercentage {value}"
+    get: "GET /Basic/TargetAttenuatorPercentage"
+    limits: [0, 100]
+    safe: 0
+    description: Transmission of the output attenuator; values below about 15 % may not be applied physically
+  attenuator_actual:
+    label: Attenuator (actual)
+    kind: measure
+    unit: "%"
+    get: "GET /Basic/ActualAttenuatorPercentage"
+  power:
+    label: Output power (calculated)
+    kind: measure
+    unit: W
+    get: "GET /Basic/ActualOutputPower"
+  energy:
+    label: Pulse energy (calculated)
+    kind: measure
+    unit: uJ
+    get: "GET /Basic/ActualOutputEnergy"
+  rep_rate:
+    label: Output repetition rate
+    kind: measure
+    unit: kHz
+    get: "GET /Basic/ActualOutputFrequency"
+  pp_divider:
+    label: Pulse-picker divider
+    kind: measure
+    type: int
+    get: "GET /Basic/ActualPpDivider"
+  state:
+    label: Laser state
+    kind: measure
+    type: str
+    get: "GET /Basic/ActualStateName2"
+    description: StateOperational, StateStandingBy, StateFailure, ... (the GeneralStatus text may be localized, so Kelvin does not use it)
+  errors:
+    label: Errors
+    kind: measure
+    type: str
+    get: "GET /Basic/Errors"
+
+safe_sequence: [attenuator, output]
+display:
+  headline: power
+health:
+  - query: "GET /Basic/Errors"
+    expect: '^\[\]$'
+raw:
+  blocked: ["PUT /Advanced/", "POST /Advanced/", "POST /Custom/", "PUT /StretcherCompressor/", "PUT /ExternalControl/",
+            "POST /OscillatorOutput/", "PUT /OscillatorOutput/", "PUT /Burst/", "PUT /Basic/TargetPpDivider",
+            "PUT /Basic/SelectedPresetIndex"]

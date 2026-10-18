@@ -1,0 +1,56 @@
+card: 1
+id: virtual/microwave-source
+model: Virtual Microwave Source
+vendor: Kelvin (simulated)
+kind: microwave-source
+status: community
+identify:
+  idn: "^VIRTUAL,MICROWAVE"
+  example: "VIRTUAL,MICROWAVE-SOURCE,SN0009,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  output:
+    label: RF output
+    kind: drive
+    type: bool
+    set: "OUTPut[:STATe] {value}"
+    get: "OUTPut[:STATe]?"
+    safe: off
+    enables: [power]
+  power:
+    label: Power
+    applies_when: output
+    kind: drive
+    unit: dBm
+    set: "SOURce:POWer[:LEVel] {value}"
+    get: "SOURce:POWer[:LEVel]?"
+    limits: [-60, 16]
+    safe: -60
+    default: -60
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "SOURce:FREQuency[:CW] {value}"
+    get: "SOURce:FREQuency[:CW]?"
+    limits: [9.0e3, 6.0e9]
+    default: 2.87e9
+  pulse_mod:
+    label: Pulse modulation
+    kind: measure
+    type: bool
+    set: "SOURce:PULM:STATe {value}"
+    get: "SOURce:PULM:STATe?"
+    default: off
+    description: Gate the output with the pulse generator's mw channel
+
+safe_sequence: [power, output]
+display:
+  headline: frequency
+raw:
+  reset: ["*RST"]
+  blocked: ["CALibration", "SYSTem:FIRMware"]

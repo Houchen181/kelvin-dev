@@ -27,6 +27,20 @@ measure: [lockin.X]
 after: { smu.V: 0, magnet.B: 0 }"""
 
 
+CW_ODMR = """plan: cw_odmr
+setup: { laser.emission: on, laser.shutter: open, laser.power: 2, mw.output: on, mw.power: -10 }
+sweep: { mw.frequency: {from: 2.84e9, to: 2.90e9, points: 61} }
+measure: [counter.rate]
+after: { mw.output: off }"""
+
+RABI = """plan: rabi
+setup: { laser.emission: on, laser.shutter: open, laser.power: 2, mw.output: on, mw.power: 0, mw.frequency: 2.868e9,
+         pg.protocol: rabi, pg.running: on }
+sweep: { pg.tau: {from: 0, to: 4.0e-7, points: 41} }
+measure: [counter.signal, counter.reference, counter.contrast]
+after: { pg.running: off, mw.output: off }"""
+
+
 class DemoProvider(Provider):
     name = "demo"
     label = "Demo"
@@ -83,6 +97,13 @@ class DemoProvider(Provider):
                 return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
             args["text"] = fact[:1].upper() + fact[1:]
             name, intro = "remember", "Keeping that for later."
+        elif "rabi" in ask:
+            name, args = "run_plan", {"plan": RABI}
+            intro = ("I'll drive the NV spins at 2.868 GHz with 0 dBm and sweep the microwave pulse from 0 to 400 ns, "
+                     "reading the counts at the start (signal) and end (reference) of each laser pulse.")
+        elif any(w in ask for w in ("odmr", "resonance", " nv")):
+            name, args = "run_plan", {"plan": CW_ODMR}
+            intro = "I'll find the NV resonance with CW ODMR: laser and microwave on, sweeping 2.84 to 2.90 GHz."
         elif "map" in ask:
             name, args = "run_plan", {"plan": FIELD_MAP}
             intro = "I'll map the lock-in signal against gate voltage at 0, 0.5 and 1 T (nested loops: field outside, gate inside)."
@@ -93,7 +114,7 @@ class DemoProvider(Provider):
             name, args, intro = "lab_status", {}, "Checking the lab."
         else:
             text = ("I'm the scripted demo, not an AI. Try *check the lab status*, *sweep the gate*, "
-                    "*map gate against field*, or *remember that …*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
+                    "*map gate against field*, *find the NV resonance*, *measure Rabi oscillations*, or *remember that …*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
             return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
         blocks = await self._say(intro, emit)
         blocks.append({"type": "tool_call", "id": "lh_call_%d" % len(history), "name": name, "input": args})

@@ -382,7 +382,8 @@ class SafetyGate:
         except Exception as e:
             res = Result(False, "error", key, message="%s: instrument error: %s" % (key, e))
             current = None
-        if res.ok and record_undo and res.action != "no-change" and getattr(self._acting, "by", None) is None:
+        undoable = res.ok and record_undo and res.action != "no-change" and current is not None
+        if undoable and getattr(self._acting, "by", None) is None:
             self._undo.append((instr, param, current))
         return self._done(res, "set", by)
 
@@ -393,6 +394,8 @@ class SafetyGate:
         return res
 
     def _current(self, inst: Instrument, spec: ParamSpec) -> Any:
+        if spec.get_cmd is None and not spec.is_drive and spec.name not in inst._last and spec.default is None:
+            return None   # a setting with no read-back (a laser's target wavelength) that nobody has set yet
         return inst.read(spec.name)
 
     def _limit_problem(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
@@ -606,7 +609,7 @@ class SafetyGate:
     def _prefix(self, spec: ParamSpec) -> Template:
         t = self._prefixes.get(id(spec))
         if t is None:
-            t = self._prefixes[id(spec)] = spec.set_cmd.header_prefix()
+            t = self._prefixes[id(spec)] = spec.family()
         return t
 
     def _raw_one(self, inst: Instrument, cmd: str) -> Result:

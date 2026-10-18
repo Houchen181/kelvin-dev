@@ -1,0 +1,51 @@
+card: 1
+id: virtual/photon-counter
+model: Virtual Photon Counter (APD and gated counter)
+vendor: Kelvin (simulated)
+kind: photon-counter
+status: community
+twin: labharness.sim.nv:PhotonCounterTwin
+identify:
+  idn: "^VIRTUAL,PHOTON-COUNTER"
+  example: "VIRTUAL,PHOTON-COUNTER,SN0010,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  integration:
+    label: Integration time
+    kind: measure
+    unit: s
+    set: "SENSe:INTegration {value}"
+    get: "SENSe:INTegration?"
+    limits: [0.001, 60]
+    default: 0.5
+  signal:
+    label: Signal counts
+    kind: measure
+    unit: counts
+    get: "COUNt:SIGNal?"
+    description: Counts in the signal windows (the start of each readout pulse) over the integration time
+  reference:
+    label: Reference counts
+    kind: measure
+    unit: counts
+    get: "COUNt:REFerence?"
+    description: Counts in the reference windows (the end of each readout pulse, spins back in ms = 0)
+  contrast:
+    label: Signal / reference
+    kind: measure
+    get: "COUNt:CONTrast?"
+    description: Below 1 where the microwave flipped the spins
+  rate:
+    label: Count rate
+    kind: measure
+    unit: counts/s
+    get: "COUNt:RATE?"
+    description: Counts per second with the light on continuously (CW ODMR)
+
+display:
+  headline: rate
+raw:
+  reset: ["*RST"]
+notes:
+  - One acquisition serves one reading each of signal, reference and contrast; reading one again starts a new one.

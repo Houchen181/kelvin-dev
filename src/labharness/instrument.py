@@ -19,6 +19,14 @@ class Instrument:
         self.backend = backend
         self.config = config
         self._last: Dict[str, Any] = {}
+        for command in card.on_connect:   # sent on connecting: a parameter with no read-back is known from the start
+            for spec in card.params.values():
+                text = spec.set_cmd.match(command) if spec.get_cmd is None and spec.set_cmd is not None else None
+                if text is not None:
+                    try:
+                        self._last[spec.name] = spec.from_wire(text)
+                    except (ValueError, TypeError):
+                        pass
 
     @property
     def simulated(self) -> bool:
@@ -60,7 +68,7 @@ class Instrument:
         if self.card.error_query is None:
             return None
         resp = self.backend.query(self.card.error_query.render()).strip()
-        return None if re.match(r"^\+?0\s*,", resp) else resp
+        return None if re.match(r"^\+?0\s*(,|$)", resp) else resp   # "0,No error", or a bare 0 (SRS LERR?)
 
     def limits(self, param: str) -> Optional[Tuple[float, float]]:
         return self.config.limits.get(param) or self.spec(param).limits

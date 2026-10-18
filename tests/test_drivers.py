@@ -185,7 +185,7 @@ def test_scan_finds_labone_devices(vendors):
         found = scan(builtin_registry())
     finally:
         set_resource_manager(None)
-    assert [(f.address, f.card_id, f.how) for f in found] == [("zhinst://dev5678", "zhinst/mfli", "LabOne discovery")]
+    assert [(f.address, f.card_id, f.how) for f in found] == [("zhinst://dev5678", "zhinst/mfli", "found by its maker's library")]
     text = draft_from([{"name": "li", "card": "zhinst/mfli", "address": "zhinst://dev5678"}], builtin_registry())
     assert 'vars: { demod: 0, osc: 0, out: 1 }' in text and load_lab_config(text, builtin_registry())
 

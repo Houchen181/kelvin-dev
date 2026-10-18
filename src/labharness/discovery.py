@@ -21,7 +21,9 @@ from .cards import Card, CardRegistry
 SHORT_NAMES = {"source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
                "laser": "laser", "laser-driver": "laser", "power-meter": "pm", "preamp": "preamp", "multimeter": "dmm",
                "nanovoltmeter": "nvm", "function-generator": "fg", "vna": "vna", "motion-stage": "stage",
-               "current-source": "isrc", "voltage-source": "vsrc"}
+               "current-source": "isrc", "voltage-source": "vsrc", "pulse-generator": "pg",
+               "microwave-source": "mw", "rf-source": "rf", "photon-counter": "counter", "awg": "awg",
+               "delay-generator": "dg", "aom-driver": "aom", "eom-driver": "eom"}
 DEFAULT_SERIAL = [(9600, "\n"), (115200, "\n"), (19200, "\r\n"), (57600, "\r\n")]
 
 
@@ -183,14 +185,15 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
             out.append(Found(name, how="already in this lab", in_lab=in_lab[name]))
             continue
         out.append(identify(name, registry, rm, timeout_ms, usb))
-    from .drivers import MODULES, discover_zhinst
-    for address, idn in discover_zhinst(MODULES.get("zhinst")):   # instruments behind vendor software
+    from .drivers import MODULES, discover_swabian, discover_zhinst
+    # instruments behind vendor software: Zurich Instruments (LabOne), Swabian Pulse Streamers and Time Taggers
+    for address, idn in discover_zhinst(MODULES.get("zhinst")) + discover_swabian():
         if address in in_lab:
             out.append(Found(address, how="already in this lab", in_lab=in_lab[address]))
             continue
         card = match_card(idn, registry)
         out.append(Found(address, idn, card.id if card else None, card.model if card else "", card.kind if card else "",
-                         "LabOne discovery" if card else "no card for this model yet"))
+                         "found by its maker's library" if card else "no card for this model yet"))
     return out, looked
 
 

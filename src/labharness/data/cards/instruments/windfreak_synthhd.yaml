@@ -1,0 +1,52 @@
+card: 1
+id: windfreak/synthhd
+model: Windfreak Technologies SynthHD (two-channel microwave generator)
+vendor: Windfreak Technologies
+kind: microwave-source
+status: draft
+manual: "Windfreak SynthHD & HD PRO API Guide v1.0b (written for hardware and firmware v1.4)"
+manual_url: "https://windfreaktech.com/wp-content/uploads/2016/12/WFT_SerialProgramming_API_10b.pdf"
+notes:
+  - "A draft: the maker's command guide is written for hardware v1.4, and no v2 reference exists. Its outputs stay simulation-only on real hardware until you check each command on your unit (send ? for its help list) and mark a copy of this card reviewed."
+  - "USB virtual COM port; commands take no terminator and are case-sensitive; replies end with LF. There is no error queue and no *IDN?, so read values back."
+  - "Kelvin selects the channel with every command (C0 = RF out A, C1 = B). The output switch here is the mute (h1 on, h0 muted)."
+connection:
+  write_termination: ""
+  read_termination: "\n"
+vars:
+  ch: { default: "0", label: "Channel (0 = RF out A, 1 = RF out B)" }
+
+parameters:
+  output:
+    label: RF output (unmuted)
+    kind: drive
+    type: bool
+    set: "C{ch}h{value}"
+    get: "C{ch}h?"
+    safe: off
+    enables: [power]
+  power:
+    label: Power
+    applies_when: output
+    kind: drive
+    unit: dBm
+    set: "C{ch}W{value}"
+    get: "C{ch}W?"
+    limits: [-60, 20]
+    safe: -60
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: MHz
+    set: "C{ch}f{value}"
+    get: "C{ch}f?"
+    limits: [10, 15000]
+
+safe_sequence: [power, output]
+display:
+  headline: frequency
+raw:
+  blocked: ["e", "a", "x", "w5"]

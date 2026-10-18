@@ -725,6 +725,31 @@ class LabRuntime:
             return "nothing in the %s manual matches %r; try other words (the manual's own terms)" % (instrument, query)
         return "\n\n".join("[%s manual, p. %d]\n%s" % (instrument, h["page"], h["text"]) for h in hits)
 
+    # ------------------------------------------------------------------ pulse sequences (spin experiments)
+
+    def pulse_sequence(self, protocol: str, times: Dict[str, Any], generator: str = "") -> str:
+        """The timing a pulse generator would play, checked: the diagram, period, duty cycles and any problem.
+        Missing times come from the generator's current settings (if named), else from pulses.DEFAULTS."""
+        from .. import pulses
+        current: Dict[str, Any] = {}
+        inst = self.lab.instruments.get(generator) if generator else None
+        if generator and inst is None:
+            return "no instrument %r (have: %s)" % (generator, ", ".join(self.lab.instruments))
+        if inst is not None:
+            for k in ("t_pi", "tau", "t_laser", "t_gate", "t_wait"):
+                if k in inst.card.params:
+                    try:
+                        current[k] = inst.read(k)
+                    except Exception:
+                        pass
+        given = {k: v for k, v in (times or {}).items() if v is not None}
+        try:
+            seq = pulses.build(protocol, dict(current, **given))
+        except (ValueError, TypeError) as e:
+            return str(e)
+        problems = pulses.check(seq)
+        return pulses.describe(seq) + ("\nproblems: " + "; ".join(problems) if problems else "\nchecks: ok")
+
     # ------------------------------------------------------------------ cards for new instruments
 
     def check_card(self, text: str) -> str:

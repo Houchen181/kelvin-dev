@@ -1,0 +1,99 @@
+card: 1
+id: m2/solstis
+model: M Squared SolsTiS Ti:sapphire laser (ICE-BLOC controller)
+vendor: M Squared
+kind: laser
+status: community
+manual: "SolsTiS 3 TCP/IP Protocol, V21 (M Squared, 2017; ask M Squared support for the copy for your firmware)"
+notes:
+  - "Address m2://<laser ip>:<port>. On the laser's web page (Configure > Network Settings > Remote interface) enter this computer's IP address and a port, tick Enable and Save Configuration; use that port here. The laser accepts only that IP."
+  - "Tuning: without a wavemeter Kelvin uses table tuning (move_wave_t). With one fitted, set the vars tune to set_wave_m and poll to poll_wave_m. Tuning takes seconds to minutes: wavelength_target starts it, tuning_status and wavelength follow it."
+  - "The protocol has no pump or emission switch: the pump laser and the shutter stay under their own control (or their own card). Kelvin changes only the wavelength, the etalon and the locks."
+  - "Moving the etalon can mode-hop and drop the locks. Unlock the reference cavity before the etalon; lock the etalon before the cavity. Set the lab's wavelength limits from GET get_wavelength_range."
+  - "Written from M Squared's protocol document (firmware V60 era); check the op names against your firmware's copy before trusting it with a sample."
+identify:
+  idn: "^M Squared"
+  example: "M Squared,M Squared SolsTiS Ti:sapphire laser (ICE-BLOC controller),192.168.1.191"
+connection: { timeout_ms: 5000 }
+vars:
+  tune: { default: "move_wave_t", label: "Tuning op: move_wave_t (no wavemeter) or set_wave_m (wavemeter fitted)" }
+  poll: { default: "poll_move_wave_t", label: "Its progress op: poll_move_wave_t, or poll_wave_m with a wavemeter" }
+
+parameters:
+  wavelength_target:
+    label: Target wavelength
+    kind: measure
+    unit: nm
+    set: "SET {tune} wavelength={value}"
+    limits: [690, 1010]
+    description: Starts tuning; the laser answers at once and tunes for seconds to minutes (see tuning_status)
+  wavelength:
+    label: Wavelength
+    kind: measure
+    unit: nm
+    get: "GET get_status#wavelength"
+  tuning_status:
+    label: Tuning status
+    kind: measure
+    type: int
+    get: "GET {poll}#status"
+    description: "poll_move_wave_t: 0 done, 1 tuning, 2 failed. poll_wave_m: 0 idle, 1 no wavemeter, 2 tuning, 3 holding"
+  etalon_lock:
+    label: Etalon lock
+    kind: measure
+    type: bool
+    set: "SET etalon_lock operation={value}"
+    bool_text: ["on", "off"]
+  etalon_state:
+    label: Etalon lock state
+    kind: measure
+    type: str
+    get: "GET etalon_lock_status#condition"
+    description: off, on, search, error, low (off because the output is low) or debug
+  cavity_lock:
+    label: Reference cavity lock
+    kind: measure
+    type: bool
+    set: "SET cavity_lock operation={value}"
+    bool_text: ["on", "off"]
+  cavity_state:
+    label: Cavity lock state
+    kind: measure
+    type: str
+    get: "GET cavity_lock_status#condition"
+  etalon_tune:
+    label: Etalon tuning
+    kind: measure
+    unit: "%"
+    set: "SET tune_etalon setting={value}"
+    limits: [0, 100]
+    description: Moves the etalon (0-100 % of its range); it can mode-hop. There is no read-back.
+  temperature:
+    label: Crystal temperature
+    kind: measure
+    unit: degC
+    get: "GET get_status#temperature"
+  output_monitor:
+    label: Output monitor
+    kind: measure
+    unit: V
+    get: "GET get_status#output_monitor"
+  etalon_voltage:
+    label: Etalon voltage
+    kind: measure
+    unit: V
+    get: "GET get_status#etalon_voltage"
+  resonator_voltage:
+    label: Resonator voltage
+    kind: measure
+    unit: V
+    get: "GET get_status#resonator_voltage"
+
+display:
+  headline: wavelength
+raw:
+  blocked: ["SET gpio_output", "SET dac_ramping", "SET digital_pot_output", "SET dac_output", "SET select_profile",
+            "SET monitor_a", "SET monitor_b", "SET digital_pid_control", "SET beam_alignment", "SET beam_adjust_x",
+            "SET beam_adjust_y", "SET pba_reference", "SET set_wave_tolerance_m", "SET set_wave_lock_tolerance_m",
+            "SET lock_wave_m_fixed", "SET fast_scan_start", "SET scan_stitch_initialise", "SET scan_stitch_op",
+            "SET terascan_continue"]

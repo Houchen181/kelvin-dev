@@ -1,0 +1,84 @@
+card: 1
+id: srs/sg384
+model: Stanford Research Systems SG380-series RF signal generator (SG382, SG384, SG386)
+vendor: Stanford Research Systems
+kind: microwave-source
+status: community
+manual: "SG380 Series RF Signal Generators User Manual, Rev 2.07, Remote programming (pp. 56-77)"
+manual_url: "https://www.thinksrs.com/downloads/pdfs/manuals/SG380m.pdf"
+notes:
+  - "The front Type-N output (950 kHz to 4.05 GHz on the SG384, 6.075 GHz on the SG386); its power drops above 3 GHz (+13 dBm at 4 GHz on the SG384). LAN: raw socket port 5025 (TCPIP0::host::5025::SOCKET), telnet 5024, VXI-11; RS-232 115200 baud with RTS/CTS."
+  - "Pulsing from a pulse generator: mod_type pulse, pulse_source external, modulation on (TYPE 4; PFNC 5; MODL 1): the RF is on while the rear modulation input is high (CMOS levels). IQ needs option 3 and a carrier above 400 MHz."
+  - "*RST and *RCL load 0 dBm on every output, so Kelvin brings the outputs to safe before sending them."
+identify:
+  idn: "^Stanford Research Systems,SG38[246]"
+  example: "Stanford Research Systems,SG384,s/n004025,ver1.00.0B"
+error_query: "LERR?"
+connection:
+  read_termination: "\r\n"
+  write_termination: "\n"
+
+parameters:
+  output:
+    label: RF output (Type-N)
+    kind: drive
+    type: bool
+    set: "ENBR {value}"
+    get: "ENBR?"
+    safe: off
+    enables: [power]
+    description: The Type-N output; reads 0 below 950 kHz even when switched on
+  power:
+    label: Power (Type-N)
+    applies_when: output
+    kind: drive
+    unit: dBm
+    set: "AMPR {value}"
+    get: "AMPR?"
+    limits: [-110, 16.5]
+    safe: -110
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "FREQ {value}"
+    get: "FREQ?"
+    limits: [9.5e5, 6.075e9]
+    description: Above 62.5 MHz the BNC output turns off; above 4.05 GHz (SG384) the signal moves to the rear doubler
+  modulation:
+    label: Modulation
+    kind: measure
+    type: bool
+    set: "MODL {value}"
+    get: "MODL?"
+  mod_type:
+    label: Modulation type
+    kind: measure
+    type: enum
+    set: "TYPE {value}"
+    get: "TYPE?"
+    values: { am: 0, fm: 1, phase: 2, sweep: 3, pulse: 4, blank: 5, iq: 6 }
+  pulse_source:
+    label: Pulse source
+    kind: measure
+    type: enum
+    set: "PFNC {value}"
+    get: "PFNC?"
+    values: { square: 3, noise: 4, external: 5 }
+  iq_source:
+    label: IQ source
+    kind: measure
+    type: enum
+    set: "QFNC {value}"
+    get: "QFNC?"
+    values: { noise: 4, external: 5 }
+
+safe_sequence: [power, output]
+display:
+  headline: frequency
+raw:
+  reset: ["*RST", "*RCL"]
+  blocked: ["*SAV", "*PSC", "*CAL", "IFCF", "IFRS", "EPHY", "XTRM", "LOCK", "REMT", "OFSL", "ENBL", "AMPL", "ENBH", "AMPH"]

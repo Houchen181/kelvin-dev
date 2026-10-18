@@ -1,0 +1,83 @@
+card: 1
+id: keysight/n5183b
+model: Keysight MXG X-Series analog signal generator (N5181B, N5183B)
+vendor: Keysight
+kind: microwave-source
+status: community
+manual: "Keysight X-Series Signal Generators SCPI Command Reference N5180-90057, Edition 1 (May 2024)"
+manual_url: "https://www.keysight.com/content/dam/keysight/en/doc/gate/programming-guides/9018-03690.pdf"
+notes:
+  - "GPIB, USB (USBTMC) or LAN (VXI-11: TCPIP0::host::inst0::INSTR). The range depends on the model and options (N5181B to 6 GHz; N5183B to 13, 20, 31.8 or 40 GHz); set the lab limits to yours."
+  - "Pulse modulation needs option UNW: pulse_mod on, pulse_source external (the rear PULSE input, TTL/CMOS). modulation is the master switch for every modulation and is on after *RST. These models have no IQ modulator."
+  - "The identity reply's format is '<company>,<model>,<serial>,<firmware>'; older units say Agilent."
+identify:
+  idn: "^(Keysight|Agilent) Technologies,\\s*N518[13]B"
+  example: "Keysight Technologies,N5183B,MY59100001,B.01.86"
+error_query: ":SYSTem:ERRor[:NEXt]?"
+
+parameters:
+  output:
+    label: RF output
+    kind: drive
+    type: bool
+    set: ":OUTPut[:STATe] {value}"
+    get: ":OUTPut[:STATe]?"
+    safe: off
+    enables: [power]
+  power:
+    label: Power
+    applies_when: output
+    kind: drive
+    unit: dBm
+    set: "[:SOURce]:POWer[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: "[:SOURce]:POWer[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-144, 30]
+    safe: -144
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: Hz
+    set: "[:SOURce]:FREQuency[:CW] {value}"
+    get: "[:SOURce]:FREQuency[:CW]?"
+    limits: [9.0e3, 4.0e10]
+  modulation:
+    label: Modulation (master)
+    kind: measure
+    type: bool
+    set: ":OUTPut:MODulation[:STATe] {value}"
+    get: ":OUTPut:MODulation[:STATe]?"
+  pulse_mod:
+    label: Pulse modulation
+    kind: measure
+    type: bool
+    set: "[:SOURce]:PULM:STATe {value}"
+    get: "[:SOURce]:PULM:STATe?"
+  pulse_source:
+    label: Pulse source
+    kind: measure
+    type: enum
+    set: "[:SOURce]:PULM:SOURce {value}"
+    get: "[:SOURce]:PULM:SOURce?"
+    values: { internal: INT, external: EXT }
+  pulse_polarity:
+    label: External pulse polarity
+    kind: measure
+    type: enum
+    set: "[:SOURce]:PULM:EXTernal:POLarity {value}"
+    get: "[:SOURce]:PULM:EXTernal:POLarity?"
+    values: { normal: NORM, inverted: INV }
+
+safe_sequence: [power, output]
+display:
+  headline: frequency
+health:
+  - query: ":SYSTem:ERRor[:NEXt]?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST", "*RCL", ":SYSTem:PRESet"]
+  blocked: [":SYSTem:PRESet:ALL", ":SYSTem:PRESet:PERSistent", ":SYSTem:SECurity", "*SAV", ":SYSTem:PON",
+            "[:SOURce]:POWer:USER", "[:SOURce]:POWer[:LEVel][:IMMediate]:OFFSet", "[:SOURce]:FREQuency:OFFSet",
+            "[:SOURce]:FREQuency:MULTiplier", ":CALibration", ":SYSTem:IDN", ":SYSTem:COMMunicate", "[:SOURce]:CORRection"]

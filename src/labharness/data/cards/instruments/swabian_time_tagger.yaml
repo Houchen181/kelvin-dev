@@ -1,0 +1,45 @@
+card: 1
+id: swabian/time-tagger
+model: Swabian Instruments Time Tagger (20, Ultra, X) as a gated photon counter
+vendor: Swabian Instruments
+kind: photon-counter
+status: community
+manual: "Time Tagger documentation, event counting (GatedCounter, Countrate)"
+manual_url: "https://www.swabianinstruments.com/static/documentation/TimeTagger/api/measurements/event_counting.html"
+notes:
+  - "Address timetagger://<serial, or empty for the first>?click=1&gate=2 (inputs, 1-based: the detector, and the pulse generator's gate; &level=0.5 sets both trigger levels in volts). Needs pip install Swabian-TimeTagger and the Opal Kelly USB driver."
+  - "Counts the detector in the gate windows: a signal window, then a reference window, each period. Kelvin finds which comes first from the generator's own timing, and reads both from one acquisition."
+identify:
+  idn: "^Swabian Instruments,Time Tagger"
+  example: "Swabian Instruments,Time Tagger Ultra,1234000ABC"
+
+parameters:
+  integration:
+    label: Integration time
+    kind: measure
+    unit: s
+    set: "SET integration {value}"
+    get: "GET integration"
+    limits: [0.001, 3600]
+    default: 0.5
+  signal:
+    label: Signal counts
+    kind: measure
+    unit: counts
+    get: "GET signal"
+  reference:
+    label: Reference counts
+    kind: measure
+    unit: counts
+    get: "GET reference"
+  contrast:
+    label: Signal / reference
+    kind: measure
+    get: "GET contrast"
+  rate:
+    label: Count rate
+    kind: measure
+    unit: counts/s
+    get: "GET rate"
+display:
+  headline: rate

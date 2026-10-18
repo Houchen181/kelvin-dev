@@ -7,6 +7,10 @@ like a SCPI instrument. The address names the driver:
     zhinst://dev3456                      Zurich Instruments (MFLI, MFIA, HF2LI, UHFLI...) through LabOne (zhinst-core)
     zhinst://dev3456?host=10.0.0.5&port=8004&interface=1GbE
     qd://192.168.1.20:5000                Quantum Design PPMS, DynaCool, VersaLab, MPMS3 through MultiPyVu
+    m2://10.0.0.8:9360                    M Squared lasers (SolsTiS...): JSON over TCP (m2.py)
+    toptica://10.0.0.9                    TOPTICA DLC pro: its command line (decop.py)
+    qick://10.0.0.50:8888/myqick          RFSoC boards running QICK, through its Pyro4 server (rfsoc.py)
+    http://10.0.0.7:20022/v1              instruments with a web API, e.g. a PHAROS laser (webapi.py)
 
 The vendor libraries are optional: `pip install zhinst-core` or `pip install MultiPyVu` on the computer that runs
 Kelvin. Without them Kelvin says what to install."""
@@ -21,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .adapters import AdapterError
 from .cards import Card
 
-SCHEMES = ("zhinst", "qd")
+SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick")
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -45,7 +49,10 @@ def _number(text: str) -> Any:
         return 1
     if low in ("off", "false"):
         return 0
-    v = float(text)
+    try:
+        v = float(text)
+    except ValueError:   # a word (a protocol) or name=value pairs (wiring): the driver reads it
+        return text.strip()
     return int(v) if v.is_integer() and "." not in text and "e" not in low else v
 
 
@@ -248,10 +255,412 @@ class MultiVu(DriverBackend):
             pass
 
 
-DRIVERS = {"zhinst": Zhinst, "qd": MultiVu}
+# ------------------------------------------------------------------ pulse generators and photon counters (spin experiments)
+
+class PulseGeneratorDriver(DriverBackend):
+    """A pulse generator that plays one of pulses.PROTOCOLS in a loop. Paths: protocol, tau, t_pi, t_laser, t_gate,
+    t_wait, running (play / stop), period and mw_duty (read). The card's on_connect says the wiring:
+        SET wiring laser=0,mw=1,gate=2          which output drives the AOM, the MW switch, the counter gate
+        SET delays laser=4.5e-7                 how late each channel's device responds (moved earlier)
+        SET limits max_mw_duty=0.2              stricter than the default 50 % (resolution comes from the model)
+    A sequence that fails pulses.check is refused before it reaches the hardware. Subclasses only play and stop."""
+    RESOLUTION = 1e-9
+    TIMES = ("tau", "t_pi", "t_laser", "t_gate", "t_wait")
+
+    def __init__(self, name: str, card: Card, address: str):
+        super().__init__(name, card, address)
+        from . import pulses
+        self.state: Dict[str, Any] = dict(pulses.DEFAULTS, protocol="pulsed_odmr", running=0)
+        self.wiring: Dict[str, int] = {"laser": 0, "mw": 1, "gate": 2}
+        self.delays: Dict[str, float] = {}
+        self.limits: Dict[str, float] = {"resolution": self.RESOLUTION}
+
+    @staticmethod
+    def _pairs(text: str) -> Dict[str, str]:
+        out = {}
+        for part in str(text).split(","):
+            k, sep, v = part.partition("=")
+            if not sep or not k.strip():
+                raise AdapterError("expected name=value pairs, got %r" % text)
+            out[k.strip().lower()] = v.strip()
+        return out
+
+    def sequence(self) -> Any:
+        from . import pulses
+        return pulses.build(str(self.state["protocol"]), {k: float(self.state[k]) for k in self.TIMES}, self.delays)
+
+    def set(self, path: str, value: Any) -> None:
+        from . import pulses
+        if path in ("wiring", "delays", "limits"):
+            pairs = self._pairs(value)
+            if path == "wiring":
+                unknown = set(pairs) - set(pulses.CHANNELS)
+                if unknown:
+                    raise AdapterError("%s: no channel %s (channels: %s)" % (self.name, ", ".join(sorted(unknown)),
+                                                                             ", ".join(pulses.CHANNELS)))
+                self.wiring.update({k: int(v) for k, v in pairs.items()})
+            elif path == "delays":
+                self.delays.update({k: float(v) for k, v in pairs.items()})
+            else:
+                self.limits.update({k: float(v) for k, v in pairs.items()})
+            return
+        if path == "protocol":
+            value = str(value).lower()
+            if value not in pulses.PROTOCOLS:
+                raise AdapterError("%s: no protocol %r (have: %s)" % (self.name, value, ", ".join(pulses.PROTOCOLS)))
+        elif path in self.TIMES:
+            value = float(value)
+        elif path != "running":
+            raise AdapterError("%s: no setting %r" % (self.name, path))
+        old = dict(self.state)
+        self.state[path] = value
+        playing = bool(int(self.state["running"]))
+        if not playing:
+            if old.get("running"):
+                self.stop()
+            return
+        seq = self.sequence()
+        problems = pulses.check(seq, self.limits)
+        if problems:
+            self.state = old
+            raise AdapterError("%s: refused: %s" % (self.name, problems[0]))
+        self.play(seq)
+
+    def get(self, path: str) -> Any:
+        if path == "period":
+            return self.sequence().period
+        if path == "mw_duty":
+            return self.sequence().duty("mw")
+        if path in self.state:
+            return self.state[path]
+        raise AdapterError("%s: no reading %r" % (self.name, path))
+
+    def channels(self, seq: Any) -> Dict[int, List[Tuple[int, int]]]:
+        """Output number -> (duration ns, level) pattern for each wired channel."""
+        return {self.wiring[ch]: seq.pattern(ch) for ch in seq.channels if ch in self.wiring}
+
+    def play(self, seq: Any) -> None:
+        raise NotImplementedError
+
+    def stop(self) -> None:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        try:
+            self.stop()
+        except Exception:
+            pass
+
+
+class CounterDriver(DriverBackend):
+    """A photon counter that reads the gate's alternating signal and reference windows. Paths: integration (s);
+    signal, reference, contrast (one acquisition serves one reading of each); rate (counts/s, light on, no gating).
+    Subclasses acquire(seconds) -> (signal, reference) and count_rate(seconds)."""
+
+    def __init__(self, name: str, card: Card, address: str):
+        super().__init__(name, card, address)
+        self.integration = 0.5
+        self._last: Optional[Dict[str, float]] = None
+        self._read: set = set()
+
+    def set(self, path: str, value: Any) -> None:
+        if path != "integration":
+            raise AdapterError("%s: no setting %r" % (self.name, path))
+        if not 1e-3 <= float(value) <= 3600:
+            raise AdapterError("%s: integration must be 1 ms to 1 h" % self.name)
+        self.integration = float(value)
+
+    def get(self, path: str) -> Any:
+        if path == "integration":
+            return self.integration
+        if path == "rate":
+            return self.count_rate(self.integration)
+        if path not in ("signal", "reference", "contrast"):
+            raise AdapterError("%s: no reading %r" % (self.name, path))
+        if self._last is None or path in self._read:
+            sig, ref = self.acquire(self.integration)
+            self._last, self._read = {"signal": sig, "reference": ref, "contrast": sig / ref if ref else 0.0}, set()
+        self._read.add(path)
+        return self._last[path]
+
+    def acquire(self, seconds: float) -> Tuple[float, float]:
+        raise NotImplementedError
+
+    def count_rate(self, seconds: float) -> float:
+        raise NotImplementedError
+
+
+PLAYING: Dict[str, Any] = {}   # the sequence each pulse generator plays: the counter needs its windows' order
+
+
+class PulseStreamer(PulseGeneratorDriver):
+    """Swabian Instruments Pulse Streamer 8/2 through its `pulsestreamer` client. Address pulsestreamer://<ip or
+    hostname>. Outputs 0-7; 1 ns steps, 2 ns shortest pulse. The client checks inputs with Python asserts (gone under
+    python -O), so this driver checks everything itself first."""
+    RESOLUTION = 2e-9
+    OUTPUTS = range(8)
+
+    def __init__(self, name: str, card: Card, address: str, module: Any = None):
+        super().__init__(name, card, address)
+        host = address.split("://", 1)[1].split("?")[0].strip("/")
+        if not host:
+            raise AdapterError("%s: a Pulse Streamer address is pulsestreamer://<ip or hostname>" % name)
+        if module is None:
+            try:
+                import pulsestreamer as module   # type: ignore
+            except ImportError as e:
+                raise AdapterError("%s needs Swabian's client: pip install pulsestreamer" % name) from e
+        self.mod = module
+        try:
+            self.ps = module.PulseStreamer(host)
+        except (AssertionError, OSError, Exception) as e:   # a failed connection is an AssertionError in the client
+            raise AdapterError("%s: no Pulse Streamer at %s (%s)" % (name, host, e)) from e
+
+    def play(self, seq: Any) -> None:
+        chans = self.channels(seq)
+        bad = [ch for ch in chans if ch not in self.OUTPUTS]
+        if bad:
+            raise AdapterError("%s: outputs are 0-7, not %s" % (self.name, bad))
+        s = self.ps.createSequence()
+        for ch, pattern in chans.items():
+            if any(n < 0 or level not in (0, 1) for n, level in pattern):
+                raise AdapterError("%s: bad pattern on output %d" % (self.name, ch))
+            s.setDigital(ch, [(int(n), int(level)) for n, level in pattern])
+        self.ps.stream(s, self.mod.PulseStreamer.REPEAT_INFINITELY, self.mod.OutputState.ZERO())
+        PLAYING[self.name] = seq
+
+    def stop(self) -> None:
+        PLAYING.pop(self.name, None)
+        self.ps.constant(self.mod.OutputState.ZERO())   # the vendor's way to stop: every output low
+
+    def identity(self) -> str:
+        try:
+            return "Swabian Instruments,Pulse Streamer 8/2,%s,%s" % (self.ps.getSerial(), self.ps.getFirmwareVersion())
+        except Exception:
+            return "Swabian Instruments,Pulse Streamer 8/2,?,?"
+
+
+class PulseBlaster(PulseGeneratorDriver):
+    """SpinCore PulseBlaster through `spinapi` (a ctypes wrapper of SpinCore's SpinAPI; SpinAPI itself must be
+    installed). Address pulseblaster://<board, 0-based>?clock=<core clock MHz>[&pro=1]. pro=1 is for the
+    PulseBlasterESR-PRO, whose bits 21-23 must be 111 for ordinary pulses (on other models they are outputs). The
+    shortest instruction is 5 clock cycles. Stopping loads an all-off program, since pb_stop may leave outputs high."""
+    ON = 0xE00000
+    MIN_CYCLES = 5
+
+    def __init__(self, name: str, card: Card, address: str, module: Any = None):
+        super().__init__(name, card, address)
+        url = urllib.parse.urlparse(address)
+        q = dict(urllib.parse.parse_qsl(url.query))
+        try:
+            self.board = int((url.netloc or url.path or "0").strip("/") or 0)
+            self.clock = float(q.get("clock", ""))
+        except ValueError:
+            raise AdapterError("%s: a PulseBlaster address is pulseblaster://0?clock=500 (board, core clock in MHz)"
+                               % name)
+        self.pro = q.get("pro") in ("1", "true", "yes")
+        self.limits["resolution"] = self.MIN_CYCLES / (self.clock * 1e6)
+        if module is None:
+            try:
+                import spinapi as module   # type: ignore
+            except ImportError as e:
+                raise AdapterError("%s needs SpinCore's SpinAPI and the Python wrapper: pip install spinapi" % name) from e
+        self.sp = module
+        try:
+            if self.sp.pb_count_boards() <= self.board:
+                raise AdapterError("%s: no PulseBlaster board %d" % (name, self.board))
+            self.sp.pb_select_board(self.board)
+            self.sp.pb_init()
+            self.sp.pb_core_clock(self.clock)
+        except AdapterError:
+            raise
+        except Exception as e:
+            raise AdapterError("%s: could not open PulseBlaster board %d: %s" % (name, self.board, e)) from e
+
+    def _program(self, steps: List[Tuple[int, float]], loop: bool) -> None:
+        sp = self.sp
+        sp.pb_start_programming(sp.PULSE_PROGRAM)
+        start = None
+        for i, (flags, ns) in enumerate(steps):
+            last = i == len(steps) - 1
+            op, data = (sp.BRANCH, start if start is not None else 0) if (last and loop) else (sp.CONTINUE, 0)
+            addr = sp.pb_inst_pbonly(flags | (self.ON if self.pro else 0), op, data, ns)
+            if start is None:
+                start = addr
+        if not loop:
+            sp.pb_inst_pbonly(self.ON if self.pro else 0, sp.STOP, 0, 1000.0)   # STOP keeps the (all-off) flags
+        sp.pb_stop_programming()
+        sp.pb_reset()
+        sp.pb_start()
+
+    def play(self, seq: Any) -> None:
+        shortest = self.MIN_CYCLES * 1e3 / self.clock   # ns
+        steps = []
+        for duration, on in seq.segments():
+            ns = duration * 1e9
+            if ns < shortest - 1e-6:
+                raise AdapterError("%s: two edges are %.1f ns apart, closer than the PulseBlaster's %.0f ns shortest "
+                                   "instruction" % (self.name, ns, shortest))
+            steps.append((sum(1 << self.wiring[ch] for ch in on if ch in self.wiring), ns))
+        self._program(steps, loop=True)
+        PLAYING[self.name] = seq
+
+    def stop(self) -> None:
+        PLAYING.pop(self.name, None)
+        self._program([(0, 1000.0)], loop=False)
+
+    def identity(self) -> str:
+        try:
+            version = self.sp.pb_get_version()
+            version = version.decode() if isinstance(version, bytes) else str(version)
+        except Exception:
+            version = "?"
+        return "SpinCore,PulseBlaster,board %d,%s" % (self.board, version)
+
+    def close(self) -> None:
+        super().close()
+        try:
+            self.sp.pb_close()
+        except Exception:
+            pass
+
+
+class TimeTagger(CounterDriver):
+    """Swabian Instruments Time Tagger (20, Ultra, X) through `Swabian-TimeTagger`. Address
+    timetagger://<serial, or empty for the first>?click=1&gate=2[&level=0.5]: the detector input and the gate input
+    (1-based; the gate's falling edge closes each window). Per period the gate opens a signal window, then a
+    reference window. Which window comes first in the record is found from the generator's own timing."""
+    BINS = 2_000_000
+
+    def __init__(self, name: str, card: Card, address: str, module: Any = None):
+        super().__init__(name, card, address)
+        url = urllib.parse.urlparse(address)
+        q = dict(urllib.parse.parse_qsl(url.query))
+        self.serial = (url.netloc or url.path).strip("/")
+        try:
+            self.click, self.gate = int(q.get("click", 1)), int(q.get("gate", 2))
+        except ValueError:
+            raise AdapterError("%s: click and gate are input numbers (1-based)" % name)
+        if module is None:
+            try:
+                from Swabian import TimeTagger as module   # type: ignore
+            except ImportError:
+                try:
+                    import TimeTagger as module   # type: ignore  (the Windows installer's module)
+                except ImportError as e:
+                    raise AdapterError("%s needs Swabian's library: pip install Swabian-TimeTagger" % name) from e
+        self.tt = module
+        try:
+            self.tagger = module.createTimeTagger(self.serial)
+            if q.get("level"):
+                for ch in (self.click, self.gate):
+                    self.tagger.setTriggerLevel(ch, float(q["level"]))
+        except Exception as e:
+            raise AdapterError("%s: could not open the Time Tagger %s: %s" % (name, self.serial or "", e)) from e
+
+    def _gated(self) -> Any:
+        if hasattr(self.tt, "GatedCounter"):
+            return self.tt.GatedCounter(self.tagger, [self.click], self.gate, -self.gate, self.BINS)
+        return self.tt.CountBetweenMarkers(self.tagger, self.click, self.gate, -self.gate, self.BINS)
+
+    def acquire(self, seconds: float) -> Tuple[float, float]:
+        m = self._gated()
+        self.tagger.sync()
+        m.startFor(int(seconds * 1e12), True)                 # picoseconds
+        if not m.waitUntilFinished(int(seconds * 1000) + 10_000):   # milliseconds
+            raise AdapterError("%s: the acquisition did not finish" % self.name)
+        data = m.getData()   # GatedCounter: one row per click channel; CountBetweenMarkers: one row
+        rows = data.tolist() if hasattr(data, "tolist") else list(data)
+        counts = list(rows[0]) if rows and isinstance(rows[0], (list, tuple)) else rows
+        widths = list(m.getBinWidths())
+        index = list(m.getIndex()) if hasattr(m, "getIndex") else []
+        filled = [i for i, w in enumerate(widths) if w > 0]
+        if len(filled) < 2:
+            raise AdapterError("%s: no gate windows arrived on input %d: is the pulse generator playing, and its gate "
+                               "output wired there?" % (self.name, self.gate))
+        start = self._first_signal(index, filled)
+        sel = filled[start:]
+        sel = sel[: len(sel) // 2 * 2]
+        return float(sum(counts[i] for i in sel[0::2])), float(sum(counts[i] for i in sel[1::2]))
+
+    @staticmethod
+    def _first_signal(index: List[int], filled: List[int]) -> int:
+        """0 if the record starts with a signal window, 1 if with a reference window: within one laser pulse the
+        signal window opens (t_laser - t_gate) before the reference window, which the generator's timing gives."""
+        seq = next(iter(PLAYING.values()), None)
+        if seq is None or len(index) < 3:
+            return 0
+        (_, s0, _), (_, r0, _) = seq.windows
+        expected = (r0 - s0) * 1e12                           # ps
+        gap01 = index[filled[1]] - index[filled[0]]
+        gap12 = index[filled[2]] - index[filled[1]]
+        return 0 if abs(gap01 - expected) <= abs(gap12 - expected) else 1
+
+    def count_rate(self, seconds: float) -> float:
+        m = self.tt.Countrate(self.tagger, [self.click])
+        m.startFor(int(seconds * 1e12), True)
+        m.waitUntilFinished(int(seconds * 1000) + 10_000)
+        return float(list(m.getData())[0])
+
+    def identity(self) -> str:
+        try:
+            return "Swabian Instruments,Time Tagger %s,%s" % (self.tagger.getModel(), self.tagger.getSerial())
+        except Exception:
+            return "Swabian Instruments,Time Tagger,%s" % self.serial
+
+    def close(self) -> None:
+        try:
+            self.tt.freeTimeTagger(self.tagger)
+        except Exception:
+            pass
+
+
+def discover_swabian(modules: Optional[Dict[str, Any]] = None) -> List[Tuple[str, str]]:
+    """(address, identity) of the Pulse Streamers and Time Taggers this computer can see, through their libraries."""
+    modules = modules if modules is not None else MODULES
+    found: List[Tuple[str, str]] = []
+    ps = modules.get("pulsestreamer")
+    if ps is None:
+        try:
+            import pulsestreamer as ps   # type: ignore
+        except ImportError:
+            ps = None
+    if ps is not None:
+        try:
+            for dev in ps.findPulseStreamers():
+                found.append(("pulsestreamer://%s" % dev.ip, "Swabian Instruments,Pulse Streamer 8/2,%s" % dev.serial))
+        except Exception:
+            pass
+    tt = modules.get("timetagger")
+    if tt is None:
+        try:
+            from Swabian import TimeTagger as tt   # type: ignore
+        except ImportError:
+            tt = None
+    if tt is not None:
+        try:
+            for serial in tt.scanTimeTagger():
+                found.append(("timetagger://%s" % serial, "Swabian Instruments,Time Tagger,%s" % serial))
+        except Exception:
+            pass
+    return found
+
+
+from .webapi import HttpInstrument   # noqa: E402  (instruments with a web API: http:// and https:// addresses)
+
+DRIVERS = {"zhinst": Zhinst, "qd": MultiVu, "pulsestreamer": PulseStreamer, "pulseblaster": PulseBlaster,
+           "timetagger": TimeTagger, "http": HttpInstrument, "https": HttpInstrument}
 MODULES: Dict[str, Any] = {}   # tests put fake vendor libraries here
+LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc", "Qick")}   # they import this module
 
 
 def open_driver(name: str, card: Card, address: str) -> DriverBackend:
     scheme = address.split("://", 1)[0].lower()
-    return DRIVERS[scheme](name, card, address, MODULES.get(scheme))
+    if scheme in LATER and scheme not in DRIVERS:
+        import importlib
+        module, cls = LATER[scheme]
+        DRIVERS[scheme] = getattr(importlib.import_module("." + module, __package__), cls)
+    backend = DRIVERS[scheme](name, card, address, MODULES.get(scheme))
+    for command in card.on_connect:   # configuration only (wiring, delays, limits); parse_card refuses drives here
+        backend.write(command)
+    return backend

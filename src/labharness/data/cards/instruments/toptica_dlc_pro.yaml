@@ -1,0 +1,93 @@
+card: 1
+id: toptica/dlc-pro
+model: TOPTICA DLC pro diode laser controller
+vendor: TOPTICA Photonics
+kind: laser-driver
+status: draft
+manual: "DLC pro manual (in the DLC pro software package, folder 1_DOCUMENTATION) and TOPTICA's Python SDK toptica-lasersdk 3.3 (parameter tree dlcpro v3_3_3)"
+notes:
+  - "Address toptica://<ip> (the command line, TCP port 1998). Parameter names follow firmware 3.x: compare with the SDK module for your firmware (fw-ver)."
+  - "Draft: the current's unit (mA) is not confirmed from a public source, so on real hardware Kelvin only simulates current and enable changes until someone checks them on the unit and marks the card lab-verified."
+  - "Emission also needs the front key and the interlock; Kelvin reads emission, interlock_open and key_locked. Set the lab's current limit below the diode's datasheet maximum and the controller's current clip."
+  - "Kelvin never sends exec commands (user level, network settings, firmware) and never raises the current clip."
+identify:
+  idn: "^TOPTICA"
+  example: "TOPTICA,TOPTICA DLC pro diode laser controller,123456,192.168.1.32"
+connection: { timeout_ms: 5000 }
+vars:
+  laser: { default: "laser1", label: "Laser head: laser1 or laser2" }
+
+parameters:
+  current_enabled:
+    label: Current driver
+    kind: drive
+    type: bool
+    set: "SET {laser}:dl:cc:enabled {value}"
+    get: "GET {laser}:dl:cc:enabled"
+    bool_text: ["#t", "#f"]
+    safe: off
+    enables: [current]
+    description: Energizes the diode (emission, when the key and interlock allow)
+  current:
+    label: Diode current
+    applies_when: current_enabled
+    kind: drive
+    unit: mA
+    set: "SET {laser}:dl:cc:current-set {value}"
+    get: "GET {laser}:dl:cc:current-set"
+    limits: [0, 500]
+    safe: 0
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+  current_act:
+    label: Diode current (actual)
+    kind: measure
+    unit: mA
+    get: "GET {laser}:dl:cc:current-act"
+  current_clip:
+    label: Current clip
+    kind: measure
+    unit: mA
+    get: "GET {laser}:dl:cc:current-clip"
+  emission:
+    label: Emission
+    kind: measure
+    type: bool
+    get: "GET emission"
+    bool_text: ["#t", "#f"]
+  interlock_open:
+    label: Interlock open
+    kind: measure
+    type: bool
+    get: "GET interlock-open"
+    bool_text: ["#t", "#f"]
+  key_locked:
+    label: Front key locked
+    kind: measure
+    type: bool
+    get: "GET frontkey-locked"
+    bool_text: ["#t", "#f"]
+  temperature:
+    label: Diode temperature
+    kind: measure
+    unit: degC
+    get: "GET {laser}:dl:tc:temp-act"
+  temperature_set:
+    label: Diode temperature setpoint
+    kind: measure
+    unit: degC
+    get: "GET {laser}:dl:tc:temp-set"
+  health_text:
+    label: System health
+    kind: measure
+    type: str
+    get: "GET system-health-txt"
+
+safe_sequence: [current, current_enabled]
+display:
+  headline: current_act
+raw:
+  blocked: ["SET {laser}:dl:cc:current-clip", "SET emission-button-enabled", "SET {laser}:dl:tc:temp-set",
+            "SET {laser}:dl:tc:temp-set-min", "SET {laser}:dl:tc:temp-set-max", "SET {laser}:dl:cc:positive-polarity",
+            "SET {laser}:dl:cc:voltage-clip", "SET {laser}:dl:cc:forced-off"]

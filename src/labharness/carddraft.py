@@ -48,6 +48,16 @@ Each parameter:
   read_when: <bool drive> for readings that would switch something on if read while it is off.
 - description: one line; default: the power-on value if the manual gives it.
 
+Instruments with a web API (HTTP and JSON; the lab config's address is http(s)://host:port): commands are the
+method, the path and, for writes, a JSON body with {value} in it: get: "GET /v1/Basic/ActualOutputPower" (the JSON
+reply is the value; "GET /v1/Status#laser.state" takes one field), set: "PUT /v1/Basic/TargetAttenuatorPercentage
+{value}" or "PUT /v1/Shutter {\"open\": {value}}". For an action per state, a bool with bool_text: [EnableOutput,
+CloseOutput] and set: "POST /v1/Basic/{value}". identify: {query: "GET /v1/...", idn: a regex for its reply}.
+
+Instruments whose commands start with the value ("ON,1" / "OFF,1"): set: "{value},{ch}" with bool_text: ["ON", "OFF"]
+(quote the words: YAML reads a bare ON as true). Settings with no read-back: leave out get; Kelvin remembers what
+it set, and on_connect may switch such a drive to its safe value so its state is known from the start.
+
 Rules: use only commands that are in the manual text you were given; never invent a command, a limit or a reply
 format. If the manual does not say, leave the parameter out and mention it. Block calibration, firmware, sensor
 curve and protection-limit commands under raw.blocked."""

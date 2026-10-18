@@ -1,0 +1,117 @@
+card: 1
+id: qick/rfsoc
+model: RFSoC board running QICK (ZCU111, ZCU216, RFSoC 4x2, QICK box)
+vendor: QICK (open source, Fermilab)
+kind: awg
+status: community
+manual: "QICK documentation and tutorials, github.com/openquantumhardware/qick (qick 0.2.436, tProc v2 firmware)"
+notes:
+  - "Address qick://<name server host>:8888/<proxy name>. On the board, start the Pyro4 name server, then the QICK server (python -m qick.pyro_cli <proxy name> -n <host> -p 8888), in that order; restart the server whenever the name server restarts."
+  - "On this computer: pip install qick Pyro4. The Pyro server has no password: keep the board on a private lab network."
+  - "Gain is a fraction of the generator's full scale, not dBm: the power depends on the board, the balun or daughtercard, the Nyquist zone and the frequency. Put an attenuator after it and set the lab's gain limit from a measurement."
+  - "A tone keeps playing after a program ends: Kelvin stops it (reset_gens: every generator to zero) whenever the output goes off, on make-safe, and when it disconnects."
+  - "Each read of i, q, magnitude and phase shares one averaged acquisition (reps). In pulsed mode, or with the output off (zero gain: the background), each read plays the pulse once per rep."
+identify:
+  idn: "^QICK"
+  example: "QICK,ZCU216,10.0.0.50:8888/myqick"
+vars:
+  gen: { default: "0", label: "Generator (DAC) channel, as print(soccfg) lists them" }
+  ro: { default: "0", label: "Readout (ADC) channel" }
+on_connect: ["SET channels gen={gen},ro={ro}"]
+
+parameters:
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: "SET output {value}"
+    get: "GET output"
+    safe: off
+    enables: [gain]
+  gain:
+    label: Gain
+    applies_when: output
+    kind: drive
+    set: "SET gain {value}"
+    get: "GET gain"
+    limits: [0, 1]
+    safe: 0
+    description: Fraction of the generator's full scale
+  frequency:
+    label: Frequency
+    kind: measure
+    unit: MHz
+    set: "SET frequency {value}"
+    get: "GET frequency"
+    limits: [0, 10000]
+  mixer:
+    label: Mixer frequency
+    kind: measure
+    unit: MHz
+    set: "SET mixer {value}"
+    get: "GET mixer"
+    limits: [0, 10000]
+    description: Only for generators with a digital mixer
+  nqz:
+    label: Nyquist zone
+    kind: measure
+    type: int
+    set: "SET nqz {value}"
+    get: "GET nqz"
+    limits: [1, 2]
+  mode:
+    label: Mode
+    kind: measure
+    type: enum
+    set: "SET mode {value}"
+    get: "GET mode"
+    values: { tone: tone, pulsed: pulsed }
+  length:
+    label: Pulse length
+    kind: measure
+    unit: us
+    set: "SET length {value}"
+    get: "GET length"
+    limits: [0.01, 100]
+  readout_length:
+    label: Readout window
+    kind: measure
+    unit: us
+    set: "SET readout_length {value}"
+    get: "GET readout_length"
+    limits: [0.01, 100]
+  trigger_delay:
+    label: Readout delay
+    kind: measure
+    unit: us
+    set: "SET trigger_delay {value}"
+    get: "GET trigger_delay"
+    limits: [0, 100]
+  reps:
+    label: Averages
+    kind: measure
+    type: int
+    set: "SET reps {value}"
+    get: "GET reps"
+    limits: [1, 1000000]
+  i:
+    label: I
+    kind: measure
+    get: "GET i"
+  q:
+    label: Q
+    kind: measure
+    get: "GET q"
+  magnitude:
+    label: Magnitude
+    kind: measure
+    get: "GET magnitude"
+  phase:
+    label: Phase
+    kind: measure
+    unit: deg
+    get: "GET phase"
+
+safe_sequence: [gain, output]
+display:
+  headline: magnitude

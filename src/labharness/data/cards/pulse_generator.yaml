@@ -1,0 +1,88 @@
+card: 1
+id: virtual/pulse-generator
+model: Virtual Pulse Generator (AOM, MW switch, counter gate)
+vendor: Kelvin (simulated)
+kind: pulse-generator
+status: community
+twin: labharness.sim.nv:PulseGeneratorTwin
+identify:
+  idn: "^VIRTUAL,PULSE-GENERATOR"
+  example: "VIRTUAL,PULSE-GENERATOR,SN0008,1.0"
+error_query: "SYSTem:ERRor[:NEXT]?"
+
+parameters:
+  running:
+    label: Playing
+    kind: drive
+    type: bool
+    set: "OUTPut[:STATe] {value}"
+    get: "OUTPut[:STATe]?"
+    safe: off
+    description: Plays the sequence in a loop, which pulses the light and the microwave onto the sample
+  protocol:
+    label: Protocol
+    kind: measure
+    type: enum
+    set: "SEQuence:PROTocol {value}"
+    get: "SEQuence:PROTocol?"
+    values: [cw, pulsed_odmr, rabi, ramsey, hahn_echo, t1]
+    default: pulsed_odmr
+    description: The pulse protocol (see pulses.py)
+  tau:
+    label: Tau
+    kind: measure
+    unit: s
+    set: "SEQuence:TAU {value}"
+    get: "SEQuence:TAU?"
+    limits: [0, 0.01]
+    default: 1.0e-7
+    description: The swept time (MW pulse length for Rabi, free evolution for Ramsey and echo, dark wait for T1)
+  t_pi:
+    label: Pi pulse
+    kind: measure
+    unit: s
+    set: "SEQuence:TPI {value}"
+    get: "SEQuence:TPI?"
+    limits: [1.0e-9, 1.0e-5]
+    default: 1.0e-7
+  t_laser:
+    label: Laser pulse
+    kind: measure
+    unit: s
+    set: "SEQuence:TLASer {value}"
+    get: "SEQuence:TLASer?"
+    limits: [1.0e-7, 1.0e-4]
+    default: 3.0e-6
+  t_gate:
+    label: Counter window
+    kind: measure
+    unit: s
+    set: "SEQuence:TGATe {value}"
+    get: "SEQuence:TGATe?"
+    limits: [1.0e-8, 1.0e-5]
+    default: 3.0e-7
+  t_wait:
+    label: Dark wait
+    kind: measure
+    unit: s
+    set: "SEQuence:TWAit {value}"
+    get: "SEQuence:TWAit?"
+    limits: [0, 1.0e-3]
+    default: 1.0e-6
+  period:
+    label: Period
+    kind: measure
+    unit: s
+    get: "SEQuence:PERiod?"
+  mw_duty:
+    label: MW duty cycle
+    kind: measure
+    get: "SEQuence:DUTY?"
+
+safe_sequence: [running]
+display:
+  headline: period
+raw:
+  reset: ["*RST"]
+notes:
+  - Channels laser (AOM), mw (switch) and gate (counter windows). A sequence the microwave would heat (duty above 50 %) is refused.

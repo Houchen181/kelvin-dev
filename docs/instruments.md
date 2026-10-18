@@ -13,7 +13,7 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
   - `settings.json`: every setting and reading it had (ranges, time constants, sensitivities...), refreshed on every start.
   - `manual.pdf`: the maker's own manual, fetched once from the address on the card, and `manual.txt` with its text by page.
 - **Manuals for involved scans.** Before a scan that uses buffers, triggers, sweep or list modes, fast acquisition, ranges or filters, Kelvin reads the instrument's manual with `instrument_info` and `search_manual`. It works from the passages it finds and cites the page. Search weighs rare words most, so a mnemonic such as `OFLT` or a SCPI path such as `SOURce:CURRent:LIMit` finds its own entry.
-- **Manuals you add yourself.** 17 of the 21 cards carry the maker's link. Keysight hands out its manuals only after a sign-in, and the Oxford Mercury iTC manual is no longer public. For these, or for any other instrument, choose the PDF in **Set up…** (**Choose PDF…**) or put it in the folder as `manual.pdf`.
+- **Manuals you add yourself.** 27 of the 36 cards carry the maker's link. Keysight hands out some manuals only after a sign-in, the Oxford Mercury iTC manual is no longer public, SpinCore's is behind its support pages, and M Squared, Light Conversion and TOPTICA give their protocol documents to owners. QICK's documentation is on its project site. For these, or for any other instrument, choose the PDF in **Set up…** (**Choose PDF…**) or put it in the folder as `manual.pdf`.
 - **Switching it off.** Settings has **Set them up when Kelvin starts**, **Fetch their manuals from the makers** and **Look on the local network too**. Fetching a manual sends only its address to the maker's site. An existing `lab.yaml` is never rewritten. Instruments it doesn't list are only reported.
 
 **Where a scan looks.** No vendor driver is needed for the network or USB.
@@ -58,6 +58,11 @@ The scan only asks each instrument who it is (`*IDN?`, or the card's own identit
 | Lasers and optics | Coherent OBIS, Thorlabs ITC4000 laser/TEC controller, Thorlabs PM100/PM400 power meter |
 | Amplifiers | SRS SR560 voltage preamp, SRS SR570 current preamp (listen-only: Kelvin shows what it last set) |
 | Meters and generators | Keysight/Agilent 344xxA DMMs, Keithley 2182A nanovoltmeter, Keysight 33500B/33600A generators |
+| Microwave and RF sources | SRS SG384/SG386, Rohde & Schwarz SMB100A, Keysight N5183B MXG, Windfreak SynthHD (draft) |
+| AOM and EOM drivers | MOGLabs XRF/ARF/QRF agile RF drivers, Novatech 409B DDS (an EOM is usually driven by one of the RF sources above) |
+| Pulse and delay generators, AWGs | Swabian Pulse Streamer 8/2, SpinCore PulseBlaster, SRS DG645, Rigol DG1000Z, RFSoC boards running QICK |
+| Photon counting | Swabian Time Tagger (Time Tagger 20, Ultra, X) |
+| Networked lasers | M Squared SolsTiS, Light Conversion PHAROS, TOPTICA DLC pro (draft) |
 
 Real hardware gets the same gate as the virtual lab, and a few protections of its own:
 - **Measuring never powers anything up.** On some source-meters a reading command switches the output on, so those readings are only taken while the output is already on (`read_when`).
@@ -69,7 +74,18 @@ Real hardware gets the same gate as the virtual lab, and a few protections of it
 - `zhinst://dev1234` for a Zurich Instruments lock-in, through LabOne's Python API (`pip install zhinst-core`). Add `?host=...&port=8004&interface=1GbE` if the data server runs elsewhere. A scan finds these devices through LabOne.
 - `qd://<computer>:5000` for a Quantum Design system, through MultiPyVu (`pip install MultiPyVu`, with its server running next to MultiVu). MultiVu ramps temperature and field itself; Kelvin sets the rate and setpoint, then waits for the reading.
 
+More instruments with a library of their own:
+- `pulsestreamer://<ip>` for a Swabian Pulse Streamer (`pip install pulsestreamer`), `pulseblaster://0?clock=500` for a SpinCore PulseBlaster (SpinCore's `spinapi`), and `timetagger://<serial>?click=1&gate=2` for a Swabian Time Tagger (Swabian's installer). A scan finds the Swabian devices.
+- `qick://<name server>:8888/<proxy name>` for an RFSoC board running QICK, through its Pyro4 server (`pip install qick Pyro4`, tProc v2 firmware). Kelvin plays one generator as a continuous tone or as pulses and reads I/Q from one readout. A tone keeps playing after a program ends, so Kelvin stops every generator (`reset_gens`) when the output goes off and when it disconnects.
+
 Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app; install Kelvin from source to use them (`pip install "kelvin-lab[desktop,zhinst]"` or `[desktop,qd]`). These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.
+
+**Instruments on the network with their own protocol.** No vendor software is needed; the address says how to talk:
+- `http://<ip>:<port>/<base>` (or `https://`) for an instrument with a web API, such as a Light Conversion PHAROS (`http://<ip>:20022/v1`). Card commands are the method, the path and a JSON body: `GET /Basic/ActualOutputPower`, `PUT /Basic/TargetAttenuatorPercentage {value}`. Add `?auth_env=NAME` for a bearer token kept in that environment variable, or `?insecure=1` for a self-signed certificate.
+- `m2://<ip>:<port>` for an M Squared laser (SolsTiS and other ICE-BLOC controllers): JSON over TCP. On the laser's web page, under Remote interface, enter this computer's IP address and the port. Kelvin starts tuning with the target wavelength and follows it with the tuning status and the wavelength reading. The protocol has no emission switch, so the pump and the shutter keep their own control.
+- `toptica://<ip>` for a TOPTICA DLC pro, through its command line (TCP port 1998). The card is a draft until someone checks the current's unit on a real controller.
+
+What Kelvin does not send: the PHAROS's start, standby and preset actions, its preset edits and interlock resets; the SolsTiS's raw hardware outputs, profiles and TeraScan; the DLC pro's exec commands and current clip. The PHAROS and the SolsTiS have no login of their own, so keep them on the lab network.
 
 **Names that differ between installations.** A card can declare variables, such as a Mercury iTC's sensor UID or a lock-in's demodulator. Set them per instrument with `vars`. The draft lab config lists them with their defaults so you can check them, and values may only contain letters, digits and `. _ + -`, so nothing can be slipped into a command.
 
@@ -86,6 +102,37 @@ instruments:
   itc:    { card: oxford/mercury-itc, address: "TCPIP0::10.0.0.9::7020::SOCKET", vars: { sensor: DB6.T1 } }
   li:     { card: zhinst/mfli, address: "zhinst://dev5678", limits: { amplitude: [0, 0.5] } }
 ```
+
+## Spin experiments (NV centers)
+
+Kelvin builds the pulse sequences for spin experiments itself, checks them, and plays them on a pulse generator:
+
+| Protocol | What it measures |
+|---|---|
+| `cw` | CW ODMR: the laser on, the microwave on for half of each period, signal and reference windows |
+| `pulsed_odmr` | the resonance with a π pulse (`t_pi`), narrower than CW |
+| `rabi` | a microwave pulse of length `tau`: the oscillation gives the π time |
+| `ramsey` | π/2, free evolution `tau`, π/2: T2* and detuning |
+| `hahn_echo` | π/2, π, π/2 with `tau` on each side: T2 |
+| `t1` | dark time `tau` after initialization: T1 |
+
+Each sequence has three channels: the laser (through the AOM), the microwave (a switch, or the source's pulse-modulation input) and the counter's gate, with a signal and a reference window. Before anything plays, Kelvin checks the timing against the generator's resolution, looks for overlapping windows, and keeps the microwave duty cycle below `max_mw_duty` (0.5 by default) so the sample doesn't heat. `show_sequence` draws a sequence before it runs. Starting a sequence (`running`) counts as a drive, so a person approves it.
+
+The usual order is CW ODMR to find the resonance at a low microwave power, then Rabi for the π time, then pulsed ODMR, Ramsey, echo or T1. Kelvin fits the Rabi oscillation and reports the π time.
+
+The virtual lab has an NV center, a pulse generator, a microwave source and a photon counter to try this on. A real setup names which output goes where, in the pulse generator's `vars`:
+
+```yaml
+lab: NV setup
+instruments:
+  pg:      { card: swabian/pulse-streamer, address: "pulsestreamer://169.254.8.2",
+             vars: { laser: "0", mw: "1", gate: "2", laser_delay: "4.5e-7", max_mw_duty: "0.3" } }
+  mw:      { card: srs/sg384, address: "TCPIP0::10.0.0.20::5025::SOCKET", limits: { power: [-60, 0] } }
+  counter: { card: swabian/time-tagger, address: "timetagger://1234000ABC?click=1&gate=2" }
+  aom:     { card: moglabs/xrf, address: "TCPIP0::10.0.0.30::7802::SOCKET", vars: { ch: "1" }, limits: { power: [-50, 30] } }
+```
+
+For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pulse_source` to external and `modulation` on. MOGLabs and Novatech drivers have no read-back for some settings, so Kelvin switches their RF off when it connects and remembers what it set.
 
 ## Cards for new instruments
 

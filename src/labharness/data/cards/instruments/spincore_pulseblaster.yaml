@@ -1,0 +1,91 @@
+card: 1
+id: spincore/pulseblaster
+model: SpinCore PulseBlaster (ESR-PRO, ESR, PB24)
+vendor: SpinCore
+kind: pulse-generator
+status: community
+manual: "SpinCore SpinAPI reference and the PulseBlasterESR-PRO owner's manual"
+notes:
+  - "Address pulseblaster://<board, from 0>?clock=<core clock in MHz> (e.g. pulseblaster://0?clock=500); add &pro=1 for a PulseBlasterESR-PRO (its bits 21-23 must be set for ordinary pulses; on other models they are outputs)."
+  - "Needs SpinCore's SpinAPI installed, and the Python wrapper: pip install spinapi (written by labscript, not SpinCore)."
+  - "The shortest instruction is 5 clock cycles (10 ns at 500 MHz): two edges closer than that are refused. Stopping loads an all-off program, since pb_stop can leave outputs high."
+  - "Manual: www.spincore.com, PulseBlasterESR-PRO owner's manual (PBESR-Pro_Manual.pdf)."
+identify:
+  idn: "^SpinCore,PulseBlaster"
+  example: "SpinCore,PulseBlaster,board 0,20250210"
+vars:
+  laser: { default: "0", label: "Output wired to the AOM (laser)" }
+  mw: { default: "1", label: "Output wired to the microwave switch or the source's pulse-modulation input" }
+  gate: { default: "2", label: "Output wired to the counter's gate input" }
+  laser_delay: { default: "0", label: "How late the AOM responds, in seconds (e.g. 4.5e-7)" }
+  max_mw_duty: { default: "0.5", label: "Highest microwave duty cycle allowed (heating of the sample)" }
+on_connect:
+  - "SET wiring laser={laser},mw={mw},gate={gate}"
+  - "SET delays laser={laser_delay}"
+  - "SET limits max_mw_duty={max_mw_duty}"
+
+parameters:
+  running:
+    label: Playing
+    kind: drive
+    type: bool
+    set: "SET running {value}"
+    get: "GET running"
+    safe: off
+    description: Plays the sequence in a loop, which pulses the light and the microwave onto the sample
+  protocol:
+    label: Protocol
+    kind: measure
+    type: enum
+    set: "SET protocol {value}"
+    get: "GET protocol"
+    values: [cw, pulsed_odmr, rabi, ramsey, hahn_echo, t1]
+    default: pulsed_odmr
+  tau:
+    label: Tau
+    kind: measure
+    unit: s
+    set: "SET tau {value}"
+    get: "GET tau"
+    limits: [0, 0.01]
+    description: The swept time (MW pulse for Rabi, free evolution for Ramsey and echo, dark wait for T1)
+  t_pi:
+    label: Pi pulse
+    kind: measure
+    unit: s
+    set: "SET t_pi {value}"
+    get: "GET t_pi"
+    limits: [1.0e-9, 1.0e-5]
+  t_laser:
+    label: Laser pulse
+    kind: measure
+    unit: s
+    set: "SET t_laser {value}"
+    get: "GET t_laser"
+    limits: [1.0e-7, 1.0e-4]
+  t_gate:
+    label: Counter window
+    kind: measure
+    unit: s
+    set: "SET t_gate {value}"
+    get: "GET t_gate"
+    limits: [1.0e-8, 1.0e-5]
+  t_wait:
+    label: Dark wait
+    kind: measure
+    unit: s
+    set: "SET t_wait {value}"
+    get: "GET t_wait"
+    limits: [0, 1.0e-3]
+  period:
+    label: Period
+    kind: measure
+    unit: s
+    get: "GET period"
+  mw_duty:
+    label: MW duty cycle
+    kind: measure
+    get: "GET mw_duty"
+safe_sequence: [running]
+display:
+  headline: period

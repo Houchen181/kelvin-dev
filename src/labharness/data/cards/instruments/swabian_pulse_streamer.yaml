@@ -1,0 +1,91 @@
+card: 1
+id: swabian/pulse-streamer
+model: Swabian Instruments Pulse Streamer 8/2
+vendor: Swabian Instruments
+kind: pulse-generator
+status: community
+manual: "Pulse Streamer 8/2 documentation (v2.1), Python API"
+manual_url: "https://www.swabianinstruments.com/static/documentation/pulse-streamer/v2.1/sections/api-doc.html"
+notes:
+  - "Address pulsestreamer://<ip or hostname> (the factory fallback address is 169.254.8.2). Needs Swabian's client: pip install pulsestreamer."
+  - "Plays Kelvin's protocols (cw, pulsed_odmr, rabi, ramsey, hahn_echo, t1) on three of its eight outputs: set which in vars, and the AOM's delay."
+  - "Stopping sets every output low (the vendor's constant(ZERO)). Steps are 1 ns, the shortest pulse 2 ns."
+identify:
+  idn: "^Swabian Instruments,Pulse Streamer"
+  example: "Swabian Instruments,Pulse Streamer 8/2,00:26:32:f0:3a:12,1.7.2"
+vars:
+  laser: { default: "0", label: "Output wired to the AOM (laser)" }
+  mw: { default: "1", label: "Output wired to the microwave switch or the source's pulse-modulation input" }
+  gate: { default: "2", label: "Output wired to the counter's gate input" }
+  laser_delay: { default: "0", label: "How late the AOM responds, in seconds (e.g. 4.5e-7)" }
+  max_mw_duty: { default: "0.5", label: "Highest microwave duty cycle allowed (heating of the sample)" }
+on_connect:
+  - "SET wiring laser={laser},mw={mw},gate={gate}"
+  - "SET delays laser={laser_delay}"
+  - "SET limits max_mw_duty={max_mw_duty}"
+
+parameters:
+  running:
+    label: Playing
+    kind: drive
+    type: bool
+    set: "SET running {value}"
+    get: "GET running"
+    safe: off
+    description: Plays the sequence in a loop, which pulses the light and the microwave onto the sample
+  protocol:
+    label: Protocol
+    kind: measure
+    type: enum
+    set: "SET protocol {value}"
+    get: "GET protocol"
+    values: [cw, pulsed_odmr, rabi, ramsey, hahn_echo, t1]
+    default: pulsed_odmr
+  tau:
+    label: Tau
+    kind: measure
+    unit: s
+    set: "SET tau {value}"
+    get: "GET tau"
+    limits: [0, 0.01]
+    description: The swept time (MW pulse for Rabi, free evolution for Ramsey and echo, dark wait for T1)
+  t_pi:
+    label: Pi pulse
+    kind: measure
+    unit: s
+    set: "SET t_pi {value}"
+    get: "GET t_pi"
+    limits: [1.0e-9, 1.0e-5]
+  t_laser:
+    label: Laser pulse
+    kind: measure
+    unit: s
+    set: "SET t_laser {value}"
+    get: "GET t_laser"
+    limits: [1.0e-7, 1.0e-4]
+  t_gate:
+    label: Counter window
+    kind: measure
+    unit: s
+    set: "SET t_gate {value}"
+    get: "GET t_gate"
+    limits: [1.0e-8, 1.0e-5]
+  t_wait:
+    label: Dark wait
+    kind: measure
+    unit: s
+    set: "SET t_wait {value}"
+    get: "GET t_wait"
+    limits: [0, 1.0e-3]
+  period:
+    label: Period
+    kind: measure
+    unit: s
+    get: "GET period"
+  mw_duty:
+    label: MW duty cycle
+    kind: measure
+    get: "GET mw_duty"
+safe_sequence: [running]
+display:
+  headline: period
