@@ -2,6 +2,9 @@
 
 Chat history is append-only: earlier turns are never edited. Project membership lives in a separate index
 (_projects.json), so filing a chat never rewrites the chat file that a running turn may be saving.
+
+Each project also keeps its memory in that index: the user's instructions and a short list of notes (durable
+facts). A chat sees only the memory of the project it is filed under, and deleting a project deletes its memory.
 """
 from __future__ import annotations
 
@@ -17,6 +20,10 @@ from typing import Any, Dict, List, Optional
 _ID = re.compile(r"^[0-9a-f]{12}$")
 _PROJECT_ID = re.compile(r"^p[0-9a-f]{8}$")
 MAX_NAME = 60
+MAX_INSTRUCTIONS = 4000  # characters, for a project's instructions and for the global ones
+MAX_NOTE = 300
+MAX_NOTES = 50
+NOTE_KINDS = ("decision", "procedure", "quirk", "result")
 
 
 def _name(name: Any) -> str:
@@ -24,6 +31,10 @@ def _name(name: Any) -> str:
     if not name:
         raise ValueError("A project needs a name.")
     return name
+
+
+def instructions_text(text: Any) -> str:
+    return str(text or "").strip()[:MAX_INSTRUCTIONS]
 
 
 class ChatStore:
@@ -92,6 +103,12 @@ class ChatStore:
     def project_of(self, chat_id: str) -> Optional[str]:
         return self._read_index()["assign"].get(chat_id)
 
+    def memory_of(self, chat_id: str) -> Optional[Dict[str, Any]]:
+        """The memory of the project this chat is filed under; None for an unfiled chat."""
+        index = self._read_index()
+        project_id = index["assign"].get(chat_id)
+        return self._find(index, project_id) if project_id else None
+
     # ------------------------------------------------------------------ projects
 
     def _read_index(self) -> Dict[str, Any]:
@@ -100,6 +117,9 @@ class ChatStore:
         except (OSError, ValueError):
             data = {}
         projects = [p for p in data.get("projects") or [] if _PROJECT_ID.match(str(p.get("id", "")))]
+        for p in projects:
+            p.setdefault("instructions", "")
+            p.setdefault("notes", [])
         known = {p["id"] for p in projects}
         assign = {c: p for c, p in (data.get("assign") or {}).items() if p in known}
         return {"projects": projects, "assign": assign}
@@ -113,8 +133,12 @@ class ChatStore:
         """In the order they were made."""
         return self._read_index()["projects"]
 
+    def project(self, project_id: str) -> Dict[str, Any]:
+        return self._find(self._read_index(), project_id)
+
     def create_project(self, name: Any) -> Dict[str, Any]:
-        project = {"id": "p" + secrets.token_hex(4), "name": _name(name), "created": time.time()}
+        project = {"id": "p" + secrets.token_hex(4), "name": _name(name), "created": time.time(),
+                   "instructions": "", "notes": []}
         with self._lock:
             index = self._read_index()
             index["projects"].append(project)
@@ -129,8 +153,49 @@ class ChatStore:
             self._write_index(index)
         return project
 
+    def set_instructions(self, project_id: str, text: Any) -> Dict[str, Any]:
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            project["instructions"] = instructions_text(text)
+            self._write_index(index)
+        return project
+
+    def add_note(self, project_id: str, text: Any, kind: str, chat_id: Optional[str] = None) -> Dict[str, Any]:
+        """Save a short durable fact to a project. Saving the same text again returns the note already there."""
+        text = " ".join(str(text or "").split())
+        if not text:
+            raise ValueError("A note needs some text.")
+        if len(text) > MAX_NOTE:
+            raise ValueError("A note is at most %d characters; shorten it to the fact itself." % MAX_NOTE)
+        if kind not in NOTE_KINDS:
+            raise ValueError("A note's kind is one of: %s." % ", ".join(NOTE_KINDS))
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            for note in project["notes"]:
+                if note["text"].lower() == text.lower():
+                    return note
+            if len(project["notes"]) >= MAX_NOTES:
+                raise ValueError("This project already has %d notes; the user can delete old ones in Project settings."
+                                 % MAX_NOTES)
+            note = {"id": "n" + secrets.token_hex(4), "kind": kind, "text": text, "created": time.time(), "chat": chat_id}
+            project["notes"].append(note)
+            self._write_index(index)
+        return note
+
+    def delete_note(self, project_id: str, note_id: str) -> None:
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            kept = [n for n in project["notes"] if n.get("id") != note_id]
+            if len(kept) == len(project["notes"]):
+                raise KeyError("no note %r" % note_id)
+            project["notes"] = kept
+            self._write_index(index)
+
     def delete_project(self, project_id: str) -> None:
-        """The project goes; its conversations stay, unfiled."""
+        """The project and its memory go; its conversations stay, unfiled."""
         with self._lock:
             index = self._read_index()
             self._find(index, project_id)

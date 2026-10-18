@@ -165,12 +165,45 @@
       <label for="default-model">Default model for new chats</label>
       <select id="default-model" name="default_model"></select>
     </div>
+    <div class="field">
+      <label for="global-instructions">Instructions for every conversation</label>
+      <textarea id="global-instructions" rows="4" maxlength="4000" spellcheck="true" placeholder="e.g. Give fields in tesla and temperatures in kelvin. Ask me before any overnight run."></textarea>
+      <span class="hint">Kelvin reads these in every chat. Keep what belongs to one experiment in that project's settings.</span>
+    </div>
     <footer class="dialog-foot">
       <button id="quit-app" class="btn" type="button" hidden>Quit Kelvin</button>
       <span id="settings-msg" class="muted small"></span>
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Cancel</button>
       <button id="save-settings" class="btn primary" type="button">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="project-dialog" class="dialog" aria-labelledby="project-dialog-title">
+  <form id="project-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="project-dialog-title">Project settings</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <p class="muted small"><b id="project-dialog-name"></b> · Only conversations in this project see what is here.</p>
+    <div class="field">
+      <label for="project-instructions">Instructions</label>
+      <textarea id="project-instructions" rows="6" maxlength="4000" spellcheck="true" placeholder="e.g. Sample: Hall bar D3, contacts 1–4 for the four-probe. Keep the gate within ±5 V."></textarea>
+      <span class="hint">Kelvin reads these in every conversation in this project.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>
+      <ul id="project-notes" class="memory-notes"></ul>
+      <span class="hint">Short facts Kelvin saved from this project's conversations. Delete any that are wrong or out of date; a deleted note is gone at once.</span>
+    </div>
+    <footer class="dialog-foot">
+      <span id="project-msg" class="muted small"></span>
+      <div class="spacer"></div>
+      <button class="btn" value="cancel" type="submit">Cancel</button>
+      <button id="save-project" class="btn primary" type="button">Save</button>
     </footer>
   </form>
 </dialog>

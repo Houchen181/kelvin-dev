@@ -1,4 +1,4 @@
-"""Portal settings: API keys and model choices, kept in a local JSON file.
+"""Portal settings: API keys, model choices and the user's global instructions, kept in a local JSON file.
 
 Keys are read by the server only and sent nowhere except their own provider;
 the browser can see whether a key is configured, never its value.
@@ -11,13 +11,15 @@ import secrets
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .store import MAX_INSTRUCTIONS
+
 ENV = {
     "anthropic_api_key": "ANTHROPIC_API_KEY",
     "openai_api_key": "OPENAI_API_KEY",
     "gemini_api_key": "GEMINI_API_KEY",
 }
 SECRET = set(ENV) | {"local_api_key"}
-EDITABLE = SECRET | {"local_base_url", "local_models", "default_model"}
+EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions"}
 
 
 class Settings:
@@ -56,6 +58,8 @@ class Settings:
             if name not in EDITABLE or value is None:
                 continue
             value = str(value).strip()
+            if name == "instructions":  # read by Kelvin in every conversation
+                value = value[:MAX_INSTRUCTIONS]
             if value:
                 self._data[name] = value
             else:
@@ -69,6 +73,7 @@ class Settings:
             "local_base_url": self._data.get("local_base_url", ""),
             "local_models": self._data.get("local_models", ""),
             "default_model": self._data.get("default_model", ""),
+            "instructions": self._data.get("instructions", ""),
         }
 
     def _save(self) -> None:

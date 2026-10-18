@@ -28,6 +28,7 @@
     dots: '<circle cx="5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="19" cy="12" r="1.1"/>',
     folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
     pencil: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
+    sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
     // instrument kinds
     "source-meter": '<path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/>',
@@ -728,6 +729,7 @@
       case "get_trace": return v("Reading", "Read") + " a trace from run " + code(a.run_id);
       case "recent_events": return v("Reading", "Read") + " the event log";
       case "wait": return v("Waiting", "Waited") + " " + esc(String(a.seconds)) + " s";
+      case "save_note": return v("Saving", "Saved") + " a note to the project";
       default: return code(name);
     }
   }
@@ -1107,9 +1109,54 @@
     popMenu(anchor, [
       { label: "New chat in this project", icon: "plus", onClick: () => newChat(p.id) },
       { label: "Rename", icon: "pencil", onClick: () => { SIDE.renaming = p.id; renderChats(); } },
+      { label: "Project settings", icon: "sliders", onClick: () => openProjectSettings(p) },
       { sep: true },
       { label: "Delete project", icon: "trash", danger: true, onClick: () => deleteProject(p, chats) },
     ]);
+  }
+
+  // project memory: the user's instructions and the notes Kelvin saved, seen only by this project's chats
+  let editingProject = null;
+  async function openProjectSettings(p) {
+    try { Object.assign(p, await api("/api/projects/" + p.id)); } catch (e) { toast(e.message); return; }  // notes may be new
+    editingProject = p;
+    $("project-dialog-name").textContent = p.name;
+    $("project-instructions").value = p.instructions || "";
+    $("project-msg").textContent = "";
+    renderNotes(p);
+    $("project-dialog").showModal();
+  }
+  function renderNotes(p) {
+    const notes = p.notes || [];
+    $("notes-count").textContent = notes.length ? notes.length + (notes.length === 1 ? " note" : " notes") : "";
+    if (!notes.length) {
+      $("project-notes").replaceChildren(h("li", { class: "memory-empty" },
+        "No notes yet. When a conversation settles something worth keeping (a decision, a procedure, an instrument quirk, a result), Kelvin saves it here."));
+      return;
+    }
+    $("project-notes").replaceChildren(...notes.map((n) => {
+      const chat = S.chats.find((c) => c.id === n.chat);
+      const when = new Date(n.created * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+      return h("li", { class: "memory-note" }, h("span", { class: "memory-kind" }, n.kind),
+        h("div", { class: "memory-body" }, h("span", {}, n.text), h("span", { class: "memory-meta" }, when + (chat ? " · " + chat.title : ""))),
+        rowButton("trash", "Delete this note", () => deleteNote(p, n)));
+    }));
+  }
+  async function deleteNote(p, n) {
+    try { await api("/api/projects/" + p.id + "/notes/" + n.id, { method: "DELETE" }); } catch (e) { $("project-msg").textContent = e.message; return; }
+    p.notes = p.notes.filter((x) => x.id !== n.id);
+    renderNotes(p);
+  }
+  async function saveProjectSettings() {
+    const p = editingProject;
+    $("project-msg").textContent = "Saving…";
+    try {
+      Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { instructions: $("project-instructions").value } }));
+      $("project-dialog").close();
+      toast("Saved. Conversations in " + p.name + " use it from their next message.");
+    } catch (e) {
+      $("project-msg").textContent = e.message;
+    }
   }
 
   function startNewProject(moveChatId) {
@@ -1423,6 +1470,7 @@
     $("local-url").value = (S.settings && S.settings.local_base_url) || "";
     $("local-models").value = (S.settings && S.settings.local_models) || "";
     fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
+    $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("settings-msg").textContent = "";
     $("settings-dialog").showModal();
   }
@@ -1435,6 +1483,7 @@
     body.local_base_url = $("local-url").value.trim();
     body.local_models = $("local-models").value.trim();
     body.default_model = $("default-model").value;
+    body.instructions = $("global-instructions").value;
     $("settings-msg").textContent = "Saving…";
     try {
       const r = await api("/api/settings", { body });
@@ -1519,6 +1568,7 @@
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
     $("save-settings").addEventListener("click", saveSettings);
+    $("save-project").addEventListener("click", saveProjectSettings);
     $("quit-app").hidden = !boot.can_quit;
     $("quit-app").addEventListener("click", async () => {
       if (!confirm("Quit Kelvin? The lab keeps its current settings.")) return;

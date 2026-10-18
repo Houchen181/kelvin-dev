@@ -83,7 +83,7 @@ class Guard:
 def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None) -> Any:
-    agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo))
+    agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo), settings)
     tasks: List[asyncio.Task] = []
 
     @asynccontextmanager
@@ -176,16 +176,30 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse(store.projects())
 
     async def project(request: Request) -> Response:
+        """One project with its memory (instructions and notes). PATCH takes a new name, new instructions, or both."""
         project_id = request.path_params["project_id"]
         try:
             if request.method == "DELETE":
-                store.delete_project(project_id)
+                store.delete_project(project_id)  # its memory goes with it
                 return JSONResponse({"ok": True})
-            return JSONResponse(store.rename_project(project_id, (await request.json()).get("name")))
+            if request.method == "PATCH":
+                body = await request.json()
+                if "name" in body:
+                    store.rename_project(project_id, body["name"])
+                if "instructions" in body:
+                    store.set_instructions(project_id, body["instructions"])
+            return JSONResponse(store.project(project_id))
         except KeyError as e:
             return error(404, e.args[0])
         except ValueError as e:
             return error(400, str(e))
+
+    async def note(request: Request) -> Response:
+        try:
+            store.delete_note(request.path_params["project_id"], request.path_params["note_id"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        return JSONResponse({"ok": True})
 
     async def turn(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
@@ -305,7 +319,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
         Route("/api/projects", projects, methods=["GET", "POST"]),
-        Route("/api/projects/{project_id}", project, methods=["PATCH", "DELETE"]),
+        Route("/api/projects/{project_id}", project, methods=["GET", "PATCH", "DELETE"]),
+        Route("/api/projects/{project_id}/notes/{note_id}", note, methods=["DELETE"]),
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/state", state),

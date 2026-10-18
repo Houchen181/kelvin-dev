@@ -445,8 +445,20 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .dialog-head { display: flex; align-items: center; }
 .dialog-head h2 { margin: 0; font-size: 18px; flex: 1; }
 .field { display: grid; gap: 6px; }
-.field label { font-weight: 550; font-size: 14px; }
-.field input, .field select { width: 100%; border: 1px solid var(--line-strong); border-radius: 10px; padding: 8px 10px; background: var(--raised); }
+.field label, .field-label { font-weight: 550; font-size: 14px; }
+.field input, .field select, .field textarea { width: 100%; border: 1px solid var(--line-strong); border-radius: 10px; padding: 8px 10px; background: var(--raised); }
+.field textarea { resize: vertical; min-height: 84px; max-height: 50vh; line-height: 1.45; }
+.field-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+/* project notes: short facts, each deletable */
+.memory-notes { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; max-height: 240px; overflow: auto; }
+.memory-note { display: flex; align-items: flex-start; gap: 8px; padding: 8px 6px 8px 10px; border-top: 1px solid var(--line); font-size: 14px; }
+.memory-note:first-child { border-top: 0; }
+.memory-kind { flex: none; margin-top: 2px; font-size: 11px; padding: 0 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.memory-body { flex: 1; min-width: 0; display: grid; overflow-wrap: anywhere; }
+.memory-meta { font-size: 12px; color: var(--muted); }
+.memory-note .row-btn { opacity: 1; }
+.memory-note .row-btn:hover { color: var(--danger); background: var(--danger-soft); }
+.memory-empty { padding: 12px; font-size: 13.5px; color: var(--muted); }
 .key-row { display: flex; gap: 6px; align-items: center; }
 .hint { font-size: 12.5px; color: var(--muted); }
 .hint.set { color: var(--ok); }

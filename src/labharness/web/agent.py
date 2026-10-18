@@ -2,6 +2,9 @@
 
 The model reaches the lab only through the same MCP tools external agents use
 (connected in-process), so the safety gate and the approval rules are identical.
+
+Memory has three levels that never mix: the user's global instructions (every chat), a project's instructions
+and notes (only the chats filed under that project), and the conversation itself.
 """
 from __future__ import annotations
 
@@ -15,7 +18,8 @@ from mcp import Client
 from ..agent.runtime import LabRuntime
 from ..agent.server import INSTRUCTIONS
 from .providers.base import Emit, ModelInfo, Provider
-from .store import ChatStore
+from .settings import Settings
+from .store import MAX_NOTE, NOTE_KINDS, ChatStore
 
 SYSTEM = INSTRUCTIONS + """
 You are Kelvin, the lab assistant in this portal, working with an experimental physicist.
@@ -24,6 +28,20 @@ Use units. Prefer a short list or small table over paragraphs. While a plan runs
 progress and plots live in a Runs pane beside the chat; when it finishes, the conversation shows the automatic
 assessment and the pane shows the key results, plots with fits and the data. So do not repeat them: add what
 they cannot (interpretation, anything suspicious, the next step)."""
+PROJECT = """# Project “{name}”
+This conversation is filed under the project “{name}”. The instructions and notes below apply to this project
+only; they come from the user and from earlier conversations in it."""
+SAVE_NOTE_HINT = """Use save_note for a fact later conversations in this project will need: a decision, a working procedure,
+an instrument quirk, or a key result (with units and run ID). Never save questions, chit-chat, one-off readings or
+anything already in the notes."""
+SAVE_NOTE = {
+    "name": "save_note",
+    "description": "Save one short, durable fact to this project's notes, so every later conversation in the project "
+                   "knows it. The user sees every note and can delete it.",
+    "schema": {"type": "object", "required": ["kind", "text"], "properties": {
+        "kind": {"type": "string", "enum": list(NOTE_KINDS)},
+        "text": {"type": "string", "description": "The fact in one sentence, at most %d characters." % MAX_NOTE}}},
+}
 MAX_STEPS = 25
 _RUN_ID = re.compile(r"run_id='([^']+)'")
 
@@ -50,9 +68,11 @@ def describe_error(provider: Provider, e: Exception) -> str:
 
 
 class ChatAgent:
-    def __init__(self, runtime: LabRuntime, store: ChatStore, mcp_server: Any, providers: Dict[str, Provider]):
+    def __init__(self, runtime: LabRuntime, store: ChatStore, mcp_server: Any, providers: Dict[str, Provider],
+                 settings: Optional[Settings] = None):
         self.runtime = runtime
         self.store = store
+        self.settings = settings
         self.mcp_server = mcp_server
         self.providers = providers
         self.tools: List[Dict[str, Any]] = []
@@ -84,6 +104,42 @@ class ChatAgent:
             except Exception as e:
                 groups.append({"provider": p.name, "label": p.label, "models": [], "error": describe_error(p, e)})
         return {"groups": groups}
+
+    # ------------------------------------------------------------------ memory
+
+    def context(self, chat_id: str) -> Dict[str, Any]:
+        """The system prompt and tools for one turn in this chat.
+
+        Stable parts come first, so a cached prompt prefix survives: Kelvin's instructions, then the user's
+        global instructions, then the project's instructions, then its notes (which change most often).
+        A chat outside every project sees no project memory and cannot save notes.
+        """
+        parts = [SYSTEM]
+        mine = self.settings.get("instructions") if self.settings else None
+        if mine:
+            parts.append("# The user's instructions for every conversation\n" + mine)
+        memory = self.store.memory_of(chat_id)
+        if not memory:
+            return {"system": "\n\n".join(parts), "tools": self.tools, "project": None}
+        parts.append(PROJECT.format(name=memory["name"]))
+        if memory["instructions"]:
+            parts.append("## Instructions\n" + memory["instructions"])
+        if memory["notes"]:
+            parts.append("## Notes, oldest first\n" + "\n".join("- [%s] %s" % (n["kind"], n["text"])
+                                                                for n in memory["notes"]))
+        parts.append(SAVE_NOTE_HINT)
+        return {"system": "\n\n".join(parts), "tools": self.tools + [SAVE_NOTE], "project": memory["id"]}
+
+    def _save_note(self, project_id: str, chat_id: str, args: Any) -> Tuple[str, bool]:
+        if not isinstance(args, dict):
+            return "the arguments were not valid JSON; send the call again", True
+        try:
+            note = self.store.add_note(project_id, args.get("text"), str(args.get("kind") or ""), chat_id)
+        except KeyError:
+            return "not saved: the project no longer exists", True
+        except ValueError as e:
+            return "not saved: %s" % e, True
+        return "in the project notes: [%s] %s" % (note["kind"], note["text"]), False
 
     # ------------------------------------------------------------------ turns
 
@@ -122,9 +178,10 @@ class ChatAgent:
                 chat["title"] = first[:48] + ("…" if len(first) > 48 else "")
             chat["model"] = model_key
             self.store.save(chat)
+            context = self.context(chat_id)  # fixed for the whole turn, so every step reuses the cached prefix
             await emit({"type": "turn_start", "model": model_key, "title": chat["title"]})
             for _ in range(MAX_STEPS):
-                if not await self._step(chat, provider, model_id, emit):
+                if not await self._step(chat, provider, model_id, context, emit):
                     return
             await emit({"type": "note", "text": "Paused after %d steps. Say “continue” to go on." % MAX_STEPS})
             await emit({"type": "turn_end", "reason": "step_limit"})
@@ -135,7 +192,8 @@ class ChatAgent:
             self.active = None
             self._stream_task = None
 
-    async def _step(self, chat: Dict[str, Any], provider: Provider, model_id: str, emit: Emit) -> bool:
+    async def _step(self, chat: Dict[str, Any], provider: Provider, model_id: str, context: Dict[str, Any],
+                    emit: Emit) -> bool:
         """One model response plus its tool calls. Returns True if the turn continues."""
         partial: List[str] = []
 
@@ -147,7 +205,7 @@ class ChatAgent:
             await emit(event)
 
         self._stream_task = asyncio.ensure_future(
-            provider.stream(model_id, SYSTEM, chat["messages"], self.tools, relay))
+            provider.stream(model_id, context["system"], chat["messages"], context["tools"], relay))
         try:
             result = await self._stream_task
         except asyncio.CancelledError:
@@ -179,7 +237,10 @@ class ChatAgent:
                 content, is_error = "not run: the user pressed stop", True
             else:
                 await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
-                content, is_error = await self._call(call, emit)
+                if call["name"] == SAVE_NOTE["name"] and context["project"]:
+                    content, is_error = self._save_note(context["project"], chat["id"], call["input"])
+                else:
+                    content, is_error = await self._call(call, emit)
                 await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
                             "is_error": is_error, "run_id": run_id_of(content) if call["name"] == "run_plan" else None})
             results.append({"id": call["id"], "name": call["name"], "content": content, "is_error": is_error})

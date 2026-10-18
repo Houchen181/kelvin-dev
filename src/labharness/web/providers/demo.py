@@ -5,6 +5,7 @@ It is not AI: it matches a few keywords and calls the real lab tools.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, Dict, List
 
 from .base import Emit, ModelInfo, Provider, TurnResult
@@ -53,13 +54,22 @@ class DemoProvider(Provider):
                 text = "That failed: %s" % (lines[0] if lines else "no details")
             elif run:  # the conversation already shows the assessment, and the Runs pane the data
                 text = "**%s.** The assessment is above; the plots and data are in the Runs pane." % (run[:1].upper() + run[1:])
+            elif result["name"] == "save_note":
+                text = "Saved. Every conversation in this project will know it; open Project settings to review or delete it."
             elif result["name"] == "lab_status":
                 text = "Here is the lab right now (expand the step for every value). Drives marked * are away from safe."
             else:
                 text = lines[0] if lines else "Done."
             return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
         ask = last["text"].lower()
-        if "map" in ask:
+        if ask.startswith(("remember", "note that")):
+            if not any(t["name"] == "save_note" for t in tools):
+                text = "Notes belong to a project. File this conversation under a project, then ask again."
+                return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
+            fact = re.sub(r"^\s*(remember|note)( that)?[:,]?\s*", "", last["text"], flags=re.I).strip()
+            kind = "quirk" if any(w in ask for w in ("leak", "drift", "noisy", "quirk", "unstable")) else "decision"
+            name, args, intro = "save_note", {"kind": kind, "text": fact[:1].upper() + fact[1:]}, "Saving that to the project notes."
+        elif "map" in ask:
             name, args = "run_plan", {"plan": FIELD_MAP}
             intro = "I'll map the lock-in signal against gate voltage at 0, 0.5 and 1 T (nested loops: field outside, gate inside)."
         elif "sweep" in ask:
@@ -71,7 +81,7 @@ class DemoProvider(Provider):
             name, args, intro = "lab_status", {}, "Checking the lab."
         else:
             text = ("I'm the scripted demo, not an AI. Try *check the lab status*, *sweep the gate*, "
-                    "*map gate against field* or *go to safe state*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
+                    "*map gate against field*, *go to safe state*, or, in a project, *remember that …*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
             return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
         blocks = await self._say(intro, emit)
         blocks.append({"type": "tool_call", "id": "lh_call_%d" % len(history), "name": name, "input": args})

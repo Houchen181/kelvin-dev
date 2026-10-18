@@ -34,6 +34,8 @@ class Scripted(Provider):
         self.turns = list(turns)
         self.delay = delay
         self.seen = []
+        self.systems = []
+        self.tool_names = []
 
     def available(self):
         return True
@@ -43,6 +45,8 @@ class Scripted(Provider):
 
     async def stream(self, model, system, history, tools, emit):
         self.seen.append([m["role"] for m in history])
+        self.systems.append(system)
+        self.tool_names.append([t["name"] for t in tools])
         if self.delay:
             await asyncio.sleep(self.delay)
         blocks = self.turns.pop(0)
@@ -324,3 +328,97 @@ def test_projects_organize_conversations(parts):
         client.delete("/api/chats/" + b["id"], headers=headers)
         assert store._read_index()["assign"] == {}                # deleting a chat drops its filing
         assert "project" not in store.load(a["id"])              # chat files never carry the project
+
+
+NOTE_CALL = [{"type": "text", "text": "Noting it."},
+             {"type": "tool_call", "id": "n1", "name": "save_note",
+              "input": {"kind": "quirk", "text": "Gate on D3 leaks above 6 V."}}]
+
+
+def test_project_memory_stays_in_its_project(parts):
+    _, settings, store = parts
+    from labharness.web.agent import SYSTEM
+    a = store.create_project("Alpha")
+    b = store.create_project("Beta")
+    store.set_instructions(a["id"], "ALPHA-RULE: keep the gate below 5 V.")
+    store.set_instructions(b["id"], "BETA-RULE: secret sample S7.")
+    store.add_note(b["id"], "BETA-NOTE: S7 is fragile.", "quirk")
+    settings.update({"instructions": "GLOBAL-RULE: fields in tesla."})
+    bot = Scripted([NOTE_CALL, DONE, DONE, NOTE_CALL, DONE, DONE])
+    client, headers = client_for(parts, {"scripted": bot})
+    with client:
+        in_a = client.post("/api/chats", json={"model": "scripted:m1", "project": a["id"]}, headers=headers).json()
+        loose = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
+
+        stream_turn(client, headers, in_a["id"], "the gate leaks above 6 V", "scripted:m1")  # saves a note
+        first, after_note = bot.systems
+        assert first == after_note                     # fixed for the whole turn: the cached prefix holds
+        assert "GLOBAL-RULE" in first and "ALPHA-RULE" in first and "Alpha" in first
+        assert "BETA" not in first
+        assert first.index(SYSTEM) < first.index("GLOBAL-RULE") < first.index("ALPHA-RULE")  # stable parts first
+        assert "save_note" in bot.tool_names[0]
+        notes = client.get("/api/projects/" + a["id"], headers=headers).json()["notes"]
+        assert [(n["kind"], n["text"], n["chat"]) for n in notes] == [("quirk", "Gate on D3 leaks above 6 V.", in_a["id"])]
+        assert store.project(b["id"])["notes"][0]["text"] == "BETA-NOTE: S7 is fragile."  # B untouched
+
+        stream_turn(client, headers, in_a["id"], "and now?", "scripted:m1")
+        assert "Gate on D3 leaks above 6 V." in bot.systems[-1]   # the next turn knows the note
+
+        events = stream_turn(client, headers, loose["id"], "the gate leaks above 6 V", "scripted:m1")
+        unfiled = bot.systems[-1]
+        assert unfiled == SYSTEM + "\n\n# The user's instructions for every conversation\nGLOBAL-RULE: fields in tesla."
+        assert "save_note" not in bot.tool_names[-1]
+        assert next(e for e in events if e["type"] == "tool_end")["is_error"]   # nowhere to save it
+        assert len(store.project(a["id"])["notes"]) == 1 and len(store.project(b["id"])["notes"]) == 1
+
+        # a human sees and deletes every note
+        note_id = notes[0]["id"]
+        assert client.delete("/api/projects/%s/notes/%s" % (a["id"], note_id), headers=headers).json() == {"ok": True}
+        assert client.delete("/api/projects/%s/notes/%s" % (a["id"], note_id), headers=headers).status_code == 404
+        assert client.delete("/api/projects/%s/notes/%s" % (b["id"], store.project(b["id"])["notes"][0]["id"]),
+                             headers=headers).status_code == 200
+        long = client.patch("/api/projects/" + a["id"], json={"instructions": "x" * 9000}, headers=headers).json()
+        assert len(long["instructions"]) == 4000 and long["name"] == "Alpha"
+
+        # deleting a project deletes its memory; its chats go on without it
+        assert client.delete("/api/projects/" + a["id"], headers=headers).json() == {"ok": True}
+        assert "xxxx" not in (store.root / "_projects.json").read_text(encoding="utf-8")
+        stream_turn(client, headers, in_a["id"], "still there?", "scripted:m1")
+        assert bot.systems[-1] == unfiled
+        assert client.get("/api/settings", headers=headers).json()["settings"]["instructions"] == "GLOBAL-RULE: fields in tesla."
+
+
+def test_notes_are_short_typed_and_bounded(tmp_path):
+    from labharness.web.store import MAX_NOTES
+    store = ChatStore(tmp_path)
+    p = store.create_project("P")
+    with pytest.raises(ValueError):
+        store.add_note(p["id"], "what is the time constant?", "question")   # only decisions, procedures, quirks, results
+    with pytest.raises(ValueError):
+        store.add_note(p["id"], "x" * 301, "result")
+    with pytest.raises(ValueError):
+        store.add_note(p["id"], "   ", "result")
+    first = store.add_note(p["id"], "T_c  = 4.2 K  (run r12)", "result")
+    assert first["text"] == "T_c = 4.2 K (run r12)"
+    assert store.add_note(p["id"], "t_c = 4.2 k (run r12)", "result") == first        # no duplicates
+    for i in range(MAX_NOTES - 1):
+        store.add_note(p["id"], "fact %d" % i, "decision")
+    with pytest.raises(ValueError):
+        store.add_note(p["id"], "one too many", "decision")
+    with pytest.raises(KeyError):
+        store.add_note("p00000000", "fact", "decision")
+
+
+def test_demo_saves_a_note_only_inside_a_project(parts):
+    _, _, store = parts
+    p = store.create_project("Hall bars")
+    client, headers = client_for(parts, {"demo": DemoProvider()})
+    with client:
+        filed = client.post("/api/chats", json={"model": "demo:demo", "project": p["id"]}, headers=headers).json()
+        loose = client.post("/api/chats", json={"model": "demo:demo"}, headers=headers).json()
+        events = stream_turn(client, headers, filed["id"], "Remember that the gate on D3 leaks above 6 V", "demo:demo")
+        assert next(e for e in events if e["type"] == "tool_end")["name"] == "save_note"
+        assert [(n["kind"], n["text"]) for n in store.project(p["id"])["notes"]] == [("quirk", "The gate on D3 leaks above 6 V")]
+        events = stream_turn(client, headers, loose["id"], "remember that the magnet quenches at 9 T", "demo:demo")
+        assert not any(e["type"] == "tool_start" for e in events)
+        assert len(store.project(p["id"])["notes"]) == 1
