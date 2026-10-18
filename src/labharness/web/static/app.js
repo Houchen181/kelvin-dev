@@ -3,7 +3,7 @@
   const token = decodeURIComponent(location.hash.slice(1));
   const $ = (id) => document.getElementById(id);
   const SVGNS = "http://www.w3.org/2000/svg";
-  const S = { chats: [], chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map() };
+  const S = { chats: [], projects: [], chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map() };
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -24,6 +24,10 @@
     x: '<path d="M6 6l12 12M18 6L6 18"/>',
     chev: '<path d="M9 6l6 6-6 6"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    dots: '<circle cx="5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="19" cy="12" r="1.1"/>',
+    folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
+    pencil: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
     // instrument kinds
     "source-meter": '<path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/>',
@@ -193,8 +197,9 @@
   const SERIES = 8;
   function lineChart(opts) {
     const { series, xKey, xUnit, yUnit } = opts;
+    const fit = series.length === 1 ? opts.fit : null;  // fitted curve over a single measured series
     const xs = series.flatMap((s) => s.points.map((p) => p.x));
-    const ys = series.flatMap((s) => s.points.map((p) => p.y));
+    const ys = series.flatMap((s) => s.points.map((p) => p.y)).concat(fit ? fit.y : []);
     const X = niceTicks(Math.min(...xs), Math.max(...xs), 5);
     const Y = niceTicks(Math.min(...ys), Math.max(...ys), 4);
     const xRange = [Math.min(...xs), Math.max(...xs)];
@@ -210,6 +215,10 @@
     if (series.length > 1) {
       box.append(h("div", { class: "legend" }, ...series.map((s, k) =>
         h("span", { class: "key" }, h("i", { style: "background:var(--s" + (k + 1) + ")" }), s.name))));
+    } else if (fit) {
+      box.append(h("div", { class: "legend" },
+        h("span", { class: "key" }, h("i", { style: "background:var(--series-1)" }), "measured"),
+        h("span", { class: "key" }, h("i", { style: "background:var(--fit)" }), fit.label)));
     }
     let drawnWidth = 0;
     const draw = () => {  // drawn at the real pixel width so text stays 11px
@@ -223,7 +232,7 @@
     return box;
 
     function build(W) {
-    const H = 200, M = { l: 48, r: series.length <= 4 ? 62 : 14, t: 10, b: 26 };
+    const H = 200, M = { l: 48, r: series.length <= 4 && !fit ? 62 : 14, t: 10, b: 26 };
     const sx = (x) => M.l + (x - xRange[0]) / (xRange[1] - xRange[0]) * (W - M.l - M.r);
     const sy = (y) => H - M.b - (y - Y.lo) / (Y.hi - Y.lo) * (H - M.t - M.b);
     const root = svg("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img", "aria-label": opts.title });
@@ -239,18 +248,28 @@
       label.textContent = tickText(t, xf, X.step);
       root.append(label);
     }
+    const taken = [];  // y positions of end labels already placed, so converging lines don't stack text
     series.forEach((s, k) => {
       const color = series.length > 1 ? "var(--s" + (k + 1) + ")" : "var(--series-1)";
       const d = s.points.map((p, i) => (i ? "L" : "M") + sx(p.x).toFixed(1) + "," + sy(p.y).toFixed(1)).join("");
-      root.append(svg("path", { class: "line", d, style: "stroke:" + color }));
+      root.append(svg("path", { class: fit ? "line thin" : "line", d, style: "stroke:" + color }));
+      if (fit && s.points.length <= 120) {
+        for (const p of s.points) root.append(svg("circle", { class: "datapt", cx: sx(p.x), cy: sy(p.y), r: 2.6, style: "fill:" + color }));
+      }
       const last = s.points[s.points.length - 1];
-      root.append(svg("circle", { class: "end", cx: sx(last.x), cy: sy(last.y), r: 4, style: "fill:" + color }));
-      if (series.length <= 4) {
-        const label = svg("text", { class: "endlabel", x: sx(last.x) + 8, y: sy(last.y) + 4 });
-        label.textContent = series.length > 1 ? s.name : fmt(last.y, yUnit);
+      if (!fit) root.append(svg("circle", { class: "end", cx: sx(last.x), cy: sy(last.y), r: 4, style: "fill:" + color }));
+      const ly = sy(last.y) + 4;
+      if (series.length <= 4 && !fit && !taken.some((t) => Math.abs(t - ly) < 13)) {
+        taken.push(ly);
+        const label = svg("text", { class: "endlabel", x: sx(last.x) + 8, y: ly });
+        label.textContent = series.length > 1 ? s.name.split(" = ").pop() : fmt(last.y, yUnit);
         root.append(label);
       }
     });
+    if (fit) {
+      const inRange = fit.x.map((x, i) => [x, fit.y[i]]).filter(([x]) => x >= xRange[0] && x <= xRange[1]);
+      root.append(svg("path", { class: "fitline", d: inRange.map(([x, y], i) => (i ? "L" : "M") + sx(x).toFixed(1) + "," + sy(y).toFixed(1)).join("") }));
+    }
     // hover layer: crosshair + tooltip
     const cross = svg("line", { class: "cross", y1: M.t, y2: H - M.b, visibility: "hidden" });
     const dots = series.map((s, k) => svg("circle", { class: "hoverdot", r: 4, visibility: "hidden",
@@ -284,17 +303,21 @@
     }
   }
 
-  async function renderRun(runId, anchor) {
-    const block = h("div", { class: "plots-block" });
-    anchor.after(block);
-    let data;
-    try { data = await api("/api/runs/" + encodeURIComponent(runId)); } catch (e) { return; }
+  function fitFor(analysis, key, trace) {
+    if (!analysis) return null;
+    const matches = analysis.series.filter((s) => s.y === key && s.fit && (trace || !s.group));
+    const s = matches[matches.length - 1];
+    return s ? { x: s.fit.x, y: s.fit.y, label: s.fit.model + " fit" } : null;
+  }
+
+  function runCharts(data, maxScalars) {
+    // data: {axes, scalars, rows, traces, analysis}; outer axis -> one line per value, inner axis -> x
     const grid = h("div", { class: "plots" });
     const axes = data.axes;
     if (axes.length && data.rows.length > 1) {
       const xa = axes[axes.length - 1];
       const outer = axes.length > 1 ? axes[0] : null;
-      for (const sc of data.scalars) {
+      for (const sc of data.scalars.slice(0, maxScalars || 99)) {
         let series;
         if (outer) {
           const groups = new Map();
@@ -307,22 +330,368 @@
         } else {
           series = [{ name: sc.key, points: data.rows.map((r) => ({ x: r[xa.key], y: r[sc.key] })) }];
         }
-        grid.append(lineChart({ title: sc.key, series, xKey: xa.key, xUnit: xa.unit, yUnit: sc.unit }));
+        series = series.map((s) => ({ name: s.name, points: s.points.filter((p) => typeof p.x === "number" && typeof p.y === "number") }))
+          .filter((s) => s.points.length);
+        if (series.length) grid.append(lineChart({ title: sc.key, series, xKey: xa.key, xUnit: xa.unit, yUnit: sc.unit, fit: fitFor(data.analysis, sc.key) }));
       }
     }
     for (const tr of data.traces) {
-      grid.append(lineChart({ title: tr.key + (data.rows.length > 1 ? " (last row)" : ""), xKey: "x", xUnit: tr.x_unit, yUnit: tr.unit,
+      grid.append(lineChart({ title: tr.key + (data.rows.length > 1 ? " (latest)" : ""), xKey: tr.x_unit === "Hz" ? "frequency" : "x",
+        xUnit: tr.x_unit, yUnit: tr.unit, fit: fitFor(data.analysis, tr.key, true),
         series: [{ name: tr.key, points: tr.x.map((x, i) => ({ x, y: tr.y[i] })) }] }));
     }
-    if (!grid.children.length) return;
-    const table = h("div", { class: "table-wrap", hidden: true });
-    const toggle = h("button", { class: "link", type: "button" }, "Show table");
-    toggle.addEventListener("click", () => {
-      if (!table.children.length) table.append(runTable(data));
-      table.hidden = !table.hidden;
-      toggle.textContent = table.hidden ? "Show table" : "Hide table";
+    return grid;
+  }
+
+  const KIND_LABEL = { peak: "peak", dip: "dip", linear: "linear", relaxation: "relaxation", flat: "no signal", steady: "steady",
+    monotonic: "monotonic", structured: "structure", value: "value", none: "too few points" };
+
+  function analysisBlock(a) {
+    const box = h("div", { class: "analysis" });
+    const ok = !a.issues.length;
+    box.append(h("div", { class: "assess" + (ok ? "" : " warn") },
+      h("span", { class: "assess-icon" }, icon(ok ? "check" : "warn")),
+      h("div", {}, h("p", { class: "assess-text" }, a.assessment), h("p", { class: "assess-next" }, h("b", {}, "Next: "), a.next))));
+    const rows = [];
+    for (const s of a.series.slice(0, 6)) {
+      if (!s.results.length) continue;
+      const fitText = s.fit ? s.fit.model + " fit, R² " + Number(s.fit.r2).toFixed(3) : "";
+      const what = s.fit && s.fit.model === s.kind ? fitText : (KIND_LABEL[s.kind] || s.kind) + (fitText ? " (" + fitText + ")" : "");
+      const title = s.y + (s.group ? " · " + s.group : "") + " — " + what;
+      rows.push(h("tr", { class: "res-head" }, h("th", { colspan: "2" }, title)));
+      for (const r of s.results) rows.push(h("tr", {}, h("td", {}, r.name), h("td", {}, r.value)));
+    }
+    if (a.issues.length > 1) box.append(h("ul", { class: "issues" }, ...a.issues.slice(1, 6).map((i) => h("li", {}, i))));
+    if (rows.length) {
+      const wrap = h("div", { class: "results", hidden: rows.length > 14 }, h("table", {}, h("tbody", {}, ...rows)));
+      const label = () => (wrap.hidden ? "Show key results" : "Hide key results");
+      const more = h("button", { class: "link soft", type: "button" }, label());
+      more.addEventListener("click", () => { wrap.hidden = !wrap.hidden; more.textContent = label(); });
+      box.append(wrap, more);
+    }
+    return box;
+  }
+
+  // ------------------------------------------------------------------ runs pane (beside the chat, like a terminal pane)
+  // One tab per run. A running run is polled from /api/live (so runs started by any agent show up);
+  // a finished run shows its assessment, key results, plots with fits, table and plan.
+  const RUNS = { open: false, tabs: new Map(), active: null, polling: false, cache: new Map(), dismissed: new Set() };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const etaText = (s) => (s ? " · about " + (s < 90 ? Math.max(1, Math.round(s)) + " s" : Math.round(s / 60) + " min") + " left" : "");
+  const durText = (s) => (s < 90 ? Math.round(s) + " s" : s < 5400 ? (s / 60).toFixed(1) + " min" : (s / 3600).toFixed(1) + " h");
+
+  function getRun(runId) {  // finished runs never change, so fetch each once
+    if (!RUNS.cache.has(runId)) {
+      const p = api("/api/runs/" + encodeURIComponent(runId)).then((d) => {
+        if (!d.meta || !d.meta.status) RUNS.cache.delete(runId);  // not finished yet: fetch again next time
+        return d;
+      }, (e) => { RUNS.cache.delete(runId); throw e; });
+      RUNS.cache.set(runId, p);
+    }
+    return RUNS.cache.get(runId);
+  }
+  function statusIcon(status) {
+    if (!status || status === "running" || status === "finishing") return h("span", { class: "spinner" });
+    return icon(status === "done" ? "check" : "warn");
+  }
+  function setState(el, status) {
+    el.className = "state" + (status === "done" ? " ok" : ["running", "finishing", null, undefined].includes(status) ? "" : " warn");
+    el.replaceChildren(statusIcon(status));
+  }
+
+  function runTab(runId, plan) {
+    let tab = RUNS.tabs.get(runId);
+    if (tab) return tab;
+    const state = h("span", { class: "state" });
+    const close = h("button", { class: "run-tab-x", type: "button", "aria-label": "Close this tab" }, icon("x"));
+    const btn = h("div", { class: "run-tab", role: "tab", tabindex: "0", title: runId, "aria-selected": "false" },
+      state, h("span", { class: "run-tab-label" }, plan || runId), close);
+    const body = h("div", { class: "run-view", role: "tabpanel", hidden: true });
+    tab = { runId, plan: plan || runId, status: null, btn, state, body, rows: [], axes: [], measures: [], trace: null,
+            done: 0, total: 0, eta: null, final: null, view: null, timer: 0 };
+    btn.addEventListener("click", (e) => { if (!close.contains(e.target)) selectRun(runId); });
+    btn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectRun(runId); } });
+    close.addEventListener("click", () => closeRunTab(runId));
+    RUNS.tabs.set(runId, tab);
+    $("run-tabs").append(btn);
+    $("run-body").append(body);
+    if (RUNS.tabs.size > 8) {  // keep the strip short: drop the oldest finished tab
+      const old = [...RUNS.tabs.values()].find((t) => t.status !== "running" && t !== tab);
+      if (old) closeRunTab(old.runId);
+    }
+    return tab;
+  }
+  function setTabStatus(tab, status) {
+    tab.status = status;
+    setState(tab.state, status);
+    $("runs-dot").hidden = ![...RUNS.tabs.values()].some((t) => t.status === "running");
+  }
+  function selectRun(runId) {
+    const tab = RUNS.tabs.get(runId);
+    if (!tab) return;
+    RUNS.active = runId;
+    for (const t of RUNS.tabs.values()) {
+      const on = t === tab;
+      t.btn.classList.toggle("on", on);
+      t.btn.setAttribute("aria-selected", String(on));
+      t.body.hidden = !on;
+    }
+    $("run-body").querySelector(".pane-empty").hidden = true;
+    tab.btn.scrollIntoView({ block: "nearest", inline: "nearest" });
+    if (tab.status !== "running" && tab.status !== "finishing" && !tab.final) loadFinal(tab);
+    else renderRunView(tab);
+  }
+  function closeRunTab(runId) {
+    const tab = RUNS.tabs.get(runId);
+    if (!tab) return;
+    clearTimeout(tab.timer);
+    RUNS.dismissed.add(runId);  // closing a running run's tab must not bring it back
+    tab.btn.remove(); tab.body.remove();
+    RUNS.tabs.delete(runId);
+    if (RUNS.active === runId) {
+      RUNS.active = null;
+      const next = [...RUNS.tabs.keys()].pop();
+      if (next) selectRun(next); else $("run-body").querySelector(".pane-empty").hidden = false;
+    }
+    $("runs-dot").hidden = ![...RUNS.tabs.values()].some((t) => t.status === "running");
+  }
+  function toggleRuns(open) {
+    RUNS.open = open === undefined ? !RUNS.open : open;
+    $("runpane").hidden = !RUNS.open;
+    $("toggle-runs").setAttribute("aria-pressed", String(RUNS.open));
+    $("toggle-runs").classList.toggle("on", RUNS.open);
+    syncScrim();
+  }
+  function openRun(runId, plan) {
+    runTab(runId, plan);
+    selectRun(runId);
+    toggleRuns(true);
+  }
+
+  // a run started (seen in the chat stream or in the lab state): give it a tab, show it, follow it
+  function noticeRun(runId, plan) {
+    if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
+    const tab = runTab(runId, plan);
+    setTabStatus(tab, "running");
+    openRun(runId, plan);
+    pollLive();
+  }
+  async function pollLive() {
+    if (RUNS.polling) return;
+    RUNS.polling = true;
+    try {
+      for (;;) {
+        const tab = [...RUNS.tabs.values()].find((t) => t.status === "running");
+        if (!tab) return;
+        let v = null;
+        try { v = (await api("/api/live?since=" + tab.rows.length)).live; } catch (e) { await sleep(2000); continue; }
+        if (!v || v.run_id !== tab.runId) {  // we missed its end: read the record instead
+          setTabStatus(tab, "finishing");
+          await loadFinal(tab);
+          if (v && v.status === "running" && !RUNS.tabs.has(v.run_id)) noticeRun(v.run_id, v.plan);
+          continue;
+        }
+        if (v.since === tab.rows.length) tab.rows.push(...v.rows);
+        tab.axes = v.axes; tab.measures = v.measures;
+        if (v.trace) tab.trace = v.trace;
+        tab.done = v.done; tab.total = v.total;
+        if (v.eta_s !== tab.etaRaw || v.phase !== tab.phase) { tab.etaRaw = v.eta_s; tab.etaAt = Date.now(); }  // count down between updates
+        tab.phase = v.phase;
+        if (v.status !== "running") { setTabStatus(tab, "finishing"); await loadFinal(tab); continue; }
+        renderRunView(tab);
+        await sleep(500);
+      }
+    } finally { RUNS.polling = false; }
+  }
+  async function loadFinal(tab) {
+    let data;
+    try { data = await getRun(tab.runId); } catch (e) { setTabStatus(tab, "missing"); renderRunView(tab); return; }
+    tab.final = data;
+    tab.plan = data.plan || tab.plan;
+    setTabStatus(tab, (data.meta && data.meta.status) || "unfinished");
+    renderRunView(tab);
+  }
+
+  function buildRunView(tab) {
+    const v = {};
+    v.state = h("span", { class: "state" });
+    v.stop = h("button", { class: "btn small", type: "button" }, "Stop run");
+    v.stop.addEventListener("click", async () => {
+      if (!confirm("Stop this run? The drives it touched go back to safe (or its on_abort steps run).")) return;
+      try { await api("/api/runs/stop", { body: {} }); } catch (e) { toast(e.message); }
     });
-    block.append(grid, h("div", { class: "plots-foot" }, h("span", {}, "Run " + runId + " · " + data.rows.length + " points"), toggle), table);
+    v.count = h("span", { class: "rv-count" });
+    v.bar = h("i");
+    v.barBox = h("div", { class: "bar" }, v.bar);
+    v.analysis = h("div", { class: "rv-analysis" });
+    v.charts = h("div", { class: "rv-charts" });
+    v.table = h("div", { class: "table-wrap", hidden: true });
+    v.tableBtn = h("button", { class: "link soft", type: "button" }, "Show table");
+    v.tableBtn.addEventListener("click", () => {
+      v.table.hidden = !v.table.hidden;
+      if (!v.table.hidden) v.table.replaceChildren(runTable(runViewData(tab)));
+      v.tableBtn.textContent = v.table.hidden ? "Show table" : "Hide table";
+    });
+    v.plan = h("details", { class: "rv-plan", hidden: true }, h("summary", {}, "Plan"), h("pre", {}));
+    v.foot = h("div", { class: "plots-foot" }, h("span", {}, tab.runId), v.tableBtn);
+    tab.body.replaceChildren(
+      h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name" }, tab.plan), h("div", { class: "spacer" }), v.stop),
+      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.charts, v.foot, v.table, v.plan);
+    tab.view = v;
+  }
+  function runViewData(tab) {
+    if (tab.final) return tab.final;
+    return { axes: tab.axes.map((a) => ({ key: a.key, unit: a.unit })), scalars: tab.measures.filter((m) => m.kind === "scalar"),
+             rows: tab.rows, traces: tab.trace ? [tab.trace] : [], analysis: null };
+  }
+  function renderRunView(tab) {
+    if (!tab.view) buildRunView(tab);
+    const v = tab.view;
+    setState(v.state, tab.status);
+    const running = tab.status === "running";
+    v.stop.hidden = !running;
+    const m = tab.final ? tab.final.meta || {} : {};
+    const total = tab.final ? m.planned_points || tab.final.rows.length : tab.total;
+    const done = tab.final ? (m.points != null ? m.points : tab.final.rows.length) : tab.done;
+    v.bar.style.width = (total ? Math.round(100 * done / total) : 0) + "%";
+    v.barBox.classList.toggle("done", !running);
+    v.barBox.classList.toggle("warn", !!tab.final && m.status !== "done");
+    if (running) {
+      const eta = tab.etaRaw == null ? null : Math.max(0, tab.etaRaw - (Date.now() - tab.etaAt) / 1000);
+      v.count.textContent = tab.phase === "setup" ? "Setting up" + etaText(eta)
+        : tab.phase === "after" ? "All " + done + " points measured · setting the final values" + etaText(eta)
+        : tab.phase === "stopping" ? "Stopping · sending the drives it touched back to safe"
+        : done + " / " + total + " points" + etaText(eta);
+    }
+    else if (!tab.final) v.count.textContent = tab.status === "missing" ? "This run's data could not be read." : "Finished · analysing…";
+    else if (m.status === "done") v.count.textContent = "Finished · " + done + " points" + (m.duration_s != null ? " in " + durText(m.duration_s) : "");
+    else if (m.status === "aborted") v.count.textContent = "Stopped after " + done + " of " + total + " points" + (m.reason ? ": " + m.reason : "");
+    else v.count.textContent = "Not finished (" + done + " points recorded)";
+    if (tab.final && !v.finalDrawn) {  // a finished run is drawn once
+      v.finalDrawn = true;
+      clearTimeout(tab.timer); tab.timer = 0;
+      v.analysis.replaceChildren(...(tab.final.analysis ? [analysisBlock(tab.final.analysis)] : []));
+      v.charts.replaceChildren(runCharts(tab.final));
+      v.plan.hidden = !tab.final.plan_text;
+      v.plan.querySelector("pre").textContent = tab.final.plan_text || "";
+      if (!v.table.hidden) v.table.replaceChildren(runTable(tab.final));
+      return;
+    }
+    if (running && !tab.timer) {  // live plots: redraw at most a few times a second
+      tab.timer = setTimeout(() => {
+        tab.timer = 0;
+        if (tab.final) return;
+        v.charts.replaceChildren(runCharts(runViewData(tab), 6));
+        if (!v.table.hidden) v.table.replaceChildren(runTable(runViewData(tab)));
+      }, 300);
+    }
+  }
+
+  async function showRunsMenu() {
+    const menu = $("runs-menu");
+    if (!menu.hidden) { menu.hidden = true; $("runs-history").setAttribute("aria-expanded", "false"); return; }
+    menu.replaceChildren(h("div", { class: "pane-menu-note" }, "Loading…"));
+    menu.hidden = false;
+    $("runs-history").setAttribute("aria-expanded", "true");
+    let runs = [];
+    try { runs = (await api("/api/runs")).runs; } catch (e) { /* keep the note */ }
+    menu.replaceChildren(...(runs.length ? runs.map((r) => {
+      const st = h("span", { class: "state" });
+      setState(st, r.status);
+      const when = r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " · " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
+      const pts = r.points != null ? r.points + (r.planned_points && r.planned_points !== r.points ? "/" + r.planned_points : "") + " pts · " : "";
+      const b = h("button", { class: "pane-menu-item", type: "button", role: "menuitem" }, st,
+        h("span", { class: "pm-plan" }, r.plan), h("span", { class: "pm-meta" }, pts + when));
+      b.addEventListener("click", () => {
+        menu.hidden = true;
+        $("runs-history").setAttribute("aria-expanded", "false");
+        if (r.status === "running") noticeRun(r.run_id, r.plan); else openRun(r.run_id, r.plan);
+      });
+      return b;
+    }) : [h("div", { class: "pane-menu-note" }, "No runs yet.")]));
+  }
+
+  function setPaneWidth(w) {
+    const max = Math.max(360, window.innerWidth - 420);
+    const width = Math.round(Math.min(max, Math.max(340, w)));
+    $("runpane").style.width = width + "px";
+    return width;
+  }
+  function initRunsPane() {
+    const saved = Number(store("lh.runsWidth"));
+    setPaneWidth(saved > 0 ? saved : Math.min(720, Math.max(420, window.innerWidth * 0.42)));
+    const handle = $("runpane-resize");
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const right = $("runpane").getBoundingClientRect().right;
+      handle.setPointerCapture(e.pointerId);
+      document.body.classList.add("resizing");
+      const move = (ev) => setPaneWidth(right - ev.clientX);
+      const up = () => {
+        handle.removeEventListener("pointermove", move);
+        document.body.classList.remove("resizing");
+        store("lh.runsWidth", String(parseInt($("runpane").style.width, 10)));
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", up, { once: true });
+    });
+    handle.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      const w = $("runpane").getBoundingClientRect().width;
+      store("lh.runsWidth", String(setPaneWidth(w + (e.key === "ArrowLeft" ? 32 : -32))));
+    });
+    $("toggle-runs").addEventListener("click", () => toggleRuns());
+    $("close-runs").addEventListener("click", () => toggleRuns(false));
+    $("runs-history").addEventListener("click", showRunsMenu);
+    document.addEventListener("click", (e) => {
+      if (!$("runs-menu").hidden && !e.target.closest(".pane-menu-wrap")) {
+        $("runs-menu").hidden = true;
+        $("runs-history").setAttribute("aria-expanded", "false");
+      }
+    });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("runs-menu").hidden = true; });
+    window.addEventListener("resize", () => { if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width); });
+  }
+
+  // the compact card a run leaves in the conversation; its data live in the runs pane
+  function runCard(plan) {
+    const state = h("span", { class: "state" }, h("span", { class: "spinner" }));
+    const title = h("span", { class: "rc-title" }, "Measuring ", h("code", {}, plan || "plan"));
+    const count = h("span", { class: "rc-count" });
+    const open = h("button", { class: "rc-open", type: "button" }, "Show data");
+    const bar = h("i");
+    const barBox = h("div", { class: "bar thin" }, bar);
+    const text = h("div", { class: "rc-text", hidden: true });
+    const el = h("div", { class: "runcard" }, h("div", { class: "rc-head" }, state, title, count, open), barBox, text);
+    const card = { el, runId: null, plan };
+    open.addEventListener("click", () => {
+      if (!card.runId) return;
+      if (RUNS.tabs.has(card.runId)) { selectRun(card.runId); toggleRuns(true); } else openRun(card.runId, card.plan);
+    });
+    card.progress = (ev) => {
+      card.runId = ev.run_id; card.plan = ev.plan;
+      title.replaceChildren("Measuring ", h("code", {}, ev.plan));
+      bar.style.width = (ev.total ? Math.round(100 * ev.done / ev.total) : 0) + "%";
+      count.textContent = ev.done + " / " + ev.total;  // the time left is in the runs pane
+    };
+    card.finish = async (runId) => {
+      card.runId = runId;
+      let data;
+      try { data = await getRun(runId); } catch (e) { setState(state, "missing"); count.textContent = "data unavailable"; return; }
+      const m = data.meta || {};
+      card.plan = data.plan;
+      setState(state, m.status || "unfinished");
+      title.replaceChildren(m.status === "aborted" ? "Stopped " : "Measured ", h("code", {}, data.plan));
+      count.textContent = (m.points != null ? m.points : data.rows.length) + " points";
+      barBox.hidden = true;
+      const a = data.analysis;
+      if (a) {
+        text.hidden = false;
+        text.replaceChildren(h("p", {}, a.assessment), h("p", { class: "rc-next" }, h("b", {}, "Next: "), a.next));
+      }
+    };
+    return card;
   }
 
   function runTable(data) {
@@ -492,7 +861,18 @@
       if (!step) return;
       step.finish(content, isError);
       step.done = true;
-      if (runId) renderRun(runId, step.last || step.el);
+      if (!runId) return;
+      if (!step.card) { step.card = runCard(); (step.last || step.el).after(step.card.el); }
+      step.card.finish(runId);
+      const tab = RUNS.tabs.get(runId);
+      if (tab && !tab.final) { setTabStatus(tab, "finishing"); loadFinal(tab); }
+    }
+    runProgress(ev) {  // the data go to the runs pane; the conversation keeps a compact card
+      const step = this.steps.get(ev.call_id);
+      if (!step) return;
+      if (!step.card) { step.card = runCard(ev.plan); (step.last || step.el).after(step.card.el); }
+      step.card.progress(ev);
+      if (ev.status === "running") noticeRun(ev.run_id, ev.plan);
     }
     approval(ev) {
       const card = makeApproval(ev);
@@ -543,48 +923,274 @@
     requestAnimationFrame(toBottom);
   }
 
-  // ------------------------------------------------------------------ chats sidebar
-  function renderChats() {
-    const list = $("chat-list");
-    list.replaceChildren(...S.chats.map((c) => {
-      const del = h("button", { class: "del", type: "button", "aria-label": "Delete conversation" }, icon("trash"));
-      const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : ""), role: "button", tabindex: "0" },
-        h("span", { class: "t" }, c.title || "New chat"), del);
-      item.addEventListener("click", () => openChat(c.id));
-      item.addEventListener("keydown", (e) => { if (e.key === "Enter") openChat(c.id); });
-      del.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        if (!confirm("Delete “" + (c.title || "New chat") + "”? The lab's event log and run data are kept.")) return;
-        try { await api("/api/chats/" + c.id, { method: "DELETE" }); } catch (err) { toast(err.message); return; }
-        if (S.chatId === c.id) newChat();
-        await refreshChats();
-      });
-      return item;
-    }));
+  // ------------------------------------------------------------------ chats sidebar: projects, then unfiled chats
+  const SIDE = { collapsed: new Set(), creating: false, moveAfterCreate: null, renaming: null, newProject: null, editor: null };
+  try { for (const id of JSON.parse(store("lh.collapsed") || "[]")) SIDE.collapsed.add(id); } catch (e) { /* fresh start */ }
+  const projectName = (id) => (S.projects.find((p) => p.id === id) || {}).name;
+
+  function setTitle(title, projectId) {
+    const name = projectName(projectId);
+    const crumb = name ? [h("span", { class: "crumb" }, icon("folder"), h("span", {}, name)), title ? h("span", { class: "crumb-sep" }, "/") : null] : [];
+    $("chat-title").replaceChildren(...crumb.filter(Boolean), title || "");
   }
+  function currentProject() {
+    const c = S.chats.find((x) => x.id === S.chatId);
+    return c ? c.project : SIDE.newProject;
+  }
+
+  function rowButton(name, label, onClick) {
+    const b = h("button", { class: "row-btn", type: "button", "aria-label": label, title: label }, icon(name));
+    b.addEventListener("click", (e) => { e.stopPropagation(); onClick(e); });
+    return b;
+  }
+  // an inline name field; the same element survives re-renders of the list, so typing is never lost
+  function nameInput(key, value, placeholder, onSubmit, onCancel) {
+    if (SIDE.editor && SIDE.editor.key === key) return SIDE.editor.el;
+    const input = h("input", { class: "side-input", value, placeholder, maxlength: "60", spellcheck: "false", "aria-label": placeholder });
+    const ed = { key, input, el: h("div", { class: "side-edit" }, input), fresh: true };
+    SIDE.editor = ed;
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      if (SIDE.editor === ed) SIDE.editor = null;
+      const v = input.value.trim();
+      if (save && v && v !== value) onSubmit(v); else onCancel();
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      if (e.key === "Escape") { e.preventDefault(); finish(false); }
+    });
+    input.addEventListener("blur", () => setTimeout(() => {  // a re-render moves the field; only a real leave counts
+      if (input.isConnected && document.activeElement === input) return;
+      finish(true);
+    }, 0));
+    input.addEventListener("click", (e) => e.stopPropagation());
+    return ed.el;
+  }
+  function dropTarget(el, projectId) {
+    el.addEventListener("dragover", (e) => {
+      if (![...e.dataTransfer.types].includes("text/x-kelvin-chat")) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      el.classList.add("drop-on");
+    });
+    el.addEventListener("dragleave", () => el.classList.remove("drop-on"));
+    el.addEventListener("drop", (e) => {
+      e.preventDefault();
+      el.classList.remove("drop-on");
+      const id = e.dataTransfer.getData("text/x-kelvin-chat");
+      if (id) moveChat(id, projectId);
+    });
+  }
+
+  function chatItem(c) {
+    if (SIDE.renaming === c.id) {
+      return nameInput("chat:" + c.id, c.title || "New chat", "Conversation name", (t) => renameChat(c, t), () => { SIDE.renaming = null; renderChats(); });
+    }
+    const more = rowButton("dots", "Options for this conversation", (e) => chatMenu(e.currentTarget, c));
+    const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : ""), role: "button", tabindex: "0", draggable: "true" },
+      h("span", { class: "t" }, c.title || "New chat"), more);
+    item.addEventListener("click", () => openChat(c.id));
+    item.addEventListener("keydown", (e) => { if (e.key === "Enter") openChat(c.id); });
+    item.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData("text/x-kelvin-chat", c.id);
+      e.dataTransfer.effectAllowed = "move";
+      item.classList.add("dragging");
+      $("chat-list").classList.add("dragging-chat");
+    });
+    item.addEventListener("dragend", () => { item.classList.remove("dragging"); $("chat-list").classList.remove("dragging-chat"); });
+    return item;
+  }
+  function projectGroup(p, chats) {
+    const holdsActive = currentProject() === p.id;
+    const open = !SIDE.collapsed.has(p.id) || holdsActive;
+    let head;
+    if (SIDE.renaming === p.id) {
+      head = nameInput("project:" + p.id, p.name, "Project name", (name) => renameProject(p, name), () => { SIDE.renaming = null; renderChats(); });
+    } else {
+      head = h("div", { class: "proj-row" + (holdsActive && !S.chatId ? " active" : ""), role: "button", tabindex: "0", "aria-expanded": String(open), title: p.name },
+        h("span", { class: "chev-s" + (open ? " open" : "") }, icon("chev")), icon("folder"),
+        h("span", { class: "t" }, p.name), h("span", { class: "count" }, chats.length ? String(chats.length) : ""),
+        rowButton("plus", "New chat in " + p.name, () => newChat(p.id)),
+        rowButton("dots", "Options for " + p.name, (e) => projectMenu(e.currentTarget, p, chats)));
+      const toggle = () => {
+        if (SIDE.collapsed.has(p.id) || !open) SIDE.collapsed.delete(p.id); else SIDE.collapsed.add(p.id);
+        store("lh.collapsed", JSON.stringify([...SIDE.collapsed]));
+        renderChats();
+      };
+      head.addEventListener("click", toggle);
+      head.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
+      dropTarget(head, p.id);
+    }
+    const group = h("div", { class: "proj" }, head);
+    if (open) {
+      group.append(h("div", { class: "proj-chats" }, ...(chats.length ? chats.map(chatItem)
+        : [h("div", { class: "side-empty" }, "No conversations yet")])));
+    }
+    return group;
+  }
+  function renderChats() {
+    const byProject = new Map(S.projects.map((p) => [p.id, []]));
+    const loose = [];
+    for (const c of S.chats) (c.project && byProject.has(c.project) ? byProject.get(c.project) : loose).push(c);
+    const kids = [h("div", { class: "side-label row" }, h("span", {}, "Projects"),
+      rowButton("plus", "New project", () => startNewProject()))];
+    if (SIDE.creating) {
+      kids.push(nameInput("new-project", "", "Project name", createProject, () => { SIDE.creating = false; SIDE.moveAfterCreate = null; renderChats(); }));
+    } else if (!S.projects.length) {
+      const hint = h("button", { class: "side-hint", type: "button" }, icon("folder"), "New project");
+      hint.addEventListener("click", () => startNewProject());
+      kids.push(hint);
+    }
+    for (const p of S.projects) kids.push(projectGroup(p, byProject.get(p.id)));
+    const label = h("div", { class: "side-label" }, "Conversations");
+    dropTarget(label, null);
+    kids.push(label, ...loose.map(chatItem));
+    if (!loose.length) kids.push(h("div", { class: "side-empty" }, S.chats.length ? "Every conversation is in a project." : "No conversations yet."));
+    const ed = SIDE.editor;
+    const typing = ed && document.activeElement === ed.input;
+    $("chat-list").replaceChildren(...kids);
+    if (ed && ed.el.isConnected && (ed.fresh || typing)) {
+      ed.input.focus();
+      if (ed.fresh) ed.input.select();
+      ed.fresh = false;
+    }
+  }
+
+  // a small menu under a button: [{label, icon, onClick, danger, checked} | {heading} | {sep: true}]
+  let openMenu = null;
+  function closeMenu() { if (openMenu) { openMenu.remove(); openMenu = null; } }
+  function popMenu(anchor, items) {
+    closeMenu();
+    const menu = h("div", { class: "menu", role: "menu" });
+    for (const it of items) {
+      if (it.sep) { menu.append(h("div", { class: "menu-sep", role: "separator" })); continue; }
+      if (it.heading) { menu.append(h("div", { class: "menu-head" }, it.heading)); continue; }
+      const b = h("button", { class: "menu-item" + (it.danger ? " danger" : ""), type: "button", role: "menuitem" },
+        it.icon ? icon(it.icon) : h("span", { class: "menu-gap" }), h("span", { class: "menu-label" }, it.label),
+        it.checked ? icon("check") : null);
+      b.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); it.onClick(); });
+      menu.append(b);
+    }
+    menu.addEventListener("keydown", (e) => {
+      const buttons = [...menu.querySelectorAll(".menu-item")];
+      const i = buttons.indexOf(document.activeElement);
+      if (e.key === "ArrowDown") { e.preventDefault(); buttons[(i + 1) % buttons.length].focus(); }
+      if (e.key === "ArrowUp") { e.preventDefault(); buttons[(i - 1 + buttons.length) % buttons.length].focus(); }
+      if (e.key === "Escape") { e.preventDefault(); closeMenu(); anchor.focus(); }
+    });
+    document.body.append(menu);
+    const r = anchor.getBoundingClientRect();
+    const top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8);
+    menu.style.top = Math.max(8, top) + "px";
+    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + "px";
+    openMenu = menu;
+    const first = menu.querySelector(".menu-item");
+    if (first) first.focus();
+  }
+  document.addEventListener("click", (e) => { if (openMenu && !openMenu.contains(e.target)) closeMenu(); });
+  window.addEventListener("resize", closeMenu);
+
+  function chatMenu(anchor, c) {
+    const items = [{ label: "Rename", icon: "pencil", onClick: () => { SIDE.renaming = c.id; renderChats(); } }];
+    items.push({ heading: "Move to project" });
+    for (const p of S.projects) {
+      items.push({ label: p.name, icon: "folder", checked: c.project === p.id, onClick: () => { if (c.project !== p.id) moveChat(c.id, p.id); } });
+    }
+    items.push({ label: "New project…", icon: "plus", onClick: () => startNewProject(c.id) });
+    if (c.project) items.push({ label: "Remove from project", icon: "x", onClick: () => moveChat(c.id, null) });
+    items.push({ sep: true }, { label: "Delete", icon: "trash", danger: true, onClick: () => deleteChat(c) });
+    popMenu(anchor, items);
+  }
+  function projectMenu(anchor, p, chats) {
+    popMenu(anchor, [
+      { label: "New chat in this project", icon: "plus", onClick: () => newChat(p.id) },
+      { label: "Rename", icon: "pencil", onClick: () => { SIDE.renaming = p.id; renderChats(); } },
+      { sep: true },
+      { label: "Delete project", icon: "trash", danger: true, onClick: () => deleteProject(p, chats) },
+    ]);
+  }
+
+  function startNewProject(moveChatId) {
+    SIDE.creating = true;
+    SIDE.moveAfterCreate = moveChatId || null;
+    renderChats();
+  }
+  async function createProject(name) {
+    SIDE.creating = false;
+    let p;
+    try { p = await api("/api/projects", { body: { name } }); } catch (e) { toast(e.message); renderChats(); return; }
+    S.projects.push(p);
+    const move = SIDE.moveAfterCreate;
+    SIDE.moveAfterCreate = null;
+    if (move) await moveChat(move, p.id); else renderChats();
+  }
+  async function renameProject(p, name) {
+    SIDE.renaming = null;
+    try { Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { name } })); } catch (e) { toast(e.message); }
+    renderChats();
+    setTitle(currentTitle(), currentProject());
+  }
+  async function deleteProject(p, chats) {
+    const n = chats.length;
+    const kept = n ? " Its " + (n === 1 ? "conversation stays" : n + " conversations stay") + ", under Conversations." : "";
+    if (!confirm("Delete the project “" + p.name + "”?" + kept)) return;
+    try { await api("/api/projects/" + p.id, { method: "DELETE" }); } catch (e) { toast(e.message); return; }
+    S.projects = S.projects.filter((x) => x.id !== p.id);
+    if (SIDE.newProject === p.id) SIDE.newProject = null;
+    await refreshChats();
+  }
+  async function moveChat(id, projectId) {
+    try { await api("/api/chats/" + id, { method: "PATCH", body: { project: projectId } }); } catch (e) { toast(e.message); return; }
+    const c = S.chats.find((x) => x.id === id);
+    if (c) c.project = projectId;
+    if (projectId) { SIDE.collapsed.delete(projectId); store("lh.collapsed", JSON.stringify([...SIDE.collapsed])); }
+    renderChats();
+    if (id === S.chatId) setTitle(currentTitle(), projectId);
+    toast(projectId ? "Moved to " + projectName(projectId) + "." : "Removed from its project.");
+  }
+  async function renameChat(c, title) {
+    SIDE.renaming = null;
+    try { await api("/api/chats/" + c.id, { method: "PATCH", body: { title } }); c.title = title; } catch (e) { toast(e.message); }
+    renderChats();
+    if (c.id === S.chatId) setTitle(c.title, c.project);
+  }
+  async function deleteChat(c) {
+    if (!confirm("Delete “" + (c.title || "New chat") + "”? The lab's event log and run data are kept.")) return;
+    try { await api("/api/chats/" + c.id, { method: "DELETE" }); } catch (err) { toast(err.message); return; }
+    if (S.chatId === c.id) newChat(c.project);
+    await refreshChats();
+  }
+  function currentTitle() {
+    const c = S.chats.find((x) => x.id === S.chatId);
+    return c ? c.title : "";
+  }
+
   async function refreshChats() {
     try { S.chats = await api("/api/chats"); } catch (e) { return; }
     renderChats();
-    const current = S.chats.find((c) => c.id === S.chatId);
-    $("chat-title").textContent = current ? current.title : "";
+    setTitle(currentTitle(), currentProject());
   }
   async function openChat(id) {
     if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
     let chat;
     try { chat = await api("/api/chats/" + id); } catch (e) { toast(e.message); return; }
     S.chatId = id;
+    SIDE.newProject = null;
     renderChat(chat);
-    $("chat-title").textContent = chat.title;
+    setTitle(chat.title, chat.project);
     if (chat.model && S.labels[chat.model]) $("model").value = chat.model;
     renderChats();
     closeSidebar();
   }
-  function newChat() {
+  function newChat(projectId) {
     if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
     S.chatId = null;
+    SIDE.newProject = projectId || null;
     thread.replaceChildren();
     showEmpty(true);
-    $("chat-title").textContent = "";
+    setTitle("", SIDE.newProject);
     renderChats();
     closeSidebar();
     $("input").focus();
@@ -610,7 +1216,7 @@
     if (!model) { openSettings(); return; }
     store("lh.model", model);
     if (!S.chatId) {
-      try { S.chatId = (await api("/api/chats", { body: { model } })).id; } catch (e) { toast(e.message); return; }
+      try { S.chatId = (await api("/api/chats", { body: { model, project: SIDE.newProject } })).id; } catch (e) { toast(e.message); return; }
     }
     $("input").value = ""; autosize();
     showEmpty(false);
@@ -658,7 +1264,7 @@
   function handle(reply, ev) {
     const stick = nearBottom();
     switch (ev.type) {
-      case "turn_start": reply.setModel(ev.model); $("chat-title").textContent = ev.title; refreshChats(); break;
+      case "turn_start": reply.setModel(ev.model); setTitle(ev.title, currentProject()); refreshChats(); break;
       case "text": reply.addText(ev.delta); break;
       case "thinking": reply.addThinking(ev.delta); break;
       case "reset": reply.resetText(); break;
@@ -670,6 +1276,7 @@
         break;
       }
       case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id); pollState(); break;
+      case "run_progress": reply.runProgress(ev); break;
       case "note": reply.note(ev.text); break;
       case "error": reply.error(ev.message); break;
       default: break;
@@ -773,6 +1380,7 @@
     badge.textContent = String(s.pending.length);
     badge.hidden = !s.pending.length;
     if (loose.length && !S.labOpen) toggleLab(true);
+    if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
   }
   function toggleLab(open) {
     S.labOpen = open === undefined ? !S.labOpen : open;
@@ -849,7 +1457,7 @@
   function closeSidebar() { $("app").classList.remove("side-open"); syncScrim(); }
   function syncScrim() {
     const narrow = window.matchMedia("(max-width: 1100px)").matches;
-    $("scrim").hidden = !($("app").classList.contains("side-open") || (S.labOpen && narrow));
+    $("scrim").hidden = !($("app").classList.contains("side-open") || ((S.labOpen || RUNS.open) && narrow));
   }
 
   const SUGGESTIONS = [
@@ -872,6 +1480,7 @@
     for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
     S.settings = boot.settings;
     S.chats = boot.chats;
+    S.projects = boot.projects || [];
     $("lab-name").textContent = boot.lab;
     $("sim-tag").hidden = !boot.simulated;
     $("empty-sub").textContent = boot.lab + (boot.simulated ? " (simulated)" : "") + " · Claude, GPT, Gemini or a local model";
@@ -881,6 +1490,7 @@
       return b;
     }));
     applyModels(boot.models.groups, boot.default_model);
+    initRunsPane();
     renderChats();
     showEmpty(true);
 
@@ -894,9 +1504,9 @@
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!S.streaming) sendMessage($("input").value); }
     });
     $("model").addEventListener("change", () => { store("lh.model", $("model").value); updateSend(); });
-    $("new-chat").addEventListener("click", newChat);
+    $("new-chat").addEventListener("click", () => newChat());
     $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });
-    $("scrim").addEventListener("click", () => { closeSidebar(); if (S.labOpen) toggleLab(false); });
+    $("scrim").addEventListener("click", () => { closeSidebar(); if (S.labOpen) toggleLab(false); if (RUNS.open) toggleRuns(false); });
     $("toggle-lab").addEventListener("click", () => toggleLab());
     $("inst-filter").addEventListener("input", (e) => { PANEL.filter = e.target.value; renderInstruments(); });
     for (const b of document.querySelectorAll("#inst-seg button")) {

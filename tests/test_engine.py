@@ -1,6 +1,9 @@
 import json
 
+import pytest
+
 from labharness import load_plan
+from labharness.plans import PlanError
 
 GATE_SWEEP = """
 plan: gate_sweep
@@ -67,7 +70,7 @@ def test_invalid_plans_are_refused_before_anything_runs(make_engine):
     engine, gate, approver = make_engine([])
     assert "lab limits" in engine.run(GATE_SWEEP.replace("to: 5", "to: 30")).message
     assert "no parameter 'Vg'" in engine.run(GATE_SWEEP.replace("smu.V: {", "smu.Vg: {")).message
-    assert "unknown key" in engine.run(GATE_SWEEP + "\nrepeat: 3\n").message
+    assert "unknown key" in engine.run(GATE_SWEEP + "\nrepeats: 3\n").message
     assert approver.requests == []
 
 
@@ -121,3 +124,108 @@ def test_plan_parsing():
     p = load_plan(GATE_SWEEP)
     assert p.points == 21 and p.requires == ["lockin", "smu", "tc"]
     assert p.axes[0].values[-1] == 5
+
+
+def test_loop_options_expand_as_written():
+    p = load_plan("""
+plan: loops
+repeat: 2
+sweep:
+  magnet.B: {from: 1, to: 100, points: 3, log: true}
+  smu.V: {from: 0, to: 1, points: 3, back: true, settle: 0.2}
+time: {every: 5, for: 10}
+measure: [lockin.X]
+""")
+    assert [(a.key, a.kind) for a in p.axes] == [("repeat", "repeat"), ("magnet.B", "instrument"),
+                                                  ("smu.V", "instrument"), ("time", "time")]
+    assert p.axes[0].values == [1, 2]
+    assert [round(v, 9) for v in p.axes[1].values] == [1, 10, 100]
+    assert p.axes[2].values == [0, 0.5, 1, 0.5, 0] and p.axes[2].settle == 0.2
+    assert p.axes[3].values == [0, 5, 10]
+    assert p.points == 2 * 3 * 5 * 3
+    assert p.instrument_axes == p.axes[1:3]
+
+
+def test_bad_loop_options_are_refused():
+    for bad in ("repeat: 0", "time: {every: 0, for: 10}", "sweep: {smu.V: {from: -1, to: 1, points: 5, log: true}}",
+                "sweep: {smu.V: {values: [1], stabilize: {read: tc.T_sample, within: -1}}}"):
+        with pytest.raises(PlanError):
+            load_plan("plan: x\nmeasure: [lockin.X]\n" + bad)
+
+
+def test_run_reports_progress_and_analyses_itself(make_engine, tmp_path):
+    engine, gate, approver = make_engine([True])
+    events = []
+    engine.progress = events.append
+    report = engine.run(GATE_SWEEP)
+    assert report.ok, report.message
+    kinds = [e["event"] for e in events]
+    assert kinds[0] == "start" and kinds[-1] == "end" and kinds.count("point") == 21
+    start = events[0]
+    assert start["total"] == 21 and [a["key"] for a in start["axes"]] == ["smu.V"]
+    assert [(m["key"], m["kind"]) for m in start["measures"]] == [("lockin.X", "scalar"), ("smu.I", "scalar")]
+    points = [e for e in events if e["event"] == "point"]
+    assert [p["done"] for p in points] == list(range(1, 22)) and 0 <= points[-1]["eta_s"] < 1
+    assert events[-1]["status"] == "done"
+    phase = next(e for e in events if e["event"] == "phase")       # GATE_SWEEP has `after` steps
+    assert phase["phase"] == "after" and kinds.index("phase") == len(kinds) - 2
+    a = report.analysis
+    peak = a["series"][0]
+    assert peak["y"] == "lockin.X" and peak["kind"] == "peak"
+    assert abs(peak["params"]["center"][0] - 1.5) < 0.05
+    assert a["series"][1]["kind"] == "linear"
+    assert "peak" in a["assessment"] and a["next"]
+    saved = json.loads((tmp_path / "runs" / report.run_id / "analysis.json").read_text(encoding="utf-8"))
+    assert saved["assessment"] == a["assessment"]
+
+
+def test_dry_run_is_not_analysed(make_engine):
+    engine, gate, approver = make_engine([])
+    assert engine.simulate(GATE_SWEEP).analysis is None
+
+
+def test_repeat_and_time_series(make_engine):
+    engine, gate, approver = make_engine([])
+    report = engine.run("""
+plan: noise_log
+setup: { lockin.amplitude: 0.05 }
+repeat: 2
+time: {every: 5, for: 10}
+measure: [lockin.X]
+""")
+    assert report.ok, report.message
+    assert [(r["repeat"], r["time"]) for r in report.rows] == [(1, 0), (1, 5), (1, 10), (2, 0), (2, 5), (2, 10)]
+    ts = [r["t"] for r in report.rows]
+    assert ts[1] - ts[0] >= 5 and ts[2] - ts[1] >= 5
+
+
+def test_stabilize_waits_for_the_reading(lab, make_engine):
+    engine, gate, approver = make_engine([True])
+    report = engine.run("""
+plan: warm_steps
+setup: { tc.heater_range: low }
+sweep:
+  tc.setpoint: {values: [1.8, 2.0], stabilize: {read: tc.T_sample, within: 0.01, for: 30, timeout: 1800}}
+measure: [tc.T_sample]
+after: { tc.setpoint: 1.6 }
+""")
+    assert report.ok, report.message
+    assert not report.warnings
+    for row in report.rows:
+        assert abs(row["tc.T_sample"] - row["tc.setpoint"]) < 0.02
+    assert report.duration_s > 60
+
+
+def test_stabilize_gives_up_with_a_warning(lab, make_engine):
+    engine, gate, approver = make_engine([True])
+    report = engine.run("""
+plan: impatient
+setup: { tc.heater_range: low }
+sweep:
+  tc.setpoint: {values: [1.8], stabilize: {read: tc.T_sample, within: 0.000001, for: 10, timeout: 60}}
+measure: [tc.T_sample]
+after: { tc.setpoint: 1.6 }
+""")
+    assert report.ok and len(report.rows) == 1
+    assert report.warnings and "did not settle" in report.warnings[0]
+    assert any("did not settle" in i for i in report.analysis["issues"])

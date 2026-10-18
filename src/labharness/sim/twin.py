@@ -20,6 +20,7 @@ class World:
     """Shared clock, noise and a toy sample wired to all twins."""
 
     STEP = 0.5  # s, integration step for slow dynamics
+    MAX_STEPS = 2000  # after a long idle gap, take coarser steps rather than stall (the dynamics are exponential/clamped)
 
     def __init__(self, clock: Any, seed: int = 0):
         self.clock = clock
@@ -41,7 +42,7 @@ class World:
         dt = now - self._t
         if dt <= 0:
             return
-        n = int(math.ceil(dt / self.STEP))
+        n = min(self.MAX_STEPS, int(math.ceil(dt / self.STEP)))
         for _ in range(n):
             for twin in self.twins.values():
                 twin.evolve(dt / n)

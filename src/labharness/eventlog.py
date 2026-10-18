@@ -95,6 +95,11 @@ class RunRecord:
             with open(self.path / "data.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps({k: _jsonable(v) for k, v in row.items()}) + "\n")
 
+    def save_json(self, name: str, data: Any) -> None:
+        if self.path:
+            with open(self.path / name, "w", encoding="utf-8") as f:
+                json.dump(_jsonable(data), f, indent=1, ensure_ascii=False)
+
     def finish(self, **meta: Any) -> None:
         self.meta.update({k: _jsonable(v) for k, v in meta.items()})
         self.meta["finished"] = _now()

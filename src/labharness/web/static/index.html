@@ -27,8 +27,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat
       </button>
     </div>
-    <div class="side-label">Conversations</div>
-    <nav id="chat-list" class="chat-list"></nav>
+    <nav id="chat-list" class="chat-list" aria-label="Projects and conversations"></nav>
     <div class="side-bottom">
       <div class="lab-chip" title="The lab this portal controls"><span class="dot on"></span><span id="lab-name">Lab</span><span id="sim-tag" class="tag" hidden>simulated</span></div>
       <button id="open-settings" class="side-btn subtle" type="button">
@@ -44,6 +43,9 @@
       </button>
       <div id="chat-title" class="chat-title"></div>
       <div class="spacer"></div>
+      <button id="toggle-runs" class="pill" type="button" aria-label="Show the runs pane" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg>Runs<span id="runs-dot" class="live-dot" hidden></span>
+      </button>
       <button id="toggle-lab" class="pill" type="button" aria-label="Show the lab panel">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Lab<span id="lab-badge" class="badge" hidden>0</span>
       </button>
@@ -80,6 +82,26 @@
       <p class="fineprint">Measurements run right away. Anything that drives the sample harder waits for your approval.</p>
     </div>
   </main>
+
+  <section id="runpane" class="runpane" aria-label="Runs" hidden>
+    <div id="runpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the runs pane" tabindex="0"></div>
+    <header class="pane-head">
+      <div id="run-tabs" class="run-tabs" role="tablist" aria-label="Runs"></div>
+      <div class="spacer"></div>
+      <div class="pane-menu-wrap">
+        <button id="runs-history" class="icon-btn" type="button" aria-label="Recent runs" aria-haspopup="menu" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+        </button>
+        <div id="runs-menu" class="pane-menu" role="menu" hidden></div>
+      </div>
+      <button id="close-runs" class="icon-btn" type="button" aria-label="Close the runs pane">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="run-body" class="pane-body">
+      <div class="pane-empty"><p>No run open.</p><p class="muted small">When a plan runs, its progress and data appear here. Open an earlier run from the clock button.</p></div>
+    </div>
+  </section>
 
   <aside id="labpanel" class="labpanel" aria-label="Lab" hidden>
     <header class="lab-head">

@@ -92,12 +92,54 @@ class LabRuntime:
         self.events_path = self.data_dir / "events.jsonl"
         self.gate = SafetyGate(lab, approver, EventLog(self.events_path, lab.clock), envelope, operator="agent")
         self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
+        self.engine.progress = self._on_progress
         self.lock = threading.RLock()
         self.busy: Optional[str] = None
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
+        self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
+        self._live_lock = threading.Lock()
         with self.lock:
             self._refresh()
+
+    def _on_progress(self, event: Dict[str, Any]) -> None:
+        """Keep a light copy of the running plan's data (scalars only, latest trace) for live displays."""
+        with self._live_lock:
+            if event["event"] == "start":
+                self.live = {"run_id": event["run_id"], "plan": event["plan"], "total": event["total"], "done": 0,
+                             "eta_s": None, "status": "running", "phase": "setup", "axes": event["axes"],
+                             "measures": event["measures"], "rows": [], "trace": None}
+            elif self.live is None or self.live["run_id"] != event["run_id"]:
+                return
+            elif event["event"] == "point":
+                row = event["row"]
+                keep = {"i", "t"} | {a["key"] for a in self.live["axes"]} | \
+                       {m["key"] for m in self.live["measures"] if m["kind"] == "scalar"}
+                self.live["rows"].append({k: v for k, v in row.items() if k in keep})
+                for m in self.live["measures"]:
+                    if m["kind"] == "trace" and isinstance(row.get(m["key"]), list):
+                        ys = row[m["key"]]
+                        x0, x1 = row.get(m["key"] + ".axis") or (0, len(ys) - 1)
+                        step = max(1, -(-len(ys) // 400))
+                        n = len(ys)
+                        self.live["trace"] = {"key": m["key"], "unit": m["unit"], "x_unit": m.get("x_unit", ""),
+                                              "x": [x0 + (x1 - x0) * i / max(1, n - 1) for i in range(0, n, step)],
+                                              "y": ys[::step]}
+                self.live["done"], self.live["eta_s"], self.live["phase"] = event["done"], event["eta_s"], "measuring"
+            elif event["event"] == "phase":  # after the last point: final values, or the stop/abort steps
+                self.live["phase"], self.live["eta_s"] = event["phase"], event.get("eta_s")
+            elif event["event"] == "end":
+                self.live["status"], self.live["eta_s"], self.live["phase"] = event["status"], 0, "end"
+
+    def live_view(self, since: int = 0) -> Optional[Dict[str, Any]]:
+        """The live run with the rows recorded since `since` (thread-safe copy)."""
+        with self._live_lock:
+            if self.live is None:
+                return None
+            view = {k: v for k, v in self.live.items() if k != "rows"}
+            view["rows"] = list(self.live["rows"][since:])
+            view["since"] = since
+            return view
 
     # ------------------------------------------------------------------ plumbing
 
@@ -244,11 +286,41 @@ class LabRuntime:
             if report.dry_run is not None and report.status in ("done", "aborted"):
                 lines.append(report.dry_run.message)
             lines.append(report.message)
-            lines += self._preview(plan, report.rows)
+            if report.analysis:
+                lines += self._analysis_lines(report.analysis)
+            else:
+                lines += self._preview(plan, report.rows)
+            lines += ["warning: " + w for w in report.warnings]
             if report.run_id and report.rows:
                 lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
             return "\n".join(lines)
         return self._do("running plan", run)
+
+    @staticmethod
+    def _analysis_lines(a: Dict[str, Any]) -> List[str]:
+        lines = ["assessment: " + a["assessment"], "next: " + a["next"]]
+        for s in a["series"][:6]:
+            label = s["y"] + (" (" + s["group"] + ")" if s.get("group") else "")
+            if s["results"]:
+                lines.append("%s [%s]: %s" % (label, s["kind"], "; ".join("%s %s" % (r["name"], r["value"]) for r in s["results"][:5])))
+        return lines
+
+    def analyze(self, run_id: str, column: Optional[str] = None, model: Optional[str] = None) -> str:
+        """Re-analyse a recorded run, optionally one column and/or with a chosen fit model."""
+        from ..analysis import MODELS, analyze_run
+        if model and model not in MODELS and model != "linear":
+            return "unknown model %r (choose: linear, %s)" % (model, ", ".join(MODELS))
+        try:
+            rows = self._rows(run_id)
+            meta = json.loads((self._run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
+            plan = self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8"))
+        except (KeyError, OSError, ValueError, PlanError) as e:
+            return "cannot analyse %s: %s" % (run_id, e)
+        cols = self.engine.columns(plan)
+        if column and column not in [m["key"] for m in cols["measures"]]:
+            return "unknown column %r (have: %s)" % (column, ", ".join(m["key"] for m in cols["measures"]))
+        a = analyze_run(rows, cols["axes"], cols["measures"], meta, force=model, only=column)
+        return "\n".join(["%s: %d rows" % (run_id, len(rows))] + self._analysis_lines(a))
 
     def _preview(self, plan: Plan, rows: List[Dict[str, Any]]) -> List[str]:
         if not rows:
@@ -284,19 +356,41 @@ class LabRuntime:
         with open(path, encoding="utf-8") as f:
             return [json.loads(line) for line in f if line.strip()]
 
-    def list_runs(self, limit: int = 10) -> str:
+    def runs_index(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Most recent runs first: run_id, plan, status, points, planned_points, reason."""
         root = self.data_dir / "runs"
         dirs = sorted((d for d in root.iterdir() if d.is_dir()), reverse=True)[:limit] if root.exists() else []
-        lines = []
+        out = []
         for d in dirs:
+            entry: Dict[str, Any] = {"run_id": d.name, "plan": d.name.split("-", 2)[-1], "status": "unfinished"}
             try:
                 meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-                lines.append("%s: %s, %s/%s points%s" % (d.name, meta.get("status"), meta.get("points"),
-                                                         meta.get("planned_points"),
-                                                         " (%s)" % meta["reason"] if meta.get("reason") else ""))
+                entry.update(status=meta.get("status"), points=meta.get("points"),
+                             planned_points=meta.get("planned_points"), reason=meta.get("reason"))
             except (OSError, ValueError):
-                lines.append("%s: unfinished" % d.name)
+                live = self.live_view(10 ** 9)
+                if live and live["run_id"] == d.name and live["status"] == "running":
+                    entry.update(status="running", points=live["done"], planned_points=live["total"])
+            out.append(entry)
+        return out
+
+    def list_runs(self, limit: int = 10) -> str:
+        lines = []
+        for r in self.runs_index(limit):
+            if r["status"] in ("unfinished", "running"):
+                lines.append("%s: %s" % (r["run_id"], r["status"]))
+            else:
+                lines.append("%s: %s, %s/%s points%s" % (r["run_id"], r["status"], r["points"], r["planned_points"],
+                                                         " (%s)" % r["reason"] if r.get("reason") else ""))
         return "\n".join(lines) or "no runs yet"
+
+    def stop_run(self) -> bool:
+        """Stop the plan that is running (its on_abort steps then run). False if none is running."""
+        live = self.live_view(10 ** 9)
+        if not live or live["status"] != "running":
+            return False
+        self.gate.request_abort()
+        return True
 
     def run_data(self, run_id: str, columns: Optional[List[str]] = None, max_rows: int = 50) -> str:
         try:
@@ -414,4 +508,6 @@ class LabRuntime:
                 "simulated": all(i.simulated for i in self.lab.instruments.values()),
                 "busy": self.busy, "pending": pending, "history": history, "status": status,
                 "instruments": self.instruments(),
+                "live": {k: v for k, v in (self.live_view(10 ** 9) or {}).items()
+                         if k in ("run_id", "plan", "done", "total", "eta_s", "status")} or None,
                 "events": [event_line(e) for e in reversed(tail_events(self.events_path, 25))]}

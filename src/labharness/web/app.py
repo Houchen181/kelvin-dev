@@ -15,7 +15,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-import yaml
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
@@ -122,7 +121,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse({
             "lab": runtime.lab.config.name,
             "simulated": all(i.simulated for i in runtime.lab.instruments.values()),
-            "chats": store.list(), "models": models, "default_model": default,
+            "chats": store.list(), "projects": store.projects(), "models": models, "default_model": default,
             "settings": settings.public(), "active": agent.active, "can_quit": on_quit is not None,
         })
 
@@ -136,7 +135,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def chats(request: Request) -> Response:
         if request.method == "POST":
             body = await request.json()
-            return JSONResponse(store.create(str(body.get("model") or "")))
+            try:
+                return JSONResponse(store.create(str(body.get("model") or ""), body.get("project") or None))
+            except KeyError as e:
+                return error(404, e.args[0])
         return JSONResponse(store.list())
 
     async def chat(request: Request) -> Response:
@@ -149,15 +151,41 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 return JSONResponse({"ok": True})
             data = store.load(chat_id)
             if request.method == "PATCH":
-                title = str((await request.json()).get("title") or "").strip()[:80]
+                body = await request.json()
+                title = str(body.get("title") or "").strip()[:80]
                 if title:
+                    if agent.active and agent.active["chat_id"] == chat_id:
+                        return error(409, "Rename it when the current answer is done.")
                     data["title"] = title
                     store.save(data)
+                if "project" in body:  # file it under a project, or null to take it out
+                    store.assign(chat_id, body["project"] or None)
             for m in data["messages"]:  # the browser never needs provider-internal state
                 m.pop("raw", None)
+            data["project"] = store.project_of(chat_id)
             return JSONResponse(data)
         except KeyError as e:
             return error(404, e.args[0])
+
+    async def projects(request: Request) -> Response:
+        if request.method == "POST":
+            try:
+                return JSONResponse(store.create_project((await request.json()).get("name")))
+            except ValueError as e:
+                return error(400, str(e))
+        return JSONResponse(store.projects())
+
+    async def project(request: Request) -> Response:
+        project_id = request.path_params["project_id"]
+        try:
+            if request.method == "DELETE":
+                store.delete_project(project_id)
+                return JSONResponse({"ok": True})
+            return JSONResponse(store.rename_project(project_id, (await request.json()).get("name")))
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ValueError as e:
+            return error(400, str(e))
 
     async def turn(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
@@ -219,44 +247,56 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse({"settings": settings.public(), "models": await agent.models()})
 
     async def run_data(request: Request) -> Response:
-        """What the browser needs to plot a run: axes, scalar columns, last trace per trace column."""
+        """What the browser needs to plot a run: axes (outer first), scalar columns, the last trace per
+        trace column, and the automatic analysis."""
         run_id = request.path_params["run_id"]
         try:
             rows = runtime._rows(run_id)
-            plan = yaml.safe_load((runtime._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8")) or {}
-        except (KeyError, OSError) as e:
+            run_dir = runtime._run_dir(run_id)
+            cols = runtime.engine.columns(runtime._plan((run_dir / "plan.yaml").read_text(encoding="utf-8")))
+        except (KeyError, OSError, ValueError) as e:
             return error(404, str(e))
-        axes = [k for k in (plan.get("sweep") or {})]
-        measures = [str(k) for k in plan.get("measure") or []]
-
-        def unit(key: str) -> str:
-            try:
-                return runtime.lab.resolve(key)[1].unit
-            except KeyError:
-                return ""
-
-        scalars = [k for k in measures if rows and isinstance(rows[0].get(k), (int, float))
-                   and not isinstance(rows[0].get(k), bool)]
+        axes = [{"key": a["key"], "unit": a["unit"]} for a in cols["axes"]]
+        scalars = [{"key": m["key"], "unit": m["unit"]} for m in cols["measures"] if m["kind"] == "scalar"]
         traces = []
-        for k in measures:
-            if rows and isinstance(rows[-1].get(k), list):
-                ys = rows[-1][k]
-                step = max(1, -(-len(ys) // TRACE_POINTS))
-                x0, x1 = rows[-1].get(k + ".axis") or (0, len(ys) - 1)
-                n = len(ys)
-                xs = [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(0, n, step)]
-                try:
-                    axis = runtime.lab.resolve(k)[1].axis
-                except KeyError:
-                    axis = None
-                axis_unit = unit("%s.%s" % (k.split(".")[0], axis[0])) if axis else ""
-                traces.append({"key": k, "unit": unit(k), "x": xs, "y": ys[::step], "x_unit": axis_unit,
-                               "row": len(rows) - 1})
-        return JSONResponse({
-            "run_id": run_id, "axes": [{"key": a, "unit": unit(a)} for a in axes],
-            "scalars": [{"key": k, "unit": unit(k)} for k in scalars],
-            "rows": [{k: r.get(k) for k in axes + scalars} for r in rows], "traces": traces,
-        })
+        for m in cols["measures"]:
+            if m["kind"] != "trace" or not rows or not isinstance(rows[-1].get(m["key"]), list):
+                continue
+            ys = rows[-1][m["key"]]
+            step = max(1, -(-len(ys) // TRACE_POINTS))
+            x0, x1 = rows[-1].get(m["key"] + ".axis") or (0, len(ys) - 1)
+            n = len(ys)
+            xs = [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(0, n, step)]
+            traces.append({"key": m["key"], "unit": m["unit"], "x": xs, "y": ys[::step], "x_unit": m.get("x_unit", ""),
+                           "row": len(rows) - 1})
+        def read_json(name: str) -> Any:
+            try:
+                return json.loads((run_dir / name).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+
+        meta = read_json("meta.json") or {}
+        keys = [a["key"] for a in axes] + [m["key"] for m in scalars]
+        return JSONResponse({"run_id": run_id, "plan": run_id.split("-", 2)[-1], "axes": axes, "scalars": scalars,
+                             "rows": [{k: r.get(k) for k in keys} for r in rows], "traces": traces,
+                             "analysis": read_json("analysis.json"),
+                             "plan_text": (run_dir / "plan.yaml").read_text(encoding="utf-8"),
+                             "meta": {k: meta.get(k) for k in ("status", "reason", "points", "planned_points",
+                                                                "duration_s", "warnings")}})
+
+    async def live(request: Request) -> Response:
+        """The running (or last) plan's rows since `since`, for the runs pane."""
+        try:
+            since = max(0, int(request.query_params.get("since", "0")))
+        except ValueError:
+            since = 0
+        return JSONResponse({"live": runtime.live_view(since)})
+
+    async def runs(request: Request) -> Response:
+        return JSONResponse({"runs": await asyncio.to_thread(runtime.runs_index, 20)})
+
+    async def stop_run(request: Request) -> Response:
+        return JSONResponse({"ok": runtime.stop_run()})
 
     routes = [
         Route("/", index),
@@ -264,12 +304,17 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/chats", chats, methods=["GET", "POST"]),
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
+        Route("/api/projects", projects, methods=["GET", "POST"]),
+        Route("/api/projects/{project_id}", project, methods=["PATCH", "DELETE"]),
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/state", state),
         Route("/api/safe_state", safe_state, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
         Route("/api/quit", quit_app, methods=["POST"]),
+        Route("/api/live", live),
+        Route("/api/runs", runs),
+        Route("/api/runs/stop", stop_run, methods=["POST"]),
         Route("/api/runs/{run_id}", run_data),
         Route("/static/{name}", static),
     ]
@@ -285,7 +330,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--data-dir", default=str(Path.home() / "Kelvin" / "virtual-lab"))
     ap.add_argument("--settings", default=str(Path.home() / "Kelvin" / "settings.json"))
-    ap.add_argument("--speed", type=float, default=0, help="0 = instant simulated time (default); N = N× real time")
+    ap.add_argument("--speed", type=float, default=10,
+                    help="virtual lab time: N× real time (default 10, so runs can be watched); 0 = instant")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--approval-timeout", type=float, default=300)
     ap.add_argument("--demo", action="store_true", help="add a scripted model so the portal works without an API key")

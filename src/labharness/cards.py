@@ -38,16 +38,24 @@ _PREFIXES = [(1e9, "G"), (1e6, "M"), (1e3, "k"), (1.0, ""), (1e-3, "m"), (1e-6, 
 _PREFIX_OF = {p: f for f, p in _PREFIXES if p}
 
 
-def si(x: float, unit: str) -> str:
-    """3.99e9 Hz -> '3.99 GHz', -8.83e-9 V -> '-8.83 nV', -0.0013 mW -> '-1.3 µW'; other units stay plain."""
+def si_parts(x: float, unit: str) -> Tuple[float, float, str]:
+    """(value in the shown unit, divisor applied, shown unit): 3.99e9, 'Hz' -> (3.99, 1e9, 'GHz')."""
     if x != 0 and unit not in SI_UNITS and len(unit) > 1 and unit[0] in _PREFIX_OF and unit[1:] in SI_UNITS:
-        x, unit = x * _PREFIX_OF[unit[0]], unit[1:]  # an already-prefixed unit such as mW or mm
+        base = _PREFIX_OF[unit[0]]  # an already-prefixed unit such as mW or mm
+        v, f, u = si_parts(x * base, unit[1:])
+        return v, f / base, u
     if unit not in SI_UNITS or x == 0 or not math.isfinite(x):
-        return num(x) + (" " + unit if unit else "")
+        return x, 1.0, unit
     for factor, prefix in _PREFIXES:
         if abs(x) >= factor * 0.99995:
             break
-    return "%s %s%s" % (num(x / factor), prefix, unit)
+    return x / factor, factor, prefix + unit
+
+
+def si(x: float, unit: str) -> str:
+    """3.99e9 Hz -> '3.99 GHz', -8.83e-9 V -> '-8.83 nV', -0.0013 mW -> '-1.3 µW'; other units stay plain."""
+    v, _, u = si_parts(x, unit)
+    return num(v) + (" " + u if u else "")
 
 
 @dataclass

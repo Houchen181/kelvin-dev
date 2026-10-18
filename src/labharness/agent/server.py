@@ -27,6 +27,7 @@ You are connected to a physics lab through Kelvin.
 - Changes that drive the sample harder (more power, voltage, current, field, temperature, outputs on) wait for a human to approve them on the Kelvin approval page, unless the project envelope covers them. Your call blocks until they answer or the request times out. You cannot approve requests yourself; do not try.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. Do not try to work around a refusal; tell the user.
 - For sweeps, write a plan and call simulate_plan, then run_plan: one approval, dry run first, everything logged.
+  run_plan analyses the data itself; report its assessment and key numbers (with uncertainties) rather than raw rows.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - If something looks wrong, call safe_state.
 - Reply to the user briefly: the result first, then the next step."""
@@ -85,8 +86,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def validate_plan(plan: str) -> str:
         """Check a plan (YAML text) and say what it would need approval for. Format:
         plan: name / preconditions: ["tc.T_sample < 2.5"] / setup: {instr.param: value} /
-        sweep: {instr.param: {from, to, step} or {values: [...]}} (several keys = nested, outer first) /
-        settle: seconds / measure: [instr.param] / after: {instr.param: value} / on_abort: {...}"""
+        sweep: {instr.param: {from, to, step} | {from, to, points} | {from, to, points, log: true} | {values: [...]},
+                plus optional back: true (there and back), settle: s,
+                stabilize: {read: instr.param, within: change, for: s, timeout: s}}
+               (several keys = nested loops, outer first) /
+        repeat: n / time: {every: s, for: s} (innermost time series) / settle: s / measure: [instr.param] /
+        after: {instr.param: value} / on_abort: {...}"""
         return rt.validate(plan)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -97,8 +102,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     def run_plan(plan: str) -> str:
         """Run a plan (YAML text): validate, health check, dry run, one human approval for its drive
-        ranges, run, log. Returns a summary and the run id."""
+        ranges, run, log, then analyse automatically. Returns the assessment, key results and the run id."""
         return rt.run(plan)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None) -> str:
+        """Re-analyse a recorded run. column: one measured instr.param; model: linear, lorentzian,
+        gaussian or exponential to force that fit (default: chosen automatically)."""
+        return rt.analyze(run_id, column, model)
 
     @server.tool(annotations=READ, structured_output=False)
     def list_runs(limit: int = 10) -> str:

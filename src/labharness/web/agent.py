@@ -20,8 +20,10 @@ from .store import ChatStore
 SYSTEM = INSTRUCTIONS + """
 You are Kelvin, the lab assistant in this portal, working with an experimental physicist.
 Write in Markdown. Lead with the result in one or two sentences, then only what helps the next decision.
-Use units. Prefer a short list or small table over paragraphs. When a run finishes, the portal draws its
-plots under your message, so do not repeat every number."""
+Use units. Prefer a short list or small table over paragraphs. While a plan runs, the portal shows its
+progress and plots live in a Runs pane beside the chat; when it finishes, the conversation shows the automatic
+assessment and the pane shows the key results, plots with fits and the data. So do not repeat them: add what
+they cannot (interpretation, anything suspicious, the next step)."""
 MAX_STEPS = 25
 _RUN_ID = re.compile(r"run_id='([^']+)'")
 
@@ -202,18 +204,36 @@ class ChatAgent:
             shown.append(request["id"])
             await emit(dict(request, type="approval", call_id=call["id"]))
 
+        before = self.runtime.live_view(10 ** 9)
+        old_run = before["run_id"] if before else None
+        sent: Dict[str, Any] = {}
+
+        async def progress() -> None:
+            """Say how a run that started during this call is going. Its data go to the runs pane (/api/live)."""
+            view = self.runtime.live_view(10 ** 9)  # no rows, just the counters
+            if not view or view["run_id"] == old_run:
+                return
+            event = {"type": "run_progress", "call_id": call["id"], "run_id": view["run_id"], "plan": view["plan"],
+                     "done": view["done"], "total": view["total"], "eta_s": view["eta_s"], "status": view["status"]}
+            key = (view["run_id"], view["done"], view["status"])
+            if sent.get("key") != key:
+                sent["key"] = key
+                await emit(event)
+
         task = asyncio.ensure_future(self.client.call_tool(call["name"], call["input"]))
         try:
             while not task.done():
                 getter = asyncio.ensure_future(requests.get())
-                done, _ = await asyncio.wait({task, getter}, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = await asyncio.wait({task, getter}, timeout=0.4, return_when=asyncio.FIRST_COMPLETED)
                 if getter in done:
                     await show(getter.result())
                 else:
                     getter.cancel()
+                await progress()
             await asyncio.sleep(0)  # let a last notification from the worker thread land
             while not requests.empty():
                 await show(requests.get_nowait())
+            await progress()
         finally:
             if unsubscribe:
                 unsubscribe()

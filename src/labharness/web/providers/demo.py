@@ -11,10 +11,19 @@ from .base import Emit, ModelInfo, Provider, TurnResult
 
 GATE_SWEEP = """plan: gate_sweep
 setup: { lockin.amplitude: 0.05, lockin.tc: 0.1, smu.output: on }
-sweep: { smu.V: {from: 0, to: 5, step: 0.25} }
+sweep: { smu.V: {from: 0, to: 5, step: 0.1} }
 settle: 0.5
 measure: [lockin.X, smu.I]
 after: { smu.V: 0 }"""
+
+FIELD_MAP = """plan: field_gate_map
+setup: { lockin.amplitude: 0.05, lockin.tc: 0.1, smu.output: on, magnet.rate: 0.5 }
+sweep:
+  magnet.B: {values: [0, 0.5, 1]}
+  smu.V: {from: 0, to: 4, step: 0.2}
+settle: 0.5
+measure: [lockin.X]
+after: { smu.V: 0, magnet.B: 0 }"""
 
 
 class DemoProvider(Provider):
@@ -40,18 +49,20 @@ class DemoProvider(Provider):
             result = last["results"][0]
             lines = [l for l in (result["content"] or "").splitlines() if l.strip()]
             run = next((l for l in lines if l.startswith("run ")), None)
-            peaks = [l for l in lines if ": min " in l]
             if result["is_error"]:
                 text = "That failed: %s" % (lines[0] if lines else "no details")
-            elif run:
-                text = "**%s**\n\n%s" % (run, "\n".join("- " + p for p in peaks))
+            elif run:  # the conversation already shows the assessment, and the Runs pane the data
+                text = "**%s.** The assessment is above; the plots and data are in the Runs pane." % (run[:1].upper() + run[1:])
             elif result["name"] == "lab_status":
                 text = "Here is the lab right now (expand the step for every value). Drives marked * are away from safe."
             else:
                 text = lines[0] if lines else "Done."
             return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
         ask = last["text"].lower()
-        if "sweep" in ask:
+        if "map" in ask:
+            name, args = "run_plan", {"plan": FIELD_MAP}
+            intro = "I'll map the lock-in signal against gate voltage at 0, 0.5 and 1 T (nested loops: field outside, gate inside)."
+        elif "sweep" in ask:
             name, args = "run_plan", {"plan": GATE_SWEEP}
             intro = "I'll sweep the gate from 0 to 5 V and record the lock-in signal."
         elif any(w in ask for w in ("safe state", "go to safe", "all drives to safe", "kill")):
@@ -60,7 +71,7 @@ class DemoProvider(Provider):
             name, args, intro = "lab_status", {}, "Checking the lab."
         else:
             text = ("I'm the scripted demo, not an AI. Try *check the lab status*, *sweep the gate*, "
-                    "or *go to safe state*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
+                    "*map gate against field* or *go to safe state*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
             return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
         blocks = await self._say(intro, emit)
         blocks.append({"type": "tool_call", "id": "lh_call_%d" % len(history), "name": name, "input": args})

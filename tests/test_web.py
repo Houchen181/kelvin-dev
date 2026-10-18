@@ -2,6 +2,7 @@
 import asyncio
 import json
 import threading
+import time
 
 import pytest
 
@@ -13,13 +14,14 @@ anyio = pytest.importorskip("anyio")
 from starlette.testclient import TestClient  # noqa: E402
 
 from labharness import build_virtual_lab, demo_envelope  # noqa: E402
+from labharness.clock import ScaledClock  # noqa: E402
 from labharness.agent.approval import WebApprover  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.web.agent import ChatAgent  # noqa: E402
 from labharness.web.app import create_app  # noqa: E402
 from labharness.web.providers.base import ModelInfo, Provider, TurnResult  # noqa: E402
-from labharness.web.providers.demo import DemoProvider  # noqa: E402
+from labharness.web.providers.demo import GATE_SWEEP, DemoProvider  # noqa: E402
 from labharness.web.settings import Settings  # noqa: E402
 from labharness.web.store import ChatStore  # noqa: E402
 
@@ -182,7 +184,12 @@ def test_demo_sweep_draws_from_run_data(parts):
         data = client.get("/api/runs/" + end["run_id"], headers=headers).json()
         assert data["axes"] == [{"key": "smu.V", "unit": "V"}]
         assert [s["key"] for s in data["scalars"]] == ["lockin.X", "smu.I"]
-        assert len(data["rows"]) == 21
+        assert len(data["rows"]) == 51
+        a = data["analysis"]
+        assert a["series"][0]["kind"] == "peak" and a["series"][0]["fit"]["model"] == "lorentzian"
+        assert a["assessment"].startswith("lockin.X has a peak") and a["next"]
+        reply = "".join(e["delta"] for e in events if e["type"] == "text")
+        assert "plots and data are in the Runs pane" in reply  # the demo does not repeat the assessment
         assert client.get("/api/runs/..%2Fsecrets", headers=headers).status_code == 404
 
 
@@ -223,3 +230,97 @@ def test_stop_button_ends_a_running_turn(parts):
     assert events[-1] == {"type": "turn_end", "reason": "stopped"}
     assert chat["messages"][-1]["blocks"][0]["text"] == "(stopped)"
     assert active is None
+
+
+def test_run_progress_and_the_runs_pane_api(tmp_path):
+    lab = build_virtual_lab(clock=ScaledClock(60), seed=1)   # the 48 s demo sweep takes ~0.8 s
+    runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
+    parts = (runtime, Settings(tmp_path / "settings.json"), ChatStore(tmp_path / "chats"))
+    client, headers = client_for(parts, {"demo": DemoProvider()})
+    with client:
+        chat = client.post("/api/chats", json={"model": "demo:demo"}, headers=headers).json()
+        human(runtime.approver, [True])
+        events = stream_turn(client, headers, chat["id"], "sweep the gate", "demo:demo")
+        kinds = [e["type"] for e in events]
+        progress = [e for e in events if e["type"] == "run_progress"]
+        assert len(progress) >= 2, kinds
+        assert kinds.index("tool_start") < kinds.index("run_progress") and max(
+            i for i, k in enumerate(kinds) if k == "run_progress") < kinds.index("tool_end")
+        first, last = progress[0], progress[-1]
+        run_id = first["run_id"]
+        assert first["call_id"] == next(e for e in events if e["type"] == "tool_start")["id"]
+        assert "rows" not in first                               # the data go to the runs pane, not the chat
+        assert [e["done"] for e in progress] == sorted(e["done"] for e in progress)
+        assert any(e["status"] == "running" for e in progress)
+        assert last["status"] == "done" and last["done"] == last["total"] == 51
+
+        live = client.get("/api/live?since=0", headers=headers).json()["live"]
+        assert live["run_id"] == run_id and live["status"] == "done"
+        assert [r["i"] for r in live["rows"]] == list(range(51))  # every point once, in order
+        assert set(live["rows"][0]) == {"i", "t", "smu.V", "lockin.X", "smu.I"}
+        assert [a["key"] for a in live["axes"]] == ["smu.V"]
+        assert len(client.get("/api/live?since=50", headers=headers).json()["live"]["rows"]) == 1
+
+        runs = client.get("/api/runs", headers=headers).json()["runs"]
+        assert runs[0]["run_id"] == run_id and runs[0]["status"] == "done" and runs[0]["points"] == 51
+        assert runs[0]["plan"] == "gate_sweep"
+        data = client.get("/api/runs/" + run_id, headers=headers).json()
+        assert data["plan"] == "gate_sweep" and data["plan_text"].startswith("plan: gate_sweep")
+        assert data["meta"]["status"] == "done" and data["meta"]["points"] == 51
+        assert client.post("/api/runs/stop", json={}, headers=headers).json() == {"ok": False}  # nothing running
+
+
+def test_stop_run_aborts_the_plan_and_goes_safe(tmp_path):
+    lab = build_virtual_lab(clock=ScaledClock(20), seed=1)
+    runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
+    human(runtime.approver, [True])
+    out = {}
+    worker = threading.Thread(target=lambda: out.setdefault("text", runtime.run(GATE_SWEEP)), daemon=True)
+    worker.start()
+    deadline = time.time() + 15
+    while not (runtime.live and runtime.live["status"] == "running" and runtime.live["done"] >= 3):
+        assert time.time() < deadline, "the run never started"
+        time.sleep(0.05)
+    assert runtime.stop_run()
+    worker.join(15)
+    assert "aborted after" in out["text"]
+    assert runtime.live["status"] == "aborted" and runtime.runs_index(1)[0]["status"] == "aborted"
+    assert lab.read("smu", "V") == 0                         # the drive it touched went back to safe
+    assert not runtime.stop_run()
+
+
+def test_projects_organize_conversations(parts):
+    _, _, store = parts
+    client, headers = client_for(parts, {"scripted": Scripted([])})
+    with client:
+        assert client.get("/api/projects", headers=headers).json() == []
+        assert client.post("/api/projects", json={"name": "   "}, headers=headers).status_code == 400
+        saw = client.post("/api/projects", json={"name": "  SAW   cavities "}, headers=headers).json()
+        assert saw["name"] == "SAW cavities"
+        hall = client.post("/api/projects", json={"name": "Hall bars"}, headers=headers).json()
+        assert [p["name"] for p in client.get("/api/bootstrap", headers=headers).json()["projects"]] == ["SAW cavities", "Hall bars"]
+
+        a = client.post("/api/chats", json={"model": "scripted:m1", "project": saw["id"]}, headers=headers).json()
+        b = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
+        assert a["project"] == saw["id"] and b["project"] is None
+        assert client.post("/api/chats", json={"model": "x", "project": "p00000000"}, headers=headers).status_code == 404
+        listed = {c["id"]: c["project"] for c in client.get("/api/chats", headers=headers).json()}
+        assert listed == {a["id"]: saw["id"], b["id"]: None}      # the index file is not listed as a chat
+
+        moved = client.patch("/api/chats/" + b["id"], json={"project": hall["id"]}, headers=headers).json()
+        assert moved["project"] == hall["id"] and moved["title"] == "New chat"
+        assert client.get("/api/chats/" + b["id"], headers=headers).json()["project"] == hall["id"]
+        assert client.patch("/api/chats/" + b["id"], json={"project": "p00000000"}, headers=headers).status_code == 404
+        client.patch("/api/chats/" + a["id"], json={"project": None}, headers=headers)
+        assert store.project_of(a["id"]) is None
+
+        renamed = client.patch("/api/projects/" + hall["id"], json={"name": "Hall bars, batch 2"}, headers=headers).json()
+        assert renamed["name"] == "Hall bars, batch 2"
+        assert client.delete("/api/projects/" + hall["id"], headers=headers).json() == {"ok": True}
+        assert client.get("/api/chats/" + b["id"], headers=headers).json()["project"] is None  # the chat stays
+        assert client.delete("/api/projects/" + hall["id"], headers=headers).status_code == 404
+
+        client.patch("/api/chats/" + b["id"], json={"project": saw["id"]}, headers=headers)
+        client.delete("/api/chats/" + b["id"], headers=headers)
+        assert store._read_index()["assign"] == {}                # deleting a chat drops its filing
+        assert "project" not in store.load(a["id"])              # chat files never carry the project

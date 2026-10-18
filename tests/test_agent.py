@@ -1,5 +1,6 @@
 """The MCP server and the human approval channel. Needs Python >= 3.10 and `mcp`."""
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -64,7 +65,8 @@ def test_tools_are_listed_and_none_can_approve(runtime):
             return (await client.list_tools()).tools
     tools = {t.name: t for t in anyio.run(main)}
     assert {"lab_status", "describe_instrument", "get_value", "set_value", "send_raw", "safe_state",
-            "validate_plan", "simulate_plan", "run_plan", "get_run_data", "get_trace", "recent_events"} <= set(tools)
+            "validate_plan", "simulate_plan", "run_plan", "analyze_run", "get_run_data", "get_trace",
+            "recent_events"} <= set(tools)
     assert not [n for n in tools if "approve" in n or "answer" in n]   # approvals only come from the page
     assert tools["get_value"].annotations.read_only_hint is True
     assert tools["set_value"].annotations.read_only_hint is False
@@ -95,12 +97,27 @@ def test_plan_over_mcp(runtime):
     validate, run = call(runtime, ("validate_plan", {"plan": GATE_SWEEP}), ("run_plan", {"plan": GATE_SWEEP}))
     assert "ok: gate_sweep, 21 points" in validate and "needs approval: smu.V" in validate
     assert "dry run: run" in run and "done: 21 points" in run
-    assert "lockin.X: min" in run and "max" in run
+    center = re.search(r"assessment: lockin\.X has a peak at smu\.V = ([\d.]+) ± ", run)
+    assert center and abs(float(center.group(1)) - 1.5) < 0.01 and "\nnext: " in run
+    assert "smu.I [linear]" in run and "resistance (1/slope)" in run
     run_id = run.split("run_id=")[1].strip("')")
     (data,) = call(runtime, ("get_run_data", {"run_id": run_id, "columns": ["smu.V", "lockin.X"], "max_rows": 5}))
     lines = data.splitlines()
     assert lines[0].startswith(run_id + ": 21 rows") and lines[1] == "smu.V,lockin.X"
     assert lines[-1].startswith("5,")                      # the last row is always included
+
+
+def test_analyze_run_refits_on_request(runtime):
+    human(runtime.approver, [True])
+    run, = call(runtime, ("run_plan", {"plan": GATE_SWEEP}))
+    run_id = run.split("run_id=")[1].strip("')")
+    gauss, wrong_model, wrong_column = call(
+        runtime, ("analyze_run", {"run_id": run_id, "column": "lockin.X", "model": "gaussian"}),
+        ("analyze_run", {"run_id": run_id, "model": "spline"}),
+        ("analyze_run", {"run_id": run_id, "column": "smu.Q"}))
+    assert gauss.startswith(run_id + ": 21 rows") and "gaussian fit" in gauss and "smu.I" not in gauss
+    assert wrong_model.startswith("unknown model 'spline'")
+    assert wrong_column.startswith("unknown column 'smu.Q'")
 
 
 def test_trace_with_frequency_axis(runtime):
