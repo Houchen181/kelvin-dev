@@ -52,6 +52,9 @@ The last command opens `http://127.0.0.1:8770` in your browser. Bookmark that li
   - **The conversation itself:** a new chat never sees another chat's history.
 
   Kelvin keeps short, typed notes, not transcripts, and never questions or chit-chat. It merges a fact it already knows instead of saving it twice. Recalled notes come with your message, and a reply says which ones it used ("Recalled 2 notes"). A large project recalls only the notes that bear on the question. You can delete any note, or switch off **Learn from conversations**.
+- **Confidential projects:** In a project's **Project settings → Who may see this project**, choose which kinds of model may read it (Claude, GPT, Gemini, local models), and whether literature search may be used. For confidential work, allow only local models and switch off literature search.
+  - **Enforcement:** Kelvin refuses any other model for chats, comparisons and second opinions, and leaves out the plan reviewer if it isn't allowed. The composer shows **Confidential**.
+  - **The rules stay with the chat:** a chat that ran under them keeps them, even if it is moved out of the project or the project is deleted, so its history never reaches a model you excluded.
 - **Incognito:** For a question that has nothing to do with your work, press **Incognito** on a new chat. Kelvin then uses no memory and keeps none, and the chat is never saved or listed; it is gone when you leave it. Instrument commands and runs are still logged, for safety.
 - **Literature:** Kelvin searches arXiv and journal papers (through [OpenAlex](https://openalex.org)) and reads them, so it can plan an experiment from what is known and check a result against published work. Try "what parameters did people use to drive magnons with SAWs in CrSBr? propose a plan".
   - **Search:** results come with authors, venue, citation counts and abstracts.
@@ -338,6 +341,15 @@ python -m venv .venv
 | Mark | a sleeping cat beside a snowflake: [`kelvin.svg`](src/labharness/web/static/kelvin.svg) |
 | Colors | navy `#1b3a5c`, ice `#2f6fb0`, frost `#e8f2fc`, snowflake `#8cc4f2` |
 | Charts | keep the validated data palette in `app.css` (`--series-1`, `--s1`…`--s8`); brand colors are for chrome, not data |
+
+## Cards for new instruments
+
+For an instrument Kelvin doesn't know, open **Lab → Set up → Make a card for it from its manual…**.
+- **Drafting:** paste the manual's remote-programming chapter (copy it from your PDF viewer, or load a text file). Pick a model and press **Draft the card**. The model writes the card from that text only, and Kelvin checks it against the card format, asking the model to fix any problems once.
+- **Checking:** read the draft against the manual, edit it, press **Check**, then **Save card**. It is kept in `~/Kelvin/cards/` and appears in the card list for your lab config.
+- **In a chat:** "here is the command reference of my magnet supply, make a card". Kelvin uses `card_guide`, `check_card` and `save_card`.
+- **Drafts are safe to try:** a new card is a **draft**. On real hardware its readings work, so you can try it, but its outputs stay simulation-only.
+- **Reviewing:** when you have checked the commands, limits and safe values, press **Mark reviewed**. Only a person can do that, and Kelvin never overwrites a card a person has reviewed.
 
 ## Writing a card
 

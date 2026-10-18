@@ -509,6 +509,14 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .pair-code { font-size: 30px; font-weight: 700; letter-spacing: 4px; font-variant-numeric: tabular-nums; }
 .pair-wait { color: var(--muted); }
 @media (max-width: 560px) { .pair-row { grid-template-columns: 1fr; } }
+.card-actions { display: inline-flex; gap: 10px; align-items: center; white-space: nowrap; }
+.memory-note.broken .memory-kind { color: var(--danger); }
+.memory-kind.ok { color: var(--ok); }
+.file-pick { cursor: pointer; }
+#card-yaml, #card-manual { width: 100%; font-size: 12.5px; }
+.rules-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; color: var(--warn); padding: 3px 7px;
+  border-radius: 999px; background: var(--warn-bg); white-space: nowrap; }
+.rules-chip svg { width: 13px; height: 13px; }
 .compare-btn { display: inline-flex; align-items: center; gap: 5px; border: 1px solid transparent; background: none;
   border-radius: 8px; padding: 5px 7px; color: var(--text-2); font-size: 13.5px; cursor: pointer; white-space: nowrap; }
 .compare-btn svg { width: 15px; height: 15px; }

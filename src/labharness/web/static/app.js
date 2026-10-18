@@ -1268,6 +1268,10 @@
     editingProject = p;
     $("project-dialog-name").textContent = p.name;
     $("project-instructions").value = p.instructions || "";
+    const rules = p.rules || { providers: null, literature: true };
+    for (const c of document.querySelectorAll("#project-providers input")) c.checked = !rules.providers || rules.providers.includes(c.value);
+    $("project-literature").checked = rules.literature !== false;
+    $("rules-summary").textContent = rulesText(rules);
     $("project-msg").textContent = "";
     renderNotes(p);
     renderPapers(p);
@@ -1321,12 +1325,53 @@
     const p = editingProject;
     $("project-msg").textContent = "Saving…";
     try {
-      Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { instructions: $("project-instructions").value } }));
+      const boxes = [...document.querySelectorAll("#project-providers input")];
+      const chosen = boxes.filter((c) => c.checked).map((c) => c.value);
+      if (!chosen.length) { $("project-msg").textContent = "Allow at least one kind of model."; return; }
+      const rules = { providers: chosen.length === boxes.length ? null : chosen, literature: $("project-literature").checked };
+      Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { instructions: $("project-instructions").value, rules } }));
+      applyRules();
       $("project-dialog").close();
       toast("Saved. Conversations in " + p.name + " use it from their next message.");
     } catch (e) {
       $("project-msg").textContent = e.message;
     }
+  }
+
+  // ------------------------------------------------------------------ who may see a project
+  const PROVIDER_NAMES = { anthropic: "Claude", openai: "GPT", gemini: "Gemini", local: "local models" };
+  function rulesText(rules) {
+    if (!rules) return "";
+    const parts = [];
+    if (rules.providers) parts.push("only " + rules.providers.map((p) => PROVIDER_NAMES[p] || p).join(" and "));
+    if (rules.literature === false) parts.push("no literature search");
+    return parts.join("; ");
+  }
+  function currentRules() {
+    if (S.chatId) return S.chatRules || null;
+    const p = SIDE.newProject && S.projects.find((x) => x.id === SIDE.newProject);
+    return p ? p.rules || null : null;
+  }
+  const modelAllowed = (key, rules) => !rules || !rules.providers || key.split(":")[0] === "demo" || rules.providers.includes(key.split(":")[0]);
+  function applyRules() {   // grey out the models this chat may not use, and say why
+    const rules = currentRules();
+    const sel = $("model");
+    for (const o of sel.querySelectorAll("option")) {
+      if (!o.value) continue;
+      o.disabled = !modelAllowed(o.value, rules);
+      o.textContent = o.textContent.replace(/ — not allowed here$/, "") + (o.disabled ? " — not allowed here" : "");
+    }
+    if (sel.selectedOptions[0] && sel.selectedOptions[0].disabled) {
+      const ok = [...sel.options].find((o) => o.value && !o.disabled);
+      sel.value = ok ? ok.value : "";
+    }
+    S.compare = S.compare.filter((k) => modelAllowed(k, rules));
+    compareLabel();
+    const text = rulesText(rules);
+    $("rules-chip").hidden = !text;
+    $("rules-chip").title = text ? "This chat's rules: " + text : "";
+    $("rules-chip-text").textContent = text ? "Confidential" : "";
+    updateSend();
   }
 
   function startNewProject(moveChatId) {
@@ -1425,9 +1470,11 @@
     leaveIncognito();
     S.chatId = id;
     SIDE.newProject = null;
+    S.chatRules = chat.rules || null;
     renderChat(chat);
     setTitle(chat.title, chat.project);
     if (chat.model && S.labels[chat.model]) $("model").value = chat.model;
+    applyRules();
     renderChats();
     closeSidebar();
   }
@@ -1435,7 +1482,9 @@
     if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
     leaveIncognito();
     S.chatId = null;
+    S.chatRules = null;
     SIDE.newProject = projectId || null;
+    applyRules();
     thread.replaceChildren();
     showEmpty(true);
     setTitle("", SIDE.newProject);
@@ -1467,7 +1516,9 @@
     if (extra.length) return sendCompare(text, [model, ...extra]);
     store("lh.model", model);
     if (!S.chatId) {
+      const rules = currentRules();
       try { S.chatId = (await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
+      S.chatRules = rules;
       applyIncognito();
     }
     $("input").value = ""; autosize();
@@ -1566,7 +1617,9 @@
   }
   async function sendCompare(text, models) {
     if (!S.chatId) {
+      const rules = currentRules();
       try { S.chatId = (await api("/api/chats", { body: { model: models[0], project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
+      S.chatRules = rules;
       applyIncognito();
     }
     $("input").value = ""; autosize();
@@ -1623,7 +1676,7 @@
     if (!menu.hidden) { menu.hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); return; }
     const main = $("model").value;
     const others = (S.groups || []).flatMap((g) => g.models.map((m) => ({ key: m.key, label: m.label, provider: g.label })))
-      .filter((m) => m.key !== main);
+      .filter((m) => m.key !== main && modelAllowed(m.key, currentRules()));
     const items = others.map((m) => {
       const box = h("input", { type: "checkbox" });
       box.checked = S.compare.includes(m.key);
@@ -1722,6 +1775,7 @@
       const preferred = (S.settings && S.settings.reviewer) || "";
       const models = (S.groups || []).flatMap((g) => g.models.map((m) => ({ key: m.key, label: m.label, provider: g.label })));
       models.sort((a, b) => (b.key === preferred) - (a.key === preferred));
+      for (let i = models.length - 1; i >= 0; i--) if (!modelAllowed(models[i].key, S.chatRules)) models.splice(i, 1);
       menu.replaceChildren(h("div", { class: "pane-menu-note" }, "Which model should check this answer?"),
         ...models.map((m) => {
           const item = h("button", { class: "pane-menu-item", type: "button" }, h("span", {}),
@@ -1963,6 +2017,88 @@
     for (const b of document.querySelectorAll("#lab-seg button")) b.classList.toggle("on", (b.dataset.use === "mine") === mine);
     $("lab-now").textContent = "Kelvin now controls " + (name || "the lab") + (mine ? "" : " (simulated)") + ".";
   }
+  // ------------------------------------------------------------------ the user's own instrument cards
+  const CARDS = { editing: null };
+  async function openCards() {
+    fillModels($("card-model"), S.groups, (S.settings && S.settings.default_model) || $("model").value);
+    showCardEditor(null);
+    $("cards-msg").textContent = "";
+    $("cards-dialog").showModal();
+    await loadCards();
+  }
+  async function loadCards() {
+    let r;
+    try { r = await api("/api/cards"); } catch (e) { $("cards-msg").textContent = e.message; return; }
+    $("card-list").replaceChildren(...(r.cards.length ? r.cards.map((c) => {
+      const reviewed = c.status === "lab-verified";
+      const flip = h("button", { class: "link soft", type: "button" }, reviewed ? "Back to draft" : "Mark reviewed");
+      flip.addEventListener("click", () => setCardStatus(c, reviewed ? "draft" : "lab-verified"));
+      const edit = h("button", { class: "link soft", type: "button" }, "Edit");
+      edit.addEventListener("click", () => showCardEditor(c.yaml, c.id, c.problems, c.warnings));
+      return h("li", { class: "memory-note" + (c.problems.length ? " broken" : "") },
+        h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, c.problems.length ? "broken" : reviewed ? "reviewed" : "draft"),
+        h("div", { class: "memory-body" }, h("span", {}, c.model),
+          h("span", { class: "memory-meta" }, (c.id || c.file) + (c.problems.length ? " · " + c.problems[0] : ""))),
+        h("span", { class: "card-actions" }, edit, c.problems.length ? null : flip),
+        rowButton("trash", "Delete this card", async () => {
+          if (!confirm("Delete the card " + (c.id || c.file) + "?")) return;
+          try { await api("/api/cards/delete", { body: { id: c.id || c.file.replace(/\.yaml$/, "") } }); } catch (e) { $("cards-msg").textContent = e.message; }
+          loadCards();
+        }));
+    }) : [h("li", { class: "memory-empty" }, "No cards of your own yet.")]));
+  }
+  function showCardEditor(text, editing, problems, warnings, notes) {
+    CARDS.editing = editing || null;
+    $("card-edit").hidden = text == null;
+    $("card-check").hidden = $("card-save").hidden = text == null;
+    if (text == null) return;
+    $("card-yaml").value = text;
+    $("card-editing").textContent = editing ? "editing " + editing : "new card";
+    showCardProblems(problems || [], warnings || []);
+    $("card-notes").textContent = notes || "";
+    $("card-yaml").focus();
+  }
+  function showCardProblems(problems, warnings) {
+    $("card-problems").replaceChildren(
+      ...problems.map((p) => h("li", { class: "bad" }, icon("warn"), h("span", {}, p))),
+      ...warnings.map((w) => h("li", { class: "bad" }, icon("warn"), h("span", { class: "muted" }, w))),
+      ...(problems.length ? [] : [h("li", { class: "good" }, icon("check"), h("span", {}, "The card is valid."))]));
+  }
+  async function draftCard() {
+    const manual = $("card-manual").value.trim();
+    if (manual.length < 200) { $("cards-msg").textContent = "Paste the manual's command reference first."; return; }
+    const btn = $("card-draft");
+    btn.disabled = true;
+    $("cards-msg").textContent = "Drafting with " + (S.labels[$("card-model").value] || "the model") + "… this can take a minute.";
+    try {
+      const r = await api("/api/cards/draft", { body: { manual, name: $("card-name").value.trim(), model: $("card-model").value } });
+      showCardEditor(r.yaml, null, r.problems, r.warnings, r.notes);
+      $("cards-msg").textContent = r.problems.length ? "Drafted, with problems to fix below." : "Drafted. Read it against the manual, then save.";
+    } catch (e) { $("cards-msg").textContent = e.message; }
+    finally { btn.disabled = false; }
+  }
+  async function checkCard() {
+    try {
+      const r = await api("/api/cards/check", { body: { yaml: $("card-yaml").value } });
+      showCardProblems(r.problems, r.warnings);
+      $("cards-msg").textContent = r.problems.length ? "Not valid yet." : "Valid: " + r.id;
+    } catch (e) { $("cards-msg").textContent = e.message; }
+  }
+  async function saveCard() {
+    try {
+      const r = await api("/api/cards", { body: { yaml: $("card-yaml").value, replace: CARDS.editing } });
+      $("cards-msg").textContent = "Saved " + r.id + " (" + r.status + "). Add it to the lab under Instruments.";
+      showCardEditor(null);
+      await loadCards();
+      if ($("lab-dialog").open) openLabSetup();
+    } catch (e) { $("cards-msg").textContent = e.message; }
+  }
+  async function setCardStatus(c, status) {
+    if (status === "lab-verified" && !confirm("Mark " + c.model + " as reviewed? You have checked its commands, limits and safe values against the manual and the instrument. Its outputs can then reach real hardware, still within your lab limits and approvals.")) return;
+    try { await api("/api/cards/status", { body: { id: c.id, status } }); } catch (e) { $("cards-msg").textContent = e.message; return; }
+    loadCards();
+  }
+
   async function openLabSetup() {
     let r;
     try { r = await api("/api/lab"); } catch (e) { toast(e.message); return; }
@@ -2101,6 +2237,7 @@
     S.labels = {};
     for (const g of groups) for (const m of g.models) S.labels[m.key] = m.label;
     fillModels($("model"), groups, store("lh.model") || preferred);
+    if ($("rules-chip")) applyRules();
     if (!$("model").value) $("input").placeholder = "Add an API key in Settings to start";
     else $("input").placeholder = "Ask Kelvin…";
     updateSend();
@@ -2252,6 +2389,19 @@
     });
     $("approval-mode").addEventListener("change", (e) => changeMode(e.target.value));
     $("open-lab-setup").addEventListener("click", openLabSetup);
+    $("open-cards").addEventListener("click", openCards);
+    $("card-draft").addEventListener("click", draftCard);
+    $("card-check").addEventListener("click", checkCard);
+    $("card-save").addEventListener("click", saveCard);
+    $("card-file").addEventListener("change", async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      if (f.size > 2e6) { $("cards-msg").textContent = "That file is large; paste only the command reference."; return; }
+      let text = await f.text();
+      if (/\.html?$/i.test(f.name)) text = new DOMParser().parseFromString(text, "text/html").body.innerText;
+      $("card-manual").value = text;
+      if (!$("card-name").value) $("card-name").value = f.name.replace(/\.[^.]+$/, "");
+    });
     $("open-report").addEventListener("click", openReport);
     $("make-report").addEventListener("click", makeReport);
     $("watch-add-toggle").addEventListener("click", () => { $("watch-form").hidden = !$("watch-form").hidden; });

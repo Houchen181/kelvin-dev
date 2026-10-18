@@ -1,0 +1,185 @@
+"""Cards for instruments Kelvin does not know yet: drafted from the manual, checked, kept in ~/Kelvin/cards.
+
+A card Kelvin writes is always a draft. On real hardware a draft card's readings work, so it can be tried against
+the instrument, but its drives stay simulation-only until a person reviews the card and marks it lab-verified.
+Only a person can do that, and Kelvin never overwrites a card a person has reviewed."""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import yaml
+
+from .cards import STATUSES, Card, CardError, parse_card
+
+DATA = Path(__file__).parent / "data" / "cards"
+EXAMPLE = DATA / "instruments" / "keithley_2400.yaml"
+MAX_MANUAL = 60000
+
+GUIDE = """# Instrument cards (YAML, schema version 1)
+A card tells Kelvin how to talk to one instrument model and which parameters are safe to change.
+
+Top level:
+- card: 1; id: vendor/model in lowercase (e.g. acme/sm-2000); model: full name; vendor; kind (source-meter,
+  lock-in, temperature-controller, magnet-supply, laser, preamplifier, multimeter, generator, ...);
+  status: draft (always, for a card you write); manual: which manual and chapter it came from.
+- identify: {idn: a regex matching the *IDN? reply, example: a real reply}. Add query: if the instrument does not
+  answer *IDN?.
+- error_query: the command that reads the error queue, if any (e.g. "SYSTem:ERRor?").
+- connection (only if the manual requires it): read_termination, write_termination, baud_rate, data_bits, parity,
+  stop_bits, timeout_ms, write_only (a listen-only instrument), ack (a reply every set returns).
+- parameters: one entry per quantity, keyed by a short name.
+- display: {headline: <parameter>} for the reading shown large; raw: {blocked: [...], reset: [...]}: command headers
+  that must never be sent (calibration, firmware, sensor curves, protection limits) and reset commands.
+
+Each parameter:
+- label; kind: measure (reading or a setting that does not drive the sample) or drive (anything that drives the
+  sample harder: voltage, current, power, field, temperature, outputs); unit (SI: V, A, W, T, K, Hz, s ...).
+- type: float (default), int, bool, enum (with values: {label: code}) or trace.
+- set: command template with {value}; get: the query. SCPI short/long forms as in the manual, optional nodes in
+  [brackets], e.g. "SOURce:VOLTage[:LEVel] {value}".
+- limits: [min, max] the instrument accepts (the vendor's, not the lab's).
+- Drives must have safe: the value that takes the drive away from the sample (0, off), and for continuous drives
+  ramp: gate with max_rate (units per second) so Kelvin ramps instead of jumping.
+- applies_when: <bool drive> when the value only reaches the sample while that switch is on; enables: [...] on the
+  switch itself.
+- Replies: field: n (0-based) for comma-separated replies; parse: a regex with one group for odd formats;
+  read_when: <bool drive> for readings that would switch something on if read while it is off.
+- description: one line; default: the power-on value if the manual gives it.
+
+Rules: use only commands that are in the manual text you were given; never invent a command, a limit or a reply
+format. If the manual does not say, leave the parameter out and mention it. Block calibration, firmware, sensor
+curve and protection-limit commands under raw.blocked."""
+
+
+def example() -> str:
+    return EXAMPLE.read_text(encoding="utf-8")
+
+
+def guide() -> str:
+    return GUIDE + "\n\n# A complete example card\n" + example()
+
+
+def extract_yaml(text: str) -> str:
+    """The card from a model's answer: the first ```yaml block, or the text from `card: 1` on."""
+    m = re.search(r"```(?:ya?ml)?\s*\n(.*?)```", text or "", re.S)
+    if m:
+        return m.group(1).strip() + "\n"
+    i = (text or "").find("card: 1")
+    return (text[i:] if i >= 0 else text or "").strip() + "\n"
+
+
+def check(text: str, source: str = "draft") -> Tuple[Optional[Card], List[str], List[str]]:
+    """(card or None, problems that stop it from being used, warnings worth fixing)."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        where = " (line %d)" % (mark.line + 1) if mark is not None else ""
+        return None, ["the YAML does not parse%s: %s" % (where, getattr(e, "problem", None) or e)], []
+    try:
+        card = parse_card(data, source)
+    except CardError as e:
+        return None, list(e.errors), []
+    warnings = []
+    if not card.idn_pattern:
+        warnings.append("no identify.idn: a scan cannot recognise this instrument")
+    if card.error_query is None:
+        warnings.append("no error_query: Kelvin cannot read the instrument's own errors")
+    if not data.get("manual"):
+        warnings.append("say which manual (and chapter) the card follows, under manual:")
+    if not any(p.is_drive for p in card.params.values()):
+        warnings.append("no drives: Kelvin can read this instrument but not set anything that reaches the sample")
+    return card, [], warnings
+
+
+def file_for(card_id: str) -> str:
+    return re.sub(r"[^\w.-]+", "_", card_id).strip("_") + ".yaml"
+
+
+def user_cards(cards_dir: Optional[Path]) -> List[Dict[str, Any]]:
+    """The user's own cards, with any problems (a broken file is listed, not skipped silently)."""
+    out = []
+    if not cards_dir or not Path(cards_dir).is_dir():
+        return out
+    for path in sorted(Path(cards_dir).glob("*.yaml")):
+        text = path.read_text(encoding="utf-8")
+        card, problems, warnings = check(text, path.name)
+        out.append({"file": path.name, "id": card.id if card else None, "model": card.model if card else path.stem,
+                    "kind": card.kind if card else "", "vendor": card.vendor if card else "",
+                    "status": card.status if card else "broken", "problems": problems, "warnings": warnings,
+                    "yaml": text})
+    return out
+
+
+def save(cards_dir: Path, text: str, builtin_ids: Iterable[str], by: str = "human",
+         replace: Optional[str] = None) -> Tuple[Card, Path, List[str]]:
+    """Check and keep a card. Kelvin's cards must be drafts and may not replace a card a person reviewed."""
+    card, problems, warnings = check(text)
+    if card is None:
+        raise ValueError("the card has problems: " + "; ".join(problems[:8]))
+    if card.id in set(builtin_ids):
+        raise ValueError("Kelvin already has a card %s; give yours another id, e.g. %s" % (
+            card.id, "mylab/" + card.id.split("/")[-1]))
+    if by != "human" and card.status != "draft":
+        raise ValueError("a card Kelvin writes must have status: draft; a person reviews it and marks it lab-verified")
+    cards_dir = Path(cards_dir)
+    cards_dir.mkdir(parents=True, exist_ok=True)
+    path = cards_dir / file_for(card.id)
+    if path.exists() and by != "human":
+        old, _, _ = check(path.read_text(encoding="utf-8"))
+        if old is not None and old.status != "draft":
+            raise ValueError("a person has reviewed %s (%s); Kelvin may not change it" % (card.id, old.status))
+    if replace and replace != card.id:   # renamed: drop the old file
+        old_path = cards_dir / file_for(replace)
+        if old_path.exists() and old_path != path:
+            old_path.unlink()
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+    tmp.replace(path)
+    return card, path, warnings
+
+
+def set_status(cards_dir: Path, card_id: str, status: str) -> Card:
+    """A person marks a card reviewed (lab-verified) or back to draft."""
+    if status not in STATUSES:
+        raise ValueError("status must be one of %s" % ", ".join(STATUSES))
+    path = Path(cards_dir) / file_for(card_id)
+    if not path.exists():
+        raise KeyError("no card %r among yours" % card_id)
+    text = path.read_text(encoding="utf-8")
+    new, n = re.subn(r"(?m)^status:\s*\S+", "status: " + status, text, count=1)
+    if not n:
+        new = re.sub(r"(?m)^(kind:.*)$", r"\1\nstatus: " + status, text, count=1)
+    card, problems, _ = check(new)
+    if card is None:
+        raise ValueError("the card has problems: " + "; ".join(problems[:8]))
+    path.write_text(new, encoding="utf-8")
+    return card
+
+
+def delete(cards_dir: Path, card_id: str) -> None:
+    path = Path(cards_dir) / file_for(card_id)
+    if not path.exists():
+        raise KeyError("no card %r among yours" % card_id)
+    path.unlink()
+
+
+DRAFT_SYSTEM = GUIDE + """
+
+You write one card for the instrument the user names, from the manual text they give you. Answer with the card in
+one ```yaml block, then at most five short lines on what you left out or are unsure of. Status: draft."""
+
+
+def draft_prompt(manual: str, name: str) -> str:
+    manual = manual.strip()
+    clipped = manual[:MAX_MANUAL]
+    note = "" if len(manual) <= MAX_MANUAL else "\n(The manual text was cut at %d characters.)" % MAX_MANUAL
+    return ("Instrument: %s\n\nAn example of a finished card, for the format:\n%s\n\nThe manual (or its "
+            "command reference):\n%s%s" % (name or "(see the manual)", example(), clipped, note))
+
+
+def repair_prompt(text: str, problems: List[str]) -> str:
+    return ("Your card has these problems:\n- %s\n\nAnswer with the corrected card in one ```yaml block.\n\n%s"
+            % ("\n- ".join(problems[:12]), text))

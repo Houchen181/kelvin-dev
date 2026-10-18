@@ -81,6 +81,7 @@
             <span class="sr-only">Model</span>
             <select id="model"></select>
           </label>
+          <span id="rules-chip" class="rules-chip" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span id="rules-chip-text"></span></span>
           <div class="pane-menu-wrap compare-wrap">
             <button id="compare-btn" class="compare-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-pressed="false"
                     title="Ask two or three models at once and compare their answers side by side">
@@ -285,6 +286,7 @@
         <select id="lab-card" aria-label="Card"></select>
         <button id="lab-add" class="btn small" type="button">Add</button>
       </div>
+      <span class="hint">Instrument not in the list? <button id="open-cards" class="link" type="button">Make a card for it from its manual…</button></span>
     </div>
     <div class="field">
       <label for="lab-yaml">Lab config</label>
@@ -297,6 +299,41 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Close</button>
       <button id="lab-save" class="btn primary" type="button">Save and connect</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="cards-dialog" class="dialog wide" aria-labelledby="cards-dialog-title">
+  <form id="cards-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="cards-dialog-title">Your instrument cards</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <p class="muted small">A card tells Kelvin how to talk to an instrument model. For one Kelvin doesn't know, paste the command reference from its manual and a model drafts the card for you to check. New cards are <b>drafts</b>: on real hardware their readings work, so you can try them, but their outputs stay simulation-only until you mark the card reviewed.</p>
+    <ul id="card-list" class="memory-notes"></ul>
+    <div class="field">
+      <span class="field-label">New card from a manual</span>
+      <div class="add-row">
+        <input id="card-name" placeholder="Instrument, e.g. Cryomagnetics 4G magnet supply" aria-label="Instrument">
+        <select id="card-model" aria-label="Model that drafts the card"></select>
+        <button id="card-draft" class="btn small" type="button">Draft the card</button>
+      </div>
+      <textarea id="card-manual" class="mono" rows="6" spellcheck="false" placeholder="Paste the manual's remote-programming chapter: the commands with their syntax, ranges and replies."></textarea>
+      <span class="hint">A PDF manual? Copy the command pages from your PDF viewer and paste them here, or <label class="link file-pick">load a text file<input id="card-file" type="file" accept=".txt,.md,.text,.csv,.html,.htm" hidden></label>. The manual goes to the model you pick.</span>
+    </div>
+    <div id="card-edit" class="field" hidden>
+      <div class="field-row"><label for="card-yaml">Card</label><span id="card-editing" class="hint"></span></div>
+      <textarea id="card-yaml" class="mono" rows="16" spellcheck="false"></textarea>
+      <ul id="card-problems" class="health-list"></ul>
+      <p id="card-notes" class="hint"></p>
+    </div>
+    <footer class="dialog-foot">
+      <span id="cards-msg" class="muted small"></span>
+      <div class="spacer"></div>
+      <button id="card-check" class="btn" type="button" hidden>Check</button>
+      <button id="card-save" class="btn primary" type="button" hidden>Save card</button>
     </footer>
   </form>
 </dialog>
@@ -353,6 +390,17 @@
       <label for="project-instructions">Instructions</label>
       <textarea id="project-instructions" rows="6" maxlength="4000" spellcheck="true" placeholder="e.g. Sample: Hall bar D3, contacts 1–4 for the four-probe. Keep the gate within ±5 V."></textarea>
       <span class="hint">Kelvin reads these in every conversation in this project.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Who may see this project</span><span id="rules-summary" class="hint"></span></div>
+      <div class="checks" id="project-providers">
+        <label class="check"><input type="checkbox" value="anthropic"> Claude</label>
+        <label class="check"><input type="checkbox" value="openai"> GPT</label>
+        <label class="check"><input type="checkbox" value="gemini"> Gemini</label>
+        <label class="check"><input type="checkbox" value="local"> Local models</label>
+      </div>
+      <div class="checks"><label class="check"><input id="project-literature" type="checkbox"> Literature search (the search words leave this computer)</label></div>
+      <span class="hint">For confidential work, allow only local models and switch off literature search. A chat that ran under these rules keeps them, even if it is moved out of the project or the project is deleted.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>

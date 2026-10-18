@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from .cards import CardRegistry
+from .cards import CardRegistry, load_card
 from .clock import RealClock, ScaledClock, SimClock
 from .lab import Lab
 from .labconfig import Envelope, LabConfig, load_envelope, load_lab_config
@@ -19,9 +19,36 @@ def builtin_registry() -> CardRegistry:
     return registry
 
 
-def build_virtual_lab(clock: Any = None, seed: int = 0, config: Optional[Any] = None) -> Lab:
-    clock = clock or SimClock()
+_BUILTIN_IDS: Optional[frozenset] = None
+
+
+def builtin_ids() -> frozenset:
+    global _BUILTIN_IDS
+    if _BUILTIN_IDS is None:
+        _BUILTIN_IDS = frozenset(c.id for c in builtin_registry())
+    return _BUILTIN_IDS
+
+
+def lab_registry(home: Any = None) -> CardRegistry:
+    """Kelvin's cards plus the user's own from `home`/cards. A broken user card, or one that reuses a built-in
+    id, is left out here; the Cards dialog lists it with its problems."""
     registry = builtin_registry()
+    folder = Path(home) / "cards" if home else None
+    if folder is not None and folder.is_dir():
+        for path in sorted(folder.glob("*.yaml")):
+            try:
+                card = load_card(path)
+            except Exception:
+                continue
+            if card.id not in registry:
+                registry.add(card)
+    return registry
+
+
+def build_virtual_lab(clock: Any = None, seed: int = 0, config: Optional[Any] = None,
+                      registry: Optional[CardRegistry] = None) -> Lab:
+    clock = clock or SimClock()
+    registry = registry or builtin_registry()
     cfg = load_lab_config(config or DATA / "virtual_lab.yaml", registry)
     world = World(clock, seed)
     return Lab(cfg, registry, sim_backend_factory(world), clock, world)
@@ -74,10 +101,11 @@ def open_home_lab(home: Any, choice: str = "auto", speed: float = 10) -> Tuple[L
     still starts, on the virtual lab, and says why."""
     path = Path(home) / "lab.yaml"
     info: Dict[str, Any] = {"kind": "virtual", "path": str(path), "error": None, "has_file": path.exists()}
+    registry = lab_registry(home)
     if choice != "virtual" and path.exists():
         try:
-            return build_lab(path), None, dict(info, kind="file")
+            return build_lab(path, registry=registry), None, dict(info, kind="file")
         except Exception as e:
             info["error"] = "Your lab (%s) could not be connected: %s" % (path.name, str(e).splitlines()[0])
-    lab = build_virtual_lab(clock=ScaledClock(speed) if speed else SimClock())
+    lab = build_virtual_lab(clock=ScaledClock(speed) if speed else SimClock(), registry=registry)
     return lab, demo_envelope(lab), info

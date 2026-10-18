@@ -117,7 +117,8 @@ class ChatStore:
             except (OSError, ValueError):
                 continue
             out.append({"id": chat["id"], "title": chat.get("title", "Chat"), "updated": chat.get("updated", 0),
-                        "model": chat.get("model"), "project": assign.get(chat["id"])})
+                        "model": chat.get("model"), "project": assign.get(chat["id"]),
+                        "rules": chat.get("rules")})
         return sorted(out, key=lambda c: c["updated"], reverse=True)
 
     def project_of(self, chat_id: str) -> Optional[str]:
@@ -146,6 +147,7 @@ class ChatStore:
             p.setdefault("instructions", "")
             p.setdefault("notes", [])
             p.setdefault("papers", [])
+            p.setdefault("rules", {"providers": None, "literature": True})
         known = {p["id"] for p in projects}
         assign = {c: p for c, p in (data.get("assign") or {}).items() if p in known}
         notes = [n for n in data.get("global_notes") or [] if isinstance(n, dict) and n.get("id") and n.get("text")]
@@ -165,7 +167,7 @@ class ChatStore:
 
     def create_project(self, name: Any) -> Dict[str, Any]:
         project = {"id": "p" + secrets.token_hex(4), "name": _name(name), "created": time.time(),
-                   "instructions": "", "notes": [], "papers": []}
+                   "instructions": "", "notes": [], "papers": [], "rules": {"providers": None, "literature": True}}
         with self._lock:
             index = self._read_index()
             index["projects"].append(project)
@@ -253,6 +255,17 @@ class ChatStore:
                 raise KeyError("no note %r" % note_id)
             project["notes"] = kept
             self._write_index(index)
+
+    def set_rules(self, project_id: str, rules: Any) -> Dict[str, Any]:
+        """Which model providers may see this project, and whether literature search may be used."""
+        from .rules import normalize
+        rules = normalize(rules)   # ValueError for unknown providers
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            project["rules"] = rules
+            self._write_index(index)
+        return project
 
     def add_paper(self, project_id: str, paper: Dict[str, Any], why: str = "",
                   chat_id: Optional[str] = None) -> Tuple[Dict[str, Any], str]:

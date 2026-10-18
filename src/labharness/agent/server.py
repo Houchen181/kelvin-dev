@@ -14,6 +14,7 @@ from typing import List, Optional
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
+from .. import carddraft
 from .._version import __version__
 from ..clock import ScaledClock, SimClock
 from ..labconfig import load_envelope
@@ -36,6 +37,8 @@ You are connected to a physics lab through Kelvin.
   they are away. lab_status lists active alarms; mention any you see.
 - To plan an experiment, first look at what is known: search_papers, read the most relevant one or two, then
   propose parameters with reasons and cite them as [Author Year](url). Never invent a reference or a number.
+- For an instrument Kelvin has no card for, ask for its manual's command reference (pasted text), read card_guide,
+  write the card from that text only, check_card until it is valid, then save_card. A person adds it to the lab.
 - Reply to the user briefly: the result first, then the next step."""
 
 READ = ToolAnnotations(readOnlyHint=True)
@@ -102,6 +105,24 @@ def build_server(rt: LabRuntime) -> MCPServer:
         except (KeyError, PermissionError) as e:
             return "not removed: %s" % (e.args[0] if e.args else e)
         return "no longer watching (%s)" % watch_id
+
+    @server.tool(annotations=READ, structured_output=False)
+    def card_guide() -> str:
+        """How to write a card for an instrument Kelvin does not know: the format, the rules, and a full example.
+        Read it before writing a card from a manual."""
+        return carddraft.guide()
+
+    @server.tool(annotations=READ, structured_output=False)
+    def check_card(card: str) -> str:
+        """Check a card (YAML text) without saving it: what is wrong, or what it offers and what to improve."""
+        return rt.check_card(card)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def save_card(card: str) -> str:
+        """Keep a new instrument card (status draft) with the user's cards. Only from the manual text the user gave;
+        never invent commands. A person adds it to the lab and reviews it; until then its drives stay
+        simulation-only on real hardware."""
+        return rt.save_card(card)
 
     @server.tool(annotations=WEB, structured_output=False)
     def search_papers(query: str, limit: int = 8, since_year: Optional[int] = None) -> str:
@@ -218,6 +239,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         envelope = load_envelope(args.envelope, lab.config, lab.registry) if args.envelope else demo_envelope(lab)
     approver = WebApprover(timeout=args.approval_timeout)
     runtime = LabRuntime(lab, approver, args.data_dir, envelope)
+    runtime.cards_dir = Path.home() / "Kelvin" / "cards"
     runtime.monitor.start()
     ui = ApprovalServer(runtime, port=args.ui_port).start()
 

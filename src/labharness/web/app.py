@@ -30,8 +30,10 @@ from ..adapters import AdapterError
 from ..clock import ScaledClock, SimClock
 from ..discovery import add_to_config
 from ..labconfig import ConfigError, load_lab_config
-from ..virtual_lab import build_lab, builtin_registry, is_simulated, open_home_lab
+from .. import carddraft
+from ..virtual_lab import build_lab, builtin_ids, builtin_registry, is_simulated, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in
+from . import review
 from .qr import QR
 from .remote import ROLES, Remote, addresses, allowed, remote_host_ok
 from .providers.base import Provider
@@ -127,6 +129,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo), settings)
     remote = Remote(settings)
     guard: Any = None
+    runtime.cards_dir = Path(settings.path).parent / "cards"
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     tasks: List[asyncio.Task] = []
 
@@ -228,6 +231,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     store.assign(chat_id, body["project"] or None)
             out = dict(data, messages=[{k: v for k, v in m.items() if k != "raw"} for m in data["messages"]])
             out["project"] = store.project_of(chat_id)  # the browser never needs provider-internal state
+            out["rules"] = agent.chat_rules(data)
             return JSONResponse(out)
         except KeyError as e:
             return error(404, e.args[0])
@@ -255,6 +259,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     store.rename_project(project_id, body["name"])
                 if "instructions" in body:
                     store.set_instructions(project_id, body["instructions"])
+                if "rules" in body:
+                    store.set_rules(project_id, body["rules"])
             return JSONResponse(store.project(project_id))
         except KeyError as e:
             return error(404, e.args[0])
@@ -287,6 +293,82 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except KeyError as e:
             return error(404, e.args[0])
         return JSONResponse({"ok": True})
+
+    # ------------------------------------------------------------------ the user's own instrument cards
+
+    async def cards_view(request: Request) -> Response:
+        """GET: the user's cards. POST {yaml, replace}: check and keep one (a person may set any status)."""
+        if request.method == "GET":
+            return JSONResponse({"cards": carddraft.user_cards(runtime.cards_dir), "folder": str(runtime.cards_dir)})
+        body = await request.json()
+        try:
+            card, path, warnings = carddraft.save(runtime.cards_dir, str(body.get("yaml") or ""), builtin_ids(), "human",
+                                                  str(body.get("replace") or "") or None)
+        except ValueError as e:
+            return error(400, str(e))
+        if body.get("replace") and body["replace"] != card.id and body["replace"] not in builtin_ids():
+            runtime.lab.registry.remove(body["replace"])
+        runtime.lab.registry.put(card)
+        runtime.gate.log.write("card", by="human", card=card.id, status=card.status, file=path.name)
+        return JSONResponse({"id": card.id, "file": path.name, "status": card.status, "warnings": warnings})
+
+    async def card_check(request: Request) -> Response:
+        card, problems, warnings = carddraft.check(str((await request.json()).get("yaml") or ""))
+        return JSONResponse({"id": card.id if card else None, "problems": problems, "warnings": warnings})
+
+    async def card_status(request: Request) -> Response:
+        body = await request.json()
+        try:
+            card = carddraft.set_status(runtime.cards_dir, str(body.get("id") or ""), str(body.get("status") or ""))
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ValueError as e:
+            return error(400, str(e))
+        runtime.lab.registry.put(card)
+        runtime.gate.log.write("card", by="human", card=card.id, status=card.status)
+        return JSONResponse({"id": card.id, "status": card.status})
+
+    async def card_delete(request: Request) -> Response:
+        card_id = str((await request.json()).get("id") or "")
+        try:
+            carddraft.delete(runtime.cards_dir, card_id)
+        except KeyError as e:
+            return error(404, e.args[0])
+        if card_id not in builtin_ids():
+            runtime.lab.registry.remove(card_id)
+        return JSONResponse({"ok": True})
+
+    async def card_draft(request: Request) -> Response:
+        """Draft a card from manual text with a model (the default one unless named); checked, repaired once."""
+        body = await request.json()
+        manual = str(body.get("manual") or "").strip()
+        if len(manual) < 200:
+            return error(400, "Paste the manual's command reference (at least a few commands with their syntax).")
+        key = str(body.get("model") or settings.get("default_model") or "")
+        if not key:
+            groups = (await agent.models())["groups"]
+            key = next((m["key"] for g in groups for m in g["models"]), "")
+        try:
+            provider, model_id = agent.provider_for(key)
+        except ValueError as e:
+            return error(400, str(e))
+        try:
+            answer = await asyncio.wait_for(review.ask(provider, model_id, carddraft.DRAFT_SYSTEM,
+                                                       carddraft.draft_prompt(manual, str(body.get("name") or ""))), 300)
+            text = carddraft.extract_yaml(answer)
+            card, problems, warnings = carddraft.check(text)
+            if problems:   # one round of repair, with the checker's own words
+                answer = await asyncio.wait_for(review.ask(provider, model_id, carddraft.DRAFT_SYSTEM,
+                                                           carddraft.repair_prompt(text, problems)), 300)
+                text = carddraft.extract_yaml(answer)
+                card, problems, warnings = carddraft.check(text)
+        except asyncio.TimeoutError:
+            return error(504, "The model did not finish the card within 5 minutes; try a shorter manual excerpt.")
+        except Exception as e:
+            return error(502, "The model could not draft it: %s" % (str(e).splitlines()[0][:200] if str(e) else type(e).__name__))
+        notes = answer.split("```")[-1].strip() if answer.count("```") >= 2 else ""
+        return JSONResponse({"yaml": text, "id": card.id if card else None, "problems": problems, "warnings": warnings,
+                             "notes": notes[:800], "model": key})
 
     # ------------------------------------------------------------------ phones and remote access
 
@@ -497,8 +579,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     lab_file.read_text(encoding="utf-8") if lab_file.exists() else "")
                 if not text.strip():
                     return error(400, "There is no lab config yet; scan for instruments or write one first.")
-                load_lab_config(text, runtime.lab.registry)   # check it before touching any instrument
-                lab = await asyncio.to_thread(build_lab, text)
+                registry = lab_registry(lab_file.parent)   # Kelvin's cards and the user's own
+                load_lab_config(text, registry)   # check it before touching any instrument
+                lab = await asyncio.to_thread(build_lab, text, None, 0, registry)
                 envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
                 if use != "mine":
                     tmp = lab_file.with_suffix(".tmp")
@@ -741,6 +824,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/me/forget", forget_me, methods=["POST"]),
         Route("/api/pair", pair, methods=["POST"]),
         Route("/api/phone", phone, methods=["GET", "POST"]),
+        Route("/api/cards", cards_view, methods=["GET", "POST"]),
+        Route("/api/cards/check", card_check, methods=["POST"]),
+        Route("/api/cards/status", card_status, methods=["POST"]),
+        Route("/api/cards/delete", card_delete, methods=["POST"]),
+        Route("/api/cards/draft", card_draft, methods=["POST"]),
         Route("/api/devices", devices, methods=["POST"]),
         Route("/api/devices/pairing/{code}", pairing),
         Route("/api/devices/{device_id}", device, methods=["DELETE"]),

@@ -21,6 +21,7 @@ from ..eventlog import EventLog, RunStore
 from ..gate import Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, Envelope
+from .. import carddraft
 from ..literature import Literature
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
@@ -84,6 +85,8 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "%s watch %s: %s" % (e.get("change"), e.get("watch"), e.get("rule"))
     elif kind == "review":
         text = "second opinion on %s: %s" % (e.get("plan"), e.get("verdict"))
+    elif kind == "card":
+        text = "card %s saved (%s)" % (e.get("card"), e.get("status"))
     elif kind == "report":
         text = "report %s (%s run%s)" % (e.get("name"), e.get("runs"), "" if e.get("runs") == 1 else "s")
     elif kind == "lab_changed":
@@ -126,6 +129,7 @@ class LabRuntime:
                                          "path": None, "error": None, "has_file": False}
         self.notifier = Notifier()
         self.literature = Literature()
+        self.cards_dir: Optional[Path] = None   # the user's own cards (~/Kelvin/cards); set by the app
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
@@ -542,6 +546,31 @@ class LabRuntime:
                 taken.append(name)
             out.append(dict(vars(f), suggested=name))
         return out
+
+    # ------------------------------------------------------------------ cards for new instruments
+
+    def check_card(self, text: str) -> str:
+        card, problems, warnings = carddraft.check(text)
+        if card is None:
+            return "not valid:\n" + "\n".join("- " + p for p in problems)
+        drives = [p.name for p in card.params.values() if p.is_drive]
+        lines = ["valid: %s (%s), %d parameters; drives: %s" % (card.id, card.model, len(card.params),
+                                                              ", ".join(drives) or "none")]
+        return "\n".join(lines + ["warning: " + w for w in warnings])
+
+    def save_card(self, text: str, by: str = "agent") -> str:
+        if self.cards_dir is None:
+            return "not saved: this Kelvin has no folder for your cards"
+        from ..virtual_lab import builtin_ids
+        try:
+            card, path, warnings = carddraft.save(self.cards_dir, text, builtin_ids(), by)
+        except ValueError as e:
+            return "not saved: %s" % e
+        self.lab.registry.put(card)
+        self.gate.log.write("card", by=by, card=card.id, status=card.status, file=path.name)
+        return "\n".join(["saved %s card %s as %s. A person adds it to the lab (Lab, Set up) and tries its readings; "
+                          "its drives stay simulation-only on real hardware until they mark it reviewed (Lab, Cards)."
+                          % (card.status, card.id, path)] + ["warning: " + w for w in warnings])
 
     # ------------------------------------------------------------------ literature
 

@@ -22,7 +22,7 @@ from ..agent.runtime import LabRuntime
 from ..agent.server import INSTRUCTIONS
 from ..gate import ApprovalRequest
 from .providers.base import Emit, ModelInfo, Provider
-from . import memory, review
+from . import memory, review, rules as rulebook
 from .settings import Settings
 from .store import MAX_NOTE, ChatStore
 
@@ -43,6 +43,10 @@ COMPARE = """# Comparing models
 The user is asking several models this same message and will compare the answers side by side. In this answer you
 may read the lab (status, values, runs, dry runs) but not change it. If something should be set or run, say exactly
 what you would do; the user picks one answer to continue with."""
+CONFIDENTIAL = """# Confidential project
+This project's rules: {rules}. Keep its details inside this conversation: never suggest pasting them into outside
+services."""
+WEB_TOOLS = {"search_papers", "read_paper"}
 COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
@@ -212,9 +216,33 @@ class ChatAgent:
                     for e in papers[-40:]))
         learn = self.settings.learning if self.settings else True
         parts.append(MEMORY_RULES + ("\n" + LEARN_RULES if learn else ""))
-        return {"system": "\n\n".join(parts),
-                "tools": self.tools + ([remember_tool(bool(project))] if learn else []) + ([SAVE_PAPER] if project else []),
-                "project": project["id"] if project else None, "learn": learn}
+        rules = self.chat_rules(chat)
+        if rulebook.restrictive(rules):
+            parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
+        tools = self.tools + ([remember_tool(bool(project))] if learn else []) + ([SAVE_PAPER] if project else [])
+        if not rules["literature"]:
+            tools = [t for t in tools if t["name"] not in WEB_TOOLS]
+        return {"system": "\n\n".join(parts), "tools": tools, "project": project["id"] if project else None,
+                "learn": learn, "rules": rules}
+
+    # ------------------------------------------------------------------ who may see a project
+
+    def chat_rules(self, chat: Dict[str, Any]) -> Dict[str, Any]:
+        """The chat's own rules (kept from any confidential project it ran in) combined with its project's now."""
+        project = self.store.memory_of(chat["id"])
+        return rulebook.merge(chat.get("rules"), (project or {}).get("rules"))
+
+    def _stamp(self, chat: Dict[str, Any]) -> None:
+        """A chat that runs under a project's rules keeps them, wherever it is filed later."""
+        project = self.store.memory_of(chat["id"])
+        if project and rulebook.restrictive(project.get("rules")):
+            chat["rules"] = rulebook.merge(chat.get("rules"), project["rules"])
+
+    def check_model(self, chat: Dict[str, Any], model_key: str, what: str = "") -> None:
+        rules = self.chat_rules(chat)
+        if not rulebook.allows(rules, model_key):
+            raise ValueError("%s is not allowed here: this project's rules say %s.%s" % (
+                self.label(model_key), rulebook.describe(rules), " " + what if what else ""))
 
     def recall(self, chat: Dict[str, Any], message: Dict[str, Any]) -> None:
         """Attach the notes that bear on this message (and were not given earlier in the chat) to the message."""
@@ -316,7 +344,7 @@ class ChatAgent:
         if self.active:
             raise Busy("Another conversation is still running.")
         provider, _ = self.provider_for(model_key)
-        self.store.load(chat_id)  # raises KeyError for an unknown chat
+        self.check_model(self.store.load(chat_id), model_key, "Pick one of the allowed models.")   # KeyError: no chat
         self.active = {"chat_id": chat_id, "model": model_key}
         self._stop = False
         return provider
@@ -343,6 +371,7 @@ class ChatAgent:
             message: Dict[str, Any] = {"role": "user", "text": text}
             self.recall(chat, message)
             self._attach_review(chat, message)
+            self._stamp(chat)
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
@@ -415,6 +444,8 @@ class ChatAgent:
                     content, is_error = self._remember(chat, context, call["input"])
                 elif call["name"] == "save_paper" and context["project"]:
                     content, is_error = await self._save_paper(chat, context, call["input"])
+                elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:
+                    content, is_error = "not available: this project keeps its work off the internet", True
                 elif call["name"] == "make_report":
                     content, is_error = await self._report(chat, call["input"])
                 elif call["name"] == "run_plan" and self.settings and self.settings.get("reviewer"):
@@ -470,6 +501,11 @@ class ChatAgent:
             return None
         plan = str(call["input"].get("plan") or "")
         await emit({"type": "review_start", "call_id": call["id"], "kind": "plan", "model": key})
+        if not rulebook.allows(self.chat_rules(chat), key):
+            await emit({"type": "review", "call_id": call["id"], "kind": "plan", "model": key, "label": self.label(key),
+                        "verdict": "", "text": "No second opinion: %s may not see this project (%s)." % (
+                            self.label(key), rulebook.describe(self.chat_rules(chat)))})
+            return None
         try:
             provider, model_id = self.provider_for(key)
             status = await asyncio.to_thread(self.runtime.lab_status)
@@ -497,6 +533,7 @@ class ChatAgent:
             raise Busy("Wait until Kelvin has finished answering.")
         provider, model_id = self.provider_for(model_key)
         chat = self.store.load(chat_id)
+        self.check_model(chat, model_key)
         prompt = review.answer_context(chat["messages"])   # ValueError when there is nothing to review
         text = await asyncio.wait_for(review.ask(provider, model_id, review.ANSWER_SYSTEM, prompt), 180)
         verdict, body = review.parse(text, "answer")
@@ -549,7 +586,9 @@ class ChatAgent:
         if not 2 <= len(keys) <= MAX_LANES:
             raise ValueError("Pick two or three different models to compare.")
         lanes = [(k,) + self.provider_for(k) for k in keys]
-        self.store.load(chat_id)  # raises KeyError for an unknown chat
+        chat = self.store.load(chat_id)  # raises KeyError for an unknown chat
+        for k in keys:
+            self.check_model(chat, k)
         self.active = {"chat_id": chat_id, "model": keys[0], "compare": keys}
         self._stop = False
         return lanes
@@ -564,13 +603,14 @@ class ChatAgent:
                                        "compare": {"models": keys, "lanes": [], "chosen": 0}}
             self.recall(chat, message)
             self._attach_review(chat, message)
+            self._stamp(chat)
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
                 chat["title"] = first[:48] + ("…" if len(first) > 48 else "")
             self.store.save(chat)
             context = self.context(chat)
-            tools = [t for t in context["tools"] if t["name"] in self.read_only]
+            tools = [t for t in context["tools"] if t["name"] in self.read_only]   # already without web tools if barred
             system = context["system"] + "\n\n" + COMPARE
             base = list(chat["messages"])
             await emit({"type": "compare_start", "models": keys, "labels": [self.label(k) for k in keys],
@@ -621,9 +661,9 @@ class ChatAgent:
                 results = []
                 for call in result.tool_calls:
                     await lane_emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
-                    if call["name"] not in self.read_only:
-                        content, is_error = ("not available while comparing models: only tools that read the lab are. "
-                                             "Say what you would do instead."), True
+                    if call["name"] not in {t["name"] for t in tools}:
+                        content, is_error = ("not available while comparing models: only tools that read the lab are "
+                                             "(and only those this chat allows). Say what you would do instead."), True
                     elif call["input"] is None:
                         content, is_error = "the arguments were not valid JSON; send the call again", True
                     else:

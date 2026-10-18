@@ -528,6 +528,16 @@ class CardRegistry:
         for path in sorted(Path(directory).rglob("*.yaml")):
             self.add(load_card(path))
 
+    def put(self, card: Card) -> None:
+        """Add or replace (the user's own cards change while Kelvin runs)."""
+        self._cards[card.id] = card
+
+    def remove(self, card_id: str) -> None:
+        self._cards.pop(card_id, None)
+
+    def __contains__(self, card_id: object) -> bool:
+        return card_id in self._cards
+
     def get(self, card_id: str) -> Card:
         try:
             return self._cards[card_id]
