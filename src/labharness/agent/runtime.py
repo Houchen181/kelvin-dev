@@ -19,7 +19,7 @@ from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunStore
 from ..gate import Approver, SafetyGate, _dur
 from ..lab import Lab
-from ..labconfig import Envelope
+from ..labconfig import Allowed, Envelope
 from ..plans import Plan, PlanError, load_plan
 from ..yamlio import load_yaml
 
@@ -68,6 +68,9 @@ def event_line(e: Dict[str, Any]) -> str:
             r for r in e.get("results", []) if "FAIL" in r)
     elif kind == "safe_state":
         text = "SAFE STATE: " + ("; ".join(e.get("results") or []) or "all drives already safe")
+    elif kind == "approval_mode":
+        text = "approvals: " + ("auto mode on (low-risk changes run without asking)" if e.get("mode") == "auto"
+                                else "ask before every drive increase")
     else:
         text = str(kind)
     by = e.get("by")
@@ -182,6 +185,9 @@ class LabRuntime:
             self._refresh()
             sim = all(i.simulated for i in self.lab.instruments.values())
             lines = ["%s%s" % (self.lab.config.name, " (simulated)" if sim else "")]
+            if self.gate.auto:
+                lines.append("approvals: auto mode (a person turned it on): low-risk drive changes and runs go ahead "
+                             "without asking; the rest still wait for a human")
             lines += self._status_lines()
             lines.append("* = drive away from its safe value")
             return "\n".join(lines)
@@ -485,6 +491,38 @@ class LabRuntime:
                         "headline": headline, "readings": readings, "drives": drives, "settings": settings})
         return out
 
+    # ------------------------------------------------------------------ approval mode (people only)
+
+    def approval_mode(self) -> Dict[str, Any]:
+        """The current mode, and what auto mode would approve in this lab, in words for the person choosing."""
+        cfg = self.lab.config
+        never, ranges = [], []
+        for name, ic in cfg.instruments.items():
+            card = self.lab.instruments[name].card
+            for param, rule in ic.auto.items():
+                key = name if param == "*" else "%s.%s" % (name, param)
+                if rule == "never":
+                    never.append(key)
+                elif isinstance(rule, Allowed):
+                    ranges.append("%s %s" % (key, rule.show(card.params[param])))
+        rule = ("drive changes and runs go ahead without asking when every drive stays within %.0f%% of the way from "
+                "its safe value to its lab limit and switches move at most one step from safe; runs also need a clean "
+                "dry run" % (100 * cfg.auto_fraction))
+        if ranges:
+            rule += ". Own auto ranges: " + ", ".join(ranges)
+        if never:
+            rule += ". Never automatic: " + ", ".join(never)
+        return {"mode": "auto" if self.gate.auto else "ask", "fraction": cfg.auto_fraction, "rule": rule + "."}
+
+    def set_approval_mode(self, mode: str, by: str = "human") -> Dict[str, Any]:
+        """Only the portal and the approval page call this; no agent tool can. It resets to ask on every start."""
+        if mode not in ("ask", "auto"):
+            raise ValueError("mode must be ask or auto")
+        if (mode == "auto") != self.gate.auto:
+            self.gate.auto = mode == "auto"
+            self.gate.log.write("approval_mode", by=by, mode=mode)
+        return self.approval_mode()
+
     def ui_state(self) -> Dict[str, Any]:
         # keep the panel live while Kelvin is idle; never wait for a running command
         if time.time() - self._status_at > 2.0 and self.lock.acquire(blocking=False):
@@ -507,6 +545,7 @@ class LabRuntime:
         return {"lab": self.lab.config.name,
                 "simulated": all(i.simulated for i in self.lab.instruments.values()),
                 "busy": self.busy, "pending": pending, "history": history, "status": status,
+                "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "instruments": self.instruments(),
                 "live": {k: v for k, v in (self.live_view(10 ** 9) or {}).items()
                          if k in ("run_id", "plan", "done", "total", "eta_s", "status")} or None,

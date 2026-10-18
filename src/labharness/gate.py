@@ -3,8 +3,9 @@
 - Measure / configure: runs immediately and is logged.
 - Drive toward safe: runs, ramped at the safe rate.
 - Drive away from safe: limit and interlock checks → asks a human unless a
-  signed envelope or an approved plan covers it → ramps while watching guard
-  readings, and returns to safe if one trips.
+  signed envelope or an approved plan covers it, or auto mode is on and the
+  change is low-risk → ramps while watching guard readings, and returns to
+  safe if one trips.
 - Beyond limits, or blocked commands: refused.
 """
 from __future__ import annotations
@@ -49,6 +50,9 @@ class Approver:
 
     def approve(self, request: ApprovalRequest) -> bool:
         raise NotImplementedError
+
+    def inform(self, request: ApprovalRequest, reasons: List[str]) -> None:
+        """Tell the human that auto mode approved `request` without asking (default: only the event log)."""
 
 
 class ConsoleApprover(Approver):
@@ -118,6 +122,7 @@ class SafetyGate:
         self.log = log if log is not None else EventLog(None, lab.clock)
         self.envelope = envelope
         self.operator = operator
+        self.auto = False  # auto mode: set by a person through the portal, never by the agent
         self._grants: Dict[str, Allowed] = {}
         self._undo: List[Tuple[str, str, Any]] = []
         self._stop_gen = 0
@@ -213,6 +218,61 @@ class SafetyGate:
     def stop_generation(self) -> int:
         return self._stop_gen
 
+    # ------------------------------------------------------------------ auto mode
+
+    def auto_verdict(self, inst: Instrument, spec: ParamSpec, values: List[Any]) -> Tuple[bool, str]:
+        """Is driving this parameter to these values low-risk enough to skip the human? And why, in words."""
+        key = "%s.%s" % (inst.name, spec.name)
+        rule = inst.config.auto.get(spec.name, inst.config.auto.get("*"))
+        if rule == "never":
+            return False, "%s is never auto-approved in this lab" % key
+        if isinstance(rule, Allowed):
+            if all(rule.covers(v) for v in values):
+                return True, "%s stays in its auto range %s" % (key, rule.show(spec))
+            return False, "%s leaves its auto range %s" % (key, rule.show(spec))
+        if not spec.numeric:
+            if all(spec.distance(v) <= 1 for v in values):
+                return True, "%s is one step from safe" % key
+            return False, "%s goes more than one step from safe" % key
+        lim = inst.limits(spec.name)
+        if lim is None or spec.safe is None:
+            return False, "%s has no limits to measure the step against" % key
+        worst = 0.0
+        for v in values:
+            edge = lim[1] if v >= spec.safe else lim[0]
+            span = abs(edge - spec.safe)
+            worst = max(worst, abs(v - spec.safe) / span if span > 0 else (0.0 if v == spec.safe else math.inf))
+        fraction = self.lab.config.auto_fraction
+        if worst <= fraction + 1e-9:
+            return True, "%s stays within %.0f%% of the way from safe to its limit" % (key, 100 * worst)
+        return False, "%s goes %.0f%% of the way from safe to its limit (auto mode covers %.0f%%)" % (
+            key, 100 * worst, 100 * fraction)
+
+    def auto_plan(self, grants: Dict[str, Allowed], dry_run: Any) -> Tuple[bool, List[str]]:
+        """Can auto mode approve a plan with these drive ranges? Needs a clean dry run and every drive low-risk."""
+        if not self.auto:
+            return False, []
+        if dry_run is None or not getattr(dry_run, "ok", False):
+            return False, ["the dry run did not finish cleanly"]
+        fine, blockers = [], []
+        for key, allowed in grants.items():
+            inst, spec = self.lab.resolve(key)
+            values = sorted(allowed.values, key=str) if allowed.values is not None else [allowed.lo, allowed.hi]
+            ok, why = self.auto_verdict(inst, spec, values)
+            (fine if ok else blockers).append(why)
+        if blockers:
+            return False, blockers
+        return True, fine + ["the dry run finished cleanly"]
+
+    def auto_approve(self, request: ApprovalRequest, reasons: List[str]) -> None:
+        """Approve without asking, and say so: in the event log and to the human's screen."""
+        request.note = "auto mode: " + "; ".join(reasons)
+        self.log.write("ask", by=self.operator, request=str(request), answer="auto-approved", note=request.note)
+        try:
+            self.approver.inform(request, reasons)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ used by the run engine
 
     def ask(self, request: ApprovalRequest) -> bool:
@@ -292,6 +352,13 @@ class SafetyGate:
                 if how is None:
                     request = ApprovalRequest("Approve drive change on %s?" % inst.name,
                                               [self._describe_move(inst, spec, current, target)])
+                    ok, why = self.auto_verdict(inst, spec, [target]) if self.auto else (False, "")
+                    if ok:
+                        self.auto_approve(request, [why])
+                        how = "auto-approved"
+                    elif self.auto:
+                        request.items.append("Auto mode does not cover this: " + why)
+                if how is None:
                     if not self.ask(request):
                         msg = "declined: %s stays %s" % (key, spec.show(current))
                         if request.note:

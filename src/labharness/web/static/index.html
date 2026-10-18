@@ -68,6 +68,14 @@
       <form id="composer" class="composer">
         <textarea id="input" rows="1" placeholder="Ask Kelvin…" aria-label="Message"></textarea>
         <div class="composer-row">
+          <label id="mode-box" class="mode-picker" title="Who approves changes that drive the sample harder">
+            <span class="sr-only">Approvals</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V6z"/></svg>
+            <select id="approval-mode">
+              <option value="ask">Ask before drive changes</option>
+              <option value="auto">Auto for low-risk runs</option>
+            </select>
+          </label>
           <label class="model-picker">
             <span class="sr-only">Model</span>
             <select id="model"></select>
@@ -79,7 +87,7 @@
           </button>
         </div>
       </form>
-      <p class="fineprint">Measurements run right away. Anything that drives the sample harder waits for your approval.</p>
+      <p id="fineprint" class="fineprint">Measurements run right away. Anything that drives the sample harder waits for your approval.</p>
     </div>
   </main>
 

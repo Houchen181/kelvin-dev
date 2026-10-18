@@ -9,6 +9,7 @@ instruments:
     rates: { V: 0.5 }
     guards:
       V: [{ read: I, max_abs: 1.0e-9 }]       # gate leakage above 1 nA stops the ramp
+    auto: { V: [-5, 5] }                       # auto mode may sweep the gate within ±5 V
   lockin:
     card: virtual/lock-in
     trust: envelope
@@ -25,6 +26,7 @@ instruments:
     limits: { power: [-90, 0] }
   laser:
     card: virtual/laser
+    auto: never                                # a person approves every laser change
     limits: { power: [0, 50] }
     rates: { power: 5 }
     guards:

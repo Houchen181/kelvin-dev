@@ -2,6 +2,11 @@
 
 Limits nest: vendor limits (card) ⊇ lab limits (this file) ⊇ project
 envelope. The model can read all of them and change none of them.
+
+Auto mode (switched on by a person, never by the agent) approves drive changes
+that stay within `auto_fraction` of the way from safe to the lab limit. The
+owner can exclude an instrument or parameter (`auto: never`) or give a
+parameter its own auto range.
 """
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ from .conditions import Condition, parse_condition
 from .yamlio import load_yaml
 
 TRUST = ("ask", "envelope")
+AUTO_FRACTION = 0.25  # default: auto mode covers the first quarter of the way from safe to each limit
 ON_TRIP = ("safe", "hold")
 
 
@@ -82,6 +88,7 @@ class InstrumentConfig:
     limits: Dict[str, Tuple[float, float]] = field(default_factory=dict)
     rates: Dict[str, float] = field(default_factory=dict)
     guards: Dict[str, List[Guard]] = field(default_factory=dict)
+    auto: Dict[str, Any] = field(default_factory=dict)  # "*" or param -> "never" | Allowed (its own auto range)
 
 
 @dataclass
@@ -97,6 +104,7 @@ class LabConfig:
     interlocks: List[Interlock] = field(default_factory=list)
     safe_actions: Dict[str, str] = field(default_factory=dict)
     source: str = ""
+    auto_fraction: float = AUTO_FRACTION
 
 
 def _pair(x: Any) -> bool:
@@ -166,9 +174,36 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
             else:
                 rates[p] = float(r)
         raw_guards[name] = d.get("guards") or {}
+        auto: Dict[str, Any] = {}
+        raw_auto = d.get("auto")
+        if raw_auto == "never":
+            auto["*"] = "never"
+        elif isinstance(raw_auto, dict):
+            for p, rule in raw_auto.items():
+                apath = "%s.auto.%s" % (path, p)
+                spec = card.params.get(str(p))
+                if spec is None or not spec.is_drive:
+                    err(apath, "auto rules belong to drives")
+                elif rule == "never":
+                    auto[str(p)] = "never"
+                elif spec.numeric:
+                    lim = limits.get(str(p)) or spec.limits
+                    if not _pair(rule):
+                        err(apath, "must be never or [low, high]")
+                    elif lim and (rule[0] < lim[0] or rule[1] > lim[1]):
+                        err(apath, "[%s, %s] exceeds limits [%s, %s]" % (num(rule[0]), num(rule[1]), num(lim[0]), num(lim[1])))
+                    else:
+                        auto[str(p)] = Allowed(lo=float(rule[0]), hi=float(rule[1]))
+                else:
+                    try:
+                        auto[str(p)] = Allowed(values=frozenset(spec.coerce(v) for v in (rule if isinstance(rule, list) else [rule])))
+                    except ValueError as e:
+                        err(apath, str(e))
+        elif raw_auto is not None:
+            err(path + ".auto", "must be never or a mapping of parameter: never | [low, high]")
         instruments[name] = InstrumentConfig(
             name=name, card=card.id, address=str(d.get("address", "sim://" + name)),
-            trust=trust, limits=limits, rates=rates)
+            trust=trust, limits=limits, rates=rates, auto=auto)
 
     def readable(key: str, path: str) -> bool:
         spec = _lookup(cards, key)
@@ -223,9 +258,14 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
         else:
             safe_actions[str(key)] = action
 
+    fraction = data.get("auto_fraction", AUTO_FRACTION)
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 <= fraction <= 1:
+        err("auto_fraction", "must be a number from 0 to 1")
+        fraction = AUTO_FRACTION
+
     if errors:
         raise ConfigError(src, errors)
-    return LabConfig(str(data.get("lab", "Lab")), instruments, interlocks, safe_actions, src)
+    return LabConfig(str(data.get("lab", "Lab")), instruments, interlocks, safe_actions, src, float(fraction))
 
 
 @dataclass

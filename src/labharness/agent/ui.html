@@ -55,6 +55,9 @@
   ol.events li { padding: 3px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
   .history li { font-size: 13px; }
   #nokey { display: none; }
+  .mode { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+  .mode select { font: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 5px 8px; }
+  .mode.auto select { border-color: var(--warn-line); background: var(--warn-bg); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -65,6 +68,9 @@
   <span class="muted"><span id="conn" class="dot"></span><span id="conntext">connecting…</span></span>
   <span id="busy" class="muted"></span>
   <span class="spacer"></span>
+  <label id="mode-box" class="mode" title="Who approves drive changes">Approvals
+    <select id="mode"><option value="ask">Ask me every time</option><option value="auto">Auto for low-risk changes</option></select>
+  </label>
   <button id="notify" hidden>Enable notifications</button>
   <button id="kill" class="danger" title="Send every drive to its safe state and stop the agent's current action">All drives to safe</button>
 </header>
@@ -155,6 +161,8 @@ function render(s) {
     el("tr", {}, el("td", { class: "name" }, name),
       el("td", {}, ...params.map((p) => el("span", { class: "chip" + (p.away ? " away" : "") }, p.name + " " + p.value))))));
   $("events").replaceChildren(...s.events.map((e) => el("li", {}, e)));
+  if (document.activeElement !== $("mode")) $("mode").value = s.approval_mode || "ask";
+  $("mode-box").classList.toggle("auto", s.approval_mode === "auto");
   firstLoad = false;
 }
 
@@ -167,6 +175,20 @@ async function refresh() {
     $("conn").className = "dot"; $("conntext").textContent = e.message === "401" ? "wrong access key" : "server not reachable";
   }
 }
+
+$("mode").addEventListener("change", async (e) => {
+  const mode = e.target.value;
+  if (mode === "auto") {
+    let rule = "";
+    try { rule = (await api("/api/state")).approval_rule || ""; } catch (err) { /* keep it short */ }
+    if (!confirm("Turn on auto mode?\n\nKelvin then approves low-risk changes for you: " + rule +
+                 "\n\nEverything else still waits for you. It goes back to asking when Kelvin restarts.")) {
+      e.target.value = "ask"; return;
+    }
+  }
+  try { await api("/api/mode", { mode }); } catch (err) { alert("Could not change the mode: " + err.message); }
+  refresh();
+});
 
 $("kill").addEventListener("click", async () => {
   if (!confirm("Send every drive to its safe state? This also declines open requests and stops the agent's current ramp or plan.")) return;

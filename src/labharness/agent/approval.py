@@ -73,6 +73,22 @@ class WebApprover(Approver):
             request.note = "declined by %s" % entry["by"]
         return bool(entry["answer"])
 
+    def inform(self, request: ApprovalRequest, reasons: List[str]) -> None:
+        """Auto mode approved this without asking: show it with the reasons, like an answered request."""
+        with self._cv:
+            self._seq += 1
+            now = time.time()
+            entry = {"id": "a%d" % self._seq, "title": request.title, "items": list(request.items), "created": now,
+                     "decided": now, "answer": True, "by": "auto mode", "reasons": list(reasons)}
+            self._history.appendleft(entry)
+        public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "auto": True,
+                  "reasons": entry["reasons"]}
+        for listener in list(self._listeners):
+            try:
+                listener(public)
+            except Exception:
+                pass
+
     def answer(self, request_id: str, approve: bool, by: str = "human") -> bool:
         with self._cv:
             entry = self._pending.get(request_id)
@@ -205,6 +221,12 @@ class ApprovalServer:
                 if self.path == "/api/answer":
                     ok = server.runtime.approver.answer(str(body.get("id")), bool(body.get("approve")))
                     return self._json(200 if ok else 409, {"ok": ok})
+                if self.path == "/api/mode":
+                    try:
+                        return self._json(200, server.runtime.set_approval_mode(str(body.get("mode")),
+                                                                               "human (approval page)"))
+                    except ValueError as e:
+                        return self._json(400, {"error": str(e)})
                 if self.path == "/api/safe_state":
                     return self._json(200, {"ok": True, "results": server.runtime.kill(by="human (approval page)")})
                 self._json(404, {"error": "not found"})

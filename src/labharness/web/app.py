@@ -249,6 +249,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         data["active"] = agent.active
         return JSONResponse(data)
 
+    async def approval_mode(request: Request) -> Response:
+        """Ask before every drive increase, or auto-approve low-risk ones. People only: no agent tool reaches this."""
+        if request.method == "POST":
+            try:
+                return JSONResponse(runtime.set_approval_mode(str((await request.json()).get("mode")), "human (portal)"))
+            except ValueError as e:
+                return error(400, str(e))
+        return JSONResponse(runtime.approval_mode())
+
     async def safe_state(request: Request) -> Response:
         agent.stop()
         results = await asyncio.to_thread(runtime.kill, "human (portal)")
@@ -325,6 +334,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/state", state),
         Route("/api/safe_state", safe_state, methods=["POST"]),
+        Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
         Route("/api/quit", quit_app, methods=["POST"]),
         Route("/api/live", live),

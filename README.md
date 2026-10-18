@@ -128,13 +128,36 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 |---|---|
 | Measure / configure | Runs immediately and is logged |
 | Drive toward safe | Runs, ramped at the lab's rate |
-| Drive away from safe | Limits and interlocks are checked, then a human is asked (unless the project envelope or an approved plan covers it). The change is ramped while guard readings are watched, and it goes back to safe if one trips |
+| Drive away from safe | Limits and interlocks are checked, then a human is asked (unless the project envelope, an approved plan or auto mode covers it). The change is ramped while guard readings are watched, and it goes back to safe if one trips |
 | Beyond limits, or a blocked command | Refused |
 
 - Raw strings are matched against the card. A raw string that sets a drive is treated as a drive. One that touches a drive's command family but can't be parsed is sent to a human. Blocked and reset families come from the card.
 - A plan is dry-run on twins first, approved once as a range, and then run.
 - `safe_state()` is the kill switch. It sends every drive to safe in card order, or holds it where the lab config says to hold.
 - Approvals come from an `Approver`, a human-facing object the agent never sees.
+
+### Auto mode
+
+A person can switch approvals from **Ask before drive changes** to **Auto for low-risk runs**, in the portal (next to the model picker) or on the approval page. No agent tool can switch it. Kelvin goes back to asking every time it restarts.
+
+In auto mode, a drive change or a run goes ahead without asking when all of these hold:
+- Every drive stays within `auto_fraction` (default 25%) of the way from its safe value to its lab limit. Kelvin judges the target's distance from safe, not the step size, so creeping up in small steps doesn't get around the rule.
+- Switches (outputs, ranges) move at most one step from safe.
+- For a run, the dry run finishes cleanly.
+- The lab config doesn't exclude the instrument.
+
+Anything else asks as usual, and the request says why auto mode didn't cover it. Each auto-approval shows in the conversation with its reasons and is written to the event log. Limits, interlocks, guard readings and **All drives to safe** work the same in both modes.
+
+The lab owner sets the rule in the lab config:
+
+```yaml
+auto_fraction: 0.25                 # share of the way from safe to each lab limit
+instruments:
+  smu:
+    auto: { V: [-5, 5] }            # this parameter's own auto range
+  laser:
+    auto: never                     # a person approves every change on this instrument
+```
 
 ## Layout
 
