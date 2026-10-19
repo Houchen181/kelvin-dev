@@ -542,10 +542,11 @@
       if (await queueOp({ op: "add", text: (tab.final && tab.final.plan_text) || "" })) showQueue();
     });
     v.plan = h("details", { class: "rv-plan", hidden: true }, h("summary", {}, "Plan"), h("pre", {}), requeue);
+    v.files = h("div", { class: "report-files rv-files", hidden: true });
     v.foot = h("div", { class: "plots-foot" }, h("span", {}, tab.runId), v.tableBtn);
     tab.body.replaceChildren(
       h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name" }, tab.plan), h("div", { class: "spacer" }), v.stop),
-      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.charts, v.foot, v.table, v.plan);
+      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.files, v.charts, v.foot, v.table, v.plan);
     tab.view = v;
   }
   function runViewData(tab) {
@@ -583,6 +584,7 @@
       v.charts.replaceChildren(runCharts(tab.final));
       v.plan.hidden = !tab.final.plan_text;
       v.plan.querySelector("pre").textContent = tab.final.plan_text || "";
+      runFiles(tab, v.files);
       if (!v.table.hidden) v.table.replaceChildren(runTable(tab.final));
       return;
     }
@@ -709,6 +711,26 @@
     const rows = data.rows.slice(0, 500).map((r) => h("tr", {}, ...cols.map((c) =>
       h("td", {}, typeof r[c.key] === "number" ? Number(r[c.key].toPrecision(6)).toString() : String(r[c.key])))));
     return h("table", {}, h("thead", {}, head), h("tbody", {}, ...rows));
+  }
+
+  // the files Kelvin keeps in a run's folder: its report, slides and data, opened on this computer
+  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "data.csv": "Data (CSV)" };
+  function runFiles(tab, box) {
+    const files = (tab.final && tab.final.files) || [];
+    const base = "/api/runs/" + encodeURIComponent(tab.runId);
+    const openIt = async (path, what) => {
+      try { await api(path, { body: {} }); toast("Opening " + what + "…"); } catch (e) { toast(e.message); }
+    };
+    const buttons = files.map((f) => {
+      const b = h("button", { class: f.name === "report.pdf" ? "btn small" : "btn small ghost", type: "button",
+        title: f.name }, RUN_FILE_LABEL[f.name] || f.name);
+      b.addEventListener("click", () => openIt(base + "/files/" + encodeURIComponent(f.name) + "/open", f.name));
+      return b;
+    });
+    const folder = h("button", { class: "link soft", type: "button" }, "Open folder");
+    folder.addEventListener("click", () => openIt(base + "/open", "the run's folder"));
+    box.replaceChildren(...buttons, folder);
+    box.hidden = false;
   }
 
   // ------------------------------------------------------------------ reports
@@ -3174,6 +3196,7 @@
     $("scan-network").checked = !S.settings || S.settings.scan_network !== false;
     $("auto-cards").checked = !S.settings || S.settings.auto_cards !== false;
     $("manuals").checked = !S.settings || S.settings.manuals !== false;
+    $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     $("pair-box").hidden = true;
     loadPhone();
     loadServices();
@@ -3224,6 +3247,7 @@
     body.scan_network = $("scan-network").checked ? "on" : "off";
     body.auto_cards = $("auto-cards").checked ? "on" : "off";
     body.manuals = $("manuals").checked ? "on" : "off";
+    body.auto_report = $("auto-report").value;
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     $("settings-msg").textContent = "Saving…";
     try {

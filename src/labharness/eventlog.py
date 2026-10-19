@@ -107,8 +107,46 @@ class RunRecord:
         self.meta.update({k: _jsonable(v) for k, v in meta.items()})
         self.meta["finished"] = _now()
         if self.path:
+            write_csv(self.path, self.rows)
             with open(self.path / "meta.json", "w", encoding="utf-8") as f:
                 json.dump(self.meta, f, indent=1)
+
+
+def write_csv(folder: Path, rows: List[Dict[str, Any]]) -> List[str]:
+    """The run's points as CSV, for any analysis program: data.csv (one row per point, every axis and scalar
+    reading) and one <reading>.csv per trace (i, x, value; i is the point's row in data.csv). Returns the files."""
+    import csv
+    scalars: List[str] = []
+    traces: List[str] = []
+    for r in rows:
+        for k, v in r.items():
+            if k.endswith(".axis"):
+                continue
+            target = traces if isinstance(v, list) else scalars
+            if k not in scalars and k not in traces:
+                target.append(k)
+    written = []
+    with open(folder / "data.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(scalars)
+        for r in rows:
+            w.writerow(["" if r.get(k) is None else r.get(k) for k in scalars])
+    written.append("data.csv")
+    for key in traces:
+        name = re.sub(r"[^\w.-]+", "_", key) + ".csv"
+        with open(folder / name, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["i", "x", key])
+            for n, r in enumerate(rows):
+                ys = r.get(key)
+                if not isinstance(ys, list):
+                    continue
+                x0, x1 = r.get(key + ".axis") or (0, len(ys) - 1)
+                step = (x1 - x0) / (len(ys) - 1) if len(ys) > 1 else 0
+                for j, y in enumerate(ys):
+                    w.writerow([r.get("i", n), "%.12g" % (x0 + step * j), y])
+        written.append(name)
+    return written
 
 
 class RunStore:

@@ -138,6 +138,7 @@ class LabRuntime:
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
         self.queue = ScanQueue(self.data_dir / "queue.json")   # scans lined up to run one after another
+        self.auto_report = "both"   # after each run (in its folder) and each queue (in reports/): both, pdf, pptx, off
         self._queue_thread: Optional[threading.Thread] = None
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
@@ -441,6 +442,7 @@ class LabRuntime:
             except PlanError as e:
                 return "invalid plan: %s" % e
             report = self.engine.run(plan)
+            made = self._auto_report(report.run_id)
             if report.run_id:
                 summary = (report.analysis or {}).get("assessment") or report.message
                 self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
@@ -454,6 +456,9 @@ class LabRuntime:
             else:
                 lines += self._preview(plan, report.rows)
             lines += ["warning: " + w for w in report.warnings]
+            if made:
+                lines.append("saved in the run folder: data.csv, %s (made automatically; use make_report only for "
+                             "another selection or wording)" % " and ".join(made))
             if report.run_id and report.rows:
                 lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
             return "\n".join(lines)
@@ -760,6 +765,7 @@ class LabRuntime:
 
     def _queue_loop(self, grants: Dict[str, Allowed], by: str) -> None:
         q = self.queue
+        started = time.time()
         while True:
             with q.lock:
                 item = q.next_waiting() if q.state == "running" else None
@@ -779,6 +785,13 @@ class LabRuntime:
                     q.save()
         done = sum(1 for i in q.items if i.status == "done")
         self.gate.log.write("queue_end", by=by, state=q.state, reason=q.reason, done=done)
+        ran = [i.run_id for i in q.items if i.run_id and i.started and i.started >= started]
+        if ran and self.auto_report != "off":   # one report of everything this queue measured, like a lab notebook page
+            try:
+                self.report(ran, title="Queue of %s" % datetime.now().strftime("%d %b %Y"), fmt=self.auto_report,
+                            by="kelvin (automatic)")
+            except Exception as e:
+                self.gate.log.write("report_failed", by="kelvin (automatic)", runs=len(ran), error=str(e)[:300])
         if q.state == "idle":
             self.notifier("run", "Queue finished", "%d items done" % done)
         else:
@@ -798,6 +811,7 @@ class LabRuntime:
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
                         q.mark(item, status, report.message if status != "done" else "", report.run_id)
+                        self._auto_report(report.run_id)
                         return status == "done", report.message
                     return self._queue_step(item)
             except Exception as e:   # an instrument that stopped answering, a plan that no longer parses...
@@ -1131,9 +1145,10 @@ class LabRuntime:
         return pick_runs(self.data_dir / "runs", runs, day, last)
 
     def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
-               notes: Any = (), by: str = "human", references: Any = ()) -> List[Dict[str, Any]]:
-        """Write a report of these runs (oldest first) as PDF and/or PowerPoint into reports/. Reads only files:
-        it never talks to an instrument, so it can run while a plan runs."""
+               notes: Any = (), by: str = "human", references: Any = (), folder: Optional[Path] = None,
+               name: str = "", log: bool = True) -> List[Dict[str, Any]]:
+        """Write a report of these runs (oldest first) as PDF and/or PowerPoint into reports/ (or folder, as
+        name.pdf / name.pptx). Reads only files: it never talks to an instrument, so it can run while a plan runs."""
         if not run_ids:
             raise ValueError("no runs to report")
         fmts = ["pdf", "pptx"] if fmt == "both" else [fmt]
@@ -1153,17 +1168,47 @@ class LabRuntime:
             all(i.simulated for i in self.lab.instruments.values())
         report = Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line).report(
             run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated, references)
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
-        base = "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"),
-                          re.sub(r"[^\w-]+", "_", report.title).strip("_")[:48] or "report")
+        target = folder or self.reports_dir
+        target.mkdir(parents=True, exist_ok=True)
+        base = name or "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"),
+                                  re.sub(r"[^\w-]+", "_", report.title).strip("_")[:48] or "report")
         out = []
         for f in fmts:
-            path = self.reports_dir / ("%s.%s" % (base, f))
+            path = target / ("%s.%s" % (base, f))
             n = write_pdf(report, path) if f == "pdf" else write_pptx(report, path)
             out.append({"name": path.name, "path": str(path), "size": path.stat().st_size, "format": f,
                         "pages" if f == "pdf" else "slides": n})
-            self.gate.log.write("report", by=by, name=path.name, runs=len(run_ids))
+            if log:   # a run's own automatic report is part of the run, not an event in the lab record
+                self.gate.log.write("report", by=by, name=path.name, runs=len(run_ids))
         return out
+
+    def _auto_report(self, run_id: Optional[str]) -> List[str]:
+        """Every finished or stopped run gets its report in its own folder (report.pdf, report.pptx), unless the
+        person switched automatic reports off. A report that cannot be written never fails the run."""
+        if not run_id or self.auto_report == "off":
+            return []
+        try:
+            out = self.report([run_id], fmt=self.auto_report, by="kelvin (automatic)", folder=self._run_dir(run_id),
+                              name="report", log=False)
+        except Exception as e:
+            self.gate.log.write("report_failed", by="kelvin (automatic)", run=run_id, error=str(e)[:300])
+            return []
+        return [o["name"] for o in out]
+
+    def run_file(self, run_id: str, name: str) -> Path:
+        """A file a person may open from a run's folder: its reports and its CSV data. KeyError otherwise."""
+        if not re.fullmatch(r"[\w.-]+\.(pdf|pptx|csv)", name or "") or ".." in name:
+            raise KeyError("no file %r in run %s" % (name, run_id))
+        path = self._run_dir(run_id) / name
+        if not path.is_file():
+            raise KeyError("no file %r in run %s" % (name, run_id))
+        return path
+
+    def run_files(self, run_id: str) -> List[Dict[str, Any]]:
+        d = self._run_dir(run_id)
+        order = {"report.pdf": 0, "report.pptx": 1, "data.csv": 2}
+        files = [p for p in d.iterdir() if p.is_file() and p.suffix in (".pdf", ".pptx", ".csv")]
+        return [{"name": p.name, "size": p.stat().st_size} for p in sorted(files, key=lambda p: (order.get(p.name, 3), p.name))]
 
     def _run_meta(self, run_id: str) -> Dict[str, Any]:
         try:

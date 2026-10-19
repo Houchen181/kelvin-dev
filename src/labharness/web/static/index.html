@@ -278,6 +278,16 @@
       <span class="hint">Where Kelvin saves runs (each in its own dated folder with its data, the instrument settings and the analysis), the lab record of every command and approval, and reports. A lab server or a synced drive works. Chats, settings and API keys stay in ~/Kelvin.</span>
     </div>
     <div class="field">
+      <label class="field-label" for="auto-report">Reports</label>
+      <select id="auto-report">
+        <option value="both">After every run and queue: PDF and PowerPoint</option>
+        <option value="pdf">After every run and queue: PDF</option>
+        <option value="pptx">After every run and queue: PowerPoint</option>
+        <option value="off">Only when I ask</option>
+      </select>
+      <span class="hint">Every run's folder gets its data as data.csv (always) and its report as report.pdf and report.pptx. When a queue ends, one report of all its runs goes to the reports folder.</span>
+    </div>
+    <div class="field">
       <div class="field-row"><span class="field-label">Connected instruments</span></div>
       <div class="checks">
         <label class="check"><input id="auto-setup" type="checkbox"> Set them up when Kelvin starts</label>

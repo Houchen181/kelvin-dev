@@ -585,6 +585,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .pane-menu.review-menu { left: 0; right: auto; width: min(320px, 86vw); }
 .lane .pane-menu.review-menu { left: auto; right: 0; }
 .report-files { display: grid; gap: 6px; margin: 6px 0; }
+.report-files.rv-files { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 4px; }
 .report-file { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px;
   background: var(--panel); padding: 8px 12px; font-size: 14px; }
 .report-file > svg { width: 20px; height: 20px; flex: none; color: var(--accent); }

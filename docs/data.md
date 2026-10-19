@@ -42,12 +42,14 @@ wait: 300                                                          # then wait 5
 
 ## Your data
 
-Every run gets its own folder, named by date, time and plan, such as `runs/20261018-015328-gate_sweep/`. Each folder holds:
+Every run is saved as it is measured, with nothing to click. It gets its own folder, named by date, time and plan, such as `runs/20261018-015328-gate_sweep/`. Each folder holds:
 - `plan.yaml`: what was asked for.
 - `snapshot_start.json` and `snapshot_end.json`: every instrument setting at the start and at the end.
-- `data.jsonl`: every point, traces included.
+- `data.jsonl`: every point, traces included, written point by point.
+- `data.csv`: the same points as a table (every axis and scalar reading), for Origin, MATLAB, Python or Excel. Each trace reading gets its own `<reading>.csv` with `i, x, value`, where `i` is the point's row in `data.csv`.
 - `meta.json`: status, points, duration and warnings.
 - `analysis.json`: the automatic fit and assessment.
+- `report.pdf` and `report.pptx`: the run's report, written as soon as the run ends (see [Reports](#reports)).
 
 Next to the run folders sit `events.jsonl`, the lab record of every command, reading, approval, refusal and alarm with who did it, and `reports/`.
 
@@ -77,6 +79,10 @@ Kelvin writes up runs as a **PDF** or as **PowerPoint slides**, to look back on,
 - for a project, the project's notes (decisions, procedures, instrument quirks, results).
 
 Kelvin builds the report from what it already keeps (run folders and the event log), so it never touches an instrument and can run while a plan runs.
+
+**Made automatically.** Every run that finishes or is stopped gets its report in its own folder, `report.pdf` and `report.pptx`, a moment after it ends. When a queue ends or pauses, one report of all the runs it measured goes to `reports/`. In the Runs pane, a finished run shows **Report (PDF)**, **Slides**, **Data (CSV)** and **Open folder**. **Settings → Reports** chooses PDF, PowerPoint or both (the default), or **Only when I ask**; the CSV data is always written. A report that can't be written never fails the run; the lab record notes it.
+
+Ask for another report when you want a different selection or your own words:
 
 - **In a chat:** "make a report of today's runs for my advisor". Kelvin's `make_report` tool covers the runs started in this conversation, or in all of the project's conversations, unless you name runs, a day, or the last N. The reply shows the files with **Open** and **Download**.
 - **In the Runs pane:** **Report…** picks this run, the project's or chat's runs, today's runs, or the last five.

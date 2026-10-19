@@ -21,7 +21,7 @@ ENV = {
 }
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
-                     "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards"}
+                     "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report"}
 
 
 class Settings:
@@ -68,6 +68,8 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "auto_report":  # a report after each run and queue: both (the default), pdf, pptx or off
+                value = value if value in ("pdf", "pptx", "off") else ""
             if name == "lab":  # which lab to open: the user's lab.yaml ("mine") or the virtual lab
                 value = value if value in ("mine", "virtual") else ""
             if name == "webhook" and value and not value.startswith(("https://", "http://")):
@@ -105,6 +107,7 @@ class Settings:
             "manuals": self._data.get("manuals") != "off",
             "scan_network": self._data.get("scan_network") != "off",
             "auto_cards": self._data.get("auto_cards") != "off",
+            "auto_report": self._data.get("auto_report") or "both",
         }
 
     @property

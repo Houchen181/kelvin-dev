@@ -208,6 +208,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         runtime.literature.enabled = settings.get("literature") != "off"
         runtime.literature.openalex_key = settings.get("openalex_api_key") or ""
         runtime.scan_network = settings.get("scan_network") != "off"   # scans also look on the local network
+        runtime.auto_report = settings.get("auto_report") or "both"     # a report after every run and queue
 
     def configure_notifications() -> None:
         try:
@@ -677,6 +678,29 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         return FileResponse(path, media_type=media, filename=path.name)
 
+    async def run_file(request: Request) -> Response:
+        """A run's report or CSV data, to download."""
+        try:
+            path = runtime.run_file(request.path_params["run_id"], request.path_params["name"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        media = {".pdf": "application/pdf", ".csv": "text/csv",
+                 ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}[path.suffix]
+        return FileResponse(path, media_type=media, filename="%s-%s" % (request.path_params["run_id"], path.name))
+
+    async def run_open(request: Request) -> Response:
+        """Open a run's file (or, with no name, its folder) on this computer."""
+        run_id, name = request.path_params["run_id"], request.path_params.get("name")
+        try:
+            path = runtime.run_file(run_id, name) if name else runtime._run_dir(run_id)
+        except KeyError as e:
+            return error(404, e.args[0])
+        try:
+            open_path(path)
+        except OSError as e:
+            return error(500, "Could not open it: %s" % e)
+        return JSONResponse({"ok": True})
+
     async def report_open(request: Request) -> Response:
         """Open a report in this computer's PDF viewer or PowerPoint (Kelvin runs on the user's own computer)."""
         try:
@@ -1112,7 +1136,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                              "analysis": read_json("analysis.json"),
                              "plan_text": (run_dir / "plan.yaml").read_text(encoding="utf-8"),
                              "meta": {k: meta.get(k) for k in ("status", "reason", "points", "planned_points",
-                                                                "duration_s", "warnings")}})
+                                                                "duration_s", "warnings")},
+                             "files": runtime.run_files(run_id)})
 
     async def live(request: Request) -> Response:
         """The running (or last) plan's rows since `since`, for the runs pane."""
@@ -1234,6 +1259,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/runs/stop", stop_run, methods=["POST"]),
         Route("/api/queue", queue, methods=["GET", "POST"]),
         Route("/api/runs/{run_id}", run_data),
+        Route("/api/runs/{run_id}/open", run_open, methods=["POST"]),
+        Route("/api/runs/{run_id}/files/{name}", run_file),
+        Route("/api/runs/{run_id}/files/{name}/open", run_open, methods=["POST"]),
         Route("/static/{name}", static),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
