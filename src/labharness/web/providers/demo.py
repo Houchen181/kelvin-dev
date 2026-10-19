@@ -73,6 +73,9 @@ class DemoProvider(Provider):
                         if "every conversation" in result["content"] else
                         "Noted. Every conversation in this project will know it; open Project settings to review or "
                         "delete it.")
+            elif result["name"] == "queue_add":
+                text = ("Queued. Open **Queue** in the Runs pane to reorder or edit the items, or say *start the queue*: "
+                        "I'll dry-run them all and you approve them once.")
             elif result["name"] == "lab_status":
                 text = "Here is the lab right now (expand the step for every value). Drives marked * are away from safe."
             else:
@@ -97,6 +100,16 @@ class DemoProvider(Provider):
                 return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
             args["text"] = fact[:1].upper() + fact[1:]
             name, intro = "remember", "Keeping that for later."
+        elif "queue" in ask and any(w in ask for w in ("start", "run", "go")):
+            name, args, intro = "queue_start", {}, "Starting the queue: every item is dry-run first, then you approve it once."
+        elif "queue" in ask:
+            step = "step: field to 0.5 T\nset: { magnet.B: 0.5 }\nwait: 30"
+            blocks = await self._say("I'll line up three items: the gate sweep, a step that sets the field to 0.5 T and "
+                                     "waits 30 s, then the gate-field map.", emit)
+            for i, (plan, note) in enumerate([(GATE_SWEEP, "at zero field"), (step, ""), (FIELD_MAP, "")]):
+                blocks.append({"type": "tool_call", "id": "lh_call_%d_%d" % (len(history), i), "name": "queue_add",
+                               "input": {"item": plan, "note": note}})
+            return TurnResult(blocks, stop_reason="tool_calls", model=model)
         elif "rabi" in ask:
             name, args = "run_plan", {"plan": RABI}
             intro = ("I'll drive the NV spins at 2.868 GHz with 0 dBm and sweep the microwave pulse from 0 to 400 ns, "
@@ -114,7 +127,7 @@ class DemoProvider(Provider):
             name, args, intro = "lab_status", {}, "Checking the lab."
         else:
             text = ("I'm the scripted demo, not an AI. Try *check the lab status*, *sweep the gate*, "
-                    "*map gate against field*, *find the NV resonance*, *measure Rabi oscillations*, or *remember that …*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
+                    "*map gate against field*, *find the NV resonance*, *measure Rabi oscillations*, *queue up some scans*, or *remember that …*. Add an API key in Settings to talk to Claude, GPT or Gemini.")
             return TurnResult(await self._say(text, emit), stop_reason="end", model=model)
         blocks = await self._say(intro, emit)
         blocks.append({"type": "tool_call", "id": "lh_call_%d" % len(history), "name": name, "input": args})

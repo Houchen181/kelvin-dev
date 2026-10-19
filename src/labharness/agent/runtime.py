@@ -11,14 +11,14 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
 from ..cards import ParamSpec, num
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunStore
-from ..gate import Approver, SafetyGate, _dur
+from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, Envelope
 from .. import carddraft
@@ -26,6 +26,7 @@ from ..literature import Literature
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
 from ..plans import Plan, PlanError, load_plan
+from ..scanqueue import Item, ScanQueue, load_named, load_step, parse_item, save_named, saved_queues
 from ..reports import Collector, pick_runs, write_pdf, write_pptx
 from ..yamlio import load_yaml
 
@@ -136,6 +137,8 @@ class LabRuntime:
         self.scan_network = True                    # scans also look on the local network (a Settings switch)
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
+        self.queue = ScanQueue(self.data_dir / "queue.json")   # scans lined up to run one after another
+        self._queue_thread: Optional[threading.Thread] = None
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
@@ -193,13 +196,20 @@ class LabRuntime:
             pass
 
     def _do(self, what: str, fn: Callable[[], str]) -> str:
-        with self.lock:
+        if not self.lock.acquire(timeout=2.0):
+            if self.queue.state in ("running", "pausing"):   # a queued scan may take hours: answer instead of waiting
+                return ("Kelvin is running the queue (%s). Ask again when this item is done, or pause or stop the "
+                        "queue." % (self.busy or "a scan"))
+            self.lock.acquire()
+        try:
             self.busy = what
             try:
                 return fn()
             finally:
                 self.busy = None
                 self._refresh()
+        finally:
+            self.lock.release()
 
     def _spec(self, key: str) -> Optional[ParamSpec]:
         try:
@@ -326,6 +336,7 @@ class LabRuntime:
                 self.gate.log.write("data_folder", by=by, moved_to=str(new),
                                     note="what stays here was not moved" if move else "earlier data stay here")
             self.data_dir = new
+            self.queue.move_to(new / "queue.json")
             self.events_path = new / "events.jsonl"
             self.gate.log = EventLog(self.events_path, self.lab.clock)
             self.engine.store = RunStore(new / "runs")
@@ -377,6 +388,9 @@ class LabRuntime:
         (a stopped plan still runs its own on_abort steps). Returns how many requests were declined."""
         decline_all = getattr(self.approver, "decline_all", None)
         declined = decline_all("stop button") if decline_all else 0
+        with self.queue.lock:   # a stop also stops the queue: nothing else starts after the stopped scan
+            if self.queue.state in ("running", "pausing"):
+                self.queue.state, self.queue.reason = "pausing", "stopped by %s" % by
         self.gate.request_abort()
         self.gate.log.write("stop", by=by, declined=declined)
         return declined
@@ -540,6 +554,282 @@ class LabRuntime:
             return False
         self.gate.request_abort()
         return True
+
+    # ------------------------------------------------------------------ the scan queue
+
+    def queue_show(self) -> str:
+        return self.queue.text()
+
+    def queue_view(self) -> Dict[str, Any]:
+        return dict(self.queue.view(), saved=saved_queues(self.data_dir / "queues"))
+
+    def _queue_problems(self, text: str) -> List[str]:
+        """What stops an item from running on this lab, before it joins the queue."""
+        kind, _ = parse_item(text)
+        if kind == "plan":
+            return self.engine.validate(self._plan(text))
+        step, errors = load_step(text), []
+        for instr, param, value in step.sets:
+            try:
+                inst, spec = self.lab.resolve("%s.%s" % (instr, param))
+                if spec.set_cmd is None:
+                    errors.append("%s.%s is read-only" % (instr, param))
+                    continue
+                target = spec.coerce(value)
+                lim = inst.limits(param)
+                if spec.numeric and lim and not lim[0] <= target <= lim[1]:
+                    errors.append("%s.%s %s is outside the limits [%s, %s]" % (instr, param, spec.show(target),
+                                                                            num(lim[0]), num(lim[1])))
+            except (KeyError, ValueError) as e:
+                errors.append(e.args[0] if e.args else str(e))
+        if step.stabilize:
+            spec = self._spec(step.stabilize.key)
+            if spec is None or spec.get_cmd is None:
+                errors.append("%s cannot be read" % step.stabilize.key)
+        return errors
+
+    def queue_add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "agent") -> str:
+        try:
+            problems = self._queue_problems(text)
+        except PlanError as e:
+            return "not added: %s" % e
+        if problems:
+            return "not added: " + "; ".join(problems[:5])
+        item = self.queue.add(text, position, note, by)
+        pos = self.queue.items.index(item) + 1
+        self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name, position=pos)
+        return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self.queue.text())
+
+    def queue_edit(self, ref: Any, text: str, by: str = "agent") -> str:
+        try:
+            problems = self._queue_problems(text)
+            if problems:
+                return "not changed: " + "; ".join(problems[:5])
+            item = self.queue.edit(ref, text)
+        except (PlanError, KeyError, ValueError) as e:
+            return "not changed: %s" % (e.args[0] if e.args else e)
+        self.gate.log.write("queue_edit", by=by, item=item.id, name=item.name)
+        return "changed %s\n%s" % (item.name, self.queue.text())
+
+    def queue_change(self, op: str, ref: Any = None, position: Optional[int] = None, by: str = "agent") -> str:
+        """move, remove, again (put a finished item back in line), clear (remove finished items)."""
+        try:
+            if op == "move":
+                item = self.queue.move(ref, int(position or 1))
+            elif op == "remove":
+                item = self.queue.remove(ref)
+            elif op == "again":
+                item = self.queue.again(ref)
+            elif op == "clear":
+                n = self.queue.clear_finished()
+                self.gate.log.write("queue_clear", by=by, removed=n)
+                return "removed %d finished items\n%s" % (n, self.queue.text())
+            else:
+                return "unknown queue change %r" % op
+        except (KeyError, ValueError, TypeError) as e:
+            return "not changed: %s" % (e.args[0] if e.args else e)
+        self.gate.log.write("queue_" + op, by=by, item=item.id, name=item.name)
+        return self.queue.text()
+
+    def queue_set_on_error(self, value: str, by: str = "human") -> None:
+        if value not in ("pause", "continue"):
+            raise ValueError("on_error is pause or continue")
+        with self.queue.lock:
+            self.queue.on_error = value
+            self.queue.save()
+        self.gate.log.write("queue_on_error", by=by, value=value)
+
+    def queue_save(self, name: str) -> str:
+        try:
+            path = save_named(self.data_dir / "queues", name, self.queue.waiting() or list(self.queue.items))
+        except (ValueError, OSError) as e:
+            return "not saved: %s" % e
+        return "saved the queue as %s" % path.name
+
+    def queue_load(self, name: str, by: str = "agent") -> str:
+        try:
+            entries = load_named(self.data_dir / "queues", name)
+        except KeyError as e:
+            return e.args[0]
+        added, problems = 0, []
+        for text, note in entries:
+            out = self.queue_add(text, None, note, by)
+            if out.startswith("not added"):
+                problems.append(out)
+            else:
+                added += 1
+        return "\n".join(["added %d items from %s" % (added, name)] + problems + [self.queue.text()])
+
+    def _queue_drives(self, items: List[Item]) -> Dict[str, List[Any]]:
+        out: Dict[str, List[Any]] = {}
+        for item in items:
+            if item.kind == "plan":
+                values = self.engine.drive_values(self._plan(item.text))
+            else:
+                values = {}
+                for instr, param, value in load_step(item.text).sets:
+                    key = "%s.%s" % (instr, param)
+                    spec = self.lab.resolve(key)[1]
+                    if spec.is_drive:
+                        values.setdefault(key, []).append(spec.coerce(value))
+            for key, vals in values.items():
+                out.setdefault(key, []).extend(vals)
+        return out
+
+    def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
+        """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong)."""
+        from ..gate import SimulationApprover
+        twin = self.lab.make_twin()
+        gate = SafetyGate(twin, SimulationApprover(), EventLog(None, twin.clock), envelope=self.gate.envelope,
+                          operator="dry-run")
+        engine = RunEngine(gate, RunStore(None))
+        engine.analyze = False
+        t0, problems, warnings = twin.clock.now(), [], []
+        for n, item in enumerate(items, 1):
+            if item.kind == "plan":
+                r = engine.run(self._plan(item.text), dry_run=False)
+                if r.status != "done":
+                    problems.append("#%d %s: %s" % (n, item.name, r.message))
+                continue
+            step = load_step(item.text)
+            for instr, param, value in step.sets:
+                r = gate._set(instr, param, value, True, "dry-run")
+                if not r.ok:
+                    problems.append("#%d %s: %s" % (n, item.name, r.message))
+            if step.stabilize:
+                engine._stabilize(step.stabilize, gate.stop_generation, warnings)
+            twin.clock.sleep(step.wait)
+        return twin.clock.now() - t0, problems
+
+    def queue_start(self, by: str = "agent") -> str:
+        """Check and dry-run every waiting item in order, ask a person once for every drive range, then run the
+        queue in the background. Returns at once after the approval; queue_show follows it."""
+        with self.queue.lock:
+            if self.queue.state in ("running", "pausing"):
+                return "the queue is already running\n" + self.queue.text()
+        items = self.queue.waiting()
+        if not items:
+            return "nothing is waiting in the queue"
+
+        def prepare() -> str:
+            problems = []
+            for n, item in enumerate(items, 1):
+                try:
+                    problems += ["#%d %s: %s" % (n, item.name, p) for p in self._queue_problems(item.text)]
+                except PlanError as e:
+                    problems.append("#%d %s: %s" % (n, item.name, e))
+            if problems:
+                return "the queue did not start:\n" + "\n".join(problems[:8])
+            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items))
+            if refusals:
+                return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
+            duration, failed = self._rehearse(items)
+            if failed:
+                return "the queue did not start; its dry run failed:\n" + "\n".join(failed[:8])
+            scans = sum(1 for i in items if i.kind == "plan")
+            steps = len(items) - scans
+            title = "Run the queue: %d scan%s%s, ~%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
+                steps, "" if steps == 1 else "s") if steps else "", _dur(duration))
+            if lines:
+                request = ApprovalRequest(title, lines + [
+                    "This approval covers every item now waiting. Each scan is still dry-run before it runs, and "
+                    "anything outside these ranges asks again."])
+                if not self.gate.ask(request):
+                    note = " (%s)" % request.note if request.note else ""
+                    self.gate.log.write("queue_declined", by=by)
+                    return "declined: the queue did not start%s" % note
+            with self.queue.lock:
+                self.queue.state, self.queue.reason = "running", ""
+                self.queue.save()
+            self.gate.log.write("queue_start", by=by, items=len(items), expected_s=round(duration))
+            self._queue_thread = threading.Thread(target=self._queue_loop, args=(grants, by), daemon=True,
+                                                  name="kelvin-queue")
+            self._queue_thread.start()
+            return "queue started: %s\n%s" % (title[len("Run the queue: "):], self.queue.text())
+        return self._do("starting the queue", prepare)
+
+    def queue_pause(self, by: str = "agent") -> str:
+        """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan."""
+        with self.queue.lock:
+            if self.queue.state != "running":
+                return "the queue is not running\n" + self.queue.text()
+            self.queue.state, self.queue.reason = "pausing", "paused by %s" % by
+            self.queue.save()
+        self.gate.log.write("queue_pause", by=by)
+        return "the queue pauses after the item that is running"
+
+    def _queue_loop(self, grants: Dict[str, Allowed], by: str) -> None:
+        q = self.queue
+        while True:
+            with q.lock:
+                item = q.next_waiting() if q.state == "running" else None
+                if item is None:
+                    finished = q.state == "running"
+                    q.state = "idle" if finished else "paused"
+                    if finished:
+                        q.reason = "finished"
+                    q.save()
+                    break
+                q.mark(item, "running")
+                position = q.items.index(item) + 1
+            ok, message = self._queue_item(item, position, grants, by)
+            with q.lock:
+                if not ok and q.state == "running" and q.on_error == "pause":
+                    q.state, q.reason = "pausing", "%s: %s" % (item.name, message)
+                    q.save()
+        done = sum(1 for i in q.items if i.status == "done")
+        self.gate.log.write("queue_end", by=by, state=q.state, reason=q.reason, done=done)
+        if q.state == "idle":
+            self.notifier("run", "Queue finished", "%d items done" % done)
+        else:
+            self.notifier("run", "Queue paused", q.reason[:300])
+
+    def _queue_item(self, item: Item, position: int, grants: Dict[str, Allowed], by: str) -> Tuple[bool, str]:
+        """Run one item under the queue's approval. (ok, message)"""
+        q = self.queue
+        with self.lock:
+            self.busy = "queue %d/%d: %s" % (position, len(q.items), item.name)
+            try:
+                with self.gate.standing(grants), self.gate.acting_as("queue (started by %s)" % by):
+                    if item.kind == "plan":
+                        report = self.engine.run(self._plan(item.text), meta={"queue": {
+                            "item": item.id, "position": position, "note": item.note}})
+                        status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
+                        if report.status == "aborted" and "stop" not in (report.message or "").lower():
+                            status = "failed"
+                        q.mark(item, status, report.message if status != "done" else "", report.run_id)
+                        return status == "done", report.message
+                    return self._queue_step(item)
+            except Exception as e:   # an instrument that stopped answering, a plan that no longer parses...
+                q.mark(item, "failed", str(e)[:300])
+                return False, str(e)
+            finally:
+                self.busy = None
+                self._refresh()
+
+    def _queue_step(self, item: Item) -> Tuple[bool, str]:
+        from ..engine import _Abort
+        step, q = load_step(item.text), self.queue
+        gen = self.gate.stop_generation
+        for instr, param, value in step.sets:
+            r = self.gate._set(instr, param, value, True, "queue:" + item.name)
+            if not r.ok:
+                q.mark(item, "failed", r.message)
+                return False, r.message
+        warnings: List[str] = []
+        try:
+            if step.stabilize:
+                self.engine._stabilize(step.stabilize, gen, warnings)
+            end = self.lab.clock.now() + step.wait
+            while self.lab.clock.now() < end:
+                if self.gate.stop_generation != gen:
+                    raise _Abort("stop requested")
+                self.lab.clock.sleep(min(1.0, end - self.lab.clock.now()))
+        except _Abort:
+            q.mark(item, "stopped", "stopped while waiting")
+            return False, "stopped"
+        q.mark(item, "done", "; ".join(warnings))
+        return True, ""
 
     def run_data(self, run_id: str, columns: Optional[List[str]] = None, max_rows: int = 50) -> str:
         try:
@@ -1055,7 +1345,7 @@ class LabRuntime:
         history = getattr(self.approver, "history_list", lambda: [])()
         return {"lab": self.lab.config.name,
                 "simulated": all(i.simulated for i in self.lab.instruments.values()),
-                "busy": self.busy, "pending": pending, "history": history, "status": status,
+                "busy": self.busy, "pending": pending, "history": history, "status": status, "queue": self.queue_view(),
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
                 "observe_only": self.lab.config.observe_only, "setup": self.setup_status, "survey": self.last_survey,

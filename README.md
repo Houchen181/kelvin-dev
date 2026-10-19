@@ -61,13 +61,13 @@ Only people can change the lab config, the approval mode or which lab Kelvin con
 
 Kelvin opens on a simulated lab with a demo model, so you can try it right away. Add an API key in Settings, or sign in with ChatGPT, to use a real model.
 
-Also included: project memory and incognito chats, literature search with citations, PDF and PowerPoint reports, a terminal, alarms and approvals from your phone, and MCP access for Claude Code, Codex or Gemini CLI.
+Also included: a queue that runs scans overnight after one approval, project memory and incognito chats, literature search with citations, PDF and PowerPoint reports, a terminal, alarms and approvals from your phone, and MCP access for Claude Code, Codex or Gemini CLI.
 
 ## Documentation
 
 - [Using Kelvin](docs/portal.md): models, projects, memory, the terminal, phone access
 - [Instruments](docs/instruments.md): setup, supported instruments, writing and trying cards
-- [Plans, data and reports](docs/data.md): plans, analysis, the data folder, reports, uninstalling
+- [Plans, data and reports](docs/data.md): plans, the queue, analysis, the data folder, reports, uninstalling
 - [Safety](docs/safety.md): the rules in full, auto mode, watches
 - [Other AI agents](docs/agents.md): Claude Code, Codex or Gemini CLI over MCP
 - [Development](docs/development.md): running from source, tests, releases

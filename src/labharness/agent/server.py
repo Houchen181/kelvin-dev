@@ -46,6 +46,10 @@ You are connected to a physics lab through Kelvin.
   t_pi, Ramsey (T2*), Hahn echo (T2) and T1. Before running a sequence, show it with show_sequence and say its
   period and duty cycles. Start with low MW and laser power and raise them within the limits. Playing a sequence
   (the generator's running) pulses light and microwaves onto the sample: it is a drive.
+- To line up scans for later (overnight, or one after another), use the queue: queue_add each plan, and steps
+  between them (step: name, set: {...}, stabilize: {read, within, for, timeout}, wait: seconds), then queue_start.
+  A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
+  queued and roughly how long it takes; queue_show follows it.
 - For an instrument Kelvin has no card for: get its manual's command reference or the maker's example scripts
   (pasted, or read_examples on a file or folder the person names), read card_guide, and write the card from that
   text only. check_card until it is valid; try_card on the instrument (it only reads) and compare the readings with
@@ -229,6 +233,51 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Run a plan (YAML text): validate, health check, dry run, one human approval for its drive
         ranges, run, log, then analyse automatically. Returns the assessment, key results and the run id."""
         return rt.run(plan)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def queue_show() -> str:
+        """The scan queue: each item (a plan, or a step that sets values and waits), its status and run, and whether
+        the queue is running, paused or idle."""
+        return rt.queue_show()
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def queue_add(item: str, position: Optional[int] = None, note: str = "") -> str:
+        """Add to the scan queue (it does not start it): a plan (YAML, as for run_plan) or a step between scans, e.g.
+        "step: cool to 2 K\nset: {tc.T_set: 2}\nstabilize: {read: tc.T, within: 0.02, for: 120, timeout: 7200}\n
+        wait: 600". position: 1 = first; default last. note: a line kept with the run."""
+        return rt.queue_add(item, position, note)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def queue_edit(item: str, text: str) -> str:
+        """Replace a waiting or finished queue item (by its number or id) with new plan or step text."""
+        return rt.queue_edit(item, text)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def queue_change(action: str, item: Optional[str] = None, position: Optional[int] = None) -> str:
+        """Rearrange the queue. action: move (item to position), remove (item), again (put a finished item back in
+        line) or clear (remove every finished item). Items are named by their number in queue_show, or their id."""
+        return rt.queue_change(action, item, position)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def queue_start() -> str:
+        """Start the queue: check every waiting item, dry-run them all in order on the simulated lab, ask a person
+        once for every drive range they use, then run them one after another in the background."""
+        return rt.queue_start()
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def queue_pause() -> str:
+        """Pause the queue after the item that is running (the Stop button ends that item too)."""
+        return rt.queue_pause()
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def queue_save(name: str) -> str:
+        """Keep the waiting items as a named queue, to load again later (queue_load)."""
+        return rt.queue_save(name)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def queue_load(name: str) -> str:
+        """Add a saved queue's items to the end of the queue."""
+        return rt.queue_load(name)
 
     @server.tool(annotations=READ, structured_output=False)
     def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None) -> str:

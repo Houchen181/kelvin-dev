@@ -433,6 +433,7 @@
   function selectRun(runId) {
     const tab = RUNS.tabs.get(runId);
     if (!tab) return;
+    hideQueue();
     RUNS.active = runId;
     for (const t of RUNS.tabs.values()) {
       const on = t === tab;
@@ -455,7 +456,7 @@
     if (RUNS.active === runId) {
       RUNS.active = null;
       const next = [...RUNS.tabs.keys()].pop();
-      if (next) selectRun(next); else $("run-body").querySelector(".pane-empty").hidden = false;
+      if (next) selectRun(next); else if (!QUEUE.open) $("run-body").querySelector(".pane-empty").hidden = false;
     }
     $("runs-dot").hidden = ![...RUNS.tabs.values()].some((t) => t.status === "running");
   }
@@ -536,7 +537,11 @@
       if (!v.table.hidden) v.table.replaceChildren(runTable(runViewData(tab)));
       v.tableBtn.textContent = v.table.hidden ? "Show table" : "Hide table";
     });
-    v.plan = h("details", { class: "rv-plan", hidden: true }, h("summary", {}, "Plan"), h("pre", {}));
+    const requeue = h("button", { class: "btn small ghost", type: "button" }, "Add to the queue");
+    requeue.addEventListener("click", async () => {
+      if (await queueOp({ op: "add", text: (tab.final && tab.final.plan_text) || "" })) showQueue();
+    });
+    v.plan = h("details", { class: "rv-plan", hidden: true }, h("summary", {}, "Plan"), h("pre", {}), requeue);
     v.foot = h("div", { class: "plots-foot" }, h("span", {}, tab.runId), v.tableBtn);
     tab.body.replaceChildren(
       h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name" }, tab.plan), h("div", { class: "spacer" }), v.stop),
@@ -1955,7 +1960,7 @@
 
   // ------------------------------------------------------------------ lab panel
   const OPEN = new Set(), SHOW_SETTINGS = new Set();
-  const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [] };
+  const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [], loose: new Map() };
 
   function splitValue(text) {  // "9.42 fA" -> ["9.42", "fA"]; words stay whole
     const m = String(text).match(/^(-?[\d.]+(?:e[-+]?\d+)?)\s+(\S+)$/i);
@@ -2044,12 +2049,25 @@
     }));
     termState(s);   // the terminal first: an approval its own command needs is asked there
     // requests not already shown in a conversation (e.g. after a page reload)
-    const loose = s.pending.filter((p) => !S.approvals.has(p.id) && !TERM.asked.has(p.id));
-    $("lab-pending").replaceChildren(...loose.map((p) => makeApproval(p).el));
+    // requests no conversation shows (a queue started here, another agent's run): asked in the Lab panel, and kept
+    // there until they are answered or closed, not redrawn away on the next poll
+    const open = new Set(s.pending.map((p) => p.id));
+    let fresh = 0;
+    for (const p of s.pending) {
+      if (PANEL.loose.has(p.id) || S.approvals.has(p.id) || TERM.asked.has(p.id)) continue;
+      PANEL.loose.set(p.id, makeApproval(p));
+      fresh += 1;
+    }
+    for (const [id, card] of PANEL.loose) {
+      if (open.has(id)) continue;
+      if (!card.decided) card.close("Closed", false);
+      PANEL.loose.delete(id);
+    }
+    $("lab-pending").replaceChildren(...[...PANEL.loose.values()].map((c) => c.el));
     const badge = $("lab-badge");
     badge.textContent = String(s.pending.length);
     badge.hidden = !s.pending.length;
-    if (loose.length && !S.labOpen) toggleLab(true);
+    if (fresh && !S.labOpen) toggleLab(true);
     showMode(s.approval_mode, s.approval_rule);
     renderAlerts(s.alarms);
     renderWatches(s.watches || [], s.status);
@@ -2067,6 +2085,7 @@
     if (S.setupState && SETUP_BUSY.has(S.setupState) && s.setup && !busySetup && $("lab-dialog").open) refreshLabSetup();
     S.setupState = s.setup && s.setup.state;
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
+    queueFromState(s.queue);
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
   function renderAlerts(alarms) {
@@ -2259,6 +2278,168 @@
     if (status === "lab-verified" && !confirm("Mark " + c.model + " as reviewed? You have checked its commands, limits and safe values against the manual and the instrument. Its outputs can then reach real hardware, still within your lab limits and approvals.")) return;
     try { await api("/api/cards/status", { body: { id: c.id, status } }); } catch (e) { $("cards-msg").textContent = e.message; return; }
     loadCards();
+  }
+
+  // ------------------------------------------------------------------ the scan queue (like Special Measure's)
+  // Plans and steps lined up to run one after another; approved once, run in the background, paused on a failure.
+  const QUEUE = { open: false, data: null, editing: null, built: false };
+  const QUEUE_STEP = "step: cool to 2 K\nset: { tc.T_set: 2 }\nstabilize: { read: tc.T, within: 0.02, for: 120, timeout: 7200 }\nwait: 600";
+  const Q_STATE = { idle: "Idle", running: "Running", pausing: "Pausing after this item", paused: "Paused" };
+  const Q_STATUS = { waiting: "waiting", running: "running…", done: "done", failed: "failed", stopped: "stopped", skipped: "skipped" };
+
+  function buildQueueView() {
+    const add = h("button", { id: "queue-add", class: "btn small", type: "button" }, "Add to the queue");
+    const example = h("button", { class: "link", type: "button" }, "a step");
+    const view = $("queue-view");
+    view.replaceChildren(
+      h("div", { class: "q-head" }, h("span", { id: "queue-state", class: "q-state" }), h("span", { id: "queue-reason", class: "q-reason" }),
+        h("button", { id: "queue-start", class: "btn small primary", type: "button" }, "Start"),
+        h("button", { id: "queue-pause", class: "btn small", type: "button" }, "Pause"),
+        h("select", { id: "queue-onerror", "aria-label": "When an item fails" },
+          h("option", { value: "pause" }, "On a failure: pause"), h("option", { value: "continue" }, "On a failure: go on"))),
+      h("ul", { id: "queue-list", class: "q-list", "aria-label": "Queue" }),
+      h("div", { class: "field q-add" },
+        h("textarea", { id: "queue-text", class: "mono", spellcheck: "false", "aria-label": "A plan or a step to queue",
+          placeholder: "A plan (as Kelvin writes them, or copied from a run's Plan), or a step between scans:\n" + QUEUE_STEP }),
+        h("div", { class: "add-row" },
+          h("input", { id: "queue-note", placeholder: "Note (kept with the run)", "aria-label": "Note" }),
+          h("input", { id: "queue-pos", class: "q-pos", placeholder: "at #", inputmode: "numeric", "aria-label": "Position" }),
+          add),
+        h("span", { class: "hint" }, "Add a scan or ", example, " (set values, wait for a reading to settle, wait). Ask Kelvin in the chat to line up scans for you. Keys on an item: u / d move it, Delete removes it.")),
+      h("div", { class: "q-foot" },
+        h("button", { id: "queue-clear", class: "btn small ghost", type: "button" }, "Clear finished"),
+        h("button", { id: "queue-save", class: "btn small ghost", type: "button" }, "Save as…"),
+        h("select", { id: "queue-saved", "aria-label": "Saved queues" }),
+        h("button", { id: "queue-load", class: "btn small ghost", type: "button" }, "Load")),
+      h("p", { id: "queue-msg", class: "hint", role: "status" }));
+    example.addEventListener("click", () => { $("queue-text").value = QUEUE_STEP; $("queue-text").focus(); });
+    add.addEventListener("click", queueAddOrSave);
+    $("queue-start").addEventListener("click", async () => {
+      $("queue-msg").textContent = "Checking and dry-running every waiting item… then approve the queue once.";
+      $("queue-start").disabled = true;
+      await queueOp({ op: "start" });
+      $("queue-start").disabled = false;
+    });
+    $("queue-pause").addEventListener("click", () => queueOp({ op: "pause" }));
+    $("queue-onerror").addEventListener("change", (e) => queueOp({ op: "on_error", value: e.target.value }, true));
+    $("queue-clear").addEventListener("click", () => queueOp({ op: "clear" }, true));
+    $("queue-save").addEventListener("click", () => {
+      const name = prompt("Save the waiting items as:", "overnight");
+      if (name) queueOp({ op: "save", name: name.trim() });
+    });
+    $("queue-load").addEventListener("click", () => { if ($("queue-saved").value) queueOp({ op: "load", name: $("queue-saved").value }); });
+    QUEUE.built = true;
+  }
+  function showQueue() {
+    if (!QUEUE.built) buildQueueView();
+    toggleRuns(true);
+    RUNS.active = null;
+    for (const t of RUNS.tabs.values()) { t.btn.classList.remove("on"); t.btn.setAttribute("aria-selected", "false"); t.body.hidden = true; }
+    $("run-body").querySelector(".pane-empty").hidden = true;
+    $("queue-view").hidden = false;
+    $("open-queue").classList.add("on");
+    QUEUE.open = true;
+    renderQueue();
+    api("/api/queue").then((q) => { QUEUE.data = q; renderQueue(); }, () => {});
+  }
+  function hideQueue() {
+    QUEUE.open = false;
+    $("queue-view").hidden = true;
+    $("open-queue").classList.remove("on");
+  }
+  async function queueOp(body, quiet) {
+    try {
+      const r = await api("/api/queue", { body });
+      QUEUE.data = r;
+      renderQueue();
+      if (!quiet) $("queue-msg").textContent = (r.message || "").split("\n")[0];
+      return r;
+    } catch (e) {
+      if (QUEUE.built) $("queue-msg").textContent = e.message; else toast(e.message);
+      return null;
+    }
+  }
+  async function queueAddOrSave() {
+    const text = $("queue-text").value.trim();
+    if (!text) { $("queue-msg").textContent = "Paste a plan or a step first."; return; }
+    const r = QUEUE.editing
+      ? await queueOp({ op: "edit", item: QUEUE.editing, text })
+      : await queueOp({ op: "add", text, note: $("queue-note").value.trim(), position: $("queue-pos").value.trim() || null });
+    if (r) { $("queue-text").value = $("queue-note").value = $("queue-pos").value = ""; queueEditing(null); }
+  }
+  function queueEditing(item) {
+    QUEUE.editing = item ? item.id : null;
+    $("queue-add").textContent = item ? "Save changes to #" + item.n : "Add to the queue";
+    if (item) { $("queue-text").value = item.text; $("queue-text").focus(); }
+  }
+  function queueItem(i, n, count) {
+    const buttons = [];
+    const act = (label, title, fn) => {
+      const b = h("button", { type: "button", title }, label);
+      b.addEventListener("click", fn);
+      buttons.push(b);
+    };
+    const idle = i.status !== "running";
+    if (n > 1) act("↑", "Move up (u)", () => queueOp({ op: "move", item: i.id, position: n - 1 }, true));
+    if (n < count) act("↓", "Move down (d)", () => queueOp({ op: "move", item: i.id, position: n + 1 }, true));
+    if (idle) act("Edit", "Edit this item", () => queueEditing(Object.assign({ n }, i)));
+    if (idle && i.status !== "waiting") act("Again", "Put it back in line", () => queueOp({ op: "again", item: i.id }, true));
+    if (i.run_id) act("Open", "Open its run", () => openRun(i.run_id, i.name));
+    if (idle) act("✕", "Remove (Delete)", () => queueOp({ op: "remove", item: i.id }, true));
+    const st = i.status === "running" ? h("span", { class: "spinner" }) : i.status === "done" ? icon("check")
+      : ["failed", "stopped"].includes(i.status) ? icon("warn") : h("span", { class: "muted" }, "·");
+    const sub = [h("span", { class: "q-status" }, Q_STATUS[i.status] || i.status)];
+    if (i.note) sub.push(h("span", {}, i.note + " "));
+    if (i.message) sub.push(h("span", {}, "— " + i.message));
+    const li = h("li", { class: "q-item " + i.status, tabindex: "0", title: i.text },
+      h("span", { class: "q-num" }, st), h("span", { class: "q-kind" }, i.kind === "plan" ? "scan" : "step"),
+      h("span", { class: "q-name" }, n + ". " + i.name), h("span", { class: "q-acts" }, ...buttons), h("div", { class: "q-sub" }, ...sub));
+    li.addEventListener("keydown", (e) => {   // Special Measure's keys: u / d move the item, Delete removes it
+      if (e.target !== li) return;
+      if (e.key === "u" && n > 1) queueOp({ op: "move", item: i.id, position: n - 1 }, true);
+      else if (e.key === "d" && n < count) queueOp({ op: "move", item: i.id, position: n + 1 }, true);
+      else if ((e.key === "Delete" || e.key === "Backspace") && i.status !== "running") queueOp({ op: "remove", item: i.id }, true);
+      else return;
+      e.preventDefault();
+    });
+    return li;
+  }
+  function renderQueue() {
+    const q = QUEUE.data;
+    queueBadge(q);
+    if (!QUEUE.open || !QUEUE.built || !q) return;
+    const items = q.items || [];
+    const running = q.state === "running" || q.state === "pausing";
+    const pos = items.findIndex((i) => i.status === "running") + 1;
+    $("queue-state").textContent = (Q_STATE[q.state] || q.state) + (pos ? " · item " + pos + " of " + items.length : "");
+    $("queue-reason").textContent = q.reason && q.reason !== "finished" ? q.reason
+      : q.waiting ? q.waiting + " waiting" : q.reason === "finished" ? "Finished" : "";
+    $("queue-start").hidden = running || !q.waiting;
+    $("queue-start").textContent = q.state === "paused" ? "Resume" : "Start";
+    $("queue-pause").hidden = q.state !== "running";
+    $("queue-onerror").value = q.on_error || "pause";
+    const focused = document.activeElement && document.activeElement.closest && document.activeElement.closest(".q-item");
+    const focusIdx = focused ? [...$("queue-list").children].indexOf(focused) : -1;
+    $("queue-list").replaceChildren(...(items.length ? items.map((i, n) => queueItem(i, n + 1, items.length))
+      : [h("li", { class: "muted small" }, "Nothing queued. Add scans below, or ask Kelvin to line them up.")]));
+    if (focusIdx >= 0 && $("queue-list").children[focusIdx]) $("queue-list").children[focusIdx].focus();
+    const saved = q.saved || [];
+    $("queue-saved").replaceChildren(...(saved.length ? saved.map((s) => h("option", { value: s }, s)) : [h("option", { value: "" }, "No saved queues")]));
+    $("queue-load").disabled = !saved.length;
+  }
+  function queueBadge(q) {
+    if (!q) return;
+    const n = (q.waiting || 0) + (q.running ? 1 : 0);
+    $("queue-count").textContent = String(n);
+    $("queue-count").hidden = !n;
+    $("open-queue").classList.toggle("live", q.state === "running" || q.state === "pausing");
+  }
+  function queueFromState(q) {
+    if (!q) return;
+    const old = QUEUE.data;
+    QUEUE.data = Object.assign({}, q);
+    if (!old || old.changed !== q.changed || old.state !== q.state || old.reason !== q.reason) renderQueue();
+    else queueBadge(q);
   }
 
   // ------------------------------------------------------------------ why Kelvin is on the virtual lab
@@ -3162,6 +3343,7 @@
       if (!$("card-name").value) $("card-name").value = files[0].name.replace(/\.[^.]+$/, "");
     });
     $("open-report").addEventListener("click", openReport);
+    $("open-queue").addEventListener("click", () => (QUEUE.open ? hideQueue() : showQueue()));
     $("make-report").addEventListener("click", makeReport);
     $("watch-add-toggle").addEventListener("click", () => { $("watch-form").hidden = !$("watch-form").hidden; });
     $("watch-form").addEventListener("submit", addWatch);

@@ -130,4 +130,4 @@ def test_the_portal_has_the_terminal_pane():
         assert el in page
     assert '"/api/terminal"' in js and "function termSlash" in js and "termState(s);" in js
     # the terminal claims the approvals its own commands wait for before the Lab panel does
-    assert js.index("termState(s);") < js.index("const loose = s.pending")
+    assert js.index("termState(s);") < js.index("const open = new Set(s.pending")

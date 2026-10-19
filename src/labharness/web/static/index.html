@@ -127,6 +127,7 @@
     <header class="pane-head">
       <div id="run-tabs" class="run-tabs" role="tablist" aria-label="Runs"></div>
       <div class="spacer"></div>
+      <button id="open-queue" class="btn small ghost" type="button" title="Scans lined up to run one after another">Queue<span id="queue-count" class="badge q-badge" hidden></span></button>
       <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
       <div class="pane-menu-wrap">
         <button id="runs-history" class="icon-btn" type="button" aria-label="Recent runs" aria-haspopup="menu" aria-expanded="false">
@@ -140,6 +141,7 @@
     </header>
     <div id="run-body" class="pane-body">
       <div class="pane-empty"><p>No run open.</p><p class="muted small">When a plan runs, its progress and data appear here. Open an earlier run from the clock button.</p></div>
+      <div id="queue-view" class="queue-view" hidden></div>
     </div>
   </section>
 

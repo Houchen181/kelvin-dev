@@ -1128,6 +1128,47 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def stop_run(request: Request) -> Response:
         return JSONResponse({"ok": runtime.stop_run()})
 
+    async def queue(request: Request) -> Response:
+        """GET: the scan queue. POST {op, ...}: a person's change to it. start asks for the queue's approval as usual
+        and returns once it is answered."""
+        if request.method == "GET":
+            return JSONResponse(runtime.queue_view())
+        body = await request.json()
+        op, by = str(body.get("op") or ""), "human"
+        item = body.get("item")
+        if op == "add":
+            pos = body.get("position")
+            msg = runtime.queue_add(str(body.get("text") or ""), int(pos) if pos else None, str(body.get("note") or ""), by)
+            ok = not msg.startswith("not added")
+        elif op == "edit":
+            msg = runtime.queue_edit(item, str(body.get("text") or ""), by)
+            ok = not msg.startswith("not changed")
+        elif op in ("move", "remove", "again", "clear"):
+            msg = runtime.queue_change(op, item, body.get("position"), by)
+            ok = not msg.startswith(("not changed", "unknown"))
+        elif op == "start":
+            msg = await asyncio.to_thread(runtime.queue_start, by)
+            ok = msg.startswith("queue started")
+        elif op == "pause":
+            msg, ok = runtime.queue_pause(by), True
+        elif op == "on_error":
+            try:
+                runtime.queue_set_on_error(str(body.get("value") or ""), by)
+                msg, ok = "ok", True
+            except ValueError as e:
+                msg, ok = str(e), False
+        elif op == "save":
+            msg = runtime.queue_save(str(body.get("name") or ""))
+            ok = msg.startswith("saved")
+        elif op == "load":
+            msg = runtime.queue_load(str(body.get("name") or ""), by)
+            ok = msg.startswith("added")
+        else:
+            return error(400, "unknown queue operation %r" % op)
+        if not ok:
+            return error(400, msg)
+        return JSONResponse(dict(runtime.queue_view(), message=msg))
+
     routes = [
         Route("/", index),
         Route("/m", mobile),
@@ -1191,6 +1232,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/live", live),
         Route("/api/runs", runs),
         Route("/api/runs/stop", stop_run, methods=["POST"]),
+        Route("/api/queue", queue, methods=["GET", "POST"]),
         Route("/api/runs/{run_id}", run_data),
         Route("/static/{name}", static),
     ]

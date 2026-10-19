@@ -125,6 +125,7 @@ class SafetyGate:
         self.operator = operator
         self.auto = False  # auto mode: set by a person through the portal, never by the agent
         self._grants: Dict[str, Allowed] = {}
+        self._standing: Dict[str, Allowed] = {}   # what a person approved for a whole queue of scans, while it runs
         self._undo: List[Tuple[str, str, Any]] = []
         self._stop_gen = 0
         self._prefixes: Dict[int, Template] = {}
@@ -286,6 +287,16 @@ class SafetyGate:
         return answer
 
     @contextmanager
+    def standing(self, grants: Dict[str, Allowed]) -> Iterator[None]:
+        """A queue's approval: every drive range its scans and steps use, approved once before it started. Scans
+        inside it run without asking again; anything outside still asks."""
+        old, self._standing = self._standing, dict(grants)
+        try:
+            yield
+        finally:
+            self._standing = old
+
+    @contextmanager
     def preapproved(self, grants: Dict[str, Allowed]) -> Iterator[None]:
         old, self._grants = self._grants, dict(grants)
         try:
@@ -306,6 +317,9 @@ class SafetyGate:
             if not away:
                 continue
             problem = self._away_problem(inst, spec)
+            standing = self._standing.get(key)
+            if not problem and standing is not None and all(standing.covers(v) for v in away):
+                continue   # inside what a person approved for the queue this scan is part of
             if problem:
                 problems.append(problem)
                 continue
@@ -429,6 +443,9 @@ class SafetyGate:
         grant = self._grants.get(key)
         if grant is not None and grant.covers(target):
             return "plan approval"
+        standing = self._standing.get(key)
+        if standing is not None and standing.covers(target):
+            return "queue approval"
         if inst.trust == "envelope" and self.envelope is not None and self.envelope.covers(key, target):
             return "envelope"
         return None

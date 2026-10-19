@@ -164,7 +164,7 @@ class RunEngine:
         report.message = "dry run: " + report.message
         return report
 
-    def run(self, plan: Any, dry_run: bool = True) -> RunReport:
+    def run(self, plan: Any, dry_run: bool = True, meta: Optional[Dict[str, Any]] = None) -> RunReport:
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan)
         except PlanError as e:
@@ -203,7 +203,7 @@ class RunEngine:
                 report = RunReport("declined", plan.name, "declined: plan %s not run%s" % (plan.name, why), dry_run=sim)
                 self.gate.log.write("run_declined", by=self.gate.operator, plan=plan.name)
                 return report
-        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None)
+        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta)
         report.dry_run = sim
         return report
 
@@ -233,13 +233,15 @@ class RunEngine:
                 raise _Abort("stop requested")
             clock.sleep(max(0.05, min(2.0, st.duration / 10)))
 
-    def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None) -> RunReport:
+    def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
+                 meta: Optional[Dict[str, Any]] = None) -> RunReport:
         """expected_s: the dry run's duration (lab time), for an honest time-left estimate that counts ramps."""
         gate, lab, clock = self.gate, self.lab, self.lab.clock
         gen = gate.stop_generation
         rec = self.store.create(plan.name, plan.source, gate.operator)
         rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
         rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
+        rec.meta.update(meta or {})   # e.g. which queue item this run was
         rec.snapshot("start", lab.snapshot())
         gate.log.write("run_start", by=gate.operator, run=rec.run_id, plan=plan.name, points=plan.points)
         cols = self.columns(plan)

@@ -707,6 +707,34 @@ body.resizing .plot-svg { pointer-events: none; }
 .run-tab-x svg { width: 13px; height: 13px; }
 .run-tab:hover .run-tab-x, .run-tab.on .run-tab-x { opacity: 1; }
 .run-tab-x:hover { background: var(--active); color: var(--text); }
+.q-badge { margin-left: 6px; background: var(--accent-soft); color: var(--text); }
+#open-queue.on { background: var(--active); }
+#open-queue.live .q-badge { background: var(--accent); color: #fff; }
+.queue-view { padding: 14px 16px 24px; display: grid; gap: 12px; }
+.q-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.q-head .q-state { font-weight: 600; }
+.q-head .q-reason { color: var(--muted); font-size: 13px; flex: 1 1 200px; }
+.q-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.q-item { display: grid; grid-template-columns: 22px auto minmax(0, 1fr) auto; align-items: center; gap: 4px 8px; padding: 7px 8px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--raised); font-size: 13.5px; }
+.q-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.q-item.running { border-color: var(--accent); }
+.q-item.done { opacity: .75; }
+.q-item.failed, .q-item.stopped { border-color: var(--warn-line); }
+.q-num { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+.q-kind { font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 5px; padding: 1px 5px; }
+.q-name { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-acts { display: flex; gap: 2px; }
+.q-acts button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 3px 6px; border-radius: 5px; font-size: 12.5px; }
+.q-acts button:hover { background: var(--hover); color: var(--text); }
+.q-sub { grid-column: 3 / -1; color: var(--muted); font-size: 12.5px; }
+.q-sub .q-status { margin-right: 8px; }
+.q-item.failed .q-status, .q-item.stopped .q-status { color: var(--warn); }
+.q-item.done .q-status { color: var(--ok); }
+.q-add textarea { width: 100%; min-height: 110px; }
+.q-add .add-row input.q-pos { width: 70px; flex: none; }
+.q-foot { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .pane-menu-wrap { position: relative; }
 .pane-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 10; width: 320px; max-height: 60vh; overflow-y: auto;
   background: var(--raised); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: var(--shadow); padding: 4px; }

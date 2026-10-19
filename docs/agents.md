@@ -31,6 +31,11 @@ Client setup. Use the full path to the venv's `kelvin-mcp` (or its Python with `
 
 A drive change blocks its tool call until a person answers. Set the client's tool timeout above the approval timeout: `MCP_TOOL_TIMEOUT` (ms) for Claude Code, `tool_timeout_sec` for Codex, `timeout` (ms) for Gemini CLI.
 
-Tools: `lab_status`, `describe_instrument`, `instrument_info`, `search_manual`, `get_value`, `set_value`, `send_raw`, `undo_last`, `health_check`, `validate_plan`, `simulate_plan`, `run_plan`, `analyze_run`, `list_runs`, `get_run_data`, `get_trace`, `recent_events`, `wait`.
+Tools:
+- **The lab:** `lab_status`, `describe_instrument`, `instrument_info`, `search_manual`, `show_sequence`, `get_value`, `set_value`, `send_raw`, `undo_last`, `health_check`, `scan_instruments`, `watch`, `watches`, `unwatch`, `wait`.
+- **Plans and the queue:** `validate_plan`, `simulate_plan`, `run_plan`, `queue_show`, `queue_add`, `queue_edit`, `queue_change`, `queue_start`, `queue_pause`, `queue_save`, `queue_load`.
+- **Data:** `analyze_run`, `list_runs`, `get_run_data`, `get_trace`, `recent_events`, `make_report`.
+- **New instruments:** `card_guide`, `check_card`, `read_examples`, `try_card`, `save_card`.
+- **Literature:** `search_papers`, `read_paper`.
 
 **Security limit:** the access key keeps the model from approving its own requests through its tools. An agent that also has a shell on the same PC could still reach the page. For real hardware, run Kelvin on a machine where the agent has no shell.

@@ -23,6 +23,23 @@ Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points
 
 After a run, Kelvin classifies each measured curve and fits it: a peak or dip (Lorentzian or Gaussian: center, FWHM, height, Q for frequency axes), a straight line (slope, and resistance for I–V), an exponential relaxation (τ), a steady value or no signal. Every number has a one-standard-error uncertainty. It also tracks how the fitted feature changes along an outer loop, and it flags clipping, under-resolved or cut-off features, hysteresis, unsettled readings and stopped runs. The result is saved as `analysis.json` in the run folder; `analyze_run` re-fits a run with a chosen model.
 
+## The queue
+
+Line up scans to run one after another, overnight or while you are away, as in Special Measure's queue. Open **Queue** in the Runs pane, or ask Kelvin ("queue a gate sweep at 2, 5 and 10 K"). An item is a plan, or a step between scans:
+
+```yaml
+step: warm to 10 K
+set: { tc.T_set: 10 }
+stabilize: { read: tc.T, within: 0.02, for: 120, timeout: 7200 }   # wait until it settles
+wait: 300                                                          # then wait 5 minutes more
+```
+
+- **Building it.** Add an item at the end or at a position, with a note that is kept with its run. Reorder with ↑ ↓ (or select an item and press `u` / `d`), edit, or remove it (Delete). **Add to the queue** under a finished run's plan queues that scan again. You can change the queue while it runs; only the running item is fixed.
+- **One approval.** **Start** checks every waiting item and dry-runs them all in order on the simulated lab, so a step that cools the sample counts for the scans after it. You then approve once, for every drive range the queue uses. Each scan is still dry-run just before it runs, and anything outside what you approved asks again.
+- **Running.** Items run in the background, one at a time, each scan in its own run folder that records its place in the queue. Chat keeps working; a tool that needs the instruments says the queue is busy instead of waiting.
+- **Stopping.** **Pause** stops after the item that is running. **Stop** ends that item as well. A failed, declined or stopped item pauses the queue, unless you choose to go on to the next item. The queue never starts by itself, even after Kelvin restarts.
+- **Keeping queues.** **Save as…** keeps the waiting items under a name (`queues/<name>.yaml` in the data folder), and **Load** adds them again. The queue itself is kept in `queue.json`.
+
 ## Your data
 
 Every run gets its own folder, named by date, time and plan, such as `runs/20261018-015328-gate_sweep/`. Each folder holds:
