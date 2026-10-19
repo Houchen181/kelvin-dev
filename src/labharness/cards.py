@@ -145,7 +145,10 @@ class ParamSpec:
                     return name
             raise ValueError("%s must be one of %s, got %r" % (self.name, ", ".join(self.values or {}), value))
         if t == "str":
-            return str(value)
+            text = str(value)
+            if ";" in text or any((ord(c) < 32 and c != "\t") or ord(c) == 127 for c in text):
+                raise ValueError("%s cannot contain command separators or control characters" % self.name)
+            return text
         raise ValueError("%s is a trace and cannot be set" % self.name)
 
     def family(self) -> Any:

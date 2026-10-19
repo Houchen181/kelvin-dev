@@ -456,6 +456,10 @@ def hysteresis(xs: Sequence[float], ys: Sequence[float], x_unit: str, y_unit: st
     turn = max(range(len(xs)), key=lambda i: xs[i]) if xs[1] >= xs[0] else min(range(len(xs)), key=lambda i: xs[i])
     if turn in (0, len(xs) - 1):
         return None
+    direction = 1 if xs[turn] > xs[0] else -1
+    if any(direction * (b - a) < 0 for a, b in zip(xs[:turn], xs[1:turn + 1])) or any(
+            direction * (b - a) > 0 for a, b in zip(xs[turn:-1], xs[turn + 1:])):
+        return None  # repeated/mixed sweeps are not one paired up/down trajectory
     up = {round(x, 12): y for x, y in zip(xs[:turn + 1], ys[:turn + 1])}
     down = {round(x, 12): y for x, y in zip(xs[turn:], ys[turn:])}
     common = [x for x in up if x in down]
@@ -486,7 +490,7 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
     trends: List[str] = []
     real_axes = [a for a in axes if a["key"] not in ("repeat",)]
     x_axis = real_axes[-1] if real_axes else None
-    outer = real_axes[0] if len(real_axes) > 1 else None
+    group_axes = [a for a in axes if x_axis is not None and a["key"] != x_axis["key"]]
 
     status, done, planned = meta.get("status"), meta.get("points", len(rows)), meta.get("planned_points", len(rows))
     if status == "aborted":
@@ -500,8 +504,8 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
         if only and m["key"] != only:
             continue
         if m.get("kind") == "trace":
-            series += _trace_series(rows, m, x_axis, force)
-            trend = _trend(series, m["key"])
+            series += _trace_series(rows, m, x_axis, force, axes)
+            trend = _trend(series, m["key"]) if len(axes) == 1 and axes[0]["key"] != "repeat" else None
             if trend:
                 trends.append(trend)
             continue
@@ -516,19 +520,28 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
             continue
         groups: Dict[Any, List[Dict[str, Any]]] = {}
         for r in rows:
-            groups.setdefault(r.get(outer["key"]) if outer else None, []).append(r)
-        for gval, grows in list(groups.items())[:12]:
+            groups.setdefault(tuple(r.get(a["key"]) for a in group_axes), []).append(r)
+        if len(groups) > 12:
+            issues.append("%s: showing analysis for 12 of %d coordinate groups" % (m["key"], len(groups)))
+        for gvals, grows in list(groups.items())[:12]:
             xs = [r.get(x_axis["key"]) for r in grows]
             ys = [r.get(m["key"]) for r in grows]
             s = analyze_curve(xs, ys, x_axis["key"], m["key"], x_axis.get("unit", ""), m["unit"], force)
-            if outer is not None:
-                s["group"] = "%s = %s" % (outer["key"], si(gval, outer.get("unit", ""))) if isinstance(gval, (int, float)) else str(gval)
-            h = hysteresis([x for x in xs if isinstance(x, (int, float))], [y for y in ys if isinstance(y, (int, float))],
+            if group_axes:
+                s["group"] = ", ".join("%s = %s" % (a["key"], si(v, a.get("unit", ""))
+                                                   if isinstance(v, (int, float)) else str(v))
+                                       for a, v in zip(group_axes, gvals))
+                s["coordinates"] = dict(zip((a["key"] for a in group_axes), gvals))
+            pairs = [(x, y) for x, y in zip(xs, ys) if isinstance(x, (int, float))
+                     and isinstance(y, (int, float)) and math.isfinite(x) and math.isfinite(y)]
+            h = hysteresis([x for x, _ in pairs], [y for _, y in pairs],
                            x_axis.get("unit", ""), m["unit"])
             if h:
                 s["flags"].append(h)
             series.append(s)
-        if outer is not None:
+        # A trend across several changing coordinates is confounded. Only compare
+        # one physical outer coordinate, never repeat number or mixed conditions.
+        if len(group_axes) == 1 and group_axes[0]["key"] != "repeat":
             trend = _trend(series, m["key"])
             if trend:
                 trends.append(trend)
@@ -596,7 +609,7 @@ def _trend(series: List[Dict[str, Any]], key: str) -> Optional[str]:
 
 
 def _trace_series(rows: List[Dict[str, Any]], m: Dict[str, str], x_axis: Optional[Dict[str, str]],
-                  force: Optional[str]) -> List[Dict[str, Any]]:
+                  force: Optional[str], axes: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, Any]]:
     out = []
     picked = rows if len(rows) <= 6 else [rows[0], rows[len(rows) // 2], rows[-1]]
     for r in picked:
@@ -608,7 +621,10 @@ def _trace_series(rows: List[Dict[str, Any]], m: Dict[str, str], x_axis: Optiona
         xs = [x0 + (x1 - x0) * i / (n - 1) for i in range(n)]
         s = analyze_curve(xs, ys, "frequency" if m.get("x_unit") == "Hz" else "x", m["key"], m.get("x_unit", ""), m["unit"], force)
         if x_axis is not None and len(rows) > 1:
-            s["group"] = "%s = %s" % (x_axis["key"], si(r.get(x_axis["key"]), x_axis.get("unit", "")))
+            coordinates = axes or [x_axis]
+            s["group"] = ", ".join("%s = %s" % (a["key"], si(r.get(a["key"]), a.get("unit", "")))
+                                   for a in coordinates if isinstance(r.get(a["key"]), (int, float)))
+            s["coordinates"] = {a["key"]: r.get(a["key"]) for a in coordinates}
         # keep curves light for the browser
         if s.get("fit"):
             s["fit"]["x"], s["fit"]["y"] = s["fit"]["x"][::2], s["fit"]["y"][::2]
@@ -629,7 +645,7 @@ def _next_step(primary: Optional[Dict[str, Any]], issues: List[str], trends: Seq
     if any("stopped after" in i for i in issues):
         return "Fix the cause of the stop, then rerun the remaining range."
     kind = primary["kind"]
-    if primary.get("group") and kind in ("peak", "dip", "linear", "relaxation"):
+    if primary.get("group") and trends and kind in ("peak", "dip", "linear", "relaxation"):
         outer = primary["group"].split(" = ")[0]
         if trends and "does not change" not in trends[0]:
             return "Add more %s values (and a finer step where it changes fastest) to map the dependence." % outer

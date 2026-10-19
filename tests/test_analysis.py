@@ -106,6 +106,44 @@ def test_hysteresis_between_up_and_down_sweeps():
     assert hysteresis(xs, [x for x in xs], "T", "V") is None
 
 
+def test_three_axis_scans_keep_each_fixed_coordinate_separate():
+    axes = [{"key": k, "unit": u, "kind": "instrument"}
+            for k, u in (("temperature", "K"), ("field", "T"), ("voltage", "V"))]
+    rows = [{"temperature": t, "field": b, "voltage": v, "signal": 10 * b + v}
+            for t in (2, 4) for b in (0, 1) for v in range(12)]
+    a = analyze_run(rows, axes, [{"key": "signal", "unit": "A", "kind": "scalar"}])
+    assert len(a["series"]) == 4
+    assert {(s["coordinates"]["temperature"], s["coordinates"]["field"]) for s in a["series"]} == {
+        (2, 0), (2, 1), (4, 0), (4, 1)}
+    assert all(s["kind"] == "linear" for s in a["series"])
+    assert not any("hysteresis" in flag for s in a["series"] for flag in s["flags"])
+    assert a["trends"] == []  # no confounded first-to-last comparison across T and B
+
+
+def test_repeats_are_not_mistaken_for_hysteresis():
+    axes = [{"key": "repeat", "unit": "", "kind": "repeat"},
+            {"key": "voltage", "unit": "V", "kind": "instrument"}]
+    rows = [{"repeat": rep, "voltage": v, "signal": 10 * rep + v}
+            for rep in (0, 1) for v in range(12)]
+    a = analyze_run(rows, axes, [{"key": "signal", "unit": "A", "kind": "scalar"}])
+    assert len(a["series"]) == 2 and a["trends"] == []
+    assert not any("hysteresis" in flag for s in a["series"] for flag in s["flags"])
+
+
+def test_mixed_trajectories_are_not_a_single_hysteresis_pair():
+    xs = list(range(10)) + list(range(9, -1, -1)) + list(range(10))
+    assert hysteresis(xs, [x + i // 10 for i, x in enumerate(xs)], "V", "A") is None
+
+
+def test_analysis_says_when_coordinate_groups_are_omitted():
+    axes = [{"key": "field", "unit": "T", "kind": "instrument"},
+            {"key": "voltage", "unit": "V", "kind": "instrument"}]
+    rows = [{"field": b, "voltage": v, "signal": b + v} for b in range(14) for v in range(6)]
+    a = analyze_run(rows, axes, [{"key": "signal", "unit": "A", "kind": "scalar"}])
+    assert len(a["series"]) == 12
+    assert any("12 of 14 coordinate groups" in issue for issue in a["issues"])
+
+
 AXES = [{"key": "magnet.B", "unit": "T", "kind": "instrument"}, {"key": "smu.V", "unit": "V", "kind": "instrument"}]
 MEASURES = [{"key": "lockin.X", "unit": "V", "kind": "scalar"}]
 

@@ -32,6 +32,12 @@ parameters:
     kind: measure
     unit: nm
     get: "GET get_status#wavelength"
+  tuning_wavelength:
+    label: Wavelength while tuning
+    kind: measure
+    unit: nm
+    get: "GET {poll}#current_wavelength|wavelength"
+    description: Read the wavelength from the tuning-progress reply, accepting the firmware's field name
   tuning_status:
     label: Tuning status
     kind: measure

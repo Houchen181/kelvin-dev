@@ -23,6 +23,8 @@ Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points
 
 After a run, Kelvin classifies each measured curve and fits it: a peak or dip (Lorentzian or Gaussian: center, FWHM, height, Q for frequency axes), a straight line (slope, and resistance for I–V), an exponential relaxation (τ), a steady value or no signal. Every number has a one-standard-error uncertainty. It also tracks how the fitted feature changes along an outer loop, and it flags clipping, under-resolved or cut-off features, hysteresis, unsettled readings and stopped runs. The result is saved as `analysis.json` in the run folder; `analyze_run` re-fits a run with a chosen model.
 
+Analysis keeps every fixed coordinate and repeat separate. It does not infer a trend across several changing coordinates, and only a single monotonic up/down trajectory is tested for hysteresis. If more than 12 coordinate groups exist, the assessment explicitly says that only the first 12 were analysed.
+
 ## The queue
 
 Line up scans to run one after another, overnight or while you are away, as in Special Measure's queue. Open **Queue** in the Runs pane, or ask Kelvin ("queue a gate sweep at 2, 5 and 10 K"). An item is a plan, or a step between scans:
@@ -46,10 +48,14 @@ Every run gets its own folder, named by date, time and plan, such as `runs/20261
 - `plan.yaml`: what was asked for.
 - `snapshot_start.json` and `snapshot_end.json`: every instrument setting at the start and at the end.
 - `data.jsonl`: every point, traces included.
-- `meta.json`: status, points, duration and warnings.
+- `meta.json`: status, points, duration, warnings and project/chat ownership. Initial ownership and `running` status are written before measurement, so an interrupted run retains them.
 - `analysis.json`: the automatic fit and assessment.
 
 Next to the run folders sit `events.jsonl`, the lab record of every command, reading, approval, refusal and alarm with who did it, and `reports/`.
+
+**Access from models:** a portal model can read runs, event excerpts and reports from its own project, or only its own chat when unfiled. Guessing another run ID does not grant access. Queued items retain their ownership in the background and after restart; a model cannot inspect or edit another project's items. Named queues saved by models live in `queues/<project-or-chat-id>/`. The standalone MCP entry point has a separate shared `external-mcp` workspace.
+
+Older runs and queue items with no recorded ownership remain available to the person in the local Runs/Queue panes, but are not automatically exposed to models. These are application-level boundaries; they do not sandbox a model that separately has access to Kelvin's files or approval credentials. Live instrument readings still describe the shared physical lab.
 
 **When you uninstall Kelvin:** the Windows uninstaller deletes Kelvin's own data and keeps your measurements.
 - **Deleted:** settings and API keys, the ChatGPT sign-in (revoked with OpenAI first), chats, projects and memory, the lab config, your instrument cards, the instrument folders with their manuals, the log and the window's cache.

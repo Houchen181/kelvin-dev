@@ -69,7 +69,8 @@ def test_an_amo_bench_through_the_gate(bench, tmp_path):
     assert gate.set("aom", "output", True).ok
     assert "ON,2" in bench.devices["TCPIP0::10.0.0.30::7802::SOCKET"].sent
     assert gate.set("aom", "frequency", 80).ok and lab.read("aom", "frequency") == pytest.approx(80)
-    assert "(approved)" in gate.raw("aom", "ON,2,POW").message             # an unlisted variant still counts as the switch
+    assert gate.raw("aom", "ON,2,POW").action == "refused"              # no safe range can be checked for this variant
+    assert "ON,2,POW" not in bench.devices["TCPIP0::10.0.0.30::7802::SOCKET"].sent
     assert gate.raw("aom", "LIMIT,2,36").action == "refused"
     assert gate.set("dds", "amplitude", 500).ok and lab.read("dds", "amplitude") == 500   # remembered: no read-back
     assert gate.set("dds", "amplitude", 2000).action == "refused"         # 1023 is full scale

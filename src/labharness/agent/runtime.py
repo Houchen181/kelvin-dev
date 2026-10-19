@@ -9,6 +9,7 @@ import json
 import re
 import threading
 import time
+from contextvars import copy_context
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -21,7 +22,7 @@ from ..eventlog import EventLog, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, Envelope
-from .. import carddraft
+from .. import carddraft, datascope
 from ..literature import Literature
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
@@ -33,7 +34,7 @@ from ..yamlio import load_yaml
 MAX_WAIT_S = 3600
 
 
-def tail_events(path: Path, n: int) -> List[Dict[str, Any]]:
+def tail_events(path: Path, n: int, predicate: Optional[Callable[[Dict[str, Any]], bool]] = None) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
     with open(path, "rb") as f:
@@ -45,12 +46,16 @@ def tail_events(path: Path, n: int) -> List[Dict[str, Any]]:
     if block < size:
         lines = lines[1:]  # the first line may be cut
     out = []
-    for line in lines[-n:]:
+    for line in reversed(lines):
+        if len(out) >= n:
+            break
         try:
-            out.append(json.loads(line))
+            event = json.loads(line)
+            if predicate is None or predicate(event):
+                out.append(event)
         except ValueError:
             pass
-    return out
+    return list(reversed(out))
 
 
 def event_line(e: Dict[str, Any]) -> str:
@@ -199,7 +204,7 @@ class LabRuntime:
         if not self.lock.acquire(timeout=2.0):
             if self.queue.state in ("running", "pausing"):   # a queued scan may take hours: answer instead of waiting
                 return ("Kelvin is running the queue (%s). Ask again when this item is done, or pause or stop the "
-                        "queue." % (self.busy or "a scan"))
+                        "queue." % ((self.busy or "a scan") if datascope.current() is None else "a scan"))
             self.lock.acquire()
         try:
             self.busy = what
@@ -510,6 +515,13 @@ class LabRuntime:
         d = (self.data_dir / "runs" / run_id).resolve()
         if d.parent != (self.data_dir / "runs").resolve() or not d.is_dir():
             raise KeyError("no run %r (see list_runs)" % run_id)
+        if datascope.current() is not None:
+            try:
+                owner = json.loads((d / "meta.json").read_text(encoding="utf-8")).get("scope")
+            except (OSError, ValueError):
+                owner = None
+            if not datascope.visible(owner):
+                raise KeyError("no run %r in this conversation's project" % run_id)
         return d
 
     def _rows(self, run_id: str) -> List[Dict[str, Any]]:
@@ -522,9 +534,13 @@ class LabRuntime:
     def runs_index(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Most recent runs first: run_id, plan, status, points, planned_points, reason."""
         root = self.data_dir / "runs"
-        dirs = sorted((d for d in root.iterdir() if d.is_dir()), reverse=True)[:limit] if root.exists() else []
+        dirs = sorted((d for d in root.iterdir() if d.is_dir()), reverse=True) if root.exists() else []
         out = []
         for d in dirs:
+            try:
+                self._run_dir(d.name)
+            except KeyError:
+                continue
             entry: Dict[str, Any] = {"run_id": d.name, "plan": d.name.split("-", 2)[-1], "status": "unfinished"}
             try:
                 meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
@@ -535,6 +551,8 @@ class LabRuntime:
                 if live and live["run_id"] == d.name and live["status"] == "running":
                     entry.update(status="running", points=live["done"], planned_points=live["total"])
             out.append(entry)
+            if len(out) >= max(1, int(limit)):
+                break
         return out
 
     def list_runs(self, limit: int = 10) -> str:
@@ -561,7 +579,12 @@ class LabRuntime:
         return self.queue.text()
 
     def queue_view(self) -> Dict[str, Any]:
-        return dict(self.queue.view(), saved=saved_queues(self.data_dir / "queues"))
+        return dict(self.queue.view(), saved=saved_queues(self._queues_dir()))
+
+    def _queues_dir(self) -> Path:
+        scope = datascope.current()
+        folder = self.data_dir / "queues"
+        return folder / (scope.get("project") or scope["chat"]) if scope else folder
 
     def _queue_problems(self, text: str) -> List[str]:
         """What stops an item from running on this lab, before it joins the queue."""
@@ -641,14 +664,14 @@ class LabRuntime:
 
     def queue_save(self, name: str) -> str:
         try:
-            path = save_named(self.data_dir / "queues", name, self.queue.waiting() or list(self.queue.items))
+            path = save_named(self._queues_dir(), name, self.queue.waiting() or self.queue.visible_items())
         except (ValueError, OSError) as e:
             return "not saved: %s" % e
         return "saved the queue as %s" % path.name
 
     def queue_load(self, name: str, by: str = "agent") -> str:
         try:
-            entries = load_named(self.data_dir / "queues", name)
+            entries = load_named(self._queues_dir(), name)
         except KeyError as e:
             return e.args[0]
         added, problems = 0, []
@@ -742,7 +765,8 @@ class LabRuntime:
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()
             self.gate.log.write("queue_start", by=by, items=len(items), expected_s=round(duration))
-            self._queue_thread = threading.Thread(target=self._queue_loop, args=(grants, by), daemon=True,
+            context = copy_context()
+            self._queue_thread = threading.Thread(target=context.run, args=(self._queue_loop, grants, by), daemon=True,
                                                   name="kelvin-queue")
             self._queue_thread.start()
             return "queue started: %s\n%s" % (title[len("Run the queue: "):], self.queue.text())
@@ -785,6 +809,10 @@ class LabRuntime:
             self.notifier("run", "Queue paused", q.reason[:300])
 
     def _queue_item(self, item: Item, position: int, grants: Dict[str, Allowed], by: str) -> Tuple[bool, str]:
+        with datascope.use(item.scope):
+            return self._scoped_queue_item(item, position, grants, by)
+
+    def _scoped_queue_item(self, item: Item, position: int, grants: Dict[str, Allowed], by: str) -> Tuple[bool, str]:
         """Run one item under the queue's approval. (ok, message)"""
         q = self.queue
         with self.lock:
@@ -884,7 +912,12 @@ class LabRuntime:
         return "\n".join(lines)
 
     def events(self, n: int = 20) -> str:
-        return "\n".join(event_line(e) for e in tail_events(self.events_path, max(1, min(int(n), 200)))) or "no events yet"
+        events = tail_events(self.events_path, max(1, min(int(n), 200)),
+                             lambda e: datascope.visible(e.get("scope")))
+        return "\n".join(event_line(e) for e in events) or "no events yet"
+
+    def _scoped_events(self) -> List[Dict[str, Any]]:
+        return [e for e in self.gate.log.events() if datascope.visible(e.get("scope"))]
 
     # ------------------------------------------------------------------ for the approval page
 
@@ -1128,7 +1161,20 @@ class LabRuntime:
         return self.data_dir / "reports"
 
     def pick_runs(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0) -> List[str]:
-        return pick_runs(self.data_dir / "runs", runs, day, last)
+        if datascope.current() is None:
+            return pick_runs(self.data_dir / "runs", runs, day, last)
+        if runs:
+            for run_id in runs:
+                self._run_dir(run_id)  # explicit requests must not bypass ownership checks
+        ids = pick_runs(self.data_dir / "runs", runs, day, 10 ** 9 if last and not (runs or day) else 0)
+        visible = []
+        for run_id in ids:
+            try:
+                self._run_dir(run_id)
+            except KeyError:
+                continue
+            visible.append(run_id)
+        return visible[-last:] if last and not (runs or day) else visible
 
     def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
                notes: Any = (), by: str = "human", references: Any = ()) -> List[Dict[str, Any]]:
@@ -1136,6 +1182,8 @@ class LabRuntime:
         it never talks to an instrument, so it can run while a plan runs."""
         if not run_ids:
             raise ValueError("no runs to report")
+        for run_id in run_ids:
+            self._run_dir(run_id)
         fmts = ["pdf", "pptx"] if fmt == "both" else [fmt]
         if any(f not in ("pdf", "pptx") for f in fmts):
             raise ValueError("format must be pdf, pptx or both")
@@ -1151,7 +1199,7 @@ class LabRuntime:
         lab_name = ", ".join(labs) if labs else self.lab.config.name
         simulated = all(m.get("simulated", True) for m in metas) if labs else \
             all(i.simulated for i in self.lab.instruments.values())
-        report = Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line).report(
+        report = Collector(self.data_dir / "runs", self.lab, columns, self._scoped_events, event_line).report(
             run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated, references)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         base = "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"),

@@ -168,36 +168,41 @@ class Collector:
             return []
         if cols is None:   # the run's instruments are not in this lab any more: plot without units
             axes = [{"key": k, "unit": ""} for k in (plan.get("sweep") or {})]
+            all_axes = ([{"key": "repeat", "unit": ""}] if plan.get("repeat") else []) + axes
             measures = [{"key": str(m), "unit": "", "kind": "trace" if isinstance(rows[-1].get(str(m)), list)
                          else "scalar"} for m in plan.get("measure") or []]
         else:
+            all_axes = cols["axes"]
             axes = [a for a in cols["axes"] if a.get("kind") != "repeat"]
             measures = cols["measures"]
         fits = [s for s in analysis.get("series") or [] if s.get("fit") and s["fit"].get("x")]
         charts: List[Chart] = []
         if axes and len(rows) > 1:
             xa = axes[-1]
-            outer = axes[0] if len(axes) > 1 else None
+            group_axes = [a for a in all_axes if a["key"] != xa["key"]]
             for m in [m for m in measures if m.get("kind") != "trace"]:
                 groups: Dict[Any, List[Dict[str, Any]]] = {}
                 for r in rows:
-                    groups.setdefault(r.get(outer["key"]) if outer else None, []).append(r)
+                    groups.setdefault(tuple(r.get(a["key"]) for a in group_axes), []).append(r)
                 series: List[Series] = []
                 model = ""
-                for k, (gval, grows) in enumerate(list(groups.items())[:MAX_GROUPS]):
-                    if outer:   # the same label the analysis gives this group
-                        name = "%s = %s" % (outer["key"], si(gval, outer.get("unit", "")) if _numbers(gval) else gval)
+                for k, (gvals, grows) in enumerate(list(groups.items())[:MAX_GROUPS]):
+                    if group_axes:   # the same fixed coordinates the analysis uses
+                        name = ", ".join("%s = %s" % (a["key"], si(v, a.get("unit", "")) if _numbers(v) else v)
+                                         for a, v in zip(group_axes, gvals))
                     else:
                         name = m["key"]
-                    color = PALETTE[k % len(PALETTE)] if outer else ""
+                    color = PALETTE[k % len(PALETTE)] if group_axes else ""
                     series.append(Series(name, [r.get(xa["key"]) for r in grows], [r.get(m["key"]) for r in grows],
                                          color=color))
                     fit = next((f for f in fits if f["y"] == m["key"]
-                                and (f.get("group") == name if outer else not f.get("group"))), None)
+                                and (f.get("group") == name if group_axes else not f.get("group"))), None)
                     if fit:
                         model = fit["fit"].get("model") or "model"
                         series.append(Series("fit", fit["fit"]["x"], fit["fit"]["y"], fit=True, color=color))
-                caption = "Dashed: %s fit%s." % (model, "s" if outer and len(groups) > 1 else "") if model else ""
+                caption = "Dashed: %s fit%s." % (model, "s" if group_axes and len(groups) > 1 else "") if model else ""
+                if len(groups) > MAX_GROUPS:
+                    caption += " Showing %d of %d coordinate groups." % (MAX_GROUPS, len(groups))
                 charts.append(Chart(m["key"], xa["key"], xa.get("unit", ""), m.get("unit", ""), series, caption))
         for m in [m for m in measures if m.get("kind") == "trace"]:
             last = next((r for r in reversed(rows) if isinstance(r.get(m["key"]), list)), None)
@@ -208,7 +213,9 @@ class Collector:
             n = len(ys)
             xs = [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(n)]
             series = [Series(m["key"], xs, ys)]
-            fit = next((f for f in fits if f["y"] == m["key"]), None)
+            coordinates = {a["key"]: last.get(a["key"]) for a in all_axes}
+            fit = next((f for f in fits if f["y"] == m["key"] and (
+                f.get("coordinates") == coordinates if len(rows) > 1 else not f.get("group"))), None)
             if fit:
                 series.append(Series("fit", fit["fit"]["x"], fit["fit"]["y"], fit=True))
             x_unit = m.get("x_unit", "")

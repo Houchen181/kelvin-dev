@@ -307,9 +307,10 @@
     }
   }
 
-  function fitFor(analysis, key, trace) {
+  function fitFor(analysis, key, trace, coordinates) {
     if (!analysis) return null;
-    const matches = analysis.series.filter((s) => s.y === key && s.fit && (trace || !s.group));
+    const matches = analysis.series.filter((s) => s.y === key && s.fit && (trace || !s.group) &&
+      (!coordinates || (s.coordinates && Object.keys(coordinates).every((k) => s.coordinates[k] === coordinates[k]))));
     const s = matches[matches.length - 1];
     return s ? { x: s.fit.x, y: s.fit.y, label: s.fit.model + " fit" } : null;
   }
@@ -319,29 +320,35 @@
     const grid = h("div", { class: "plots" });
     const axes = data.axes;
     if (axes.length && data.rows.length > 1) {
-      const xa = axes[axes.length - 1];
-      const outer = axes.length > 1 ? axes[0] : null;
+      const xa = [...axes].reverse().find((a) => a.key !== "repeat") || axes[axes.length - 1];
+      const groupAxes = axes.filter((a) => a.key !== xa.key);
       for (const sc of data.scalars.slice(0, maxScalars || 99)) {
         let series;
-        if (outer) {
+        if (groupAxes.length) {
           const groups = new Map();
           for (const r of data.rows) {
-            const key = r[outer.key];
-            if (!groups.has(key)) groups.set(key, []);
-            groups.get(key).push({ x: r[xa.key], y: r[sc.key] });
+            const values = groupAxes.map((a) => r[a.key]);
+            const key = JSON.stringify(values);
+            if (!groups.has(key)) groups.set(key, { values, points: [] });
+            groups.get(key).points.push({ x: r[xa.key], y: r[sc.key] });
           }
-          series = [...groups.entries()].slice(0, SERIES).map(([k, pts]) => ({ name: outer.key + " = " + fmt(k, outer.unit), points: pts }));
+          series = [...groups.values()].slice(0, SERIES).map((g) => ({
+            name: groupAxes.map((a, i) => a.key + " = " + fmt(g.values[i], a.unit)).join(", "), points: g.points
+          }));
         } else {
           series = [{ name: sc.key, points: data.rows.map((r) => ({ x: r[xa.key], y: r[sc.key] })) }];
         }
         series = series.map((s) => ({ name: s.name, points: s.points.filter((p) => typeof p.x === "number" && typeof p.y === "number") }))
           .filter((s) => s.points.length);
-        if (series.length) grid.append(lineChart({ title: sc.key, series, xKey: xa.key, xUnit: xa.unit, yUnit: sc.unit, fit: fitFor(data.analysis, sc.key) }));
+        if (series.length) grid.append(lineChart({ title: sc.key, series, xKey: xa.key, xUnit: xa.unit, yUnit: sc.unit,
+          fit: groupAxes.length ? null : fitFor(data.analysis, sc.key) }));
       }
     }
     for (const tr of data.traces) {
+      const row = data.rows[tr.row] || data.rows[data.rows.length - 1] || {};
+      const coordinates = data.rows.length > 1 ? Object.fromEntries(axes.map((a) => [a.key, row[a.key]])) : null;
       grid.append(lineChart({ title: tr.key + (data.rows.length > 1 ? " (latest)" : ""), xKey: tr.x_unit === "Hz" ? "frequency" : "x",
-        xUnit: tr.x_unit, yUnit: tr.unit, fit: fitFor(data.analysis, tr.key, true),
+        xUnit: tr.x_unit, yUnit: tr.unit, fit: fitFor(data.analysis, tr.key, true, coordinates),
         series: [{ name: tr.key, points: tr.x.map((x, i) => ({ x, y: tr.y[i] })) }] }));
     }
     return grid;
