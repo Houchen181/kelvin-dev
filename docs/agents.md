@@ -14,6 +14,8 @@ Kelvin's lab tools are an MCP server, so Claude Code, Codex, Gemini CLI or anoth
 
 By default the server starts the virtual lab in instant simulated time. Use `--speed 10` for 10× real time. Event logs and run folders go to `~/Kelvin/virtual-lab`. The server also opens the **approval page** in your browser; its URL, which includes an access key, is printed on the server's stderr.
 
+The standalone server's run and queue tools use a separate shared `external-mcp` workspace. They do not inherit access to portal projects or older unowned records, even when the data folder is the same. The local owner can still inspect those records in the portal. Application embedding code using `build_server` must pass a bound data scope before exposing it to a model; an unscoped runtime is trusted owner code.
+
 On the approval page you can:
 - **Approve or decline** what the agent asks for. An unanswered request is declined after 120 s (`--approval-timeout`). No MCP tool can answer approvals.
 - **Watch** every instrument (drives away from safe are highlighted) and the activity log.

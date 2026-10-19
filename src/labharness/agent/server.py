@@ -9,12 +9,13 @@ import argparse
 import sys
 import webbrowser
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
 from .. import carddraft
+from ..datascope import ScopedRuntime
 from .._version import __version__
 from ..clock import ScaledClock, SimClock
 from ..labconfig import load_envelope
@@ -61,7 +62,9 @@ WEB = ToolAnnotations(readOnlyHint=True, openWorldHint=True)   # reads the publi
 ACT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 
 
-def build_server(rt: LabRuntime) -> MCPServer:
+def build_server(rt: LabRuntime, *, scope: Optional[Dict[str, Optional[str]]] = None) -> MCPServer:
+    if scope is not None:
+        rt = ScopedRuntime(rt, scope)
     server = MCPServer("kelvin", instructions=INSTRUCTIONS, version=__version__)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -346,7 +349,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if not args.no_browser:
         webbrowser.open(ui.url)
 
-    server = build_server(runtime)
+    server = build_server(runtime, scope={"project": None, "chat": "external-mcp"})
     if args.transport == "stdio":
         server.run("stdio")
     else:

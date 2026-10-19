@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .labconfig import read_yaml
 from .plans import PlanError, Stabilize, _split, _stabilize, load_plan
+from . import datascope
 
 STATES = ("waiting", "running", "done", "failed", "stopped", "skipped")
 STEP_KEYS = {"step", "set", "stabilize", "wait", "note"}
@@ -90,6 +91,7 @@ class Item:
     finished: Optional[float] = None
     run_id: Optional[str] = None
     message: str = ""
+    scope: Optional[Dict[str, Optional[str]]] = None
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
@@ -122,6 +124,15 @@ class ScanQueue:
         self.changed = time.time()
         if path is not None:
             self._load()
+
+    @property
+    def reason(self) -> str:
+        return self._reason
+
+    @reason.setter
+    def reason(self, value: str) -> None:
+        self._reason = value
+        self._reason_scope = datascope.current()
 
     # ------------------------------------------------------------------ kept on disk
 
@@ -165,18 +176,24 @@ class ScanQueue:
     def find(self, ref: Any) -> Item:
         """An item by its id, or by its position (1 = first)."""
         with self.lock:
-            for i in self.items:
+            items = self.visible_items()
+            for i in items:
                 if i.id == str(ref):
                     return i
             try:
                 n = int(str(ref).strip().lstrip("#"))
-                return self.items[n - 1] if n >= 1 else self.items[n]
+                return items[n - 1] if n >= 1 else items[n]
             except (ValueError, IndexError):
-                raise KeyError("no queue item %r (the queue has %d)" % (ref, len(self.items)))
+                raise KeyError("no queue item %r (the queue has %d)" % (ref, len(items)))
+
+    def visible_items(self) -> List[Item]:
+        with self.lock:
+            return [i for i in self.items if datascope.visible(i.scope)]
 
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "") -> Item:
         kind, name = parse_item(text)
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time())
+        item.scope = datascope.current()
         with self.lock:
             if position is None or position > len(self.items):
                 self.items.append(item)
@@ -226,7 +243,7 @@ class ScanQueue:
     def clear_finished(self) -> int:
         with self.lock:
             before = len(self.items)
-            self.items = [i for i in self.items if i.status in ("waiting", "running")]
+            self.items = [i for i in self.items if i.status in ("waiting", "running") or not datascope.visible(i.scope)]
             self.save()
             return before - len(self.items)
 
@@ -234,11 +251,11 @@ class ScanQueue:
 
     def waiting(self) -> List[Item]:
         with self.lock:
-            return [i for i in self.items if i.status == "waiting"]
+            return [i for i in self.visible_items() if i.status == "waiting"]
 
     def next_waiting(self) -> Optional[Item]:
         with self.lock:
-            return next((i for i in self.items if i.status == "waiting"), None)
+            return next((i for i in self.visible_items() if i.status == "waiting"), None)
 
     def mark(self, item: Item, status: str, message: str = "", run_id: Optional[str] = None) -> None:
         with self.lock:
@@ -253,18 +270,21 @@ class ScanQueue:
 
     def view(self) -> Dict[str, Any]:
         with self.lock:
-            running = next((i for i in self.items if i.status == "running"), None)
-            return {"state": self.state, "reason": self.reason, "on_error": self.on_error,
-                    "items": [i.view() for i in self.items], "running": running.id if running else None,
-                    "waiting": sum(1 for i in self.items if i.status == "waiting"), "changed": self.changed}
+            items = self.visible_items()
+            running = next((i for i in items if i.status == "running"), None)
+            reason = self.reason if datascope.visible(self._reason_scope) else ""
+            return {"state": self.state, "reason": reason, "on_error": self.on_error,
+                    "items": [i.view() for i in items], "running": running.id if running else None,
+                    "waiting": sum(1 for i in items if i.status == "waiting"), "changed": self.changed}
 
     def text(self) -> str:
         v = self.view()
         lines = ["queue: %s%s" % (v["state"], " (%s)" % v["reason"] if v["reason"] else "")]
-        for n, i in enumerate(self.items, 1):
+        items = self.visible_items()
+        for n, i in enumerate(items, 1):
             extra = (" → run %s" % i.run_id if i.run_id else "") + (": %s" % i.message if i.message else "")
             lines.append("%d. [%s] %s %s%s%s" % (n, i.status, i.kind, i.name, " (%s)" % i.note if i.note else "", extra))
-        if not self.items:
+        if not items:
             lines.append("(empty: add plans or steps with queue_add)")
         return "\n".join(lines)
 

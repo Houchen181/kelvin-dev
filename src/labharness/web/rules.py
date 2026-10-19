@@ -57,7 +57,7 @@ def describe(rules: Optional[Dict[str, Any]]) -> str:
     r = normalize(rules)
     parts = []
     if r["providers"] is not None:
-        names = [PROVIDERS[p] for p in r["providers"]]
+        names = [PROVIDERS.get(p, p) for p in r["providers"]]
         parts.append("only %s may see it" % (" and ".join(names) if names else "no model"))
     if not r["literature"]:
         parts.append("no literature search")

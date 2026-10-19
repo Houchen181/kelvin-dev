@@ -15,6 +15,97 @@ LINE = "plan: scan\nsweep: {stage.position: {from: 0, to: 2, step: 1}}\nmeasure:
 LOCAL_ONLY = {"providers": ["local"], "literature": False}
 
 
+def test_confidential_tools_cannot_write_global_memory_or_lookup_papers(parts):
+    runtime, settings, store = parts
+    outbound = []
+    runtime.literature.fetch = lambda url: outbound.append(url) or b"{}"
+    local = bot("local", [tool("remember", {"scope": "global", "kind": "profile", "text": "SECRET_SAMPLE"}),
+                          say("not promoted"), tool("save_paper", {"paper": "doi:10.1234/SECRET_SAMPLE"}),
+                          say("not fetched")])
+    client, headers = client_for(parts, {"local": local})
+    with client:
+        project = store.create_project("secret")
+        store.set_rules(project["id"], LOCAL_ONLY)
+        chat = store.create("local:m1", project=project["id"])
+        events = stream_turn(client, headers, chat["id"], "remember", "local:m1")
+        result = next(e for e in events if e["type"] == "tool_end")
+        assert result["is_error"] and "cannot write global memory" in result["content"]
+        assert store.global_notes() == []
+        events = stream_turn(client, headers, chat["id"], "keep paper", "local:m1")
+        assert next(e for e in events if e["type"] == "tool_end")["is_error"]
+        assert outbound == [] and "save_paper" not in local.tool_names[-1]
+
+
+def test_portal_models_cannot_read_another_projects_runs_reports_or_log(parts):
+    import copy
+    runtime, _, store = parts
+    local = bot("local", [tool("run_plan", {"plan": LINE.replace("scan", "SECRET_SCAN")}), say("done")])
+    cloud = bot("openai", [])
+    histories = []
+    original_stream = cloud.stream
+
+    async def capture(model, system, history, tools, emit):
+        histories.append(copy.deepcopy(history))
+        return await original_stream(model, system, history, tools, emit)
+
+    cloud.stream = capture
+    client, headers = client_for(parts, {"local": local, "openai": cloud})
+    with client:
+        secret = store.create_project("secret")
+        store.set_rules(secret["id"], LOCAL_ONLY)
+        chat = store.create("local:m1", project=secret["id"])
+        stream_turn(client, headers, chat["id"], "scan", "local:m1")
+        run_id = runtime.runs_index()[0]["run_id"]
+        assert runtime._run_meta(run_id)["scope"]["project"] == secret["id"]
+        cloud.turns = [tool("list_runs", {}), tool("get_run_data", {"run_id": run_id}, "c2"),
+                       tool("recent_events", {}, "c3"), tool("make_report", {"runs": [run_id]}, "c4"), say("done")]
+        public = store.create("openai:m1")
+        events = stream_turn(client, headers, public["id"], "read data", "openai:m1")
+        results = {e["name"]: e for e in events if e["type"] == "tool_end"}
+        assert results["list_runs"]["content"] == "no runs yet"
+        assert "no run" in results["get_run_data"]["content"]
+        assert "SECRET_SCAN" not in results["recent_events"]["content"]
+        assert results["make_report"]["content"].startswith("no report:")
+        assert not any("lockin.X" in r.get("content", "") for h in histories for m in h
+                       if m.get("role") == "tool" for r in m.get("results", []))
+
+
+def test_incognito_can_use_tools_without_a_missing_policy_error(parts):
+    runtime, _, store = parts
+    runtime.search_papers = lambda *a, **k: "no papers"
+    model = bot("openai", [tool("search_papers", {"query": "physics"}), say("done")])
+    client, headers = client_for(parts, {"openai": model})
+    with client:
+        chat = store.create("openai:m1", incognito=True)
+        events = stream_turn(client, headers, chat["id"], "look up physics", "openai:m1")
+        assert next(e for e in events if e["type"] == "tool_end")["content"] == "no papers"
+        assert not any(e["type"] == "error" for e in events)
+
+
+def test_custom_provider_policy_has_a_readable_description():
+    assert rules.describe({"providers": ["openrouter"]}) == "only openrouter may see it"
+
+
+def test_standalone_mcp_workspace_does_not_inherit_portal_data(parts):
+    import asyncio
+    from mcp import Client
+    from labharness import datascope
+    from labharness.agent.server import build_server
+    runtime, _, _ = parts
+    with datascope.use({"project": "psecret", "chat": "private"}):
+        rec = runtime.engine.store.create("private", {"plan": "private"}, "agent")
+        rec.add({"secret_result": 123.456})
+        rec.finish(status="done", points=1)
+
+    async def check():
+        async with Client(build_server(runtime, scope={"project": None, "chat": "external-mcp"})) as client:
+            result = await client.call_tool("get_run_data", {"run_id": rec.run_id})
+            text = "\n".join(c.text for c in result.content if getattr(c, "type", "") == "text")
+            assert "123.456" not in text and "no run" in text
+
+    asyncio.run(check())
+
+
 def test_rule_sets_only_get_stricter():
     assert rules.normalize(None) == {"providers": None, "literature": True}
     assert rules.normalize({"providers": ["local", "anthropic"]})["providers"] == ["anthropic", "local"]

@@ -113,6 +113,13 @@ def _same(spec: ParamSpec, a: Any, b: Any) -> bool:
     return a == b
 
 
+def _toward_safe(spec: ParamSpec, current: Any, target: Any) -> bool:
+    # Crossing zero/safe and energizing the other polarity is a new drive,
+    # even when the final magnitude happens to be smaller.
+    crosses_safe = spec.numeric and (current - spec.safe) * (target - spec.safe) < 0
+    return spec.distance(target) < spec.distance(current) and not crosses_safe
+
+
 class SafetyGate:
     def __init__(self, lab: Any, approver: Approver, log: Optional[EventLog] = None,
                  envelope: Optional[Envelope] = None, operator: str = "agent"):
@@ -163,6 +170,10 @@ class SafetyGate:
         return self._set(instr, param, value, wait, self._who())
 
     def raw(self, instr: str, command: str) -> Result:
+        if any((ord(c) < 32 and c != "\t") or ord(c) == 127 for c in command):
+            return self._done(Result(False, "refused", instr,
+                                     message="refused: raw commands cannot contain message terminators or control characters"),
+                              "raw")
         try:
             inst = self.lab.instrument(instr)
         except KeyError as e:
@@ -312,8 +323,7 @@ class SafetyGate:
         for key, values in drive_values.items():
             inst, spec = self.lab.resolve(key)
             current = self._current(inst, spec)
-            d0 = spec.distance(current)
-            away = [v for v in values if not _same(spec, v, current) and spec.distance(v) >= d0]
+            away = [v for v in values if not _same(spec, v, current) and not _toward_safe(spec, current, v)]
             if not away:
                 continue
             problem = self._away_problem(inst, spec)
@@ -354,6 +364,9 @@ class SafetyGate:
         problem = self._limit_problem(inst, spec, target)
         if problem:
             return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
+        moving = False
+        generation = self._stop_gen
+        current = None
         try:
             current = self._current(inst, spec)
             if not spec.is_drive:
@@ -369,7 +382,8 @@ class SafetyGate:
                 res = self._move(inst, spec, current, target, away=False, wait=wait, how=None)
             elif _same(spec, current, target):
                 res = Result(True, "no-change", key, value=target, message="%s already %s" % (key, spec.show(target)))
-            elif spec.distance(target) < spec.distance(current):
+            elif _toward_safe(spec, current, target):
+                moving = True
                 res = self._move(inst, spec, current, target, away=False, wait=wait, how="toward safe")
             else:
                 problem = self._away_problem(inst, spec)
@@ -392,10 +406,21 @@ class SafetyGate:
                             msg += " (%s)" % request.note
                         return self._done(Result(False, "declined", key, value=current, message=msg), "set", by)
                     how = "approved"
+                # Approval can take minutes. Neither the old interlock readings nor
+                # the state shown in its preview authorize a move after they change.
+                problem = self._limit_problem(inst, spec, target) or self._away_problem(inst, spec)
+                if problem:
+                    return self._done(Result(False, "refused", key, value=target,
+                                             message="refused after approval: " + problem), "set", by)
+                if self._stop_gen != generation:
+                    return self._done(Result(False, "stopped", key, message="stopped before drive change"), "set", by)
+                current = self._current(inst, spec)
+                moving = True
                 res = self._move(inst, spec, current, target, away=True, wait=wait, how=how)
         except Exception as e:
             res = Result(False, "error", key, message="%s: instrument error: %s" % (key, e))
-            current = None
+        if moving and res.action in ("error", "timeout"):
+            res = self._protection_failure(inst, spec, inst._last.get(param, current), res.message, res.action)
         undoable = res.ok and record_undo and res.action != "no-change" and current is not None
         if undoable and getattr(self._acting, "by", None) is None:
             self._undo.append((instr, param, current))
@@ -515,6 +540,9 @@ class SafetyGate:
                     eta = self._eta(inst, spec, current, target)
                     notes.append("ramping" + (", ~%s" % _dur(eta) if eta else ""))
             elif away:
+                problem = self._away_problem(inst, spec)
+                if problem:
+                    return self._protection_failure(inst, spec, target, problem, "tripped")
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, target, trip)
@@ -544,12 +572,19 @@ class SafetyGate:
             if watch and self._stop_gen != gen:
                 return Result(False, "stopped", "%s.%s" % (inst.name, spec.name), value=v, before=current,
                               message="%s.%s stopped at %s (stop requested)" % (inst.name, spec.name, spec.show(v)))
+            if watch:
+                problem = self._away_problem(inst, spec)
+                if problem:
+                    return self._protection_failure(inst, spec, v, problem, "tripped")
             v = target if k == n else current + delta * k / n
             if spec.type == "int":
                 v = int(round(v))
             inst.write(spec.name, v)
             self.lab.clock.sleep(dwell)
             if watch:
+                problem = self._away_problem(inst, spec)
+                if problem:
+                    return self._protection_failure(inst, spec, v, problem, "tripped")
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, v, trip)
@@ -565,9 +600,10 @@ class SafetyGate:
         t0 = clock.now()
         while True:
             val = inst.read(spec.readback)
-            if abs(val - target) <= spec.tol:
-                return None
             if watch:
+                problem = self._away_problem(inst, spec)
+                if problem:
+                    return self._protection_failure(inst, spec, val, problem, "tripped")
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, val, trip)
@@ -575,10 +611,39 @@ class SafetyGate:
                     inst.write(spec.name, val)
                     return Result(False, "stopped", key, value=val,
                                   message="%s stopped at %s (stop requested)" % (key, spec.show(val)))
+            if abs(val - target) <= spec.tol:
+                return None
             if clock.now() - t0 > timeout:
                 return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)" % (
                     key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
             clock.sleep(poll)
+
+    def _protection_failure(self, inst: Instrument, spec: ParamSpec, at: Any, reason: str,
+                            action: str = "error") -> Result:
+        """Best-effort recovery for direct commands as well as plans; never hide a failed recovery."""
+        key = "%s.%s" % (inst.name, spec.name)
+        hold = self.lab.config.safe_actions.get(key) == "hold" or any(
+            g.on_trip == "hold" for g in inst.guards(spec.name))
+        try:
+            if hold:
+                if spec.ramp == "instrument" and spec.readback:
+                    actual = inst.read(spec.readback)
+                    inst.write(spec.name, actual)
+                recovery = "holding the drive"
+            else:
+                try:
+                    at = inst.read(spec.readback or spec.name)
+                except Exception:
+                    if at is None:
+                        raise
+                r = self._move(inst, spec, at, spec.safe, away=False, wait=False, how=None)
+                recovery = ("commanded safe value %s" % spec.show(spec.safe) if r.ok
+                            else "recovery failed: " + r.message)
+        except Exception as e:
+            recovery = "recovery failed: %s" % e
+        message = "%s; %s" % (reason, recovery)
+        self.log.write("trip", by=self._who(), target=key, at=at, message=message)
+        return Result(False, action, key, value=at, message=message)
 
     def _guard_trip(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[Guard, float]]:
         for g in inst.guards(spec.name):
@@ -642,6 +707,17 @@ class SafetyGate:
                     return done(Result(False, "refused", target,
                                        message="refused: %r is blocked on %s (firmware/calibration class)" % (cmd, inst.name)))
             if is_query(cmd):
+                getter = next((p for p in card.getters if p.get_cmd.match(cmd) is not None), None)
+                known = getter is not None or Template(card.idn_query).match(cmd) is not None or (
+                    card.error_query is not None and card.error_query.match(cmd) is not None) or any(
+                    h.query and Template(h.query).match(cmd) is not None for h in card.health)
+                if not inst.simulated and not known:
+                    return done(Result(False, "refused", target,
+                                       message="refused: query is not classified by this instrument's card"))
+                if getter is not None and getter.read_when:
+                    value = inst.read(getter.name)  # respect reads that would otherwise switch an output on
+                    return done(Result(True, "read", target, value=value,
+                                       message="%s %s → %s" % (inst.name, cmd, getter.show(value))))
                 resp = inst.query_raw(cmd).strip()
                 shown = resp if len(resp) <= 80 else resp[:77] + "..."
                 return done(Result(True, "read", target, value=resp, message="%s %s → %s" % (inst.name, cmd, shown)))
@@ -668,16 +744,16 @@ class SafetyGate:
                 if spec.set_cmd is not None and self._prefix(spec).match(cmd) is not None:
                     item = ("%s: %r touches drive %s but is not a plain %s setting, so limits can't be checked"
                             % (inst.name, cmd, spec.name, spec.name))
+                    if not inst.simulated:
+                        return done(Result(False, "refused", target, message="refused: " + item))
                     request = ApprovalRequest("Send raw command?", [item])
                     if not self.ask(request):
                         note = " (%s)" % request.note if request.note else ""
                         return done(Result(False, "declined", target, message="declined: %r not sent%s" % (cmd, note)))
                     return self._send(inst, cmd, target, done, "approved")
-            if card.status == "draft" and not inst.simulated:
-                item = "%s: %r is not on the (draft) card, so it can't be classified" % (inst.name, cmd)
-                if not self.ask(ApprovalRequest("Send raw command?", [item])):
-                    return done(Result(False, "declined", target, message="declined: %r not sent" % cmd))
-                return self._send(inst, cmd, target, done, "approved")
+            if not inst.simulated:
+                return done(Result(False, "refused", target,
+                                   message="refused: command is not classified by this instrument's card"))
             return self._send(inst, cmd, target, done, None, unmatched=True)
         except Exception as e:
             return done(Result(False, "error", target, message="%s: instrument error: %s" % (inst.name, e)))

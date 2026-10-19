@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from ._version import __version__
+from . import datascope
 
 
 def _jsonable(v: Any) -> Any:
@@ -51,6 +52,9 @@ class EventLog:
         with self._lock:
             self._seq += 1
             event: Dict[str, Any] = {"seq": self._seq, "wall": _now(), "type": type_}
+            scope = datascope.current()
+            if scope is not None:
+                event["scope"] = scope
             if self.clock is not None:
                 event["t"] = round(self.clock.now(), 6)
             for k, v in fields.items():
@@ -81,10 +85,12 @@ class RunRecord:
         self.rows: List[Dict[str, Any]] = []
         self.meta: Dict[str, Any] = {"run_id": run_id, "plan": plan.get("plan"), "operator": operator,
                                      "started": _now(), "labharness": __version__}
+        self.meta.update(status="running", scope=datascope.current())
         if path:
             path.mkdir(parents=True)
             with open(path / "plan.yaml", "w", encoding="utf-8") as f:
                 yaml.safe_dump(plan, f, sort_keys=False, allow_unicode=True)
+            self.save_json("meta.json", self.meta)  # ownership exists even during a run or after a crash
 
     def snapshot(self, kind: str, data: Dict[str, Any]) -> None:
         self.meta["snapshot_" + kind] = True

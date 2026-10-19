@@ -19,7 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from mcp import Client
 
 from ..agent.runtime import LabRuntime
-from ..agent.server import INSTRUCTIONS
+from ..agent.server import INSTRUCTIONS, build_server
+from .. import datascope
 from ..gate import ApprovalRequest
 from .providers.base import Emit, ModelInfo, Provider
 from . import memory, review, rules as rulebook
@@ -46,7 +47,7 @@ what you would do; the user picks one answer to continue with."""
 CONFIDENTIAL = """# Confidential project
 This project's rules: {rules}. Keep its details inside this conversation: never suggest pasting them into outside
 services."""
-WEB_TOOLS = {"search_papers", "read_paper"}
+WEB_TOOLS = {"search_papers", "read_paper", "save_paper"}
 COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
@@ -64,9 +65,9 @@ No saved notes or instructions are used here, nothing from this chat is remember
 leaves it. Answer from this conversation alone."""
 
 
-def remember_tool(in_project: bool) -> Dict[str, Any]:
-    scopes = ["global", "project"] if in_project else ["global"]
-    kinds = list(memory.GLOBAL_KINDS) + (list(memory.PROJECT_KINDS) if in_project else [])
+def remember_tool(in_project: bool, allow_global: bool = True) -> Dict[str, Any]:
+    scopes = (["global"] if allow_global else []) + (["project"] if in_project else [])
+    kinds = (list(memory.GLOBAL_KINDS) if allow_global else []) + (list(memory.PROJECT_KINDS) if in_project else [])
     return {
         "name": "remember",
         "description": "Keep one short, durable fact for later conversations. global: the user's lasting preferences "
@@ -162,6 +163,7 @@ class ChatAgent:
         self._stream_task: Optional[asyncio.Future] = None
         self._exit = AsyncExitStack()
         self.client: Any = None
+        self._turn_client: Any = None
         self.read_only: set = set()
         self._lanes: List[asyncio.Future] = []
 
@@ -199,7 +201,8 @@ class ChatAgent:
         per message instead (see recall). A chat outside every project gets no project memory; an incognito chat
         gets no memory at all and cannot save any."""
         if chat.get("incognito"):
-            return {"system": SYSTEM + "\n\n" + INCOGNITO, "tools": self.tools, "project": None, "learn": False}
+            return {"system": SYSTEM + "\n\n" + INCOGNITO, "tools": self.tools, "project": None, "learn": False,
+                    "rules": self.chat_rules(chat)}
         parts = [SYSTEM]
         mine = self.settings.get("instructions") if self.settings else None
         if mine:
@@ -219,7 +222,9 @@ class ChatAgent:
         rules = self.chat_rules(chat)
         if rulebook.restrictive(rules):
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
-        tools = self.tools + ([remember_tool(bool(project))] if learn else []) + ([SAVE_PAPER] if project else [])
+        allow_global = not rulebook.restrictive(rules)
+        tools = self.tools + ([remember_tool(bool(project), allow_global)] if learn and (project or allow_global)
+                             else []) + ([SAVE_PAPER] if project else [])
         if not rules["literature"]:
             tools = [t for t in tools if t["name"] not in WEB_TOOLS]
         return {"system": "\n\n".join(parts), "tools": tools, "project": project["id"] if project else None,
@@ -231,6 +236,9 @@ class ChatAgent:
         """The chat's own rules (kept from any confidential project it ran in) combined with its project's now."""
         project = self.store.memory_of(chat["id"])
         return rulebook.merge(chat.get("rules"), (project or {}).get("rules"))
+
+    def data_scope(self, chat: Dict[str, Any]) -> Dict[str, Optional[str]]:
+        return {"chat": chat["id"], "project": self.store.project_of(chat["id"])}
 
     def _stamp(self, chat: Dict[str, Any]) -> None:
         """A chat that runs under a project's rules keeps them, wherever it is filed later."""
@@ -249,7 +257,7 @@ class ChatAgent:
         if chat.get("incognito"):
             return
         project = self.store.memory_of(chat["id"])
-        notes = memory.recall(self.store.global_notes(), project, message["text"], chat.get("recalled", []))
+        notes = memory.recall(self.store.recallable_global_notes(), project, message["text"], chat.get("recalled", []))
         if notes:
             message["memory"] = notes
             if project:
@@ -260,6 +268,8 @@ class ChatAgent:
         if not isinstance(args, dict):
             return "the arguments were not valid JSON; send the call again", True
         scope = str(args.get("scope") or "")
+        if scope == "global" and rulebook.restrictive(self.chat_rules(chat)):
+            return "not saved: confidential conversations cannot write global memory", True
         try:
             note, what = self.store.remember(scope, args.get("text"), str(args.get("kind") or ""),
                                              project_id=context["project"], chat_id=chat["id"],
@@ -293,6 +303,8 @@ class ChatAgent:
                 if n.get("kind") in memory.PROJECT_KINDS]
 
     async def _save_paper(self, chat: Dict[str, Any], context: Dict[str, Any], args: Any) -> Tuple[str, bool]:
+        if not self.chat_rules(chat)["literature"]:
+            return "not available: this project keeps its work off the internet", True
         if not isinstance(args, dict) or not args.get("paper"):
             return "say which paper (its id from search_papers)", True
         if not self.runtime.literature.enabled:
@@ -322,9 +334,10 @@ class ChatAgent:
         if not (runs or day or last):
             runs = [r for r in runs_in(chats) if (self.runtime.data_dir / "runs" / r).is_dir()] or None
         title = str(args.get("title") or "") or ("%s report" % project["name"] if project else "")
-        text = await asyncio.to_thread(self.runtime.make_report, runs, day, last, title, str(args.get("summary") or ""),
-                                       str(args.get("format") or "pdf"), self.report_notes(project), "agent",
-                                       self.report_references(project))
+        with datascope.use(self.data_scope(chat)):
+            text = await asyncio.to_thread(self.runtime.make_report, runs, day, last, title,
+                                           str(args.get("summary") or ""), str(args.get("format") or "pdf"),
+                                           self.report_notes(project), "agent", self.report_references(project))
         return text, text.startswith("no report")
 
     # ------------------------------------------------------------------ turns
@@ -366,8 +379,11 @@ class ChatAgent:
     async def run_turn(self, chat_id: str, text: str, model_key: str, provider: Provider, emit: Emit) -> None:
         """Call claim() first. Always releases the claim."""
         model_id = model_key.partition(":")[2]
+        stack = AsyncExitStack()
         try:
             chat = self.store.load(chat_id)
+            self._turn_client = await stack.enter_async_context(Client(build_server(
+                datascope.ScopedRuntime(self.runtime, self.data_scope(chat)))))
             message: Dict[str, Any] = {"role": "user", "text": text}
             self.recall(chat, message)
             self._attach_review(chat, message)
@@ -391,12 +407,17 @@ class ChatAgent:
             await emit({"type": "error", "message": describe_error(provider, e)})
             await emit({"type": "turn_end", "reason": "error"})
         finally:
-            self.active = None
-            self._stream_task = None
+            try:
+                await stack.aclose()
+            finally:
+                self._turn_client = None
+                self.active = None
+                self._stream_task = None
 
     async def _step(self, chat: Dict[str, Any], provider: Provider, model_id: str, context: Dict[str, Any],
                     emit: Emit) -> bool:
         """One model response plus its tool calls. Returns True if the turn continues."""
+        self.check_model(chat, "%s:%s" % (provider.name, model_id))
         partial: List[str] = []
 
         async def relay(event: Dict[str, Any]) -> None:
@@ -444,7 +465,7 @@ class ChatAgent:
                     content, is_error = self._remember(chat, context, call["input"])
                 elif call["name"] == "save_paper" and context["project"]:
                     content, is_error = await self._save_paper(chat, context, call["input"])
-                elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:
+                elif call["name"] in WEB_TOOLS and not self.chat_rules(chat)["literature"]:
                     content, is_error = "not available: this project keeps its work off the internet", True
                 elif call["name"] == "make_report":
                     content, is_error = await self._report(chat, call["input"])
@@ -597,8 +618,11 @@ class ChatAgent:
         """Every model answers the same message at once, able to read the lab but not change it. The first answer
         continues the chat unless the user picks another (choose)."""
         keys = [k for k, _, _ in lanes]
+        stack = AsyncExitStack()
         try:
             chat = self.store.load(chat_id)
+            self._turn_client = await stack.enter_async_context(Client(build_server(
+                datascope.ScopedRuntime(self.runtime, self.data_scope(chat)))))
             message: Dict[str, Any] = {"role": "user", "text": text,
                                        "compare": {"models": keys, "lanes": [], "chosen": 0}}
             self.recall(chat, message)
@@ -617,7 +641,7 @@ class ChatAgent:
                         "title": chat["title"]})
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
-            self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit))
+            self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit, chat))
                            for i, (key, provider, model_id) in enumerate(lanes)]
             done = await asyncio.gather(*self._lanes, return_exceptions=True)
             results = []
@@ -641,11 +665,16 @@ class ChatAgent:
             await emit({"type": "error", "message": "Could not compare: %s" % e})
             await emit({"type": "turn_end", "reason": "error"})
         finally:
-            self._lanes = []
-            self.active = None
+            try:
+                await stack.aclose()
+            finally:
+                self._turn_client = None
+                self._lanes = []
+                self.active = None
 
     async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
-                    base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit) -> Dict[str, Any]:
+                    base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit,
+                    chat: Dict[str, Any]) -> Dict[str, Any]:
         out: List[Dict[str, Any]] = []
 
         async def lane_emit(event: Dict[str, Any]) -> None:
@@ -653,6 +682,7 @@ class ChatAgent:
 
         try:
             for _ in range(COMPARE_STEPS):
+                self.check_model(chat, key)
                 result = await provider.stream(model_id, system, base + out, tools, lane_emit)
                 out.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
                             "blocks": result.blocks, "raw": result.raw})
@@ -661,14 +691,16 @@ class ChatAgent:
                 results = []
                 for call in result.tool_calls:
                     await lane_emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
-                    if call["name"] not in {t["name"] for t in tools}:
+                    if call["name"] in WEB_TOOLS and not self.chat_rules(chat)["literature"]:
+                        content, is_error = "not available: this project keeps its work off the internet", True
+                    elif call["name"] not in {t["name"] for t in tools}:
                         content, is_error = ("not available while comparing models: only tools that read the lab are "
                                              "(and only those this chat allows). Say what you would do instead."), True
                     elif call["input"] is None:
                         content, is_error = "the arguments were not valid JSON; send the call again", True
                     else:
                         try:
-                            r = await self.client.call_tool(call["name"], call["input"])
+                            r = await (self._turn_client or self.client).call_tool(call["name"], call["input"])
                             content = "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text")
                             is_error = bool(r.is_error)
                         except Exception as e:
@@ -742,7 +774,7 @@ class ChatAgent:
                 sent["key"] = key
                 await emit(event)
 
-        task = asyncio.ensure_future(self.client.call_tool(call["name"], call["input"]))
+        task = asyncio.ensure_future((self._turn_client or self.client).call_tool(call["name"], call["input"]))
         try:
             while not task.done():
                 getter = asyncio.ensure_future(requests.get())

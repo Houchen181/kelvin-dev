@@ -211,6 +211,15 @@ class ChatStore:
             raise ValueError("This conversation is not in a project, so there is no project to keep it for.")
         with self._lock:
             index = self._read_index()
+            if scope == "global":
+                # Enforce at storage, too: a model's choice of note category is
+                # not permission to promote confidential project content.
+                from .rules import merge, restrictive
+                source = self.load(chat_id) if chat_id else {}
+                origin = project_id or index["assign"].get(chat_id)
+                project_rules = self._find(index, origin).get("rules") if origin else None
+                if restrictive(merge(source.get("rules"), project_rules)):
+                    raise ValueError("confidential conversations cannot write global memory")
             if scope == "project":
                 notes, cap = self._find(index, project_id)["notes"], MAX_NOTES
                 where = "This project already has %d notes; the user can delete old ones in Project settings."
@@ -236,6 +245,28 @@ class ChatStore:
 
     def global_notes(self) -> List[Dict[str, Any]]:
         return self._read_index()["global_notes"]
+
+    def recallable_global_notes(self) -> List[Dict[str, Any]]:
+        """Quarantine older promoted notes whose source is confidential or no longer available.
+
+        They remain visible to the person in Settings through global_notes().
+        """
+        from .rules import merge, restrictive
+        index = self._read_index()
+        out = []
+        for note in index["global_notes"]:
+            origin = note.get("chat")
+            if origin:
+                try:
+                    chat = self.load(origin)
+                    project_id = index["assign"].get(origin)
+                    project = self._find(index, project_id) if project_id else {}
+                except (KeyError, OSError, ValueError):
+                    continue
+                if restrictive(merge(chat.get("rules"), project.get("rules"))):
+                    continue
+            out.append(note)
+        return out
 
     def delete_global_note(self, note_id: str) -> None:
         with self._lock:

@@ -137,6 +137,23 @@ def test_runs_written_up_as_pdf_and_slides(runtime):
     assert [r["name"] for r in runtime.reports_index()] == sorted([pdf.name, pdf.with_suffix(".pptx").name], reverse=True)
 
 
+def test_report_charts_keep_all_fixed_coordinates_and_match_their_fits(runtime):
+    from labharness.analysis import analyze_run
+    from labharness.reports.collect import Collector
+    axes = [{"key": k, "unit": u, "kind": "instrument"}
+            for k, u in (("T", "K"), ("B", "T"), ("V", "V"))]
+    rows = [{"T": t, "B": b, "V": v, "signal": 10 * b + v}
+            for t in (2, 4) for b in (0, 1) for v in range(12)]
+    measures = [{"key": "signal", "unit": "A", "kind": "scalar"}]
+    analysis = analyze_run(rows, axes, measures)
+    collector = Collector(runtime.data_dir / "runs", runtime.lab, lambda _: None, lambda: [], str)
+    chart = collector._charts(rows, {"axes": axes, "measures": measures}, {}, analysis)[0]
+    curves = [s for s in chart.series if not s.fit]
+    fits = [s for s in chart.series if s.fit]
+    assert len(curves) == len(fits) == 4
+    assert all("T = " in s.name and "B = " in s.name for s in curves)
+
+
 def test_a_report_survives_a_lab_without_the_runs_instruments(runtime, monkeypatch):
     runtime.run(LINE)
 
