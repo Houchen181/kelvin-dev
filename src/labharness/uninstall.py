@@ -1,10 +1,11 @@
 """What uninstalling Kelvin removes, and what it keeps (Kelvin.exe --remove-data; the Windows uninstaller runs it).
 
 Removed, Kelvin's own:  settings and API keys, the ChatGPT sign-in (revoked with OpenAI first), chats, projects and
-                        memory, the lab config, your instrument cards, the instrument folders with their manuals,
-                        the app's log, lock file and window cache.
-Kept, your measurements: every run folder, the lab record of commands and approvals (events.jsonl) and reports, in
-                        ~/Kelvin/virtual-lab and in any data folder chosen in Settings.
+                        memory, the accounts, the lab config, your instrument cards, the instrument folders with their
+                        manuals, the app's log, lock file and window cache. With accounts, each person's too.
+Kept, your measurements: every run folder, the record of commands and approvals (events.jsonl) and reports, in
+                        ~/Kelvin/virtual-lab, in each person's ~/Kelvin/users/<name>/data and in any data folder
+                        chosen in Settings; the lab's instrument log (instrument-log.jsonl, and lab/events.jsonl).
 
 Only items Kelvin itself makes are deleted, by name; anything else in the folder is left alone."""
 from __future__ import annotations
@@ -17,8 +18,9 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 HARNESS = ("settings.json", "chatgpt.json", "app.json", "kelvin.log", "lab.yaml", "lab.tmp", "settings.tmp",
-           "webview", "instruments", "cards")
+           "webview", "instruments", "cards", "accounts.json", "accounts.tmp")
 DATA_HARNESS = ("chats",)                       # in the default data folder: the conversations, projects and memory
+PERSON = ("settings.json", "settings.tmp", "chatgpt.json", "chatgpt.tmp", "chats")   # in each ~/Kelvin/users/<name>
 MEASUREMENTS = ("runs", "reports", "events.jsonl")
 NOTE = "About this folder.txt"
 
@@ -28,6 +30,11 @@ def _chosen_data_folder(home: Path) -> str:
         return str(json.loads((home / "settings.json").read_text(encoding="utf-8")).get("data_dir") or "")
     except (OSError, ValueError):
         return ""
+
+
+def _people(home: Path) -> List[Path]:
+    users = home / "users"
+    return sorted(p for p in users.iterdir() if p.is_dir()) if users.is_dir() else []
 
 
 def _revoke_chatgpt(home: Path, seconds: float = 10.0) -> str:
@@ -61,13 +68,15 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
     report: Dict[str, List[str]] = {"removed": [], "kept": [], "failed": [], "notes": []}
     if not home.is_dir():
         return report
-    chosen = _chosen_data_folder(home)   # read before settings.json goes
+    people = _people(home)
+    chosen = [c for c in [_chosen_data_folder(home)] + [_chosen_data_folder(p) for p in people] if c]   # before they go
     if revoke:
-        note = _revoke_chatgpt(home)
-        if note:
-            report["notes"].append(note)
+        for folder in [home] + people:
+            note = _revoke_chatgpt(folder)
+            if note:
+                report["notes"].append(note + ("" if folder == home else " (%s)" % folder.name))
     data = home / "virtual-lab"
-    for path in [home / n for n in HARNESS] + [data / n for n in DATA_HARNESS]:
+    for path in [home / n for n in HARNESS] + [data / n for n in DATA_HARNESS] + [p / n for p in people for n in PERSON]:
         if not path.exists():
             continue
         try:
@@ -75,10 +84,10 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
             report["removed"].append(str(path))
         except OSError as e:
             report["failed"].append("%s (%s)" % (path, e.strerror or e))
-    report["kept"] = [str(data / n) for n in MEASUREMENTS if (data / n).exists()]
-    if chosen and Path(chosen).exists():
-        report["kept"].append(chosen)
-    for folder in (data, home):   # nothing left: no empty folders behind
+    report["kept"] = [str(d / n) for d in [data] + [p / "data" for p in people] for n in MEASUREMENTS if (d / n).exists()]
+    report["kept"] += [str(p) for p in (home / "instrument-log.jsonl", home / "lab" / "events.jsonl") if p.exists()]
+    report["kept"] += [c for c in chosen if Path(c).exists()]
+    for folder in [data, home / "lab"] + people + [home / "users", home]:   # nothing left: no empty folders behind
         try:
             if folder.is_dir() and not any(folder.iterdir()):
                 folder.rmdir()
@@ -91,10 +100,14 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
                  "                            the start and end, and the automatic analysis",
                  "  virtual-lab/events.jsonl  the lab record: every command, reading, approval and alarm",
                  "  virtual-lab/reports       PDF and PowerPoint reports"]
-        if chosen:
-            lines += ["", "Runs from after you chose a data folder in Settings are in %s." % chosen]
-        lines += ["", "Kelvin's settings, API keys, chats, memory, lab config, instrument cards and instrument "
-                  "folders were deleted.", "Installing Kelvin again shows these runs again."]
+        if people:
+            lines += ["", "Each person's runs, record and reports are in users/<name>/data, the same way."]
+        if (home / "instrument-log.jsonl").exists():
+            lines += ["", "instrument-log.jsonl is the lab's log: every command from everyone, with their names."]
+        for c in chosen:
+            lines += ["", "Runs from after a data folder was chosen in Settings are in %s." % c]
+        lines += ["", "Kelvin's settings, API keys, accounts, chats, memory, lab config, instrument cards and "
+                  "instrument folders were deleted.", "Installing Kelvin again shows these runs again."]
         try:
             (home / NOTE).write_text("\n".join(lines) + "\n", encoding="utf-8")
         except OSError:

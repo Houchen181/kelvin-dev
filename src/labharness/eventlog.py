@@ -32,12 +32,20 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
 
 
-class EventLog:
-    """One JSON object per line; never rewritten. path=None keeps it in memory."""
+_SHARED = threading.Lock()
 
-    def __init__(self, path: Any = None, clock: Any = None):
+
+class EventLog:
+    """One JSON object per line; never rewritten. path=None keeps it in memory.
+
+    shared: the lab's instrument log (~/Kelvin/instrument-log.jsonl), where every event of everyone who uses these
+    instruments is also written, with user: the signed-in person (None: nobody, such as setting up on start)."""
+
+    def __init__(self, path: Any = None, clock: Any = None, shared: Any = None, user: Optional[str] = None):
         self.path = Path(path) if path else None
         self.clock = clock
+        self.shared = Path(shared) if shared else None
+        self.user = user
         self._memory: List[Dict[str, Any]] = []
         self._seq = 0
         self._lock = threading.Lock()  # agent, plans and people write from different threads; keep every line
@@ -61,6 +69,15 @@ class EventLog:
                     f.write(json.dumps(event, ensure_ascii=False) + "\n")
             else:
                 self._memory.append(event)
+        if self.shared:
+            line = json.dumps(dict(event, user=self.user), ensure_ascii=False) + "\n"
+            try:
+                with _SHARED:
+                    self.shared.parent.mkdir(parents=True, exist_ok=True)
+                    with open(self.shared, "a", encoding="utf-8") as f:
+                        f.write(line)
+            except OSError:   # the person's own record has it; the lab's log is a copy
+                pass
         return event
 
     def events(self) -> List[Dict[str, Any]]:

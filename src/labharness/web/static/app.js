@@ -22,6 +22,7 @@
     check: '<path d="M5 12.5l4.5 4.5L19 7"/>',
     warn: '<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18.1A2 2 0 0 0 3.5 21h17a2 2 0 0 0 1.7-2.9L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
     x: '<path d="M6 6l12 12M18 6L6 18"/>',
+    lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
     chev: '<path d="M9 6l6 6-6 6"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     incognito: '<path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/>',
@@ -80,11 +81,97 @@
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
     if (!res.ok) {
-      let msg = "HTTP " + res.status;
-      try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
+      let msg = "HTTP " + res.status, data = null;
+      try { data = await res.json(); msg = data.error || msg; } catch (e) { /* not JSON */ }
+      if (res.status === 401 && data && data.signin) setTimeout(() => location.reload(), 300);   // signed out elsewhere
       throw new Error(msg);
     }
     return res.json();
+  }
+
+  // ------------------------------------------------------------------ who is using Kelvin (accounts)
+  const initials = (name) => String(name).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
+
+  function showSignIn(session) {
+    $("signin").hidden = false;
+    for (const slot of $("signin").querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
+    const people = session.accounts || [];
+    let chosen = null;
+    const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
+    const view = (mode) => {   // people | password | new
+      $("signin-people").hidden = mode !== "people";
+      $("signin-pass").hidden = mode !== "password";
+      $("signin-new").hidden = mode !== "new";
+      $("signin-add").hidden = mode !== "people";
+      $("new-back").hidden = !people.length;
+      $("signin-title").textContent = mode === "new" ? (people.length ? "Add a person" : "Welcome to Kelvin") : "Who's using Kelvin?";
+      $("signin-sub").textContent = mode !== "new" ? "" : people.length ? "Anyone can add themselves; nobody's account is above another's."
+        : session.legacy ? "Make your account. Your chats, runs and API keys from before come with it." : "Make your account to start.";
+      say("");
+      if (mode === "password") { $("signin-pass-label").textContent = chosen.name + "'s password"; $("signin-password").value = ""; $("signin-password").focus(); }
+      if (mode === "new") { $("new-name").value = people.length ? "" : session.suggest || ""; $("new-password").value = ""; $("new-name").focus(); }
+    };
+    const enter = async (name, password) => {
+      say("Signing in…");
+      try { await api("/api/session", { body: { name, password } }); location.reload(); } catch (e) { say(e.message, true); }
+    };
+    $("signin-people").replaceChildren(...people.map((p) => {
+      const b = h("button", { class: "person", type: "button" }, h("span", { class: "avatar" }, initials(p.name)), h("span", {}, p.name));
+      if (p.password) { const lock = icon("lock"); lock.classList.add("lock"); b.append(lock); }
+      b.addEventListener("click", () => { chosen = p; if (p.password) view("password"); else enter(p.name, ""); });
+      return b;
+    }));
+    $("signin-pass").onsubmit = (e) => { e.preventDefault(); enter(chosen.name, $("signin-password").value); };
+    $("signin-new").onsubmit = async (e) => {
+      e.preventDefault();
+      say("Making your account…");
+      try { await api("/api/accounts", { body: { name: $("new-name").value, password: $("new-password").value } }); location.reload(); }
+      catch (err) { say(err.message, true); }
+    };
+    $("signin-back").onclick = () => view("people");
+    $("new-back").onclick = () => view("people");
+    $("signin-add").onclick = () => view("new");
+    const busy = (s) => {
+      $("signin-busy").hidden = !s.busy;
+      $("signin-busy-text").textContent = s.busy ? (s.busy_user ? s.busy_user + "'s work: " : "") + s.busy : "";
+    };
+    busy(session);
+    $("signin-stop").onclick = async () => {   // anyone may stop what runs: safety never waits for a password
+      try { await api("/api/runs/stop", { body: { queue: true } }); say("Stopping: the step in progress ends, then everything goes safe."); }
+      catch (e) { say(e.message, true); }
+      setTimeout(async () => { try { busy(await api("/api/session")); } catch (e) { /* keep what is shown */ } }, 4000);
+    };
+    view(people.length ? "people" : "new");
+  }
+
+  function renderAccount() {
+    const a = S.account || {};
+    const on = !!(a.accounts_on && a.user);
+    $("account-row").hidden = !on;
+    $("account-field").hidden = !on;
+    $("activity-all").hidden = !a.accounts_on;
+    if (!on) return;
+    $("account-avatar").textContent = initials(a.user.name);
+    $("account-name").textContent = a.user.name;
+    $("account-status").textContent = a.user.name + (a.user.password ? " · password set" : " · no password");
+    $("pw-old").hidden = !a.user.password;
+  }
+
+  async function signOut() {
+    try { await api("/api/session", { method: "DELETE" }); } catch (e) { /* the sign-in screen shows either way */ }
+    location.reload();
+  }
+
+  async function changePassword() {
+    $("settings-msg").textContent = "Changing…";
+    try {
+      S.account = await api("/api/account", { body: { old: $("pw-old").value, new: $("pw-new").value } });
+      renderAccount();
+      $("pw-old").value = ""; $("pw-new").value = "";
+      $("settings-msg").textContent = S.account.user.password ? "Password changed. Your API keys are encrypted with it." : "Password removed.";
+    } catch (e) {
+      $("settings-msg").textContent = e.message;
+    }
   }
 
   let toastTimer = null;
@@ -2156,7 +2243,7 @@
 
   // ------------------------------------------------------------------ lab panel
   const OPEN = new Set(), SHOW_SETTINGS = new Set();
-  const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [], loose: new Map() };
+  const PANEL = { filter: "", activeOnly: store("lh.activeOnly") === "1", instruments: [], loose: new Map(), everyone: false };
 
   function splitValue(text) {  // "9.42 fA" -> ["9.42", "fA"]; words stay whole
     const m = String(text).match(/^(-?[\d.]+(?:e[-+]?\d+)?)\s+(\S+)$/i);
@@ -2239,9 +2326,12 @@
     $("agent-state").classList.toggle("busy", !!s.busy);
     PANEL.instruments = s.instruments;
     renderInstruments();
-    $("lab-events").replaceChildren(...s.events.map((e) => {
-      const m = e.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
-      return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, m[2])) : h("li", {}, e);
+    let lines = s.events.map((e) => ({ text: e, user: "" }));
+    if (PANEL.everyone) { try { lines = (await api("/api/lab-log?n=25")).events; } catch (e) { /* keep this person's */ } }
+    $("lab-events").replaceChildren(...lines.map((e) => {
+      const m = e.text.match(/^(\d\d:\d\d:\d\d)\s+(.*)$/);
+      const who = e.user ? e.user + ": " : "";
+      return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, who + m[2])) : h("li", {}, who + e.text);
     }));
     termState(s);   // the terminal first: an approval its own command needs is asked there
     // requests not already shown in a conversation (e.g. after a page reload)
@@ -2313,7 +2403,7 @@
   function renderWatches(watches, status) {
     $("watch-summary").textContent = watches.length ? watches.filter((w) => w.alarm).length + " alarm · " + watches.length + " watched" : "";
     $("watch-list").replaceChildren(...(watches.length ? watches.map((w) => {
-      const remove = w.source === "lab" ? h("span", { class: "tag", title: "From the lab config; the lab owner changes it there" }, "lab")
+      const remove = w.source === "lab" ? h("span", { class: "tag", title: "From the lab config; change it there" }, "lab")
         : rowButton("x", "Stop watching", async () => { try { await api("/api/watches/" + w.id, { method: "DELETE" }); } catch (e) { toast(e.message); } pollState(); });
       return h("li", { class: "watch" + (w.alarm ? " alarm" : "") }, h("span", { class: "dot" + (w.alarm ? " bad" : " on") }),
         h("span", { class: "watch-rule" }, w.rule, w.then.length ? h("span", { class: "watch-then" }, " → " + w.then.join(", ")) : null),
@@ -3462,6 +3552,9 @@
   // ------------------------------------------------------------------ start
   async function init() {
     if (!token) { $("nokey").hidden = false; return; }
+    let session = null;
+    try { session = await api("/api/session"); } catch (e) { /* the bootstrap below says what is wrong */ }
+    if (session && session.accounts_on && !session.user) { showSignIn(session); return; }
     let boot;
     try { boot = await api("/api/bootstrap"); } catch (e) {
       $("nokey").hidden = false;
@@ -3471,6 +3564,15 @@
     $("app").hidden = false;
     for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
     S.settings = boot.settings;
+    S.account = boot.account || null;
+    renderAccount();
+    $("sign-out").addEventListener("click", signOut);
+    $("pw-change").addEventListener("click", changePassword);
+    $("activity-all").addEventListener("click", () => {   // the lab's instrument log: everyone's activity, by name
+      PANEL.everyone = !PANEL.everyone;
+      $("activity-all").setAttribute("aria-pressed", String(PANEL.everyone));
+      pollState();
+    });
     S.chats = boot.chats;
     S.projects = boot.projects || [];
     $("lab-name").textContent = boot.lab;

@@ -43,6 +43,29 @@ def test_kelvins_own_data_go_and_measurements_stay(tmp_path):
     assert "virtual-lab/runs" in note and str(chosen) in note and "were deleted" in note
 
 
+def test_each_persons_own_things_go_and_their_data_stay(tmp_path):
+    home = make_home(tmp_path)
+    chosen = tmp_path / "ben's data"
+    (chosen / "runs").mkdir(parents=True)
+    files = {"accounts.json": "{}", "instrument-log.jsonl": "{}", "lab/events.jsonl": "{}",
+             "users/Ada/settings.json": "{}", "users/Ada/chatgpt.json": "{}", "users/Ada/chats/c1.json": "{}",
+             "users/Ada/data/runs/r1/data.jsonl": "{}", "users/Ada/data/events.jsonl": "{}",
+             "users/Ben/settings.json": json.dumps({"data_dir": str(chosen)}), "users/Ben/chats/_projects.json": "{}"}
+    for name, text in files.items():
+        (home / name).parent.mkdir(parents=True, exist_ok=True)
+        (home / name).write_text(text, encoding="utf-8")
+    report = remove_data(home, revoke=False)
+    for gone in ("accounts.json", "users/Ada/settings.json", "users/Ada/chatgpt.json", "users/Ada/chats",
+                 "users/Ben/settings.json", "users/Ben/chats", "users/Ben"):
+        assert not (home / gone).exists(), gone
+    for kept in ("users/Ada/data/runs/r1/data.jsonl", "users/Ada/data/events.jsonl", "instrument-log.jsonl",
+                 "lab/events.jsonl"):
+        assert (home / kept).exists(), kept
+    assert str(chosen) in report["kept"] and (chosen / "runs").exists()
+    note = (home / NOTE).read_text(encoding="utf-8")
+    assert "users/<name>/data" in note and "instrument-log.jsonl" in note and str(chosen) in note
+
+
 def test_nothing_left_means_no_folder_left(tmp_path):
     home = tmp_path / "Kelvin"
     (home / "virtual-lab" / "chats").mkdir(parents=True)

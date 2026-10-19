@@ -137,23 +137,35 @@ class SignIn:
     """The ChatGPT account Kelvin is signed in to, if any."""
 
     def __init__(self, home: Any, http: Http = _http):
-        self.home = Path(home)
-        self.path = self.home / "chatgpt.json"
         self.http = http
-        self.pending: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._jwks: Optional[Dict[str, Any]] = None
+        self.use(home)
+
+    def use(self, home: Any, cipher: Any = None) -> None:
+        """The signed-in person's ChatGPT sign-in (chatgpt.json in their folder; sealed with their password)."""
+        self.home = Path(home)
+        self.path = self.home / "chatgpt.json"
+        self.cipher = cipher
+        self.pending: Dict[str, Dict[str, Any]] = {}
         try:
-            self.data: Dict[str, Any] = json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            self.data = {}
+            data = {}
+        if isinstance(data, dict) and "sealed" in data:
+            try:
+                data = json.loads(cipher.decrypt(data["sealed"]) or "{}") if cipher is not None else {}
+            except ValueError:
+                data = {}
+        self.data: Dict[str, Any] = data if isinstance(data, dict) else {}
 
     # ------------------------------------------------------------------ storage
 
     def _save(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=1), encoding="utf-8")
+        data = {"sealed": self.cipher.encrypt(json.dumps(self.data))} if self.cipher is not None else self.data
+        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
         try:
             os.chmod(tmp, 0o600)
         except OSError:

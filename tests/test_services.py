@@ -42,7 +42,7 @@ def test_settings_keep_keys_out_of_sight(tmp_path, monkeypatch):
     settings.add_service({"preset": "openrouter", "api_key": "sk-or-secret"})
     monkeypatch.setenv("GROQ_API_KEY", "gsk-env")
     settings.add_service({"preset": "groq", "api_key": "gsk-form"})
-    settings._data["services"][1]["api_key"] = ""      # as if only the environment had it
+    settings._user["services"][1]["api_key"] = ""      # as if only the environment had it
     views = settings.service_views()
     assert [(v["id"], v["key"]) for v in views] == [("openrouter", "settings"), ("groq", "environment")]
     assert "sk-or-secret" not in json.dumps(views) and settings.service_key(settings.services[1]) == "gsk-env"

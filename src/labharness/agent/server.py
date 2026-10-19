@@ -125,7 +125,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def watch(reading: str, above: Optional[float] = None, below: Optional[float] = None, for_seconds: float = 0,
               note: str = "") -> str:
         """Watch a reading (e.g. tc.T_A) and alert the user when it goes above/below a value for `for_seconds`.
-        Only reads and notifies; the lab owner's watches may also act. Returns the watch id."""
+        Only reads and notifies; watches written in the lab config may also act. Returns the watch id."""
         try:
             v = rt.add_watch(reading, above, below, for_seconds, note, source="agent")
         except (KeyError, ValueError) as e:
@@ -139,7 +139,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=ACT, structured_output=False)
     def unwatch(watch_id: str) -> str:
-        """Stop a watch you or the user added (the lab owner's watches stay)."""
+        """Stop a watch you or the user added (watches from the lab config stay)."""
         try:
             rt.remove_watch(watch_id, source="agent")
         except (KeyError, PermissionError) as e:
@@ -319,8 +319,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
 def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m labharness.agent", description=__doc__.splitlines()[0])
-    ap.add_argument("--data-dir", default=str(Path.home() / "Kelvin" / "virtual-lab"),
-                    help="event log and run folders (default: ~/Kelvin/virtual-lab)")
+    ap.add_argument("--data-dir", help="event log and run folders (default: ~/Kelvin/virtual-lab; once people have "
+                                       "accounts in the app, ~/Kelvin/agents, so no one's own folder)")
     ap.add_argument("--envelope", help="project envelope YAML (default: the demo envelope)")
     ap.add_argument("--no-envelope", action="store_true", help="ask for every drive increase")
     ap.add_argument("--speed", type=float, default=0, help="0 = instant simulated time (default); N = N× real time")
@@ -338,7 +338,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     if not args.no_envelope:
         envelope = load_envelope(args.envelope, lab.config, lab.registry) if args.envelope else demo_envelope(lab)
     approver = WebApprover(timeout=args.approval_timeout)
-    runtime = LabRuntime(lab, approver, args.data_dir, envelope)
+    home = Path.home() / "Kelvin"
+    data_dir = args.data_dir or home / ("agents" if (home / "accounts.json").exists() else "virtual-lab")
+    runtime = LabRuntime(lab, approver, data_dir, envelope)
     runtime.cards_dir = Path.home() / "Kelvin" / "cards"
     runtime.monitor.start()
     ui = ApprovalServer(runtime, port=args.ui_port).start()

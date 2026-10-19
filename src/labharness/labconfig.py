@@ -107,7 +107,7 @@ class LabConfig:
     safe_actions: Dict[str, str] = field(default_factory=dict)
     source: str = ""
     auto_fraction: float = AUTO_FRACTION
-    watches: List[Dict[str, Any]] = field(default_factory=list)  # the lab owner's watches (see monitor.py)
+    watches: List[Dict[str, Any]] = field(default_factory=list)  # watches written in the lab config (see monitor.py)
     observe_only: bool = False   # written by auto-setup: read and configure, but no drive leaves safe until a person
                                  # has reviewed the limits and removed the line
 

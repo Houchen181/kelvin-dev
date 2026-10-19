@@ -52,7 +52,7 @@ python -m venv .venv
 
 - Work on a branch and open a pull request into `main`. GitHub Actions runs the tests on Python 3.9 (core) and 3.13 (everything) for every push and PR.
 - [VISION.md](../VISION.md) is the spec. [ARCHITECTURE.md](../ARCHITECTURE.md) records the design decisions and the build order; update it when a decision changes.
-- Never commit API keys, lab data, or a machine-specific `.mcp.json`. `.gitignore` already excludes them; keys live in `~/Kelvin/settings.json`.
+- Never commit API keys, lab data, or a machine-specific `.mcp.json`. `.gitignore` already excludes them; keys live in `~/Kelvin/users/<name>/settings.json`.
 - Changes to the safety gate (`gate.py`), the card format (`cards.py`) or the approval path need a test that shows the rule holds.
 
 ## Releasing

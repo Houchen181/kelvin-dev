@@ -136,7 +136,7 @@ def test_pairing_and_roles(app):
 
         view = local.get("/api/phone", headers=owner).json()
         assert [(d["name"], d["role"]) for d in view["devices"]] == [("Ana's phone", "control"), ("Lab tablet", "watch")]
-        assert "hash" not in json.dumps(view) and paired["token"] not in json.dumps(settings._data)   # only a hash is kept
+        assert "hash" not in json.dumps(view) and paired["token"] not in json.dumps(settings._user)   # only a hash is kept
         tablet = view["devices"][1]["id"]
         assert local.delete("/api/devices/" + tablet, headers=owner).json() == {"ok": True}
         assert phone.get("/api/state", headers=watch).status_code == 401

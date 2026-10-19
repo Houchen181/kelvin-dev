@@ -31,7 +31,7 @@ In auto mode, a drive change or a run goes ahead without asking when all of thes
 
 Anything else asks as usual, and the request says why auto mode didn't cover it. Each auto-approval shows in the conversation with its reasons and is written to the event log. Limits, interlocks, guard readings and Stop work the same in both modes.
 
-The lab owner sets the rule in the lab config:
+Whoever sets up the lab writes the rule in the lab config:
 
 ```yaml
 auto_fraction: 0.25                 # share of the way from safe to each lab limit
@@ -50,7 +50,7 @@ Who can add a watch, and what it may do:
 
 | Watch | Added by | On alarm |
 |---|---|---|
-| Lab watch | The lab owner, in the lab config | Tells people; can stop the running plan and send named drives to their **safe** values (the config refuses any other value) |
+| Lab watch | A person, in the lab config | Tells people; can stop the running plan and send named drives to their **safe** values (the config refuses any other value) |
 | Your watch | You, in the Lab panel (**Watches → Add…**) | Tells people |
 | Kelvin's watch | The agent (`watch`, `watches`, `unwatch`), e.g. "tell me if the sample warms above 4 K while this runs" | Tells people |
 

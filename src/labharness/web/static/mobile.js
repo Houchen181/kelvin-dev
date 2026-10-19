@@ -28,6 +28,7 @@
     });
     let data = null;
     try { data = await res.json(); } catch (e) { /* not JSON */ }
+    if (res.status === 401 && token && data && data.signin) throw new Error(data.error);   // still paired; its person is away
     if (res.status === 401 && token) { forget(); throw new Error("This phone is no longer paired."); }
     if (!res.ok) throw new Error((data && data.error) || "HTTP " + res.status);
     return data;

@@ -425,7 +425,7 @@ class SafetyGate:
     def _away_problem(self, inst: Instrument, spec: ParamSpec) -> Optional[str]:
         key = "%s.%s" % (inst.name, spec.name)
         if inst.card.status == "draft" and not inst.simulated:
-            return "%s: draft card; its drives stay simulation-only until the owner reviews it" % key
+            return "%s: draft card; its drives stay simulation-only until a person reviews it" % key
         if self.lab.config.observe_only and not inst.simulated:
             return ("%s: Kelvin set this lab up on its own, so drives stay at safe until a person reviews the limits "
                     "in Lab setup and unlocks them" % key)

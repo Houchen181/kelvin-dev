@@ -14,6 +14,32 @@
   <p>This page needs the access key from the link Kelvin printed when it started (it ends in <code>#</code> and a key).</p>
 </div>
 
+<div id="signin" class="signin" hidden>
+  <div class="signin-card">
+    <span class="logo" aria-hidden="true" data-mark></span>
+    <h1 id="signin-title">Who's using Kelvin?</h1>
+    <p id="signin-sub" class="muted"></p>
+    <div id="signin-people" class="signin-people"></div>
+    <form id="signin-pass" class="signin-form" hidden>
+      <label id="signin-pass-label" for="signin-password">Password</label>
+      <input id="signin-password" type="password" autocomplete="current-password">
+      <div class="signin-actions"><button id="signin-back" class="link" type="button">Back</button><button class="btn primary" type="submit">Sign in</button></div>
+    </form>
+    <form id="signin-new" class="signin-form" hidden>
+      <label for="new-name">Your name</label>
+      <input id="new-name" autocomplete="name" maxlength="40" spellcheck="false">
+      <label for="new-password">Password <span class="muted">(optional)</span></label>
+      <input id="new-password" type="password" autocomplete="new-password">
+      <span class="hint">With a password, your API keys are encrypted with it. Nobody can reset a forgotten one: there is no administrator.</span>
+      <div class="signin-actions"><button id="new-back" class="link" type="button">Back</button><button class="btn primary" type="submit">Create account</button></div>
+    </form>
+    <button id="signin-add" class="link" type="button">Add a person</button>
+    <p id="signin-msg" class="signin-msg" role="status"></p>
+    <div id="signin-busy" class="signin-busy" hidden><span id="signin-busy-text"></span><button id="signin-stop" class="btn small" type="button">Stop it</button></div>
+    <p class="muted small signin-foot">Everyone here is equal. Each person has their own chats, projects, memory, API keys, data folder and record. The instruments, their cards and the lab's instrument log are shared.</p>
+  </div>
+</div>
+
 <div id="app" class="app" hidden>
   <div id="scrim" class="scrim" hidden></div>
 
@@ -29,6 +55,11 @@
     </div>
     <nav id="chat-list" class="chat-list" aria-label="Projects and conversations"></nav>
     <div class="side-bottom">
+      <div id="account-row" class="account-row" hidden>
+        <span id="account-avatar" class="avatar" aria-hidden="true"></span>
+        <span id="account-name" class="account-name"></span>
+        <button id="sign-out" class="link soft" type="button" title="Sign out, so someone else can sign in">Sign out</button>
+      </div>
       <div class="lab-chip" title="The lab this portal controls"><span class="dot on"></span><span id="lab-name">Lab</span><span id="sim-tag" class="tag" hidden>simulated</span></div>
       <button id="open-settings" class="side-btn subtle" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings
@@ -191,7 +222,7 @@
         <button class="btn small" type="submit">Watch</button>
       </form>
       <ul id="watch-list" class="watch-list"></ul>
-      <h3>Activity</h3>
+      <div class="inst-head-row"><h3>Activity</h3><button id="activity-all" class="link soft" type="button" aria-pressed="false" hidden>Everyone</button></div>
       <ol id="lab-events" class="lab-events"></ol>
     </div>
   </aside>
@@ -205,7 +236,12 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">API keys stay on this computer (in the settings file next to your lab data) and go only to their own provider. Leave a field empty to keep the current key.</p>
+    <div id="account-field" class="field" hidden>
+      <div class="field-row"><span class="field-label">Your account</span><span id="account-status" class="hint"></span></div>
+      <span class="hint">Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.</span>
+      <div class="key-row pw-row"><input id="pw-old" type="password" autocomplete="current-password" placeholder="Current password"><input id="pw-new" type="password" autocomplete="new-password" placeholder="New password (empty: none)"><button id="pw-change" class="btn small" type="button">Change</button></div>
+    </div>
+    <p class="muted small">API keys stay on this computer (in your own settings file) and go only to their own provider. Leave a field empty to keep the current key.</p>
     <div class="field">
       <label for="k-anthropic">Claude — Anthropic API key</label>
       <div class="key-row"><input id="k-anthropic" name="anthropic_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="anthropic_api_key">Remove</button></div>

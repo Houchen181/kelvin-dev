@@ -52,21 +52,21 @@ Every run is saved as it is measured, with nothing to click. It gets its own fol
 - `report.pdf` and `report.pptx`: the scan report, written as soon as the run ends (see [Reports](#reports)).
 - In `meta.json`, the run's **project** and **device** (the sample), which the device and master reports use.
 
-Next to the run folders sit `events.jsonl`, the lab record of every command, reading, approval, refusal and alarm with who did it, and `reports/`.
+Next to the run folders sit `events.jsonl`, your record of every command, reading, approval, refusal and alarm with who did it, and `reports/`. Each person has their own (see [Signing in](portal.md#signing-in)); the lab's instrument log, `~/Kelvin/instrument-log.jsonl`, has everyone's, each with their name.
 
 **When you uninstall Kelvin:** the Windows uninstaller deletes Kelvin's own data and keeps your measurements.
-- **Deleted:** settings and API keys, the ChatGPT sign-in (revoked with OpenAI first), chats, projects and memory, the lab config, your instrument cards, the instrument folders with their manuals, the log and the window's cache.
-- **Kept:** every run folder, `events.jsonl` and `reports/`, in `~/Kelvin/virtual-lab` and in any data folder you chose. A note in `~/Kelvin`, "About this folder.txt", says what is there. Installing Kelvin again shows those runs again.
+- **Deleted:** settings and API keys, the ChatGPT sign-ins (revoked with OpenAI first), the accounts, chats, projects and memory, the lab config, your instrument cards, the instrument folders with their manuals, the log and the window's cache. Everyone's.
+- **Kept:** every run folder, `events.jsonl` and `reports/`, in `~/Kelvin/virtual-lab`, in each person's `~/Kelvin/users/<name>/data` and in any data folder someone chose; and the lab's instrument log. A note in `~/Kelvin`, "About this folder.txt", says what is there. Installing Kelvin again shows those runs again.
 - **Only Kelvin's own items are deleted, by name.** Any other file you put in `~/Kelvin` stays.
 - **Kelvin must be closed:** the uninstaller waits until it is.
 - **On a Mac or from source:** run `/Applications/Kelvin.app/Contents/MacOS/Kelvin --remove-data` (from source: `python -m labharness.desktop --remove-data`) for the same clean-up, then delete the app.
 
-**Choosing the data folder:** these live in `~/Kelvin/virtual-lab` until you choose another folder under **Settings → Data folder**. A lab server or a synced drive works:
+**Choosing the data folder:** these live in your own folder, `~/Kelvin/users/<you>/data` (for the first account, `~/Kelvin/virtual-lab`, where they were before accounts), until you choose another folder under **Settings → Data folder**. A lab server or a synced drive works:
 - **Use this folder** switches at once. Kelvin checks first that it can write there.
 - **Move what is saved now** takes the existing runs, reports and record along. Nothing there is overwritten: a run whose name is taken stays where it was, and Kelvin says so.
-- **If the folder can't be written to at start-up** (a network drive that is offline, say), Kelvin saves to `~/Kelvin/virtual-lab` meanwhile and tells you in Settings.
+- **If the folder can't be written to when you sign in** (a network drive that is offline, say), Kelvin saves to your own folder meanwhile and tells you in Settings.
 - **What stays in `~/Kelvin`:** chats, settings, API keys and instrument folders.
-- **From a terminal:** `kelvin --data-dir <folder>` overrides the setting.
+- **From a terminal:** `kelvin --data-dir <folder>` overrides the setting, for one person without sign-in.
 
 ## Reports
 

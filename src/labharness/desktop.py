@@ -5,7 +5,8 @@
     kelvin-app --browser       # use the default browser instead of a window
     kelvin-app --self-test     # start, check that the portal answers, exit (used by the release builds)
 
-Everything Kelvin keeps (settings, API keys, chats, event logs, runs) lives in ~/Kelvin.
+Everything Kelvin keeps lives in ~/Kelvin: the computer's settings and instruments, and each person's own folder
+(settings, API keys, chats, runs, record) in ~/Kelvin/users after they sign in (accounts.py).
 """
 from __future__ import annotations
 
@@ -162,6 +163,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     lock = home / "app.json"
     mutex = _hold_app_mutex()  # noqa: F841  (held until Kelvin exits)
 
+    from .accounts import Accounts
     from .agent.approval import WebApprover
     from .agent.runtime import LabRuntime
     from .virtual_lab import open_home_lab
@@ -181,16 +183,23 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     port = args.port or _free_port()
     # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time
     lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10)
-    from .web.app import data_folder_for
-    data_dir, problem = data_folder_for(settings, home)   # the folder chosen in Settings, else ~/Kelvin/virtual-lab
+    # people sign in, each to their own data folder; until someone does, what happens is the lab's (~/Kelvin/lab).
+    # The self-test checks the app, not a person, so it runs without accounts.
+    accounts = None if args.self_test else Accounts(home)
+    if accounts is None:
+        from .web.app import data_folder_for
+        data_dir, problem = data_folder_for(settings, home)   # the folder chosen in Settings, else ~/Kelvin/virtual-lab
+    else:
+        data_dir, problem = home / "lab", None
     runtime = LabRuntime(lab, WebApprover(timeout=300), data_dir, envelope)
     runtime.data_problem = problem
     runtime.lab_info = info
     quit_event = threading.Event()
-    app = create_app(runtime, settings, ChatStore(home / "virtual-lab" / "chats"), demo=not args.no_demo,
+    chats = home / ("virtual-lab" if accounts is None else "lab") / "chats"
+    app = create_app(runtime, settings, ChatStore(chats, create=accounts is None), demo=not args.no_demo,
                      auto_setup=not (args.self_test or args.no_setup),   # set up connected instruments on start
                      hosts=("127.0.0.1:%d" % port, "localhost:%d" % port),
-                     on_quit=quit_event.set if args.browser else None)
+                     on_quit=quit_event.set if args.browser else None, accounts=accounts)
     agent = app.app.state.agent
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None, log_level="warning"))
     thread = threading.Thread(target=server.run, name="kelvin-server", daemon=True)

@@ -95,6 +95,39 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .nokey { max-width: 520px; margin: 18vh auto; padding: 0 16px; text-align: center; }
 .nokey img { display: block; margin: 0 auto 12px; }
 
+/* ---------- who is using Kelvin (accounts) ---------- */
+.signin { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); }
+.signin[hidden] { display: none; }
+.signin-card { width: min(400px, 100%); display: grid; gap: 12px; justify-items: center; text-align: center; }
+.signin-card .logo { width: 64px; height: 64px; border-radius: 16px; }
+.signin-card h1 { margin: 4px 0 0; font-size: 24px; }
+.signin-card > p { margin: 0; }
+.signin-people { display: grid; gap: 8px; width: 100%; }
+.signin-people[hidden] { display: none; }
+.person { display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--raised); cursor: pointer; text-align: left; font-weight: 550; }
+.person:hover, .person.on { border-color: var(--accent); background: var(--accent-soft); }
+.person .lock { margin-left: auto; width: 16px; height: 16px; color: var(--muted); fill: none; stroke: currentColor; stroke-width: 2; }
+.avatar { width: 32px; height: 32px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--brand-navy); color: #fff; font-weight: 650; font-size: 13px; }
+.signin-form { display: grid; gap: 6px; width: 100%; text-align: left; }
+.signin-form[hidden] { display: none; }
+.signin-form label { font-weight: 550; font-size: 14px; }
+.signin-form input { width: 100%; border: 1px solid var(--line-strong); border-radius: 10px; padding: 8px 10px; background: var(--raised); }
+.signin-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 6px; }
+.signin-actions .link { margin-right: auto; }
+.signin-msg { min-height: 1.2em; margin: 0; font-size: 14px; color: var(--muted); }
+.signin-msg.bad { color: var(--danger); }
+.signin-busy { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 1px solid var(--warn-line); border-radius: 10px; background: var(--warn-bg); color: var(--warn); font-size: 14px; text-align: left; }
+.signin-busy[hidden] { display: none; }
+.signin-busy span { flex: 1; }
+.signin-foot { max-width: 360px; margin: 4px 0 0; }
+.account-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px 8px; }
+.account-row[hidden] { display: none; }
+.account-row .avatar { width: 26px; height: 26px; font-size: 11px; }
+.account-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; font-size: 14px; }
+.pw-row { flex-wrap: wrap; }
+.pw-row input { flex: 1 1 140px; }
+#activity-all[aria-pressed="true"] { color: var(--accent); font-weight: 600; }
+
 /* ---------- layout ---------- */
 .app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
 .sidebar {

@@ -1,4 +1,4 @@
-"""Watching instruments: thresholds that must hold for a while, instruments that stop answering, the lab owner's
+"""Watching instruments: thresholds that must hold for a while, instruments that stop answering, the lab config's
 watches that act (only toward safe), and telling people in the app and through a webhook."""
 import json
 import threading

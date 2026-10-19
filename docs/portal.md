@@ -2,13 +2,27 @@
 
 The portal is where you chat with Kelvin: the desktop app's window, or the site that `kelvin` opens in your browser.
 
+## Signing in
+
+Everyone who uses Kelvin on a lab computer has an account, and everyone is equal: there is no administrator or lab owner. Anyone at the computer can add themselves with **Add a person** on the sign-in screen.
+
+- **Yours alone:** your settings and API keys, ChatGPT sign-in, chats, projects and memory, your data folder (runs and reports), your queue, the sample you mounted, and your record (`events.jsonl`).
+- **Everyone's:** the instruments, the lab config, the instrument cards, the switches for setting up instruments and phone access, and the lab's **instrument log** (`~/Kelvin/instrument-log.jsonl`): every command and approval from everyone, with the name of whoever was signed in. The Lab panel's **Activity → Everyone** shows it.
+- **Passwords are optional.** With one, your API keys and ChatGPT sign-in are encrypted with it. Nobody can reset a forgotten password, because there is no administrator; your runs and reports are still in your data folder. Change or remove it in Settings → **Your account**.
+- **One person, no password:** Kelvin signs you in by itself when it starts, so a single user never sees the sign-in screen.
+- **Signing out** (bottom of the sidebar) declines open approvals and turns the approval mode back to asking: one person's yes is never another's. A run or queue you leave running goes on, and is recorded as yours. Nobody else can sign in until it ends; anyone can press **Stop it** on the sign-in screen.
+- **Before accounts:** the first account takes over what Kelvin kept until then: chats and runs in `~/Kelvin/virtual-lab`, and the API keys.
+- **What accounts don't do:** they keep people's work apart inside Kelvin, but they don't lock files. Anyone who can open this computer's files can read the folders.
+
+Each person's things are in `~/Kelvin/users/<name>/`: `settings.json`, `chatgpt.json`, `chats/` and `data/` (their default data folder; Settings → **Data folder** chooses another).
+
 ## In the portal
 
-- **Models:** Add keys under Settings for Claude, GPT or Gemini, or point it at a local OpenAI-compatible server (Ollama, vLLM, LM Studio) for confidential work. Keys stay in `~/Kelvin/settings.json` and go only to their own provider.
+- **Models:** Add keys under Settings for Claude, GPT or Gemini, or point it at a local OpenAI-compatible server (Ollama, vLLM, LM Studio) for confidential work. Keys stay in your own settings file (`~/Kelvin/users/<you>/settings.json`, encrypted if you have a password) and go only to their own provider.
 - **ChatGPT plan:** Instead of an OpenAI API key, you can use your ChatGPT plan. In Settings press **Continue with ChatGPT** and sign in on OpenAI's page in your browser.
   - **What Kelvin gets:** it never sees your password and gets no access to your ChatGPT conversations.
   - **Where it shows:** ChatGPT models then appear as **ChatGPT plan** in the model picker, and **Using ChatGPT plan** shows by the picker while one is selected.
-  - **Tokens:** they're kept in `~/Kelvin/chatgpt.json`, renewed automatically, and revoked when you sign out.
+  - **Tokens:** they're kept in `~/Kelvin/users/<you>/chatgpt.json`, renewed automatically, and revoked when you sign out of ChatGPT.
   - **Limits:** use **Manage usage** to set them; project rules can allow or exclude ChatGPT plan by name.
   - **Basis:** this follows OpenAI's Sign in with ChatGPT for open-source and personal local apps.
 - **Other model services:** Under Settings → **Other model services**, add any service that speaks the OpenAI Chat Completions API.
@@ -75,5 +89,7 @@ Check on a run from the coffee room, or answer an approval from home. Phone acce
 The phone then opens Kelvin's phone page: alarms with **Got it**, requests with **Approve** (control) or **Decline**, the run in progress with its progress and **Stop**, the instruments, and recent notices. A control phone can also open the full portal.
 
 Settings, instruments, the lab config, the approval mode and pairing work only on the Kelvin computer. Remove a phone in Settings, or with **Forget this phone** on the phone itself.
+
+Each person pairs their own phones, and a phone works while its person is signed in on the Kelvin computer: it sees that person's chats and runs, never someone else's.
 
 **Away from the lab:** install [Tailscale](https://tailscale.com) (a free, encrypted VPN) on the lab computer and on the phone, and pair the phone using the Tailscale address. On a plain Wi-Fi network traffic isn't encrypted, so on a shared network prefer Tailscale. Don't forward Kelvin's port to the internet. For push notifications to the phone, add an ntfy topic under Notifications.

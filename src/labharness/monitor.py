@@ -1,6 +1,6 @@
 """Watching sensitive instruments: readings that leave their range, instruments that stop answering or report
 errors. A watch only reads. When it trips it raises an alarm once (and clears it when the reading is back), tells
-people (see notify.py), and, for watches the lab owner wrote, can stop the running plan and send named drives to
+people (see notify.py), and, for watches written in the lab config, can stop the running plan and send named drives to
 their safe values - the only kind of change it may make.
 
 Durations are in lab time (the lab clock), so the virtual lab at 10x real time and tests on a simulated clock behave
@@ -104,7 +104,7 @@ class Monitor:
             if w is None:
                 raise KeyError("no watch %r" % watch_id)
             if source is not None and w.source == "lab":
-                raise PermissionError("%s comes from the lab config; only the lab owner can change it" % watch_id)
+                raise PermissionError("%s comes from the lab config; change it there" % watch_id)
             return self.watches.pop(watch_id)
 
     def list(self) -> List[Dict[str, Any]]:

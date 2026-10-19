@@ -100,6 +100,8 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "report %s (%s run%s)" % (e.get("name"), e.get("runs"), "" if e.get("runs") == 1 else "s")
     elif kind == "lab_changed":
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
+    elif kind in ("signed_in", "signed_out"):
+        text = kind.replace("_", " ")
     elif kind == "approval_mode":
         text = "approvals: " + ("auto mode on (low-risk changes run without asking)" if e.get("mode") == "auto"
                                 else "ask before every drive increase")
@@ -125,7 +127,9 @@ class LabRuntime:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.events_path = self.data_dir / "events.jsonl"
-        self.gate = SafetyGate(lab, approver, EventLog(self.events_path, lab.clock), envelope, operator="agent")
+        self.user: Optional[str] = None             # the person signed in to the portal (accounts.py), if any
+        self.shared_log: Optional[Path] = None      # the lab's instrument log, everyone's events; set by the app
+        self.gate = SafetyGate(lab, approver, self._new_log(lab.clock), envelope, operator="agent")
         self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
         self.engine.progress = self._on_progress
         self.lock = threading.RLock()
@@ -358,10 +362,52 @@ class LabRuntime:
             self.data_dir = new
             self.queue.move_to(new / "queue.json")
             self.events_path = new / "events.jsonl"
-            self.gate.log = EventLog(self.events_path, self.lab.clock)
+            self.gate.log = self._new_log()
             self.engine.store = RunStore(new / "runs")
             self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept))
             return dict(self.data_summary(), moved=moved, kept=kept, previous=str(old))
+        finally:
+            self.lock.release()
+
+    def _new_log(self, clock: Any = None) -> EventLog:
+        return EventLog(self.events_path, clock or self.lab.clock, shared=self.shared_log, user=self.user)
+
+    def use_user(self, user: Optional[str], data_dir: Any, problem: Optional[str] = None) -> None:
+        """Work for another person (None: nobody is signed in). Their data folder holds their runs, reports, record
+        (events.jsonl), queue and mounted sample; the instruments, cards and the lab's instrument log are shared.
+        Refused while a plan or the queue runs. Open approvals are declined and the approval mode goes back to
+        asking: one person's yes is not another's."""
+        new = Path(data_dir)
+        new.mkdir(parents=True, exist_ok=True)
+        if not self.lock.acquire(blocking=False):
+            raise RuntimeError("Kelvin is busy (%s); try again when it is idle" % (self.busy or "working"))
+        try:
+            if self.live and self.live.get("status") == "running":
+                raise RuntimeError("A plan is running; wait for it to finish or stop it first.")
+            if self.queue.state in ("running", "pausing"):
+                raise RuntimeError("The queue is running; wait for it to finish or stop it first.")
+            self.flush_reports()   # the last person's device and master reports, while their projects are known
+            decline_all = getattr(self.approver, "decline_all", None)
+            if decline_all:
+                decline_all("signed out")
+            if self.gate.auto:
+                self.gate.auto = False
+                self.gate.log.write("approval_mode", by="sign-in", mode="ask")
+            if self.user:
+                self.gate.log.write("signed_out", user=self.user)
+            self.user = user
+            self.data_dir = new
+            self.events_path = new / "events.jsonl"
+            self.gate.log = self._new_log()
+            self.engine.store = RunStore(new / "runs")
+            self.queue = ScanQueue(new / "queue.json")
+            self.mounted = self._load_mounted()
+            self.attribution = {}
+            self.data_problem = problem
+            with self._live_lock:
+                self.live = None
+            if user:
+                self.gate.log.write("signed_in", user=user, data=str(new))
         finally:
             self.lock.release()
 
@@ -1548,7 +1594,7 @@ class LabRuntime:
 
     def add_watch(self, key: str, above: Optional[float] = None, below: Optional[float] = None, for_s: float = 0.0,
                   note: str = "", source: str = "person") -> Dict[str, Any]:
-        """A notify-only watch (actions on alarm are for the lab owner's watches in the lab config)."""
+        """A notify-only watch (actions on alarm are for the watches written in the lab config)."""
         spec = self._spec(key)
         if spec is None:
             raise KeyError("%r is not a parameter in this lab" % key)
@@ -1560,7 +1606,7 @@ class LabRuntime:
         return view
 
     def remove_watch(self, watch_id: str, source: str = "person") -> None:
-        w = self.monitor.remove(watch_id, source)   # the lab owner's watches change only in the lab config
+        w = self.monitor.remove(watch_id, source)   # watches from the lab config change only there
         self.gate.log.write("watch", by=source, change="removed", watch=w.id, rule=w.rule())
 
     def watches_text(self) -> str:
@@ -1582,7 +1628,7 @@ class LabRuntime:
                 raise RuntimeError("a plan is running; wait for it to finish or stop it first")
             old = self.lab
             self.lab = lab
-            self.gate = SafetyGate(lab, self.approver, EventLog(self.events_path, lab.clock), envelope, operator="agent")
+            self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
             self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
             self.engine.progress = self._on_progress
             self.lab_info = dict(info)

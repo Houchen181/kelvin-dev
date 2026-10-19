@@ -53,12 +53,19 @@ def instructions_text(text: Any) -> str:
 
 
 class ChatStore:
-    def __init__(self, root: Any):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-        self._index_path = self.root / "_projects.json"
+    def __init__(self, root: Any, create: bool = True):
         self._lock = threading.Lock()
-        self._temp: Dict[str, Dict[str, Any]] = {}  # incognito chats: this process only
+        self.use(root, create)
+
+    def use(self, root: Any, create: bool = True) -> None:
+        """Keep chats in another folder: the signed-in person's. Incognito chats of whoever was here are gone.
+        create=False: make the folder only when there is something to save in it."""
+        with self._lock:
+            self.root = Path(root)
+            if create:
+                self.root.mkdir(parents=True, exist_ok=True)
+            self._index_path = self.root / "_projects.json"
+            self._temp: Dict[str, Dict[str, Any]] = {}  # incognito chats: this process only
 
     def _path(self, chat_id: str) -> Path:
         if not _ID.match(chat_id or ""):
@@ -98,6 +105,7 @@ class ChatStore:
             self._temp[chat["id"]] = chat
             return
         path = self._path(chat["id"])
+        self.root.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps({k: v for k, v in chat.items() if k != "project"}, ensure_ascii=False),
                        encoding="utf-8")
@@ -167,6 +175,7 @@ class ChatStore:
         return {"projects": projects, "assign": assign, "global_notes": notes, "general": general}
 
     def _write_index(self, index: Dict[str, Any]) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
         tmp = self._index_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self._index_path)

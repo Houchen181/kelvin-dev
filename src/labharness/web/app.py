@@ -16,13 +16,14 @@ import time
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from ..accounts import Accounts, cipher_for, has_legacy
 from ..agent.approval import WebApprover
 from ..agent.runtime import LabRuntime
 from ..agent.server import build_server
@@ -46,6 +47,8 @@ from .store import ChatStore
 
 STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
+# what works while nobody is signed in: signing in, a new account, and stopping whatever runs
+SIGNED_OUT = {"/api/session", "/api/accounts", "/api/stop", "/api/runs/stop"}
 
 
 def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -95,11 +98,15 @@ class Guard:
     """On 127.0.0.1, only this machine's browser holding the access key may use the API. On the network listener
     (phone access, see remote.py) only paired devices may, each within its role; the access key never works there."""
 
-    def __init__(self, app: Any, token: str, hosts: Iterable[str], remote: Optional[Remote] = None):
+    def __init__(self, app: Any, token: str, hosts: Iterable[str], remote: Optional[Remote] = None,
+                 signed_in: Optional[Callable[[], bool]] = None,
+                 paired_with: Optional[Callable[[str], Optional[str]]] = None):
         self.app = app
         self.token = token
         self.hosts = set(hosts)
         self.remote = remote
+        self.signed_in = signed_in       # with accounts: is someone signed in? (else the API waits for them)
+        self.paired_with = paired_with   # with accounts: whose phone a token is, when it isn't the signed-in person's
 
     async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "http":
@@ -117,9 +124,16 @@ class Guard:
                     problem = (403, "bad origin")
                 elif path == "/auth/callback":
                     problem = (403, "sign in from the Kelvin computer")
+                elif path.startswith("/api/") and self.signed_in is not None and not self.signed_in():
+                    problem = (401, "Nobody is signed in to Kelvin on its computer now.", {"signin": True})
                 elif path.startswith("/api/") and not (path == "/api/pair" and method == "POST"):
-                    device = self.remote.device_for(headers.get("x-kelvin-token", ""))
-                    if device is None:
+                    token = headers.get("x-kelvin-token", "")
+                    device = self.remote.device_for(token)
+                    owner = self.paired_with(token) if device is None and self.paired_with else None
+                    if owner:   # a person's phone works while they are signed in; it stays paired meanwhile
+                        problem = (401, "This phone is %s's; it works while %s is signed in on the Kelvin computer."
+                                   % (owner, owner), {"signin": True})
+                    elif device is None:
                         problem = (401, "This device is not paired with Kelvin, or was removed. Pair it again.")
                     elif not allowed(device["role"], method, path):
                         problem = (403, "A %s device cannot do that. Use the Kelvin computer." % device["role"])
@@ -131,9 +145,13 @@ class Guard:
                     problem = (403, "bad origin")
                 elif path.startswith("/api/") and not hmac.compare_digest(headers.get("x-kelvin-token", ""), self.token):
                     problem = (401, "missing or wrong access key")
+                elif (path.startswith("/api/") and path not in SIGNED_OUT and self.signed_in is not None
+                      and not self.signed_in()):
+                    problem = (401, "Sign in to Kelvin first.", {"signin": True})
                 scope["kelvin"] = {"role": "owner", "device": None}
             if problem:
-                await JSONResponse({"error": problem[1]}, status_code=problem[0])(scope, receive, send)
+                body = dict(problem[2] if len(problem) > 2 else {}, error=problem[1])
+                await JSONResponse(body, status_code=problem[0])(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
@@ -161,7 +179,9 @@ def open_path(path: Path) -> None:
 def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None,
-               auto_setup: bool = False) -> Any:
+               auto_setup: bool = False, accounts: Optional[Accounts] = None) -> Any:
+    """accounts: people sign in, each to their own settings, keys, chats, data folder and record (accounts.py).
+    Without it, one person uses Kelvin, as before accounts."""
     signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo, signin), settings)
     runtime.project_info = agent.project_info            # reports: names, devices, notes, reading lists
@@ -175,6 +195,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
     default_data = home / "virtual-lab"                   # runs, record and reports unless the user chose a folder
     loop_ref: Dict[str, Any] = {}
+    session: Dict[str, Any] = {"user": None}              # who is signed in (with accounts); everyone is equal
+    nobody = home / "lab"                                 # the record of what happens while nobody is signed in
+
+    def user_default_data() -> Path:
+        return accounts.data_dir(session["user"]) if accounts is not None and session["user"] else default_data
 
     async def card_model() -> str:
         """The model that writes cards: the default one, else the first real (not demo) model there is."""
@@ -275,7 +300,157 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             "simulated": all(i.simulated for i in runtime.lab.instruments.values()),
             "chats": store.list(), "projects": store.projects(), "models": models, "default_model": default,
             "settings": settings.public(), "active": agent.active, "can_quit": on_quit is not None,
+            "account": session_data(),
         })
+
+    # ------------------------------------------------------------------ people (accounts.py)
+
+    def running_for() -> Optional[str]:
+        """What keeps Kelvin from changing person now, if anything."""
+        problem = busy_problem()
+        if problem:
+            return problem
+        if runtime.queue.state in ("running", "pausing"):
+            return "The queue is running; wait for it to finish or stop it first."
+        return None
+
+    def session_data() -> Dict[str, Any]:
+        if accounts is None:
+            return {"accounts_on": False, "user": None}
+        user = session["user"]
+        listed = accounts.list()
+        busy = running_for()
+        return {"accounts_on": True, "accounts": listed,
+                "user": {"name": user["name"], "password": bool(user.get("hash"))} if user else None,
+                "suggest": "" if listed else suggested_name(),
+                "busy": busy, "busy_user": runtime.user if busy else None,
+                "legacy": not listed and has_legacy(home)}
+
+    def sign_in(account: Dict[str, Any], password: str) -> None:
+        """Serve this person: their settings and keys, chats, ChatGPT sign-in, data folder and record. The
+        instruments, cards and the lab's instrument log stay as they are: they are everyone's."""
+        same = runtime.user == account["name"]   # back to their own work, maybe still running: nothing to switch
+        problem = None if same else running_for()
+        if problem:
+            raise RuntimeError(("Kelvin is still doing %s's work. " % runtime.user if runtime.user else "") + problem)
+        cipher = cipher_for(password, account)
+        settings.use(accounts.settings_path(account), cipher)
+        data_dir, problem = data_folder_for(settings, home, accounts.data_dir(account))
+        if not same:
+            try:
+                runtime.use_user(account["name"], data_dir, problem)
+            except RuntimeError:
+                settings.use(None)
+                raise
+        store.use(accounts.chats_dir(account))
+        signin.use(accounts.dir(account), cipher)
+        if providers is None:
+            agent.providers = make_providers(settings, demo, signin)
+        configure_notifications()
+        configure_literature()
+        session["user"] = account
+
+    def sign_out() -> None:
+        """Nobody is signed in: the portal waits for the next person. A plan or queue still running goes on and is
+        recorded as its person's; Kelvin turns to nobody's record when it ends (or at the next sign-in)."""
+        agent.stop()   # a chat still answering ends with its person
+        session["user"] = None
+        settings.use(None)
+        signin.use(nobody)
+        if providers is None:
+            agent.providers = make_providers(settings, demo, signin)
+        try:
+            runtime.use_user(None, nobody)
+            configure_notifications()
+        except RuntimeError:
+            pass   # their run goes on, with their notifications
+
+    async def session_view(request: Request) -> Response:
+        """GET: who is signed in, and who can. POST {name, password}: sign in (or change person).
+        DELETE: sign out."""
+        if accounts is None:
+            return JSONResponse(session_data())
+        if request.method == "DELETE":
+            if session["user"] is not None:
+                await asyncio.to_thread(sign_out)
+            return JSONResponse(session_data())
+        if request.method == "POST":
+            body = await request.json()
+            try:
+                account = await asyncio.to_thread(accounts.verify, str(body.get("name") or ""),
+                                                  str(body.get("password") or ""))
+            except ValueError as e:
+                await asyncio.sleep(1)   # no fast guessing
+                return error(401, str(e))
+            try:
+                await asyncio.to_thread(sign_in, account, str(body.get("password") or ""))
+            except (RuntimeError, OSError) as e:
+                return error(409, str(e))
+        return JSONResponse(session_data())
+
+    async def accounts_view(request: Request) -> Response:
+        """POST {name, password}: a new account, signed in at once. Anyone at the computer can make one; the first
+        takes over what Kelvin kept before accounts (chats, runs, keys)."""
+        if accounts is None:
+            return error(404, "Kelvin runs without accounts here.")
+        problem = running_for()
+        if problem:
+            return error(409, problem)
+        body = await request.json()
+        password = str(body.get("password") or "")
+        first = not accounts.list()
+        try:
+            account = await asyncio.to_thread(accounts.create, str(body.get("name") or ""), password,
+                                              first and has_legacy(home))
+        except ValueError as e:
+            return error(400, str(e))
+        if first:
+            settings.adopt(accounts.settings_path(account))
+        try:
+            await asyncio.to_thread(sign_in, account, password)
+        except (RuntimeError, OSError) as e:
+            return error(409, str(e))
+        settings._save()   # keys taken over from before accounts are encrypted now, if there is a password
+        return JSONResponse(session_data())
+
+    async def account_view(request: Request) -> Response:
+        """POST {old, new}: change (or set, or remove) the signed-in person's password; their keys are encrypted
+        again with it. DELETE {password}: forget the account (its folder stays on disk) and sign out."""
+        user = session["user"]
+        if accounts is None or user is None:
+            return error(404, "Nobody is signed in.")
+        body = await request.json()
+        if request.method == "DELETE":
+            try:
+                await asyncio.to_thread(accounts.remove, user["name"], str(body.get("password") or ""))
+            except ValueError as e:
+                await asyncio.sleep(1)
+                return error(401, str(e))
+            await asyncio.to_thread(sign_out)
+            return JSONResponse(session_data())
+        new = str(body.get("new") or "")
+        try:
+            account = await asyncio.to_thread(accounts.change_password, user["name"], str(body.get("old") or ""), new)
+        except ValueError as e:
+            await asyncio.sleep(1)
+            return error(400, str(e))
+        session["user"] = account
+        cipher = cipher_for(new, account)
+        settings.cipher = cipher
+        settings._save()
+        signin.cipher = cipher
+        if signin.data:
+            signin._save()
+        return JSONResponse(session_data())
+
+    async def lab_log(request: Request) -> Response:
+        """The lab's instrument log: the latest events of everyone who used these instruments, with their names."""
+        path = home / "instrument-log.jsonl"
+        from ..agent.runtime import event_line, tail_events
+        n = max(1, min(int(request.query_params.get("n") or 50), 500))
+        events = tail_events(path, n) if path.exists() else []
+        return JSONResponse({"events": [{"user": e.get("user") or "", "wall": e.get("wall", ""), "text": event_line(e)}
+                                        for e in reversed(events)]})
 
     async def quit_app(request: Request) -> Response:
         if on_quit is None:
@@ -1006,8 +1181,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             except (ValueError, RuntimeError, OSError) as e:
                 return error(400, str(e))
             settings.set_data_dir(result["path"])
-            return JSONResponse(dict(result, default=str(default_data), problem=None))
-        return JSONResponse(dict(runtime.data_summary(), default=str(default_data),
+            return JSONResponse(dict(result, default=str(user_default_data()), problem=None))
+        return JSONResponse(dict(runtime.data_summary(), default=str(user_default_data()),
                                  problem=getattr(runtime, "data_problem", None)))
 
     async def terminal(request: Request) -> Response:
@@ -1273,6 +1448,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse({"runs": await asyncio.to_thread(runtime.runs_index, 20)})
 
     async def stop_run(request: Request) -> Response:
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, dict) and body.get("queue"):   # the queue too: nothing else starts after this scan
+            runtime.stop("human (portal)")
+            return JSONResponse({"ok": True})
         return JSONResponse({"ok": runtime.stop_run()})
 
     async def queue(request: Request) -> Response:
@@ -1342,6 +1524,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/devices/pairing/{code}", pairing),
         Route("/api/devices/{device_id}", device, methods=["DELETE"]),
         Route("/api/bootstrap", bootstrap),
+        Route("/api/session", session_view, methods=["GET", "POST", "DELETE"]),
+        Route("/api/accounts", accounts_view, methods=["POST"]),
+        Route("/api/account", account_view, methods=["POST", "DELETE"]),
+        Route("/api/lab-log", lab_log),
         Route("/api/chats", chats, methods=["GET", "POST"]),
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
@@ -1397,13 +1583,48 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     app.state.agent = agent
     app.state.remote = remote
     app.state.signin = signin
-    guard = Guard(app, settings.access_key, hosts, remote)
+    if accounts is not None:   # one person without a password goes straight in; otherwise the sign-in screen
+        runtime.shared_log = home / "instrument-log.jsonl"
+        listed = accounts.list()
+        if len(listed) == 1 and not listed[0]["password"]:
+            sign_in(accounts.find(listed[0]["name"]), "")
+        else:
+            settings.use(None)
+            signin.use(nobody)
+            runtime.use_user(None, nobody)
+            if providers is None:
+                agent.providers = make_providers(settings, demo, signin)
+    def paired_with(token: str) -> Optional[str]:
+        """Whose paired phone this is, among everyone with an account (phones are paired per person)."""
+        from .remote import token_hash
+        h = token_hash(token) if token else ""
+        for a in accounts.list() if accounts is not None and h else []:
+            try:
+                mine = json.loads(accounts.settings_path(accounts.find(a["name"])).read_text(encoding="utf-8"))
+            except (OSError, ValueError, KeyError):
+                continue
+            if any(isinstance(d, dict) and hmac.compare_digest(str(d.get("hash") or ""), h) for d in mine.get("devices") or []):
+                return a["name"]
+        return None
+
+    guard = Guard(app, settings.access_key, hosts, remote,
+                  signed_in=None if accounts is None else lambda: session["user"] is not None,
+                  paired_with=None if accounts is None else paired_with)
     return guard
 
 
-def data_folder_for(settings: Settings, home: Path) -> Any:
+def suggested_name() -> str:
+    """The computer's name for this person, offered when the first account is made."""
+    import getpass
+    try:
+        return getpass.getuser()[:40]
+    except Exception:
+        return ""
+
+
+def data_folder_for(settings: Settings, home: Path, default: Optional[Path] = None) -> Any:
     """The data folder the user chose in Settings, if Kelvin can write there now; otherwise the default, and why."""
-    default = home / "virtual-lab"
+    default = default or home / "virtual-lab"
     chosen = settings.get("data_dir")
     if not chosen:
         return default, None
@@ -1434,6 +1655,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--lab", help="lab config YAML using sim:// instruments (default: the built-in virtual lab)")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--no-setup", action="store_true", help="do not look for connected instruments on start")
+    ap.add_argument("--no-accounts", action="store_true",
+                    help="one person, no sign-in (also the case with --data-dir)")
     args = ap.parse_args(argv)
 
     settings = Settings(args.settings)
@@ -1446,14 +1669,22 @@ def main(argv: Optional[List[str]] = None) -> None:
     else:   # the user's lab.yaml next to the settings, if they have one; otherwise the virtual lab
         lab, envelope, info = open_home_lab(Path(args.settings).parent, settings.get("lab") or "auto", args.speed)
     home = Path(args.settings).parent
-    data_dir, problem = (Path(args.data_dir), None) if args.data_dir else data_folder_for(settings, home)
+    accounts = None if (args.no_accounts or args.data_dir) else Accounts(home)   # people sign in (accounts.py)
+    if accounts is not None:
+        data_dir, problem = home / "lab", None   # until someone signs in
+    else:
+        data_dir, problem = (Path(args.data_dir), None) if args.data_dir else data_folder_for(settings, home)
     runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), data_dir, envelope)
     runtime.data_problem = problem
     if info:
         runtime.lab_info = info
-    store = ChatStore(Path(args.data_dir or home / "virtual-lab") / "chats")
+    if accounts is not None:
+        store = ChatStore(home / "lab" / "chats", create=False)
+    else:
+        store = ChatStore(Path(args.data_dir or home / "virtual-lab") / "chats")
     hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)
-    app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts, auto_setup=not (args.no_setup or args.lab))
+    app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts, auto_setup=not (args.no_setup or args.lab),
+                     accounts=accounts)
     url = "http://127.0.0.1:%d/#%s" % (args.port, settings.access_key)
     print("Kelvin portal: %s" % url, file=sys.stderr, flush=True)
     if not args.no_browser:
