@@ -107,6 +107,7 @@ def test_an_m2_laser_tunes_and_reads_through_the_gate(tmp_path):
     assert lab.read("ti", "etalon_state") == "off"
     assert gate.raw("ti", "SET gpio_output output=1").action == "refused"  # raw hardware outputs: blocked
     assert gate.raw("ti", "GET poll_move_wave_t#current_wavelength|wavelength").value == "795.5"
+    assert gate.get("ti", "tuning_wavelength").value == pytest.approx(795.5)
     with pytest.raises(AdapterError, match="acts on the laser"):
         backend.query("GET tune_etalon")                                  # a GET never sends an op that acts
     with pytest.raises(AdapterError, match="operation not recognised"):
