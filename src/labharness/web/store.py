@@ -30,7 +30,15 @@ MAX_NOTE = 300
 MAX_NOTES = 50          # per project
 MAX_GLOBAL_NOTES = 40
 MAX_PAPERS = 200        # on a project's reading list
+MAX_DEVICES = 200       # samples per project
+MAX_SUMMARY = 6000      # the summary at the top of a project's master report
+GENERAL = "general"     # the workspace of runs and devices outside every project
 NOTE_KINDS = PROJECT_KINDS
+
+
+def _label(text: Any) -> str:
+    """A short one-line label that may be empty (a device's name or material)."""
+    return " ".join(str(text or "").split())[:MAX_NAME]
 
 
 def _name(name: Any) -> str:
@@ -148,10 +156,15 @@ class ChatStore:
             p.setdefault("notes", [])
             p.setdefault("papers", [])
             p.setdefault("rules", {"providers": None, "literature": True})
+            p.setdefault("devices", [])
+            p.setdefault("summary", "")
         known = {p["id"] for p in projects}
         assign = {c: p for c, p in (data.get("assign") or {}).items() if p in known}
         notes = [n for n in data.get("global_notes") or [] if isinstance(n, dict) and n.get("id") and n.get("text")]
-        return {"projects": projects, "assign": assign, "global_notes": notes}
+        general = data.get("general") if isinstance(data.get("general"), dict) else {}
+        general.setdefault("devices", [])
+        general.setdefault("summary", "")
+        return {"projects": projects, "assign": assign, "global_notes": notes, "general": general}
 
     def _write_index(self, index: Dict[str, Any]) -> None:
         tmp = self._index_path.with_suffix(".tmp")
@@ -324,6 +337,76 @@ class ChatStore:
                 index["assign"][chat_id] = project_id
             else:
                 index["assign"].pop(chat_id, None)
+            self._write_index(index)
+
+    # ------------------------------------------------------------------ devices (samples) and the master report
+
+    def _workspace(self, index: Dict[str, Any], project_id: Optional[str]) -> Dict[str, Any]:
+        """A project, or the General workspace (project_id None or "general") for work outside every project."""
+        return index["general"] if project_id in (None, "", GENERAL) else self._find(index, project_id)
+
+    def devices(self, project_id: Optional[str]) -> List[Dict[str, Any]]:
+        return list(self._workspace(self._read_index(), project_id)["devices"])
+
+    def find_device(self, project_id: Optional[str], ref: Any) -> Dict[str, Any]:
+        """A device by its id or its name (any case)."""
+        ref = str(ref or "").strip()
+        for d in self.devices(project_id):
+            if d["id"] == ref or d["name"].lower() == ref.lower():
+                return d
+        raise KeyError("no device %r here (have: %s)" % (ref, ", ".join(d["name"] for d in self.devices(project_id))
+                                                         or "none yet"))
+
+    def add_device(self, project_id: Optional[str], name: Any, material: Any = "", description: Any = "") -> Dict[str, Any]:
+        """A sample measured in this project, e.g. "D3" on a graphene chip."""
+        name = _label(name)
+        if not name:
+            raise ValueError("Give the device a name, such as D3 or Chip 2 / Hall bar A.")
+        with self._lock:
+            index = self._read_index()
+            devices = self._workspace(index, project_id)["devices"]
+            if any(d["name"].lower() == name.lower() for d in devices):
+                raise ValueError("There is already a device called %s here." % name)
+            if len(devices) >= MAX_DEVICES:
+                raise ValueError("This project already has %d devices; retire old ones first." % MAX_DEVICES)
+            device = {"id": "d" + secrets.token_hex(4), "name": name, "material": _label(material),
+                      "description": str(description or "").strip()[:MAX_INSTRUCTIONS], "created": time.time(),
+                      "retired": False}
+            devices.append(device)
+            self._write_index(index)
+        return device
+
+    def update_device(self, project_id: Optional[str], device_id: str, **fields: Any) -> Dict[str, Any]:
+        with self._lock:
+            index = self._read_index()
+            devices = self._workspace(index, project_id)["devices"]
+            device = next((d for d in devices if d["id"] == device_id), None)
+            if device is None:
+                raise KeyError("no device %r" % device_id)
+            if fields.get("name") is not None:
+                name = _label(fields["name"])
+                if not name:
+                    raise ValueError("A device needs a name.")
+                if any(d["name"].lower() == name.lower() and d["id"] != device_id for d in devices):
+                    raise ValueError("There is already a device called %s here." % name)
+                device["name"] = name
+            if fields.get("material") is not None:
+                device["material"] = _label(fields["material"])
+            if fields.get("description") is not None:
+                device["description"] = str(fields["description"]).strip()[:MAX_INSTRUCTIONS]
+            if fields.get("retired") is not None:
+                device["retired"] = bool(fields["retired"])
+            self._write_index(index)
+            return device
+
+    def summary_of(self, project_id: Optional[str]) -> str:
+        return self._workspace(self._read_index(), project_id).get("summary") or ""
+
+    def set_summary(self, project_id: Optional[str], text: Any) -> None:
+        """The words at the top of the project's master report; empty means Kelvin's summary from the data."""
+        with self._lock:
+            index = self._read_index()
+            self._workspace(index, project_id)["summary"] = str(text or "").strip()[:MAX_SUMMARY]
             self._write_index(index)
 
     @staticmethod

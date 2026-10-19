@@ -708,6 +708,13 @@ body.resizing .plot-svg { pointer-events: none; }
 .run-tab-x svg { width: 13px; height: 13px; }
 .run-tab:hover .run-tab-x, .run-tab.on .run-tab-x { opacity: 1; }
 .run-tab-x:hover { background: var(--active); color: var(--text); }
+.mount-select { width: 100%; margin: 2px 0 4px; }
+.mount-hint { display: block; margin-bottom: 10px; }
+.report-library { display: grid; gap: 10px; max-height: 300px; overflow-y: auto; }
+.lib-project { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; display: grid; gap: 4px; background: var(--raised); }
+.lib-head { display: flex; align-items: center; gap: 8px; }
+.lib-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.lib-label { min-width: 140px; color: var(--text-2); }
 .q-badge { margin-left: 6px; background: var(--accent-soft); color: var(--text); }
 #open-queue.on { background: var(--active); }
 #open-queue.live .q-badge { background: var(--accent); color: #fff; }

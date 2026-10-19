@@ -142,6 +142,12 @@ def role_of(request: Request) -> str:
     return (request.scope.get("kelvin") or {}).get("role") or "owner"
 
 
+SUMMARY_SYSTEM = ("You write the opening of a physics project's master report: two or three short paragraphs "
+                  "saying what the project is about, what has been measured on which samples, what was found "
+                  "(with the numbers given), and what comes next. Use only the facts given; never invent results "
+                  "or references. Plain prose, no headings, no lists.")
+
+
 def open_path(path: Path) -> None:
     """Open a file with the program the user has for it."""
     if sys.platform.startswith("win"):
@@ -158,6 +164,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                auto_setup: bool = False) -> Any:
     signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo, signin), settings)
+    runtime.project_info = agent.project_info            # reports: names, devices, notes, reading lists
+    runtime.project_chat_runs = agent.project_chat_runs
+    runtime.project_ids = lambda: [None] + [p["id"] for p in store.projects()]
     remote = Remote(settings)
     guard: Any = None
     runtime.cards_dir = Path(settings.path).parent / "cards"
@@ -209,6 +218,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         runtime.literature.openalex_key = settings.get("openalex_api_key") or ""
         runtime.scan_network = settings.get("scan_network") != "off"   # scans also look on the local network
         runtime.auto_report = settings.get("auto_report") or "both"     # a report after every run and queue
+        runtime.report_kinds = set(settings.report_kinds)                # scan, device and project reports
 
     def configure_notifications() -> None:
         try:
@@ -347,6 +357,118 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(404, e.args[0])
         except ValueError as e:
             return error(400, str(e))
+
+    # ------------------------------------------------------------------ devices (samples) and master reports
+
+    def project_key(request: Request) -> Optional[str]:
+        pid = request.path_params["project_id"]
+        return None if pid == "general" else pid
+
+    async def devices_view(request: Request) -> Response:
+        """GET: a project's devices ("general" for work outside projects). POST {name, material, description}."""
+        pid = project_key(request)
+        try:
+            if request.method == "POST":
+                body = await request.json()
+                store.add_device(pid, body.get("name"), body.get("material") or "", body.get("description") or "")
+            folder = runtime.project_folder(pid)
+            master = [folder.name + "/" + p.name for p in sorted(folder.glob("*_master.*"))] if folder.is_dir() else []
+            return JSONResponse({"devices": store.devices(pid), "summary": store.summary_of(pid),
+                                 "folder": folder.name, "master": master})
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ValueError as e:
+            return error(400, str(e))
+
+    async def device_view(request: Request) -> Response:
+        """PATCH {name, material, description, retired}."""
+        try:
+            body = await request.json()
+            d = store.update_device(project_key(request), request.path_params["device_id"],
+                                    **{k: body.get(k) for k in ("name", "material", "description", "retired")})
+            return JSONResponse(d)
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ValueError as e:
+            return error(400, str(e))
+
+    async def summary_view(request: Request) -> Response:
+        """PUT {text}: the words that open the project's master report (empty: Kelvin's summary from the data).
+        POST {model}: a model writes it from the project's scans and notes, if the project's rules allow that model."""
+        pid = project_key(request)
+        try:
+            body = await request.json()
+            if request.method == "PUT":
+                store.set_summary(pid, body.get("text") or "")
+                return JSONResponse({"summary": store.summary_of(pid)})
+            key = str(body.get("model") or settings.get("default_model") or "")
+            rules = store.project(pid).get("rules") if pid else None
+            if not key or not rulebook.allows(rulebook.merge(None, rules), key):
+                return error(400, "Choose a model this project's rules allow.")
+            provider, model_id = agent.provider_for(key)
+            text = await asyncio.wait_for(review.ask(provider, model_id, SUMMARY_SYSTEM,
+                                                     await asyncio.to_thread(summary_prompt, pid)), 180)
+            store.set_summary(pid, text.strip())
+            return JSONResponse({"summary": store.summary_of(pid), "model": key})
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ValueError as e:
+            return error(400, str(e))
+        except asyncio.TimeoutError:
+            return error(504, "The model did not answer within 3 minutes.")
+
+    def summary_prompt(pid: Optional[str]) -> str:
+        from ..reports import kinds
+        info = agent.project_info(pid)
+        owners = runtime._run_owners()
+        ds = [d for d in runtime._digests() if owners.get(d.run_id) == pid]
+        lines = ["Project: %s" % info["name"],
+                 "Devices: " + ("; ".join("%s (%s) %s" % (d["name"], d.get("material") or "", d.get("description") or "")
+                                          for d in info["devices"]) or "none")]
+        lines += ["Note (%s): %s" % (k, t) for k, t in info["notes"]]
+        for d in sorted(ds, key=lambda d: d.started)[-60:]:
+            lines.append("%s %s%s [%s]: %s %s" % (d.day, d.plan, " on " + d.device_name if d.device_name else "",
+                                                   d.status, kinds._first_sentence(d.assessment), d.key_result()))
+        return "\n".join(lines)
+
+    async def mount_view(request: Request) -> Response:
+        """GET: the mounted sample and every project's devices to choose from. POST {project, device} mounts one
+        (a person's choice); POST {} records that nothing is mounted."""
+        if request.method == "POST":
+            body = await request.json()
+            pid = body.get("project") or None
+            try:
+                if body.get("device"):
+                    runtime.mount(pid, store.find_device(pid, body["device"]), by="human")
+                else:
+                    runtime.unmount(by="human")
+            except KeyError as e:
+                return error(404, e.args[0])
+        choices = [{"project": None, "name": "General", "devices": store.devices(None)}] + \
+            [{"project": p["id"], "name": p["name"], "devices": p.get("devices") or []} for p in store.projects()]
+        return JSONResponse({"mounted": runtime.mounted or None, "choices": choices})
+
+    async def reports_tree(request: Request) -> Response:
+        return JSONResponse(dict(runtime.reports_tree(), folder=str(runtime.reports_dir)))
+
+    async def reports_open_folder(request: Request) -> Response:
+        runtime.reports_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            open_path(runtime.reports_dir)
+        except OSError as e:
+            return error(500, "Could not open it: %s" % e)
+        return JSONResponse({"ok": True})
+
+    async def reports_refresh(request: Request) -> Response:
+        """POST {project}: rewrite a project's master and device reports now ("general" or none: General)."""
+        body = await request.json()
+        pid = body.get("project")
+        pid = None if pid in (None, "", "general") else str(pid)
+        try:
+            written = await asyncio.to_thread(runtime.refresh_reports, [pid])
+        except Exception as e:
+            return error(500, "Could not write the reports: %s" % e)
+        return JSONResponse({"written": written})
 
     async def paper(request: Request) -> Response:
         try:
@@ -1230,6 +1352,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/projects/{project_id}", project, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/projects/{project_id}/notes/{note_id}", note, methods=["DELETE"]),
         Route("/api/projects/{project_id}/papers/{paper_id}", paper, methods=["DELETE"]),
+        Route("/api/projects/{project_id}/devices", devices_view, methods=["GET", "POST"]),
+        Route("/api/projects/{project_id}/devices/{device_id}", device_view, methods=["PATCH"]),
+        Route("/api/projects/{project_id}/summary", summary_view, methods=["PUT", "POST"]),
+        Route("/api/mount", mount_view, methods=["GET", "POST"]),
         Route("/api/memory", memory_view),
         Route("/api/memory/notes/{note_id}", memory_note, methods=["DELETE"]),
         Route("/api/stop", stop, methods=["POST"]),
@@ -1238,8 +1364,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/lab", lab_view, methods=["GET", "POST"]),
         Route("/api/reports", reports_view, methods=["GET", "POST"]),
-        Route("/api/reports/{name}", report_file),
-        Route("/api/reports/{name}/open", report_open, methods=["POST"]),
+        Route("/api/reports/tree", reports_tree),
+        Route("/api/reports/refresh", reports_refresh, methods=["POST"]),
+        Route("/api/reports/open-folder", reports_open_folder, methods=["POST"]),
+        Route("/api/reports/{name:path}/open", report_open, methods=["POST"]),
+        Route("/api/reports/{name:path}", report_file),
         Route("/api/watches", watches_view, methods=["GET", "POST"]),
         Route("/api/watches/{watch_id}", watch_view, methods=["DELETE"]),
         Route("/api/alarms/{alarm_id}/ack", alarm_ack, methods=["POST"]),

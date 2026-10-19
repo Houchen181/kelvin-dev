@@ -49,7 +49,8 @@ Every run is saved as it is measured, with nothing to click. It gets its own fol
 - `data.csv`: the same points as a table (every axis and scalar reading), for Origin, MATLAB, Python or Excel. Each trace reading gets its own `<reading>.csv` with `i, x, value`, where `i` is the point's row in `data.csv`.
 - `meta.json`: status, points, duration and warnings.
 - `analysis.json`: the automatic fit and assessment.
-- `report.pdf` and `report.pptx`: the run's report, written as soon as the run ends (see [Reports](#reports)).
+- `report.pdf` and `report.pptx`: the scan report, written as soon as the run ends (see [Reports](#reports)).
+- In `meta.json`, the run's **project** and **device** (the sample), which the device and master reports use.
 
 Next to the run folders sit `events.jsonl`, the lab record of every command, reading, approval, refusal and alarm with who did it, and `reports/`.
 
@@ -69,22 +70,48 @@ Next to the run folders sit `events.jsonl`, the lab record of every command, rea
 
 ## Reports
 
-Kelvin writes up runs as a **PDF** or as **PowerPoint slides**, to look back on, review with your advisor, or bring to group meeting. A report has:
-- an opening summary in your words (or Kelvin's, when you ask it in a chat);
-- each run's plots, with the fitted curves dashed;
-- the results with uncertainties, and Kelvin's assessment and suggested next step;
-- what was swept and set up, and every instrument's state at the start;
-- drives the run left away from safe, the plan itself, and the approvals and alarms during the run;
-- a lab log of the period;
-- for a project, the project's notes (decisions, procedures, instrument quirks, results).
+Kelvin keeps three kinds of report up to date by itself, following **project → device (sample) → scan**. Each is a PDF and a PowerPoint deck with the same numbered sections every time, so you always find things in the same place. They are built from what Kelvin already keeps (run folders, the lab record, the project's notes and reading list), with no model call, so they never touch an instrument and can be written while a plan runs.
 
-Kelvin builds the report from what it already keeps (run folders and the event log), so it never touches an instrument and can run while a plan runs.
+| Report | Covers | Sections |
+|---|---|---|
+| **Scan report** | one run | 1 Result (assessment, fitted values with uncertainties, next step) · 2 Plots with fits · 3 Method · 4 Conditions at the start · 5 Approvals and alarms · 6 Appendix (plan and files) |
+| **Device report** | one sample, all its scans | 1 The device (material, geometry, contacts) · 2 Mount history · 3 Results by measurement · 4 Trends across repeated scans · 5 Ranges explored · 6 Problems · 7 Scan index |
+| **Master report** | the whole project | 1 Summary · 2 Goals and decisions (project notes) · 3 Devices compared · 4 Main results and figures · 5 Timeline · 6 Open questions and issues · 7 References · 8 Index |
 
-**Made automatically.** Every run that finishes or is stopped gets its report in its own folder, `report.pdf` and `report.pptx`, a moment after it ends. When a queue ends or pauses, one report of all the runs it measured goes to `reports/`. In the Runs pane, a finished run shows **Report (PDF)**, **Slides**, **Data (CSV)** and **Open folder**. **Settings → Reports** chooses PDF, PowerPoint or both (the default), or **Only when I ask**; the CSV data is always written. A report that can't be written never fails the run; the lab record notes it.
+A section with nothing to show yet still appears, with a line saying so.
 
-Ask for another report when you want a different selection or your own words:
+**Where they go:**
 
-- **In a chat:** "make a report of today's runs for my advisor". Kelvin's `make_report` tool covers the runs started in this conversation, or in all of the project's conversations, unless you name runs, a day, or the last N. The reply shows the files with **Open** and **Download**.
-- **In the Runs pane:** **Report…** picks this run, the project's or chat's runs, today's runs, or the last five.
+```
+<data folder>/
+  runs/<run_id>/report.pdf, report.pptx    each scan's report, next to its data (data.csv, ...)
+  reports/
+    <project>/
+      <project>_master.pdf / .pptx          the master report, always the latest
+      devices/<device>.pdf / .pptx          one per sample, always the latest
+      history/2026-10-19_master.pdf         a dated copy for each day it changed
+      index.csv                             every scan: date, device, measurement, status, key result, folder
+    queues/                                 a report of each queue's runs
+    custom/                                 reports you ask for
+```
 
-Reports are saved in the `reports` folder of your data folder, next to the run folders. Slides are 16:9; the plots are native shapes and the results native tables, so you can edit them in PowerPoint, Keynote or Google Slides. Neither format needs extra software to write. Characters that the standard PDF fonts can't show are spelled out (Ω becomes "Ohm").
+Work outside every project goes to a **General** project.
+
+**When they are written:**
+- **Scan report:** as soon as the run finishes or is stopped.
+- **Device and master reports:** a little after each scan of that device or project (about 20 s, so a queue of quick scans rewrites them once). **Update now** in **Reports** or in **Project settings** rewrites them at once.
+
+**Devices.** A device is a sample you measure, such as Hall bar D3 or an NV diamond.
+- **The list:** each project has one, in **Project settings → Devices** (name, material, description). Retire a device you no longer measure.
+- **Mounting:** in the Lab panel, **Sample** shows which device is in the setup now. Choose another when you change samples (the change goes into the lab record), or use **New device…**. Kelvin can do the same when you tell it in a chat ("I just mounted D3").
+- **Which device a scan belongs to:** every scan records its device and project. With nothing mounted, a scan belongs to the project of the chat that started it. A plan can name another device on the same chip with `device: D4`.
+
+**The master report's opening.** By default it is a summary of the data: how many scans, on which devices, and the latest result. Write your own in **Project settings → Master report**, or press **Write the opening with Kelvin**. Kelvin writes it from the project's scans and notes, if the project's rules allow your model. Kelvin uses that opening until you change it, then the summary of the data follows.
+
+**Reports of runs you choose.** For a different selection or your own words:
+- **In a chat:** "make a report of today's runs for my advisor". Kelvin's `make_report` covers the runs started in this conversation, or in all of the project's conversations, unless you name runs, a day, or the last N. It also rewrites a master or device report on request (`kind` project or device).
+- **In the Runs pane:** **Report…** opens the library of every report above, and below it makes a report of this run, the project's or chat's runs, today's runs, or the last five. These go to `reports/custom/`.
+
+**Settings → Reports** chooses PDF, PowerPoint or both (the default), or **Only when I ask**, and which of the three kinds Kelvin keeps up to date. The CSV data is always written. A report that can't be written never fails the run; the lab record notes it.
+
+Slides are 16:9; the plots are native shapes and the results native tables, so you can edit them in PowerPoint, Keynote or Google Slides. Neither format needs extra software to write. Characters that the standard PDF fonts can't show are spelled out (Ω becomes "Ohm").

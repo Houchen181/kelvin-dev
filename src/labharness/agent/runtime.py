@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
@@ -28,9 +28,17 @@ from ..notify import Notifier
 from ..plans import Plan, PlanError, load_plan
 from ..scanqueue import Item, ScanQueue, load_named, load_step, parse_item, save_named, saved_queues
 from ..reports import Collector, pick_runs, write_pdf, write_pptx
+from ..reports import kinds as report_kinds
+from ..reports.document import write_document_pdf, write_document_pptx
 from ..yamlio import load_yaml
 
 MAX_WAIT_S = 3600
+
+
+def default_project_info(project_id: Optional[str]) -> Dict[str, Any]:
+    """Without the portal there are no projects: everything is the General workspace."""
+    return {"id": project_id, "name": "General" if not project_id else project_id, "devices": [], "notes": [],
+            "references": [], "summary": "", "private": False}
 
 
 def tail_events(path: Path, n: int) -> List[Dict[str, Any]]:
@@ -139,6 +147,17 @@ class LabRuntime:
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
         self.queue = ScanQueue(self.data_dir / "queue.json")   # scans lined up to run one after another
         self.auto_report = "both"   # after each run (in its folder) and each queue (in reports/): both, pdf, pptx, off
+        self.mounted: Dict[str, Any] = self._load_mounted()   # the sample in the setup now (project, device, since)
+        self.attribution: Dict[str, Optional[str]] = {}       # the project of the chat whose turn this is (portal)
+        # what Kelvin knows about a project (name, devices, notes, references, summary); the portal sets this
+        self.project_info: Callable[[Optional[str]], Dict[str, Any]] = default_project_info
+        self.project_ids: Callable[[], List[Optional[str]]] = lambda: [None]   # None is the General workspace
+        self.project_chat_runs: Callable[[Optional[str]], List[str]] = lambda pid: []   # runs its chats started
+        self.report_kinds = {"scan", "device", "project"}   # which reports Kelvin keeps up to date by itself
+        self.report_delay = 20.0     # seconds after a run before its device and master reports are rewritten
+        self._dirty_runs: set = set()
+        self._report_timer: Optional[threading.Timer] = None
+        self._report_lock = threading.Lock()
         self._queue_thread: Optional[threading.Thread] = None
         self.monitor = self._new_monitor()
         subscribe = getattr(approver, "subscribe", None)
@@ -441,7 +460,7 @@ class LabRuntime:
                 plan = self._plan(plan_text)
             except PlanError as e:
                 return "invalid plan: %s" % e
-            report = self.engine.run(plan)
+            report = self.engine.run(plan, meta=self._attribute(plan))
             made = self._auto_report(report.run_id)
             if report.run_id:
                 summary = (report.analysis or {}).get("assessment") or report.message
@@ -562,6 +581,49 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ the scan queue
 
+    # ------------------------------------------------------------------ the sample in the setup
+
+    def _load_mounted(self) -> Dict[str, Any]:
+        try:
+            data = json.loads((self.data_dir / "mounted.json").read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) and data.get("device_name") else {}
+        except (OSError, ValueError):
+            return {}
+
+    def mount(self, project: Optional[str], device: Dict[str, Any], by: str = "human") -> Dict[str, Any]:
+        """Record which sample is in the setup now. Every run from here on belongs to it (and to its project)."""
+        info = self.project_info(project)
+        self.mounted = {"project": project or None, "project_name": info.get("name") or "General",
+                        "device": device.get("id"), "device_name": device.get("name"),
+                        "since": datetime.now().isoformat(timespec="seconds"), "by": by}
+        (self.data_dir / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
+        self.gate.log.write("mount", by=by, device=self.mounted["device_name"], project=self.mounted["project_name"])
+        return self.mounted
+
+    def unmount(self, by: str = "human") -> None:
+        if self.mounted:
+            self.gate.log.write("unmount", by=by, device=self.mounted.get("device_name"),
+                                project=self.mounted.get("project_name"))
+        self.mounted = {}
+        try:
+            (self.data_dir / "mounted.json").unlink()
+        except OSError:
+            pass
+
+    def _attribute(self, plan: Plan, project: Optional[str] = None) -> Dict[str, Any]:
+        """Which project and sample a run belongs to: the plan's own device:, else the mounted device, else the
+        project of the chat that started it (or queued it); runs outside every project go to General."""
+        m = self.mounted
+        pid = m.get("project") if m else (project if project is not None else self.attribution.get("project"))
+        info = self.project_info(pid)
+        out = {"project": pid, "project_name": info.get("name") or "General",
+               "device": m.get("device") if m else None, "device_name": m.get("device_name") if m else None}
+        if plan.device:
+            dev = next((d for d in info.get("devices") or []
+                        if d["id"] == plan.device or d["name"].lower() == plan.device.lower()), None)
+            out["device"], out["device_name"] = (dev["id"], dev["name"]) if dev else (None, plan.device)
+        return out
+
     def queue_show(self) -> str:
         return self.queue.text()
 
@@ -600,7 +662,7 @@ class LabRuntime:
             return "not added: %s" % e
         if problems:
             return "not added: " + "; ".join(problems[:5])
-        item = self.queue.add(text, position, note, by)
+        item = self.queue.add(text, position, note, by, project=self.attribution.get("project"))
         pos = self.queue.items.index(item) + 1
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name, position=pos)
         return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self.queue.text())
@@ -789,7 +851,7 @@ class LabRuntime:
         if ran and self.auto_report != "off":   # one report of everything this queue measured, like a lab notebook page
             try:
                 self.report(ran, title="Queue of %s" % datetime.now().strftime("%d %b %Y"), fmt=self.auto_report,
-                            by="kelvin (automatic)")
+                            by="kelvin (automatic)", folder=self.reports_dir / "queues")
             except Exception as e:
                 self.gate.log.write("report_failed", by="kelvin (automatic)", runs=len(ran), error=str(e)[:300])
         if q.state == "idle":
@@ -805,8 +867,9 @@ class LabRuntime:
             try:
                 with self.gate.standing(grants), self.gate.acting_as("queue (started by %s)" % by):
                     if item.kind == "plan":
-                        report = self.engine.run(self._plan(item.text), meta={"queue": {
-                            "item": item.id, "position": position, "note": item.note}})
+                        plan = self._plan(item.text)
+                        report = self.engine.run(plan, meta=dict(self._attribute(plan, item.project), queue={
+                            "item": item.id, "position": position, "note": item.note}))
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
@@ -1168,7 +1231,7 @@ class LabRuntime:
             all(i.simulated for i in self.lab.instruments.values())
         report = Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line).report(
             run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated, references)
-        target = folder or self.reports_dir
+        target = folder or self.reports_dir / "custom"
         target.mkdir(parents=True, exist_ok=True)
         base = name or "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"),
                                   re.sub(r"[^\w-]+", "_", report.title).strip("_")[:48] or "report")
@@ -1176,24 +1239,208 @@ class LabRuntime:
         for f in fmts:
             path = target / ("%s.%s" % (base, f))
             n = write_pdf(report, path) if f == "pdf" else write_pptx(report, path)
-            out.append({"name": path.name, "path": str(path), "size": path.stat().st_size, "format": f,
+            try:
+                shown = path.relative_to(self.reports_dir).as_posix()
+            except ValueError:
+                shown = path.name
+            out.append({"name": shown, "path": str(path), "size": path.stat().st_size, "format": f,
                         "pages" if f == "pdf" else "slides": n})
             if log:   # a run's own automatic report is part of the run, not an event in the lab record
-                self.gate.log.write("report", by=by, name=path.name, runs=len(run_ids))
+                self.gate.log.write("report", by=by, name=shown, runs=len(run_ids))
         return out
 
     def _auto_report(self, run_id: Optional[str]) -> List[str]:
-        """Every finished or stopped run gets its report in its own folder (report.pdf, report.pptx), unless the
-        person switched automatic reports off. A report that cannot be written never fails the run."""
+        """Every finished or stopped run gets its scan report in its own folder (report.pdf, report.pptx), and its
+        device and project reports are rewritten a little later, unless the person switched automatic reports off.
+        A report that cannot be written never fails the run."""
         if not run_id or self.auto_report == "off":
             return []
+        out: List[str] = []
+        if "scan" in self.report_kinds:
+            try:
+                out = self.write_scan_report(run_id)
+            except Exception as e:
+                self.gate.log.write("report_failed", by="kelvin (automatic)", run=run_id, error=str(e)[:300])
+        self._mark_dirty(run_id)
+        return out
+
+    def _formats(self, fmt: Optional[str] = None) -> List[str]:
+        fmt = fmt or (self.auto_report if self.auto_report != "off" else "both")
+        return ["pdf", "pptx"] if fmt == "both" else [fmt]
+
+    def _collector(self) -> Collector:
+        def columns(run_id: str) -> Optional[Dict[str, List[Dict[str, str]]]]:
+            try:
+                return self.engine.columns(self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8")))
+            except Exception:   # the run's instruments are not in this lab any more
+                return None
+        return Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line)
+
+    def _write_doc(self, doc: Any, base: Path, fmt: Optional[str] = None) -> List[str]:
+        base.parent.mkdir(parents=True, exist_ok=True)
+        out = []
+        for f in self._formats(fmt):
+            path = base.with_name(base.name + "." + f)
+            (write_document_pdf if f == "pdf" else write_document_pptx)(doc, path)
+            out.append(path.name)
+        return out
+
+    def write_scan_report(self, run_id: str, fmt: Optional[str] = None) -> List[str]:
+        """The scan report, on its fixed outline, in the run's own folder: report.pdf and/or report.pptx."""
+        d = self._run_dir(run_id)
+        dg = report_kinds.digest(d)
+        if dg is None:
+            raise KeyError("run %s has not finished" % run_id)
+        part = self._collector().run(run_id, self.gate.log.events())
+        files = {p.name for p in d.iterdir() if p.is_file()} | {"report." + f for f in self._formats(fmt)}
+        doc = report_kinds.scan_document(part, dg, files, dg.lab or self.lab.config.name, dg.simulated)
+        return self._write_doc(doc, d / "report", fmt)
+
+    # ------------------------------------------------------------------ device and master reports
+
+    def _mark_dirty(self, run_id: str) -> None:
+        if not ({"device", "project"} & self.report_kinds):
+            return
+        with self._report_lock:
+            self._dirty_runs.add(run_id)
+            if self._report_timer is None:
+                self._report_timer = threading.Timer(self.report_delay, self.flush_reports)
+                self._report_timer.daemon = True
+                self._report_timer.start()
+
+    def flush_reports(self) -> Dict[str, List[str]]:
+        """Rewrite now the device and master reports that new runs have made out of date."""
+        with self._report_lock:
+            runs, self._dirty_runs = set(self._dirty_runs), set()
+            if self._report_timer is not None:
+                self._report_timer.cancel()
+                self._report_timer = None
+        if not runs:
+            return {}
         try:
-            out = self.report([run_id], fmt=self.auto_report, by="kelvin (automatic)", folder=self._run_dir(run_id),
-                              name="report", log=False)
+            owners = self._run_owners()
+            return self.refresh_reports({owners.get(r) for r in runs})
         except Exception as e:
-            self.gate.log.write("report_failed", by="kelvin (automatic)", run=run_id, error=str(e)[:300])
-            return []
-        return [o["name"] for o in out]
+            self.gate.log.write("report_failed", by="kelvin (automatic)", runs=len(runs), error=str(e)[:300])
+            return {}
+
+    def _digests(self) -> List[report_kinds.Digest]:
+        root = self.data_dir / "runs"
+        out = []
+        for d in sorted(root.iterdir()) if root.exists() else []:
+            if d.is_dir():
+                dg = report_kinds.digest(d)
+                if dg is not None:
+                    out.append(dg)
+        return out
+
+    def _run_owners(self, digests: Optional[List[report_kinds.Digest]] = None) -> Dict[str, Optional[str]]:
+        """run id -> project id (None: General). A run records its project; older runs belong to the project of
+        the chat that ran them."""
+        from_chats: Dict[str, Optional[str]] = {}
+        for pid in self.project_ids():
+            for rid in self.project_chat_runs(pid):
+                from_chats.setdefault(rid, pid)
+        return {d.run_id: (d.project if d.attributed else from_chats.get(d.run_id))
+                for d in (digests if digests is not None else self._digests())}
+
+    def project_folder(self, project_id: Optional[str]) -> Path:
+        """reports/<project>/ (General for work outside every project); two projects with one name get their ids."""
+        name = self.project_info(project_id).get("name") if project_id else "General"
+        safe = report_kinds.safe_name(name or "General")
+        clash = [p for p in self.project_ids() if p != project_id and
+                 report_kinds.safe_name(self.project_info(p).get("name") if p else "General") == safe]
+        return self.reports_dir / (safe + ("_" + project_id if clash and project_id else ""))
+
+    def refresh_reports(self, projects: Optional[Iterable[Optional[str]]] = None,
+                        fmt: Optional[str] = None) -> Dict[str, List[str]]:
+        """Rewrite each project's master report, its device reports, index.csv and today's history copy.
+        Returns {project folder name: files written, relative to reports/}."""
+        digests = self._digests()
+        owners = self._run_owners(digests)
+        targets = list(dict.fromkeys(projects)) if projects is not None else list(self.project_ids())
+        events = self.gate.log.events()
+        collector = self._collector()
+        written: Dict[str, List[str]] = {}
+        for pid in targets:
+            info = self.project_info(pid)
+            ds = [d for d in digests if owners.get(d.run_id) == pid]
+            folder = self.project_folder(pid)
+            lab = next((d.lab for d in reversed(ds) if d.lab), self.lab.config.name)
+            simulated = all(d.simulated for d in ds) if ds else all(i.simulated for i in self.lab.instruments.values())
+            files: List[str] = []
+            device_files: Dict[str, str] = {}
+            devices = [dict(d) for d in info.get("devices") or []]
+            known = {d["name"].lower() for d in devices}
+            for name in sorted({d.device_name for d in ds if d.device_name and d.device_name.lower() not in known}):
+                devices.append({"id": None, "name": name, "material": "", "description": ""})   # named only in plans
+            if "device" in self.report_kinds:
+                for dev in devices:
+                    mine = [d for d in ds if (dev.get("id") and d.device == dev["id"]) or
+                            (d.device_name and d.device_name.lower() == dev["name"].lower())]
+                    if dev.get("retired") and not mine:
+                        continue
+                    latest = {}
+                    for plan in {d.plan for d in mine}:
+                        done = [d for d in mine if d.plan == plan and d.ok]
+                        if done:
+                            latest[plan] = collector.run(max(done, key=lambda d: d.started).run_id, events)
+                    doc = report_kinds.device_document(dev, info.get("name") or "General", mine, latest,
+                                                       self._mounts(events, dev["name"]), lab, simulated)
+                    base = folder / "devices" / report_kinds.safe_name(dev["name"])
+                    names = self._write_doc(doc, base, fmt)
+                    device_files[dev["name"]] = "devices/" + names[0]
+                    files += ["devices/" + n for n in names]
+            if "project" in self.report_kinds:
+                latest_any = {}
+                for plan in {d.plan for d in ds}:
+                    done = [d for d in ds if d.plan == plan and d.ok]
+                    if done:
+                        last = max(done, key=lambda d: d.started)
+                        latest_any[plan] = (collector.run(last.run_id, events), last)
+                doc = report_kinds.project_document(dict(info, devices=devices), ds, latest_any, device_files, lab,
+                                                    simulated)
+                base = folder / (report_kinds.safe_name(info.get("name") if pid else "General") + "_master")
+                names = self._write_doc(doc, base, fmt)
+                files += names
+                history = folder / "history"
+                history.mkdir(exist_ok=True)
+                today = datetime.now().strftime("%Y-%m-%d")
+                for n in names:   # one dated copy per day, the last one of the day
+                    (history / ("%s_master%s" % (today, Path(n).suffix))).write_bytes((folder / n).read_bytes())
+            folder.mkdir(parents=True, exist_ok=True)
+            report_kinds.write_index_csv(folder / "index.csv", ds)
+            written[folder.name] = files + ["index.csv"]
+        return written
+
+    @staticmethod
+    def _mounts(events: List[Dict[str, Any]], device: str) -> List[Tuple[str, str]]:
+        out = []
+        for e in events:
+            if e.get("type") in ("mount", "unmount") and str(e.get("device", "")).lower() == device.lower():
+                out.append((str(e.get("wall", ""))[:16].replace("T", " "),
+                            "%s by %s" % ("mounted" if e["type"] == "mount" else "taken out", e.get("by", "?"))))
+        return out
+
+    def reports_tree(self) -> Dict[str, Any]:
+        """The reports folder as the Reports browser shows it: projects (master, devices, history), queues, and
+        reports made on request (custom, and any older ones at the top)."""
+        root = self.reports_dir
+        rel = lambda p: p.relative_to(root).as_posix()   # noqa: E731
+        files = lambda d: sorted((p for p in d.iterdir() if p.suffix in (".pdf", ".pptx")),
+                                 key=lambda p: p.stat().st_mtime, reverse=True) if d.is_dir() else []   # noqa: E731
+        projects = []
+        ids = {self.project_folder(pid).name: pid or "general" for pid in self.project_ids()}
+        for d in sorted(p for p in root.iterdir() if p.is_dir() and p.name not in ("queues", "custom")) \
+                if root.is_dir() else []:
+            pid = ids.get(d.name)
+            name = (self.project_info(pid).get("name") if pid and pid != "general" else None) or d.name.replace("_", " ")
+            projects.append({"name": name, "folder": d.name, "project": pid,
+                             "master": [rel(p) for p in files(d)],
+                             "devices": [rel(p) for p in sorted(files(d / "devices"), key=lambda p: p.name)],
+                             "history": [rel(p) for p in files(d / "history")][:20]})
+        return {"projects": projects, "queues": [rel(p) for p in files(root / "queues")][:30],
+                "custom": [rel(p) for p in files(root / "custom") + files(root)][:40]}
 
     def run_file(self, run_id: str, name: str) -> Path:
         """A file a person may open from a run's folder: its reports and its CSV data. KeyError otherwise."""
@@ -1218,8 +1465,38 @@ class LabRuntime:
 
     def make_report(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
                     summary: str = "", fmt: str = "pdf", notes: Any = (), by: str = "agent",
-                    references: Any = ()) -> str:
-        """The make_report tool's answer. With nothing chosen: today's runs, or else the latest run."""
+                    references: Any = (), kind: str = "runs", device: str = "",
+                    project: Optional[str] = None) -> str:
+        """The make_report tool's answer. kind runs (default): the runs chosen, or today's, or else the latest.
+        kind project: the project's master report, rewritten now; device: that sample's report; scan: a run's own."""
+        if kind in ("project", "device"):
+            if fmt not in ("pdf", "pptx", "both"):
+                return "no report: format must be pdf, pptx or both"
+            try:
+                written = self.refresh_reports([project], fmt)
+            except Exception as e:
+                return "no report: %s" % e
+            folder = self.project_folder(project).name
+            files = written.get(folder, [])
+            if kind == "device":
+                want = report_kinds.safe_name(device).lower()
+                files = [f for f in files if f.startswith("devices/") and Path(f).stem.lower() == want]
+                if not files:
+                    return "no report: no device %r here (devices: %s)" % (device, ", ".join(
+                        d["name"] for d in self.project_info(project).get("devices") or []) or "none yet")
+            else:
+                files = [f for f in files if not f.startswith("devices/") and f != "index.csv"]
+            lines = ["report: %s/%s" % (folder, f) for f in files]
+            lines.append("rewritten in %s; it is kept up to date after every scan" % (self.reports_dir / folder))
+            return "\n".join(lines)
+        if kind == "scan":
+            try:
+                ids = self.pick_runs(runs, day, last) if (runs or day or last) else self.pick_runs(last=1)
+                made = [(r, self.write_scan_report(r, fmt)) for r in ids[-5:]]
+            except (KeyError, ValueError, OSError) as e:
+                return "no report: %s" % (e.args[0] if e.args else e)
+            return "\n".join("scan report: runs/%s/%s (open it from the run in the Runs pane)" % (r, f)
+                             for r, files in made for f in files) or "no report: no runs yet"
         try:
             ids = self.pick_runs(runs, day, last)
             if not (runs or day or last):
@@ -1239,16 +1516,23 @@ class LabRuntime:
         return "\n".join(lines)
 
     def reports_index(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Reports made on request or by a queue, newest first (projects' reports are in reports_tree)."""
         d = self.reports_dir
-        files = sorted((p for p in d.iterdir() if p.suffix in (".pdf", ".pptx")), key=lambda p: p.name, reverse=True) \
-            if d.exists() else []
-        return [{"name": p.name, "size": p.stat().st_size, "format": p.suffix[1:]} for p in files[:limit]]
+        files = [p for sub in (d / "custom", d / "queues", d) if sub.is_dir() for p in sub.iterdir()
+                 if p.suffix in (".pdf", ".pptx")]
+        files.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+        return [{"name": p.relative_to(d).as_posix(), "size": p.stat().st_size, "format": p.suffix[1:]}
+                for p in files[:limit]]
 
     def report_path(self, name: str) -> Path:
-        """A report file by name; KeyError for anything that is not one."""
-        if not re.fullmatch(r"[\w.-]+\.(pdf|pptx)", name or "") or ".." in name:
+        """A report file by its path inside reports/ (e.g. custom/x.pdf, Graphene/devices/D3.pdf); KeyError for
+        anything that is not one."""
+        name = name or ""
+        parts = name.split("/")
+        if not re.fullmatch(r"[\w.-]+\.(pdf|pptx)", parts[-1]) or len(parts) > 3 or \
+                any(not re.fullmatch(r"[\w.-]+", p) or p.startswith(".") for p in parts):
             raise KeyError("no report %r" % name)
-        path = self.reports_dir / name
+        path = self.reports_dir.joinpath(*parts)
         if not path.is_file():
             raise KeyError("no report %r" % name)
         return path
@@ -1391,6 +1675,7 @@ class LabRuntime:
         return {"lab": self.lab.config.name,
                 "simulated": all(i.simulated for i in self.lab.instruments.values()),
                 "busy": self.busy, "pending": pending, "history": history, "status": status, "queue": self.queue_view(),
+                "mounted": self.mounted or None,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
                 "observe_only": self.lab.config.observe_only, "setup": self.setup_status, "survey": self.last_survey,

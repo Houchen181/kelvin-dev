@@ -168,6 +168,10 @@
         safe until you check the limits and unlock them.
         <button id="lab-observe-review" class="link" type="button">Review and unlock…</button>
       </div>
+      <div class="inst-head-row"><h3>Sample</h3><span id="mount-summary" class="inst-summary"></span>
+        <button id="mount-new" class="link soft" type="button">New device…</button></div>
+      <select id="mount-select" class="mount-select" aria-label="The sample in the setup now"></select>
+      <span class="hint mount-hint">Every scan is filed under this device and its project. Its report and the project's master report update after each scan.</span>
       <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span>
         <button id="open-lab-setup" class="link soft" type="button">Set up…</button></div>
       <div class="inst-tools">
@@ -285,7 +289,12 @@
         <option value="pptx">After every run and queue: PowerPoint</option>
         <option value="off">Only when I ask</option>
       </select>
-      <span class="hint">Every run's folder gets its data as data.csv (always) and its report as report.pdf and report.pptx. When a queue ends, one report of all its runs goes to the reports folder.</span>
+      <div class="checks" id="report-kinds">
+        <label class="check"><input type="checkbox" value="scan"> Scan reports (in each run's folder)</label>
+        <label class="check"><input type="checkbox" value="device"> Device reports</label>
+        <label class="check"><input type="checkbox" value="project"> Master reports</label>
+      </div>
+      <span class="hint">Every run's folder gets its data as data.csv (always). The reports folder holds a folder per project, with its master report, a report per device, an index of every scan (index.csv) and a dated copy each day; queues and reports you ask for have their own folders.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Connected instruments</span></div>
@@ -458,14 +467,19 @@
 <dialog id="report-dialog" class="dialog" aria-labelledby="report-dialog-title">
   <form id="report-form" method="dialog">
     <header class="dialog-head">
-      <h2 id="report-dialog-title">Make a report</h2>
+      <h2 id="report-dialog-title">Reports</h2>
       <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">A PDF or slides to look back on or discuss with others: each run's plots with fits, results with uncertainties, conditions and plan, and the approvals and alarms. Kelvin can also write one in a chat ("make a report of today's runs for my advisor").</p>
+    <p class="muted small">Kelvin keeps three kinds of report up to date by itself: each <b>scan</b>'s report in its run folder, each <b>device</b>'s report, and each project's <b>master report</b>. Below them, make a separate report of runs you choose.</p>
     <div class="field">
-      <label for="report-scope">Runs</label>
+      <div class="field-row"><span class="field-label">Library</span><button id="report-folder" class="link soft" type="button">Open folder</button></div>
+      <div id="report-library" class="report-library"></div>
+    </div>
+    <div class="field">
+      <span class="field-label">A report of chosen runs</span>
+      <label for="report-scope" class="hint">Runs</label>
       <select id="report-scope"></select>
     </div>
     <div class="field">
@@ -518,6 +532,17 @@
       <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>
       <ul id="project-notes" class="memory-notes"></ul>
       <span class="hint">Short facts Kelvin saved from this project's conversations. Delete any that are wrong or out of date; a deleted note is gone at once.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Devices</span><span id="devices-count" class="hint"></span></div>
+      <ul id="project-devices" class="memory-notes"></ul>
+      <div class="add-row"><input id="device-name" placeholder="New device, e.g. D3" aria-label="Device name"><input id="device-material" placeholder="Material" aria-label="Material"><button id="device-add" class="btn small" type="button">Add</button></div>
+      <span class="hint">The samples measured in this project. Mount one in the Lab panel before measuring; each gets its own report.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><label class="field-label" for="project-summary">Master report</label><span id="master-files" class="hint"></span></div>
+      <textarea id="project-summary" rows="4" maxlength="6000" spellcheck="true" placeholder="The opening of the master report: what the project is about and what it has found. Leave empty for Kelvin's summary from the data."></textarea>
+      <div class="add-row"><button id="master-open" class="btn small" type="button">Open master report</button><button id="summary-write" class="btn small ghost" type="button">Write the opening with Kelvin</button><button id="master-update" class="link soft" type="button">Update now</button></div>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Reading list</span><span id="papers-count" class="hint"></span></div>

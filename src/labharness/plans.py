@@ -1,6 +1,7 @@
 """Plans: declarative experiments the run engine executes without an LLM turn per point.
 
     plan: gate_sweep
+    device: D3                               # the sample measured (default: the device mounted in the lab)
     preconditions: ["tc.T_sample < 2.5"]
     setup:   { lockin.amplitude: 0.05, smu.output: on }
     sweep:                                   # several keys = nested loops, outer first
@@ -24,7 +25,7 @@ from .conditions import Condition, parse_condition
 from .labconfig import read_yaml
 
 MAX_POINTS = 1_000_000
-_KEYS = {"plan", "description", "requires", "preconditions", "setup", "sweep", "repeat", "time",
+_KEYS = {"plan", "description", "device", "requires", "preconditions", "setup", "sweep", "repeat", "time",
          "settle", "measure", "after", "on_abort"}
 
 
@@ -87,6 +88,7 @@ class Plan:
     after: List[Step] = field(default_factory=list)
     on_abort: Optional[List[Step]] = None
     source: Dict[str, Any] = field(default_factory=dict)
+    device: str = ""                  # the sample this run measures, when it is not the mounted one
 
     @property
     def points(self) -> int:
@@ -265,7 +267,7 @@ def load_plan(source: Any) -> Plan:
 
     plan = Plan(name=name, description=str(data.get("description", "")), preconditions=preconditions,
                 setup=setup, axes=axes, measure=measure, settle=settle, after=after, on_abort=on_abort,
-                source=data)
+                source=data, device=" ".join(str(data.get("device") or "").split())[:60])
     if plan.points > MAX_POINTS:
         errors.append("plan has %d points (max %d)" % (plan.points, MAX_POINTS))
     used = [s.instr for s in plan.all_steps()] + [a.instr for a in plan.instrument_axes] \

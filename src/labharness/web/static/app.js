@@ -735,7 +735,7 @@
 
   // ------------------------------------------------------------------ reports
   function reportNames(content) {
-    return [...String(content || "").matchAll(/^report: ([\w.-]+\.(?:pdf|pptx))/gm)].map((m) => m[1]);
+    return [...String(content || "").matchAll(/^report: ([\w./-]+\.(?:pdf|pptx))/gm)].map((m) => m[1]);
   }
   async function downloadReport(name) {
     try {
@@ -773,6 +773,103 @@
     $("report-files").hidden = true;
     $("report-msg").textContent = "";
     $("report-dialog").showModal();
+    loadLibrary();
+  }
+  // the reports Kelvin keeps: per project its master report, its devices' reports and their history
+  async function loadLibrary() {
+    const box = $("report-library");
+    let t;
+    try { t = await api("/api/reports/tree"); } catch (e) { box.replaceChildren(h("p", { class: "hint" }, e.message)); return; }
+    const kind = (name) => (name.endsWith(".pdf") ? "PDF" : "Slides");
+    const pdfFirst = (names) => [...names].sort((a, b) => (a.endsWith(".pdf") ? 0 : 1) - (b.endsWith(".pdf") ? 0 : 1));
+    const dated = (name) => {   // history/2026-10-19_master.pdf -> Oct 19 PDF
+      const m = name.match(/(\d{4})-(\d{2})-(\d{2})_master\.(pdf|pptx)$/);
+      return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + kind(name) : name;
+    };
+    const link = (name, label) => {
+      const b = h("button", { class: "btn small ghost", type: "button", title: name }, label);
+      b.addEventListener("click", async () => {
+        try { await api("/api/reports/" + encodeURIComponent(name) + "/open", { body: {} }); toast("Opening " + name + "…"); }
+        catch (e) { toast(e.message); }
+      });
+      return b;
+    };
+    const rows = [];
+    for (const p of t.projects) {
+      const update = h("button", { class: "link soft", type: "button", hidden: !p.project }, "Update now");
+      update.addEventListener("click", async () => {
+        update.disabled = true;
+        try { await api("/api/reports/refresh", { body: { project: p.project } }); await loadLibrary(); }
+        catch (e) { toast(e.message); } finally { update.disabled = false; }
+      });
+      const devices = new Map();
+      for (const d of p.devices) {
+        const n = d.split("/").pop().replace(/\.(pdf|pptx)$/, "");
+        if (!devices.has(n)) devices.set(n, []);
+        devices.get(n).push(d);
+      }
+      rows.push(h("div", { class: "lib-project" },
+        h("div", { class: "lib-head" }, h("b", {}, p.name), h("div", { class: "spacer" }), update),
+        h("div", { class: "lib-row" }, h("span", { class: "lib-label" }, "Master report"),
+          ...(p.master.length ? pdfFirst(p.master).map((n) => link(n, kind(n))) : [h("span", { class: "hint" }, "not written yet")])),
+        ...[...devices.entries()].map(([n, files]) => h("div", { class: "lib-row" },
+          h("span", { class: "lib-label" }, "Device " + n.replace(/_/g, " ")), ...pdfFirst(files).map((f) => link(f, kind(f))))),
+        p.history.length ? h("div", { class: "lib-row" }, h("span", { class: "lib-label muted" }, "Earlier versions"),
+          ...pdfFirst(p.history.slice(0, 6)).filter((f) => f.endsWith(".pdf")).slice(0, 3).map((f) => link(f, dated(f)))) : null));
+    }
+    if (t.queues.length) rows.push(h("div", { class: "lib-project" }, h("div", { class: "lib-head" }, h("b", {}, "Queues")),
+      ...t.queues.slice(0, 6).map((n) => h("div", { class: "lib-row" }, h("span", { class: "lib-label" }, n.split("/").pop()), link(n, "Open")))));
+    if (t.custom.length) rows.push(h("div", { class: "lib-project" }, h("div", { class: "lib-head" }, h("b", {}, "Made on request")),
+      ...t.custom.slice(0, 8).map((n) => h("div", { class: "lib-row" }, h("span", { class: "lib-label" }, n.split("/").pop()), link(n, "Open")))));
+    box.replaceChildren(...(rows.length ? rows : [h("p", { class: "hint" },
+      "No reports yet. They appear after the first scan: mount a device in the Lab panel, then measure.")]));
+  }
+  // ------------------------------------------------------------------ the sample in the setup
+  const MOUNT = { choices: [], key: "" };
+  async function loadMount() {
+    let r;
+    try { r = await api("/api/mount"); } catch (e) { return; }
+    MOUNT.choices = r.choices;
+    const sel = $("mount-select");
+    const groups = r.choices.filter((c) => c.devices.some((d) => !d.retired)).map((c) => {
+      const g = document.createElement("optgroup");
+      g.label = c.name;
+      for (const d of c.devices.filter((d) => !d.retired)) g.append(new Option(d.name + (d.material ? " · " + d.material : ""),
+        JSON.stringify([c.project, d.id])));
+      return g;
+    });
+    sel.replaceChildren(new Option(groups.length ? "Nothing mounted" : "No devices yet: add one with New device…", ""), ...groups);
+    showMounted(r.mounted);
+  }
+  function showMounted(m) {
+    const key = m ? JSON.stringify([m.project || null, m.device]) : "";
+    $("mount-summary").textContent = m ? m.device_name + " · " + m.project_name : "nothing mounted";
+    if (key === MOUNT.key) return;
+    MOUNT.key = key;
+    const sel = $("mount-select");
+    if ([...sel.options].some((o) => o.value === key)) sel.value = key;
+    else if (m) loadMount();
+  }
+  async function mountChosen() {
+    const v = $("mount-select").value;
+    const [project, device] = v ? JSON.parse(v) : [null, null];
+    try { const r = await api("/api/mount", { body: device ? { project, device } : {} }); MOUNT.key = "x"; showMounted(r.mounted); }
+    catch (e) { toast(e.message); }
+  }
+  async function newDevice() {
+    const chat = S.chats.find((c) => c.id === S.chatId);
+    const pid = (chat && chat.project) || "general";
+    const where = pid === "general" ? "work outside projects" : projectName(pid);
+    const name = prompt("Name of the new device (sample) in " + where + ", e.g. D3:");
+    if (!name) return;
+    const material = prompt("Its material (optional), e.g. graphene/hBN:") || "";
+    try {
+      const r = await api("/api/projects/" + pid + "/devices", { body: { name, material } });
+      const d = r.devices.find((x) => x.name.toLowerCase() === name.trim().toLowerCase());
+      await api("/api/mount", { body: { project: pid === "general" ? null : pid, device: d.id } });
+      await loadMount();
+      toast(d.name + " is mounted: scans from now on are filed under it.");
+    } catch (e) { toast(e.message); }
   }
   async function makeReport() {
     const fmt = (document.querySelector('input[name="report-format"]:checked') || {}).value || "pdf";
@@ -1311,7 +1408,80 @@
     $("project-msg").textContent = "";
     renderNotes(p);
     renderPapers(p);
+    $("project-summary").value = p.summary || "";
+    renderDevices(p);
     $("project-dialog").showModal();
+    loadProjectReports(p);
+  }
+  async function loadProjectReports(p) {
+    try {
+      const r = await api("/api/projects/" + p.id + "/devices");
+      p.master = r.master;
+      $("master-files").textContent = r.master.length ? "in reports/" + r.folder : "written after the first scan";
+      $("master-open").disabled = !r.master.length;
+    } catch (e) { $("master-files").textContent = ""; }
+  }
+  function renderDevices(p) {
+    const devices = p.devices || [];
+    $("devices-count").textContent = devices.length ? devices.length + (devices.length === 1 ? " device" : " devices") : "";
+    if (!devices.length) {
+      $("project-devices").replaceChildren(h("li", { class: "memory-empty" }, "No devices yet. Add the samples you measure in this project."));
+      return;
+    }
+    $("project-devices").replaceChildren(...devices.map((d) => {
+      const edit = rowButton("pencil", "Describe it", async () => {
+        const text = prompt("Describe " + d.name + ": geometry, contacts, fabrication.", d.description || "");
+        if (text === null) return;
+        try { Object.assign(d, await api("/api/projects/" + p.id + "/devices/" + d.id, { method: "PATCH", body: { description: text } })); renderDevices(p); }
+        catch (e) { $("project-msg").textContent = e.message; }
+      });
+      const retire = h("button", { class: "link soft", type: "button" }, d.retired ? "Restore" : "Retire");
+      retire.addEventListener("click", async () => {
+        try { Object.assign(d, await api("/api/projects/" + p.id + "/devices/" + d.id, { method: "PATCH", body: { retired: !d.retired } })); renderDevices(p); loadMount(); }
+        catch (e) { $("project-msg").textContent = e.message; }
+      });
+      return h("li", { class: "memory-note" + (d.retired ? " muted" : "") }, h("span", { class: "memory-kind" }, d.retired ? "retired" : "device"),
+        h("div", { class: "memory-body" }, h("span", {}, d.name + (d.material ? " · " + d.material : "")),
+          h("span", { class: "memory-meta" }, d.description || "no description yet")), edit, retire);
+    }));
+  }
+  async function addDevice() {
+    const p = editingProject;
+    const name = $("device-name").value.trim();
+    if (!name) { $("project-msg").textContent = "Give the device a name."; return; }
+    try {
+      const r = await api("/api/projects/" + p.id + "/devices", { body: { name, material: $("device-material").value.trim() } });
+      p.devices = r.devices;
+      $("device-name").value = $("device-material").value = "";
+      renderDevices(p);
+      loadMount();
+    } catch (e) { $("project-msg").textContent = e.message; }
+  }
+  async function writeSummary() {
+    const p = editingProject;
+    $("project-msg").textContent = "Kelvin is writing the opening from the project's scans and notes…";
+    $("summary-write").disabled = true;
+    try {
+      const r = await api("/api/projects/" + p.id + "/summary", { method: "POST", body: { model: $("model").value } });
+      $("project-summary").value = r.summary;
+      $("project-msg").textContent = "Written. Edit it if you like, then Save; the master report uses it.";
+    } catch (e) { $("project-msg").textContent = e.message; } finally { $("summary-write").disabled = false; }
+  }
+  async function updateMaster(open) {
+    const p = editingProject;
+    try {
+      await api("/api/projects/" + p.id + "/summary", { method: "PUT", body: { text: $("project-summary").value } });
+      if (!open || !(p.master || []).length) {
+        $("project-msg").textContent = "Updating the master and device reports…";
+        await api("/api/reports/refresh", { body: { project: p.id } });
+        await loadProjectReports(p);
+        $("project-msg").textContent = "Updated.";
+      }
+      if (open && (p.master || []).length) {
+        const pdf = p.master.find((n) => n.endsWith(".pdf")) || p.master[0];
+        await api("/api/reports/" + encodeURIComponent(pdf) + "/open", { body: {} });
+      }
+    } catch (e) { $("project-msg").textContent = e.message; }
   }
   function renderNotes(p) {
     const notes = p.notes || [];
@@ -1366,6 +1536,10 @@
       if (!chosen.length) { $("project-msg").textContent = "Allow at least one kind of model."; return; }
       const rules = { providers: chosen.length === boxes.length ? null : chosen, literature: $("project-literature").checked };
       Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { instructions: $("project-instructions").value, rules } }));
+      if (($("project-summary").value || "") !== (p.summary || "")) {
+        await api("/api/projects/" + p.id + "/summary", { method: "PUT", body: { text: $("project-summary").value } });
+        p.summary = $("project-summary").value;
+      }
       applyRules();
       $("project-dialog").close();
       toast("Saved. Conversations in " + p.name + " use it from their next message.");
@@ -2108,6 +2282,7 @@
     S.setupState = s.setup && s.setup.state;
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
     queueFromState(s.queue);
+    showMounted(s.mounted);
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
   function renderAlerts(alarms) {
@@ -3197,6 +3372,8 @@
     $("auto-cards").checked = !S.settings || S.settings.auto_cards !== false;
     $("manuals").checked = !S.settings || S.settings.manuals !== false;
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
+    const reportKinds = (S.settings && S.settings.report_kinds) || ["scan", "device", "project"];
+    for (const c of document.querySelectorAll("#report-kinds input")) c.checked = reportKinds.includes(c.value);
     $("pair-box").hidden = true;
     loadPhone();
     loadServices();
@@ -3248,6 +3425,7 @@
     body.auto_cards = $("auto-cards").checked ? "on" : "off";
     body.manuals = $("manuals").checked ? "on" : "off";
     body.auto_report = $("auto-report").value;
+    body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     $("settings-msg").textContent = "Saving…";
     try {
@@ -3367,6 +3545,16 @@
       if (!$("card-name").value) $("card-name").value = files[0].name.replace(/\.[^.]+$/, "");
     });
     $("open-report").addEventListener("click", openReport);
+    $("mount-select").addEventListener("change", mountChosen);
+    $("mount-new").addEventListener("click", newDevice);
+    $("device-add").addEventListener("click", addDevice);
+    $("summary-write").addEventListener("click", writeSummary);
+    $("master-update").addEventListener("click", () => updateMaster(false));
+    $("master-open").addEventListener("click", () => updateMaster(true));
+    $("report-folder").addEventListener("click", async () => {
+      try { await api("/api/reports/open-folder", { body: {} }); } catch (e) { toast(e.message); }
+    });
+    loadMount();
     $("open-queue").addEventListener("click", () => (QUEUE.open ? hideQueue() : showQueue()));
     $("make-report").addEventListener("click", makeReport);
     $("watch-add-toggle").addEventListener("click", () => { $("watch-form").hidden = !$("watch-form").hidden; });

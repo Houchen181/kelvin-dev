@@ -118,8 +118,8 @@ def test_runs_written_up_as_pdf_and_slides(runtime):
     out = runtime.make_report(last=2, title="Stage scans", summary="We scanned the stage.\n\nNothing moved.",
                               fmt="both", notes=[("decision", "Scan the stage in 1 mm steps")])
     lines = out.splitlines()
-    assert re.match(r"report: \d{8}-\d{6}-Stage_scans\.pdf \(2 runs, \d+ pages\)", lines[0]), out
-    assert re.match(r"report: \d{8}-\d{6}-Stage_scans\.pptx \(2 runs, \d+ slides\)", lines[1]), out
+    assert re.match(r"report: custom/\d{8}-\d{6}-Stage_scans\.pdf \(2 runs, \d+ pages\)", lines[0]), out   # on request
+    assert re.match(r"report: custom/\d{8}-\d{6}-Stage_scans\.pptx \(2 runs, \d+ slides\)", lines[1]), out
     pdf = runtime.report_path(lines[0].split()[1])
     pages = check_pdf(pdf)
     text = " ".join(pdf_strings(pdf))
@@ -133,8 +133,8 @@ def test_runs_written_up_as_pdf_and_slides(runtime):
     assert "Project notes" in slides[2]
     assert any(s.startswith("stage_scan") for s in slides) and any("tc_map: conditions" in s for s in slides)
     assert "Lab log" in slides[-1]
-    assert "report %s (2 runs)" % pdf.name in runtime.events(5)
-    assert [r["name"] for r in runtime.reports_index()] == sorted([pdf.name, pdf.with_suffix(".pptx").name], reverse=True)
+    assert "report custom/%s (2 runs)" % pdf.name in runtime.events(5)
+    assert [r["name"] for r in runtime.reports_index()] == ["custom/" + n for n in sorted([pdf.name, pdf.with_suffix(".pptx").name], reverse=True)]
 
 
 def test_a_report_survives_a_lab_without_the_runs_instruments(runtime, monkeypatch):
@@ -172,7 +172,7 @@ def test_kelvin_writes_a_report_from_mcp(runtime):
     from test_agent import call
     runtime.run(LINE)
     [out] = call(runtime, ("make_report", {"format": "pptx", "title": "Quick look"}))
-    assert re.match(r"report: \d{8}-\d{6}-Quick_look\.pptx \(1 run, \d+ slides\)", out), out
+    assert re.match(r"report: custom/\d{8}-\d{6}-Quick_look\.pptx \(1 run, \d+ slides\)", out), out
     check_pptx(runtime.report_path(out.split()[1]))
 
 
@@ -232,7 +232,7 @@ def test_report_api(runtime, tmp_path, monkeypatch):
         pdf, pptx = (f["name"] for f in r["files"])
         got = client.get("/api/reports/" + pdf, headers=headers)
         assert got.status_code == 200 and got.headers["content-type"] == "application/pdf" and got.content.startswith(b"%PDF")
-        assert "attachment" in got.headers["content-disposition"] and pdf in got.headers["content-disposition"]
+        assert "attachment" in got.headers["content-disposition"] and pdf.split("/")[-1] in got.headers["content-disposition"]
         assert client.get("/api/reports/" + pptx, headers=headers).headers["content-type"].endswith("presentationml.presentation")
         assert client.get("/api/reports/" + pdf).status_code in (401, 403)       # the access key is needed
         assert client.get("/api/reports/..%2Fevents.jsonl", headers=headers).status_code == 404

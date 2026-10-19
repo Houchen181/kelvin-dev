@@ -46,6 +46,9 @@ You are connected to a physics lab through Kelvin.
   t_pi, Ramsey (T2*), Hahn echo (T2) and T1. Before running a sequence, show it with show_sequence and say its
   period and duty cycles. Start with low MW and laser power and raise them within the limits. Playing a sequence
   (the generator's running) pulses light and microwaves onto the sample: it is a drive.
+- Every scan is filed under the device (sample) mounted in the lab and its project. When the person says which
+  sample is in, call mount_device; a plan can name another device on the same chip with device: <name>. Reports
+  keep themselves up to date: each scan's report, each device's report and the project's master report.
 - To line up scans for later (overnight, or one after another), use the queue: queue_add each plan, and steps
   between them (step: name, set: {...}, stabilize: {read, within, for, timeout}, wait: seconds), then queue_start.
   A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
@@ -192,13 +195,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=ACT, structured_output=False)
     def make_report(runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
-                    summary: str = "", format: str = "pdf") -> str:
-        """Write a report to share or discuss (format pdf, pptx or both): for each run the plots with fits, results
-        with uncertainties, assessment, conditions, plan, approvals and alarms, plus a lab log. Choose runs by id,
-        by day (YYYY-MM-DD, today, yesterday) or the last N; with none chosen, today's runs. summary: 2-5 short
-        sentences in your own words (the goal, what was done, what was found, what next); it opens the report.
+                    summary: str = "", format: str = "pdf", kind: str = "runs", device: str = "") -> str:
+        """Reports. Kelvin already keeps three up to date by itself: each run's scan report (in its folder), each
+        device's report and each project's master report. kind project: rewrite the project's master report now
+        (summary, if given, becomes its opening, in your own words); device: rewrite that sample's report; scan: a
+        run's own report again. kind runs (default): a separate report of the runs chosen by id, by day (YYYY-MM-DD,
+        today, yesterday) or the last N (default today's), with summary as its opening, for sharing a selection.
         Only facts from the runs and the conversation; no speculation."""
-        return rt.make_report(runs, day, last, title, summary, format)
+        return rt.make_report(runs, day, last, title, summary, format, kind=kind, device=device)
 
     @server.tool(annotations=READ, structured_output=False)
     def scan_instruments() -> str:

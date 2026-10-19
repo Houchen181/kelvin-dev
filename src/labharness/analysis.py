@@ -35,6 +35,12 @@ def _fmt_pm(value: float, err: Optional[float], unit: str) -> str:
     return "%.*f ± %.*f%s" % (digits, shown, digits, e, tail)
 
 
+def _numeric(value: float, err: Optional[float], unit: str) -> Dict[str, Any]:
+    """A result's number, error and unit as plain values, for reports that follow it across runs (JSON has no NaN)."""
+    ok = lambda v: isinstance(v, (int, float)) and math.isfinite(v)   # noqa: E731
+    return {"num": float(value) if ok(value) else None, "err": float(err) if ok(err) else None, "unit": unit}
+
+
 def _mad_sigma(values: Sequence[float]) -> float:
     if len(values) < 2:
         return 0.0
@@ -265,7 +271,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
     xu = " " + x_unit if x_unit else ""
 
     def res(name: str, value: float, err: Optional[float], unit: str) -> None:
-        out["results"].append({"name": name, "value": _fmt_pm(value, err, unit)})
+        out["results"].append({"name": name, "value": _fmt_pm(value, err, unit), **_numeric(value, err, unit)})
 
     # clipping: several points pinned at the same extreme value
     for extreme in (max(ys_s), min(ys_s)):
@@ -296,6 +302,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
         if lin:
             res("drift (slope)", lin["values"][1], lin["errors"][1], "")
             out["results"][-1]["value"] += " %s/%s" % (y_unit or "1", x_unit or "1")
+            out["results"][-1]["unit"] = "%s/%s" % (y_unit or "1", x_unit or "1")
         return out
 
     if force is None and (span == 0 or (sigma > 0 and span < 5 * sigma)
@@ -380,6 +387,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
             y_name, x_name, _fmt_pm(v[1], e[1], ""), slope_unit, chosen["r2"])
         res("slope", v[1], e[1], "")
         out["results"][-1]["value"] += " " + slope_unit
+        out["results"][-1]["unit"] = slope_unit
         res("intercept", v[0], e[0], y_unit)
         out["params"] = {"slope": [v[1], e[1], slope_unit], "intercept": [v[0], e[0], y_unit]}
         if x_unit == "V" and y_unit == "A" and v[1] != 0:
@@ -512,7 +520,8 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
                 sd = _mad_sigma(vals) if len(vals) > 2 else 0.0
                 series.append({"x": None, "y": m["key"], "kind": "value", "fit": None, "flags": [],
                                "summary": "%s = %s" % (m["key"], _fmt_pm(mean, sd / math.sqrt(len(vals)) if sd else None, m["unit"])),
-                               "results": [{"name": "mean", "value": _fmt_pm(mean, None, m["unit"])}]})
+                               "results": [{"name": "mean", "value": _fmt_pm(mean, None, m["unit"]),
+                                            **_numeric(mean, sd / math.sqrt(len(vals)) if sd else None, m["unit"])}]})
             continue
         groups: Dict[Any, List[Dict[str, Any]]] = {}
         for r in rows:

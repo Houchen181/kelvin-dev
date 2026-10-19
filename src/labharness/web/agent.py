@@ -123,6 +123,30 @@ SAVE_PAPER = {
 }
 
 
+DEVICES = {
+    "name": "devices",
+    "description": "The samples (devices) of this conversation's project, and which one is mounted in the setup now. "
+                   "Every scan is filed under the mounted device, and each device has its own report.",
+    "schema": {"type": "object", "properties": {}},
+}
+ADD_DEVICE = {
+    "name": "add_device",
+    "description": "Add a sample to this project's device list, as the person describes it.",
+    "schema": {"type": "object", "required": ["name"], "properties": {
+        "name": {"type": "string", "description": "A short name, e.g. D3 or Chip 2 Hall bar A"},
+        "material": {"type": "string", "description": "e.g. graphene/hBN, EuIn2As2 flake, NV diamond"},
+        "description": {"type": "string", "description": "Geometry, contacts, fabrication: what the person said"}}},
+}
+MOUNT_DEVICE = {
+    "name": "mount_device",
+    "description": "Record which sample is in the setup now, only when the person says so; every scan from now on is "
+                   "filed under it. An empty device records that nothing is mounted.",
+    "schema": {"type": "object", "required": ["device"], "properties": {
+        "device": {"type": "string", "description": "The device's name (add_device first if it is new), or empty"}}},
+}
+DEVICE_TOOLS = {"devices", "add_device", "mount_device"}
+
+
 def reference(entry: Dict[str, Any]) -> str:
     """A reading-list entry as a reference line."""
     names = entry.get("authors") or []
@@ -219,7 +243,8 @@ class ChatAgent:
         rules = self.chat_rules(chat)
         if rulebook.restrictive(rules):
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
-        tools = self.tools + ([remember_tool(bool(project))] if learn else []) + ([SAVE_PAPER] if project else [])
+        tools = self.tools + ([remember_tool(bool(project))] if learn else []) + ([SAVE_PAPER] if project else []) \
+            + [DEVICES, ADD_DEVICE, MOUNT_DEVICE]
         if not rules["literature"]:
             tools = [t for t in tools if t["name"] not in WEB_TOOLS]
         return {"system": "\n\n".join(parts), "tools": tools, "project": project["id"] if project else None,
@@ -306,6 +331,57 @@ class ChatAgent:
             return "not saved: %s" % e, True
         return "%s the reading list: %s" % ("already on" if what == "known" else "added to", reference(entry)), False
 
+    # ------------------------------------------------------------------ devices and the reports' view of projects
+
+    def project_info(self, project_id: Optional[str]) -> Dict[str, Any]:
+        """What reports need about a project; None is the General workspace (work outside every project)."""
+        project = None
+        if project_id:
+            try:
+                project = self.store.project(project_id)
+            except KeyError:
+                return {"id": project_id, "name": project_id, "devices": [], "notes": [], "references": [],
+                        "summary": "", "private": False}
+        return {"id": project_id, "name": project["name"] if project else "General",
+                "devices": self.store.devices(project_id), "notes": self.report_notes(project),
+                "references": self.report_references(project), "summary": self.store.summary_of(project_id),
+                "private": bool(project and rulebook.restrictive(project.get("rules")))}
+
+    def project_chat_runs(self, project_id: Optional[str]) -> List[str]:
+        chats = []
+        for c in self.store.list():
+            if (c["project"] or None) == (project_id or None):
+                try:
+                    chats.append(self.store.load(c["id"]))
+                except KeyError:
+                    pass
+        return runs_in(chats)
+
+    def _device_tool(self, chat: Dict[str, Any], name: str, args: Any) -> Tuple[str, bool]:
+        pid = self.store.project_of(chat["id"])
+        args = args if isinstance(args, dict) else {}
+        try:
+            if name == "add_device":
+                d = self.store.add_device(pid, args.get("name"), args.get("material") or "", args.get("description") or "")
+                return "added device %s to %s" % (d["name"], self.project_info(pid)["name"]), False
+            if name == "mount_device":
+                ref = str(args.get("device") or "").strip()
+                if not ref:
+                    self.runtime.unmount(by="agent")
+                    return "nothing is mounted now; scans are filed under the project only", False
+                d = self.store.find_device(pid, ref)
+                m = self.runtime.mount(pid, d, by="agent")
+                return "mounted %s (%s); every scan from now on is filed under it" % (m["device_name"],
+                                                                                    m["project_name"]), False
+            devices = self.store.devices(pid)
+            m = self.runtime.mounted
+            lines = ["%s%s%s" % (d["name"], " (%s)" % d["material"] if d.get("material") else "",
+                                 ", retired" if d.get("retired") else "") for d in devices] or ["no devices yet"]
+            lines.append("mounted now: %s" % ("%s (%s)" % (m["device_name"], m["project_name"]) if m else "nothing"))
+            return "\n".join(lines), False
+        except (KeyError, ValueError) as e:
+            return str(e.args[0] if e.args else e), True
+
     def report_references(self, project: Optional[Dict[str, Any]]) -> List[str]:
         return [reference(e) for e in (project or {}).get("papers", [])]
 
@@ -322,9 +398,13 @@ class ChatAgent:
         if not (runs or day or last):
             runs = [r for r in runs_in(chats) if (self.runtime.data_dir / "runs" / r).is_dir()] or None
         title = str(args.get("title") or "") or ("%s report" % project["name"] if project else "")
+        kind = str(args.get("kind") or "runs")
+        if kind == "project" and args.get("summary"):   # Kelvin's words open the master report until rewritten
+            self.store.set_summary(project["id"] if project else None, str(args["summary"]))
         text = await asyncio.to_thread(self.runtime.make_report, runs, day, last, title, str(args.get("summary") or ""),
                                        str(args.get("format") or "pdf"), self.report_notes(project), "agent",
-                                       self.report_references(project))
+                                       self.report_references(project), kind, str(args.get("device") or ""),
+                                       project["id"] if project else None)
         return text, text.startswith("no report")
 
     # ------------------------------------------------------------------ turns
@@ -368,6 +448,9 @@ class ChatAgent:
         model_id = model_key.partition(":")[2]
         try:
             chat = self.store.load(chat_id)
+            # the project scans started in this turn belong to, when no device is mounted
+            self.runtime.attribution = {"project": None if chat.get("incognito") else self.store.project_of(chat_id),
+                                        "chat": chat_id}
             message: Dict[str, Any] = {"role": "user", "text": text}
             self.recall(chat, message)
             self._attach_review(chat, message)
@@ -391,6 +474,7 @@ class ChatAgent:
             await emit({"type": "error", "message": describe_error(provider, e)})
             await emit({"type": "turn_end", "reason": "error"})
         finally:
+            self.runtime.attribution = {}
             self.active = None
             self._stream_task = None
 
@@ -442,6 +526,8 @@ class ChatAgent:
                 await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
                 if call["name"] == "remember" and context["learn"]:
                     content, is_error = self._remember(chat, context, call["input"])
+                elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):
+                    content, is_error = self._device_tool(chat, call["name"], call["input"])
                 elif call["name"] == "save_paper" and context["project"]:
                     content, is_error = await self._save_paper(chat, context, call["input"])
                 elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:

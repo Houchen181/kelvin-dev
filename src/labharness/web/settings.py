@@ -21,7 +21,8 @@ ENV = {
 }
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
-                     "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report"}
+                     "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
+                     "report_kinds"}
 
 
 class Settings:
@@ -70,6 +71,9 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "auto_report":  # a report after each run and queue: both (the default), pdf, pptx or off
                 value = value if value in ("pdf", "pptx", "off") else ""
+            if name == "report_kinds":  # which reports Kelvin keeps up to date: scan, device, project (all by default)
+                kept = [k for k in ("scan", "device", "project") if k in value.split(",")]
+                value = "" if len(kept) == 3 else ",".join(kept) or "none"
             if name == "lab":  # which lab to open: the user's lab.yaml ("mine") or the virtual lab
                 value = value if value in ("mine", "virtual") else ""
             if name == "webhook" and value and not value.startswith(("https://", "http://")):
@@ -108,7 +112,13 @@ class Settings:
             "scan_network": self._data.get("scan_network") != "off",
             "auto_cards": self._data.get("auto_cards") != "off",
             "auto_report": self._data.get("auto_report") or "both",
+            "report_kinds": self.report_kinds,
         }
+
+    @property
+    def report_kinds(self) -> list:
+        raw = self._data.get("report_kinds")
+        return ["scan", "device", "project"] if not raw else [k for k in raw.split(",") if k and k != "none"]
 
     @property
     def notify_kinds(self) -> list:
