@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kelvin-lab"
-version = "0.3.3"
+version = "0.3.4"
 description = "Kelvin, the coolest cat in the lab: a safety-gated AI lab assistant for experimental physicists"
 readme = "README.md"
 requires-python = ">=3.9"

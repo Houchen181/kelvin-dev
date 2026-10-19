@@ -57,7 +57,7 @@ python -m venv .venv
 
 ## Releasing
 
-To publish a new version: bump the version in `src/labharness/_version.py` and `pyproject.toml`, then push a tag such as `v0.3.3`. GitHub builds both apps, tests them, and publishes the release.
+To publish a new version: bump the version in `src/labharness/_version.py` and `pyproject.toml`, then push a tag such as `v0.3.4`. GitHub builds both apps, tests them, and publishes the release.
 
 ## Code layout
 
