@@ -554,6 +554,31 @@ def test_a_file_the_hub_keeps_failing_on_waits_while_the_others_go(tmp_path, mon
     assert json.loads(state_file.read_text(encoding="utf-8"))["retry"] == {}
 
 
+def test_a_connection_that_breaks_on_one_file_holds_back_only_that_file(tmp_path, monkeypatch):
+    """A big upload that times out, or a hub that closes the connection after refusing it, is a network error, not
+    an answer: that file waits, the others go (it used to end every sync at that file)."""
+    hub, browser = the_hub(tmp_path)
+    k = portal(tmp_path, monkeypatch, browser)
+    connect(k, browser)
+    d = run(k.runtime, "20261020-100000-scan", None)
+    (d / "big.csv").write_text("x", encoding="utf-8")
+    run(k.runtime, "20261020-100100-other", None)
+    base = through(browser)
+    tries = []
+
+    def big_times_out(method, url, body=None, headers=None):
+        if method == "PUT" and url.endswith("/big.csv"):
+            tries.append(url)
+            raise TimeoutError("timed out")
+        return base(method, url, body, headers)
+    k.link.http = big_times_out
+    s = k.link.sync_once()
+    assert s["ok"] and s["files"] == 6 and len(tries) == 1               # both runs' other files went
+    again = [r for r in s["refused"] if r.get("file") == "big.csv"]
+    assert again[0]["again"] == 300 and "connection broke" in again[0]["why"]
+    assert k.link.sync_once()["ok"] and len(tries) == 1                 # and it waits before trying again
+
+
 def test_unshared_work_keeps_its_place_and_its_notes(tmp_path, monkeypatch):
     hub, browser = the_hub(tmp_path)
     k = portal(tmp_path, monkeypatch, browser)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import hmac
 import html
 import ipaddress
@@ -30,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
+import anyio
 from starlette.applications import Starlette
 from starlette.background import BackgroundTask
 from starlette.concurrency import run_in_threadpool as call
@@ -48,6 +50,7 @@ MAX_TOKEN = 16 * 1024              # bytes in a token trade
 MAX_SYNC = 64 * 1024 * 1024        # bytes in one sync
 EXPORT_EVERY = 600                 # seconds between one person's exports
 AT_ONCE = 3                        # one person's syncs and uploads in flight; more get a 429 at once, on the event loop
+HEAVY_THREADS = 16                 # worker threads syncs and uploads may hold across the hub (of 40): pages keep the rest
 CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
 LOGO = Path(__file__).resolve().parent.parent / "web" / "static" / "kelvin.svg"
 SECURITY_HEADERS = [
@@ -249,6 +252,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     operators: Dict[str, Dict[str, Any]] = {}   # operator sessions, in memory: a restart asks for the key again
     exported: Dict[int, float] = {}            # when each person last exported
     in_flight: Dict[int, int] = {}             # each person's syncs and uploads running now
+    heavy_limit: Dict[str, Any] = {}           # the limiter for syncs and uploads, made on the event loop
 
     # ------------------------------------------------------------------ helpers
 
@@ -329,6 +333,14 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         in_flight[user_id] -= 1
         if in_flight[user_id] <= 0:
             del in_flight[user_id]
+
+    async def heavy(func: Any, *args: Any) -> Any:
+        """A sync's or an upload's work (parsing included) in a worker thread, at most HEAVY_THREADS of them across the
+        whole hub: many people syncing at once wait their turn on the event loop and never take the threads that
+        sign-ins and pages need. Never on the event loop itself, where a 64 MB parse would stop every request."""
+        if "limiter" not in heavy_limit:
+            heavy_limit["limiter"] = anyio.CapacityLimiter(HEAVY_THREADS)
+        return await anyio.to_thread.run_sync(functools.partial(func, *args), limiter=heavy_limit["limiter"])
 
     async def app_of(request: Request) -> Optional[Dict[str, Any]]:
         auth = request.headers.get("authorization", "")
@@ -892,7 +904,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error("The hub is still busy with your other requests; try again in a moment.", 429)
         try:
             body = await read_body(request, MAX_SYNC)
-            return JSONResponse(await call(hub.sync, app, json.loads(body or b"{}")))
+            return JSONResponse(await heavy(hub.sync, app, await heavy(json.loads, body or b"{}")))
         except HubError as err:
             return api_error(str(err), err.status)
         except ValueError as err:
@@ -919,8 +931,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
 
     async def upload_file(request: Request, app: Dict[str, Any], declared: int) -> Response:
         try:   # check the run, the name and the person's share of the disk before a byte is stored
-            ticket = await call(hub.reserve_upload, app, request.path_params["run_id"], request.path_params["name"],
-                                declared)
+            ticket = await heavy(hub.reserve_upload, app, request.path_params["run_id"], request.path_params["name"],
+                                 declared)
         except HubError as err:
             return api_error(str(err), err.status)
         tmp = hub.home / "tmp" / ("upload-%s" % secrets.token_hex(8))
@@ -932,7 +944,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                     if written > ticket["size"]:
                         return api_error("the file is longer than its Content-Length", 400)
                     f.write(chunk)
-            return JSONResponse(await call(hub.store_upload, ticket, tmp, written))
+            return JSONResponse(await heavy(hub.store_upload, ticket, tmp, written))
         except HubError as err:
             return api_error(str(err), err.status)
         finally:

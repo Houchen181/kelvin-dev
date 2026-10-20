@@ -500,17 +500,21 @@ class HubLink:
                         client.upload(item["id"], name, data)
                         last["files"] += 1
                         failures = 0
-                    except HubClientError as e:
-                        if not (e.status == 429 or (e.status or 0) >= 500):
-                            if e.status not in REFUSED:
+                    except (HubClientError,) + NETWORK as e:
+                        status = e.status if isinstance(e, HubClientError) else None
+                        if isinstance(e, HubClientError) and not (status == 429 or (status or 0) >= 500):
+                            if status not in REFUSED:
                                 raise   # signed out there, or new terms
                             last["refused"].append({"run": item["id"], "file": name, "why": said(e)})
-                        else:   # the hub failed on this one (a timeout on a big file, say): the others first
+                        else:   # the hub failed on this one, or the connection broke while it went (a timeout on a
+                            # big file, say, or the hub closing early after refusing it): the others first
                             wait = min(RETRY_MAX, 2 * later[name][1]) if later.get(name) else RETRY_FIRST
                             later = state["retry"].setdefault(item["id"], {})
                             later[name] = [time.time() + wait, wait]
+                            why = said(e) if isinstance(e, HubClientError) else \
+                                "the connection broke while it went (%s)" % type(e).__name__
                             last["refused"].append({"run": item["id"], "file": name, "again": wait,
-                                                    "why": said(e) + "; Kelvin tries it again later"})
+                                                    "why": why + "; Kelvin tries it again later"})
                             failures += 1
                             save_state(snap["folder"], state)
                             if failures >= FAILURES:

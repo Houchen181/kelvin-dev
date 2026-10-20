@@ -558,3 +558,87 @@ def test_chats_keep_their_size_and_an_old_database_learns_it(tmp_path):
     with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
         assert con.execute("SELECT bytes FROM chats").fetchone()[0] == size[1]
         assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def test_folding_never_files_shared_work_into_a_project_made_private_since(tmp_path):
+    """Review round 3: the old id shared project p with a chat and a run, and the new id has marked p not shared since.
+    The old copies go; they are never re-filed into p, where a labmate would see them until the next sync."""
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
+    lab = hub.create_lab(ada["id"], "Lab")
+    hub.join_lab(ben["id"], lab["join_code"])
+    old_id, new_id = "urn:uuid:5f0c1c55-0000-4000-8000-0000000000c1", "urn:uuid:5f0c1c55-0000-4000-8000-0000000000c2"
+    _, old = connected(hub, ada, lab["id"], inst=dict(INST, id=old_id))
+    hub.sync(old, {"projects": [{"id": "p00000001", "name": "Thesis"}],
+                   "chats": [{"id": "aaaaaaaaaaaa", "project": "p00000001", "title": "c1", "messages": []}],
+                   "runs": [{"id": "run1", "project": "p00000001"}]})
+    upload = tmp_path / "tmp" / "u"
+    upload.write_bytes(b"1,2\n")
+    hub.store_run_file(old, "run1", "data.csv", upload, 4)
+    _, new = connected(hub, ada, lab["id"], inst=dict(INST, id=new_id))
+    hub.sync(new, {"projects": [{"id": "p00000001", "shared": False}]})   # marked private on the new id
+    assert [c["title"] for c in hub.shared_with(ben["id"])["chats"]] == ["c1"]   # still there, under the old id
+    cb = "http://127.0.0.1:8770/hub/callback"
+    code = hub.connect_code(ada, cb, challenge_of("v" * 50), dict(INST, id=new_id), lab["id"], [old_id])
+    hub.connect_app(code, "v" * 50, cb)                                   # the old id is folded in
+    seen = hub.shared_with(ben["id"])
+    assert seen["chats"] == [] and seen["runs"] == [] and seen["projects"] == []
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert con.execute("SELECT COUNT(*) FROM chats").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+    assert not list((tmp_path / "files").rglob("data.csv"))              # its files went too
+
+
+def test_a_connect_code_outlives_a_busy_hub_but_not_a_wrong_verifier(tmp_path, monkeypatch):
+    """Review round 3: the code is used up with the connection itself, so a busy hub (or a failure while folding)
+    leaves it for a retry; a wrong verifier still uses it up at once."""
+    monkeypatch.setattr(hubdb, "LOCK_WAIT", 0.2)
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    cb = "http://127.0.0.1:8770/hub/callback"
+    code = hub.connect_code(ada, cb, challenge_of("v" * 50), INST, None)
+    lock = hub._lock_for(ada["id"])
+    lock.acquire()                                                        # as during one of Ada's long syncs
+    try:
+        with pytest.raises(Busy):
+            hub.connect_app(code, "v" * 50, cb)
+    finally:
+        lock.release()
+    assert hub.connect_app(code, "v" * 50, cb)["access_token"].startswith("khub_")   # the same code, now
+    with pytest.raises(HubError, match="expired or was already used"):
+        hub.connect_app(code, "v" * 50, cb)                               # and only once
+    code = hub.connect_code(ada, cb, challenge_of("v" * 50), INST, None)
+    with pytest.raises(HubError, match="code_verifier"):
+        hub.connect_app(code, "w" * 50, cb)
+    with pytest.raises(HubError, match="expired or was already used"):
+        hub.connect_app(code, "v" * 50, cb)                               # a wrong verifier used it up
+
+
+def test_deleting_an_account_frees_the_database_before_its_files_go(tmp_path, monkeypatch):
+    """Review round 3: the files of a large account can take a long time to delete; nobody else's sign-in or sync
+    may wait for that, so the deletion is committed first."""
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    _, app = connected(hub, ada)
+    hub.sync(app, {"runs": [{"id": "run1"}]})
+    upload = tmp_path / "tmp" / "u"
+    upload.write_bytes(b"1,2\n")
+    hub.store_run_file(app, "run1", "data.csv", upload, 4)
+    seen = {}
+    real = hubdb.shutil.rmtree
+
+    def rmtree(path, *args, **kwargs):
+        con = sqlite3.connect(str(tmp_path / "hub.sqlite3"), timeout=0.5)
+        try:                                                              # someone else writing meanwhile
+            con.execute("BEGIN IMMEDIATE")
+            con.rollback()
+            seen["write"] = "ok"
+        except sqlite3.OperationalError as e:
+            seen["write"] = str(e)
+        finally:
+            con.close()
+        return real(path, *args, **kwargs)
+    monkeypatch.setattr(hubdb.shutil, "rmtree", rmtree)
+    hub.delete_user(ada["id"])
+    assert seen["write"] == "ok" and not list((tmp_path / "files").rglob("data.csv"))

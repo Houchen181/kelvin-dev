@@ -36,7 +36,7 @@ Kelvin keeps accounts per computer ([portal.md](portal.md#signing-in)). The hub 
 - **Resetting a password:** the reset page gives the same answer, and as fast, whether or not the account exists; the mail goes out after the answer. A new password that won't do leaves the link working. A reset signs out every browser and disconnects every Kelvin of the account. A password change in the account page signs out the other browsers but keeps the Kelvins connected.
 - **Labs have no owner.** Anyone can make a lab. Everyone in it sees its join code (like `K7Q2-9XMB-4TRA`) and can pass it on. A lab nobody is in any more is deleted.
 - **Your data:** **Export everything** on the account page downloads a zip of the account, labs, connections, everything shared and the hub's record of the account's activity. It can be made once every 10 minutes.
-- **Deleting an account:** **Delete account** (with the password) deletes the account and all it shared, even if the person hasn't agreed to new terms.
+- **Deleting an account:** **Delete account** (with the password) deletes the account and all it shared, even if the person hasn't agreed to new terms. Its files are deleted after the database is updated, so a large account never holds up anyone else's sign-in or sync.
   - **Also removed:** the Kelvins only that account used, and mail to it waiting in `outbox/`.
   - **Timing:** it waits for the person's sync or upload in progress, so no file lands afterwards.
   - **The log:** `hub.log` never has addresses. The activity record keeps only that account number N was deleted, without addresses or details. Account numbers are never reused. Database backups keep a deleted account until they age out (30 days by default).
@@ -51,9 +51,9 @@ This works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page:
    - **Who is shown:** the page names the account it would connect to, and the person using Kelvin (the optional `person` parameter Kelvin sends).
    - **Not you?** This signs out and comes back to the request.
    - **Limits:** the password here counts toward the same limit as signing in, so 10 wrong passwords, here or on the sign-in page, also block connecting for 15 minutes.
-3. The hub sends the browser back to the callback with a one-use code (10 minutes). Kelvin trades the code and its PKCE verifier for a token at `POST /api/token`.
+3. The hub sends the browser back to the callback with a one-use code (10 minutes). Kelvin trades the code and its PKCE verifier for a token at `POST /api/token`. The code is used up together with the connection: if the hub is busy (429) Kelvin can try the same code again; a wrong verifier or callback uses it up.
 4. Kelvin keeps the token in the person's own settings, encrypted with their password. The hub keeps one token per account and installation id, so connecting the same Kelvin again replaces it. **Disconnect** on the account page, `DELETE /api/token`, or a password reset ends it.
-   - **Earlier ids:** Kelvin may name up to 5 earlier installation ids of its own (`previous`, comma-separated). The hub moves that account's projects, chats, runs and run files from those ids to the new one, keeps one copy where both have an item, and ends the old ids' connections.
+   - **Earlier ids:** Kelvin may name up to 5 earlier installation ids of its own (`previous`, comma-separated). The hub moves that account's projects, chats, runs and run files from those ids to the new one, keeps one copy where both have an item, and ends the old ids' connections. Where the new id has marked a project not shared since, the old ids' chats and runs of it are deleted, never moved into it.
    - **Ids from before:** the new id's computer part (what Kelvin used before ids were per person) counts as an earlier id without being named.
 
 `HubClient` in `hub/client.py` does Kelvin's side: `begin`, `finish`, `push`, `upload` and `disconnect`, plus `collect(store)`, which gathers what a `ChatStore` may share.
@@ -76,7 +76,7 @@ Settings → **Account** → Kelvin hub (`web/hubsync.py`, routes in `web/app.py
   - **Runs that stay:** a run's `meta.json` says when an incognito chat started it (`incognito`), or a chat that keeps an unshared project's marks or limits (`unshared`, whatever project the run is filed under). Neither is ever sent.
   - **Older runs:** some runs are held back: those made before Kelvin noted who made them, those made without accounts, and those of queue items from before (`legacy`). They go only when the person ticks **Also share older runs** (`hub_old_runs`, off by default). The status says how many stay back.
   - **Files:** then it uploads each new or changed run file (`meta.json`, `data.csv`, `plan.yaml`, plots, reports; up to 200 MB each), and tells the hub what is gone since (`removed`). A file the hub refuses (400, 413) goes again only when it changes. When nothing changed, it sends nothing.
-  - **Retries:** a file the hub fails on (429 or 5xx, such as Cloudflare's 524 on a slow upload) waits while the others go on. It waits 5 minutes, then twice as long each time, up to 4 hours (`retry` in `hub-sync.json`). Three such failures in a row end that sync.
+  - **Retries:** a file the hub fails on (429 or 5xx, such as Cloudflare's 524 on a slow upload), or whose connection breaks while it goes (a timeout), waits while the others go on. It waits 5 minutes, then twice as long each time, up to 4 hours (`retry` in `hub-sync.json`). Three such failures in a row end that sync.
 - **Marks on chats** (`web/store.py`):
   - **Leaving a project:** a chat moved out of an unpublished, confidential or model-limited project, or left when the project is deleted, keeps that mark and the project's limits as they are then. Changing a project's limits locks no chat. A chat keeps limits only when it runs under them, leaves the project or is left when it is deleted.
   - **Notes:** a chat in unshared work keeps no notes for every conversation.
@@ -166,7 +166,7 @@ Kelvin accepts a hub address on the internet only with https.
   | Exports | one per person per 10 minutes |
   | Syncs and uploads | 3 of one person's at once; more get a 429 at once. Each waits at most 10 seconds for that person's other sync or upload, then gets a 429 |
 
-  Account-page forms have none. One person's flood of syncs or uploads never takes the worker threads from anyone else.
+  Account-page forms have none. One person's flood of syncs or uploads never takes the worker threads from anyone else, and all syncs and uploads together hold at most 16 of the hub's 40 worker threads (the rest wait their turn without one), so pages and sign-ins always have threads left. A sync's JSON is read in a worker thread, never on the event loop.
 - **Request bodies** are capped as they stream in: forms at 64 kB, token trades at 16 kB, one sync at 64 MB.
 - **Uploads:**
   - names are checked part by part (no `..`, and no device names, even with a space as in `NUL .txt`);

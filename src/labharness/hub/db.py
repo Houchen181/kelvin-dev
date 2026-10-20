@@ -757,11 +757,20 @@ class Hub:
                                                      "previous": list(previous or [])})
 
     def connect_app(self, code: Any, verifier: Any, redirect_uri: Any, ip: Optional[str] = None) -> Dict[str, Any]:
-        user_id, data = self.take_code("connect", code)
+        # looked at here, used up below in the same transaction as the connection: a busy hub (Busy) or a failure
+        # while folding leaves the code for a retry; a wrong verifier or callback uses it up at once
+        user_id, data = self.peek_code("connect", code)
+        problem = None
         if str(redirect_uri or "") != data["redirect_uri"]:
-            raise HubError("redirect_uri does not match the one this code was made for.")
-        if not hmac.compare_digest(challenge_of(str(verifier or "")), data["challenge"]):
-            raise HubError("code_verifier does not match the code_challenge.")
+            problem = "redirect_uri does not match the one this code was made for."
+        elif not hmac.compare_digest(challenge_of(str(verifier or "")), data["challenge"]):
+            problem = "code_verifier does not match the code_challenge."
+        if problem:
+            try:
+                self.take_code("connect", code)
+            except HubError:
+                pass
+            raise HubError(problem)
         user = self.user(user_id)
         if user["disabled_at"]:
             raise HubError("This account is disabled.")
@@ -772,6 +781,9 @@ class Hub:
         token, now = "khub_" + secrets.token_urlsafe(32), time.time()
         gone: List[Path] = []
         with self._person(user_id), self.connect() as con:
+            if con.execute("DELETE FROM codes WHERE code_hash = ? AND kind = 'connect'",
+                           (sha(str(code or "")),)).rowcount != 1:   # used meanwhile by another request
+                raise HubError("This link or code has expired or was already used.")
             con.execute("INSERT INTO installations (id, lab_id, name, platform, version, created_at, last_seen)"
                         " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET lab_id = excluded.lab_id,"
                         " name = excluded.name, platform = excluded.platform, version = excluded.version,"
@@ -802,15 +814,23 @@ class Hub:
         mine = {"u": user_id, "old": old, "new": new}
         dup = ("user_id = :u AND installation_id = :old AND local_id IN (SELECT local_id FROM %s WHERE user_id = :u"
                " AND installation_id = :new)")
-        for p in con.execute("SELECT o.id AS old_id, n.id AS new_id FROM projects o JOIN projects n ON"
-                             " n.user_id = o.user_id AND n.local_id = o.local_id AND n.installation_id = :new"
-                             " WHERE o.user_id = :u AND o.installation_id = :old", mine).fetchall():
-            for table in ("chats", "runs"):   # keep their items: point them at the project that stays
-                con.execute("UPDATE %s SET project_id = ? WHERE project_id = ?" % table, (p["new_id"], p["old_id"]))
+        gone: List[Path] = []
+        for p in con.execute("SELECT o.id AS old_id, n.id AS new_id, n.shared AS new_shared FROM projects o JOIN"
+                             " projects n ON n.user_id = o.user_id AND n.local_id = o.local_id AND"
+                             " n.installation_id = :new WHERE o.user_id = :u AND o.installation_id = :old",
+                             mine).fetchall():
+            if p["new_shared"]:   # keep their items: point them at the project that stays
+                for table in ("chats", "runs"):
+                    con.execute("UPDATE %s SET project_id = ? WHERE project_id = ?" % table, (p["new_id"], p["old_id"]))
+            else:   # the project that stays is not shared (marked since): what the old id shared of it goes
+                gone += [self.home / r["files_path"] for r in con.execute(
+                    "SELECT files_path FROM runs WHERE project_id = ?", (p["old_id"],)) if r["files_path"]]
+                for table in ("chats", "runs"):
+                    con.execute("DELETE FROM %s WHERE project_id = ?" % table, (p["old_id"],))
         con.execute("DELETE FROM projects WHERE " + dup % "projects", mine)
         con.execute("DELETE FROM chats WHERE " + dup % "chats", mine)
-        gone = [self.home / r["files_path"] for r in con.execute("SELECT files_path FROM runs WHERE " + dup % "runs",
-                                                                  mine) if r["files_path"]]
+        gone += [self.home / r["files_path"] for r in con.execute("SELECT files_path FROM runs WHERE " + dup % "runs",
+                                                                   mine) if r["files_path"]]
         con.execute("DELETE FROM runs WHERE " + dup % "runs", mine)
         moved = 0
         for table in ("projects", "chats", "runs"):
@@ -1307,17 +1327,21 @@ class Hub:
         never reused); hub.log never has addresses. Backups still hold it until they age out (backups_kept days).
         It waits for the person's sync or upload in progress, so no file lands after the folder is gone."""
         email = self.user(user_id)["email"]
-        with self._person(user_id), self.connect() as con:
-            labs = [r["lab_id"] for r in con.execute("SELECT lab_id FROM lab_members WHERE user_id = ?", (user_id,))]
-            con.execute("DELETE FROM users WHERE id = ?", (user_id,))
-            for lab_id in labs:
-                con.execute("DELETE FROM labs WHERE id = ? AND NOT EXISTS (SELECT 1 FROM lab_members WHERE lab_id = ?)",
-                            (lab_id, lab_id))
-            con.execute("DELETE FROM installations WHERE id NOT IN (SELECT installation_id FROM tokens WHERE"
-                        " installation_id IS NOT NULL) AND id NOT IN (SELECT installation_id FROM projects UNION"
-                        " SELECT installation_id FROM chats UNION SELECT installation_id FROM runs)")
-            con.execute("UPDATE audit SET detail = '{}', ip = NULL WHERE user_id = ?", (user_id,))
-            self.audit(con, actor, "account deleted", user_id)
+        with self._person(user_id):
+            with self.connect() as con:
+                labs = [r["lab_id"] for r in con.execute("SELECT lab_id FROM lab_members WHERE user_id = ?",
+                                                          (user_id,))]
+                con.execute("DELETE FROM users WHERE id = ?", (user_id,))
+                for lab_id in labs:
+                    con.execute("DELETE FROM labs WHERE id = ? AND NOT EXISTS (SELECT 1 FROM lab_members WHERE"
+                                " lab_id = ?)", (lab_id, lab_id))
+                con.execute("DELETE FROM installations WHERE id NOT IN (SELECT installation_id FROM tokens WHERE"
+                            " installation_id IS NOT NULL) AND id NOT IN (SELECT installation_id FROM projects UNION"
+                            " SELECT installation_id FROM chats UNION SELECT installation_id FROM runs)")
+                con.execute("UPDATE audit SET detail = '{}', ip = NULL WHERE user_id = ?", (user_id,))
+                self.audit(con, actor, "account deleted", user_id)
+            # committed: the files go after, so nobody else's sign-in or sync waits on the disk (a large account's
+            # folder can take many seconds); the person's lock is still held, so no upload lands meanwhile
             shutil.rmtree(self.home / "files" / str(int(user_id)), ignore_errors=True)
         self._forget_mail(email)
 

@@ -383,3 +383,75 @@ def test_limits_count_an_ipv4_mapped_address_as_ipv4():
     assert net_of("::ffff:192.0.2.8") != net_of("::ffff:192.0.2.7")
     assert net_of("2001:db8::1") == net_of("2001:db8::2") == "2001:db8::/64"
     assert net_of("198.51.100.4") == "198.51.100.4" and net_of("?") == "?"
+
+
+def test_many_people_syncing_at_once_leave_threads_for_everyone_else(tmp_path, monkeypatch):
+    """Review round 3: 14 people with 3 syncs each held up at once used to take all 40 worker threads, so nobody
+    else's page could load. Syncs and uploads may hold only HEAVY_THREADS of them; the rest wait on the event loop."""
+    import threading
+    import time
+    from labharness.hub import db as hubdb
+    from labharness.hub.db import challenge_of
+    monkeypatch.setattr(hubdb, "LOCK_WAIT", 4.0)
+    hub = Hub(tmp_path / "hub")
+    with TestClient(create_app(hub, hosts=["testserver"], backups=False)) as client:   # one event loop, one pool
+        register(client)                                                # Ada, in the browser
+        bearers, locks = [], []
+        for i in range(14):
+            p = hub.register("p%d@example.org" % i, "P%d" % i, "correct horse", consent=True)
+            inst = {"id": "urn:uuid:5f0c1c55-0000-4000-8000-%012d" % (i + 1), "name": "PC", "platform": "",
+                    "version": ""}
+            code = hub.connect_code(p, CALLBACK, challenge_of("v" * 50), inst, None)
+            bearers.append({"Authorization": "Bearer " + hub.connect_app(code, "v" * 50, CALLBACK)["access_token"]})
+            locks.append(hub._lock_for(p["id"]))
+        for lock in locks:
+            lock.acquire()                                              # as during each one's long sync
+        statuses = []
+
+        def sync(bearer):
+            statuses.append(client.post("/api/sync", json={}, headers=bearer).status_code)
+        flood = [threading.Thread(target=sync, args=(b,)) for b in bearers for _ in range(3)]
+        for t in flood:
+            t.start()
+        time.sleep(0.5)
+        got = {}
+        other = threading.Thread(target=lambda: got.update(page=client.get("/account")))
+        started = time.time()
+        other.start()
+        other.join(8)
+        try:
+            assert "page" in got and got["page"].status_code == 200 and time.time() - started < 2
+        finally:
+            for lock in locks:
+                lock.release()
+            for t in flood:
+                t.join(20)
+        assert len(statuses) == 42 and 500 not in statuses
+
+
+def test_a_sync_is_read_off_the_event_loop(tmp_path, monkeypatch):
+    """Review round 3: parsing a 64 MB sync takes about a second; on the event loop it would stop every request."""
+    import asyncio
+    import json
+    from labharness.hub.db import challenge_of
+    hub = Hub(tmp_path / "hub")
+    p = hub.register("p@example.org", "P", "correct horse", consent=True)
+    inst = {"id": "urn:uuid:5f0c1c55-0000-4000-8000-0000000000f1", "name": "PC", "platform": "", "version": ""}
+    code = hub.connect_code(p, CALLBACK, challenge_of("v" * 50), inst, None)
+    bearer = {"Authorization": "Bearer " + hub.connect_app(code, "v" * 50, CALLBACK)["access_token"]}
+    where, real = [], json.loads
+
+    def loads(s, *args, **kwargs):
+        probe = b"off-the-loop-probe" if isinstance(s, (bytes, bytearray)) else "off-the-loop-probe"
+        if probe in s:
+            try:
+                asyncio.get_running_loop()
+                where.append("the event loop")
+            except RuntimeError:
+                where.append("a worker thread")
+        return real(s, *args, **kwargs)
+    monkeypatch.setattr(json, "loads", loads)
+    with TestClient(create_app(hub, hosts=["testserver"], backups=False)) as client:
+        r = client.post("/api/sync", json={"chats": [{"id": "aaaaaaaaaaaa", "title": "off-the-loop-probe",
+                                                      "messages": []}]}, headers=bearer)
+    assert r.status_code == 200 and where == ["a worker thread"]
