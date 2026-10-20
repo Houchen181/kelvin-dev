@@ -25,6 +25,14 @@ except ImportError:
     CRYPTO = False
 
 
+@pytest.fixture(autouse=True)
+def no_keys_in_the_environment(monkeypatch):
+    """These tests say whose keys are whose; a key in this computer's environment would answer for everyone."""
+    from labharness.web.settings import ENV
+    for name in list(ENV.values()) + ["GOOGLE_API_KEY"]:
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_accounts_are_equal_and_keep_passwords_hashed(tmp_path):
     acc = Accounts(tmp_path)
     ada = acc.create("Ada Lovelace", "pw1234")
