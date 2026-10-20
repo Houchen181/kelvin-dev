@@ -162,7 +162,7 @@ def test_kelvins_approvals_are_locked_while_claude_operates(parts):
 
 
 def test_screen_tools(monkeypatch):
-    from PIL import Image
+    Image = pytest.importorskip("PIL.Image")   # screenshots need Pillow (the private build has it)
     monkeypatch.setattr(screen, "grab", lambda: Image.new("RGB", (2732, 1536), "white"))
     png, note = screen.screenshot_png()
     assert png[:4] == b"\x89PNG" and "shown at 1366x768" in note
