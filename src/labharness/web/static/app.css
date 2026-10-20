@@ -513,6 +513,26 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .field textarea { resize: vertical; min-height: 84px; max-height: 50vh; line-height: 1.45; }
 .field-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .dialog.wide { width: min(760px, calc(100vw - 32px)); }
+/* Settings: a list of sections on the left, one section at a time on the right */
+.dialog.settings { width: min(900px, calc(100vw - 32px)); }
+.dialog.settings form { height: min(720px, calc(100vh - 48px)); height: min(720px, calc(100dvh - 48px)); grid-template-rows: auto minmax(0, 1fr) auto; }
+.set-body { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 20px; min-height: 0; }
+.set-nav { display: flex; flex-direction: column; gap: 2px; padding-right: 12px; border-right: 1px solid var(--line); overflow: auto; }
+.set-nav button { text-align: left; border: 0; background: none; padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--text-2); font-weight: 550; }
+.set-nav button:hover { background: var(--hover); }
+.set-nav button.on { background: var(--accent-soft); color: var(--accent); }
+.set-nav button[hidden] { display: none; }
+.set-pages { overflow: auto; min-height: 0; padding: 0 4px 8px 0; }
+.set-page { display: grid; gap: 18px; align-content: start; }
+.set-page[hidden] { display: none; }
+.set-title { margin: 2px 0 -8px; font-size: 17px; }
+/* a section of one field: its title says what the field's label would */
+.set-page:is([data-page="account"], [data-page="instruments"], [data-page="memory"], [data-page="literature"], [data-page="notifications"], [data-page="phone"], [data-page="updates"]) > .field:first-of-type > .field-row > .field-label { visibility: hidden; }
+@media (max-width: 640px) {
+  .set-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 12px; }
+  .set-nav { flex-direction: row; padding: 0 0 8px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .set-nav button { white-space: nowrap; flex: none; }
+}
 .mono { font: 12.5px/1.5 ui-monospace, Consolas, monospace !important; }
 .lab-which { align-items: center; }
 .found-list { border: 1px solid var(--line); border-radius: 10px; max-height: 260px; overflow: auto; }

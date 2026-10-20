@@ -149,6 +149,7 @@
     const on = !!(a.accounts_on && a.user);
     $("account-row").hidden = !on;
     $("account-field").hidden = !on;
+    $("nav-account").hidden = !on;
     $("activity-all").hidden = !a.accounts_on;
     if (!on) return;
     $("account-avatar").textContent = initials(a.user.name);
@@ -3449,7 +3450,18 @@
     else $("input").placeholder = "Ask Kelvin…";
     updateSend();
   }
+  // Settings: one section at a time, chosen from the list on the left (the last one is remembered)
+  function settingsPage(name) {
+    const tabs = [...document.querySelectorAll(".set-nav button")].filter((b) => !b.hidden);
+    const tab = tabs.find((b) => b.dataset.page === name) || tabs.find((b) => b.dataset.page === "models") || tabs[0];
+    for (const b of tabs) { b.classList.toggle("on", b === tab); b.setAttribute("aria-current", b === tab ? "page" : "false"); }
+    for (const p of document.querySelectorAll(".set-page")) p.hidden = p.dataset.page !== tab.dataset.page;
+    $("set-pages").scrollTop = 0;
+    store("lh.settingsPage", tab.dataset.page);
+  }
+
   function openSettings() {
+    settingsPage(store("lh.settingsPage") || "models");
     const keys = (S.settings && S.settings.keys) || {};
     for (const hint of document.querySelectorAll("[data-hint]")) {
       const src = keys[hint.dataset.hint];
@@ -3782,6 +3794,7 @@
     }
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
+    for (const b of document.querySelectorAll(".set-nav button")) b.addEventListener("click", () => settingsPage(b.dataset.page));
     $("save-settings").addEventListener("click", saveSettings);
     $("save-project").addEventListener("click", saveProjectSettings);
     $("quit-app").hidden = !boot.can_quit;
