@@ -1014,6 +1014,7 @@
       case "read_paper": return v("Reading", "Read") + " " + code(a.paper || "") + (a.start ? " from character " + esc(String(a.start)) : "");
       case "save_paper": return v("Adding", "Added") + " " + code(a.paper || "") + " to the reading list";
       case "make_report": return v("Writing", "Wrote") + " a report" + (a.title ? ": " + esc(String(a.title)) : "");
+      case "operate_computer": return v("Operating", "Operated") + " the computer: " + esc(String(a.task || ""));
       case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat" : " for this project") +
         (a.text ? ": " + esc(String(a.text)) : "");
       default: return code(name);
@@ -1176,6 +1177,12 @@
       if (!step.card) { step.card = runCard(ev.plan); (step.last || step.el).after(step.card.el); }
       step.card.progress(ev);
       if (ev.status === "running") noticeRun(ev.run_id, ev.plan);
+    }
+    computerStep(ev) {   // what Claude did on the screen, listed under its operate_computer step
+      const step = this.steps.get(ev.call_id);
+      if (!step) return;
+      if (!step.log) { step.log = h("ol", { class: "cu-log" }); (step.last || step.el).after(step.log); step.last = step.log; }
+      step.log.append(h("li", {}, ev.text));
     }
     approval(ev) {
       const el = ev.auto ? autoApproval(ev) : makeApproval(ev).el;
@@ -2231,6 +2238,7 @@
       }
       case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id); pollState(); break;
       case "run_progress": reply.runProgress(ev); break;
+      case "computer_step": reply.computerStep(ev); break;
       case "note": reply.note(ev.text); break;
       case "memory": reply.memory(ev.notes); break;
       case "review_start": reply.reviewStart(ev); break;
@@ -3469,6 +3477,7 @@
     loadServices();
     loadDataFolder();
     loadChatGPT();
+    loadClaudeCode();
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
     for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
     $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
@@ -3497,6 +3506,20 @@
         }));
     }));
   }
+  async function loadClaudeCode() {   // Claude Code bridge (temporary): found here? signed in?
+    $("cc-field").hidden = !S.claudeCode;
+    if (!S.claudeCode) return;
+    $("cc-on").checked = !S.settings || S.settings.claude_code !== false;
+    $("cc-path").value = (S.settings && S.settings.claude_code_path) || "";
+    $("cc-status").textContent = "Checking…";
+    try {
+      const s = await api("/api/claude-code");
+      $("cc-status").textContent = !s.cli ? "claude not found" : s.signed_in ? "Signed in" + (s.method ? " (" + s.method + ")" : "")
+        : "Found, not signed in: run claude once and sign in";
+      $("cc-status").classList.toggle("set", !!(s.cli && s.signed_in));
+    } catch (e) { $("cc-status").textContent = e.message; }
+  }
+
   async function saveSettings() {
     const body = {};
     for (const input of document.querySelectorAll("#settings-form input[type=password][name]")) {
@@ -3517,6 +3540,7 @@
     body.auto_report = $("auto-report").value;
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
+    if (S.claudeCode) { body.claude_code = $("cc-on").checked ? "on" : "off"; body.claude_code_path = $("cc-path").value.trim(); }
     $("settings-msg").textContent = "Saving…";
     try {
       const r = await api("/api/settings", { body });
@@ -3564,6 +3588,7 @@
     $("app").hidden = false;
     for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
     S.settings = boot.settings;
+    S.claudeCode = !!boot.claude_code;   // Claude Code bridge (temporary)
     S.account = boot.account || null;
     renderAccount();
     $("sign-out").addEventListener("click", signOut);

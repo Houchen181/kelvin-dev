@@ -127,6 +127,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .pw-row { flex-wrap: wrap; }
 .pw-row input { flex: 1 1 140px; }
 #activity-all[aria-pressed="true"] { color: var(--accent); font-weight: 600; }
+.cu-log { margin: 4px 0 8px 22px; padding: 0 0 0 14px; border-left: 2px solid var(--line); font-size: 13px; color: var(--text-2); max-height: 220px; overflow: auto; }
+.cu-log li { padding: 1px 0; }
 
 /* ---------- layout ---------- */
 .app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }

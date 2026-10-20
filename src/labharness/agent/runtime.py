@@ -102,6 +102,12 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
     elif kind in ("signed_in", "signed_out"):
         text = kind.replace("_", " ")
+    elif kind == "computer_task":
+        text = "operating the computer: %s" % e.get("task")
+    elif kind == "computer":
+        text = "screen: %s" % e.get("action")
+    elif kind == "computer_task_end":
+        text = "done operating the computer (%s steps)" % e.get("steps")
     elif kind == "approval_mode":
         text = "approvals: " + ("auto mode on (low-risk changes run without asking)" if e.get("mode") == "auto"
                                 else "ask before every drive increase")
@@ -129,6 +135,7 @@ class LabRuntime:
         self.events_path = self.data_dir / "events.jsonl"
         self.user: Optional[str] = None             # the person signed in to the portal (accounts.py), if any
         self.shared_log: Optional[Path] = None      # the lab's instrument log, everyone's events; set by the app
+        self.operating: Optional[str] = None        # Claude Code bridge: the task Claude is doing on the screen now
         self.gate = SafetyGate(lab, approver, self._new_log(lab.clock), envelope, operator="agent")
         self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
         self.engine.progress = self._on_progress

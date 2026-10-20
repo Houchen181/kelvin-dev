@@ -261,6 +261,13 @@
         <button id="chatgpt-signout" class="link soft" type="button" hidden>Sign out</button>
       </div>
     </div>
+    <div id="cc-field" class="field" hidden>
+      <div class="field-row"><span class="field-label">Claude Code on this computer <span class="tag">temporary</span></span><span id="cc-status" class="hint"></span></div>
+      <span class="hint">Chats can use the Claude Code you are signed in to here, on your own Claude plan, and Kelvin can have Claude operate this computer's screen, mouse and keyboard for programs without an API. It is only in Kelvin run from source or in a private build, because Anthropic's terms don't let apps route requests through other people's Claude plans. While Claude operates the computer, Kelvin's approvals and settings are locked; Stop ends it.</span>
+      <label class="check"><input id="cc-on" type="checkbox"> Use Claude Code</label>
+      <label for="cc-path">The claude program <span class="muted">(only if Kelvin doesn't find it)</span></label>
+      <input id="cc-path" name="claude_code_path" spellcheck="false" placeholder="C:\Users\you\.local\bin\claude.exe">
+    </div>
     <div class="field">
       <label for="k-gemini">Gemini — Google AI API key</label>
       <div class="key-row"><input id="k-gemini" name="gemini_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="gemini_api_key">Remove</button></div>

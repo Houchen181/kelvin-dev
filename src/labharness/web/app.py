@@ -49,6 +49,10 @@ STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
 SIGNED_OUT = {"/api/session", "/api/accounts", "/api/stop", "/api/runs/stop"}
+# Claude Code bridge: locked while Claude works the screen, so its clicks never answer for a person
+LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
+                          "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/phone",
+                          "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount", "/api/quit")
 
 
 def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -75,6 +79,12 @@ def make_providers(settings: Settings, demo: bool = False, signin: Optional[Sign
     if signin is not None and signin.status()["plan"]:   # ChatGPT models on the user's ChatGPT plan
         from .providers.chatgpt_provider import ChatGPTProvider
         providers["chatgpt"] = ChatGPTProvider(signin)
+    from .. import claudecode   # Claude Code bridge (temporary): the person's own Claude Code, if they want it
+    if claudecode.enabled() and settings.get("claude_code") != "off":
+        cli = claudecode.find_cli(settings.get("claude_code_path") or "")
+        if cli:
+            from .providers.claudecode_provider import ClaudeCodeProvider
+            providers["claudecode"] = ClaudeCodeProvider([cli], claudecode.workdir(Path(settings.path).parent))
     if demo:
         from .providers.demo import DemoProvider
         providers["demo"] = DemoProvider()
@@ -100,13 +110,15 @@ class Guard:
 
     def __init__(self, app: Any, token: str, hosts: Iterable[str], remote: Optional[Remote] = None,
                  signed_in: Optional[Callable[[], bool]] = None,
-                 paired_with: Optional[Callable[[str], Optional[str]]] = None):
+                 paired_with: Optional[Callable[[str], Optional[str]]] = None,
+                 operating: Optional[Callable[[], Optional[str]]] = None):
         self.app = app
         self.token = token
         self.hosts = set(hosts)
         self.remote = remote
         self.signed_in = signed_in       # with accounts: is someone signed in? (else the API waits for them)
         self.paired_with = paired_with   # with accounts: whose phone a token is, when it isn't the signed-in person's
+        self.operating = operating       # Claude Code bridge: the task Claude is doing on the screen, if any
 
     async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "http":
@@ -148,6 +160,10 @@ class Guard:
                 elif (path.startswith("/api/") and path not in SIGNED_OUT and self.signed_in is not None
                       and not self.signed_in()):
                     problem = (401, "Sign in to Kelvin first.", {"signin": True})
+                elif (method != "GET" and self.operating is not None and self.operating()
+                      and path.startswith(LOCKED_WHILE_OPERATING)):
+                    problem = (423, "Claude is operating this computer, so Kelvin's approvals and settings are locked "
+                                    "until it finishes. Press Stop to end it.")
                 scope["kelvin"] = {"role": "owner", "device": None}
             if problem:
                 body = dict(problem[2] if len(problem) > 2 else {}, error=problem[1])
@@ -301,6 +317,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             "chats": store.list(), "projects": store.projects(), "models": models, "default_model": default,
             "settings": settings.public(), "active": agent.active, "can_quit": on_quit is not None,
             "account": session_data(),
+            "claude_code": claude_code_enabled(),
         })
 
     # ------------------------------------------------------------------ people (accounts.py)
@@ -442,6 +459,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if signin.data:
             signin._save()
         return JSONResponse(session_data())
+
+    async def claude_code_view(request: Request) -> Response:
+        """Claude Code bridge (temporary): is it part of this Kelvin, is `claude` here, and is it signed in?"""
+        from .. import claudecode
+        if not claudecode.enabled():
+            return JSONResponse({"enabled": False})
+        cli = claudecode.find_cli(settings.get("claude_code_path") or "")
+        state = await asyncio.to_thread(claudecode.status, [cli]) if cli else {"signed_in": False}
+        return JSONResponse(dict(state, enabled=True, cli=cli, on=settings.get("claude_code") != "off",
+                                 active="claudecode" in agent.providers, operating=runtime.operating))
 
     async def lab_log(request: Request) -> Response:
         """The lab's instrument log: the latest events of everyone who used these instruments, with their names."""
@@ -1528,6 +1555,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/accounts", accounts_view, methods=["POST"]),
         Route("/api/account", account_view, methods=["POST", "DELETE"]),
         Route("/api/lab-log", lab_log),
+        Route("/api/claude-code", claude_code_view),
         Route("/api/chats", chats, methods=["GET", "POST"]),
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
@@ -1609,8 +1637,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     guard = Guard(app, settings.access_key, hosts, remote,
                   signed_in=None if accounts is None else lambda: session["user"] is not None,
-                  paired_with=None if accounts is None else paired_with)
+                  paired_with=None if accounts is None else paired_with,
+                  operating=lambda: runtime.operating)
     return guard
+
+
+def claude_code_enabled() -> bool:
+    from .. import claudecode   # Claude Code bridge (temporary)
+    return claudecode.enabled()
 
 
 def suggested_name() -> str:

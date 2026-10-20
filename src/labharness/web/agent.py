@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import re
+import sys
 import time
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional, Tuple
@@ -146,6 +148,27 @@ MOUNT_DEVICE = {
 }
 DEVICE_TOOLS = {"devices", "add_device", "mount_device"}
 
+# Claude Code bridge (temporary, see claudecode.py): Claude works the screen through Kelvin's screen tools
+OPERATE_COMPUTER = {
+    "name": "operate_computer",
+    "description": "Have Claude, through the Claude Code on this computer, use the screen, mouse and keyboard to do a "
+                   "task in another program: vendor software without an API, a web page, a file dialog. Say what to "
+                   "do, what done looks like, and what must not be touched. It returns what was done. Settings changed "
+                   "this way bypass Kelvin's safety gate: use Kelvin's own instrument tools whenever they can do it, "
+                   "and name in the task exactly which instrument settings may change.",
+    "schema": {"type": "object", "required": ["task"], "properties": {
+        "task": {"type": "string", "description": "The task, in plain words, with what done looks like"},
+        "minutes": {"type": "number", "description": "Time limit in minutes (default 10, at most 30)"}}},
+}
+COMPUTER_RULES = """You are operating a lab computer for Kelvin, a lab assistant, with the screen tools (screenshot,
+click_at, type_into, press_keys, scroll_at, drag_from_to, wait_seconds).
+- Do only the task you were given. Take a screenshot first, and again after each step that changes the screen.
+- Never click in Kelvin's own window (its approvals, settings or stop button) and never change Claude Code's or the
+  computer's settings.
+- Change instrument settings only as the task says. If something looks unsafe, unexpected or different from the
+  task, stop and say so.
+- End with a short report: what you did, what you saw (with any numbers shown), and anything left undone."""
+
 
 def reference(entry: Dict[str, Any]) -> str:
     """A reading-list entry as a reference line."""
@@ -245,6 +268,8 @@ class ChatAgent:
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
         tools = self.tools + ([remember_tool(bool(project))] if learn else []) + ([SAVE_PAPER] if project else []) \
             + [DEVICES, ADD_DEVICE, MOUNT_DEVICE]
+        if "claudecode" in self.providers and rulebook.allows(rules, "claudecode:opus"):   # Claude Code bridge
+            tools = tools + [OPERATE_COMPUTER]
         if not rules["literature"]:
             tools = [t for t in tools if t["name"] not in WEB_TOOLS]
         return {"system": "\n\n".join(parts), "tools": tools, "project": project["id"] if project else None,
@@ -534,6 +559,8 @@ class ChatAgent:
                     content, is_error = "not available: this project keeps its work off the internet", True
                 elif call["name"] == "make_report":
                     content, is_error = await self._report(chat, call["input"])
+                elif call["name"] == "operate_computer":   # Claude Code bridge
+                    content, is_error = await self._operate_computer(call, emit)
                 elif call["name"] == "run_plan" and self.settings and self.settings.get("reviewer"):
                     content, is_error, opinion = await self._reviewed_run(chat, call, emit)
                 else:
@@ -550,6 +577,66 @@ class ChatAgent:
             await emit({"type": "turn_end", "reason": "stopped"})
             return False
         return True
+
+    # ------------------------------------------------------------------ Claude Code bridge (temporary)
+
+    async def _operate_computer(self, call: Dict[str, Any], emit: Any) -> Tuple[str, bool]:
+        """Claude Code does a task on the screen with Kelvin's screen tools (screen.py), every step shown and
+        recorded. While it runs, Kelvin's own approvals and settings are locked (the guard in app.py), so a click
+        can never stand in for a person's yes. Stop ends it."""
+        from .. import claudecode, screen
+        provider = self.providers.get("claudecode")
+        if provider is None:
+            return "not available: Claude Code is not set up on this computer", True
+        args = call["input"] if isinstance(call["input"], dict) else {}
+        task = str(args.get("task") or "").strip()
+        if not task:
+            return "no task given", True
+        try:
+            minutes = max(1.0, min(30.0, float(args.get("minutes") or 10)))
+        except (TypeError, ValueError):
+            minutes = 10.0
+        model = (self.active or {}).get("model") or ""
+        alias = model.split(":", 1)[1] if model.startswith("claudecode:") else "opus"
+        config = provider.cwd / "screen-mcp.json"
+        command = [sys.executable, "--screen-mcp"] if getattr(sys, "frozen", False) else \
+            [sys.executable, "-m", "labharness.screen"]
+        config.write_text(json.dumps({"mcpServers": {"screen": {"type": "stdio", "command": command[0],
+                                                                "args": command[1:]}}}), encoding="utf-8")
+        argv = ["-p", task, "--output-format", "stream-json", "--verbose", "--tools", "", "--mcp-config", str(config),
+                "--strict-mcp-config", "--allowedTools", "mcp__screen__*", "--permission-mode", "dontAsk",
+                "--no-session-persistence", "--max-turns", "100", "--model", alias,
+                "--append-system-prompt", COMPUTER_RULES]
+        log = self.runtime.gate.log
+        log.write("computer_task", by="Claude Code", task=task)
+        self.runtime.operating = task
+        steps: List[str] = []
+        ends: List[Dict[str, Any]] = []
+        try:
+            async for ev in claudecode.stream(provider.cmd, argv, "", provider.cwd, should_stop=lambda: self._stop,
+                                              timeout=minutes * 60):
+                if ev.get("type") in ("result", "exit"):
+                    ends.append(ev)
+                if ev.get("type") != "assistant":
+                    continue
+                for b in (ev.get("message") or {}).get("content") or []:
+                    if isinstance(b, dict) and b.get("type") == "tool_use":
+                        line = screen.describe(str(b.get("name") or ""), b.get("input") or {})
+                        steps.append(line)
+                        log.write("computer", by="Claude Code", action=line)
+                        await emit({"type": "computer_step", "call_id": call["id"], "text": line})
+        except claudecode.StopRequested:
+            return "stopped by the person after %d steps" % len(steps), True
+        except (TimeoutError, OSError) as e:
+            return "Claude Code did not finish: %s (%d steps done)" % (e, len(steps)), True
+        finally:
+            self.runtime.operating = None
+            log.write("computer_task_end", by="Claude Code", steps=len(steps))
+        problem = claudecode.failure(ends)
+        if problem:
+            return "Claude Code could not finish: %s (%d steps done)" % (problem, len(steps)), True
+        report = next((str(e.get("result") or "") for e in ends if e.get("type") == "result"), "")
+        return "Claude operated the computer (%d steps).\n%s" % (len(steps), report.strip()), False
 
     # ------------------------------------------------------------------ second opinions
 

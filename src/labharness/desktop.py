@@ -89,6 +89,8 @@ def _self_test(port: int, key: str) -> int:
     page_ok = page_ok and bridge_ok
     ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
     message = "Kelvin self-test: %s (lab %r)" % ("ok" if ok else "FAILED", boot.get("lab"))
+    if boot.get("claude_code"):   # Claude Code bridge: only in a private build, never in a published one
+        message += " (Claude Code bridge on)"
     log.info(message)
     print(message, flush=True)
     return 0 if ok else 1

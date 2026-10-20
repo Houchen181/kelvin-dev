@@ -59,6 +59,17 @@ python -m venv .venv
 
 To publish a new version: bump the version in `src/labharness/_version.py` and `pyproject.toml`, then push a tag such as `v0.3.5`. GitHub builds both apps, tests them, and publishes the release.
 
+## Claude Code bridge (temporary, developer only)
+
+On the developer's own computer, Kelvin can use the Claude Code there: chats answered on that person's Claude plan (models **Claude Opus / Sonnet / Haiku (Claude Code)**), and `operate_computer`, where Claude works the screen, mouse and keyboard through Kelvin's screen tools for programs without an API. It is to be removed.
+
+- **Only here:** Anthropic's terms don't let third-party apps route requests through people's Claude plans or handle their Claude credentials. So the bridge exists only when Kelvin runs from source, or in a private build with `src/labharness/_private_bridge.py` (gitignored). Published releases never have it. Kelvin only starts the unmodified `claude` program and never reads its credentials.
+- **Needs:** the Claude Code command line, signed in (`claude`, then `/login`). Kelvin finds it on PATH or in `~/.local/bin`; otherwise give its path in Settings → **Claude Code on this computer**, which also shows whether it is signed in and switches the bridge off per person.
+- **Chats:** each turn is one `claude -p` run with Claude Code's own tools off, Kelvin's system prompt, and Kelvin's tools described as `<tool_call name="...">{json}</tool_call>`. Kelvin runs the calls in its own loop, through the safety gate and approvals like any model's.
+- **Operating the computer:** `operate_computer` runs `claude -p` with only Kelvin's screen tools (`python -m labharness.screen`, or `Kelvin.exe --screen-mcp`). Each step shows under the tool's step in the chat and goes to the record (`computer` events, by Claude Code). There is no extra approval, but while it runs Kelvin's approvals, settings, lab, queue and terminal are locked (HTTP 423), so a click can never stand in for a person's yes. Stop ends it. Mouse and keyboard work on Windows; on macOS they need pyobjc's Quartz.
+- **The private build:** create `src/labharness/_private_bridge.py` (any content), run `pyinstaller packaging/kelvin.spec --noconfirm --distpath dist/private --workpath build/private`, delete the file again, and run `dist/private/Kelvin/Kelvin.exe`. `Kelvin.exe --self-test` says whether the bridge is in. Installing a published release replaces it.
+- **Removing it:** delete `claudecode.py`, `screen.py`, `web/providers/claudecode_provider.py`, `tests/test_claude_code.py` and `tests/fake_claude.py`, and the code marked "Claude Code bridge" in `web/app.py`, `web/agent.py`, `web/settings.py`, `agent/runtime.py`, `desktop.py`, `packaging/kelvin_app.py` and the Settings section in `index.html`/`app.js`.
+
 ## Code layout
 
 The Python package is still called `labharness` (`import labharness`); the product, commands and repo are Kelvin.

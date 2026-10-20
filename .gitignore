@@ -12,4 +12,5 @@ runs/
 .mcp.json
 .env
 /settings.json
+src/labharness/_private_bridge.py
 *.local.json
