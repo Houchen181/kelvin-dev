@@ -38,7 +38,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Redire
 from starlette.routing import Route
 
 from .._version import __version__
-from .db import DEFAULTS, SESSION_TTL, Hub, HubError, TooMuch, installation, loopback, log
+from .db import DEFAULTS, SESSION_TTL, Busy, Hub, HubError, TooMuch, installation, loopback, log, previous_ids
 
 COOKIE = "kelvin_hub"
 OPERATOR_COOKIE = "kelvin_hub_operator"
@@ -47,6 +47,7 @@ MAX_FORM = 64 * 1024               # bytes in a form post
 MAX_TOKEN = 16 * 1024              # bytes in a token trade
 MAX_SYNC = 64 * 1024 * 1024        # bytes in one sync
 EXPORT_EVERY = 600                 # seconds between one person's exports
+AT_ONCE = 3                        # one person's syncs and uploads in flight; more get a 429 at once, on the event loop
 CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
 LOGO = Path(__file__).resolve().parent.parent / "web" / "static" / "kelvin.svg"
 SECURITY_HEADERS = [
@@ -168,6 +169,8 @@ def net_of(ip: str) -> str:
         addr = ipaddress.ip_address(ip)
     except ValueError:
         return ip
+    if addr.version == 6 and addr.ipv4_mapped:   # ::ffff:1.2.3.4 is 1.2.3.4
+        return str(addr.ipv4_mapped)
     return str(ipaddress.ip_network("%s/64" % addr, strict=False)) if addr.version == 6 else str(addr)
 
 
@@ -245,6 +248,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     operator_tries = Limiter(5, 900)
     operators: Dict[str, Dict[str, Any]] = {}   # operator sessions, in memory: a restart asks for the key again
     exported: Dict[int, float] = {}            # when each person last exported
+    in_flight: Dict[int, int] = {}             # each person's syncs and uploads running now
 
     # ------------------------------------------------------------------ helpers
 
@@ -312,6 +316,19 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
 
     def api_error(message: str, status: int = 400, **extra: Any) -> JSONResponse:
         return JSONResponse(dict(extra, error=message), status_code=status)
+
+    def take_turn(user_id: int) -> bool:
+        """On the event loop: may one more sync or upload of this person start? (Their requests wait for each other
+        in worker threads, so a flood of them must not take all the threads from everyone else.)"""
+        if in_flight.get(user_id, 0) >= AT_ONCE:
+            return False
+        in_flight[user_id] = in_flight.get(user_id, 0) + 1
+        return True
+
+    def end_turn(user_id: int) -> None:
+        in_flight[user_id] -= 1
+        if in_flight[user_id] <= 0:
+            del in_flight[user_id]
 
     async def app_of(request: Request) -> Optional[Dict[str, Any]]:
         auth = request.headers.get("authorization", "")
@@ -739,8 +756,9 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         state = params.get("state", "")
         if not 8 <= len(state) <= 200:
             raise HubError("Kelvin's request has no valid state.")
-        return {"redirect_uri": uri, "challenge": params["code_challenge"], "state": state,
-                "installation": installation(params)}
+        inst = installation(params)
+        return {"redirect_uri": uri, "challenge": params["code_challenge"], "state": state, "installation": inst,
+                "previous": previous_ids(params.get("previous"), inst["id"])}
 
     def back_to_kelvin(req: Dict[str, Any], **params: str) -> RedirectResponse:
         uri = req["redirect_uri"]
@@ -781,7 +799,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                     raise HubError("That isn't the password of %s. Not you? Sign in as yourself below."
                                    % user["email"])
                 lab_id = int(params["lab"]) if params.get("lab") else None
-                code = await call(hub.connect_code, user, req["redirect_uri"], req["challenge"], inst, lab_id)
+                code = await call(hub.connect_code, user, req["redirect_uri"], req["challenge"], inst, lab_id,
+                                  req["previous"])
             except (HubError, ValueError) as err:
                 return await connect_page(sess, params, req, str(err))
             return back_to_kelvin(req, code=code)
@@ -794,7 +813,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         labs = await call(hub.labs_of, user["id"])
         keep = {k: v for k, v in params.items() if k in ("redirect_uri", "state", "code_challenge",
                                                          "code_challenge_method", "installation", "name", "platform",
-                                                         "version", "person")}
+                                                         "version", "person", "previous")}
         hidden = "".join('<input type="hidden" name="%s" value="%s">' % (e(k), e(v)) for k, v in keep.items())
         chosen = str(params.get("lab") or "")
         options = "".join('<option value="%d"%s>%s</option>' % (lab["id"], " selected" if str(lab["id"]) == chosen
@@ -842,7 +861,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                 raise HubError("grant_type must be authorization_code")
             result = await call(hub.connect_app, body.get("code"), body.get("code_verifier"), body.get("redirect_uri"),
                                 ip)
-        except TooMuch as err:
+        except (TooMuch, Busy) as err:
             return api_error(str(err), err.status)
         except (HubError, ValueError) as err:
             token_tries.hit("token:" + who(request))
@@ -868,6 +887,9 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if hub.needs_consent(app["user"]):
             return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403,
                              consent_url=hub.base_url + "/consent")
+        uid = app["user"]["id"]
+        if not take_turn(uid):
+            return api_error("The hub is still busy with your other requests; try again in a moment.", 429)
         try:
             body = await read_body(request, MAX_SYNC)
             return JSONResponse(await call(hub.sync, app, json.loads(body or b"{}")))
@@ -875,6 +897,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error(str(err), err.status)
         except ValueError as err:
             return api_error(str(err))
+        finally:
+            end_turn(uid)
 
     async def run_file_upload(request: Request) -> Response:
         app = await app_of(request)
@@ -885,9 +909,18 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         declared = request.headers.get("content-length", "")
         if not declared.isdigit():
             return api_error("send the file with a Content-Length", 411)
+        uid = app["user"]["id"]
+        if not take_turn(uid):
+            return api_error("The hub is still busy with your other requests; try again in a moment.", 429)
+        try:
+            return await upload_file(request, app, int(declared))
+        finally:
+            end_turn(uid)
+
+    async def upload_file(request: Request, app: Dict[str, Any], declared: int) -> Response:
         try:   # check the run, the name and the person's share of the disk before a byte is stored
             ticket = await call(hub.reserve_upload, app, request.path_params["run_id"], request.path_params["name"],
-                                int(declared))
+                                declared)
         except HubError as err:
             return api_error(str(err), err.status)
         tmp = hub.home / "tmp" / ("upload-%s" % secrets.token_hex(8))

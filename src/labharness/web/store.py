@@ -318,16 +318,14 @@ class ChatStore:
             self._write_index(index)
 
     def set_rules(self, project_id: str, rules: Any) -> Dict[str, Any]:
-        """Which model providers may see this project, and whether literature search may be used. Its chats keep
-        limits set now, wherever they are filed later (and so are never shared on the hub)."""
+        """Which model providers may see this project, and whether literature search may be used. Its chats are
+        under them while they are in it; a chat keeps them when it runs under them (agent.py), leaves the project,
+        or is left when the project is deleted."""
         rules = normalize(rules)   # ValueError for unknown providers
         with self._lock:
             index = self._read_index()
             project = self._find(index, project_id)
             project["rules"] = rules
-            for chat_id, pid in index["assign"].items():
-                if pid == project_id:
-                    self._keep_rules(index, chat_id, project)
             self._write_index(index)
         return project
 

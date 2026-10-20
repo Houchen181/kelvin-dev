@@ -92,6 +92,8 @@ class Item:
     message: str = ""
     project: Optional[str] = None   # the project of the chat that queued it, for runs with no device mounted
     incognito: bool = False         # queued from an incognito chat: its runs are never shared on the Kelvin hub
+    unshared: bool = False          # queued from a chat that left unshared work: nor are these
+    legacy: bool = False            # queued before Kelvin noted either: its runs are held like older runs
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
@@ -137,8 +139,8 @@ class ScanQueue:
                 item = Item(**{k: raw[k] for k in Item.__dataclass_fields__ if k in raw})
             except TypeError:
                 continue
-            if "incognito" not in raw and not item.project:   # queued before Kelvin noted incognito chats:
-                item.incognito = True                           # it may have come from one, so never shared
+            if "incognito" not in raw and not item.project:   # queued before Kelvin noted incognito chats: it may
+                item.legacy = True                              # have come from one, so shared only with older runs
             if item.status == "running":   # Kelvin closed in the middle of it
                 item.status, item.message = "stopped", "Kelvin closed while it ran"
             self.items.append(item)
@@ -179,10 +181,10 @@ class ScanQueue:
                 raise KeyError("no queue item %r (the queue has %d)" % (ref, len(self.items)))
 
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "",
-            project: Optional[str] = None, incognito: bool = False) -> Item:
+            project: Optional[str] = None, incognito: bool = False, unshared: bool = False) -> Item:
         kind, name = parse_item(text)
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time(),
-                    project=project, incognito=incognito)
+                    project=project, incognito=incognito, unshared=unshared)
         with self.lock:
             if position is None or position > len(self.items):
                 self.items.append(item)

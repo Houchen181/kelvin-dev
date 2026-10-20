@@ -343,13 +343,16 @@ def test_the_disk_share_holds_under_parallel_uploads(tmp_path, monkeypatch):
     assert done["chats"] == 0 and "share" in done["refused"][0]["why"]   # chats count toward the share too
 
 
-def test_account_ids_are_never_reused_and_deletion_leaves_nothing(tmp_path):
-    """Review S4."""
+def test_account_ids_are_never_reused_and_deletion_leaves_nothing(tmp_path, caplog):
+    """Review S4; hub.log never gets an address in the first place (review H4)."""
+    caplog.set_level("INFO", logger="kelvin.hub")
     hub = Hub(tmp_path)
     bob = hub.register("bob@example.org", "Bob", "correct horse", consent=True)
     connected(hub, bob, inst=dict(INST, id="urn:uuid:5f0c1c55-0000-4000-8000-0000000000bb"))
     hub.send_confirmation(bob)
-    (tmp_path / "hub.log").write_text("x registered bob@example.org\nother line\n", encoding="utf-8")
+    hub.config["mail"] = dict(hub.config["mail"], smtp_host="127.0.0.1", smtp_port=1)   # a mail that fails
+    hub.send_confirmation(bob)
+    hub.config["mail"] = dict(hub.config["mail"], smtp_host="")
     hub.delete_user(bob["id"])
     carol = hub.register("carol@example.org", "Carol", "correct horse", consent=True)
     assert carol["id"] != bob["id"]
@@ -359,8 +362,7 @@ def test_account_ids_are_never_reused_and_deletion_leaves_nothing(tmp_path):
     with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
         assert con.execute("SELECT COUNT(*) FROM installations").fetchone()[0] == 0
     assert not list((tmp_path / "outbox").glob("*.txt"))
-    log_text = (tmp_path / "hub.log").read_text(encoding="utf-8")
-    assert "bob@example.org" not in log_text and "[deleted]" in log_text
+    assert caplog.records and not any("bob@example.org" in r.getMessage() for r in caplog.records)
 
 
 def test_an_old_database_gets_ids_that_are_never_reused(tmp_path):
@@ -429,3 +431,130 @@ def test_passwords_resets_and_names(tmp_path):
                 "http://127.0.0.1:8770/cb\x00"):
         with pytest.raises(HubError):
             loopback(bad)
+
+
+def test_a_sign_in_never_undoes_a_reset_that_lands_meanwhile(tmp_path, monkeypatch):
+    """Review H2: the rehash of an old 200k hash must not write the old password back over a reset."""
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "old password", consent=True)
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        salt = bytes(16)
+        con.execute("UPDATE users SET password_hash = ?, salt = ?, iterations = 200000",
+                    (hubdb._hash("old password", salt, 200_000), salt.hex()))
+    hub.start_reset("ada@example.org")
+    code = last_code(hub, "/reset/new")
+    real, landed = hubdb._hash, []
+
+    def racing(password, salt, iterations=hubdb.ITERATIONS):
+        if password == "old password" and iterations == hubdb.ITERATIONS and not landed:
+            landed.append(True)   # the rehash is being made: the reset lands right now
+            hub.finish_reset(code, "new password")
+        return real(password, salt, iterations)
+
+    monkeypatch.setattr(hubdb, "_hash", racing)
+    hub.authenticate("ada@example.org", "old password")
+    assert landed
+    monkeypatch.setattr(hubdb, "_hash", real)
+    assert hub.authenticate("ada@example.org", "new password")["id"] == ada["id"]
+    with pytest.raises(HubError):
+        hub.authenticate("ada@example.org", "old password")
+
+
+def test_an_old_hash_takes_as_long_to_check(tmp_path, monkeypatch):
+    """Review H6: a wrong password costs a full current hash, old account or none, so timing says nothing."""
+    hub = Hub(tmp_path)
+    hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        salt = bytes(16)
+        con.execute("UPDATE users SET password_hash = ?, salt = ?, iterations = 200000",
+                    (hubdb._hash("correct horse", salt, 200_000), salt.hex()))
+    real, spent = hubdb._hash, []
+    monkeypatch.setattr(hubdb, "_hash", lambda pw, salt, it=hubdb.ITERATIONS: spent.append(it) or real(pw, salt, it))
+    for email in ("ada@example.org", "nobody@example.org"):
+        spent.clear()
+        with pytest.raises(HubError):
+            hub.authenticate(email, "wrong password")
+        assert sum(spent) == hubdb.ITERATIONS
+
+
+def test_re_reading_hub_json_never_resets_it(tmp_path):
+    """Review H3: hub.json gone or half written while the hub runs: keep the settings, write nothing."""
+    import os
+    import time
+    hub = Hub(tmp_path)
+    hub.ensure_operator_key()
+    hub.config["base_url"] = "https://hub.example.org"
+    hub.save_config()
+    want = dict(hub.config)
+    path = tmp_path / "hub.json"
+    path.write_text('{"base_url": "https://hub.exa', encoding="utf-8")   # an editor mid-save
+    os.utime(path, ns=(time.time_ns(), time.time_ns() + 10**9))
+    assert hub.is_operator("khop_x") is False and hub.config == want
+    path.unlink()                                                     # ...or between delete and rename
+    hub.refresh_config()
+    assert hub.config == want and not path.exists()
+
+
+def test_reconnecting_with_a_new_installation_id_folds_the_old_one_in(tmp_path):
+    """Review A1: nothing stays behind under an earlier installation id of the same person's Kelvin."""
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
+    lab = hub.create_lab(ada["id"], "Lab")
+    hub.join_lab(ben["id"], lab["join_code"])
+    computer = "urn:uuid:5f0c1c55-0000-4000-8000-0000000000cc"
+    old_token, old = connected(hub, ada, lab["id"], inst=dict(INST, id=computer))   # an id from before per-person ids
+    hub.sync(old, {"projects": [{"id": "p00000001", "name": "Secret soon"}],
+                   "chats": [{"id": "aaaaaaaaaaaa", "project": "p00000001", "title": "c1", "messages": []},
+                             {"id": "bbbbbbbbbbbb", "title": "c2", "messages": []}],
+                   "runs": [{"id": "run1", "project": "p00000001"}]})
+    upload = tmp_path / "tmp" / "u"
+    upload.write_bytes(b"1,2\n")
+    hub.store_run_file(old, "run1", "data.csv", upload, 4)
+    hub.sync(old, {"chats": [{"id": "cccccccccccc", "title": "c3", "messages": []}]})
+
+    new_id = computer + ":0123456789ab"
+    _, new = connected(hub, ada, lab["id"], inst=dict(INST, id=new_id))   # the computer part is folded in by itself
+    hub.sync(new, {"projects": [{"id": "p00000001", "name": "Secret soon"}],   # Kelvin sends everything again
+                   "chats": [{"id": "aaaaaaaaaaaa", "project": "p00000001", "title": "c1", "messages": []}]})
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        for table, n in (("projects", 1), ("chats", 3), ("runs", 1)):
+            assert con.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0] == n, table   # one copy each
+        assert {r[0] for r in con.execute("SELECT installation_id FROM chats")} == {new_id}
+    assert hub.app(old_token) is None                                 # the old connection is over
+    assert hub.run(ben["id"], hub.shared_with(ben["id"])["runs"][0]["id"])["files"] == ["data.csv"]
+
+    hub.sync(new, {"projects": [{"id": "p00000001", "shared": False}]})   # now confidential: nothing of it stays
+    seen = hub.shared_with(ben["id"])
+    assert sorted(c["title"] for c in seen["chats"]) == ["c2", "c3"]
+    assert seen["runs"] == [] and seen["projects"] == []
+
+    elsewhere = "urn:uuid:5f0c1c55-0000-4000-8000-0000000000dd:0123456789ab"   # named as previous by the Kelvin
+    code = hub.connect_code(ada, "http://127.0.0.1:8770/cb", challenge_of("v" * 50), dict(INST, id=elsewhere), None,
+                            [new_id])
+    hub.connect_app(code, "v" * 50, "http://127.0.0.1:8770/cb")
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert {r[0] for r in con.execute("SELECT installation_id FROM chats")} == {elsewhere}
+    with pytest.raises(HubError):
+        hubdb.previous_ids(",".join("urn:uuid:%08d" % i for i in range(6)), elsewhere)   # at most 5
+    with pytest.raises(HubError):
+        hubdb.previous_ids("bad id!", elsewhere)
+
+
+def test_chats_keep_their_size_and_an_old_database_learns_it(tmp_path):
+    """Review H1: a person's share is summed from an index, not by reading every chat."""
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    _, app = connected(hub, ada)
+    hub.sync(app, {"chats": [{"id": "aaaaaaaaaaaa", "title": "t", "messages": ["µ" * 100]}]})
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        size = con.execute("SELECT bytes, LENGTH(CAST(messages AS BLOB)) FROM chats").fetchone()
+        assert size[0] == size[1] > 200
+        plan = " ".join(r[-1] for r in con.execute("EXPLAIN QUERY PLAN SELECT SUM(bytes) FROM chats WHERE user_id = 1"))
+        assert "COVERING INDEX" in plan
+        con.execute("UPDATE chats SET bytes = 0")
+        con.execute("PRAGMA user_version = 2")
+    Hub(tmp_path)                                                     # schema 2 -> 3 works the sizes out
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert con.execute("SELECT bytes FROM chats").fetchone()[0] == size[1]
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 3

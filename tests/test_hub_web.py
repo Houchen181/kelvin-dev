@@ -320,3 +320,66 @@ def test_reset_answers_the_same_whether_or_not_the_account_exists(tmp_path):
     assert a.status_code == b.status_code == 200 and a.text == b.text
     mails = [m.read_text(encoding="utf-8") for m in (tmp_path / "hub" / "outbox").glob("*.txt")]
     assert sum("/reset/new?code=" in m for m in mails) == 1            # sent after the answer, to Ada only
+
+
+def test_one_persons_flood_never_holds_up_anyone_else(tmp_path, monkeypatch):
+    """Review H1: while one person's turn is held (a long sync), their extra requests are turned away at once, and
+    everyone else's requests still get a worker thread."""
+    import threading
+    import time
+    from labharness.hub import db as hubdb
+    from labharness.hub.db import challenge_of
+    monkeypatch.setattr(hubdb, "LOCK_WAIT", 4.0)   # longer than the other person may wait
+    hub = Hub(tmp_path / "hub")
+    with TestClient(create_app(hub, hosts=["testserver"], backups=False)) as client:   # one event loop, one pool
+        register(client)                                                # Ada, in the browser
+        m = hub.register("m@example.org", "M", "correct horse", consent=True)
+        inst = {"id": "urn:uuid:5f0c1c55-0000-4000-8000-0000000000ee", "name": "PC", "platform": "", "version": ""}
+        code = hub.connect_code(m, CALLBACK, challenge_of("v" * 50), inst, None)
+        bearer = {"Authorization": "Bearer " + hub.connect_app(code, "v" * 50, CALLBACK)["access_token"]}
+        assert client.post("/api/sync", json={"runs": [{"id": "run1"}]}, headers=bearer).status_code == 200
+        lock = hub._lock_for(m["id"])
+        lock.acquire()                                                  # as during one of M's long syncs
+        statuses = []
+
+        def put(i):
+            statuses.append(client.put("/api/sync/runs/run1/files/f%d.bin" % i, content=b"x",
+                                       headers=bearer).status_code)
+
+        flood = [threading.Thread(target=put, args=(i,)) for i in range(45)]
+        for t in flood:
+            t.start()
+        time.sleep(0.3)
+        got = {}
+        other = threading.Thread(target=lambda: got.update(page=client.get("/account")))
+        started = time.time()
+        other.start()
+        other.join(8)
+        try:
+            assert "page" in got and got["page"].status_code == 200 and time.time() - started < 2
+        finally:
+            lock.release()
+            for t in flood:
+                t.join(10)
+        assert len(statuses) == 45 and statuses.count(429) >= 42 and 500 not in statuses
+
+
+def test_connect_passes_on_earlier_installation_ids(tmp_path):
+    """Review A1: /connect takes `previous` (checked) and keeps it through the form."""
+    hub, client = make(tmp_path)
+    register(client)
+    kelvin = HubClient("http://127.0.0.1:8780", http=through(client))
+    url, pending = kelvin.begin(CALLBACK, "urn:uuid:5f0c1c55-0000-4000-8000-0000000000ff:0123456789ab")
+    path = url[len("http://127.0.0.1:8780"):]
+    assert client.get(path + "&previous=" + "bad%20id!").status_code == 400
+    page = client.get(path + "&previous=urn:uuid:5f0c1c55-0000-4000-8000-000000000011")
+    assert page.status_code == 200 and 'name="previous" value="urn:uuid:5f0c1c55-0000-4000-8000-000000000011"' in page.text
+
+
+def test_limits_count_an_ipv4_mapped_address_as_ipv4():
+    """Review H5."""
+    from labharness.hub.server import net_of
+    assert net_of("::ffff:192.0.2.7") == "192.0.2.7"
+    assert net_of("::ffff:192.0.2.8") != net_of("::ffff:192.0.2.7")
+    assert net_of("2001:db8::1") == net_of("2001:db8::2") == "2001:db8::/64"
+    assert net_of("198.51.100.4") == "198.51.100.4" and net_of("?") == "?"

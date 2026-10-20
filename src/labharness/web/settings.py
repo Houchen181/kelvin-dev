@@ -170,6 +170,14 @@ class Settings:
                 self._user.pop(name, None)
         self._save()
 
+    def hub_installations(self) -> List[str]:
+        """The installation ids this person connected to the hub with, latest first (for the hub to fold together)."""
+        return [str(i) for i in self._user.get("hub_installations") or [] if i][:5]
+
+    def add_hub_installation(self, ident: str) -> None:
+        self._user["hub_installations"] = [ident] + [i for i in self.hub_installations() if i != ident][:4]
+        self._save()
+
     def installation_id(self) -> str:
         """This Kelvin's own stable id, which the hub keys what it shares by: the computer's, made once."""
         if not self._lab.get("hub_installation"):

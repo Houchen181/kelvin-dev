@@ -112,9 +112,10 @@ class HubClient:
     # ------------------------------------------------------------------ connecting
 
     def begin(self, redirect_uri: str, installation: str, name: str = "", platform: str = "",
-              version: str = "", person: str = "") -> Tuple[str, Dict[str, Any]]:
+              version: str = "", person: str = "", previous: Any = ()) -> Tuple[str, Dict[str, Any]]:
         """The hub's /connect URL for the browser, and what finish() needs back. person: who is signed in to this
-        Kelvin (its local account), for the hub to show."""
+        Kelvin (its local account), for the hub to show. previous: up to 5 earlier installation ids of this person's
+        Kelvin, whose shared work the hub moves to this one."""
         if not redirect_uri.startswith("http://127.0.0.1:"):
             raise HubClientError("the callback must be http://127.0.0.1:<port>/...")
         verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(24)
@@ -123,6 +124,9 @@ class HubClient:
                   "platform": platform, "version": version}
         if person:
             params["person"] = person
+        previous = [str(i) for i in previous if i and str(i) != installation][:5]
+        if previous:
+            params["previous"] = ",".join(previous)
         pending = {"state": state, "verifier": verifier, "redirect_uri": redirect_uri, "at": time.time()}
         return self.base_url + "/connect?" + urllib.parse.urlencode(params), pending
 

@@ -21,7 +21,7 @@ Kelvin keeps accounts per computer ([portal.md](portal.md#signing-in)). The hub 
   - when a project stops being shared, it deletes everything it had of it.
 
   It can only check the marks Kelvin sends: an unmarked chat or run is taken as shared.
-- **Marking a project:** in Kelvin, a project's **Project settings → On the Kelvin hub** is *Shared* (the default), *Unpublished* or *Confidential*. A chat moved out of an unpublished, confidential or model-limited project, or left unfiled when that project is deleted, keeps the mark (or the project's model limits) and stays unshared. So does a chat that was in a project when it was limited to some models. A run started (or queued) from an incognito chat says so in its `meta.json`, and is never sent. Nor is a run whose project is gone, since Kelvin can't tell whether that project was shared.
+- **Marking a project:** in Kelvin, a project's **Project settings → On the Kelvin hub** is *Shared* (the default), *Unpublished* or *Confidential*. A chat moved out of an unpublished, confidential or model-limited project, or left unfiled when that project is deleted, keeps the mark (or the project's model limits) and stays unshared. Changing a project's limits locks none of its chats. A run started (or queued) from an incognito chat, or from a chat that keeps an unshared project's marks or limits, says so in its `meta.json`, and is never sent. Nor is a run whose project is gone, since Kelvin can't tell whether that project was shared.
 - **Who sees it:** its owner, and the other members of the lab it was shared in, while both are members. A Kelvin connected with "No lab" shares only with its person.
 - **Which lab:** everything a Kelvin shared is filed under the lab it shares into now. Connecting it again with another lab, or with "No lab", moves all of it at once.
 - **Leaving a lab** takes your work out of it for good: joining again doesn't bring it back, only connecting a Kelvin into that lab again does.
@@ -29,12 +29,17 @@ Kelvin keeps accounts per computer ([portal.md](portal.md#signing-in)). The hub 
 ## Accounts and labs
 
 - **Registering:** name, email, an optional ORCID iD (its check digit is checked) and a password of 8 characters or more. Agreeing to the terms and the privacy notice is required, and the hub records which version and when. When the version in `hub.json` changes, everyone is asked to agree again before going on, and syncing pauses until they do.
-- **Passwords:** PBKDF2-SHA256 with 600,000 iterations, as OWASP suggests. A hash made with fewer is redone at the person's next sign-in. Browser sessions, app tokens and one-use codes are stored only as their SHA-256. A one-use code works once, even when two requests bring it at the same moment.
+- **Passwords:** PBKDF2-SHA256 with 600,000 iterations, as OWASP suggests.
+  - **Older hashes:** a hash made with fewer is redone at the person's next sign-in, unless the password changed meanwhile.
+  - **Timing:** checking it takes as long as a current one, as does checking an email that has no account. Browser sessions, app tokens and one-use codes are stored only as their SHA-256. A one-use code works once, even when two requests bring it at the same moment.
 - **Email:** the hub sends a confirmation link, and password reset links. Until an SMTP server is set, these go to `outbox/` in the hub's folder for the operator to pass on. `"require_confirmed_email": true` then stops unconfirmed people from connecting a Kelvin or sharing.
 - **Resetting a password:** the reset page gives the same answer, and as fast, whether or not the account exists; the mail goes out after the answer. A new password that won't do leaves the link working. A reset signs out every browser and disconnects every Kelvin of the account. A password change in the account page signs out the other browsers but keeps the Kelvins connected.
 - **Labs have no owner.** Anyone can make a lab. Everyone in it sees its join code (like `K7Q2-9XMB-4TRA`) and can pass it on. A lab nobody is in any more is deleted.
 - **Your data:** **Export everything** on the account page downloads a zip of the account, labs, connections, everything shared and the hub's record of the account's activity. It can be made once every 10 minutes.
-- **Deleting an account:** **Delete account** (with the password) deletes the account and all it shared, even if the person hasn't agreed to new terms. It also removes the Kelvins only that account used, mail to it waiting in `outbox/`, and its address in `hub.log`. The activity record keeps only that account number N was deleted, without addresses or details. Account numbers are never reused. Database backups keep a deleted account until they age out (30 days by default).
+- **Deleting an account:** **Delete account** (with the password) deletes the account and all it shared, even if the person hasn't agreed to new terms.
+  - **Also removed:** the Kelvins only that account used, and mail to it waiting in `outbox/`.
+  - **Timing:** it waits for the person's sync or upload in progress, so no file lands afterwards.
+  - **The log:** `hub.log` never has addresses. The activity record keeps only that account number N was deleted, without addresses or details. Account numbers are never reused. Database backups keep a deleted account until they age out (30 days by default).
 
 ## Connecting a Kelvin
 
@@ -45,8 +50,11 @@ This works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page:
    - **Why the password:** it's asked even when the browser is already signed in. On a shared computer, that session may be someone else's.
    - **Who is shown:** the page names the account it would connect to, and the person using Kelvin (the optional `person` parameter Kelvin sends).
    - **Not you?** This signs out and comes back to the request.
+   - **Limits:** the password here counts toward the same limit as signing in, so 10 wrong passwords, here or on the sign-in page, also block connecting for 15 minutes.
 3. The hub sends the browser back to the callback with a one-use code (10 minutes). Kelvin trades the code and its PKCE verifier for a token at `POST /api/token`.
 4. Kelvin keeps the token in the person's own settings, encrypted with their password. The hub keeps one token per account and installation id, so connecting the same Kelvin again replaces it. **Disconnect** on the account page, `DELETE /api/token`, or a password reset ends it.
+   - **Earlier ids:** Kelvin may name up to 5 earlier installation ids of its own (`previous`, comma-separated). The hub moves that account's projects, chats, runs and run files from those ids to the new one, keeps one copy where both have an item, and ends the old ids' connections.
+   - **Ids from before:** the new id's computer part (what Kelvin used before ids were per person) counts as an earlier id without being named.
 
 `HubClient` in `hub/client.py` does Kelvin's side: `begin`, `finish`, `push`, `upload` and `disconnect`, plus `collect(store)`, which gathers what a `ChatStore` may share.
 
@@ -55,22 +63,29 @@ This works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page:
 Settings → **Account** → Kelvin hub (`web/hubsync.py`, routes in `web/app.py`):
 
 - **Connect:** the person types the hub's address and presses **Connect**. Kelvin opens the hub's `/connect` page in the browser, with its callback `http://127.0.0.1:<port>/hub/callback`.
-  - **Installation id:** one per person on this computer, so two people on one PC each keep their own connection. It's the computer's id (`hub_installation` in `~/Kelvin/settings.json`, made once), a colon, and the first 12 hex digits of the SHA-256 of the person's folder.
+  - **Installation id:** one per person on this computer, so two people on one PC each keep their own connection. It's the computer's id (`hub_installation` in `~/Kelvin/settings.json`, made once), a colon, and the first 12 hex digits of the SHA-256 of the person's folder. The folder is resolved first (`Path.resolve()`, then `normcase`, lower case on Windows), so another spelling of it, such as an 8.3 short name, gives the same id.
+  - **Earlier ids (`previous`):** Kelvin remembers the ids each person connected with (`hub_installations` in their `settings.json`, the latest 5). On connect it sends them, plus the id that Kelvin's first hub branch made from the folder as spelled and the bare computer id, at most 5 in all. At the token trade the hub moves what was shared under those to the new id and ends their tokens, so it keeps one copy of everything.
   - **Name:** Kelvin also sends the person's name (`person`), which the hub shows.
-  - **Callback:** works only on Kelvin's own computer, never from a paired phone.
+  - **Callback:** works only on Kelvin's own computer, never from a paired phone. It answers at once, even while a sync of the old connection is still uploading.
   - **Token:** the hub's address and the token go in the person's `settings.json` (`hub_url`, `hub_token`). The token is encrypted with their password like the API keys, and never reaches the browser or the logs.
-- **Status:** who the person is on the hub, which lab this Kelvin shares into, and the last sync (from `GET /api/me`). If the hub says the connection ended (disconnected on the account page), Kelvin forgets the token and says so.
+- **Status:** who the person is on the hub, which lab this Kelvin shares into, and the last sync of this connection (from `GET /api/me`). If the hub says the connection ended (disconnected on the account page, or after a password reset), Kelvin forgets the token and says so.
 - **Disconnect:** Kelvin forgets the token at once, then ends the connection on the hub (`DELETE /api/token`, confirmed only by a 204). A sync in progress stops before its next request. What was shared stays on the hub, and the account page deletes it.
 - **Background sync:** every two minutes, and right after connecting or **Sync now**, Kelvin sends what changed with `POST /api/sync`, projects first, in batches of at most 500 items or 16 MB.
   - **What goes:** what `collect` returns: each chat with its marks and rules, and shared projects with theirs. Plus the finished runs in the person's data folder (those with a `meta.json`) in a shared project or in none.
   - **Whose runs:** only runs this person made (`meta.json` notes `user`), so a data folder shared with someone else never sends their runs.
-  - **Older runs:** runs made before Kelvin noted who made them, or made without accounts, go only when the person ticks **Also share older runs** (`hub_old_runs`, off by default). The status says how many stay back.
-  - **Files:** then it uploads each new or changed run file (`meta.json`, `data.csv`, `plan.yaml`, plots, reports; up to 200 MB each), and tells the hub what is gone since (`removed`). An upload the hub couldn't take for now (429, 5xx) goes again at the next sync. When nothing changed, it sends nothing.
-- **What was sent** is kept in `hub-sync.json` in the person's folder (`~/Kelvin/users/<name>/`): ids and fingerprints, never content. Connecting again sends everything once more.
+  - **Runs that stay:** a run's `meta.json` says when an incognito chat started it (`incognito`), or a chat that keeps an unshared project's marks or limits (`unshared`, whatever project the run is filed under). Neither is ever sent.
+  - **Older runs:** some runs are held back: those made before Kelvin noted who made them, those made without accounts, and those of queue items from before (`legacy`). They go only when the person ticks **Also share older runs** (`hub_old_runs`, off by default). The status says how many stay back.
+  - **Files:** then it uploads each new or changed run file (`meta.json`, `data.csv`, `plan.yaml`, plots, reports; up to 200 MB each), and tells the hub what is gone since (`removed`). A file the hub refuses (400, 413) goes again only when it changes. When nothing changed, it sends nothing.
+  - **Retries:** a file the hub fails on (429 or 5xx, such as Cloudflare's 524 on a slow upload) waits while the others go on. It waits 5 minutes, then twice as long each time, up to 4 hours (`retry` in `hub-sync.json`). Three such failures in a row end that sync.
+- **Marks on chats** (`web/store.py`):
+  - **Leaving a project:** a chat moved out of an unpublished, confidential or model-limited project, or left when the project is deleted, keeps that mark and the project's limits as they are then. Changing a project's limits locks no chat. A chat keeps limits only when it runs under them, leaves the project or is left when it is deleted.
+  - **Notes:** a chat in unshared work keeps no notes for every conversation.
+  - **Runs:** its runs are filed in its own project, without another project's mounted sample.
+- **What was sent** is kept in `hub-sync.json` in the person's folder (`~/Kelvin/users/<name>/`): ids and fingerprints, never content, and a digest of the token it belongs to. A new connection sends everything once more.
 - **Safety:**
   - **Snapshot:** a sync works from a snapshot of the person's settings, chats and data folder. It stops when someone else signs in, or when the person disconnects or connects again, so work never goes out under another connection. A 401 that arrives after such a change never wipes the new token.
   - **Redirects:** Kelvin never follows a redirect from the hub, so the token can't be sent on to another address.
-  - **Retries:** with the hub unreachable, Kelvin tries again at the next sync. With new terms, it waits until the person agrees to them on the hub.
+  - **Unreachable or new terms:** with the hub unreachable, Kelvin tries again at the next sync. With new terms, it waits until the person agrees to them on the hub.
 
 | Portal call | What it does |
 |---|---|
@@ -102,20 +117,22 @@ It serves `http://127.0.0.1:8780` on this computer only. On the first start it w
 .venv/Scripts/kelvin-hub stats --home C:/path/to/hub-data
 ```
 
-`backup` copies the database now and `stats` prints the counts. `operator-key` makes a new operator key; the old one stops working at once, even while the hub runs, and so do the operator pages opened with it. `KELVIN_HUB_HOME` can stand in for `--home`.
+`backup` copies the database now and `stats` prints the counts. `operator-key` makes a new operator key; the old one stops working at once, even while the hub runs, and so do the operator pages opened with it.
+
+While the hub runs, it re-reads `hub.json` when the file changes. If the file can't be read at that moment (half saved, or between an editor's delete and rename), it keeps the settings it has and tries again later. It never writes defaults over it. `KELVIN_HUB_HOME` can stand in for `--home`.
 
 The hub's folder:
 
 | Path | What it is |
 |---|---|
-| `hub.sqlite3` | Accounts, labs, connected Kelvins and what they share (SQLite, WAL) |
+| `hub.sqlite3` | Accounts, labs, connected Kelvins and what they share (SQLite, WAL). An older database is brought up to date when the hub starts (schema 3) |
 | `hub.json` | Settings: `base_url`, `consent_version`, `require_confirmed_email`, `max_file_mb` (200), `quota_gb_per_user` (5), `backups_kept` (30), `client_ip_header`, `mail`, and the operator key's hash. No secrets |
 | `operator-key.txt` | The operator key, written once. Move it to a password manager, then delete the file |
 | `files/<user_id>/<run_id>/` | Run files |
 | `backups/hub-YYYY-MM-DD.sqlite3` | One copy of the database a day, made while the hub runs (SQLite's online backup) |
 | `outbox/` | Mail the hub would have sent, while no SMTP server is set |
 | `terms.html`, `privacy.html` | Optional: your own terms and privacy notice, replacing the built-in drafts |
-| `hub.log` | Sign-ins, connections, syncs and errors; never passwords or tokens |
+| `hub.log` | Sign-ins, connections, syncs and errors by account number; never addresses, passwords or tokens |
 
 **Backups:** the daily copy covers the database only. Back up `files/` with the rest of the machine.
 
@@ -147,13 +164,14 @@ Kelvin accepts a hub address on the internet only with https.
   | Token trades | 30 failures in 15 minutes per address |
   | Operator key | 5 failures in 15 minutes per address |
   | Exports | one per person per 10 minutes |
+  | Syncs and uploads | 3 of one person's at once; more get a 429 at once. Each waits at most 10 seconds for that person's other sync or upload, then gets a 429 |
 
-  Account-page forms and syncs have none.
+  Account-page forms have none. One person's flood of syncs or uploads never takes the worker threads from anyone else.
 - **Request bodies** are capped as they stream in: forms at 64 kB, token trades at 16 kB, one sync at 64 MB.
 - **Uploads:**
   - names are checked part by part (no `..`, and no device names, even with a space as in `NUL .txt`);
   - each file needs a `Content-Length` and may be at most `max_file_mb`;
-  - its bytes are held against the person's share (`quota_gb_per_user`, which chats count toward too) before it streams in, so parallel uploads can't overrun the share;
+  - its bytes are held against the person's share (`quota_gb_per_user`, which chats count toward too) before it streams in, so parallel uploads can't overrun the share. The share is summed from each chat's stored size, never by reading the chats;
   - at most 2 uploads at a time per person.
 - **Times** Kelvin sends must be numbers from the year 2000 to a day from now; anything else is stored as the moment it arrived.
 
@@ -179,6 +197,8 @@ Every call but `health` and `token` needs `Authorization: Bearer <token>`. Items
 - **Backups:** they keep deleted work for up to 30 days.
 - **Phones:** a paired phone with control can set a project back to Shared.
 - **Registration:** it says when an email already has an account.
+- **Quoting:** Kelvin's tools that read runs can quote an unshared run into a shared chat. The chat then carries the quote to the hub.
+- **Each sync** looks through everything for what changed.
 
 ## Not built yet
 

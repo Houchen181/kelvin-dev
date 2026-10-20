@@ -15,7 +15,8 @@ Never: unpublished, confidential or model-limited projects with their chats and 
 they started, anyone else's runs, API keys, or ChatGPT and Claude Code sign-ins.
 
 Each person connects as their own installation (the computer's id and their folder's), so two people on one computer
-keep their own connections.
+keep their own connections. Connecting again tells the hub the ids this person connected with before, so it moves
+what they shared under those to the new one instead of keeping two copies.
 
 What was sent is remembered per person in hub-sync.json (ids and fingerprints, never content), so only what changed
 goes again."""
@@ -36,7 +37,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from .._version import __version__
 from ..hub.client import PENDING_TTL, HubClient, HubClientError, Http, _http, check_url, collect
-from ..hub.db import LOCAL_ID, MAX_BATCH, MAX_MESSAGES, MAX_META, HubError, file_parts
+from ..hub.db import INSTALLATION_ID, LOCAL_ID, MAX_BATCH, MAX_MESSAGES, MAX_META, HubError, file_parts
 from .store import GENERAL, ChatStore
 
 log = logging.getLogger("labharness.hubsync")
@@ -49,6 +50,9 @@ STATE = "hub-sync.json"
 KINDS = ("projects", "chats", "runs")
 NETWORK = (OSError, HTTPException, ValueError)   # the hub can't be reached, or answered nonsense
 REFUSED = (400, 413)              # the hub won't take this file as it is: again only when it changes
+RETRY_FIRST = 300                 # a file the hub failed on (5xx, 429) waits this long, doubling each time...
+RETRY_MAX = 4 * 3600              # ...up to this
+FAILURES = 3                      # file failures in a row that end a sync: the hub itself is in trouble
 OLD = object()                    # a run's meta without "user": made before Kelvin noted who made runs
 
 
@@ -63,11 +67,38 @@ def computer_name() -> str:
         return "Kelvin"
 
 
+def _digest(where: str) -> str:
+    return hashlib.sha256(where.encode("utf-8")).hexdigest()[:12]
+
+
 def installation_for(computer: str, folder: Any) -> str:
     """This person's installation on the hub: the computer's id and a digest of their own folder, so two people on
-    one computer (or one person with two accounts on it) each keep their own connection."""
-    where = os.path.normcase(os.path.abspath(str(folder)))
-    return "%s:%s" % (computer, hashlib.sha256(where.encode("utf-8")).hexdigest()[:12])
+    one computer (or one person with two accounts on it) each keep their own connection. The folder is resolved
+    first, so another spelling of it (a short 8.3 name, other case) gives the same id."""
+    try:
+        where = str(Path(folder).resolve())
+    except OSError:
+        where = os.path.abspath(str(folder))
+    where = os.path.normcase(where)
+    return "%s:%s" % (computer, _digest(where.lower() if sys.platform == "win32" else where))
+
+
+def previous_installations(computer: str, folder: Any, remembered: Any = ()) -> List[str]:
+    """The ids this person's Kelvin may have shared under before (latest first, at most 5): the ones it connected
+    with, the one Kelvin 0.3.8's hub branch made from the folder as spelled, and the bare computer id (the first
+    connections)."""
+    current = installation_for(computer, folder)
+    as_spelled = "%s:%s" % (computer, _digest(os.path.normcase(os.path.abspath(str(folder)))))
+    out: List[str] = []
+    for ident in list(remembered) + [as_spelled, computer]:
+        if ident and ident != current and ident not in out and INSTALLATION_ID.match(str(ident)):
+            out.append(str(ident))
+    return out[:5]
+
+
+def connection_of(token: str) -> str:
+    """Which connection hub-sync.json was made for (a digest of the token, never the token)."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] if token else ""
 
 
 def said(e: HubClientError) -> str:
@@ -107,13 +138,13 @@ def run_items(runs: Path, shared: Set[str], person: Optional[str] = None,
             meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue   # still running, or never finished
-        if not isinstance(meta, dict) or meta.get("incognito"):
-            continue
+        if not isinstance(meta, dict) or meta.get("incognito") or meta.get("unshared"):
+            continue   # from an incognito chat, or one that keeps unshared work's marks
         project = meta.get("project") or None
         project = None if project == GENERAL else project
         if project is not None and project not in shared:
             continue
-        owner = meta.get("user", OLD)
+        owner = OLD if meta.get("legacy") else meta.get("user", OLD)   # legacy: from a queue item of then
         if owner != person:
             if owner is not OLD and owner is not None:
                 continue   # someone else's, in a data folder they share with this person
@@ -173,6 +204,7 @@ def load_state(folder: Optional[Path], url: str) -> Dict[str, Any]:
     sent = data.get("sent") if isinstance(data.get("sent"), dict) else {}
     data["sent"] = {k: dict(sent.get(k) or {}) for k in KINDS}
     data["files"] = data.get("files") if isinstance(data.get("files"), dict) else {}
+    data["retry"] = data.get("retry") if isinstance(data.get("retry"), dict) else {}   # run → file → [when, wait]
     return data
 
 
@@ -241,10 +273,12 @@ class HubLink:
                 raise HubClientError("Sign in to Kelvin first.")
             now = time.time()
             self.pending = {s: p for s, p in self.pending.items() if now - p["at"] < PENDING_TTL}
+            computer = self.settings.installation_id()
+            installation = installation_for(computer, self.folder)
             link, pending = HubClient(url, http=self.http).begin(
-                redirect_uri, installation_for(self.settings.installation_id(), self.folder), computer_name(),
-                sys.platform, __version__, self.person or "")
-            self.pending[pending["state"]] = dict(pending, url=url, gen=self.gen)
+                redirect_uri, installation, computer_name(), sys.platform, __version__, self.person or "",
+                previous_installations(computer, self.folder, self.settings.hub_installations()))
+            self.pending[pending["state"]] = dict(pending, url=url, gen=self.gen, installation=installation)
         return link
 
     def finish(self, query: Dict[str, str]) -> Dict[str, Any]:
@@ -262,8 +296,8 @@ class HubLink:
             if mine:
                 self.gen += 1   # a sync still going with the old token stops at its next request
                 self.settings.set_hub(p["url"], token)
+                self.settings.add_hub_installation(p["installation"])
                 self.url, self.token = p["url"], token
-                folder = self.folder
         if not mine:   # someone else signed in to Kelvin meanwhile, or this one disconnected: not theirs to keep
             try:
                 client.disconnect()
@@ -271,13 +305,7 @@ class HubLink:
                 pass
             raise HubClientError("Someone else signed in to Kelvin meanwhile, or it was disconnected. Connect again "
                                  "from your own Settings.")
-        with self._sync:   # once that sync has saved what it did: send everything once more, keeping the ids
-            state = load_state(folder, p["url"])   # (for what was removed since)
-            state["sent"] = {k: {i: "" for i in state["sent"][k]} for k in KINDS}
-            state["files"] = {}
-            state.pop("last", None)
-            save_state(folder, state)
-        log.info("connected to the hub at %s", p["url"])
+        log.info("connected to the hub at %s", p["url"])   # the next sync sends everything once more
         try:
             return client.me()
         except (HubClientError,) + NETWORK:
@@ -315,6 +343,8 @@ class HubLink:
         with self._switch:
             gen, folder, url, token = self.gen, self.folder, self.url, self.token
         state = load_state(folder, url) if folder is not None and url else {}
+        if state.get("connection") != connection_of(token):
+            state = {}   # made for another connection: this one hasn't synced yet
         out: Dict[str, Any] = {"connected": bool(folder is not None and url and token), "url": url, "account": None,
                                "problem": None, "sync": state.get("last"), "synced_at": state.get("synced_at"),
                                "syncing": self.syncing}
@@ -362,6 +392,12 @@ class HubLink:
     def _sync_person(self, snap: Dict[str, Any]) -> Dict[str, Any]:
         client = HubClient(snap["url"], snap["token"], http=self.http)
         state = load_state(snap["folder"], snap["url"])
+        if state.get("connection") != connection_of(snap["token"]):
+            # a new connection: send everything once more, keeping the ids for what was removed since
+            state["sent"] = {k: {i: "" for i in state["sent"][k]} for k in KINDS}
+            state.update(files={}, retry={}, connection=connection_of(snap["token"]))
+            state.pop("last", None)
+            state.pop("synced_at", None)
         last: Dict[str, Any] = {"at": time.time(), "ok": False, "sent": {k: 0 for k in KINDS}, "withheld": 0,
                                 "removed": 0, "files": 0, "refused": [], "older_runs": 0, "error": None}
         try:
@@ -437,18 +473,20 @@ class HubLink:
                     state["sent"][k].pop(i, None)
                     if k == "runs":
                         state["files"].pop(i, None)
+                        state["retry"].pop(i, None)
             last["removed"] += int(done.get("removed") or 0)
             gone = {k: ids[MAX_BATCH:] for k, ids in gone.items()}
             save_state(snap["folder"], state)
 
-        tried = 0
+        tried = failures = 0
         for item, folder in reversed(runs):   # newest first
             if item["id"] in refused_now or item["id"] not in state["sent"]["runs"]:
                 continue
             have = state["files"].setdefault(item["id"], {})
+            later = state["retry"].get(item["id"]) or {}
             for name, path, fp in run_files(folder):
-                if have.get(name) == fp:
-                    continue
+                if have.get(name) == fp or (later.get(name) or [0])[0] > time.time():
+                    continue   # sent, or the hub failed on it lately: later
                 self._check(snap)
                 if fp[0] > MAX_FILE:
                     last["refused"].append({"run": item["id"], "file": name, "why": "larger than 200 MB"})
@@ -461,11 +499,27 @@ class HubLink:
                     try:
                         client.upload(item["id"], name, data)
                         last["files"] += 1
+                        failures = 0
                     except HubClientError as e:
-                        if e.status not in REFUSED:
-                            raise   # signed out there, new terms, or the hub busy (429, 5xx): this file next time
-                        last["refused"].append({"run": item["id"], "file": name, "why": said(e)})
+                        if not (e.status == 429 or (e.status or 0) >= 500):
+                            if e.status not in REFUSED:
+                                raise   # signed out there, or new terms
+                            last["refused"].append({"run": item["id"], "file": name, "why": said(e)})
+                        else:   # the hub failed on this one (a timeout on a big file, say): the others first
+                            wait = min(RETRY_MAX, 2 * later[name][1]) if later.get(name) else RETRY_FIRST
+                            later = state["retry"].setdefault(item["id"], {})
+                            later[name] = [time.time() + wait, wait]
+                            last["refused"].append({"run": item["id"], "file": name, "again": wait,
+                                                    "why": said(e) + "; Kelvin tries it again later"})
+                            failures += 1
+                            save_state(snap["folder"], state)
+                            if failures >= FAILURES:
+                                raise
+                            continue
                 have[name] = fp   # sent, or refused: again only when it changes
+                later.pop(name, None)
                 tried += 1
                 if tried % 20 == 0:
                     save_state(snap["folder"], state)
+            if not state["retry"].get(item["id"]):
+                state["retry"].pop(item["id"], None)

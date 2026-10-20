@@ -2,6 +2,7 @@
 background sync of what a person shares (never what is unpublished, confidential, model-limited or incognito)."""
 import json
 import re
+import sys
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -21,6 +22,9 @@ from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.hub.client import collect  # noqa: E402
 from labharness.hub.db import Hub  # noqa: E402
 from labharness.hub.server import create_app as hub_app  # noqa: E402
+from labharness.web import hubsync  # noqa: E402
+from labharness.web.hubsync import installation_for, previous_installations  # noqa: E402
+from labharness.web.providers.base import ModelInfo, Provider, TurnResult  # noqa: E402
 from labharness.web.settings import Settings  # noqa: E402
 from labharness.web.store import ChatStore  # noqa: E402
 
@@ -70,14 +74,15 @@ def the_hub(tmp_path, email="ada@example.org", lab="Smith Lab"):
     return hub, browser
 
 
-def portal(tmp_path, monkeypatch, browser, accounts=None, calls=None):
+def portal(tmp_path, monkeypatch, browser, accounts=None, calls=None, providers=None):
     opened = []
     monkeypatch.setattr(web_app, "open_url", opened.append)
     lab = build_virtual_lab(seed=1)
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
     settings = Settings(tmp_path / "settings.json")
     store = ChatStore(tmp_path / "lab" / "chats" if accounts else tmp_path / "chats", create=not accounts)
-    guard = web_app.create_app(runtime, settings, store, hosts=["testserver"], demo=True, accounts=accounts)
+    guard = web_app.create_app(runtime, settings, store, hosts=["testserver"], demo=True, accounts=accounts,
+                               providers=providers)
     guard.app.state.hub.http = through(browser, calls)
     return SimpleNamespace(client=TestClient(guard), h={"X-Kelvin-Token": settings.access_key}, runtime=runtime,
                            settings=settings, store=store, opened=opened, link=guard.app.state.hub)
@@ -310,13 +315,17 @@ def test_cancelled_ended_and_unreachable_connections(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ after review: what must never leave, and races
 
 
-def test_model_limited_chats_keep_their_rules_wherever_they_go(tmp_path):
+def test_model_limited_chats_keep_the_rules_they_leave_with(tmp_path):
     store = ChatStore(tmp_path / "chats")
     local = store.create_project("Local only")
     early = chat(store, "talked before the limits", local["id"])
-    store.set_rules(local["id"], {"providers": ["local"], "literature": False})   # its chats keep them from now on
-    store.set_rules(local["id"], {"providers": None, "literature": True})        # ...even when they are lifted
-    store.assign(early["id"], None)
+    store.set_rules(local["id"], {"providers": None, "literature": False})       # off and straight back on:
+    store.set_rules(local["id"], {"providers": None, "literature": True})        # no harm done, nothing locked
+    assert "rules" not in store.load(early["id"]) and [c["id"] for c in collect(store)["chats"]] == [early["id"]]
+    store.set_rules(local["id"], {"providers": ["local"], "literature": False})
+    assert collect(store)["chats"] == []                                          # in it: not shared
+    store.assign(early["id"], None)                                               # it leaves with the rules of now
+    store.set_rules(local["id"], {"providers": None, "literature": True})
     assert store.load(early["id"])["rules"] == {"providers": ["local"], "literature": False}   # models too
     gone = store.create_project("Gone")
     store.set_rules(gone["id"], {"providers": ["local"], "literature": True})
@@ -351,15 +360,16 @@ def test_only_this_persons_newer_runs_go_and_older_ones_on_request(tmp_path, mon
     run(k.runtime, "20261020-100200-older", None, old=True)            # from before Kelvin said who made runs
     run(k.runtime, "20261020-100300-no-accounts", None, user=None)     # ...or from before accounts
     run(k.runtime, "20261020-100400-incognito", None, user="Ben", incognito=True)
+    run(k.runtime, "20261020-100500-queued-then", None, user="Ben", legacy=True)   # an old queue item's run
     s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
-    assert s["ok"] and s["older_runs"] == 2
+    assert s["ok"] and s["older_runs"] == 3
     assert [r["local_id"] for r in hub.shared_with(1)["runs"]] == ["20261020-100000-bens"]
     assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_old_runs"] is False
     k.client.post("/api/settings", headers=k.h, json={"hub_old_runs": "on"})   # "Also share older runs"
     s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
     assert s["ok"] and s["older_runs"] == 0
     assert sorted(r["local_id"] for r in hub.shared_with(1)["runs"]) == [
-        "20261020-100000-bens", "20261020-100200-older", "20261020-100300-no-accounts"]
+        "20261020-100000-bens", "20261020-100200-older", "20261020-100300-no-accounts", "20261020-100500-queued-then"]
     assert "adas" not in on_the_hub(hub) and "incognito" not in on_the_hub(hub)   # never anyone else's
 
     lab = build_virtual_lab(seed=1)
@@ -371,7 +381,12 @@ def test_only_this_persons_newer_runs_go_and_older_ones_on_request(tmp_path, mon
         {"id": "a2", "kind": "plan", "name": "gate_sweep", "text": SWEEP, "project": "p00000001"}]}))
     from labharness.scanqueue import ScanQueue
     old_queue = ScanQueue(tmp_path / "queue.json")                     # queued before Kelvin noted incognito chats
-    assert [i.incognito for i in old_queue.items] == [True, False]
+    assert [i.legacy for i in old_queue.items] == [True, False]        # held like older runs, and said so on disk
+    assert [i.incognito for i in old_queue.items] == [False, False]
+    old_queue.save()
+    saved = json.loads((tmp_path / "queue.json").read_text())["items"][0]
+    assert saved["legacy"] is True and saved["incognito"] is False
+    assert runtime._attribute(SimpleNamespace(device=None), None, False, False, True)["legacy"] is True
 
 
 def test_two_people_on_one_computer_keep_their_own_connections(tmp_path, monkeypatch):
@@ -445,7 +460,6 @@ def test_a_redirect_never_carries_the_token():
 
 def test_disconnecting_or_reconnecting_during_a_sync(tmp_path, monkeypatch):
     import threading
-    import time
     hub, browser = the_hub(tmp_path)
     k = portal(tmp_path, monkeypatch, browser)
     connect(k, browser)
@@ -480,53 +494,80 @@ def test_disconnecting_or_reconnecting_during_a_sync(tmp_path, monkeypatch):
     syncing.start()
     assert at_upload.wait(20)
     reconnecting = threading.Thread(target=lambda: again.append(connect(k, browser)))
-    reconnecting.start()                # it waits for the sync to stop before it starts afresh
-    deadline = time.time() + 20
-    while k.link.token in ("", old) and time.time() < deadline:
-        time.sleep(0.05)
+    reconnecting.start()
+    reconnecting.join(20)               # the page answers at once, while that upload still hangs
     new = k.link.token
+    assert not reconnecting.is_alive() and again and again[0].status_code == 200 and new not in ("", old)
+    assert k.client.get("/api/hub", headers=k.h).json()["sync"] is None    # this connection hasn't synced yet
     go.set()
     syncing.join(20)
-    reconnecting.join(20)
-    assert again and again[0].status_code == 200 and new not in ("", old)
-    assert out and not out[0]["ok"]
+    assert out and not out[0]["ok"] and "Interrupted" in out[0]["error"]
     assert k.settings.get("hub_token") == new and k.link.connected   # the old sync's 401 didn't wipe the new one
-    state = json.loads((tmp_path / "hub-sync.json").read_text(encoding="utf-8"))
-    assert state["files"] == {} and set(state["sent"]["runs"].values()) <= {""}   # started afresh after it
     k.link.http = base
-    s = k.link.sync_once()
+    s = k.link.sync_once()                                            # a new connection sends everything again
     assert s["ok"] and s["sent"]["runs"] == 3 and s["files"] == 9
 
 
-def test_busy_hubs_get_the_file_again_and_unshared_work_keeps_its_place(tmp_path, monkeypatch):
+def test_a_file_the_hub_keeps_failing_on_waits_while_the_others_go(tmp_path, monkeypatch):
     hub, browser = the_hub(tmp_path)
     k = portal(tmp_path, monkeypatch, browser)
     connect(k, browser)
-    run(k.runtime, "20261020-100000-scan", None)
+    d = run(k.runtime, "20261020-100000-scan", None)
+    (d / "bad.csv").write_text("x", encoding="utf-8")
     base = through(browser)
-    busy = []
+    tries = []
 
-    def once_busy(method, url, body=None, headers=None):
-        if method == "PUT" and not busy:
-            busy.append(url)
-            return 502, {"error": "the hub is busy"}
+    def bad_fails(method, url, body=None, headers=None):
+        if method == "PUT" and url.endswith("/bad.csv"):
+            tries.append(url)
+            return 500, {"error": "the hub fell over"}   # as a 524 from Cloudflare on a slow big upload would
         return base(method, url, body, headers)
-    k.link.http = once_busy
+    k.link.http = bad_fails
     s = k.link.sync_once()
-    assert not s["ok"] and "busy" in s["error"]
-    k.link.http = base
-    s = k.link.sync_once()
-    assert s["ok"] and s["files"] == 3                                  # the one refused for a moment, too
+    assert s["ok"] and s["files"] == 3 and len(tries) == 1               # the others went
+    assert [r["again"] for r in s["refused"] if r.get("file") == "bad.csv"] == [300]
+    assert k.link.sync_once()["ok"] and len(tries) == 1                 # not again so soon
+    state_file = tmp_path / "hub-sync.json"
 
+    def due_now():
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        for files in state["retry"].values():
+            for entry in files.values():
+                entry[0] = 0
+        state_file.write_text(json.dumps(state), encoding="utf-8")
+        return state
+    due_now()
+    k.link.sync_once()
+    retry = json.loads(state_file.read_text(encoding="utf-8"))["retry"]
+    assert len(tries) == 2 and retry["20261020-100000-scan"]["bad.csv"][1] == 600   # waits twice as long now
+
+    for i in range(5):
+        run(k.runtime, "20261020-1001%02d-more" % i, None)
+    k.link.http = lambda m, u, b=None, h=None: (503, {"error": "down"}) if m == "PUT" else base(m, u, b, h)
+    s = k.link.sync_once()                                              # a hub failing on everything:
+    assert not s["ok"] and "down" in s["error"]                         # the sync ends after a few files
+    assert len([r for r in s["refused"] if "down" in r["why"]]) == hubsync.FAILURES
+    k.link.http = base
+    due_now()
+    s = k.link.sync_once()
+    assert s["ok"] and s["files"] == 5 * 3 + 1                         # all of them, bad.csv too, once it works
+    assert json.loads(state_file.read_text(encoding="utf-8"))["retry"] == {}
+
+
+def test_unshared_work_keeps_its_place_and_its_notes(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path)
+    k = portal(tmp_path, monkeypatch, browser)
     store, rt = k.store, k.runtime
     shared, secret = store.create_project("Shared sample"), store.create_project("Secret")
     store.set_sharing(secret["id"], "confidential")
     rt.mounted = {"project": shared["id"], "device": "d1", "device_name": "D1"}
     rt.attribution = {"project": secret["id"], "chat": "abcdefabcdef"}
     meta = rt._attribute(SimpleNamespace(device=None))
-    assert meta["project"] == secret["id"] and meta["device"] is None   # the confidential chat's project wins
+    assert meta["project"] == secret["id"]                              # the confidential chat's project wins,
+    assert meta["device"] is None and meta["device_name"] is None       # without the other project's sample
     rt.attribution = {"project": None, "chat": "abcdefabcdef"}
-    assert rt._attribute(SimpleNamespace(device=None))["project"] == shared["id"]   # otherwise the mounted sample's
+    meta = rt._attribute(SimpleNamespace(device=None))
+    assert (meta["project"], meta["device"], meta["device_name"]) == (shared["id"], "d1", "D1")   # else the sample's
     rt.mounted = {}
 
     agent = k.client.app.app.state.agent
@@ -540,3 +581,106 @@ def test_busy_hubs_get_the_file_again_and_unshared_work_keeps_its_place(tmp_path
     opened = chat(store, "open chat", shared["id"])
     scopes = next(t for t in agent.context(store.load(opened["id"]))["tools"] if t["name"] == "remember")
     assert scopes["schema"]["properties"]["scope"]["enum"] == ["global", "project"]
+
+
+class Recorder(Provider):
+    """A model that answers "ok", noting how a run started now would be filed."""
+    name, label = "scripted", "Scripted"
+    runtime = None
+
+    def __init__(self):
+        self.metas = []
+
+    def available(self):
+        return True
+
+    async def models(self):
+        return [ModelInfo("m1", "Model One", self.name)]
+
+    async def stream(self, model, system, history, tools, emit):
+        self.metas.append(self.runtime._attribute(SimpleNamespace(device=None)))
+        await emit({"type": "text", "delta": "ok"})
+        return TurnResult([{"type": "text", "text": "ok"}], stop_reason="end", model=model)
+
+
+def turn(k, chat_id, text="measure something"):
+    with k.client.stream("POST", "/api/chats/%s/turn" % chat_id, json={"text": text, "model": "scripted:m1"},
+                         headers=k.h) as r:
+        assert r.status_code == 200
+        list(r.iter_lines())
+
+
+def test_runs_from_a_chat_that_keeps_unshared_marks_stay_here(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path)
+    recorder = Recorder()
+    k = portal(tmp_path, monkeypatch, browser, providers={"scripted": recorder})
+    recorder.runtime = k.runtime
+    store = k.store
+    secret = store.create_project("Secret")
+    store.set_sharing(secret["id"], "confidential")
+    left = chat(store, "left the secret", secret["id"])
+    store.assign(left["id"], None)                                      # unfiled now, and still unshared
+    quiet = store.create_project("No search")
+    store.set_rules(quiet["id"], {"providers": None, "literature": False})
+    ran = chat(store, "ran without search", quiet["id"])                # it runs under the limit: it keeps it
+    plain = chat(store, "plain")
+    for c in (left, ran, plain):
+        turn(k, c["id"])
+    assert [m.get("unshared", False) for m in recorder.metas] == [True, True, False]
+    assert recorder.metas[0]["project"] is None                         # filed under General, yet never shared
+    k.runtime.attribution = {"project": None, "chat": left["id"], "unshared": True}
+    assert k.runtime.queue_add(SWEEP).startswith("added") and k.runtime.queue.items[-1].unshared   # queued: too
+    k.runtime.attribution = {}
+
+    connect(k, browser)
+    run(k.runtime, "20261020-100000-from-left", None, unshared=True)
+    run(k.runtime, "20261020-100100-plain", None)
+    assert k.link.sync_once()["ok"]
+    assert [r["local_id"] for r in hub.shared_with(1)["runs"]] == ["20261020-100100-plain"]
+    assert sorted(c["title"] for c in hub.shared_with(1)["chats"]) == ["plain"]
+
+
+def test_connecting_again_names_the_earlier_installations(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path)
+    k = portal(tmp_path, monkeypatch, browser)
+    computer, folder = k.settings.installation_id(), tmp_path          # without accounts: the settings' folder
+    connect(k, browser)
+    query = parse_qs(urlsplit(k.opened[-1]).query)
+    mine = query["installation"][0]
+    assert mine == installation_for(computer, folder) and k.settings.hub_installations() == [mine]
+    sent = query["previous"][0].split(",")
+    assert sent == previous_installations(computer, folder) and computer in sent and mine not in sent
+    assert all(re.match(r"^[A-Za-z0-9:_.-]{8,80}$", i) for i in sent) and len(sent) <= 5
+    assert installation_for(computer, folder / "x" / "..") == mine      # the same folder, spelled otherwise
+    if sys.platform == "win32":
+        assert installation_for(computer, str(folder).upper()) == mine
+    later = folder / "users" / "Ada"                                     # say, accounts are turned on later
+    assert previous_installations(computer, later, k.settings.hub_installations())[0] == mine
+    connect(k, browser)                                                  # connecting again: still one id
+    assert k.settings.hub_installations() == [mine]
+
+
+def test_the_hub_folds_in_what_earlier_installations_shared(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path)
+    k = portal(tmp_path, monkeypatch, browser)
+    real = hubsync.installation_for
+    # connected before under another digest of the folder (a short 8.3 name, say): only Kelvin knows that id
+    monkeypatch.setattr(hubsync, "installation_for", lambda computer, folder: computer + ":0123456789ab")
+    connect(k, browser)
+    old = k.settings.get("hub_token")
+    crsbr = k.store.create_project("CrSBr")
+    chat(k.store, "Unfiled once")
+    chat(k.store, "In CrSBr", crsbr["id"])
+    assert k.link.sync_once()["ok"]
+    monkeypatch.setattr(hubsync, "installation_for", real)
+    connect(k, browser)                                                  # this version's id, naming the old one
+    assert k.link.sync_once()["ok"]
+    mine = real(k.settings.installation_id(), tmp_path)
+    with hub.connect() as con:
+        chats = [dict(r) for r in con.execute("SELECT installation_id, title FROM chats")]
+    assert sorted(c["title"] for c in chats) == ["In CrSBr", "Unfiled once"]   # one copy each,
+    assert {c["installation_id"] for c in chats} == {mine}                     # under the new id
+    assert browser.get("/api/me", headers={"Authorization": "Bearer " + old}).status_code == 401
+    k.client.patch("/api/projects/" + crsbr["id"], headers=k.h, json={"sharing": "confidential"})
+    assert k.link.sync_once()["ok"]
+    assert "CrSBr" not in on_the_hub(hub) and len(hub.connections(1)) == 1

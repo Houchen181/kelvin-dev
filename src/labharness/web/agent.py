@@ -495,6 +495,9 @@ class ChatAgent:
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
+            # a chat that keeps unshared work's marks or limits (it left such a project, or ran under its rules):
+            # its runs are never shared, wherever they are filed
+            self.runtime.attribution["unshared"] = unshared(chat)
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]

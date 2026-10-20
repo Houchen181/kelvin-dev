@@ -663,24 +663,29 @@ class LabRuntime:
         except OSError:
             pass
 
-    def _attribute(self, plan: Plan, project: Optional[str] = None, incognito: Optional[bool] = None) -> Dict[str, Any]:
+    def _attribute(self, plan: Plan, project: Optional[str] = None, incognito: Optional[bool] = None,
+                   unshared: Optional[bool] = None, legacy: bool = False) -> Dict[str, Any]:
         """Which project and sample a run belongs to: the plan's own device:, else the mounted device, else the
         project of the chat that started it (or queued it); runs outside every project go to General. A chat in an
-        unshared (unpublished, confidential or model-limited) project keeps its runs there, whatever is mounted.
-        A run says who made it, and whether an incognito chat started (or queued) it: such runs, and anyone else's,
-        are never shared on the Kelvin hub."""
+        unshared (unpublished, confidential or model-limited) project keeps its runs there, without the mounted
+        sample, which is another project's. A run says who made it, and whether an incognito chat started (or
+        queued) it, or a chat that keeps unshared work's marks: such runs, and anyone else's, are never shared on
+        the Kelvin hub. legacy: queued before Kelvin noted these; held like older runs."""
         m = self.mounted
         chat_pid = project if project is not None else self.attribution.get("project")
         pid = m.get("project") if m else chat_pid
-        moved = bool(m and chat_pid and chat_pid != pid and self.project_info(chat_pid).get("unshared"))
-        if moved:
-            pid = chat_pid
+        if m and chat_pid and chat_pid != pid and self.project_info(chat_pid).get("unshared"):
+            pid, m = chat_pid, {}
         info = self.project_info(pid)
         out = {"project": pid, "project_name": info.get("name") or "General",
-               "device": m.get("device") if m and not moved else None,
+               "device": m.get("device") if m else None,
                "device_name": m.get("device_name") if m else None, "user": self.user}
         if self.attribution.get("incognito") if incognito is None else incognito:
             out["incognito"] = True
+        if self.attribution.get("unshared") if unshared is None else unshared:
+            out["unshared"] = True
+        if legacy:
+            out["legacy"] = True
         if plan.device:
             dev = next((d for d in info.get("devices") or []
                         if d["id"] == plan.device or d["name"].lower() == plan.device.lower()), None)
@@ -726,7 +731,8 @@ class LabRuntime:
         if problems:
             return "not added: " + "; ".join(problems[:5])
         item = self.queue.add(text, position, note, by, project=self.attribution.get("project"),
-                              incognito=bool(self.attribution.get("incognito")))
+                              incognito=bool(self.attribution.get("incognito")),
+                              unshared=bool(self.attribution.get("unshared")))
         pos = self.queue.items.index(item) + 1
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name, position=pos)
         return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self.queue.text())
@@ -932,7 +938,7 @@ class LabRuntime:
                 with self.gate.standing(grants), self.gate.acting_as("queue (started by %s)" % by):
                     if item.kind == "plan":
                         plan = self._plan(item.text)
-                        meta = self._attribute(plan, item.project, item.incognito)
+                        meta = self._attribute(plan, item.project, item.incognito, item.unshared, item.legacy)
                         report = self.engine.run(plan, meta=dict(meta, queue={
                             "item": item.id, "position": position, "note": item.note}))
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
