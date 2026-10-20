@@ -66,8 +66,8 @@ def _flags() -> int:
 def status(cmd: List[str], timeout: float = 20) -> Dict[str, Any]:
     """Is Claude Code signed in? (`claude auth status`; says how, never with what)."""
     try:
-        p = subprocess.run(cmd + ["auth", "status"], capture_output=True, text=True, timeout=timeout, env=child_env(),
-                           creationflags=_flags())
+        p = subprocess.run(cmd + ["auth", "status"], capture_output=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, env=child_env(), creationflags=_flags())   # UTF-8 whatever the locale
     except (OSError, subprocess.TimeoutExpired) as e:
         return {"signed_in": False, "error": str(e)}
     try:

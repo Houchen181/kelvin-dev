@@ -150,3 +150,22 @@ def test_the_portal_installs_only_when_nothing_runs(tmp_path):
 def test_from_source_there_is_nothing_to_update(monkeypatch):
     assert updater.view(None, "auto")["state"] == "unsupported"
     assert updater.channel() == "stable" and updater.other_copy() is None   # not frozen
+
+
+UNICODE_GH = '''
+import sys
+sys.stdout.buffer.write(%r)
+'''
+
+
+def test_release_notes_in_any_script_never_stop_the_check(tmp_path):
+    """gh writes UTF-8; a computer whose locale is GBK or cp1252 must still read it (a real failure on 0.3.6)."""
+    notes = [dict(RELEASES[2], body="Settings → sections; it’s “private” · 设置")]
+    gh = tmp_path / "gh.py"
+    gh.write_text(UNICODE_GH % json.dumps(notes, ensure_ascii=False).encode("utf-8"), encoding="utf-8")
+    u = Updater(tmp_path, current="0.3.6", chan="private", plat="win32", gh=[sys.executable, str(gh)],
+                fetch=fetcher({}))
+    state = u.check()
+    assert state["state"] == "available" and state["latest"] == "0.3.7" and "→" in state["notes"]
+    gh.write_text("print('not json')", encoding="utf-8")
+    assert u.check()["state"] == "error"                                   # reported, never raised

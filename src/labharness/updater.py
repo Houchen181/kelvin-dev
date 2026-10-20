@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -31,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ._version import __version__
 
+log = logging.getLogger("kelvin")
 REPO = "Houchen181/kelvin"
 API = "https://api.github.com/repos/%s/releases?per_page=30" % REPO
 TAGS = {"stable": re.compile(r"^v(\d+\.\d+\.\d+)$"), "private": re.compile(r"^private-v(\d+\.\d+\.\d+)$")}
@@ -142,7 +144,9 @@ class Updater:
         if not self.gh:
             raise UpdateError("the Kelvin repository is private, and the GitHub CLI (gh) isn't installed here to "
                               "reach it")
-        p = subprocess.run(self.gh + args, capture_output=True, text=True, timeout=timeout,
+        # gh writes UTF-8; read it as UTF-8 whatever the computer's locale (GBK, cp1252...), or release notes
+        # with characters like "→" stop the check
+        p = subprocess.run(self.gh + args, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout,
                            creationflags=_flags())
         if p.returncode != 0:
             raise UpdateError("the GitHub CLI could not reach the releases (is it signed in?): %s"
@@ -173,13 +177,17 @@ class Updater:
         self._set(state="checking")
         try:
             found = pick(self.releases(), self.channel, self.current, self.platform)
-        except (UpdateError, subprocess.TimeoutExpired) as e:
-            self._set(state="error", error=str(e), checked=time.time())
+        except Exception as e:   # whatever goes wrong, the check reports it and the next one runs
+            self._set(state="error", error=str(e) or type(e).__name__, checked=time.time())
+            log.warning("update check failed: %s", self.state["error"])
             return self.state
         self.found = found
         if found is None:
             self._set(state="up_to_date", checked=time.time())
+            log.info("update check: Kelvin %s is the newest on the %s channel (via %s)", self.current, self.channel,
+                     self.via)
         else:
+            log.info("update check: Kelvin %s is out (via %s)", found["version"], self.via)
             ready = self.pending()
             self._set(state="ready" if ready and ready["version"] == found["version"] else "available",
                       latest=found["version"], url=found["url"], notes=found["notes"], checked=time.time(),
@@ -205,8 +213,9 @@ class Updater:
             else:
                 path.write_bytes(self._fetch(asset["browser_download_url"]))
             got = hashlib.sha256(path.read_bytes()).hexdigest()
-        except (UpdateError, OSError, urllib.error.URLError, subprocess.TimeoutExpired) as e:
+        except Exception as e:
             self._set(state="error", error="the download failed: %s" % e, latest=found["version"], url=found["url"])
+            log.warning(self.state["error"])
             raise UpdateError(self.state["error"])
         if got != digest.split(":", 1)[1].lower():
             path.unlink()
@@ -217,6 +226,7 @@ class Updater:
                                                            "sha256": got, "tag": found["tag"]}), encoding="utf-8")
         self._set(state="ready", latest=found["version"], url=found["url"], notes=found["notes"],
                   can_install=self.platform == "win32")
+        log.info("update: Kelvin %s downloaded and checked; it installs when Kelvin closes", found["version"])
         return self.state
 
     def pending(self) -> Optional[Dict[str, Any]]:

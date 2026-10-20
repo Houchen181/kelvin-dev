@@ -482,7 +482,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         await asyncio.sleep(20)
         while True:
             if settings.updates != "off":
-                await asyncio.to_thread(updater.run_once, settings.updates)
+                try:
+                    await asyncio.to_thread(updater.run_once, settings.updates)
+                except Exception:   # never let one bad check end the checking
+                    setup_log.exception("update check")
             await asyncio.sleep(12 * 3600)
 
     async def update_view(request: Request) -> Response:
