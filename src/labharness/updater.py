@@ -284,7 +284,9 @@ class Updater:
         if spawn is not None:
             spawn(cmd)
         else:
-            flags = 0x00000008 | 0x00000200 | _flags()   # DETACHED_PROCESS, CREATE_NEW_PROCESS_GROUP
+            # CREATE_NEW_PROCESS_GROUP and a hidden console of its own, so it outlives Kelvin. Not DETACHED_PROCESS:
+            # a PowerShell without a console exits as if all went well but never starts the installer (0.3.8, 0.3.9)
+            flags = 0x00000200 | _flags()
             subprocess.Popen(cmd, creationflags=flags, close_fds=True)
         self._set(state="installing", latest=p["version"])
         return cmd

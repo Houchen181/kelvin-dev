@@ -169,3 +169,28 @@ def test_release_notes_in_any_script_never_stop_the_check(tmp_path):
     assert state["state"] == "available" and state["latest"] == "0.3.7" and "→" in state["notes"]
     gh.write_text("print('not json')", encoding="utf-8")
     assert u.check()["state"] == "error"                                   # reported, never raised
+
+
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="the installer helper is PowerShell on Windows")
+def test_the_install_helper_really_starts_the_installer(tmp_path):
+    """The helper waits for Kelvin to close, then starts the installer. A stand-in installer records how it was
+    started. (0.3.8 and 0.3.9 started the helper without a console, where it never ran the installer.)"""
+    import subprocess
+    import time
+    setup = tmp_path / "updates" / "Kelvin-Setup-0.3.6.cmd"
+    setup.parent.mkdir()
+    setup.write_text('@>"%~dp0started.txt" echo %*\r\n', encoding="ascii")   # redirect first: "1>" would eat a 1
+    (setup.parent / "pending.json").write_text(json.dumps({
+        "version": "0.3.6", "path": str(setup), "tag": "v0.3.6",
+        "sha256": hashlib.sha256(setup.read_bytes()).hexdigest()}), encoding="utf-8")
+    kelvin = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5)"])   # Kelvin, about to close
+    u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher({}))
+    u.install(kelvin.pid, relaunch=True)
+    started = setup.parent / "started.txt"
+    for _ in range(60):
+        if started.exists() and started.read_text(encoding="ascii", errors="replace").strip():
+            break
+        time.sleep(0.5)
+    assert kelvin.poll() is not None                                       # it waited for Kelvin to close
+    args = started.read_text(encoding="ascii", errors="replace").split()
+    assert args == ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1"]
