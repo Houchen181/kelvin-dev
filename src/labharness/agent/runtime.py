@@ -159,7 +159,7 @@ class LabRuntime:
         self.queue = ScanQueue(self.data_dir / "queue.json")   # scans lined up to run one after another
         self.auto_report = "both"   # after each run (in its folder) and each queue (in reports/): both, pdf, pptx, off
         self.mounted: Dict[str, Any] = self._load_mounted()   # the sample in the setup now (project, device, since)
-        self.attribution: Dict[str, Optional[str]] = {}       # the project of the chat whose turn this is (portal)
+        self.attribution: Dict[str, Any] = {}       # the project of the chat whose turn this is (portal), and incognito
         # what Kelvin knows about a project (name, devices, notes, references, summary); the portal sets this
         self.project_info: Callable[[Optional[str]], Dict[str, Any]] = default_project_info
         self.project_ids: Callable[[], List[Optional[str]]] = lambda: [None]   # None is the General workspace
@@ -663,14 +663,17 @@ class LabRuntime:
         except OSError:
             pass
 
-    def _attribute(self, plan: Plan, project: Optional[str] = None) -> Dict[str, Any]:
+    def _attribute(self, plan: Plan, project: Optional[str] = None, incognito: Optional[bool] = None) -> Dict[str, Any]:
         """Which project and sample a run belongs to: the plan's own device:, else the mounted device, else the
-        project of the chat that started it (or queued it); runs outside every project go to General."""
+        project of the chat that started it (or queued it); runs outside every project go to General. A run that an
+        incognito chat started (or queued) says so, and is never shared on the Kelvin hub."""
         m = self.mounted
         pid = m.get("project") if m else (project if project is not None else self.attribution.get("project"))
         info = self.project_info(pid)
         out = {"project": pid, "project_name": info.get("name") or "General",
                "device": m.get("device") if m else None, "device_name": m.get("device_name") if m else None}
+        if self.attribution.get("incognito") if incognito is None else incognito:
+            out["incognito"] = True
         if plan.device:
             dev = next((d for d in info.get("devices") or []
                         if d["id"] == plan.device or d["name"].lower() == plan.device.lower()), None)
@@ -715,7 +718,8 @@ class LabRuntime:
             return "not added: %s" % e
         if problems:
             return "not added: " + "; ".join(problems[:5])
-        item = self.queue.add(text, position, note, by, project=self.attribution.get("project"))
+        item = self.queue.add(text, position, note, by, project=self.attribution.get("project"),
+                              incognito=bool(self.attribution.get("incognito")))
         pos = self.queue.items.index(item) + 1
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name, position=pos)
         return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self.queue.text())
@@ -921,7 +925,8 @@ class LabRuntime:
                 with self.gate.standing(grants), self.gate.acting_as("queue (started by %s)" % by):
                     if item.kind == "plan":
                         plan = self._plan(item.text)
-                        report = self.engine.run(plan, meta=dict(self._attribute(plan, item.project), queue={
+                        meta = self._attribute(plan, item.project, item.incognito)
+                        report = self.engine.run(plan, meta=dict(meta, queue={
                             "item": item.id, "position": position, "note": item.note}))
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():

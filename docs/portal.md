@@ -6,15 +6,15 @@ The portal is where you chat with Kelvin: the desktop app's window, or the site 
 
 Everyone who uses Kelvin on a lab computer has an account, and everyone is equal: there is no administrator or lab owner. Anyone at the computer can add themselves with **Add a person** on the sign-in screen.
 
-- **Yours alone:** your settings and API keys, ChatGPT sign-in, chats, projects and memory, your data folder (runs and reports), your queue, the sample you mounted, and your record (`events.jsonl`).
+- **Yours alone:** your settings and API keys, ChatGPT sign-in, Kelvin hub connection, chats, projects and memory, your data folder (runs and reports), your queue, the sample you mounted, and your record (`events.jsonl`).
 - **Everyone's:** the instruments, the lab config, the instrument cards, the switches for setting up instruments and phone access, and the lab's **instrument log** (`~/Kelvin/instrument-log.jsonl`): every command and approval from everyone, with the name of whoever was signed in. The Lab panel's **Activity → Everyone** shows it.
-- **Passwords are optional.** With one, your API keys and ChatGPT sign-in are encrypted with it. Nobody can reset a forgotten password, because there is no administrator; your runs and reports are still in your data folder. Change or remove it in Settings → **Your account**.
+- **Passwords are optional.** With one, your API keys, ChatGPT sign-in and Kelvin hub token are encrypted with it. Nobody can reset a forgotten password, because there is no administrator; your runs and reports are still in your data folder. Change or remove it in Settings → **Your account**.
 - **One person, no password:** Kelvin signs you in by itself when it starts, so a single user never sees the sign-in screen.
 - **Signing out** (bottom of the sidebar) declines open approvals and turns the approval mode back to asking: one person's yes is never another's. A run or queue you leave running goes on, and is recorded as yours. Nobody else can sign in until it ends; anyone can press **Stop it** on the sign-in screen.
 - **Before accounts:** the first account takes over what Kelvin kept until then: chats and runs in `~/Kelvin/virtual-lab`, and the API keys.
 - **What accounts don't do:** they keep people's work apart inside Kelvin, but they don't lock files. Anyone who can open this computer's files can read the folders.
 
-Each person's things are in `~/Kelvin/users/<name>/`: `settings.json`, `chatgpt.json`, `chats/` and `data/` (their default data folder; Settings → **Data folder** chooses another).
+Each person's things are in `~/Kelvin/users/<name>/`: `settings.json`, `chatgpt.json`, `hub-sync.json` (what was shared on the Kelvin hub), `chats/` and `data/` (their default data folder; Settings → **Data folder** chooses another).
 
 ## In the portal
 
@@ -42,6 +42,11 @@ Each person's things are in `~/Kelvin/users/<name>/`: `settings.json`, `chatgpt.
 - **Confidential projects:** In a project's **Project settings → Who may see this project**, choose which kinds of model may read it (Claude, GPT, Gemini, local models), and whether literature search may be used. For confidential work, allow only local models and switch off literature search.
   - **Enforcement:** Kelvin refuses any other model for chats, comparisons and second opinions, and leaves out the plan reviewer if it isn't allowed. The composer shows **Confidential**.
   - **The rules stay with the chat:** a chat that ran under them keeps them, even if it is moved out of the project or the project is deleted, so its history never reaches a model you excluded.
+- **Kelvin hub:** the hub is one server for Kelvin users in every lab ([hub.md](hub.md)). In Settings → **Account**, under Kelvin hub, type the hub's address and press **Connect**. Kelvin opens the hub in your browser, where you sign in (or register) and choose the lab to share into.
+  - **What is shared:** your normal projects and unfiled chats, with their runs (meta.json, data.csv, plots, reports) and whole conversations, with the members of that lab. Kelvin sends what changed every two minutes, and what you delete goes from the hub too. **Sync now** sends it at once.
+  - **Never shared:** projects marked **Unpublished** or **Confidential** under **Project settings → On the Kelvin hub**, not even their names; projects limited to some models or without literature search; incognito chats and the runs they started; API keys; ChatGPT and Claude Code sign-ins. Marking a project takes away what the hub had of it. A chat moved out of an unpublished or confidential project, or left when it is deleted, stays unshared.
+  - **The token:** Kelvin never sees your hub password. Its token is kept in your settings, encrypted with your password, and never shown in the browser.
+  - **Disconnect** stops sharing. What was shared stays on the hub until you delete it on your account page there (**Your account on the hub**).
 - **Incognito:** For a question that has nothing to do with your work, press **Incognito** in the top bar; from a saved chat it starts a new incognito one. Kelvin then uses no memory and keeps none, and the chat is never saved or listed; it is gone when you leave it. Instrument commands and runs are still logged, for safety.
 - **Literature:** Kelvin searches arXiv and journal papers (through [OpenAlex](https://openalex.org)) and reads them, so it can plan an experiment from what is known and check a result against published work. Try "what parameters did people use to drive magnons with SAWs in CrSBr? propose a plan".
   - **Search:** results come with authors, venue, citation counts and abstracts.

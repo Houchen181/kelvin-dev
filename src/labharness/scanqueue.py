@@ -91,6 +91,7 @@ class Item:
     run_id: Optional[str] = None
     message: str = ""
     project: Optional[str] = None   # the project of the chat that queued it, for runs with no device mounted
+    incognito: bool = False         # queued from an incognito chat: its runs are never shared on the Kelvin hub
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
@@ -176,10 +177,10 @@ class ScanQueue:
                 raise KeyError("no queue item %r (the queue has %d)" % (ref, len(self.items)))
 
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "",
-            project: Optional[str] = None) -> Item:
+            project: Optional[str] = None, incognito: bool = False) -> Item:
         kind, name = parse_item(text)
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time(),
-                    project=project)
+                    project=project, incognito=incognito)
         with self.lock:
             if position is None or position > len(self.items):
                 self.items.append(item)

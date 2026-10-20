@@ -149,7 +149,7 @@
     const on = !!(a.accounts_on && a.user);
     $("account-row").hidden = !on;
     $("account-field").hidden = !on;
-    $("nav-account").hidden = !on;
+    $("nav-account").hidden = false;   // also holds the Kelvin hub, which works without accounts
     $("activity-all").hidden = !a.accounts_on;
     if (!on) return;
     $("account-avatar").textContent = initials(a.user.name);
@@ -1499,6 +1499,7 @@
       return h("label", { class: "check" }, box, " " + label);
     }));
     $("project-literature").checked = rules.literature !== false;
+    $("project-sharing").value = p.unpublished ? "unpublished" : p.confidential ? "confidential" : "";
     $("rules-summary").textContent = rulesText(rules);
     $("project-msg").textContent = "";
     renderNotes(p);
@@ -1630,7 +1631,7 @@
       const chosen = boxes.filter((c) => c.checked).map((c) => c.value);
       if (!chosen.length) { $("project-msg").textContent = "Allow at least one kind of model."; return; }
       const rules = { providers: chosen.length === boxes.length ? null : chosen, literature: $("project-literature").checked };
-      Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { instructions: $("project-instructions").value, rules } }));
+      Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { instructions: $("project-instructions").value, rules, sharing: $("project-sharing").value } }));
       if (($("project-summary").value || "") !== (p.summary || "")) {
         await api("/api/projects/" + p.id + "/summary", { method: "PUT", body: { text: $("project-summary").value } });
         p.summary = $("project-summary").value;
@@ -2051,6 +2052,75 @@
       applyModels(b.models.groups, b.default_model);
     } catch (e) { $("chatgpt-status").textContent = e.message; }
   }
+  // ------------------------------------------------------------------ the Kelvin hub (accounts across labs)
+  const HUB = { timer: 0, st: null };
+  function hubSyncText(st) {
+    if (st.syncing) return "Sharing now…";
+    const s = st.sync;
+    if (!s) return st.connected ? "Kelvin shares what changes every few minutes." : "";
+    const at = (t) => new Date(t * 1000).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+    if (s.error) return s.error + (st.synced_at ? " Last shared " + at(st.synced_at) + "." : "");
+    const n = (k, one, many) => (k ? k + " " + (k === 1 ? one : many) : "");
+    const sent = [n(s.sent.projects, "project", "projects"), n(s.sent.chats, "chat", "chats"), n(s.sent.runs, "run", "runs"),
+      n(s.files, "run file", "run files")].filter(Boolean);
+    const more = [n(s.removed, "item removed", "items removed"),
+      n((s.refused || []).length, "item the hub didn't take", "items the hub didn't take")].filter(Boolean);
+    return "Up to date, " + at(s.at) + (sent.length ? ": sent " + sent.join(", ") : "") + (more.length ? "; " + more.join("; ") : "") + ".";
+  }
+  function showHub(st) {
+    HUB.st = st;
+    const a = st.account;
+    let text;
+    if (!st.connected) text = st.problem || "Not connected";
+    else if (a) text = "Connected as " + a.name + " (" + a.email + "), sharing " + (a.shares_into ? "into " + a.shares_into : "with only you (no lab)");
+    else text = "Connected to " + st.url + (st.problem ? ". " + st.problem : "");
+    if (a && a.needs_consent) text += ". The hub's terms changed: agree to them there to go on sharing";
+    $("hub-status").textContent = text;
+    if (st.url) $("hub-url").value = st.url;
+    $("hub-url").disabled = !!st.connected;
+    $("hub-connect").hidden = !!st.connected;
+    $("hub-actions").hidden = !st.connected;
+    $("hub-account").href = a ? (a.needs_consent ? a.consent_url : a.account_url) : (st.url ? st.url + "/account" : "#");
+    $("hub-sync-status").textContent = hubSyncText(st);
+  }
+  async function loadHub() {
+    $("hub-status").textContent = "…";
+    try { showHub(await api("/api/hub")); } catch (e) { $("hub-status").textContent = e.message; }
+  }
+  async function connectHub() {
+    const url = $("hub-url").value.trim();
+    if (!url) { $("hub-status").textContent = "Enter the hub's address first."; $("hub-url").focus(); return; }
+    try { await api("/api/hub/connect", { body: { url } }); }
+    catch (e) { $("hub-status").textContent = e.message; return; }
+    $("hub-status").textContent = "Finish connecting in your browser…";
+    clearInterval(HUB.timer);
+    const until = Date.now() + 10 * 60 * 1000;
+    HUB.timer = setInterval(async () => {
+      if (Date.now() > until) { clearInterval(HUB.timer); loadHub(); return; }
+      let st;
+      try { st = await api("/api/hub"); } catch (e) { return; }
+      if (!st.connected) return;
+      clearInterval(HUB.timer);
+      showHub(st);
+      toast("Kelvin is connected to the hub.");
+    }, 2000);
+  }
+  async function disconnectHub() {
+    if (!confirm("Disconnect Kelvin from the hub? It stops sharing. What it shared stays on the hub until you delete it there.")) return;
+    try {
+      const st = await api("/api/hub/disconnect", { body: {} });
+      showHub(st);
+      toast(st.revoked ? "Disconnected from the hub." : "Disconnected here. The hub could not be reached, so also disconnect this Kelvin on your hub account page.");
+    } catch (e) { $("hub-status").textContent = e.message; }
+  }
+  async function syncHub() {
+    $("hub-sync-status").textContent = "Sharing now…";
+    try {
+      const st = await api("/api/hub/sync", { body: {} });
+      showHub(Object.assign({}, st, { account: st.connected ? (HUB.st || {}).account : null }));
+    } catch (e) { $("hub-sync-status").textContent = e.message; }
+  }
+
   function showPlanChip() {   // OpenAI asks apps to say when a request uses the ChatGPT plan
     $("plan-chip").hidden = !String($("model").value || "").startsWith("chatgpt:");
   }
@@ -3489,6 +3559,7 @@
     loadServices();
     loadDataFolder();
     loadChatGPT();
+    loadHub();
     loadClaudeCode();
     $("updates").value = (S.settings && S.settings.updates) || "auto";
     $("update-status").textContent = updateText(S.update);
@@ -3706,6 +3777,10 @@
     $("svc-preset").addEventListener("change", servicePreset);
     $("chatgpt-signin").addEventListener("click", signInChatGPT);
     $("chatgpt-signout").addEventListener("click", signOutChatGPT);
+    $("hub-connect").addEventListener("click", connectHub);
+    $("hub-url").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); connectHub(); } });
+    $("hub-sync").addEventListener("click", syncHub);
+    $("hub-disconnect").addEventListener("click", disconnectHub);
     $("svc-add").addEventListener("click", addService);
     $("data-path").addEventListener("input", dataPathChanged);
     $("data-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("data-use").disabled) useDataFolder(); } });

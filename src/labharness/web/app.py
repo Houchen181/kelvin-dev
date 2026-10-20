@@ -39,6 +39,7 @@ from ..virtual_lab import build_lab, builtin_ids, builtin_registry, is_simulated
 from .agent import Busy, ChatAgent, runs_in
 from . import review, rules as rulebook
 from .chatgpt import SignIn, SignInError
+from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
 from .qr import QR
 from .remote import ROLES, Remote, addresses, allowed, remote_host_ok
 from .providers.base import Provider
@@ -53,7 +54,7 @@ SIGNED_OUT = {"/api/session", "/api/accounts", "/api/stop", "/api/runs/stop"}
 LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
                           "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/phone",
                           "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount", "/api/quit",
-                          "/api/update")
+                          "/api/update", "/api/hub")
 
 
 def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -135,7 +136,7 @@ class Guard:
                     problem = (403, "bad host")
                 elif origin and origin.split("://", 1)[-1] != host:
                     problem = (403, "bad origin")
-                elif path == "/auth/callback":
+                elif path in ("/auth/callback", "/hub/callback"):
                     problem = (403, "sign in from the Kelvin computer")
                 elif path.startswith("/api/") and self.signed_in is not None and not self.signed_in():
                     problem = (401, "Nobody is signed in to Kelvin on its computer now.", {"signin": True})
@@ -202,6 +203,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     Without it, one person uses Kelvin, as before accounts. updater: keeps an installed Kelvin up to date
     (updater.py); on_exit closes the app (the desktop window), so an update can install."""
     signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
+    hub = HubLink(settings, store, lambda: runtime.data_dir)   # the Kelvin hub: the person's account across labs
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo, signin), settings)
     runtime.project_info = agent.project_info            # reports: names, devices, notes, reading lists
     runtime.project_chat_runs = agent.project_chat_runs
@@ -282,9 +284,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             tasks.append(asyncio.ensure_future(update_loop()))
         if auto_setup:   # find and set up connected instruments (or say why not: switched off, a lab chosen...)
             setup.start("start")
+        hub.wake = asyncio.Event()
+        tasks.append(asyncio.ensure_future(hub_loop()))
         try:
             yield
         finally:
+            hub.stopping = True   # a sync in progress stops at its next file
             for t in tasks:
                 t.cancel()
             runtime.monitor.stop()
@@ -357,6 +362,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if problem:
             raise RuntimeError(("Kelvin is still doing %s's work. " % runtime.user if runtime.user else "") + problem)
         cipher = cipher_for(password, account)
+        hub.use(None)   # until this person's things are all in place
         settings.use(accounts.settings_path(account), cipher)
         data_dir, problem = data_folder_for(settings, home, accounts.data_dir(account))
         if not same:
@@ -372,12 +378,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_notifications()
         configure_literature()
         session["user"] = account
+        hub.use(accounts.dir(account))
 
     def sign_out() -> None:
         """Nobody is signed in: the portal waits for the next person. A plan or queue still running goes on and is
         recorded as its person's; Kelvin turns to nobody's record when it ends (or at the next sign-in)."""
         agent.stop()   # a chat still answering ends with its person
         session["user"] = None
+        hub.use(None)
         settings.use(None)
         signin.use(nobody)
         if providers is None:
@@ -584,7 +592,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse(store.projects())
 
     async def project(request: Request) -> Response:
-        """One project with its memory (instructions and notes). PATCH takes a new name, new instructions, or both."""
+        """One project with its memory (instructions and notes). PATCH takes a new name, new instructions, rules,
+        or whether it is shared on the Kelvin hub."""
         project_id = request.path_params["project_id"]
         try:
             if request.method == "DELETE":
@@ -603,6 +612,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     if strange:
                         return error(400, "no model service called %s" % ", ".join(map(str, strange)))
                     store.set_rules(project_id, body["rules"])
+                if "sharing" in body:   # on the Kelvin hub: "" (shared), "unpublished" or "confidential"
+                    store.set_sharing(project_id, body["sharing"])
             return JSONResponse(store.project(project_id))
         except KeyError as e:
             return error(404, e.args[0])
@@ -789,6 +800,68 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     "again from Kelvin's Settings and allow it." % (st["email"] or "you"))
         return HTMLResponse(_page("You're signed in to Kelvin with ChatGPT", text + " You can close this tab and go "
                                   "back to Kelvin."))
+
+    # ------------------------------------------------------------------ the Kelvin hub (hubsync.py)
+
+    async def hub_loop() -> None:
+        """Share what changed every few minutes, and at once after connecting."""
+        await asyncio.sleep(10)
+        while True:
+            hub.wake.clear()
+            if hub.connected:
+                try:
+                    await asyncio.to_thread(hub.sync_once)
+                except Exception:   # never let one bad sync end the syncing
+                    setup_log.exception("hub sync")
+            try:
+                await asyncio.wait_for(hub.wake.wait(), HUB_EVERY)
+            except asyncio.TimeoutError:
+                pass
+
+    async def hub_view(request: Request) -> Response:
+        """The person's hub: its address, who they are there, which lab Kelvin shares into and the last sync.
+        Never the token."""
+        return JSONResponse(await asyncio.to_thread(hub.status))
+
+    async def hub_connect(request: Request) -> Response:
+        """POST {url}: open the hub's connect page in the browser; it comes back to /hub/callback on this address."""
+        body = await request.json()
+        port = request.url.port or 80
+        try:
+            url = await asyncio.to_thread(hub.begin, str(body.get("url") or ""),
+                                          "http://127.0.0.1:%d/hub/callback" % port)
+        except HubClientError as e:
+            return error(400, str(e))
+        await asyncio.to_thread(open_url, url)
+        return JSONResponse({"url": url})
+
+    async def hub_disconnect(request: Request) -> Response:
+        confirmed = await asyncio.to_thread(hub.disconnect)
+        return JSONResponse(dict(await asyncio.to_thread(hub.status, False), revoked=confirmed))
+
+    async def hub_sync(request: Request) -> Response:
+        """Sync now, and say how it went."""
+        if not hub.connected:
+            return error(409, "Kelvin is not connected to the hub.")
+        await asyncio.to_thread(hub.sync_once)
+        return JSONResponse(await asyncio.to_thread(hub.status, False))
+
+    async def hub_callback(request: Request) -> Response:
+        title = "Kelvin could not connect to the hub"
+        try:
+            me = await asyncio.to_thread(hub.finish, dict(request.query_params))
+        except HubClientError as e:
+            return HTMLResponse(_page(title, str(e)), status_code=400)
+        except HUB_UNREACHABLE:
+            return HTMLResponse(_page(title, "Kelvin can't reach the hub now. Try again from Kelvin's Settings."),
+                                status_code=502)
+        hub.poke()
+        who = " as %s (%s)" % (me["name"], me.get("email") or "") if me.get("name") else ""
+        into = "sharing into %s" % me["shares_into"] if me.get("shares_into") else "sharing with only you (no lab)"
+        return HTMLResponse(_page("Kelvin is connected to the hub", (
+            "Connected%s, %s. Kelvin now shares your normal projects and unfiled chats there, with their runs; never "
+            "unpublished or confidential projects, or incognito chats. You can close this tab and go back to Kelvin."
+            % (who, into))))
 
     # ------------------------------------------------------------------ other model services
 
@@ -1587,6 +1660,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/chatgpt/signin", chatgpt_signin, methods=["POST"]),
         Route("/api/chatgpt/signout", chatgpt_signout, methods=["POST"]),
         Route("/api/chatgpt/welcomed", chatgpt_welcomed, methods=["POST"]),
+        Route("/hub/callback", hub_callback),
+        Route("/api/hub", hub_view),
+        Route("/api/hub/connect", hub_connect, methods=["POST"]),
+        Route("/api/hub/disconnect", hub_disconnect, methods=["POST"]),
+        Route("/api/hub/sync", hub_sync, methods=["POST"]),
         Route("/api/services", services_view, methods=["GET", "POST"]),
         Route("/api/services/{service_id}", service_view, methods=["DELETE"]),
         Route("/api/services/{service_id}/test", service_test, methods=["POST"]),
@@ -1661,6 +1739,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     app.state.agent = agent
     app.state.remote = remote
     app.state.signin = signin
+    app.state.hub = hub
     if accounts is not None:   # one person without a password goes straight in; otherwise the sign-in screen
         runtime.shared_log = home / "instrument-log.jsonl"
         listed = accounts.list()
@@ -1672,6 +1751,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             runtime.use_user(None, nobody)
             if providers is None:
                 agent.providers = make_providers(settings, demo, signin)
+    else:   # one person, as before accounts
+        hub.use(home)
     def paired_with(token: str) -> Optional[str]:
         """Whose paired phone this is, among everyone with an account (phones are paired per person)."""
         from .remote import token_hash

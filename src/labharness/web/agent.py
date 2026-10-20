@@ -475,7 +475,7 @@ class ChatAgent:
             chat = self.store.load(chat_id)
             # the project scans started in this turn belong to, when no device is mounted
             self.runtime.attribution = {"project": None if chat.get("incognito") else self.store.project_of(chat_id),
-                                        "chat": chat_id}
+                                        "chat": chat_id, "incognito": bool(chat.get("incognito"))}
             message: Dict[str, Any] = {"role": "user", "text": text}
             self.recall(chat, message)
             self._attach_review(chat, message)

@@ -1,0 +1,1037 @@
+"""The hub's web server: pages for people (register, sign in, labs, connected Kelvins, export, delete), the API that
+connected Kelvins use, and the operator's page.
+
+    kelvin-hub --home <folder>                  # serve on http://127.0.0.1:8780
+    kelvin-hub backup | operator-key | stats --home <folder>
+
+Connecting a Kelvin works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page: Kelvin opens
+<hub>/connect in the browser with a PKCE challenge and its loopback callback (http://127.0.0.1:<port>/...); the person
+signs in and says yes; the hub sends the browser back with a one-use code; Kelvin trades the code and its verifier
+for a token at POST /api/token, and keeps the token in the person's own (encrypted) settings.
+
+The pages need no JavaScript. Every response forbids framing and inline scripts; forms carry an anti-forgery value
+and the hub refuses posts from other sites."""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hmac
+import html
+import json
+import logging
+import os
+import re
+import secrets
+import sys
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
+
+from starlette.applications import Starlette
+from starlette.background import BackgroundTask
+from starlette.concurrency import run_in_threadpool as call
+from starlette.requests import Request
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.routing import Route
+
+from .._version import __version__
+from .db import DEFAULTS, SESSION_TTL, Hub, HubError, installation, loopback, log
+
+COOKIE = "kelvin_hub"
+OPERATOR_COOKIE = "kelvin_hub_operator"
+OPERATOR_TTL = 12 * 3600
+MAX_FORM = 64 * 1024
+MAX_SYNC = 64 * 1024 * 1024
+CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
+LOGO = Path(__file__).resolve().parent.parent / "web" / "static" / "kelvin.svg"
+SECURITY_HEADERS = [
+    (b"content-security-policy", b"default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
+                                 b"form-action 'self' http://127.0.0.1:*; frame-ancestors 'none'; base-uri 'none'"),
+    (b"x-frame-options", b"DENY"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"same-origin"),   # not no-referrer: browsers would then send "Origin: null" on our own forms
+    (b"cache-control", b"no-store"),
+]
+NOTES = {
+    "sent": "We sent you a new confirmation link.",
+    "confirm": "Welcome! We sent a link to confirm your email address.",
+    "password": "Your password is changed.",
+    "profile": "Saved.",
+    "lab": "Lab made. Pass its join code to your labmates so they can join.",
+    "joined": "You joined the lab.",
+    "left": "You left the lab.",
+    "revoked": "That Kelvin is disconnected.",
+}
+
+CSS = """
+:root{--navy:#1b3a5c;--ice:#2f6fb0;--frost:#e8f2fc;--snow:#8cc4f2;--ink:#1f2328;--muted:#59636e;--line:#d0d7de;
+--bg:#fff;--card:#f6f8fa;--bad:#b42318}
+@media (prefers-color-scheme:dark){:root{--ink:#e6edf3;--muted:#9da7b3;--line:#30363d;--bg:#0d1117;--card:#161b22;
+--frost:#132a42;--ice:#6cb0f0;--bad:#ff7b72}}
+*{box-sizing:border-box}body{margin:0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);
+background:var(--bg)}header{background:var(--navy);color:#fff;padding:.6rem 1rem;display:flex;gap:1rem;
+align-items:center;flex-wrap:wrap}header a{color:#fff;text-decoration:none}.brand{display:flex;gap:.5rem;
+align-items:center;font-weight:600}.brand img{width:28px;height:28px}header nav{margin-left:auto;display:flex;
+gap:1rem;align-items:center;flex-wrap:wrap}header button{border:1px solid #fff;background:transparent;padding:.2rem .7rem}
+main{max-width:48rem;margin:0 auto;padding:1.5rem 1rem 4rem}h1{font-size:1.5rem;margin:.2rem 0 1rem}
+h2{font-size:1.15rem;margin:2.2rem 0 .6rem}a{color:var(--ice)}.muted{color:var(--muted);font-size:.92rem}
+form.stack{display:grid;gap:.8rem;max-width:28rem}label{display:grid;gap:.25rem;font-weight:500}
+input[type=text],input[type=email],input[type=password],input[type=search],select{font:inherit;padding:.5rem .6rem;
+border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);width:100%}
+label.check{display:flex;gap:.5rem;align-items:flex-start;font-weight:400}label.check input{margin-top:.35rem}
+button{font:inherit;padding:.5rem 1rem;border-radius:6px;border:1px solid var(--ice);background:var(--ice);color:#fff;
+cursor:pointer}button.plain{background:transparent;color:var(--ice)}button.danger{background:var(--bad);
+border-color:var(--bad)}a.button{display:inline-block;padding:.5rem 1rem;border-radius:6px;
+border:1px solid var(--ice);background:var(--ice);color:#fff;text-decoration:none}a.button.plain{
+background:transparent;color:var(--ice)}.note{background:var(--frost);border-radius:8px;padding:.8rem 1rem;margin:1rem 0}
+.error{border-left:4px solid var(--bad);background:var(--card);padding:.6rem 1rem;margin:1rem 0}
+.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.95rem}th,td{text-align:left;
+padding:.4rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}th{font-weight:600}
+.row{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center}form.inline{display:inline;margin:0}
+code{background:var(--card);padding:.1rem .35rem;border-radius:4px;word-break:break-all}
+pre{background:var(--card);padding:.7rem;border-radius:6px;overflow-x:auto;font-size:.85rem}
+.msg{border:1px solid var(--line);border-radius:8px;padding:.6rem .8rem;margin:.6rem 0;white-space:pre-wrap;
+overflow-wrap:anywhere}.msg.user{background:var(--frost)}.who{font-size:.8rem;color:var(--muted);font-weight:600;
+text-transform:uppercase;letter-spacing:.03em}details{margin:.3rem 0}summary{cursor:pointer;color:var(--muted)}
+ul.plain{padding-left:1.1rem}
+"""
+
+TERMS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the public.</p>
+<ul class="plain">
+<li>The hub keeps your account and the work your Kelvin shares, so you and your labmates can see it.</li>
+<li>Share only work you are allowed to share. Mark unpublished or confidential projects as such in Kelvin: the hub
+never receives them.</li>
+<li>Labs have no owner: anyone with a lab's join code can join it and see what its members share there.</li>
+<li>The Kelvin team may disable an account that abuses the hub.</li>
+<li>The hub is provided as it is, without warranty. Keep your own copies of your data; Kelvin keeps them on your
+computer anyway.</li>
+</ul>"""
+
+PRIVACY = """<p class="note"><b>Draft.</b> The Kelvin team must review this notice before the hub opens to the public.</p>
+<ul class="plain">
+<li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password),
+your labs, the Kelvins you connected, and what they share: normal projects, unfiled chats with their whole
+conversations, and runs with their files.</li>
+<li><b>What it never receives:</b> unpublished, confidential or model-limited projects, incognito chats, API keys,
+and ChatGPT or Claude Code sign-ins.</li>
+<li><b>Who sees your shared work:</b> you, and the members of the lab it was shared in while you are a member too.
+Leaving a lab takes your work out of its view.</li>
+<li><b>Records:</b> the hub logs sign-ins, connections and changes, with the IP address, for security.</li>
+<li><b>Your rights:</b> download everything with <b>Export</b>, and delete your account and all it shared with
+<b>Delete account</b>, both on your account page. Daily database backups are kept for up to 30 days, then
+removed.</li>
+</ul>"""
+
+
+def e(value: Any) -> str:
+    return html.escape("" if value is None else str(value))
+
+
+def when(ts: Any) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts))) if ts else "–"
+
+
+def size(n: Any) -> str:
+    n = float(n or 0)
+    for unit in ("B", "kB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" if unit == "B" else "%.1f %s") % (n, unit)
+        n /= 1024
+    return ""
+
+
+def safe_next(value: Any, default: str = "/account") -> str:
+    """Only a path on this hub, never another site."""
+    text = str(value or "")
+    return text if text.startswith("/") and not text.startswith(("//", "/\\")) else default
+
+
+class Limiter:
+    """Too many failed tries from one key (an address, an email) in a window: refuse for a while."""
+
+    def __init__(self, tries: int, window: float):
+        self.tries, self.window = tries, window
+        self.seen: Dict[str, List[float]] = {}
+
+    def blocked(self, key: str) -> bool:
+        now = time.time()
+        times = [t for t in self.seen.get(key, ()) if now - t < self.window]
+        if times:
+            self.seen[key] = times
+        else:
+            self.seen.pop(key, None)
+        return len(times) >= self.tries
+
+    def hit(self, key: str) -> None:
+        if len(self.seen) > 50_000:
+            self.seen.clear()
+        self.seen.setdefault(key, []).append(time.time())
+
+    def clear(self, key: str) -> None:
+        self.seen.pop(key, None)
+
+
+class Gate:
+    """Only the hub's own addresses (no DNS rebinding), no posts from other sites, and safety headers on everything."""
+
+    def __init__(self, app: Any, hosts: Iterable[str]):
+        self.app = app
+        self.hosts = set(hosts)
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        problem = None
+        if headers.get("host", "") not in self.hosts:
+            problem = "bad host"
+        elif scope.get("method", "GET") not in ("GET", "HEAD", "OPTIONS"):
+            origin = headers.get("origin")
+            if origin is not None and urlsplit(origin).netloc not in self.hosts:
+                problem = "bad origin"
+        if problem:
+            await Response(problem, status_code=403, media_type="text/plain")(scope, receive, send)
+            return
+
+        async def secured(message: Dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                have = {k.lower() for k, _ in message.get("headers", [])}
+                message = dict(message, headers=list(message.get("headers", []))
+                               + [(k, v) for k, v in SECURITY_HEADERS if k not in have])
+            await send(message)
+
+        await self.app(scope, receive, secured)
+
+
+def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None, backups: bool = True) -> Any:
+    if hosts is None:
+        hosts = {urlsplit(hub.base_url).netloc, "127.0.0.1:%d" % port, "localhost:%d" % port}
+    signin_tries = Limiter(10, 900)
+    form_tries = Limiter(20, 3600)        # registrations and reset mails per address
+    token_tries = Limiter(30, 900)
+    operator_tries = Limiter(5, 900)
+    operators: Dict[str, Dict[str, Any]] = {}   # operator sessions, in memory: a restart asks for the key again
+
+    # ------------------------------------------------------------------ helpers
+
+    def ip_of(request: Request) -> Optional[str]:
+        header = hub.config.get("client_ip_header")
+        if header and request.headers.get(header):
+            return request.headers[header].split(",")[0].strip()[:64]
+        return request.client.host if request.client else None
+
+    def secure(request: Request) -> bool:
+        return hub.base_url.startswith("https://") and request.headers.get("host") == urlsplit(hub.base_url).netloc
+
+    async def form_of(request: Request) -> Dict[str, str]:
+        body = await request.body()
+        if len(body) > MAX_FORM:
+            raise HubError("That form is too large.")
+        return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True).items()}
+
+    async def session_of(request: Request) -> Optional[Dict[str, Any]]:
+        token = request.cookies.get(COOKIE)
+        return await call(hub.session, token) if token else None
+
+    def here(request: Request) -> str:
+        return request.url.path + ("?" + request.url.query if request.url.query else "")
+
+    async def signed_in(request: Request, any_consent: bool = False) -> Tuple[Optional[Dict[str, Any]], Optional[Response]]:
+        sess = await session_of(request)
+        if sess is None:
+            return None, RedirectResponse("/signin?" + urlencode({"next": here(request)}), 303)
+        if not any_consent and hub.needs_consent(sess["user"]):
+            return None, RedirectResponse("/consent?" + urlencode({"next": here(request)}), 303)
+        return sess, None
+
+    def check_csrf(sess: Dict[str, Any], form: Dict[str, str]) -> None:
+        if not hmac.compare_digest(form.get("csrf", ""), sess["csrf"]):
+            raise HubError("This form has expired. Reload the page and try again.")
+
+    def csrf_field(sess: Optional[Dict[str, Any]]) -> str:
+        return '<input type="hidden" name="csrf" value="%s">' % e(sess["csrf"]) if sess else ""
+
+    def begin_session(response: Response, request: Request, user_id: int) -> Response:
+        token, _ = hub.new_session(user_id)
+        response.set_cookie(COOKIE, token, max_age=SESSION_TTL, httponly=True, samesite="lax", secure=secure(request))
+        return response
+
+    def page(title: str, body: str, sess: Optional[Dict[str, Any]] = None, status: int = 200,
+             error: Optional[str] = None, note: Optional[str] = None) -> HTMLResponse:
+        if sess:
+            nav = ('<a href="/account">%s</a><form class="inline" method="post" action="/signout">%s'
+                   '<button>Sign out</button></form>' % (e(sess["user"]["name"]), csrf_field(sess)))
+        else:
+            nav = '<a href="/signin">Sign in</a><a href="/register">Create account</a>'
+        flash = ('<div class="error" role="alert">%s</div>' % e(error) if error else "") + \
+                ('<div class="note" role="status">%s</div>' % e(note) if note else "")
+        return HTMLResponse(
+            '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" '
+            'content="width=device-width, initial-scale=1"><title>%s · Kelvin hub</title><link rel="icon" '
+            'href="/kelvin.svg"><style>%s</style></head><body><header><a class="brand" href="/"><img src="/kelvin.svg" '
+            'alt="">Kelvin hub</a><nav>%s</nav></header><main><h1>%s</h1>%s%s</main></body></html>'
+            % (e(title), CSS, nav, e(title), flash, body), status_code=status)
+
+    def api_error(message: str, status: int = 400, **extra: Any) -> JSONResponse:
+        return JSONResponse(dict(extra, error=message), status_code=status)
+
+    async def app_of(request: Request) -> Optional[Dict[str, Any]]:
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        return await call(hub.app, token) if token else None
+
+    # ------------------------------------------------------------------ public pages
+
+    async def home(request: Request) -> Response:
+        sess = await session_of(request)
+        if sess:
+            return RedirectResponse("/account", 303)
+        return page("One account for Kelvin, in every lab", (
+            '<p>Make one account, join your lab, and connect each Kelvin you use. Kelvin then shares your work with '
+            'your labmates here: normal projects and unfiled chats, with their runs and whole conversations.</p>'
+            '<p>Unpublished and confidential projects, incognito chats, API keys and sign-ins never leave your '
+            'computer.</p><p class="row"><a class="button" href="/register">Create account</a>'
+            '<a class="button plain" href="/signin">Sign in</a></p>'
+            '<p class="muted"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></p>'))
+
+    async def logo(request: Request) -> Response:
+        return FileResponse(LOGO, media_type="image/svg+xml") if LOGO.exists() else Response(status_code=404)
+
+    async def terms(request: Request) -> Response:
+        custom = hub.home / "terms.html"
+        return page("Terms", custom.read_text(encoding="utf-8") if custom.exists() else TERMS,
+                    await session_of(request))
+
+    async def privacy(request: Request) -> Response:
+        custom = hub.home / "privacy.html"
+        return page("Privacy", custom.read_text(encoding="utf-8") if custom.exists() else PRIVACY,
+                    await session_of(request))
+
+    def register_form(values: Dict[str, str], error: Optional[str] = None) -> HTMLResponse:
+        return page("Create your account", (
+            '<form class="stack" method="post" action="/register">'
+            '<input type="hidden" name="next" value="%s">'
+            '<label>Name<input type="text" name="name" autocomplete="name" required maxlength="80" value="%s"></label>'
+            '<label>Email<input type="email" name="email" autocomplete="email" required value="%s"></label>'
+            '<label>ORCID iD <span class="muted">(optional)</span><input type="text" name="orcid" '
+            'placeholder="0000-0002-1825-0097" value="%s"></label>'
+            '<label>Password <span class="muted">(8 characters or more)</span><input type="password" '
+            'name="password" autocomplete="new-password" required minlength="8"></label>'
+            '<label class="check"><input type="checkbox" name="consent" value="yes" required><span>I agree to the '
+            '<a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a>.</span></label>'
+            '<button>Create account</button></form>'
+            '<p class="muted">Already have one? <a href="/signin">Sign in</a>.</p>'
+            % (e(values.get("next", "")), e(values.get("name")), e(values.get("email")), e(values.get("orcid")))),
+            error=error, status=400 if error else 200)
+
+    async def register(request: Request) -> Response:
+        if request.method == "GET":
+            return register_form({"next": request.query_params.get("next", "")})
+        f = await form_of(request)
+        ip = ip_of(request) or "?"
+        if form_tries.blocked("register:" + ip):
+            return register_form(f, "Too many new accounts from this address. Try again later.")
+        try:
+            user = await call(hub.register, f.get("email"), f.get("name"), f.get("password"),
+                              f.get("consent") == "yes", f.get("orcid"), ip)
+        except HubError as err:
+            return register_form(f, str(err))
+        form_tries.hit("register:" + ip)
+        await call(hub.send_confirmation, user)
+        target = safe_next(f.get("next"), "/account?note=confirm")
+        return await call(begin_session, RedirectResponse(target, 303), request, user["id"])
+
+    def signin_form(values: Dict[str, str], error: Optional[str] = None) -> HTMLResponse:
+        return page("Sign in", (
+            '<form class="stack" method="post" action="/signin"><input type="hidden" name="next" value="%s">'
+            '<label>Email<input type="email" name="email" autocomplete="email" required value="%s"></label>'
+            '<label>Password<input type="password" name="password" autocomplete="current-password" required></label>'
+            '<button>Sign in</button></form><p class="muted"><a href="/reset">Forgot your password?</a> · '
+            '<a href="/register%s">Create an account</a></p>'
+            % (e(values.get("next", "")), e(values.get("email")),
+               e("?" + urlencode({"next": values["next"]}) if values.get("next") else ""))),
+            error=error, status=400 if error else 200)
+
+    async def signin(request: Request) -> Response:
+        if request.method == "GET":
+            return signin_form({"next": request.query_params.get("next", "")})
+        f = await form_of(request)
+        keys = ("signin:" + f.get("email", "").strip().lower(), "signin-ip:" + (ip_of(request) or "?"))
+        if any(signin_tries.blocked(k) for k in keys):
+            return signin_form(f, "Too many tries. Wait 15 minutes, or reset your password.")
+        try:
+            user = await call(hub.authenticate, f.get("email"), f.get("password"), ip_of(request))
+        except HubError as err:
+            for k in keys:
+                signin_tries.hit(k)
+            return signin_form(f, str(err))
+        signin_tries.clear(keys[0])
+        return await call(begin_session, RedirectResponse(safe_next(f.get("next")), 303), request, user["id"])
+
+    async def signout(request: Request) -> Response:
+        sess = await session_of(request)
+        if sess:
+            check_csrf(sess, await form_of(request))
+            await call(hub.end_session, request.cookies.get(COOKIE))
+        response = RedirectResponse("/", 303)
+        response.delete_cookie(COOKIE)
+        return response
+
+    async def consent(request: Request) -> Response:
+        sess, redirect = await signed_in(request, any_consent=True)
+        if redirect:
+            return redirect
+        target = safe_next(request.query_params.get("next"))
+        if request.method == "POST":
+            f = await form_of(request)
+            check_csrf(sess, f)
+            if f.get("consent") == "yes":
+                await call(hub.give_consent, sess["user"]["id"], ip_of(request))
+                return RedirectResponse(safe_next(f.get("next")), 303)
+        return page("The terms have changed", (
+            '<p>Please read the <a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a> '
+            '(version %s), then agree to keep using the hub. If you don\'t agree, you can '
+            '<a href="/account/export">export your data</a>.</p>'
+            '<form class="stack" method="post" action="/consent">%s<input type="hidden" name="next" value="%s">'
+            '<label class="check"><input type="checkbox" name="consent" value="yes" required><span>I agree.</span>'
+            '</label><button>Continue</button></form>' % (e(hub.config["consent_version"]), csrf_field(sess),
+                                                          e(target))), sess)
+
+    async def confirm(request: Request) -> Response:
+        sess = await session_of(request)
+        try:
+            await call(hub.confirm_email, request.query_params.get("code"))
+        except HubError as err:
+            return page("Confirm your email", '<p><a href="/account">Your account</a> can send a new link.</p>', sess,
+                        400, error=str(err))
+        return page("Email confirmed", '<p>Thanks. <a href="/account">Go to your account</a>.</p>', sess)
+
+    async def reset(request: Request) -> Response:
+        if request.method == "GET":
+            return page("Reset your password", (
+                '<form class="stack" method="post" action="/reset"><label>Email<input type="email" name="email" '
+                'autocomplete="email" required></label><button>Send me a link</button></form>'))
+        f = await form_of(request)
+        ip = ip_of(request) or "?"
+        if not form_tries.blocked("reset:" + ip):
+            form_tries.hit("reset:" + ip)
+            await call(hub.start_reset, f.get("email"), ip)
+        outbox = "" if (hub.config.get("mail") or {}).get("smtp_host") else (
+            ' <span class="muted">(This hub has no mail server yet, so the Kelvin team has to pass the link on.)</span>')
+        return page("Check your email", '<p>If there is an account for that address, we sent it a link to choose '
+                                        'a new password. It works for an hour.%s</p>' % outbox)
+
+    async def reset_new(request: Request) -> Response:
+        if request.method == "GET":
+            return page("Choose a new password", (
+                '<form class="stack" method="post" action="/reset/new"><input type="hidden" name="code" value="%s">'
+                '<label>New password <span class="muted">(8 characters or more)</span><input type="password" '
+                'name="password" autocomplete="new-password" required minlength="8"></label>'
+                '<button>Save and sign in</button></form>' % e(request.query_params.get("code", ""))))
+        f = await form_of(request)
+        try:
+            user = await call(hub.finish_reset, f.get("code"), f.get("password"), ip_of(request))
+        except HubError as err:
+            return page("Choose a new password", '<p><a href="/reset">Ask for a new link</a>.</p>', status=400,
+                        error=str(err))
+        return await call(begin_session, RedirectResponse("/account?note=password", 303), request, user["id"])
+
+    # ------------------------------------------------------------------ the account page
+
+    async def account(request: Request, error: Optional[str] = None) -> Response:
+        sess, redirect = await signed_in(request)
+        if redirect:
+            return redirect
+        user = sess["user"]
+        uid = user["id"]
+        labs, connections, shared = await asyncio.gather(
+            call(hub.labs_of, uid), call(hub.connections, uid), call(hub.shared_with, uid))
+        csrf = csrf_field(sess)
+        parts = []
+        if not user["email_confirmed_at"]:
+            parts.append('<div class="note">Please confirm <b>%s</b> with the link we sent. '
+                         '<form class="inline" method="post" action="/account/confirm">%s<button class="plain">'
+                         'Send it again</button></form></div>' % (e(user["email"]), csrf))
+
+        parts.append('<h2>Shared in your labs</h2>')
+        if shared["chats"] or shared["runs"] or shared["projects"]:
+            if shared["projects"]:
+                parts.append('<div class="scroll"><table><tr><th>Project</th><th>By</th><th>Lab</th><th>Updated</th>'
+                             '</tr>%s</table></div>' % "".join(
+                                 '<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                                 % (e(p["name"]), e(p["owner"]), e(p["lab"] or "only you"), when(p["updated_at"]))
+                                 for p in shared["projects"]))
+            if shared["chats"]:
+                parts.append('<div class="scroll"><table><tr><th>Chat</th><th>By</th><th>Project</th><th>Lab</th>'
+                             '<th>Updated</th></tr>%s</table></div>' % "".join(
+                                 '<tr><td><a href="/shared/chats/%d">%s</a></td><td>%s</td><td>%s</td><td>%s</td>'
+                                 '<td>%s</td></tr>' % (c["id"], e(c["title"]), e(c["owner"]), e(c["project"] or "–"),
+                                                       e(c["lab"] or "only you"), when(c["updated_at"]))
+                                 for c in shared["chats"]))
+            if shared["runs"]:
+                parts.append('<div class="scroll"><table><tr><th>Run</th><th>Device</th><th>By</th><th>Project</th>'
+                             '<th>Lab</th><th>Size</th><th>Started</th></tr>%s</table></div>' % "".join(
+                                 '<tr><td><a href="/shared/runs/%d">%s</a></td><td>%s</td><td>%s</td><td>%s</td>'
+                                 '<td>%s</td><td>%s</td><td>%s</td></tr>'
+                                 % (r["id"], e(r["local_id"]), e(r["device"] or "–"), e(r["owner"]),
+                                    e(r["project"] or "–"), e(r["lab"] or "only you"), size(r["bytes"]),
+                                    when(r["created_at"])) for r in shared["runs"]))
+        else:
+            parts.append('<p class="muted">Nothing yet. Once you connect a Kelvin, the work it shares, and what your '
+                         'labmates share, shows here.</p>')
+
+        parts.append('<h2>Your labs</h2>')
+        if labs:
+            parts.append('<div class="scroll"><table><tr><th>Lab</th><th>People</th><th>Join code</th><th></th></tr>'
+                         '%s</table></div>' % "".join(
+                             '<tr><td><b>%s</b><br><span class="muted">%s</span></td><td>%s</td><td><code>%s</code>'
+                             '</td><td><form class="inline" method="post" action="/labs/%d/leave">%s<button '
+                             'class="plain">Leave</button></form></td></tr>'
+                             % (e(lab["name"]), e(lab["institution"]), e(", ".join(lab["people"])), e(lab["join_code"]),
+                                lab["id"], csrf) for lab in labs))
+        else:
+            parts.append('<p class="muted">You are in no lab yet. Join yours with the code a labmate gives you, or '
+                         'make it.</p>')
+        parts.append(
+            '<div class="row" style="align-items:flex-start;gap:2rem">'
+            '<form class="stack" method="post" action="/labs/join">%s<label>Join a lab<input type="text" '
+            'name="code" placeholder="ABCD-EFGH-JKLM" required></label><button>Join</button></form>'
+            '<form class="stack" method="post" action="/labs">%s<label>Make a lab<input type="text" name="name" '
+            'placeholder="Name, e.g. Smith Lab" required maxlength="80"></label><label>Institution '
+            '<span class="muted">(optional)</span><input type="text" name="institution" maxlength="80"></label>'
+            '<button>Make lab</button></form></div>'
+            '<p class="muted">Labs have no owner: everyone in a lab sees its join code and what its members share '
+            'there.</p>' % (csrf, csrf))
+
+        parts.append('<h2>Connected Kelvins</h2>')
+        if connections:
+            parts.append('<div class="scroll"><table><tr><th>Kelvin</th><th>Shares into</th><th>Last seen</th><th>'
+                         '</th></tr>%s</table></div>' % "".join(
+                             '<tr><td>%s<br><span class="muted">%s %s</span></td><td>%s</td><td>%s</td><td><form '
+                             'class="inline" method="post" action="/connections/%d/revoke">%s<button class="plain">'
+                             'Disconnect</button></form></td></tr>'
+                             % (e(c["name"] or "Kelvin"), e(c["platform"]), e(c["version"]), e(c["lab"] or "only you"),
+                                when(c["last_used"]), c["id"], csrf) for c in connections))
+        else:
+            parts.append('<p class="muted">None yet. Start the connection from the Kelvin you want to connect; it '
+                         'opens this hub in your browser to ask you.</p>')
+
+        parts.append(
+            '<h2>Your profile</h2><form class="stack" method="post" action="/account/profile">%s'
+            '<label>Email<input type="email" value="%s" disabled></label>'
+            '<label>Name<input type="text" name="name" required maxlength="80" value="%s"></label>'
+            '<label>ORCID iD <span class="muted">(optional)</span><input type="text" name="orcid" value="%s"></label>'
+            '<button>Save</button></form>'
+            '<h2>Password</h2><form class="stack" method="post" action="/account/password">%s'
+            '<label>Current password<input type="password" name="old" autocomplete="current-password" required></label>'
+            '<label>New password<input type="password" name="new" autocomplete="new-password" required minlength="8">'
+            '</label><button>Change password</button></form>'
+            '<h2>Your data</h2><p><a href="/account/export">Export everything</a> <span class="muted">(a zip of your '
+            'account, labs, connections, and all you shared)</span></p>'
+            '<details><summary>Delete your account</summary><form class="stack" method="post" '
+            'action="/account/delete">%s<p>This deletes your account and everything your Kelvins shared to the hub. '
+            'Your own computers keep their copies. It can\'t be undone.</p><label>Password<input type="password" '
+            'name="password" autocomplete="current-password" required></label><label class="check"><input '
+            'type="checkbox" name="sure" value="yes" required><span>Yes, delete my account.</span></label>'
+            '<button class="danger">Delete my account</button></form></details>'
+            '<p class="muted">Account made %s · agreed to the terms of %s · <a href="/terms">Terms</a> · '
+            '<a href="/privacy">Privacy</a></p>'
+            % (csrf, e(user["email"]), e(user["name"]), e(user["orcid"] or ""), csrf, csrf, when(user["created_at"]),
+               e(user["consent_version"])))
+        note = NOTES.get(request.query_params.get("note", ""))
+        return page("Your account", "".join(parts), sess, error=error, note=note, status=400 if error else 200)
+
+    def account_action(fn: Any) -> Any:
+        """A form on the account page: signed in, anti-forgery checked; a HubError shows on the page."""
+        async def endpoint(request: Request) -> Response:
+            sess, redirect = await signed_in(request)
+            if redirect:
+                return redirect
+            f = await form_of(request)
+            try:
+                check_csrf(sess, f)
+                return await fn(request, sess, f)
+            except HubError as err:
+                request.scope["query_string"] = b""
+                return await account(request, error=str(err))
+        return endpoint
+
+    async def resend(request: Request, sess: Dict[str, Any], f: Dict[str, str]) -> Response:
+        await call(hub.send_confirmation, sess["user"])
+        return RedirectResponse("/account?note=sent", 303)
+
+    async def profile(request: Request, sess: Dict[str, Any], f: Dict[str, str]) -> Response:
+        await call(hub.set_profile, sess["user"]["id"], f.get("name"), f.get("orcid"))
+        return RedirectResponse("/account?note=profile", 303)
+
+    async def password(request: Request, sess: Dict[str, Any], f: Dict[str, str]) -> Response:
+        await call(hub.change_password, sess["user"]["id"], f.get("old"), f.get("new"), request.cookies.get(COOKIE),
+                   ip_of(request))
+        return RedirectResponse("/account?note=password", 303)
+
+    async def make_lab(request: Request, sess: Dict[str, Any], f: Dict[str, str]) -> Response:
+        await call(hub.create_lab, sess["user"]["id"], f.get("name"), f.get("institution"))
+        return RedirectResponse("/account?note=lab", 303)
+
+    async def join_lab(request: Request, sess: Dict[str, Any], f: Dict[str, str]) -> Response:
+        await call(hub.join_lab, sess["user"]["id"], f.get("code"))
+        return RedirectResponse("/account?note=joined", 303)
+
+    async def leave_lab(request: Request, sess: Dict[str, Any], f: Dict[str, str]) -> Response:
+        await call(hub.leave_lab, sess["user"]["id"], int(request.path_params["lab_id"]))
+        return RedirectResponse("/account?note=left", 303)
+
+    async def revoke(request: Request, sess: Dict[str, Any], f: Dict[str, str]) -> Response:
+        await call(hub.revoke, sess["user"]["id"], int(request.path_params["token_id"]), ip_of(request))
+        return RedirectResponse("/account?note=revoked", 303)
+
+    async def delete_account(request: Request, sess: Dict[str, Any], f: Dict[str, str]) -> Response:
+        if f.get("sure") != "yes":
+            raise HubError("Tick the box to confirm that you want your account deleted.")
+        await call(hub.authenticate, sess["user"]["email"], f.get("password"), ip_of(request))
+        await call(hub.delete_user, sess["user"]["id"], "user", ip_of(request))
+        response = page("Your account is deleted", '<p>Your account and everything your Kelvins shared to the hub '
+                                                   'are gone. Thanks for trying the hub.</p>')
+        response.delete_cookie(COOKIE)
+        return response
+
+    async def export(request: Request) -> Response:
+        sess, redirect = await signed_in(request, any_consent=True)
+        if redirect:
+            return redirect
+        path = await call(hub.export, sess["user"]["id"])
+        return FileResponse(path, media_type="application/zip", filename="kelvin-hub-%s.zip" % time.strftime("%Y-%m-%d"),
+                            background=BackgroundTask(os.remove, path))
+
+    # ------------------------------------------------------------------ shared work
+
+    def render_message(m: Any) -> str:
+        if not isinstance(m, dict):
+            return '<div class="msg">%s</div>' % e(json.dumps(m, ensure_ascii=False)[:2000])
+        role = m.get("role", "")
+        if role == "user":
+            return '<div class="msg user"><div class="who">Person</div>%s</div>' % e(m.get("text") or m.get("content"))
+        if role == "assistant":
+            out = []
+            for b in m.get("blocks") or []:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    out.append(e(b.get("text")))
+                elif isinstance(b, dict) and b.get("type") == "tool_call":
+                    out.append('<details><summary>%s</summary><pre>%s</pre></details>'
+                               % (e(b.get("name")), e(json.dumps(b.get("input"), indent=1, ensure_ascii=False)[:4000])))
+            return '<div class="msg"><div class="who">Kelvin · %s</div>%s</div>' % (e(m.get("model") or ""),
+                                                                                    "".join(out))
+        if role == "tool":
+            return "".join('<details><summary>%s result%s</summary><pre>%s</pre></details>'
+                           % (e(r.get("name")), " (error)" if r.get("is_error") else "",
+                              e(str(r.get("content"))[:4000])) for r in m.get("results") or [] if isinstance(r, dict))
+        return '<div class="msg">%s</div>' % e(json.dumps(m, ensure_ascii=False)[:2000])
+
+    async def shared_chat(request: Request) -> Response:
+        sess, redirect = await signed_in(request)
+        if redirect:
+            return redirect
+        try:
+            chat = await call(hub.chat, sess["user"]["id"], int(request.path_params["chat_id"]))
+        except HubError as err:
+            return page("Not found", "", sess, 404, error=str(err))
+        return page(chat["title"], '<p class="muted">By %s · %s · %s · updated %s</p>%s' % (
+            e(chat["owner"]), e(chat["project"] or "no project"), e(chat["lab"] or "only you"), when(chat["updated_at"]),
+            "".join(render_message(m) for m in chat["messages"])), sess)
+
+    async def shared_run(request: Request) -> Response:
+        sess, redirect = await signed_in(request)
+        if redirect:
+            return redirect
+        try:
+            run = await call(hub.run, sess["user"]["id"], int(request.path_params["run_id"]))
+        except HubError as err:
+            return page("Not found", "", sess, 404, error=str(err))
+        files = "".join('<li><a href="/shared/runs/%d/files/%s">%s</a></li>' % (run["id"], quote(f), e(f))
+                        for f in run["files"]) or '<li class="muted">No files sent yet.</li>'
+        return page("Run %s" % run["local_id"], (
+            '<p class="muted">By %s · %s · %s · %s · started %s</p><h2>Files</h2><ul class="plain">%s</ul>'
+            '<h2>About the run</h2><pre>%s</pre>'
+            % (e(run["owner"]), e(run["device"] or "no device"), e(run["project"] or "no project"),
+               e(run["lab"] or "only you"), when(run["created_at"]), files,
+               e(json.dumps(run["meta"], indent=1, ensure_ascii=False)))), sess)
+
+    async def shared_run_file(request: Request) -> Response:
+        sess, redirect = await signed_in(request)
+        if redirect:
+            return redirect
+        try:
+            path = await call(hub.run_file, sess["user"]["id"], int(request.path_params["run_id"]),
+                              request.path_params["name"])
+        except HubError as err:
+            return page("Not found", "", sess, 404, error=str(err))
+        return FileResponse(path, filename=path.name, media_type="application/octet-stream")   # never shown inline
+
+    # ------------------------------------------------------------------ connecting a Kelvin
+
+    def connect_request(params: Dict[str, str]) -> Dict[str, Any]:
+        """The checked request from Kelvin; raises HubError before anything redirects anywhere."""
+        uri = loopback(params.get("redirect_uri"))
+        if params.get("code_challenge_method", "S256") != "S256" or not CHALLENGE.match(params.get("code_challenge", "")):
+            raise HubError("Kelvin's request has no valid PKCE code_challenge (S256).")
+        state = params.get("state", "")
+        if not 8 <= len(state) <= 200:
+            raise HubError("Kelvin's request has no valid state.")
+        return {"redirect_uri": uri, "challenge": params["code_challenge"], "state": state,
+                "installation": installation(params)}
+
+    def back_to_kelvin(req: Dict[str, Any], **params: str) -> RedirectResponse:
+        uri = req["redirect_uri"]
+        return RedirectResponse(uri + ("&" if "?" in uri else "?") + urlencode(dict(params, state=req["state"])), 303)
+
+    async def connect(request: Request) -> Response:
+        sess = await session_of(request)
+        if request.method == "GET":
+            params = dict(request.query_params)
+        else:
+            params = await form_of(request)
+        try:
+            req = connect_request(params)
+        except HubError as err:
+            return page("Connect Kelvin", "<p>Start again from Kelvin.</p>", sess, 400, error=str(err))
+        sess, redirect = await signed_in(request)
+        if redirect:
+            if request.method == "POST":   # signed out meanwhile: show the request again after signing in
+                redirect = RedirectResponse("/signin?" + urlencode({"next": "/connect?" + urlencode(
+                    {k: params[k] for k in params if k not in ("csrf", "action", "lab")})}), 303)
+            return redirect
+        user = sess["user"]
+        inst = req["installation"]
+        if request.method == "POST":
+            try:
+                check_csrf(sess, params)
+                if params.get("action") != "allow":
+                    return back_to_kelvin(req, error="access_denied")
+                lab_id = int(params["lab"]) if params.get("lab") else None
+                code = await call(hub.connect_code, user, req["redirect_uri"], req["challenge"], inst, lab_id)
+            except (HubError, ValueError) as err:
+                return page("Connect Kelvin", "", sess, 400, error=str(err))
+            return back_to_kelvin(req, code=code)
+        labs = await call(hub.labs_of, user["id"])
+        hidden = "".join('<input type="hidden" name="%s" value="%s">' % (e(k), e(v)) for k, v in params.items()
+                         if k in ("redirect_uri", "state", "code_challenge", "code_challenge_method", "installation",
+                                  "name", "platform", "version"))
+        options = "".join('<option value="%d">%s</option>' % (lab["id"], e(lab["name"])) for lab in labs)
+        return page("Connect Kelvin to your account?", (
+            '<p><b>%s</b> <span class="muted">(%s, Kelvin %s)</span> wants to connect to <b>%s</b>.</p>'
+            '<div class="note"><b>It will share:</b> your normal projects and unfiled chats, with their runs and whole '
+            'conversations.<br><b>Never:</b> unpublished or confidential projects, incognito chats, API keys, or '
+            'ChatGPT and Claude Code sign-ins.</div>'
+            '<form class="stack" method="post" action="/connect">%s%s<label>Share into<select name="lab">%s'
+            '<option value="">No lab: only I see it</option></select></label>'
+            '<div class="row"><button name="action" value="allow">Connect</button><button class="plain" '
+            'name="action" value="cancel">Cancel</button></div></form>'
+            '<p class="muted">Only connect a Kelvin you started yourself. You can disconnect it any time on your '
+            '<a href="/account">account page</a>.</p>'
+            % (e(inst["name"]), e(inst["platform"] or "?"), e(inst["version"] or "?"), e(user["email"]),
+               csrf_field(sess), hidden, options)), sess)
+
+    # ------------------------------------------------------------------ the API for connected Kelvins
+
+    async def health(request: Request) -> Response:
+        return JSONResponse({"ok": True, "hub": __version__})
+
+    async def token(request: Request) -> Response:
+        app = await app_of(request)
+        if request.method == "DELETE":
+            if app is None:
+                return api_error("not connected", 401)
+            await call(hub.revoke, app["user"]["id"], app["token_id"], ip_of(request), "app")
+            return Response(status_code=204)
+        ip = ip_of(request) or "?"
+        if token_tries.blocked("token:" + ip):
+            return api_error("too many tries; wait 15 minutes", 429)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict) or body.get("grant_type", "authorization_code") != "authorization_code":
+                raise HubError("grant_type must be authorization_code")
+            result = await call(hub.connect_app, body.get("code"), body.get("code_verifier"), body.get("redirect_uri"),
+                                ip)
+        except (HubError, ValueError) as err:
+            token_tries.hit("token:" + ip)
+            return api_error("invalid_grant", 400, error_description=str(err))
+        return JSONResponse(result)
+
+    async def me(request: Request) -> Response:
+        app = await app_of(request)
+        if app is None:
+            return api_error("not connected", 401)
+        user = app["user"]
+        labs = await call(hub.labs_of, user["id"])
+        lab = next((lab["name"] for lab in labs if lab["id"] == app["lab_id"]), None)
+        return JSONResponse({"name": user["name"], "email": user["email"], "orcid": user["orcid"],
+                             "email_confirmed": bool(user["email_confirmed_at"]), "shares_into": lab,
+                             "labs": [lab["name"] for lab in labs], "needs_consent": hub.needs_consent(user),
+                             "account_url": hub.base_url + "/account"})
+
+    async def sync(request: Request) -> Response:
+        app = await app_of(request)
+        if app is None:
+            return api_error("not connected", 401)
+        if hub.needs_consent(app["user"]):
+            return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403,
+                             consent_url=hub.base_url + "/consent")
+        body = await request.body()
+        if len(body) > MAX_SYNC:
+            return api_error("send at most 64 MB at a time", 413)
+        try:
+            return JSONResponse(await call(hub.sync, app, json.loads(body or b"{}")))
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+
+    async def run_file_upload(request: Request) -> Response:
+        app = await app_of(request)
+        if app is None:
+            return api_error("not connected", 401)
+        if hub.needs_consent(app["user"]):
+            return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403)
+        limit = hub.max_file_bytes
+        tmp = hub.home / "tmp" / ("upload-%s" % secrets.token_hex(8))
+        written = 0
+        try:
+            with open(tmp, "wb") as f:
+                async for chunk in request.stream():
+                    written += len(chunk)
+                    if written > limit:
+                        return api_error("a file may be at most %s MB" % hub.config.get("max_file_mb"), 413)
+                    f.write(chunk)
+            return JSONResponse(await call(hub.store_run_file, app, request.path_params["run_id"],
+                                           request.path_params["name"], tmp, written))
+        except HubError as err:
+            return api_error(str(err))
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+
+    # ------------------------------------------------------------------ the operator's page
+
+    def operator_of(request: Request) -> Optional[Dict[str, Any]]:
+        op = operators.get(request.cookies.get(OPERATOR_COOKIE, ""))
+        if op is None or op["expires"] < time.time():
+            return None
+        return op
+
+    def admin_page(op: Dict[str, Any], body: str, error: Optional[str] = None, note: Optional[str] = None) -> Response:
+        signout_form = ('<form class="inline" method="post" action="/admin/signout"><input type="hidden" name="csrf" '
+                        'value="%s"><button class="plain">Leave the operator page</button></form>' % e(op["csrf"]))
+        return page("Kelvin hub · operator", body + signout_form, error=error, note=note, status=400 if error else 200)
+
+    async def admin(request: Request, error: Optional[str] = None, note: Optional[str] = None) -> Response:
+        op = operator_of(request)
+        if op is None:
+            return page("Kelvin hub · operator", (
+                '<form class="stack" method="post" action="/admin/signin"><label>Operator key<input type="password" '
+                'name="key" autocomplete="off" required></label><button>Open</button></form><p class="muted">The key '
+                'is in operator-key.txt in the hub\'s folder when the hub is first set up; '
+                '<code>kelvin-hub operator-key</code> makes a new one.</p>'), error=error,
+                status=400 if error else 200)
+        query = request.query_params.get("q", "")
+        stats, people, activity = await asyncio.gather(call(hub.stats), call(hub.find_users, query, 100),
+                                                       call(hub.recent_activity, 60))
+        csrf = '<input type="hidden" name="csrf" value="%s">' % e(op["csrf"])
+        rows = "".join(
+            '<tr><td>%d</td><td>%s<br><span class="muted">%s</span></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
+            '<td><form class="inline" method="post" action="/admin/users/%d/%s">%s<button class="plain">%s</button>'
+            '</form></td></tr>'
+            % (u["id"], e(u["name"]), e(u["email"]), "yes" if u["email_confirmed_at"] else "no", u["labs"],
+               when(u["created_at"]), when(u["last_seen"]), u["id"], "enable" if u["disabled_at"] else "disable",
+               csrf, "Enable" if u["disabled_at"] else "Disable") for u in people)
+        events = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                         % (when(a["at"]), e(a["actor"]), e(a["action"]), e(a["user_id"] or ""), e(a["detail"]))
+                         for a in activity)
+        stats_rows = "".join('<tr><th>%s</th><td>%s</td></tr>' % (e(k.replace("_", " ")),
+                                                                   e(size(v) if k.endswith("bytes") else v))
+                             for k, v in stats.items())
+        return admin_page(op, (
+            '<h2>The hub</h2><div class="scroll"><table>%s</table></div>'
+            '<form class="inline" method="post" action="/admin/backup">%s<button class="plain">Back up the database '
+            'now</button></form>'
+            '<h2>People</h2><form class="row" method="get" action="/admin"><input type="search" name="q" value="%s" '
+            'placeholder="Name or email" style="max-width:20rem"><button class="plain">Find</button></form>'
+            '<div class="scroll"><table><tr><th>#</th><th>Person</th><th>Confirmed</th><th>Labs</th><th>Joined</th>'
+            '<th>Last seen</th><th></th></tr>%s</table></div>'
+            '<h2>Recent activity</h2><div class="scroll"><table><tr><th>When</th><th>Who</th><th>What</th><th>Account'
+            '</th><th>Detail</th></tr>%s</table></div>' % (stats_rows, csrf, e(query), rows, events)),
+            error=error, note=note)
+
+    async def admin_signin(request: Request) -> Response:
+        ip = ip_of(request) or "?"
+        f = await form_of(request)
+        if operator_tries.blocked("op:" + ip):
+            return await admin(request, error="Too many tries. Wait 15 minutes.")
+        if not hub.is_operator(f.get("key")):
+            operator_tries.hit("op:" + ip)
+            return await admin(request, error="That isn't the operator key.")
+        token = secrets.token_urlsafe(32)
+        operators[token] = {"expires": time.time() + OPERATOR_TTL, "csrf": secrets.token_urlsafe(24)}
+        with hub.connect() as con:
+            hub.audit(con, "operator", "operator signed in", None, None, ip)
+        response = RedirectResponse("/admin", 303)
+        response.set_cookie(OPERATOR_COOKIE, token, max_age=OPERATOR_TTL, httponly=True, samesite="strict",
+                            secure=secure(request), path="/admin")
+        return response
+
+    def operator_action(fn: Any) -> Any:
+        async def endpoint(request: Request) -> Response:
+            op = operator_of(request)
+            f = await form_of(request)
+            if op is None or not hmac.compare_digest(f.get("csrf", ""), op["csrf"]):
+                return RedirectResponse("/admin", 303)
+            try:
+                note = await fn(request, f)
+            except HubError as err:
+                return await admin(request, error=str(err))
+            return await admin(request, note=note)
+        return endpoint
+
+    async def admin_signout(request: Request) -> Response:
+        operators.pop(request.cookies.get(OPERATOR_COOKIE, ""), None)
+        response = RedirectResponse("/", 303)
+        response.delete_cookie(OPERATOR_COOKIE, path="/admin")
+        return response
+
+    async def admin_disable(request: Request, f: Dict[str, str]) -> str:
+        user_id, verb = int(request.path_params["user_id"]), request.path_params["verb"]
+        if verb not in ("disable", "enable"):
+            raise HubError("Unknown action.")
+        await call(hub.set_disabled, user_id, verb == "disable", ip_of(request))
+        return "Account %d is %sd." % (user_id, verb)
+
+    async def admin_backup(request: Request, f: Dict[str, str]) -> str:
+        path = await call(hub.backup, None, True)
+        return "Backed up to backups/%s." % path.name
+
+    async def admin_stats(request: Request) -> Response:
+        if not hub.is_operator(request.headers.get("x-operator-key")):
+            return api_error("operator key needed", 401)
+        return JSONResponse(await call(hub.stats))
+
+    # ------------------------------------------------------------------ the app
+
+    async def failed(request: Request, exc: Exception) -> Response:
+        if isinstance(exc, HubError):
+            if request.url.path.startswith("/api/"):
+                return api_error(str(exc))
+            return page("Something is wrong", "", await session_of(request), 400, error=str(exc))
+        log.exception("error on %s %s", request.method, request.url.path)
+        if request.url.path.startswith("/api/"):
+            return api_error("the hub had a problem; it is logged", 500)
+        return page("Something went wrong", "<p>The hub had a problem; it is logged. Try again.</p>", status=500)
+
+    @asynccontextmanager
+    async def lifespan(app: Any) -> Any:
+        async def nightly() -> None:   # one backup a day, checked every hour
+            while True:
+                try:
+                    await call(hub.backup)
+                except Exception:
+                    log.exception("backup failed")
+                await asyncio.sleep(3600)
+        task = asyncio.create_task(nightly()) if backups else None
+        yield
+        if task:
+            task.cancel()
+
+    routes = [
+        Route("/", home),
+        Route("/kelvin.svg", logo),
+        Route("/terms", terms),
+        Route("/privacy", privacy),
+        Route("/register", register, methods=["GET", "POST"]),
+        Route("/signin", signin, methods=["GET", "POST"]),
+        Route("/signout", signout, methods=["POST"]),
+        Route("/consent", consent, methods=["GET", "POST"]),
+        Route("/confirm", confirm),
+        Route("/reset", reset, methods=["GET", "POST"]),
+        Route("/reset/new", reset_new, methods=["GET", "POST"]),
+        Route("/account", account),
+        Route("/account/confirm", account_action(resend), methods=["POST"]),
+        Route("/account/profile", account_action(profile), methods=["POST"]),
+        Route("/account/password", account_action(password), methods=["POST"]),
+        Route("/account/delete", account_action(delete_account), methods=["POST"]),
+        Route("/account/export", export),
+        Route("/labs", account_action(make_lab), methods=["POST"]),
+        Route("/labs/join", account_action(join_lab), methods=["POST"]),
+        Route("/labs/{lab_id:int}/leave", account_action(leave_lab), methods=["POST"]),
+        Route("/connections/{token_id:int}/revoke", account_action(revoke), methods=["POST"]),
+        Route("/shared/chats/{chat_id:int}", shared_chat),
+        Route("/shared/runs/{run_id:int}", shared_run),
+        Route("/shared/runs/{run_id:int}/files/{name:path}", shared_run_file),
+        Route("/connect", connect, methods=["GET", "POST"]),
+        Route("/admin", admin),
+        Route("/admin/signin", admin_signin, methods=["POST"]),
+        Route("/admin/signout", admin_signout, methods=["POST"]),
+        Route("/admin/users/{user_id:int}/{verb}", operator_action(admin_disable), methods=["POST"]),
+        Route("/admin/backup", operator_action(admin_backup), methods=["POST"]),
+        Route("/api/health", health),
+        Route("/api/token", token, methods=["POST", "DELETE"]),
+        Route("/api/me", me),
+        Route("/api/sync", sync, methods=["POST"]),
+        Route("/api/sync/runs/{run_id}/files/{name:path}", run_file_upload, methods=["PUT"]),
+        Route("/api/admin/stats", admin_stats),
+    ]
+    app = Starlette(routes=routes, lifespan=lifespan, exception_handlers={Exception: failed, HubError: failed})
+    return Gate(app, hosts)
+
+
+def _logging(hub: Hub) -> None:
+    handler = logging.FileHandler(hub.home / "hub.log", encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    ap = argparse.ArgumentParser(prog="kelvin-hub", description="The Kelvin hub: online accounts for Kelvin users "
+                                                                "across labs, and the work they share.")
+    ap.add_argument("command", nargs="?", default="serve", choices=["serve", "init", "backup", "operator-key", "stats"],
+                    help="serve (default); init: make the hub's folder and database; backup: copy the database to "
+                         "backups/ now; operator-key: make a new operator key; stats: print counts")
+    ap.add_argument("--home", default=os.environ.get("KELVIN_HUB_HOME") or str(Path.home() / "Kelvin-hub"),
+                    help="the hub's folder (default: $KELVIN_HUB_HOME, else ~/Kelvin-hub)")
+    ap.add_argument("--host", default="127.0.0.1", help="address to listen on (default 127.0.0.1: this computer only)")
+    ap.add_argument("--port", type=int, default=8780)
+    ap.add_argument("--base-url", help="the address people reach the hub at, saved in hub.json "
+                                       "(e.g. https://hub.example.org behind a Cloudflare Tunnel)")
+    args = ap.parse_args(argv)
+
+    hub = Hub(args.home)
+    _logging(hub)
+    if args.base_url:
+        hub.config["base_url"] = args.base_url.rstrip("/")
+        hub.save_config()
+    elif hub.config["base_url"] == DEFAULTS["base_url"] and args.port != 8780:
+        hub.config["base_url"] = "http://127.0.0.1:%d" % args.port
+        hub.save_config()
+    key_file = hub.ensure_operator_key()
+    if key_file:
+        print("The operator key (for /admin) is in %s. Move it to a password manager, then delete the file."
+              % key_file, file=sys.stderr)
+    if args.command == "init":
+        print("Kelvin hub ready in %s" % hub.home, file=sys.stderr)
+    elif args.command == "backup":
+        print("Backed up to %s" % hub.backup(force=True), file=sys.stderr)
+    elif args.command == "operator-key":
+        if not key_file:
+            print("New operator key in %s; the old one no longer works." % hub.new_operator_key(), file=sys.stderr)
+    elif args.command == "stats":
+        print(json.dumps(hub.stats(), indent=1))
+    else:
+        import uvicorn
+        if args.host not in ("127.0.0.1", "localhost", "::1"):
+            print("Listening on %s: anyone who can reach this computer can reach the hub. Prefer 127.0.0.1 behind a "
+                  "Cloudflare Tunnel, which gives https." % args.host, file=sys.stderr)
+        print("Kelvin hub: %s (data in %s)" % (hub.base_url, hub.home), file=sys.stderr, flush=True)
+        uvicorn.run(create_app(hub, port=args.port), host=args.host, port=args.port, log_level="warning")
+
+
+if __name__ == "__main__":
+    main()

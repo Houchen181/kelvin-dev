@@ -261,6 +261,18 @@
             <span class="hint">Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.</span>
             <div class="key-row pw-row"><input id="pw-old" type="password" autocomplete="current-password" placeholder="Current password"><input id="pw-new" type="password" autocomplete="new-password" placeholder="New password (empty: none)"><button id="pw-change" class="btn small" type="button">Change</button></div>
           </div>
+          <div id="hub-field" class="field">
+            <div class="field-row"><span class="field-label">Your hub account</span><span id="hub-status" class="hint"></span></div>
+            <span class="hint">The hub is one server for Kelvin users in every lab. Connected, Kelvin shares your normal projects and unfiled chats there, with their runs and whole conversations, with the lab you choose. Never: projects marked unpublished or confidential (in each project's settings) or limited to some models, incognito chats and their runs, API keys, or ChatGPT and Claude Code sign-ins.</span>
+            <div class="key-row"><input id="hub-url" type="url" placeholder="https://hub.example.org" spellcheck="false" autocomplete="off" aria-label="The hub's address"><button id="hub-connect" class="btn small" type="button">Connect</button></div>
+            <div id="hub-actions" class="chatgpt-row" hidden>
+              <a id="hub-account" class="link soft" href="#" target="_blank" rel="noopener noreferrer">Your account on the hub</a>
+              <button id="hub-sync" class="link soft" type="button">Sync now</button>
+              <button id="hub-disconnect" class="link soft" type="button">Disconnect</button>
+            </div>
+            <span id="hub-sync-status" class="hint"></span>
+            <span class="hint">Kelvin opens the hub in your browser to connect; it never sees your hub password. Its token stays in your settings, encrypted with your password. Disconnecting stops sharing; what was shared stays on the hub until you delete it there.</span>
+          </div>
         </section>
         <section class="set-page" data-page="models" hidden>
           <h3 class="set-title">Models</h3>
@@ -628,6 +640,15 @@
       <div class="checks" id="project-providers"></div>
       <div class="checks"><label class="check"><input id="project-literature" type="checkbox"> Literature search (the search words leave this computer)</label></div>
       <span class="hint">For confidential work, allow only local models and switch off literature search. A chat that ran under these rules keeps them, even if it is moved out of the project or the project is deleted.</span>
+    </div>
+    <div class="field">
+      <label class="field-label" for="project-sharing">On the Kelvin hub</label>
+      <select id="project-sharing">
+        <option value="">Shared, with its chats and runs</option>
+        <option value="unpublished">Unpublished: not shared</option>
+        <option value="confidential">Confidential: not shared</option>
+      </select>
+      <span class="hint">While Kelvin is connected to the hub (Settings → Account), it shares normal projects with your lab there. Unpublished and confidential projects, and projects limited to some models or without literature search, are never shared, not even their names; marking a project removes what the hub had of it. A chat moved out of an unshared project, or left when it is deleted, stays unshared.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>

@@ -13,6 +13,7 @@ import json
 import os
 import secrets
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,12 +25,15 @@ ENV = {
     "gemini_api_key": "GEMINI_API_KEY",
 }
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
+# secrets Kelvin keeps itself, never shown or set from the browser: the Kelvin hub's token (hubsync.py)
+SEALED = SECRET | {"hub_token"}
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
-LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates"}
+LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
+       "hub_installation"}
 
 
 def _load(path: Optional[Path]) -> Dict[str, Any]:
@@ -64,7 +68,7 @@ class Settings:
         self.cipher = cipher
         data = _load(self.user_path)
         if cipher is not None:
-            for name in SECRET:
+            for name in SEALED:
                 if _sealed(data.get(name)):
                     data[name] = cipher.decrypt(data[name]) or data[name]
             for s in data.get("services") or []:
@@ -152,6 +156,24 @@ class Settings:
         else:
             self._user.pop("data_dir", None)
         self._save()
+
+    # ------------------------------------------------------------------ the Kelvin hub (hubsync.py)
+
+    def set_hub(self, url: Optional[str], token: Optional[str]) -> None:
+        """The hub this person connected: its address, and the token (encrypted with their password, like the keys)."""
+        for name, value in (("hub_url", url), ("hub_token", token)):
+            if value:
+                self._user[name] = str(value)
+            else:
+                self._user.pop(name, None)
+        self._save()
+
+    def installation_id(self) -> str:
+        """This Kelvin's own stable id, which the hub keys what it shares by: the computer's, made once."""
+        if not self._lab.get("hub_installation"):
+            self._lab["hub_installation"] = "urn:uuid:" + str(uuid.uuid4())
+            self._save()
+        return self._lab["hub_installation"]
 
     def public(self) -> Dict[str, Any]:
         """What the browser may see: which keys exist and where from, never the keys."""
@@ -282,7 +304,7 @@ class Settings:
         if self.user_path is not None and self._user is not self._lab:
             mine = json.loads(json.dumps(self._user))
             if self.cipher is not None:   # their password protects their keys
-                for name in SECRET:
+                for name in SEALED:
                     if mine.get(name) and not _sealed(mine[name]):
                         mine[name] = self.cipher.encrypt(str(mine[name]))
                 for s in mine.get("services") or []:

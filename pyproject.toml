@@ -20,12 +20,14 @@ hardware = ["pyvisa>=1.13", "pyvisa-py>=0.7", "pyserial>=3.5", "pyusb>=1.2", "li
 zhinst = ["zhinst-core"]        # Zurich Instruments lock-ins through LabOne
 qd = ["MultiPyVu"]              # Quantum Design PPMS, DynaCool, VersaLab, MPMS3 through MultiVu
 desktop = ["kelvin-lab[web,hardware]", "pywebview>=5"]
+hub = ["starlette", "uvicorn"]  # the Kelvin hub server (accounts across labs): `kelvin-hub`
 dev = ["pytest>=6", "httpx", "pypdf>=4"]
 
 [project.scripts]
 kelvin = "labharness.web.app:main"
 kelvin-mcp = "labharness.agent.server:main"
 kelvin-scan = "labharness.discovery:main"
+kelvin-hub = "labharness.hub.server:main"
 
 [project.gui-scripts]
 kelvin-app = "labharness.desktop:main"

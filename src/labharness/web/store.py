@@ -32,6 +32,7 @@ MAX_GLOBAL_NOTES = 40
 MAX_PAPERS = 200        # on a project's reading list
 MAX_DEVICES = 200       # samples per project
 MAX_SUMMARY = 6000      # the summary at the top of a project's master report
+SHARING = ("", "unpublished", "confidential")   # on the Kelvin hub: shared (the default), or never
 GENERAL = "general"     # the workspace of runs and devices outside every project
 NOTE_KINDS = PROJECT_KINDS
 
@@ -119,11 +120,13 @@ class ChatStore:
             path.unlink()
         with self._lock:
             index = self._read_index()
-            if index["assign"].pop(chat_id, None) is not None:
+            filed, marked = index["assign"].pop(chat_id, None), index["marks"].pop(chat_id, None)
+            if filed is not None or marked is not None:
                 self._write_index(index)
 
     def list(self) -> List[Dict[str, Any]]:
-        assign = self._read_index()["assign"]
+        index = self._read_index()
+        assign = index["assign"]
         out = []
         for path in self.root.glob("*.json"):
             if not _ID.match(path.stem):  # the projects index, or a stray file
@@ -134,7 +137,7 @@ class ChatStore:
                 continue
             out.append({"id": chat["id"], "title": chat.get("title", "Chat"), "updated": chat.get("updated", 0),
                         "model": chat.get("model"), "project": assign.get(chat["id"]),
-                        "rules": chat.get("rules")})
+                        "rules": chat.get("rules"), **{m: True for m in index["marks"].get(chat["id"], [])}})
         return sorted(out, key=lambda c: c["updated"], reverse=True)
 
     def project_of(self, chat_id: str) -> Optional[str]:
@@ -172,7 +175,9 @@ class ChatStore:
         general = data.get("general") if isinstance(data.get("general"), dict) else {}
         general.setdefault("devices", [])
         general.setdefault("summary", "")
-        return {"projects": projects, "assign": assign, "global_notes": notes, "general": general}
+        marks = {c: [m for m in ms if m in SHARING[1:]] for c, ms in (data.get("marks") or {}).items()
+                 if isinstance(ms, list)}   # chats that left an unshared project (never shared on the hub)
+        return {"projects": projects, "assign": assign, "global_notes": notes, "general": general, "marks": marks}
 
     def _write_index(self, index: Dict[str, Any]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -322,11 +327,37 @@ class ChatStore:
             project["papers"] = kept
             self._write_index(index)
 
-    def delete_project(self, project_id: str) -> None:
-        """The project and its memory go; its conversations stay, unfiled."""
+    def set_sharing(self, project_id: str, sharing: Any) -> Dict[str, Any]:
+        """Whether a connected Kelvin shares this project on the Kelvin hub (hubsync.py): "" (yes, the default),
+        "unpublished" or "confidential" (never)."""
+        sharing = str(sharing or "")
+        if sharing not in SHARING:
+            raise ValueError("sharing must be one of: %s" % ", ".join(repr(s) for s in SHARING))
         with self._lock:
             index = self._read_index()
-            self._find(index, project_id)
+            project = self._find(index, project_id)
+            for mark in SHARING[1:]:
+                project.pop(mark, None)
+            if sharing:
+                project[sharing] = True
+            self._write_index(index)
+        return project
+
+    @staticmethod
+    def _keep_marks(index: Dict[str, Any], chat_id: str, project: Optional[Dict[str, Any]]) -> None:
+        """A chat leaving an unpublished or confidential project keeps that mark, so it is never shared later."""
+        marks = [m for m in SHARING[1:] if project and project.get(m)]
+        if marks:
+            index["marks"][chat_id] = sorted(set(index["marks"].get(chat_id, [])) | set(marks))
+
+    def delete_project(self, project_id: str) -> None:
+        """The project and its memory go; its conversations stay, unfiled (and unshared, if it was)."""
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            for chat_id, pid in index["assign"].items():
+                if pid == project_id:
+                    self._keep_marks(index, chat_id, project)
             index["projects"] = [p for p in index["projects"] if p["id"] != project_id]
             index["assign"] = {c: p for c, p in index["assign"].items() if p != project_id}
             self._write_index(index)
@@ -343,6 +374,10 @@ class ChatStore:
             index = self._read_index()
             if project_id:
                 self._find(index, project_id)
+            old = index["assign"].get(chat_id)
+            if old and old != project_id:
+                self._keep_marks(index, chat_id, self._find(index, old))
+            if project_id:
                 index["assign"][chat_id] = project_id
             else:
                 index["assign"].pop(chat_id, None)
