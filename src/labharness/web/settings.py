@@ -26,9 +26,10 @@ ENV = {
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
-                     "report_kinds", "claude_code", "claude_code_path"}   # the last two: Claude Code bridge
+                     "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
+                     "updates"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
-LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port"}
+LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates"}
 
 
 def _load(path: Optional[Path]) -> Dict[str, Any]:
@@ -120,6 +121,8 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name in ("auto_setup", "manuals", "scan_network", "auto_cards"):  # setting up instruments: on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "updates":  # keeping Kelvin up to date (updater.py): auto (the default), ask or off
+                value = value if value in ("ask", "off") else ""
             if name == "claude_code":  # Claude Code bridge (temporary): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
@@ -168,9 +171,14 @@ class Settings:
             "auto_cards": self._lab.get("auto_cards") != "off",
             "auto_report": self._user.get("auto_report") or "both",
             "report_kinds": self.report_kinds,
+            "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "claude_code_path": self._user.get("claude_code_path", ""),
         }
+
+    @property
+    def updates(self) -> str:
+        return self._lab.get("updates") or "auto"
 
     @property
     def report_kinds(self) -> list:

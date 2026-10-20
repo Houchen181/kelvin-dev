@@ -76,6 +76,12 @@ The **Terminal** button in the top bar (or Ctrl+`) opens a console at the foot o
   - `/clear`: clear the screen.
 - **Keys:** Up and Down recall what you typed. Tab completes commands, instrument names and parameters. Esc stops Kelvin's answer.
 
+## Updates and one Kelvin per computer
+
+Kelvin keeps itself up to date. Twice a day it looks for a newer version, downloads it, checks it against the checksum GitHub gives for the file, and installs it when you close Kelvin. **Restart to update** in the bar at the top installs it at once. It never installs while a plan, the queue or a chat is running. Settings → **Updates** chooses Automatic, Ask me first, or Off for everyone on the computer, and has **Check now**. On macOS Kelvin says when a new version is out and links to it.
+
+There is only ever one Kelvin on a computer: an update or a new installer replaces the installed one in place, keeping your settings, chats and data. If you start another copy (say, one unzipped somewhere), Kelvin says where the installed one is, so you can delete the extra copy.
+
 ## Phone and remote access
 
 Check on a run from the coffee room, or answer an approval from home. Phone access is **off** until you switch it on in Settings → **Phone access**. When it's on, Kelvin also listens on the network (port 8771 by default). Your desktop's access key never works there; only paired phones do.

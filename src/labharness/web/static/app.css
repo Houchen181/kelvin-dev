@@ -129,6 +129,10 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 #activity-all[aria-pressed="true"] { color: var(--accent); font-weight: 600; }
 .cu-log { margin: 4px 0 8px 22px; padding: 0 0 0 14px; border-left: 2px solid var(--line); font-size: 13px; color: var(--text-2); max-height: 220px; overflow: auto; }
 .cu-log li { padding: 1px 0; }
+.update-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0 16px 8px; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--accent-soft); font-size: 14px; }
+.update-bar[hidden] { display: none; }
+.update-bar span { flex: 1 1 220px; }
+.update-bar.warn { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn); }
 
 /* ---------- layout ---------- */
 .app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }

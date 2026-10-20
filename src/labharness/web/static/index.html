@@ -88,6 +88,11 @@
       </button>
     </header>
 
+    <div id="update-bar" class="update-bar" role="status" hidden>
+      <span id="update-text"></span>
+      <a id="update-notes" class="link soft" target="_blank" rel="noopener noreferrer" hidden>What's new</a>
+      <button id="update-go" class="btn small primary" type="button" hidden>Restart to update</button>
+    </div>
     <div id="alerts" class="alerts" role="alert" hidden></div>
     <div id="scroller" class="scroller">
       <section id="empty" class="empty">
@@ -299,6 +304,16 @@
     <div class="field">
       <label for="default-model">Default model for new chats</label>
       <select id="default-model" name="default_model"></select>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Updates</span><button id="update-check" class="link" type="button">Check now</button></div>
+      <select id="updates" name="updates">
+        <option value="auto">Automatic: download, and install when Kelvin closes</option>
+        <option value="ask">Ask me first</option>
+        <option value="off">Off</option>
+      </select>
+      <span id="update-status" class="hint"></span>
+      <span class="hint">For everyone on this computer. Kelvin looks twice a day for a newer version and checks each download against GitHub's checksum. An update replaces the installed Kelvin, so there is only ever one, and never installs while a plan, the queue or a chat is running. Your settings, chats and data stay.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Phone access</span>

@@ -3478,6 +3478,8 @@
     loadDataFolder();
     loadChatGPT();
     loadClaudeCode();
+    $("updates").value = (S.settings && S.settings.updates) || "auto";
+    $("update-status").textContent = updateText(S.update);
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
     for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
     $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
@@ -3506,6 +3508,55 @@
         }));
     }));
   }
+  // ------------------------------------------------------------------ keeping Kelvin up to date (updater.py)
+  function updateText(u) {
+    if (!u) return "";
+    switch (u.state) {
+      case "unsupported": return "Runs from source: update it with git.";
+      case "checking": return "Looking for a newer Kelvin…";
+      case "downloading": return "Downloading Kelvin " + u.latest + "…";
+      case "ready": return "Kelvin " + u.latest + " is ready" + (u.mode === "auto" ? "; it installs when you close Kelvin." : ".");
+      case "available": return "Kelvin " + u.latest + " is out" + (u.can_install ? "." : "; download it from GitHub.");
+      case "installing": return "Installing Kelvin " + u.latest + "; Kelvin starts again when it is done.";
+      case "up_to_date": return "Kelvin " + u.current + " is the newest.";
+      case "error": return "Couldn't update: " + u.error;
+      default: return "Kelvin " + u.current + (u.mode === "off" ? "; updates are off." : ".");
+    }
+  }
+  function showUpdate(u) {
+    S.update = u || null;
+    if (!u) return;
+    const bar = $("update-bar");
+    $("update-status").textContent = updateText(u);
+    if (u.other_copy) {   // there is only one Kelvin on a computer: this copy is not it
+      bar.hidden = false; bar.classList.add("warn");
+      $("update-text").textContent = "This copy of Kelvin isn't the installed one (that is in " + u.other_copy + "). Close it, use the installed Kelvin, and delete this copy.";
+      $("update-go").hidden = true; $("update-notes").hidden = true;
+      return;
+    }
+    bar.classList.remove("warn");
+    const show = ["ready", "available", "installing"].includes(u.state) && u.mode !== "off";
+    bar.hidden = !show;
+    if (!show) return;
+    $("update-text").textContent = updateText(u);
+    $("update-notes").hidden = !u.url;
+    if (u.url) $("update-notes").href = u.url;
+    $("update-go").hidden = !(u.can_install && ["ready", "available"].includes(u.state));
+    $("update-go").textContent = u.state === "ready" ? "Restart to update" : "Download and update";
+  }
+  async function installUpdate() {
+    $("update-go").disabled = true;
+    try {
+      if (S.update && S.update.state === "available") showUpdate(await api("/api/update", { body: { op: "download" } }));
+      showUpdate(await api("/api/update", { body: { op: "install" } }));
+    } catch (e) { toast(e.message); }
+    $("update-go").disabled = false;
+  }
+  async function checkUpdate() {
+    $("update-status").textContent = "Looking for a newer Kelvin…";
+    try { showUpdate(await api("/api/update", { body: { op: "check" } })); } catch (e) { $("update-status").textContent = e.message; }
+  }
+
   async function loadClaudeCode() {   // Claude Code bridge (temporary): found here? signed in?
     $("cc-field").hidden = !S.claudeCode;
     if (!S.claudeCode) return;
@@ -3541,6 +3592,7 @@
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     if (S.claudeCode) { body.claude_code = $("cc-on").checked ? "on" : "off"; body.claude_code_path = $("cc-path").value.trim(); }
+    body.updates = $("updates").value;
     $("settings-msg").textContent = "Saving…";
     try {
       const r = await api("/api/settings", { body });
@@ -3589,6 +3641,10 @@
     for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
     S.settings = boot.settings;
     S.claudeCode = !!boot.claude_code;   // Claude Code bridge (temporary)
+    showUpdate(boot.update);
+    $("update-go").addEventListener("click", installUpdate);
+    $("update-check").addEventListener("click", checkUpdate);
+    setInterval(async () => { try { showUpdate(await api("/api/update")); } catch (e) { /* next time */ } }, 10 * 60 * 1000);
     S.account = boot.account || null;
     renderAccount();
     $("sign-out").addEventListener("click", signOut);

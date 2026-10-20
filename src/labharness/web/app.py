@@ -52,7 +52,8 @@ SIGNED_OUT = {"/api/session", "/api/accounts", "/api/stop", "/api/runs/stop"}
 # Claude Code bridge: locked while Claude works the screen, so its clicks never answer for a person
 LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
                           "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/phone",
-                          "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount", "/api/quit")
+                          "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount", "/api/quit",
+                          "/api/update")
 
 
 def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -195,9 +196,11 @@ def open_path(path: Path) -> None:
 def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None,
-               auto_setup: bool = False, accounts: Optional[Accounts] = None) -> Any:
+               auto_setup: bool = False, accounts: Optional[Accounts] = None, updater: Any = None,
+               on_exit: Optional[Any] = None) -> Any:
     """accounts: people sign in, each to their own settings, keys, chats, data folder and record (accounts.py).
-    Without it, one person uses Kelvin, as before accounts."""
+    Without it, one person uses Kelvin, as before accounts. updater: keeps an installed Kelvin up to date
+    (updater.py); on_exit closes the app (the desktop window), so an update can install."""
     signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo, signin), settings)
     runtime.project_info = agent.project_info            # reports: names, devices, notes, reading lists
@@ -275,6 +278,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_literature()
         await start_phone()
         runtime.monitor.start()
+        if updater is not None:   # look for a newer Kelvin soon after start, then twice a day
+            tasks.append(asyncio.ensure_future(update_loop()))
         if auto_setup:   # find and set up connected instruments (or say why not: switched off, a lab chosen...)
             setup.start("start")
         try:
@@ -318,6 +323,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             "settings": settings.public(), "active": agent.active, "can_quit": on_quit is not None,
             "account": session_data(),
             "claude_code": claude_code_enabled(),
+            "update": update_summary(updater, settings.updates),
         })
 
     # ------------------------------------------------------------------ people (accounts.py)
@@ -469,6 +475,46 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         state = await asyncio.to_thread(claudecode.status, [cli]) if cli else {"signed_in": False}
         return JSONResponse(dict(state, enabled=True, cli=cli, on=settings.get("claude_code") != "off",
                                  active="claudecode" in agent.providers, operating=runtime.operating))
+
+    # ------------------------------------------------------------------ keeping Kelvin up to date (updater.py)
+
+    async def update_loop() -> None:
+        await asyncio.sleep(20)
+        while True:
+            if settings.updates != "off":
+                await asyncio.to_thread(updater.run_once, settings.updates)
+            await asyncio.sleep(12 * 3600)
+
+    async def update_view(request: Request) -> Response:
+        """GET: is there a newer Kelvin? POST {op: check}: look now (and download it in automatic mode).
+        POST {op: install}: install the downloaded update now; Kelvin closes and starts again."""
+        from .. import updater as updates
+        if request.method == "POST":
+            if updater is None:
+                return error(404, "This Kelvin runs from source; update it with git.")
+            op = str((await request.json()).get("op") or "")
+            if op == "check":
+                await asyncio.to_thread(updater.run_once, settings.updates if settings.updates != "off" else "ask")
+            elif op == "download":
+                found = await asyncio.to_thread(updater.check)
+                if found["state"] == "available":
+                    try:
+                        await asyncio.to_thread(updater.download)
+                    except updates.UpdateError as e:
+                        return error(502, str(e))
+            elif op == "install":
+                problem = running_for() or (("Claude is operating the computer.") if runtime.operating else None)
+                if problem:
+                    return error(409, "Not now: " + problem)
+                try:
+                    updater.install(os.getpid(), relaunch=True)
+                except updates.UpdateError as e:
+                    return error(409, str(e))
+                if on_exit is not None:   # close Kelvin; the installer waits for that, then starts it again
+                    asyncio.get_running_loop().call_later(0.8, on_exit)
+            else:
+                return error(400, "unknown update operation %r" % op)
+        return JSONResponse(updates.view(updater, settings.updates))
 
     async def lab_log(request: Request) -> Response:
         """The lab's instrument log: the latest events of everyone who used these instruments, with their names."""
@@ -1556,6 +1602,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/account", account_view, methods=["POST", "DELETE"]),
         Route("/api/lab-log", lab_log),
         Route("/api/claude-code", claude_code_view),
+        Route("/api/update", update_view, methods=["GET", "POST"]),
         Route("/api/chats", chats, methods=["GET", "POST"]),
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
@@ -1640,6 +1687,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                   paired_with=None if accounts is None else paired_with,
                   operating=lambda: runtime.operating)
     return guard
+
+
+def update_summary(updater: Any, mode: str) -> Dict[str, Any]:
+    from .. import updater as updates
+    return updates.view(updater, mode)
 
 
 def claude_code_enabled() -> bool:

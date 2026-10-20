@@ -59,7 +59,7 @@ Only people can change the lab config, the approval mode or which lab Kelvin con
 - **Windows 10/11:** run [`Kelvin-Setup.exe`](https://github.com/Houchen181/kelvin/releases/latest/download/Kelvin-Setup.exe); no admin rights needed. It isn't code-signed yet: if Windows warns you, choose **More info → Run anyway**.
 - **macOS (Apple silicon):** move `Kelvin.app` from the [latest release](https://github.com/Houchen181/kelvin/releases/latest)'s zip to Applications. The first time, right-click it and choose **Open**.
 
-Kelvin opens on a simulated lab with a demo model, so you can try it right away. Add an API key in Settings, or sign in with ChatGPT, to use a real model.
+Kelvin opens on a simulated lab with a demo model, so you can try it right away. Add an API key in Settings, or sign in with ChatGPT, to use a real model. It keeps itself up to date, replacing the installed copy, so there is only ever one Kelvin on a computer.
 
 Also included: sign-in for everyone in the lab, each with their own chats, keys, data and record, and a shared instrument log; a queue that runs scans overnight after one approval; reports that keep themselves up to date for every scan, every sample and every project (PDF and PowerPoint), with CSV data; project memory and incognito chats, literature search with citations, a terminal, alarms and approvals from your phone, and MCP access for Claude Code, Codex or Gemini CLI.
 

@@ -5,12 +5,17 @@
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
+; /DSuffix=-private for the private build (the Claude Code bridge): same app id and folder, so it replaces the
+; installed Kelvin like any update; there is only ever one Kelvin on a computer
+#ifndef Suffix
+  #define Suffix ""
+#endif
 
 [Setup]
 AppId={{8C0F6E5A-3B7D-4C1E-9A2F-6D5E4B3A2C10}
 AppName=Kelvin
 AppVersion={#AppVersion}
-AppVerName=Kelvin {#AppVersion}
+AppVerName=Kelvin {#AppVersion}{#Suffix}
 AppPublisher=Kelvin project
 AppComments=The coolest cat in the lab
 DefaultDirName={localappdata}\Programs\Kelvin
@@ -18,7 +23,7 @@ DefaultGroupName=Kelvin
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
-OutputBaseFilename=Kelvin-Setup-{#AppVersion}
+OutputBaseFilename=Kelvin-Setup-{#AppVersion}{#Suffix}
 SetupIconFile=icons\kelvin.ico
 UninstallDisplayIcon={app}\Kelvin.exe
 Compression=lzma2/max
@@ -40,6 +45,14 @@ Name: "{autodesktop}\Kelvin"; Filename: "{app}\Kelvin.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\Kelvin.exe"; Description: "Start Kelvin"; Flags: nowait postinstall skipifsilent
+; an update Kelvin installed itself (updater.py, /RELAUNCH=1): start it again afterwards
+Filename: "{app}\Kelvin.exe"; Flags: nowait runasoriginaluser; Check: Relaunch
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
 
 [UninstallRun]
 ; Kelvin's own data go (settings, keys, chats, memory, lab config, cards, instrument folders); measurements stay

@@ -57,7 +57,9 @@ python -m venv .venv
 
 ## Releasing
 
-To publish a new version: bump the version in `src/labharness/_version.py` and `pyproject.toml`, then push a tag such as `v0.3.5`. GitHub builds both apps, tests them, and publishes the release.
+To publish a new version: bump the version in `src/labharness/_version.py` and `pyproject.toml`, then push a tag such as `v0.3.5`. GitHub builds both apps, tests them, and publishes the release. The tag must match the version.
+
+Installed Kelvins find the release by themselves (`updater.py`): twice a day they look at this repository's releases, download the installer for their channel, check it against the SHA-256 digest GitHub reports for the file, and install it when Kelvin closes (or at once with **Restart to update**). While the repository is private, they reach it through the GitHub CLI (`gh`) signed in on that computer; anonymous checks start working once it is public. On macOS Kelvin only says a new version is out and links to it.
 
 ## Claude Code bridge (temporary, developer only)
 
@@ -67,7 +69,7 @@ On the developer's own computer, Kelvin can use the Claude Code there: chats ans
 - **Needs:** the Claude Code command line, signed in (`claude`, then `/login`). Kelvin finds it on PATH or in `~/.local/bin`; otherwise give its path in Settings → **Claude Code on this computer**, which also shows whether it is signed in and switches the bridge off per person.
 - **Chats:** each turn is one `claude -p` run with Claude Code's own tools off, Kelvin's system prompt, and Kelvin's tools described as `<tool_call name="...">{json}</tool_call>`. Kelvin runs the calls in its own loop, through the safety gate and approvals like any model's.
 - **Operating the computer:** `operate_computer` runs `claude -p` with only Kelvin's screen tools (`python -m labharness.screen`, or `Kelvin.exe --screen-mcp`). Each step shows under the tool's step in the chat and goes to the record (`computer` events, by Claude Code). There is no extra approval, but while it runs Kelvin's approvals, settings, lab, queue and terminal are locked (HTTP 423), so a click can never stand in for a person's yes. Stop ends it. Mouse and keyboard work on Windows; on macOS they need pyobjc's Quartz.
-- **The private build:** create `src/labharness/_private_bridge.py` (any content), run `pyinstaller packaging/kelvin.spec --noconfirm --distpath dist/private --workpath build/private`, delete the file again, and run `dist/private/Kelvin/Kelvin.exe`. `Kelvin.exe --self-test` says whether the bridge is in. Installing a published release replaces it.
+- **The private build:** push a tag `private-vX.Y.Z` (the version in `_version.py`). GitHub builds the Windows installer with `_private_bridge.py` (gitignored, never committed) as a pre-release, `Kelvin-Setup-X.Y.Z-private.exe`, never marked latest. It has the same app id and folder as the published installer, so it replaces the installed Kelvin like any update; a private Kelvin then updates itself from later `private-v` pre-releases, a published one from `v` releases. The release check fails if the bridge is in a published build or missing from a private one. To try it locally instead: create `src/labharness/_private_bridge.py`, run `pyinstaller packaging/kelvin.spec --noconfirm --distpath dist/private --workpath build/private`, delete the file again; `Kelvin.exe --self-test` says whether the bridge is in. Don't keep such a copy next to the installed Kelvin.
 - **Removing it:** delete `claudecode.py`, `screen.py`, `web/providers/claudecode_provider.py`, `tests/test_claude_code.py` and `tests/fake_claude.py`, and the code marked "Claude Code bridge" in `web/app.py`, `web/agent.py`, `web/settings.py`, `agent/runtime.py`, `desktop.py`, `packaging/kelvin_app.py` and the Settings section in `index.html`/`app.js`.
 
 ## Code layout

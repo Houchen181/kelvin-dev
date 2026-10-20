@@ -96,11 +96,13 @@ def _self_test(port: int, key: str) -> int:
     return 0 if ok else 1
 
 
-def _window(url: str, agent: Any, runtime: Any, home: Path) -> None:
+def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dict] = None) -> None:
     import webview  # imported here so headless self-tests never need a GUI toolkit
 
     window = webview.create_window("Kelvin", url, width=1280, height=860, min_size=(420, 560),
                                    background_color="#f6f8fb")
+    if closer is not None:   # Restart to update closes the window like the person would
+        closer["fn"] = window.destroy
 
     def on_closing() -> bool:
         if agent.active:
@@ -180,6 +182,17 @@ def _run(args: argparse.Namespace, home: Path) -> int:
             webbrowser.open("http://127.0.0.1:%d/#%s" % (port, settings.access_key))
             return 0
 
+    updater = None
+    if getattr(sys, "frozen", False) and not args.self_test:   # an installed Kelvin keeps itself up to date
+        from .updater import Updater
+        updater = Updater(home)
+        updater.clean()
+        ready = updater.pending()
+        if ready and settings.updates == "auto" and not ready.get("tried") and sys.platform.startswith("win"):
+            log.info("installing Kelvin %s, then starting again", ready["version"])   # not closed properly last time
+            updater.install(os.getpid(), relaunch=True)
+            return 0
+
     import uvicorn
 
     port = args.port or _free_port()
@@ -197,11 +210,13 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     runtime.data_problem = problem
     runtime.lab_info = info
     quit_event = threading.Event()
+    closer: dict = {"fn": None}
     chats = home / ("virtual-lab" if accounts is None else "lab") / "chats"
     app = create_app(runtime, settings, ChatStore(chats, create=accounts is None), demo=not args.no_demo,
                      auto_setup=not (args.self_test or args.no_setup),   # set up connected instruments on start
                      hosts=("127.0.0.1:%d" % port, "localhost:%d" % port),
-                     on_quit=quit_event.set if args.browser else None, accounts=accounts)
+                     on_quit=quit_event.set if args.browser else None, accounts=accounts, updater=updater,
+                     on_exit=lambda: (closer["fn"] or quit_event.set)())
     agent = app.app.state.agent
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None, log_level="warning"))
     thread = threading.Thread(target=server.run, name="kelvin-server", daemon=True)
@@ -223,11 +238,19 @@ def _run(args: argparse.Namespace, home: Path) -> int:
             while not quit_event.wait(0.5):
                 pass
         else:
-            _window(url, agent, runtime, home)
+            _window(url, agent, runtime, home, closer)
         return 0
     finally:
         server.should_exit = True
         thread.join(10)
+        if updater is not None and settings.updates == "auto" and updater.state.get("state") != "installing":
+            ready = updater.pending()   # automatic updates install when Kelvin closes
+            if ready and not ready.get("tried") and sys.platform.startswith("win"):
+                try:
+                    updater.install(os.getpid(), relaunch=False)
+                    log.info("Kelvin %s installs now that Kelvin has closed", ready["version"])
+                except Exception:
+                    log.exception("could not start the update")
         try:
             if json.loads(lock.read_text(encoding="utf-8")).get("pid") == os.getpid():
                 lock.unlink()
