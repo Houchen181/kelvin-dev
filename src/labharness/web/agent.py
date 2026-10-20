@@ -66,21 +66,31 @@ No saved notes or instructions are used here, nothing from this chat is remember
 leaves it. Answer from this conversation alone."""
 
 
-def remember_tool(in_project: bool) -> Dict[str, Any]:
-    scopes = ["global", "project"] if in_project else ["global"]
-    kinds = list(memory.GLOBAL_KINDS) + (list(memory.PROJECT_KINDS) if in_project else [])
+def unshared(item: Optional[Dict[str, Any]]) -> bool:
+    """A project (or chat) whose work stays on this computer: unpublished, confidential or model-limited."""
+    return bool(item and (item.get("unpublished") or item.get("confidential")
+                          or rulebook.restrictive(item.get("rules"))))
+
+
+def remember_tool(in_project: bool, everywhere: bool = True) -> Dict[str, Any]:
+    """everywhere: may this chat keep notes for every conversation? Not from unshared work, whose notes would be
+    recalled in shared chats."""
+    scopes = (["global"] if everywhere else []) + (["project"] if in_project else [])
+    kinds = (list(memory.GLOBAL_KINDS) if everywhere else []) + (list(memory.PROJECT_KINDS) if in_project else [])
     return {
         "name": "remember",
-        "description": "Keep one short, durable fact for later conversations. global: the user's lasting preferences "
-                       "and conventions (used in every conversation)." + (
+        "description": "Keep one short, durable fact for later conversations." + (
+                           " global: the user's lasting preferences and conventions (used in every conversation)."
+                           if everywhere else " This work isn't shared, so nothing from it goes into the notes for "
+                           "every conversation.") + (
                            " project: a decision, procedure, instrument quirk or key result, used only in this "
                            "project's conversations." if in_project else " This chat is in no project, so "
                            "experiment facts cannot be kept.") + " The user sees every note and can delete it.",
         "schema": {"type": "object", "required": ["scope", "kind", "text"], "properties": {
             "scope": {"type": "string", "enum": scopes},
             "kind": {"type": "string", "enum": kinds,
-                     "description": "global: preference, convention or profile; project: decision, procedure, quirk "
-                                    "or result"},
+                     "description": ("global: preference, convention or profile; " if everywhere else "")
+                                    + "project: decision, procedure, quirk or result"},
             "text": {"type": "string", "description": "The fact in one sentence, at most %d characters." % MAX_NOTE},
             "replaces": {"type": "string", "description": "id of an outdated note this one corrects (optional)"}}},
     }
@@ -266,14 +276,15 @@ class ChatAgent:
         rules = self.chat_rules(chat)
         if rulebook.restrictive(rules):
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
-        tools = self.tools + ([remember_tool(bool(project))] if learn else []) + ([SAVE_PAPER] if project else []) \
-            + [DEVICES, ADD_DEVICE, MOUNT_DEVICE]
+        private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
+        remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
+        tools = self.tools + remember + ([SAVE_PAPER] if project else []) + [DEVICES, ADD_DEVICE, MOUNT_DEVICE]
         if "claudecode" in self.providers and rulebook.allows(rules, "claudecode:opus"):   # Claude Code bridge
             tools = tools + [OPERATE_COMPUTER]
         if not rules["literature"]:
             tools = [t for t in tools if t["name"] not in WEB_TOOLS]
         return {"system": "\n\n".join(parts), "tools": tools, "project": project["id"] if project else None,
-                "learn": learn, "rules": rules}
+                "learn": learn, "rules": rules, "private": private}
 
     # ------------------------------------------------------------------ who may see a project
 
@@ -310,6 +321,9 @@ class ChatAgent:
         if not isinstance(args, dict):
             return "the arguments were not valid JSON; send the call again", True
         scope = str(args.get("scope") or "")
+        if scope == "global" and context.get("private"):
+            return ("not saved: this work isn't shared (unpublished, confidential or model-limited), so nothing from "
+                    "it goes into the notes for every conversation"), True
         try:
             note, what = self.store.remember(scope, args.get("text"), str(args.get("kind") or ""),
                                              project_id=context["project"], chat_id=chat["id"],
@@ -366,11 +380,12 @@ class ChatAgent:
                 project = self.store.project(project_id)
             except KeyError:
                 return {"id": project_id, "name": project_id, "devices": [], "notes": [], "references": [],
-                        "summary": "", "private": False}
+                        "summary": "", "private": False, "unshared": False}
         return {"id": project_id, "name": project["name"] if project else "General",
                 "devices": self.store.devices(project_id), "notes": self.report_notes(project),
                 "references": self.report_references(project), "summary": self.store.summary_of(project_id),
-                "private": bool(project and rulebook.restrictive(project.get("rules")))}
+                "private": bool(project and rulebook.restrictive(project.get("rules"))),
+                "unshared": unshared(project)}
 
     def project_chat_runs(self, project_id: Optional[str]) -> List[str]:
         chats = []

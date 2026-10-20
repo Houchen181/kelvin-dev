@@ -1,7 +1,7 @@
 """A Kelvin's side of the hub: connect through the browser, then send what its person shares.
 
     client = HubClient("https://hub.example.org")
-    url, pending = client.begin("http://127.0.0.1:8770/hub/callback", host_id, "Lab PC 2", "win32", "0.3.8")
+    url, pending = client.begin("http://127.0.0.1:8770/hub/callback", host_id, "Lab PC 2", "win32", "0.3.8", "Ada")
     # open url in the person's browser; the hub sends it back to the callback with ?code=...&state=...
     token = client.finish(query, pending)    # keep it in the person's settings (encrypted with their password)
     client.push(**collect(store))            # their shared projects and chats (ChatStore), never the others
@@ -31,13 +31,24 @@ class HubClientError(Exception):
         self.body = body
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is answered as the 3xx it is, never followed: urllib would send the token on to wherever it points,
+    plain http included."""
+
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirects)
+
+
 def _http(method: str, url: str, body: Optional[bytes] = None, headers: Optional[Dict[str, str]] = None) -> Tuple[int, Any]:
-    """(status, parsed JSON or text). Never raises for an HTTP error status."""
+    """(status, parsed JSON or text). Never raises for an HTTP error status, and never follows a redirect."""
     from .._version import __version__
     req = urllib.request.Request(url, data=body, method=method, headers=dict(
         {"User-Agent": "Kelvin/%s" % __version__, "Accept": "application/json"}, **(headers or {})))
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with _OPENER.open(req, timeout=60) as r:
             raw, status = r.read(), r.status
     except urllib.error.HTTPError as e:
         raw, status = e.read(), e.code
@@ -67,10 +78,12 @@ def shareable_chat(chat: Dict[str, Any]) -> bool:
 def collect(store: Any) -> Dict[str, List[Dict[str, Any]]]:
     """What a ChatStore shares: its shared projects, and the chats in them and unfiled chats, with their whole
     conversations. An unshared project goes only as its id and "not shared" (never its name), so the hub drops
-    whatever it had of it."""
+    whatever it had of it. Projects and chats carry their marks (all clear, or they wouldn't be sent), so the hub
+    can check them again."""
     projects = store.projects()
     shared = {p["id"] for p in projects if project_shared(p)}
-    out_projects = [{"id": p["id"], "name": p["name"]} if p["id"] in shared else {"id": p["id"], "shared": False}
+    out_projects = [{"id": p["id"], "name": p["name"], "unpublished": False, "confidential": False,
+                     "rules": p.get("rules")} if p["id"] in shared else {"id": p["id"], "shared": False}
                     for p in projects]
     chats = []
     for summary in store.list():
@@ -85,7 +98,8 @@ def collect(store: Any) -> Dict[str, List[Dict[str, Any]]]:
         if not shareable_chat(chat):
             continue
         chats.append({"id": chat["id"], "project": summary.get("project"), "title": chat.get("title", "Chat"),
-                      "updated": chat.get("updated"), "messages": chat.get("messages", [])})
+                      "updated": chat.get("updated"), "messages": chat.get("messages", []),
+                      "rules": chat.get("rules"), "unpublished": False, "confidential": False, "incognito": False})
     return {"projects": out_projects, "chats": chats}
 
 
@@ -98,14 +112,17 @@ class HubClient:
     # ------------------------------------------------------------------ connecting
 
     def begin(self, redirect_uri: str, installation: str, name: str = "", platform: str = "",
-              version: str = "") -> Tuple[str, Dict[str, Any]]:
-        """The hub's /connect URL for the browser, and what finish() needs back."""
+              version: str = "", person: str = "") -> Tuple[str, Dict[str, Any]]:
+        """The hub's /connect URL for the browser, and what finish() needs back. person: who is signed in to this
+        Kelvin (its local account), for the hub to show."""
         if not redirect_uri.startswith("http://127.0.0.1:"):
             raise HubClientError("the callback must be http://127.0.0.1:<port>/...")
         verifier, state = secrets.token_urlsafe(48), secrets.token_urlsafe(24)
         params = {"redirect_uri": redirect_uri, "state": state, "code_challenge": challenge_of(verifier),
                   "code_challenge_method": "S256", "installation": installation, "name": name,
                   "platform": platform, "version": version}
+        if person:
+            params["person"] = person
         pending = {"state": state, "verifier": verifier, "redirect_uri": redirect_uri, "at": time.time()}
         return self.base_url + "/connect?" + urllib.parse.urlencode(params), pending
 
@@ -125,12 +142,15 @@ class HubClient:
         self.token = body["access_token"]
         return self.token
 
-    def disconnect(self) -> None:
-        if self.token:
-            try:
-                self._json("DELETE", "/api/token")
-            finally:
-                self.token = None
+    def disconnect(self) -> bool:
+        """End this connection on the hub. True only if the hub confirmed it (204)."""
+        if not self.token:
+            return False
+        try:
+            status, _ = self._json("DELETE", "/api/token")
+        finally:
+            self.token = None
+        return status == 204
 
     # ------------------------------------------------------------------ using it
 

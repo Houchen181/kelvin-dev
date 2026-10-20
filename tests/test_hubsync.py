@@ -83,8 +83,9 @@ def portal(tmp_path, monkeypatch, browser, accounts=None, calls=None):
                            settings=settings, store=store, opened=opened, link=guard.app.state.hub)
 
 
-def connect(k, browser, lab="Smith Lab", action="allow"):
-    """Settings → Account → Kelvin hub → Connect, then the person's yes on the hub's page in their browser."""
+def connect(k, browser, lab="Smith Lab", action="allow", password="correct horse"):
+    """Settings → Account → Kelvin hub → Connect, then the person's yes (with their hub password) on the hub's
+    page in their browser."""
     url = k.client.post("/api/hub/connect", headers=k.h, json={"url": HUB}).json()["url"]
     assert k.opened[-1] == url and url.startswith(HUB + "/connect?")
     path = url[len(HUB):]
@@ -93,7 +94,8 @@ def connect(k, browser, lab="Smith Lab", action="allow"):
     form = {key: v[0] for key, v in parse_qs(urlsplit(path).query).items()}
     labs = dict(re.findall(r'<option value="(\d+)">([^<]+)</option>', page.text))
     chosen = next((i for i, name in labs.items() if name == lab), "")
-    r = browser.post("/connect", data=dict(form, csrf=csrf(page), lab=chosen, action=action), follow_redirects=False)
+    r = browser.post("/connect", data=dict(form, csrf=csrf(page), lab=chosen, action=action, password=password),
+                     follow_redirects=False)
     back = urlsplit(r.headers["location"])
     assert back.netloc.startswith("127.0.0.1:") and back.path == "/hub/callback"   # back to Kelvin, nowhere else
     return k.client.get("/hub/callback?" + back.query)
@@ -108,11 +110,15 @@ def chat(store, title, project=None, incognito=False):
     return c
 
 
-def run(runtime, name, project, **meta):
+def run(runtime, name, project, user=None, old=False, **meta):
+    """A finished run in the data folder, made by user (None: without accounts), or by an older Kelvin (old)."""
     d = runtime.data_dir / "runs" / name
     d.mkdir(parents=True)
-    (d / "meta.json").write_text(json.dumps(dict(run_id=name, project=project, device_name="D1", status="done",
-                                                 started="2026-10-20T10:00:00.000", **meta)), encoding="utf-8")
+    meta = dict(run_id=name, project=project, device_name="D1", status="done", started="2026-10-20T10:00:00.000",
+                **meta)
+    if not old:
+        meta["user"] = user
+    (d / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     (d / "data.csv").write_text("V,I\n0,1\n", encoding="utf-8")
     (d / "plan.yaml").write_text("plan: %s\n" % name, encoding="utf-8")
     return d
@@ -299,3 +305,238 @@ def test_cancelled_ended_and_unreachable_connections(tmp_path, monkeypatch):
     k.client.app.remote.port = 8771                                     # as if phone access were on
     phone = TestClient(k.client.app, base_url="http://192.168.1.50:8771")
     assert phone.get("/hub/callback", params={"state": "x"}).status_code == 403   # only on this computer
+
+
+# ------------------------------------------------------------------ after review: what must never leave, and races
+
+
+def test_model_limited_chats_keep_their_rules_wherever_they_go(tmp_path):
+    store = ChatStore(tmp_path / "chats")
+    local = store.create_project("Local only")
+    early = chat(store, "talked before the limits", local["id"])
+    store.set_rules(local["id"], {"providers": ["local"], "literature": False})   # its chats keep them from now on
+    store.set_rules(local["id"], {"providers": None, "literature": True})        # ...even when they are lifted
+    store.assign(early["id"], None)
+    assert store.load(early["id"])["rules"] == {"providers": ["local"], "literature": False}   # models too
+    gone = store.create_project("Gone")
+    store.set_rules(gone["id"], {"providers": ["local"], "literature": True})
+    left = chat(store, "left behind", gone["id"])
+    moved = chat(store, "moved out", gone["id"])
+    store.assign(moved["id"], None)
+    store.delete_project(gone["id"])
+    assert store.load(left["id"])["rules"]["providers"] == ["local"]
+    assert [c["title"] for c in collect(store)["chats"]] == []                   # none of them is shared
+    open_chat = chat(store, "open")
+    store.set_rules(local["id"], {"providers": ["local"], "literature": False})
+    store.create_project("Open")
+    out = collect(store)
+    sent, = out["chats"]
+    assert sent["id"] == open_chat["id"] and sent["incognito"] is False and sent["unpublished"] is False
+    assert sent["confidential"] is False and "rules" in sent                      # for the hub to check again
+    assert {"id": local["id"], "shared": False} in out["projects"]               # unshared: still only that
+    shared, = [p for p in out["projects"] if p.get("name") == "Open"]
+    assert shared["unpublished"] is False and shared["confidential"] is False and shared["rules"]
+
+
+def test_only_this_persons_newer_runs_go_and_older_ones_on_request(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path)
+    acc = Accounts(tmp_path)
+    acc.create("Ada", "")
+    acc.create("Ben", "")
+    k = portal(tmp_path, monkeypatch, browser, accounts=acc)
+    k.client.post("/api/session", headers=k.h, json={"name": "Ben"})
+    connect(k, browser)
+    run(k.runtime, "20261020-100000-bens", None, user="Ben")
+    run(k.runtime, "20261020-100100-adas", None, user="Ada")          # a data folder Ada and Ben share
+    run(k.runtime, "20261020-100200-older", None, old=True)            # from before Kelvin said who made runs
+    run(k.runtime, "20261020-100300-no-accounts", None, user=None)     # ...or from before accounts
+    run(k.runtime, "20261020-100400-incognito", None, user="Ben", incognito=True)
+    s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
+    assert s["ok"] and s["older_runs"] == 2
+    assert [r["local_id"] for r in hub.shared_with(1)["runs"]] == ["20261020-100000-bens"]
+    assert k.client.get("/api/settings", headers=k.h).json()["settings"]["hub_old_runs"] is False
+    k.client.post("/api/settings", headers=k.h, json={"hub_old_runs": "on"})   # "Also share older runs"
+    s = k.client.post("/api/hub/sync", headers=k.h).json()["sync"]
+    assert s["ok"] and s["older_runs"] == 0
+    assert sorted(r["local_id"] for r in hub.shared_with(1)["runs"]) == [
+        "20261020-100000-bens", "20261020-100200-older", "20261020-100300-no-accounts"]
+    assert "adas" not in on_the_hub(hub) and "incognito" not in on_the_hub(hub)   # never anyone else's
+
+    lab = build_virtual_lab(seed=1)
+    runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "solo", demo_envelope(lab))
+    runtime.user = "Ben"
+    assert runtime._attribute(SimpleNamespace(device=None))["user"] == "Ben"     # new runs say who made them
+    (tmp_path / "queue.json").write_text(json.dumps({"items": [
+        {"id": "a1", "kind": "plan", "name": "gate_sweep", "text": SWEEP},
+        {"id": "a2", "kind": "plan", "name": "gate_sweep", "text": SWEEP, "project": "p00000001"}]}))
+    from labharness.scanqueue import ScanQueue
+    old_queue = ScanQueue(tmp_path / "queue.json")                     # queued before Kelvin noted incognito chats
+    assert [i.incognito for i in old_queue.items] == [True, False]
+
+
+def test_two_people_on_one_computer_keep_their_own_connections(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path)
+    acc = Accounts(tmp_path)
+    acc.create("Ada", "")
+    acc.create("Ben", "")
+    k = portal(tmp_path, monkeypatch, browser, accounts=acc)
+    tokens = {}
+    for name in ("Ada", "Ben"):        # both use the same hub account here, the case that clashed before
+        k.client.post("/api/session", headers=k.h, json={"name": name})
+        assert connect(k, browser).status_code == 200
+        query = parse_qs(urlsplit(k.opened[-1]).query)
+        assert query["person"] == [name]                                # the hub shows whose Kelvin it is
+        assert re.match(r"^[A-Za-z0-9:_.-]{8,80}$", query["installation"][0])
+        tokens[name] = (k.settings.get("hub_token"), query["installation"][0])
+    computer = {tokens[name][1].rsplit(":", 1)[0] for name in tokens}
+    assert tokens["Ada"][1] != tokens["Ben"][1] and len(computer) == 1           # one computer, two installations
+    assert len(hub.connections(1)) == 2
+    for name in ("Ada", "Ben"):
+        k.client.post("/api/session", headers=k.h, json={"name": name})
+        assert k.client.get("/api/hub", headers=k.h).json()["connected"]
+        assert browser.get("/api/me", headers={"Authorization": "Bearer " + tokens[name][0]}).status_code == 200
+
+
+def test_a_redirect_never_carries_the_token():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from labharness.hub.client import HubClient, HubClientError
+    seen = []
+
+    class Redirecting(BaseHTTPRequestHandler):
+        def answer(self):
+            seen.append((self.command, self.path, self.headers.get("Authorization")))
+            if int(self.headers.get("Content-Length") or 0):
+                self.rfile.read(int(self.headers["Content-Length"]))
+            if self.path.startswith("/api/"):   # off to somewhere else, as a hijacked or misconfigured hub might
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/elsewhere" % self.server.server_port)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+        do_GET = do_POST = do_PUT = do_DELETE = answer
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Redirecting)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        client = HubClient("http://127.0.0.1:%d" % server.server_port, token="khub_secret")
+        with pytest.raises(HubClientError) as e:
+            client.me()
+        assert e.value.status == 302
+        with pytest.raises(HubClientError):
+            client.push(chats=[])
+        with pytest.raises(HubClientError):
+            client.upload("run-1", "data.csv", b"x")
+        assert client.disconnect() is False                             # not confirmed: not a 204
+        assert [path for _, path, _ in seen] == ["/api/me", "/api/sync", "/api/sync/runs/run-1/files/data.csv",
+                                                 "/api/token"]          # never followed
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_disconnecting_or_reconnecting_during_a_sync(tmp_path, monkeypatch):
+    import threading
+    import time
+    hub, browser = the_hub(tmp_path)
+    k = portal(tmp_path, monkeypatch, browser)
+    connect(k, browser)
+    for i in range(3):
+        run(k.runtime, "20261020-10000%d-scan" % i, None)
+    base = through(browser)
+    puts = []
+
+    def disconnect_at_first_file(method, url, body=None, headers=None):
+        if method == "PUT":
+            puts.append(url)
+            if len(puts) == 1:
+                k.link.disconnect()        # pressed while the first file goes up
+        return base(method, url, body, headers)
+    k.link.http = disconnect_at_first_file
+    s = k.link.sync_once()
+    assert not s["ok"] and "Interrupted" in s["error"] and len(puts) == 1   # nothing more after that
+    assert k.settings.get("hub_token") is None and not k.link.connected
+
+    k.link.http = base
+    connect(k, browser)
+    old = k.settings.get("hub_token")
+    at_upload, go, out, again = threading.Event(), threading.Event(), [], []
+
+    def held_at_first_file(method, url, body=None, headers=None):
+        if method == "PUT" and not at_upload.is_set():
+            at_upload.set()
+            go.wait(20)
+        return base(method, url, body, headers)
+    k.link.http = held_at_first_file
+    syncing = threading.Thread(target=lambda: out.append(k.link.sync_once()))
+    syncing.start()
+    assert at_upload.wait(20)
+    reconnecting = threading.Thread(target=lambda: again.append(connect(k, browser)))
+    reconnecting.start()                # it waits for the sync to stop before it starts afresh
+    deadline = time.time() + 20
+    while k.link.token in ("", old) and time.time() < deadline:
+        time.sleep(0.05)
+    new = k.link.token
+    go.set()
+    syncing.join(20)
+    reconnecting.join(20)
+    assert again and again[0].status_code == 200 and new not in ("", old)
+    assert out and not out[0]["ok"]
+    assert k.settings.get("hub_token") == new and k.link.connected   # the old sync's 401 didn't wipe the new one
+    state = json.loads((tmp_path / "hub-sync.json").read_text(encoding="utf-8"))
+    assert state["files"] == {} and set(state["sent"]["runs"].values()) <= {""}   # started afresh after it
+    k.link.http = base
+    s = k.link.sync_once()
+    assert s["ok"] and s["sent"]["runs"] == 3 and s["files"] == 9
+
+
+def test_busy_hubs_get_the_file_again_and_unshared_work_keeps_its_place(tmp_path, monkeypatch):
+    hub, browser = the_hub(tmp_path)
+    k = portal(tmp_path, monkeypatch, browser)
+    connect(k, browser)
+    run(k.runtime, "20261020-100000-scan", None)
+    base = through(browser)
+    busy = []
+
+    def once_busy(method, url, body=None, headers=None):
+        if method == "PUT" and not busy:
+            busy.append(url)
+            return 502, {"error": "the hub is busy"}
+        return base(method, url, body, headers)
+    k.link.http = once_busy
+    s = k.link.sync_once()
+    assert not s["ok"] and "busy" in s["error"]
+    k.link.http = base
+    s = k.link.sync_once()
+    assert s["ok"] and s["files"] == 3                                  # the one refused for a moment, too
+
+    store, rt = k.store, k.runtime
+    shared, secret = store.create_project("Shared sample"), store.create_project("Secret")
+    store.set_sharing(secret["id"], "confidential")
+    rt.mounted = {"project": shared["id"], "device": "d1", "device_name": "D1"}
+    rt.attribution = {"project": secret["id"], "chat": "abcdefabcdef"}
+    meta = rt._attribute(SimpleNamespace(device=None))
+    assert meta["project"] == secret["id"] and meta["device"] is None   # the confidential chat's project wins
+    rt.attribution = {"project": None, "chat": "abcdefabcdef"}
+    assert rt._attribute(SimpleNamespace(device=None))["project"] == shared["id"]   # otherwise the mounted sample's
+    rt.mounted = {}
+
+    agent = k.client.app.app.state.agent
+    hidden = chat(store, "secret chat", secret["id"])
+    context = agent.context(store.load(hidden["id"]))
+    remember = next(t for t in context["tools"] if t["name"] == "remember")
+    assert remember["schema"]["properties"]["scope"]["enum"] == ["project"]   # no notes for every conversation
+    said, failed = agent._remember(store.load(hidden["id"]), context,
+                                   {"scope": "global", "kind": "preference", "text": "the secret sample is CrSBr"})
+    assert failed and store.global_notes() == []
+    opened = chat(store, "open chat", shared["id"])
+    scopes = next(t for t in agent.context(store.load(opened["id"]))["tools"] if t["name"] == "remember")
+    assert scopes["schema"]["properties"]["scope"]["enum"] == ["global", "project"]

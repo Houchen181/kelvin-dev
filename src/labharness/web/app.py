@@ -378,7 +378,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_notifications()
         configure_literature()
         session["user"] = account
-        hub.use(accounts.dir(account))
+        hub.use(accounts.dir(account), account["name"])
 
     def sign_out() -> None:
         """Nobody is signed in: the portal waits for the next person. A plan or queue still running goes on and is

@@ -30,7 +30,7 @@ SEALED = SECRET | {"hub_token"}
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
-                     "updates"}
+                     "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "hub_installation"}
@@ -129,6 +129,8 @@ class Settings:
                 value = value if value in ("ask", "off") else ""
             if name == "claude_code":  # Claude Code bridge (temporary): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "hub_old_runs":  # also share runs from before Kelvin noted who made them: off unless on
+                value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "auto_report":  # a report after each run and queue: both (the default), pdf, pptx or off
@@ -196,6 +198,7 @@ class Settings:
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "claude_code_path": self._user.get("claude_code_path", ""),
+            "hub_old_runs": self._user.get("hub_old_runs") == "on",
         }
 
     @property

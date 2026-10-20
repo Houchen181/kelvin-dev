@@ -38,7 +38,7 @@ MAX_WAIT_S = 3600
 def default_project_info(project_id: Optional[str]) -> Dict[str, Any]:
     """Without the portal there are no projects: everything is the General workspace."""
     return {"id": project_id, "name": "General" if not project_id else project_id, "devices": [], "notes": [],
-            "references": [], "summary": "", "private": False}
+            "references": [], "summary": "", "private": False, "unshared": False}
 
 
 def tail_events(path: Path, n: int) -> List[Dict[str, Any]]:
@@ -665,13 +665,20 @@ class LabRuntime:
 
     def _attribute(self, plan: Plan, project: Optional[str] = None, incognito: Optional[bool] = None) -> Dict[str, Any]:
         """Which project and sample a run belongs to: the plan's own device:, else the mounted device, else the
-        project of the chat that started it (or queued it); runs outside every project go to General. A run that an
-        incognito chat started (or queued) says so, and is never shared on the Kelvin hub."""
+        project of the chat that started it (or queued it); runs outside every project go to General. A chat in an
+        unshared (unpublished, confidential or model-limited) project keeps its runs there, whatever is mounted.
+        A run says who made it, and whether an incognito chat started (or queued) it: such runs, and anyone else's,
+        are never shared on the Kelvin hub."""
         m = self.mounted
-        pid = m.get("project") if m else (project if project is not None else self.attribution.get("project"))
+        chat_pid = project if project is not None else self.attribution.get("project")
+        pid = m.get("project") if m else chat_pid
+        moved = bool(m and chat_pid and chat_pid != pid and self.project_info(chat_pid).get("unshared"))
+        if moved:
+            pid = chat_pid
         info = self.project_info(pid)
         out = {"project": pid, "project_name": info.get("name") or "General",
-               "device": m.get("device") if m else None, "device_name": m.get("device_name") if m else None}
+               "device": m.get("device") if m and not moved else None,
+               "device_name": m.get("device_name") if m else None, "user": self.user}
         if self.attribution.get("incognito") if incognito is None else incognito:
             out["incognito"] = True
         if plan.device:

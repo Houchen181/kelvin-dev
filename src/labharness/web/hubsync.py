@@ -8,10 +8,14 @@ their password like the API keys, and never goes to the browser or the logs.
 
 While connected, Kelvin sends in the background what its person shares (docs/hub.md), and what was removed since:
 - their normal projects and unfiled chats, with whole conversations (collect() in hub/client.py), and
-- the finished runs in their data folder that belong to those projects or to none: the run (its meta.json), then
-  its files (data.csv, plots, reports...) one by one.
+- the finished runs in their data folder that they made, in those projects or in none: the run (its meta.json),
+  then its files (data.csv, plots, reports...) one by one. Runs from before Kelvin noted who made them and whether an
+  incognito chat did only if the person says so ("Also share older runs").
 Never: unpublished, confidential or model-limited projects with their chats and runs, incognito chats and the runs
-they started, API keys, or ChatGPT and Claude Code sign-ins.
+they started, anyone else's runs, API keys, or ChatGPT and Claude Code sign-ins.
+
+Each person connects as their own installation (the computer's id and their folder's), so two people on one computer
+keep their own connections.
 
 What was sent is remembered per person in hub-sync.json (ids and fingerprints, never content), so only what changed
 goes again."""
@@ -44,6 +48,8 @@ MAX_RUN_FILES = 200               # files sent per run
 STATE = "hub-sync.json"
 KINDS = ("projects", "chats", "runs")
 NETWORK = (OSError, HTTPException, ValueError)   # the hub can't be reached, or answered nonsense
+REFUSED = (400, 413)              # the hub won't take this file as it is: again only when it changes
+OLD = object()                    # a run's meta without "user": made before Kelvin noted who made runs
 
 
 class Stopped(Exception):
@@ -55,6 +61,13 @@ def computer_name() -> str:
         return socket.gethostname()[:80] or "Kelvin"
     except OSError:
         return "Kelvin"
+
+
+def installation_for(computer: str, folder: Any) -> str:
+    """This person's installation on the hub: the computer's id and a digest of their own folder, so two people on
+    one computer (or one person with two accounts on it) each keep their own connection."""
+    where = os.path.normcase(os.path.abspath(str(folder)))
+    return "%s:%s" % (computer, hashlib.sha256(where.encode("utf-8")).hexdigest()[:12])
 
 
 def said(e: HubClientError) -> str:
@@ -74,15 +87,19 @@ def started(meta: Dict[str, Any], folder: Path) -> float:
             return time.time()
 
 
-def run_items(runs: Path, shared: Set[str]) -> List[Tuple[Dict[str, Any], Path]]:
-    """The finished runs (those with a meta.json) that may be shared, oldest first: in a shared project or in none,
-    and not started by an incognito chat. A run of a project that is gone is not shared: Kelvin can't tell
-    whether that project was."""
+def run_items(runs: Path, shared: Set[str], person: Optional[str] = None,
+              old_runs: bool = False) -> Tuple[List[Tuple[Dict[str, Any], Path]], int]:
+    """The finished runs (those with a meta.json) that may be shared, oldest first, and how many older ones stay
+    here. A run is shared if this person made it (meta "user"; None without accounts), in a shared project or in
+    none, and no incognito chat started it. A run of a project that is gone is not shared: Kelvin can't tell whether
+    that project was. Runs from before Kelvin noted who made them (no "user"; or made without accounts, now that
+    there are) are shared only with old_runs: one may have come from an incognito chat, or from someone else using
+    the same data folder."""
     try:
         folders = sorted(d for d in runs.iterdir() if d.is_dir())
     except OSError:
-        return []
-    out = []
+        return [], 0
+    out, held = [], 0
     for d in folders:
         if not LOCAL_ID.match(d.name):
             continue
@@ -96,9 +113,16 @@ def run_items(runs: Path, shared: Set[str]) -> List[Tuple[Dict[str, Any], Path]]
         project = None if project == GENERAL else project
         if project is not None and project not in shared:
             continue
+        owner = meta.get("user", OLD)
+        if owner != person:
+            if owner is not OLD and owner is not None:
+                continue   # someone else's, in a data folder they share with this person
+            if not old_runs:
+                held += 1
+                continue
         out.append(({"id": d.name, "project": project, "device": str(meta.get("device_name") or ""), "meta": meta,
                      "created": started(meta, d)}, d))
-    return out
+    return out, held
 
 
 def run_files(folder: Path) -> List[Tuple[str, Path, List[int]]]:
@@ -176,8 +200,9 @@ class HubLink:
         self.http = http                  # tests answer with the hub's own app
         self._switch = threading.Lock()   # whose hub this is changes only under it
         self._sync = threading.Lock()     # one sync at a time
-        self.gen = 0                      # counts person changes
+        self.gen = 0                      # counts changes of person and of connection: a sync of another stops
         self.folder: Optional[Path] = None
+        self.person: Optional[str] = None
         self.url = ""
         self.token = ""
         self.pending: Dict[str, Dict[str, Any]] = {}
@@ -185,13 +210,15 @@ class HubLink:
         self.stopping = False
         self.wake: Any = None             # an asyncio.Event the portal's sync loop waits on
 
-    def use(self, folder: Optional[Any]) -> None:
-        """Serve the person whose settings are in use now (hub-sync.json goes in their folder); None: nobody.
-        A connection someone started and didn't finish is dropped."""
+    def use(self, folder: Optional[Any], person: Optional[str] = None) -> None:
+        """Serve the person whose settings are in use now (hub-sync.json goes in their folder; person: their account
+        name, None without accounts); folder None: nobody. A connection someone started and didn't finish is
+        dropped."""
         with self._switch:
             self.gen += 1
             self.pending = {}
             self.folder = Path(folder) if folder is not None else None
+            self.person = person if folder is not None else None
             self.url = (self.settings.get("hub_url") or "") if folder is not None else ""
             self.token = (self.settings.get("hub_token") or "") if folder is not None else ""
 
@@ -215,7 +242,8 @@ class HubLink:
             now = time.time()
             self.pending = {s: p for s, p in self.pending.items() if now - p["at"] < PENDING_TTL}
             link, pending = HubClient(url, http=self.http).begin(
-                redirect_uri, self.settings.installation_id(), computer_name(), sys.platform, __version__)
+                redirect_uri, installation_for(self.settings.installation_id(), self.folder), computer_name(),
+                sys.platform, __version__, self.person or "")
             self.pending[pending["state"]] = dict(pending, url=url, gen=self.gen)
         return link
 
@@ -232,20 +260,23 @@ class HubLink:
         with self._switch:
             mine = p["gen"] == self.gen
             if mine:
+                self.gen += 1   # a sync still going with the old token stops at its next request
                 self.settings.set_hub(p["url"], token)
                 self.url, self.token = p["url"], token
                 folder = self.folder
-        if not mine:   # someone else signed in to Kelvin meanwhile: the token isn't theirs to keep
+        if not mine:   # someone else signed in to Kelvin meanwhile, or this one disconnected: not theirs to keep
             try:
                 client.disconnect()
             except (HubClientError,) + NETWORK:
                 pass
-            raise HubClientError("Someone else signed in to Kelvin meanwhile. Connect again from your own Settings.")
-        state = load_state(folder, p["url"])   # send everything once more; keep the ids, for what was removed since
-        state["sent"] = {k: {i: "" for i in state["sent"][k]} for k in KINDS}
-        state["files"] = {}
-        state.pop("last", None)
-        save_state(folder, state)
+            raise HubClientError("Someone else signed in to Kelvin meanwhile, or it was disconnected. Connect again "
+                                 "from your own Settings.")
+        with self._sync:   # once that sync has saved what it did: send everything once more, keeping the ids
+            state = load_state(folder, p["url"])   # (for what was removed since)
+            state["sent"] = {k: {i: "" for i in state["sent"][k]} for k in KINDS}
+            state["files"] = {}
+            state.pop("last", None)
+            save_state(folder, state)
         log.info("connected to the hub at %s", p["url"])
         try:
             return client.me()
@@ -253,19 +284,21 @@ class HubLink:
             return {}
 
     def disconnect(self) -> bool:
-        """End this Kelvin's connection on the hub, and forget the token here. True if the hub confirmed it. What
-        was shared stays on the hub (the account page deletes it)."""
+        """Forget the token here, then end the connection on the hub. True if the hub confirmed it. A sync in
+        progress stops at its next request. What was shared stays on the hub (the account page deletes it)."""
         with self._switch:
-            gen, url, token = self.gen, self.url, self.token
-        confirmed = False
-        if token:
-            try:
-                HubClient(url, token, http=self.http).disconnect()
-                confirmed = True
-            except (HubClientError,) + NETWORK:
-                pass   # unreachable, or already ended there: forgotten here anyway
-        self._forget(gen)
-        return confirmed
+            self.gen += 1
+            url, token = self.url, self.token
+            if token:
+                self.settings.set_hub(url, None)   # the address stays, for connecting again
+                self.token = ""
+                log.info("disconnected from the hub at %s", url)
+        if not token:
+            return False
+        try:
+            return HubClient(url, token, http=self.http).disconnect()
+        except (HubClientError,) + NETWORK:
+            return False   # unreachable: forgotten here anyway; the account page there ends it too
 
     def _forget(self, gen: int) -> None:
         with self._switch:
@@ -314,7 +347,8 @@ class HubLink:
                 if not (self.folder is not None and self.url and self.token):
                     return None
                 snap = {"gen": self.gen, "folder": self.folder, "url": self.url, "token": self.token,
-                        "chats": self.store.root, "runs": Path(self.data_dir()) / "runs"}
+                        "chats": self.store.root, "runs": Path(self.data_dir()) / "runs", "person": self.person,
+                        "old_runs": self.settings.get("hub_old_runs") == "on"}
             self.syncing = True
             try:
                 return self._sync_person(snap)
@@ -329,7 +363,7 @@ class HubLink:
         client = HubClient(snap["url"], snap["token"], http=self.http)
         state = load_state(snap["folder"], snap["url"])
         last: Dict[str, Any] = {"at": time.time(), "ok": False, "sent": {k: 0 for k in KINDS}, "withheld": 0,
-                                "removed": 0, "files": 0, "refused": [], "error": None}
+                                "removed": 0, "files": 0, "refused": [], "older_runs": 0, "error": None}
         try:
             self._send(client, snap, state, last)
             last["ok"] = True
@@ -337,7 +371,9 @@ class HubLink:
         except Stopped:
             last["error"] = "Interrupted; Kelvin goes on at the next sync."
         except HubClientError as e:
-            if e.status == 401:
+            if e.status == 401 and snap["gen"] != self.gen:
+                last["error"] = "Interrupted; Kelvin goes on at the next sync."
+            elif e.status == 401:
                 self._forget(snap["gen"])
                 last["error"] = "The hub ended this connection. Connect again in Settings → Account."
             elif e.status == 403:
@@ -357,7 +393,7 @@ class HubLink:
     def _send(self, client: HubClient, snap: Dict[str, Any], state: Dict[str, Any], last: Dict[str, Any]) -> None:
         got = collect(ChatStore(snap["chats"], create=False))   # its own view of the folder: a switch can't move it
         shared = {p["id"] for p in got["projects"] if p.get("name")}
-        runs = run_items(snap["runs"], shared)
+        runs, last["older_runs"] = run_items(snap["runs"], shared, snap["person"], snap["old_runs"])
         current = {"projects": got["projects"], "chats": got["chats"], "runs": [item for item, _ in runs]}
         refused_now: Set[str] = set()
         for kind in KINDS:   # projects first: the hub files chats and runs under projects it already has
@@ -421,12 +457,13 @@ class HubLink:
                         data = path.read_bytes()
                     except OSError:
                         continue   # being written, or gone: next time
+                    self._check(snap)
                     try:
                         client.upload(item["id"], name, data)
                         last["files"] += 1
                     except HubClientError as e:
-                        if e.status in (401, 403):
-                            raise
+                        if e.status not in REFUSED:
+                            raise   # signed out there, new terms, or the hub busy (429, 5xx): this file next time
                         last["refused"].append({"run": item["id"], "file": name, "why": said(e)})
                 have[name] = fp   # sent, or refused: again only when it changes
                 tried += 1

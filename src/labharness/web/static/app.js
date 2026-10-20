@@ -1487,8 +1487,13 @@
 
   // project memory: the user's instructions and the notes Kelvin saved, seen only by this project's chats
   let editingProject = null;
+  function freshProject(p, fresh) {   // the server's copy; a mark it no longer has must not linger here
+    delete p.unpublished;
+    delete p.confidential;
+    return Object.assign(p, fresh);
+  }
   async function openProjectSettings(p) {
-    try { Object.assign(p, await api("/api/projects/" + p.id)); } catch (e) { toast(e.message); return; }  // notes may be new
+    try { freshProject(p, await api("/api/projects/" + p.id)); } catch (e) { toast(e.message); return; }  // notes may be new
     editingProject = p;
     $("project-dialog-name").textContent = p.name;
     $("project-instructions").value = p.instructions || "";
@@ -1631,7 +1636,7 @@
       const chosen = boxes.filter((c) => c.checked).map((c) => c.value);
       if (!chosen.length) { $("project-msg").textContent = "Allow at least one kind of model."; return; }
       const rules = { providers: chosen.length === boxes.length ? null : chosen, literature: $("project-literature").checked };
-      Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { instructions: $("project-instructions").value, rules, sharing: $("project-sharing").value } }));
+      freshProject(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { instructions: $("project-instructions").value, rules, sharing: $("project-sharing").value } }));
       if (($("project-summary").value || "") !== (p.summary || "")) {
         await api("/api/projects/" + p.id + "/summary", { method: "PUT", body: { text: $("project-summary").value } });
         p.summary = $("project-summary").value;
@@ -1704,7 +1709,7 @@
   }
   async function renameProject(p, name) {
     SIDE.renaming = null;
-    try { Object.assign(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { name } })); } catch (e) { toast(e.message); }
+    try { freshProject(p, await api("/api/projects/" + p.id, { method: "PATCH", body: { name } })); } catch (e) { toast(e.message); }
     renderChats();
     setTitle(currentTitle(), currentProject());
   }
@@ -2064,8 +2069,13 @@
     const sent = [n(s.sent.projects, "project", "projects"), n(s.sent.chats, "chat", "chats"), n(s.sent.runs, "run", "runs"),
       n(s.files, "run file", "run files")].filter(Boolean);
     const more = [n(s.removed, "item removed", "items removed"),
-      n((s.refused || []).length, "item the hub didn't take", "items the hub didn't take")].filter(Boolean);
+      n((s.refused || []).length, "item the hub didn't take", "items the hub didn't take"),
+      n(s.older_runs, "older run stays here", "older runs stay here")].filter(Boolean);
     return "Up to date, " + at(s.at) + (sent.length ? ": sent " + sent.join(", ") : "") + (more.length ? "; " + more.join("; ") : "") + ".";
+  }
+  function hubSkipped(st) {   // what the hub didn't take, for the status line's tooltip
+    return ((st.sync && st.sync.refused) || []).map((r) =>
+      (r.chat ? "chat " + r.chat : r.project ? "project " + r.project : "run " + r.run + (r.file ? ", " + r.file : "")) + ": " + r.why).join("\n");
   }
   function showHub(st) {
     HUB.st = st;
@@ -2082,6 +2092,7 @@
     $("hub-actions").hidden = !st.connected;
     $("hub-account").href = a ? (a.needs_consent ? a.consent_url : a.account_url) : (st.url ? st.url + "/account" : "#");
     $("hub-sync-status").textContent = hubSyncText(st);
+    $("hub-sync-status").title = hubSkipped(st);
   }
   async function loadHub() {
     $("hub-status").textContent = "…";
@@ -3546,6 +3557,7 @@
     $("reviewer").options[0].textContent = "Off";
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
+    $("hub-old-runs").checked = !!(S.settings && S.settings.hub_old_runs);
     $("literature").checked = !S.settings || S.settings.literature !== false;
     $("auto-setup").checked = !S.settings || S.settings.auto_setup !== false;
     $("scan-network").checked = !S.settings || S.settings.scan_network !== false;
@@ -3666,6 +3678,7 @@
     body.reviewer = $("reviewer").value;
     body.instructions = $("global-instructions").value;
     body.learn = $("learn").checked ? "on" : "off";
+    body.hub_old_runs = $("hub-old-runs").checked ? "on" : "off";
     body.literature = $("literature").checked ? "on" : "off";
     body.auto_setup = $("auto-setup").checked ? "on" : "off";
     body.scan_network = $("scan-network").checked ? "on" : "off";

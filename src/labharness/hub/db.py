@@ -28,17 +28,21 @@ import re
 import secrets
 import shutil
 import sqlite3
+import threading
 import time
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import urlsplit
 
-from ..accounts import ITERATIONS, _hash
+from ..accounts import _hash
 
 log = logging.getLogger("kelvin.hub")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2               # 2: account ids are never reused (AUTOINCREMENT)
+ITERATIONS = 600_000             # PBKDF2-SHA256, as OWASP suggests; older hashes are redone at the next sign-in
+UPLOADS_AT_ONCE = 2              # per person
+EARLIEST = 946684800.0           # 2000-01-01: an earlier or non-finite time from a Kelvin is taken as "now"
 CONSENT_VERSION = "2026-10-20"   # bump when the terms or privacy notice change; people then agree again
 SESSION_TTL = 30 * 86400
 CODE_TTL = {"connect": 600, "confirm": 7 * 86400, "reset": 3600}
@@ -68,7 +72,7 @@ DEFAULTS: Dict[str, Any] = {
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,   -- never reused: the activity record keeps bare ids after a deletion
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
   name TEXT NOT NULL,
   orcid TEXT,
@@ -189,6 +193,17 @@ VISIBLE = ("(x.user_id = :me OR (x.lab_id IS NOT NULL"
 
 class HubError(ValueError):
     """Something the person (or the Kelvin) can fix; the message says what."""
+    status = 400
+
+
+class TooMuch(HubError):
+    """Larger than the hub takes, or over the person's share of its disk."""
+    status = 413
+
+
+class Busy(HubError):
+    """Too much at once: try again in a moment."""
+    status = 429
 
 
 def sha(text: str) -> str:
@@ -265,9 +280,18 @@ def file_parts(name: Any) -> List[str]:
         raise HubError("A run file needs a name, at most 4 folders deep.")
     for p in parts:
         if (not FILE_PART.match(p) or p.endswith((".", " ")) or ".." in p
-                or p.split(".")[0].upper() in WINDOWS_RESERVED):
+                or p.split(".")[0].strip().upper() in WINDOWS_RESERVED):   # "NUL .txt" is NUL on Windows
             raise HubError("%r can't be a file name on the hub." % p)
     return parts
+
+
+def _timestamp(value: Any, now: float) -> float:
+    """A time a Kelvin sent: a finite number from 2000 to a day from now, else now."""
+    try:
+        t = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return now
+    return t if EARLIEST <= t <= now + 86400 else now   # also false for nan and inf
 
 
 def installation(info: Dict[str, Any]) -> Dict[str, str]:
@@ -282,13 +306,15 @@ def installation(info: Dict[str, Any]) -> Dict[str, str]:
 def loopback(redirect_uri: Any) -> str:
     """Kelvin's own callback on its computer, http://127.0.0.1:<port>/..., as for Sign in with ChatGPT."""
     uri = str(redirect_uri or "")
-    try:
-        parts = urlsplit(uri)
-        port = parts.port
-    except ValueError:
-        port = None
-    if (len(uri) > 300 or parts.scheme != "http" or parts.hostname != "127.0.0.1" or not port
-            or parts.username or parts.password or parts.fragment):
+    problem = len(uri) > 300 or any(ord(c) <= 32 or ord(c) == 127 for c in uri)   # no spaces or control characters
+    if not problem:
+        try:
+            parts = urlsplit(uri)
+            problem = (parts.scheme != "http" or parts.hostname != "127.0.0.1" or not parts.port
+                       or bool(parts.username or parts.password or parts.fragment))
+        except ValueError:   # e.g. "http://[" or a port out of range
+            problem = True
+    if problem:
         raise HubError("Kelvin's callback must be http://127.0.0.1:<port>/...")
     return uri
 
@@ -302,6 +328,18 @@ def project_shared(project: Dict[str, Any]) -> bool:
     """Normal projects are shared; unpublished, confidential and model-limited ones never are."""
     return not (project.get("shared") is False or project.get("unpublished") or project.get("confidential")
                 or restricted(project.get("rules")))
+
+
+def chat_shared(chat: Dict[str, Any]) -> bool:
+    """Incognito chats, chats marked unpublished or confidential, and chats that ran under model limits never are."""
+    return not (chat.get("incognito") or chat.get("shared") is False or chat.get("unpublished")
+                or chat.get("confidential") or restricted(chat.get("rules")))
+
+
+def run_shared(run: Dict[str, Any]) -> bool:
+    """Runs started by an incognito chat, or marked unpublished or confidential, never are."""
+    meta = run.get("meta") if isinstance(run.get("meta"), dict) else {}
+    return not any(d.get(k) for d in (run, meta) for k in ("incognito", "unpublished", "confidential"))
 
 
 def join_code() -> str:
@@ -328,12 +366,37 @@ class Hub:
             (self.home / sub).mkdir(parents=True, exist_ok=True)
         self.db_path = self.home / "hub.sqlite3"
         self.config_path = self.home / "hub.json"
+        self._config_mtime = 0.0
         self.config = self._load_config()
+        self._uploads = threading.Lock()   # guards _user_locks
+        self._user_locks: Dict[int, threading.Lock] = {}
+        self.reserved: Dict[int, Dict[str, int]] = {}   # user id -> {upload ticket: bytes held against their share}
         with contextlib.closing(sqlite3.connect(str(self.db_path))) as con:
             con.execute("PRAGMA journal_mode = WAL")
+            version = con.execute("PRAGMA user_version").fetchone()[0]
+            if version == 1:
+                self._migrate_1_to_2(con)
             con.executescript(SCHEMA)
             con.execute("PRAGMA user_version = %d" % SCHEMA_VERSION)
             con.commit()
+
+    @staticmethod
+    def _migrate_1_to_2(con: sqlite3.Connection) -> None:
+        """Make account ids AUTOINCREMENT, so a deleted account's id (kept in the activity record) is never reused.
+        The next id is above every id ever used, including deleted ones."""
+        con.execute("PRAGMA foreign_keys = OFF")
+        old = con.execute("SELECT sql FROM sqlite_master WHERE name = 'users'").fetchone()[0]
+        new = old.replace("id INTEGER PRIMARY KEY,", "id INTEGER PRIMARY KEY AUTOINCREMENT,", 1)
+        new = re.sub(r"^(CREATE TABLE (?:IF NOT EXISTS )?)\"?users\"?", r"\1users_v2", new, count=1)
+        con.executescript("BEGIN;" + new + ";"
+                          "INSERT INTO users_v2 SELECT * FROM users; DROP TABLE users;"
+                          "ALTER TABLE users_v2 RENAME TO users; COMMIT;")
+        top = con.execute("SELECT MAX(x) FROM (SELECT MAX(id) AS x FROM users UNION ALL "
+                          "SELECT MAX(user_id) FROM audit)").fetchone()[0] or 0
+        con.execute("DELETE FROM sqlite_sequence WHERE name = 'users'")
+        con.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('users', ?)", (top,))
+        con.execute("PRAGMA foreign_keys = ON")
+        con.commit()
 
     # ------------------------------------------------------------------ plumbing
 
@@ -354,6 +417,7 @@ class Hub:
 
     def _load_config(self) -> Dict[str, Any]:
         try:
+            mtime = self.config_path.stat().st_mtime_ns
             data = json.loads(self.config_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             data = None
@@ -364,12 +428,23 @@ class Hub:
         if data is None:
             self.config = merged
             self.save_config()
+        else:
+            self._config_mtime = mtime
         return merged
+
+    def refresh_config(self) -> None:
+        """Take in hub.json again if it changed on disk, e.g. a new operator key made while the hub runs."""
+        try:
+            if self.config_path.stat().st_mtime_ns != self._config_mtime:
+                self.config = self._load_config()
+        except (OSError, HubError):
+            log.exception("could not read hub.json again; keeping the settings in use")
 
     def save_config(self) -> None:
         tmp = self.config_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.config, indent=1), encoding="utf-8")
         os.replace(tmp, self.config_path)
+        self._config_mtime = self.config_path.stat().st_mtime_ns
 
     @property
     def max_file_bytes(self) -> int:
@@ -406,8 +481,13 @@ class Hub:
         return path
 
     def is_operator(self, key: Any) -> bool:
-        want = self.config.get("operator_key_sha256")
+        want = self.operator_key_hash()
         return bool(want and key) and hmac.compare_digest(sha(str(key)), want)
+
+    def operator_key_hash(self) -> str:
+        """The current operator key's hash, from hub.json as it is now (operator sessions end when it changes)."""
+        self.refresh_config()
+        return str(self.config.get("operator_key_sha256") or "")
 
     # ------------------------------------------------------------------ people
 
@@ -426,7 +506,7 @@ class Hub:
                 cur = con.execute(
                     "INSERT INTO users (email, name, orcid, password_hash, salt, iterations, consent_version,"
                     " consent_at, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (email, name, orcid_id, _hash(password, salt), salt.hex(), ITERATIONS,
+                    (email, name, orcid_id, _hash(password, salt, ITERATIONS), salt.hex(), ITERATIONS,
                      self.config["consent_version"], now, now, now))
             except sqlite3.IntegrityError:
                 raise HubError("There is already an account with that email. Sign in, or reset its password.")
@@ -445,15 +525,20 @@ class Hub:
         with self.connect() as con:
             row = con.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
         if row is None or not row["password_hash"]:
-            _hash(str(password or ""), b"\0" * 16)   # take as long as a real check
+            _hash(str(password or ""), b"\0" * 16, ITERATIONS)   # take as long as a real check
             raise HubError("Wrong email or password.")
-        got = _hash(str(password or ""), bytes.fromhex(row["salt"]), int(row["iterations"] or ITERATIONS))
+        got = _hash(str(password or ""), bytes.fromhex(row["salt"]), int(row["iterations"]))
         if not hmac.compare_digest(got, row["password_hash"]):
             with self.connect() as con:
                 self.audit(con, "user", "wrong password", row["id"], None, ip)
             raise HubError("Wrong email or password.")
         if row["disabled_at"]:
             raise HubError("This account is disabled. Write to the Kelvin team if you think that's a mistake.")
+        if int(row["iterations"] or 0) < ITERATIONS:   # an older, weaker hash: redo it now that we have the password
+            salt = secrets.token_bytes(16)
+            with self.connect() as con:
+                con.execute("UPDATE users SET password_hash = ?, salt = ?, iterations = ? WHERE id = ?",
+                            (_hash(str(password), salt, ITERATIONS), salt.hex(), ITERATIONS, row["id"]))
         return _public(row)
 
     def needs_consent(self, user: Dict[str, Any]) -> bool:
@@ -482,13 +567,15 @@ class Hub:
         with self.connect() as con:
             self.audit(con, "user", "password changed", user_id, None, ip)
 
-    def _set_password(self, user_id: int, password: str, keep_session: Optional[str] = None) -> None:
+    def _set_password(self, user_id: int, password: str, keep_session: Optional[str] = None,
+                      apps_too: bool = False) -> None:
+        """Signs out every other browser; with apps_too, also disconnects every Kelvin (after a reset by mail)."""
         salt = secrets.token_bytes(16)
         with self.connect() as con:
             con.execute("UPDATE users SET password_hash = ?, salt = ?, iterations = ? WHERE id = ?",
-                        (_hash(password, salt), salt.hex(), ITERATIONS, user_id))
-            con.execute("DELETE FROM tokens WHERE user_id = ? AND kind = 'web' AND token_hash != ?",
-                        (user_id, sha(keep_session) if keep_session else ""))
+                        (_hash(password, salt, ITERATIONS), salt.hex(), ITERATIONS, user_id))
+            con.execute("DELETE FROM tokens WHERE user_id = ? AND kind IN ('web', ?) AND token_hash != ?",
+                        (user_id, "app" if apps_too else "web", sha(keep_session) if keep_session else ""))
 
     # ------------------------------------------------------------------ one-use codes and mail
 
@@ -500,16 +587,24 @@ class Hub:
                         (sha(code), kind, user_id, json.dumps(data or {}), time.time() + CODE_TTL[kind]))
         return code
 
-    def take_code(self, kind: str, code: Any) -> Tuple[int, Dict[str, Any]]:
-        """Use a code up (it works once). Raises HubError if it is unknown, used or expired."""
+    def peek_code(self, kind: str, code: Any) -> Tuple[int, Dict[str, Any]]:
+        """What a code is for, without using it up. Raises HubError if it is unknown, used or expired."""
         with self.connect() as con:
             row = con.execute("SELECT * FROM codes WHERE code_hash = ? AND kind = ?",
                               (sha(str(code or "")), kind)).fetchone()
-            if row is not None:
-                con.execute("DELETE FROM codes WHERE code_hash = ?", (row["code_hash"],))
         if row is None or row["expires_at"] < time.time():
             raise HubError("This link or code has expired or was already used.")
         return int(row["user_id"]), json.loads(row["data"])
+
+    def take_code(self, kind: str, code: Any) -> Tuple[int, Dict[str, Any]]:
+        """Use a code up: it works once, even when two requests bring it at the same moment."""
+        user_id, data = self.peek_code(kind, code)
+        with self.connect() as con:
+            taken = con.execute("DELETE FROM codes WHERE code_hash = ? AND kind = ?",
+                                (sha(str(code or "")), kind)).rowcount
+        if taken != 1:   # someone else used it between the look and the delete
+            raise HubError("This link or code has expired or was already used.")
+        return user_id, data
 
     def mail(self, to: str, subject: str, body: str) -> None:
         """Send through the SMTP server in hub.json (password from KELVIN_HUB_SMTP_PASSWORD), or, with none set,
@@ -532,8 +627,8 @@ class Hub:
                 path = self.home / "outbox" / ("%s-%019d-%s.txt" % (time.strftime("%Y%m%d-%H%M%S"), time.time_ns(),
                                                                      secrets.token_hex(3)))   # in the order sent
                 path.write_text("To: %s\nSubject: %s\n\n%s\n" % (to, subject, body), encoding="utf-8")
-        except Exception:
-            log.exception("could not send mail to %s", to)
+        except Exception as e:   # the address stays out of the log; SMTP errors can quote it
+            log.error("could not send a mail (%s)", type(e).__name__)
 
     def send_confirmation(self, user: Dict[str, Any]) -> None:
         code = self.new_code("confirm", user["id"])
@@ -564,9 +659,12 @@ class Hub:
                       % (row["name"], self.base_url, code))
 
     def finish_reset(self, code: Any, password: Any, ip: Optional[str] = None) -> Dict[str, Any]:
-        user_id, _ = self.take_code("reset", code)
-        user = self.user(user_id)
-        self._set_password(user_id, _check_password(password, user["email"]))
+        """A new password from a reset link. A password that won't do leaves the link working. Signs out every
+        browser and disconnects every Kelvin: whoever could sign in before may no longer be welcome."""
+        user_id, _ = self.peek_code("reset", code)
+        password = _check_password(password, self.user(user_id)["email"])
+        self.take_code("reset", code)
+        self._set_password(user_id, password, apps_too=True)
         with self.connect() as con:   # the link came by mail, so the address works
             con.execute("UPDATE users SET email_confirmed_at = COALESCE(email_confirmed_at, ?) WHERE id = ?",
                         (time.time(), user_id))
@@ -645,6 +743,7 @@ class Hub:
                         (user_id, inst["id"]))
             con.execute("INSERT INTO tokens (user_id, kind, token_hash, installation_id, lab_id, created_at, last_used)"
                         " VALUES (?, 'app', ?, ?, ?, ?, ?)", (user_id, sha(token), inst["id"], lab_id, now, now))
+            self._refile(con, user_id, inst["id"], lab_id)
             self.audit(con, "app", "connected", user_id, {"installation": inst["id"], "name": inst.get("name", ""),
                                                           "lab": lab_id}, ip)
         return {"access_token": token, "token_type": "Bearer", "user": {"name": user["name"], "email": user["email"]},
@@ -667,6 +766,15 @@ class Hub:
                 con.execute("UPDATE users SET last_seen = ? WHERE id = ?", (now, row["id"]))
         return {"user": _public(row), "token_id": row["token_id"], "installation_id": row["installation_id"],
                 "lab_id": row["token_lab"]}
+
+    @staticmethod
+    def _refile(con: sqlite3.Connection, user_id: int, installation_id: str, lab_id: Optional[int]) -> None:
+        """Everything a Kelvin shared goes under the lab it shares into now; None: only its person sees it."""
+        con.execute("UPDATE projects SET lab_id = CASE WHEN shared = 1 THEN ? END WHERE user_id = ?"
+                    " AND installation_id = ?", (lab_id, user_id, installation_id))
+        for table in ("chats", "runs"):
+            con.execute("UPDATE %s SET lab_id = ? WHERE user_id = ? AND installation_id = ?" % table,
+                        (lab_id, user_id, installation_id))
 
     def disconnect(self, token: Any, ip: Optional[str] = None) -> None:
         app = self.app(token)
@@ -726,10 +834,12 @@ class Hub:
         return dict(row)
 
     def leave_lab(self, user_id: int, lab_id: Any) -> None:
-        """Leaving takes your shared work out of the lab's view; a lab nobody is in any more is deleted."""
+        """Leaving takes your shared work out of the lab for good (joining again doesn't bring it back); a lab
+        nobody is in any more is deleted."""
         with self.connect() as con:
             con.execute("DELETE FROM lab_members WHERE lab_id = ? AND user_id = ?", (lab_id, user_id))
-            con.execute("UPDATE tokens SET lab_id = NULL WHERE user_id = ? AND lab_id = ?", (user_id, lab_id))
+            for table in ("tokens", "projects", "chats", "runs"):
+                con.execute("UPDATE %s SET lab_id = NULL WHERE user_id = ? AND lab_id = ?" % table, (user_id, lab_id))
             con.execute("DELETE FROM labs WHERE id = ? AND NOT EXISTS (SELECT 1 FROM lab_members WHERE lab_id = ?)",
                         (lab_id, lab_id))
             self.audit(con, "user", "left lab", user_id, {"lab": lab_id})
@@ -760,9 +870,12 @@ class Hub:
     def sync(self, app: Dict[str, Any], payload: Any) -> Dict[str, Any]:
         """Take what a Kelvin shares: {"projects": [...], "chats": [...], "runs": [...], "removed": {...}}.
 
-        The hub applies the sharing rules itself: an unpublished, confidential or model-limited project is kept only
-        as "not shared" (no name), and whatever the hub had of it is deleted; incognito chats, and chats or runs in
-        a project that isn't shared, are refused."""
+        The hub applies the sharing rules itself, on the marks Kelvin sends: an unpublished, confidential or
+        model-limited project is kept only as "not shared" (no name), and whatever the hub had of it is deleted;
+        incognito, unpublished, confidential or model-limited chats, runs marked incognito, unpublished or
+        confidential, and chats or runs in a project that isn't shared are refused (and deleted if the hub had
+        them). Everything this Kelvin shared is filed under the lab it shares into now. Chats count toward the
+        person's share of the disk, as run files do."""
         if not isinstance(payload, dict):
             raise HubError("The body must be a JSON object.")
         user = app["user"]
@@ -778,8 +891,11 @@ class Hub:
                 raise HubError("%s must be a list of at most %d objects." % (kind, MAX_BATCH))
             return got
 
-        with self.connect() as con:
+        with self._lock_for(uid), self.connect() as con:
             lab_id = app["lab_id"] if app["lab_id"] is not None and self.is_member(app["lab_id"], uid, con) else None
+            self._refile(con, uid, inst, lab_id)
+            used = self._used(con, uid) + sum(self.reserved.get(uid, {}).values())
+            quota = self.quota_bytes
 
             def project_row(local: Any) -> Optional[sqlite3.Row]:
                 return con.execute("SELECT * FROM projects WHERE user_id = ? AND installation_id = ? AND local_id = ?",
@@ -800,8 +916,8 @@ class Hub:
                         con.execute("INSERT INTO projects (user_id, lab_id, installation_id, local_id, name, shared,"
                                     " updated_at) VALUES (?, ?, ?, ?, ?, 1, ?)", (uid, lab_id, inst, local, name, now))
                     else:
-                        con.execute("UPDATE projects SET name = ?, shared = 1, lab_id = COALESCE(lab_id, ?),"
-                                    " updated_at = ? WHERE id = ?", (name, lab_id, now, old["id"]))
+                        con.execute("UPDATE projects SET name = ?, shared = 1, lab_id = ?, updated_at = ?"
+                                    " WHERE id = ?", (name, lab_id, now, old["id"]))
                     done["projects"] += 1
                 else:   # unpublished or confidential: the hub keeps only that it exists and isn't shared
                     if old is None:
@@ -822,12 +938,13 @@ class Hub:
                 if project is None or not project["shared"]:
                     done["refused"].append({kind: local, "why": "its project isn't shared (or wasn't sent first)"})
                     return False, None, None
-                return True, project["id"], project["lab_id"]
+                return True, project["id"], lab_id
 
             for c in items("chats"):
                 local = _local_id(c.get("id"), "A chat")
-                if c.get("incognito") or restricted(c.get("rules")):
-                    done["refused"].append({"chat": local, "why": "incognito and confidential chats are never shared"})
+                if not chat_shared(c):
+                    done["refused"].append({"chat": local, "why": "incognito, unpublished and confidential chats are "
+                                                                  "never shared"})
                     con.execute("DELETE FROM chats WHERE user_id = ? AND installation_id = ? AND local_id = ?",
                                 (uid, inst, local))
                     continue
@@ -840,19 +957,32 @@ class Hub:
                 if not isinstance(messages, list):
                     raise HubError("A chat's messages must be a list.")
                 text = json.dumps(messages, ensure_ascii=False)
-                if len(text.encode("utf-8")) > MAX_MESSAGES:
+                size = len(text.encode("utf-8"))
+                if size > MAX_MESSAGES:
                     done["refused"].append({"chat": local, "why": "longer than the hub keeps (5 MB)"})
                     continue
+                had = con.execute("SELECT LENGTH(CAST(messages AS BLOB)) FROM chats WHERE user_id = ?"
+                                  " AND installation_id = ? AND local_id = ?", (uid, inst, local)).fetchone()
+                had = had[0] if had else 0
+                if used - had + size > quota:
+                    done["refused"].append({"chat": local, "why": "over your share of the hub's disk"})
+                    continue
+                used += size - had
                 con.execute("INSERT INTO chats (user_id, project_id, lab_id, installation_id, local_id, title, messages,"
                             " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_id, installation_id, local_id)"
                             " DO UPDATE SET project_id = excluded.project_id, lab_id = excluded.lab_id,"
                             " title = excluded.title, messages = excluded.messages, updated_at = excluded.updated_at",
                             (uid, project_id, item_lab, inst, local, _text(c.get("title"), None, MAX_TITLE) or "Chat",
-                             text, float(c.get("updated") or now)))
+                             text, _timestamp(c.get("updated"), now)))
                 done["chats"] += 1
 
             for r in items("runs"):
                 local = _local_id(r.get("id"), "A run")
+                if not run_shared(r):
+                    done["refused"].append({"run": local, "why": "runs of incognito, unpublished or confidential work "
+                                                                 "are never shared"})
+                    purge_runs("user_id = ? AND installation_id = ? AND local_id = ?", (uid, inst, local))
+                    continue
                 ok, project_id, item_lab = filed(r, "run", local)
                 if not ok:
                     purge_runs("user_id = ? AND installation_id = ? AND local_id = ?", (uid, inst, local))
@@ -861,7 +991,7 @@ class Hub:
                 if len(meta.encode("utf-8")) > MAX_META:
                     done["refused"].append({"run": local, "why": "its meta is larger than 256 kB"})
                     continue
-                created = float(r.get("created") or now)
+                created = _timestamp(r.get("created"), now)
                 con.execute("INSERT INTO runs (user_id, project_id, lab_id, installation_id, local_id, device, meta,"
                             " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
                             " ON CONFLICT (user_id, installation_id, local_id) DO UPDATE SET"
@@ -905,31 +1035,83 @@ class Hub:
             shutil.rmtree(folder, ignore_errors=True)
         return done
 
-    def store_run_file(self, app: Dict[str, Any], run_local_id: Any, name: Any, upload: Path, size: int) -> Dict[str, Any]:
-        """Move an uploaded file (already on disk in tmp/) into its run's folder."""
+    def _lock_for(self, user_id: int) -> threading.Lock:
+        """One person's syncs and uploads take turns, so their share of the disk can't be overrun in parallel."""
+        with self._uploads:
+            return self._user_locks.setdefault(user_id, threading.Lock())
+
+    @staticmethod
+    def _used(con: sqlite3.Connection, user_id: int) -> int:
+        """Bytes a person keeps on the hub: run files and chats."""
+        return con.execute("SELECT (SELECT COALESCE(SUM(bytes), 0) FROM runs WHERE user_id = :u) + (SELECT "
+                           "COALESCE(SUM(LENGTH(CAST(messages AS BLOB))), 0) FROM chats WHERE user_id = :u)",
+                           {"u": user_id}).fetchone()[0]
+
+    @property
+    def quota_bytes(self) -> int:
+        return int(float(self.config.get("quota_gb_per_user") or 5) * 1024 ** 3)
+
+    def reserve_upload(self, app: Dict[str, Any], run_local_id: Any, name: Any, size: int) -> Dict[str, Any]:
+        """Before a file streams in: check its run and name, and hold its bytes against the person's share of the
+        disk, so parallel uploads can't overrun it. Release the ticket afterwards (release_upload)."""
         parts = file_parts(name)
         uid = app["user"]["id"]
         local = _local_id(run_local_id, "A run")
-        with self.connect() as con:
-            row = con.execute("SELECT id, files_path FROM runs WHERE user_id = ? AND installation_id = ?"
-                              " AND local_id = ?", (uid, app["installation_id"], local)).fetchone()
-            if row is None:
-                raise HubError("Send the run itself first (POST /api/sync), then its files.")
-            used = con.execute("SELECT COALESCE(SUM(bytes), 0) FROM runs WHERE user_id = ?", (uid,)).fetchone()[0]
-        folder = (self.home / row["files_path"]).resolve()
-        dest = folder.joinpath(*parts).resolve()
-        if folder not in dest.parents:
-            raise HubError("That file name leaves the run's folder.")
-        old = dest.stat().st_size if dest.exists() else 0
-        if used - old + size > float(self.config.get("quota_gb_per_user") or 5) * 1024 ** 3:
-            raise HubError("This would take you over your share of the hub's disk (%s GB)."
-                           % self.config.get("quota_gb_per_user"))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(upload, dest)
-        total = sum(f.stat().st_size for f in folder.rglob("*") if f.is_file())
-        with self.connect() as con:
-            con.execute("UPDATE runs SET bytes = ?, updated_at = ? WHERE id = ?", (total, time.time(), row["id"]))
-        return {"run": local, "file": "/".join(parts), "bytes": size}
+        if size > self.max_file_bytes:
+            raise TooMuch("A file may be at most %s MB." % self.config.get("max_file_mb"))
+        with self._lock_for(uid):
+            mine = self.reserved.setdefault(uid, {})
+            if len(mine) >= UPLOADS_AT_ONCE:
+                raise Busy("Send at most %d files at a time." % UPLOADS_AT_ONCE)
+            with self.connect() as con:
+                row = con.execute("SELECT id, files_path FROM runs WHERE user_id = ? AND installation_id = ?"
+                                  " AND local_id = ?", (uid, app["installation_id"], local)).fetchone()
+                if row is None:
+                    raise HubError("Send the run itself first (POST /api/sync), then its files.")
+                used = self._used(con, uid)
+            folder = (self.home / row["files_path"]).resolve()
+            dest = folder.joinpath(*parts).resolve()
+            if folder not in dest.parents:
+                raise HubError("That file name leaves the run's folder.")
+            old = dest.stat().st_size if dest.is_file() else 0
+            if used + sum(mine.values()) - old + size > self.quota_bytes:
+                raise TooMuch("This would take you over your share of the hub's disk (%s GB)."
+                               % self.config.get("quota_gb_per_user"))
+            key = secrets.token_hex(8)
+            mine[key] = size
+        return {"key": key, "user": uid, "run": row["id"], "local": local, "file": "/".join(parts),
+                "folder": folder, "dest": dest, "size": size}
+
+    def store_upload(self, ticket: Dict[str, Any], upload: Path, size: int) -> Dict[str, Any]:
+        """Move a file that streamed into tmp/ into its run's folder."""
+        if size != ticket["size"]:
+            raise HubError("The file wasn't as long as its Content-Length said.")
+        with self._lock_for(ticket["user"]):
+            with self.connect() as con:
+                if con.execute("SELECT 1 FROM runs WHERE id = ?", (ticket["run"],)).fetchone() is None:
+                    raise HubError("That run was removed meanwhile.")
+            ticket["dest"].parent.mkdir(parents=True, exist_ok=True)
+            os.replace(upload, ticket["dest"])
+            total = sum(f.stat().st_size for f in ticket["folder"].rglob("*") if f.is_file())
+            with self.connect() as con:
+                con.execute("UPDATE runs SET bytes = ?, updated_at = ? WHERE id = ?",
+                            (total, time.time(), ticket["run"]))
+        return {"run": ticket["local"], "file": ticket["file"], "bytes": size}
+
+    def release_upload(self, ticket: Dict[str, Any]) -> None:
+        with self._lock_for(ticket["user"]):
+            mine = self.reserved.get(ticket["user"], {})
+            mine.pop(ticket["key"], None)
+            if not mine:
+                self.reserved.pop(ticket["user"], None)
+
+    def store_run_file(self, app: Dict[str, Any], run_local_id: Any, name: Any, upload: Path, size: int) -> Dict[str, Any]:
+        """Reserve, store and release in one go, for a file already on disk."""
+        ticket = self.reserve_upload(app, run_local_id, name, size)
+        try:
+            return self.store_upload(ticket, upload, size)
+        finally:
+            self.release_upload(ticket)
 
     # ------------------------------------------------------------------ what a person can see
 
@@ -1030,17 +1212,41 @@ class Hub:
         return path
 
     def delete_user(self, user_id: int, actor: str = "user", ip: Optional[str] = None) -> None:
-        """Delete the account and everything it shared. Labs left empty go too. The activity record keeps only
-        that account number N was deleted. Backups still hold it until they age out (backups_kept days)."""
+        """Delete the account and everything it shared. Labs left empty go too, and so do the Kelvins only it used,
+        mail to it in outbox/ and its address in hub.log. The activity record keeps only that account number N was
+        deleted (ids are never reused). Backups still hold it until they age out (backups_kept days)."""
+        email = self.user(user_id)["email"]
         with self.connect() as con:
             labs = [r["lab_id"] for r in con.execute("SELECT lab_id FROM lab_members WHERE user_id = ?", (user_id,))]
             con.execute("DELETE FROM users WHERE id = ?", (user_id,))
             for lab_id in labs:
                 con.execute("DELETE FROM labs WHERE id = ? AND NOT EXISTS (SELECT 1 FROM lab_members WHERE lab_id = ?)",
                             (lab_id, lab_id))
+            con.execute("DELETE FROM installations WHERE id NOT IN (SELECT installation_id FROM tokens WHERE"
+                        " installation_id IS NOT NULL) AND id NOT IN (SELECT installation_id FROM projects UNION"
+                        " SELECT installation_id FROM chats UNION SELECT installation_id FROM runs)")
             con.execute("UPDATE audit SET detail = '{}', ip = NULL WHERE user_id = ?", (user_id,))
             self.audit(con, actor, "account deleted", user_id)
         shutil.rmtree(self.home / "files" / str(int(user_id)), ignore_errors=True)
+        self._forget_address(email)
+
+    def _forget_address(self, email: str) -> None:
+        """Delete mail to this address waiting in outbox/, and blot the address out of hub.log."""
+        for mail in (self.home / "outbox").glob("*.txt"):
+            try:
+                if mail.read_text(encoding="utf-8").split("\n", 1)[0].strip().lower() == "to: " + email.lower():
+                    mail.unlink()
+            except OSError:
+                pass
+        path = self.home / "hub.log"
+        try:
+            text = path.read_text(encoding="utf-8")
+            if email.lower() in text.lower():
+                with open(path, "r+", encoding="utf-8") as f:   # in place: the log handler keeps it open
+                    f.write(re.sub(re.escape(email), "[deleted]", text, flags=re.IGNORECASE))
+                    f.truncate()
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------ the operator's view
 

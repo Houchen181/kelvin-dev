@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import hmac
 import html
+import ipaddress
 import json
 import logging
 import os
@@ -37,13 +38,15 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Redire
 from starlette.routing import Route
 
 from .._version import __version__
-from .db import DEFAULTS, SESSION_TTL, Hub, HubError, installation, loopback, log
+from .db import DEFAULTS, SESSION_TTL, Hub, HubError, TooMuch, installation, loopback, log
 
 COOKIE = "kelvin_hub"
 OPERATOR_COOKIE = "kelvin_hub_operator"
 OPERATOR_TTL = 12 * 3600
-MAX_FORM = 64 * 1024
-MAX_SYNC = 64 * 1024 * 1024
+MAX_FORM = 64 * 1024               # bytes in a form post
+MAX_TOKEN = 16 * 1024              # bytes in a token trade
+MAX_SYNC = 64 * 1024 * 1024        # bytes in one sync
+EXPORT_EVERY = 600                 # seconds between one person's exports
 CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
 LOGO = Path(__file__).resolve().parent.parent / "web" / "static" / "kelvin.svg"
 SECURITY_HEADERS = [
@@ -130,7 +133,10 @@ def e(value: Any) -> str:
 
 
 def when(ts: Any) -> str:
-    return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts))) if ts else "–"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts))) if ts else "–"
+    except (TypeError, ValueError, OverflowError, OSError):   # nan, 1e300, a negative time on Windows...
+        return "–"
 
 
 def size(n: Any) -> str:
@@ -140,6 +146,29 @@ def size(n: Any) -> str:
             return ("%d %s" if unit == "B" else "%.1f %s") % (n, unit)
         n /= 1024
     return ""
+
+
+async def read_body(request: Request, limit: int) -> bytes:
+    """The request's body, refused as soon as it would pass limit: by its Content-Length, or while it streams in."""
+    declared = request.headers.get("content-length")
+    if declared is not None and (not declared.isdigit() or int(declared) > limit):
+        raise TooMuch("That is more than the hub takes at once.")
+    chunks, got = [], 0
+    async for chunk in request.stream():
+        got += len(chunk)
+        if got > limit:
+            raise TooMuch("That is more than the hub takes at once.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def net_of(ip: str) -> str:
+    """The key for limits: an IPv4 address, or an IPv6 address's /64 (one household or server gets a whole /64)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    return str(ipaddress.ip_network("%s/64" % addr, strict=False)) if addr.version == 6 else str(addr)
 
 
 def safe_next(value: Any, default: str = "/account") -> str:
@@ -165,9 +194,10 @@ class Limiter:
         return len(times) >= self.tries
 
     def hit(self, key: str) -> None:
-        if len(self.seen) > 50_000:
-            self.seen.clear()
-        self.seen.setdefault(key, []).append(time.time())
+        now = time.time()
+        if len(self.seen) > 50_000:   # forget only keys whose tries have all expired
+            self.seen = {k: v for k, v in self.seen.items() if v and now - v[-1] < self.window}
+        self.seen.setdefault(key, []).append(now)
 
     def clear(self, key: str) -> None:
         self.seen.pop(key, None)
@@ -214,22 +244,27 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     token_tries = Limiter(30, 900)
     operator_tries = Limiter(5, 900)
     operators: Dict[str, Dict[str, Any]] = {}   # operator sessions, in memory: a restart asks for the key again
+    exported: Dict[int, float] = {}            # when each person last exported
 
     # ------------------------------------------------------------------ helpers
 
     def ip_of(request: Request) -> Optional[str]:
+        """The client's address. client_ip_header (e.g. CF-Connecting-IP) counts only when the request came from a
+        proxy on this computer (cloudflared), and then its last value, the one that proxy added."""
+        peer = request.client.host if request.client else None
         header = hub.config.get("client_ip_header")
-        if header and request.headers.get(header):
-            return request.headers[header].split(",")[0].strip()[:64]
-        return request.client.host if request.client else None
+        if header and peer in ("127.0.0.1", "::1") and request.headers.get(header):
+            return request.headers[header].split(",")[-1].strip()[:64]
+        return peer
+
+    def who(request: Request) -> str:
+        return net_of(ip_of(request) or "?")
 
     def secure(request: Request) -> bool:
         return hub.base_url.startswith("https://") and request.headers.get("host") == urlsplit(hub.base_url).netloc
 
     async def form_of(request: Request) -> Dict[str, str]:
-        body = await request.body()
-        if len(body) > MAX_FORM:
-            raise HubError("That form is too large.")
+        body = await read_body(request, MAX_FORM)
         return {k: v[0] for k, v in parse_qs(body.decode("utf-8", "replace"), keep_blank_values=True).items()}
 
     async def session_of(request: Request) -> Optional[Dict[str, Any]]:
@@ -332,14 +367,14 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return register_form({"next": request.query_params.get("next", "")})
         f = await form_of(request)
         ip = ip_of(request) or "?"
-        if form_tries.blocked("register:" + ip):
+        if form_tries.blocked("register:" + who(request)):
             return register_form(f, "Too many new accounts from this address. Try again later.")
         try:
             user = await call(hub.register, f.get("email"), f.get("name"), f.get("password"),
                               f.get("consent") == "yes", f.get("orcid"), ip)
         except HubError as err:
             return register_form(f, str(err))
-        form_tries.hit("register:" + ip)
+        form_tries.hit("register:" + who(request))
         await call(hub.send_confirmation, user)
         target = safe_next(f.get("next"), "/account?note=confirm")
         return await call(begin_session, RedirectResponse(target, 303), request, user["id"])
@@ -359,7 +394,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if request.method == "GET":
             return signin_form({"next": request.query_params.get("next", "")})
         f = await form_of(request)
-        keys = ("signin:" + f.get("email", "").strip().lower(), "signin-ip:" + (ip_of(request) or "?"))
+        keys = ("signin:" + f.get("email", "").strip().lower(), "signin-ip:" + who(request))
         if any(signin_tries.blocked(k) for k in keys):
             return signin_form(f, "Too many tries. Wait 15 minutes, or reset your password.")
         try:
@@ -373,10 +408,11 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
 
     async def signout(request: Request) -> Response:
         sess = await session_of(request)
+        f = await form_of(request)
         if sess:
-            check_csrf(sess, await form_of(request))
+            check_csrf(sess, f)
             await call(hub.end_session, request.cookies.get(COOKIE))
-        response = RedirectResponse("/", 303)
+        response = RedirectResponse(safe_next(f.get("next"), "/"), 303)
         response.delete_cookie(COOKIE)
         return response
 
@@ -394,7 +430,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         return page("The terms have changed", (
             '<p>Please read the <a href="/terms">terms</a> and the <a href="/privacy">privacy notice</a> '
             '(version %s), then agree to keep using the hub. If you don\'t agree, you can '
-            '<a href="/account/export">export your data</a>.</p>'
+            '<a href="/account/export">export your data</a> and <a href="/account/delete">delete your account</a>.</p>'
             '<form class="stack" method="post" action="/consent">%s<input type="hidden" name="next" value="%s">'
             '<label class="check"><input type="checkbox" name="consent" value="yes" required><span>I agree.</span>'
             '</label><button>Continue</button></form>' % (e(hub.config["consent_version"]), csrf_field(sess),
@@ -416,13 +452,15 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                 'autocomplete="email" required></label><button>Send me a link</button></form>'))
         f = await form_of(request)
         ip = ip_of(request) or "?"
-        if not form_tries.blocked("reset:" + ip):
-            form_tries.hit("reset:" + ip)
-            await call(hub.start_reset, f.get("email"), ip)
         outbox = "" if (hub.config.get("mail") or {}).get("smtp_host") else (
             ' <span class="muted">(This hub has no mail server yet, so the Kelvin team has to pass the link on.)</span>')
-        return page("Check your email", '<p>If there is an account for that address, we sent it a link to choose '
-                                        'a new password. It works for an hour.%s</p>' % outbox)
+        response = page("Check your email", '<p>If there is an account for that address, we sent it a link to choose '
+                                            'a new password. It works for an hour.%s</p>' % outbox)
+        if not form_tries.blocked("reset:" + who(request)):
+            form_tries.hit("reset:" + who(request))
+            # after the answer is sent, so its timing says nothing about whether the account exists
+            response.background = BackgroundTask(hub.start_reset, f.get("email"), ip)
+        return response
 
     async def reset_new(request: Request) -> Response:
         if request.method == "GET":
@@ -544,10 +582,10 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         note = NOTES.get(request.query_params.get("note", ""))
         return page("Your account", "".join(parts), sess, error=error, note=note, status=400 if error else 200)
 
-    def account_action(fn: Any) -> Any:
+    def account_action(fn: Any, any_consent: bool = False) -> Any:
         """A form on the account page: signed in, anti-forgery checked; a HubError shows on the page."""
         async def endpoint(request: Request) -> Response:
-            sess, redirect = await signed_in(request)
+            sess, redirect = await signed_in(request, any_consent)
             if redirect:
                 return redirect
             f = await form_of(request)
@@ -556,6 +594,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                 return await fn(request, sess, f)
             except HubError as err:
                 request.scope["query_string"] = b""
+                if any_consent and hub.needs_consent(sess["user"]):
+                    return delete_form(sess, str(err))
                 return await account(request, error=str(err))
         return endpoint
 
@@ -598,11 +638,30 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         response.delete_cookie(COOKIE)
         return response
 
+    def delete_form(sess: Dict[str, Any], error: Optional[str] = None) -> Response:
+        return page("Delete your account", (
+            '<form class="stack" method="post" action="/account/delete">%s<p>This deletes your account and everything '
+            'your Kelvins shared to the hub. Your own computers keep their copies. It can\'t be undone. You may want to '
+            '<a href="/account/export">export your data</a> first.</p><label>Password<input type="password" '
+            'name="password" autocomplete="current-password" required></label><label class="check"><input '
+            'type="checkbox" name="sure" value="yes" required><span>Yes, delete my account.</span></label>'
+            '<button class="danger">Delete my account</button></form>' % csrf_field(sess)), sess, error=error,
+            status=400 if error else 200)
+
+    async def delete_page(request: Request) -> Response:
+        sess, redirect = await signed_in(request, any_consent=True)
+        return redirect or delete_form(sess)
+
     async def export(request: Request) -> Response:
         sess, redirect = await signed_in(request, any_consent=True)
         if redirect:
             return redirect
-        path = await call(hub.export, sess["user"]["id"])
+        uid = sess["user"]["id"]
+        if time.time() - exported.get(uid, 0) < EXPORT_EVERY:   # each export can be gigabytes: one per 10 minutes
+            return page("Export everything", "", sess, 429, error="You can export once every 10 minutes. Try again "
+                                                                  "in a little while.")
+        exported[uid] = time.time()
+        path = await call(hub.export, uid)
         return FileResponse(path, media_type="application/zip", filename="kelvin-hub-%s.zip" % time.strftime("%Y-%m-%d"),
                             background=BackgroundTask(os.remove, path))
 
@@ -706,33 +765,61 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         user = sess["user"]
         inst = req["installation"]
         if request.method == "POST":
+            if params.get("action") != "allow":
+                check_csrf(sess, params)
+                return back_to_kelvin(req, error="access_denied")
+            key = "signin:" + user["email"]
             try:
                 check_csrf(sess, params)
-                if params.get("action") != "allow":
-                    return back_to_kelvin(req, error="access_denied")
+                if signin_tries.blocked(key) or signin_tries.blocked("signin-ip:" + who(request)):
+                    raise HubError("Too many tries. Wait 15 minutes.")
+                try:   # the browser may be someone else's session: only this account's password connects to it
+                    await call(hub.authenticate, user["email"], params.get("password"), ip_of(request))
+                except HubError:
+                    signin_tries.hit(key)
+                    signin_tries.hit("signin-ip:" + who(request))
+                    raise HubError("That isn't the password of %s. Not you? Sign in as yourself below."
+                                   % user["email"])
                 lab_id = int(params["lab"]) if params.get("lab") else None
                 code = await call(hub.connect_code, user, req["redirect_uri"], req["challenge"], inst, lab_id)
             except (HubError, ValueError) as err:
-                return page("Connect Kelvin", "", sess, 400, error=str(err))
+                return await connect_page(sess, params, req, str(err))
             return back_to_kelvin(req, code=code)
+        return await connect_page(sess, params, req)
+
+    async def connect_page(sess: Dict[str, Any], params: Dict[str, str], req: Dict[str, Any],
+                           error: Optional[str] = None) -> Response:
+        user = sess["user"]
+        inst = req["installation"]
         labs = await call(hub.labs_of, user["id"])
-        hidden = "".join('<input type="hidden" name="%s" value="%s">' % (e(k), e(v)) for k, v in params.items()
-                         if k in ("redirect_uri", "state", "code_challenge", "code_challenge_method", "installation",
-                                  "name", "platform", "version"))
-        options = "".join('<option value="%d">%s</option>' % (lab["id"], e(lab["name"])) for lab in labs)
+        keep = {k: v for k, v in params.items() if k in ("redirect_uri", "state", "code_challenge",
+                                                         "code_challenge_method", "installation", "name", "platform",
+                                                         "version", "person")}
+        hidden = "".join('<input type="hidden" name="%s" value="%s">' % (e(k), e(v)) for k, v in keep.items())
+        chosen = str(params.get("lab") or "")
+        options = "".join('<option value="%d"%s>%s</option>' % (lab["id"], " selected" if str(lab["id"]) == chosen
+                                                                else "", e(lab["name"])) for lab in labs)
+        person = " ".join(str(params.get("person") or "").split())[:80]
         return page("Connect Kelvin to your account?", (
-            '<p><b>%s</b> <span class="muted">(%s, Kelvin %s)</span> wants to connect to <b>%s</b>.</p>'
+            '<p><b>%s</b> <span class="muted">(%s, Kelvin %s)</span>%s wants to connect to the hub account of '
+            '<b>%s</b> (%s).</p>'
             '<div class="note"><b>It will share:</b> your normal projects and unfiled chats, with their runs and whole '
             'conversations.<br><b>Never:</b> unpublished or confidential projects, incognito chats, API keys, or '
             'ChatGPT and Claude Code sign-ins.</div>'
             '<form class="stack" method="post" action="/connect">%s%s<label>Share into<select name="lab">%s'
             '<option value="">No lab: only I see it</option></select></label>'
+            '<label>Your hub password <span class="muted">(to be sure it\'s you)</span><input type="password" '
+            'name="password" autocomplete="current-password" required></label>'
             '<div class="row"><button name="action" value="allow">Connect</button><button class="plain" '
-            'name="action" value="cancel">Cancel</button></div></form>'
+            'name="action" value="cancel" formnovalidate>Cancel</button></div></form>'
+            '<form class="inline" method="post" action="/signout">%s<input type="hidden" name="next" value="%s">'
+            '<button class="plain">Not %s? Sign in as yourself</button></form>'
             '<p class="muted">Only connect a Kelvin you started yourself. You can disconnect it any time on your '
             '<a href="/account">account page</a>.</p>'
-            % (e(inst["name"]), e(inst["platform"] or "?"), e(inst["version"] or "?"), e(user["email"]),
-               csrf_field(sess), hidden, options)), sess)
+            % (e(inst["name"]), e(inst["platform"] or "?"), e(inst["version"] or "?"),
+               ", used by <b>%s</b> on that computer," % e(person) if person else "", e(user["name"]), e(user["email"]),
+               csrf_field(sess), hidden, options, csrf_field(sess), e("/connect?" + urlencode(keep)), e(user["name"]))),
+            sess, error=error, status=400 if error else 200)
 
     # ------------------------------------------------------------------ the API for connected Kelvins
 
@@ -747,16 +834,18 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             await call(hub.revoke, app["user"]["id"], app["token_id"], ip_of(request), "app")
             return Response(status_code=204)
         ip = ip_of(request) or "?"
-        if token_tries.blocked("token:" + ip):
+        if token_tries.blocked("token:" + who(request)):
             return api_error("too many tries; wait 15 minutes", 429)
         try:
-            body = await request.json()
+            body = json.loads(await read_body(request, MAX_TOKEN))
             if not isinstance(body, dict) or body.get("grant_type", "authorization_code") != "authorization_code":
                 raise HubError("grant_type must be authorization_code")
             result = await call(hub.connect_app, body.get("code"), body.get("code_verifier"), body.get("redirect_uri"),
                                 ip)
+        except TooMuch as err:
+            return api_error(str(err), err.status)
         except (HubError, ValueError) as err:
-            token_tries.hit("token:" + ip)
+            token_tries.hit("token:" + who(request))
             return api_error("invalid_grant", 400, error_description=str(err))
         return JSONResponse(result)
 
@@ -779,12 +868,12 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if hub.needs_consent(app["user"]):
             return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403,
                              consent_url=hub.base_url + "/consent")
-        body = await request.body()
-        if len(body) > MAX_SYNC:
-            return api_error("send at most 64 MB at a time", 413)
         try:
+            body = await read_body(request, MAX_SYNC)
             return JSONResponse(await call(hub.sync, app, json.loads(body or b"{}")))
-        except (HubError, ValueError) as err:
+        except HubError as err:
+            return api_error(str(err), err.status)
+        except ValueError as err:
             return api_error(str(err))
 
     async def run_file_upload(request: Request) -> Response:
@@ -793,29 +882,40 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error("not connected", 401)
         if hub.needs_consent(app["user"]):
             return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403)
-        limit = hub.max_file_bytes
+        declared = request.headers.get("content-length", "")
+        if not declared.isdigit():
+            return api_error("send the file with a Content-Length", 411)
+        try:   # check the run, the name and the person's share of the disk before a byte is stored
+            ticket = await call(hub.reserve_upload, app, request.path_params["run_id"], request.path_params["name"],
+                                int(declared))
+        except HubError as err:
+            return api_error(str(err), err.status)
         tmp = hub.home / "tmp" / ("upload-%s" % secrets.token_hex(8))
         written = 0
         try:
             with open(tmp, "wb") as f:
                 async for chunk in request.stream():
                     written += len(chunk)
-                    if written > limit:
-                        return api_error("a file may be at most %s MB" % hub.config.get("max_file_mb"), 413)
+                    if written > ticket["size"]:
+                        return api_error("the file is longer than its Content-Length", 400)
                     f.write(chunk)
-            return JSONResponse(await call(hub.store_run_file, app, request.path_params["run_id"],
-                                           request.path_params["name"], tmp, written))
+            return JSONResponse(await call(hub.store_upload, ticket, tmp, written))
         except HubError as err:
-            return api_error(str(err))
+            return api_error(str(err), err.status)
         finally:
+            await call(hub.release_upload, ticket)
             if tmp.exists():
                 tmp.unlink()
 
     # ------------------------------------------------------------------ the operator's page
 
     def operator_of(request: Request) -> Optional[Dict[str, Any]]:
-        op = operators.get(request.cookies.get(OPERATOR_COOKIE, ""))
-        if op is None or op["expires"] < time.time():
+        token = request.cookies.get(OPERATOR_COOKIE, "")
+        op = operators.get(token)
+        if op is None:
+            return None
+        if op["expires"] < time.time() or not hmac.compare_digest(op["key"], hub.operator_key_hash()):
+            operators.pop(token, None)   # expired, or the key changed since (kelvin-hub operator-key)
             return None
         return op
 
@@ -865,13 +965,14 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     async def admin_signin(request: Request) -> Response:
         ip = ip_of(request) or "?"
         f = await form_of(request)
-        if operator_tries.blocked("op:" + ip):
+        if operator_tries.blocked("op:" + who(request)):
             return await admin(request, error="Too many tries. Wait 15 minutes.")
         if not hub.is_operator(f.get("key")):
-            operator_tries.hit("op:" + ip)
+            operator_tries.hit("op:" + who(request))
             return await admin(request, error="That isn't the operator key.")
         token = secrets.token_urlsafe(32)
-        operators[token] = {"expires": time.time() + OPERATOR_TTL, "csrf": secrets.token_urlsafe(24)}
+        operators[token] = {"expires": time.time() + OPERATOR_TTL, "csrf": secrets.token_urlsafe(24),
+                            "key": hub.operator_key_hash()}
         with hub.connect() as con:
             hub.audit(con, "operator", "operator signed in", None, None, ip)
         response = RedirectResponse("/admin", 303)
@@ -919,8 +1020,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     async def failed(request: Request, exc: Exception) -> Response:
         if isinstance(exc, HubError):
             if request.url.path.startswith("/api/"):
-                return api_error(str(exc))
-            return page("Something is wrong", "", await session_of(request), 400, error=str(exc))
+                return api_error(str(exc), exc.status)
+            return page("Something is wrong", "", await session_of(request), exc.status, error=str(exc))
         log.exception("error on %s %s", request.method, request.url.path)
         if request.url.path.startswith("/api/"):
             return api_error("the hub had a problem; it is logged", 500)
@@ -956,7 +1057,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/account/confirm", account_action(resend), methods=["POST"]),
         Route("/account/profile", account_action(profile), methods=["POST"]),
         Route("/account/password", account_action(password), methods=["POST"]),
-        Route("/account/delete", account_action(delete_account), methods=["POST"]),
+        Route("/account/delete", delete_page),
+        Route("/account/delete", account_action(delete_account, any_consent=True), methods=["POST"]),
         Route("/account/export", export),
         Route("/labs", account_action(make_lab), methods=["POST"]),
         Route("/labs/join", account_action(join_lab), methods=["POST"]),

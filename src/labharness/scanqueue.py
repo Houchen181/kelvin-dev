@@ -137,6 +137,8 @@ class ScanQueue:
                 item = Item(**{k: raw[k] for k in Item.__dataclass_fields__ if k in raw})
             except TypeError:
                 continue
+            if "incognito" not in raw and not item.project:   # queued before Kelvin noted incognito chats:
+                item.incognito = True                           # it may have come from one, so never shared
             if item.status == "running":   # Kelvin closed in the middle of it
                 item.status, item.message = "stopped", "Kelvin closed while it ran"
             self.items.append(item)

@@ -3,11 +3,13 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 
 import pytest
 
+from labharness.hub import db as hubdb
 from labharness.hub.client import HubClientError, check_url, collect
-from labharness.hub.db import Hub, HubError, challenge_of, file_parts, loopback, orcid_ok
+from labharness.hub.db import Busy, Hub, HubError, TooMuch, challenge_of, file_parts, loopback, orcid_ok
 
 INST = {"id": "urn:uuid:5f0c1c55-0000-4000-8000-000000000001", "name": "Lab PC", "platform": "win32",
         "version": "0.3.8"}
@@ -229,3 +231,201 @@ def test_a_kelvin_sends_only_its_shared_chats(tmp_path):
     for bad in ("http://hub.example.org", "ftp://x", ""):
         with pytest.raises(HubClientError):
             check_url(bad)
+
+
+def lab_sees(hub, user):
+    seen = hub.shared_with(user["id"])
+    return sorted(c["title"] for c in seen["chats"]) + sorted(r["local_id"] for r in seen["runs"])
+
+
+def test_shared_work_follows_the_lab_a_kelvin_shares_into_now(tmp_path):
+    """Review P1: reconnecting with another lab, or none, moves everything that Kelvin shared; leaving a lab is
+    for good."""
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    ben = hub.register("ben@example.org", "Ben", "correct horse", consent=True)
+    cy = hub.register("cy@example.org", "Cy", "correct horse", consent=True)
+    first = hub.create_lab(ada["id"], "First Lab")
+    hub.join_lab(ben["id"], first["join_code"])
+    _, app = connected(hub, ada, first["id"])
+    hub.sync(app, {"projects": [{"id": "p00000001", "name": "P"}],
+                   "chats": [{"id": "aaaaaaaaaaaa", "project": "p00000001", "title": "old", "messages": []}],
+                   "runs": [{"id": "run1", "project": "p00000001"}]})
+    assert lab_sees(hub, ben) == ["old", "run1"]
+
+    _, app = connected(hub, ada, None)                        # reconnected with "No lab"
+    assert lab_sees(hub, ben) == []                           # ...takes everything out of First Lab at once
+    hub.sync(app, {"projects": [{"id": "p00000001", "name": "P"}],
+                   "chats": [{"id": "bbbbbbbbbbbb", "project": "p00000001", "title": "new", "messages": []}]})
+    assert lab_sees(hub, ben) == [] and lab_sees(hub, ada) == ["new", "old", "run1"]
+
+    second = hub.create_lab(ada["id"], "Second Lab")
+    hub.join_lab(cy["id"], second["join_code"])
+    connected(hub, ada, second["id"])                         # reconnected into Second Lab
+    assert lab_sees(hub, cy) == ["new", "old", "run1"] and lab_sees(hub, ben) == []
+
+    hub.leave_lab(ada["id"], second["id"])
+    hub.join_lab(ada["id"], second["join_code"])              # rejoining doesn't bring old work back
+    assert lab_sees(hub, cy) == []
+
+
+def test_the_hub_refuses_marked_chats_and_runs(tmp_path):
+    """Review S6: the hub checks the marks itself, whatever a Kelvin sends."""
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    _, app = connected(hub, ada)
+    hub.sync(app, {"chats": [{"id": "aaaaaaaaaaaa", "title": "fine", "messages": []}]})
+    done = hub.sync(app, {
+        "chats": [{"id": "aaaaaaaaaaaa", "title": "now unpublished", "unpublished": True, "messages": []},
+                  {"id": "bbbbbbbbbbbb", "title": "confidential", "confidential": True, "messages": []},
+                  {"id": "cccccccccccc", "title": "limited", "rules": {"providers": ["local"]}, "messages": []},
+                  {"id": "dddddddddddd", "title": "unshared", "shared": False, "messages": []}],
+        "runs": [{"id": "run1", "meta": {"incognito": True}}, {"id": "run2", "incognito": True},
+                 {"id": "run3", "meta": {"confidential": True}}, {"id": "run4"}]})
+    assert done["chats"] == 0 and done["runs"] == 1 and len(done["refused"]) == 7
+    assert lab_sees(hub, ada) == ["run4"]                     # the chat it had before is gone too
+
+
+def test_times_from_a_kelvin_are_checked(tmp_path):
+    """Review S2: nonsense times are stored as now, so no page breaks on them."""
+    import time
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    _, app = connected(hub, ada)
+    bad = [1e300, -5, float("nan"), float("inf"), "soon", None, 0]
+    hub.sync(app, {"chats": [{"id": "c%d" % i, "title": "t", "messages": [], "updated": t} for i, t in enumerate(bad)],
+                   "runs": [{"id": "r%d" % i, "created": t} for i, t in enumerate(bad)]})
+    seen = hub.shared_with(ada["id"])
+    times = [c["updated_at"] for c in seen["chats"]] + [r["created_at"] for r in seen["runs"]]
+    assert len(times) == 14 and all(abs(t - time.time()) < 60 for t in times)
+    hub.sync(app, {"chats": [{"id": "ok", "title": "t", "messages": [], "updated": 1.7e9}]})
+    assert [c["updated_at"] for c in hub.shared_with(ada["id"])["chats"] if c["title"] == "t"][-1] == 1.7e9
+
+
+def test_the_disk_share_holds_under_parallel_uploads(tmp_path, monkeypatch):
+    """Review S3: bytes are reserved before a file streams in; chats count; only a few uploads at once."""
+    import time
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    _, app = connected(hub, ada)
+    hub.sync(app, {"runs": [{"id": "run1"}]})
+    hub.config["quota_gb_per_user"] = 1500 / 1024 ** 3        # 1500 bytes
+    used = Hub._used
+    monkeypatch.setattr(Hub, "_used", staticmethod(lambda con, uid: time.sleep(0.05) or used(con, uid)))   # a race
+    stored, refused = [], []
+
+    def upload(i):
+        path = tmp_path / "tmp" / ("u%d" % i)
+        path.write_bytes(b"x" * 1000)
+        try:
+            stored.append(hub.store_run_file(app, "run1", "f%d.bin" % i, path, 1000))
+        except HubError as e:
+            refused.append(e)
+
+    threads = [threading.Thread(target=upload, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(stored) == 1 and len(refused) == 7 and all(isinstance(e, (TooMuch, Busy)) for e in refused)
+    assert sum(f.stat().st_size for f in (tmp_path / "files").rglob("*") if f.is_file()) == 1000
+
+    hub.config["quota_gb_per_user"] = 10_000 / 1024 ** 3
+    first = hub.reserve_upload(app, "run1", "a.bin", 10)
+    second = hub.reserve_upload(app, "run1", "b.bin", 10)
+    with pytest.raises(Busy):
+        hub.reserve_upload(app, "run1", "c.bin", 10)          # at most two at once
+    hub.release_upload(second)
+    with pytest.raises(TooMuch):
+        hub.reserve_upload(app, "run1", "d.bin", 9000)         # 1000 stored + 10 held + 9000 > 10000
+    hub.release_upload(first)
+    done = hub.sync(app, {"chats": [{"id": "big", "title": "t", "messages": ["y" * 9500]}]})
+    assert done["chats"] == 0 and "share" in done["refused"][0]["why"]   # chats count toward the share too
+
+
+def test_account_ids_are_never_reused_and_deletion_leaves_nothing(tmp_path):
+    """Review S4."""
+    hub = Hub(tmp_path)
+    bob = hub.register("bob@example.org", "Bob", "correct horse", consent=True)
+    connected(hub, bob, inst=dict(INST, id="urn:uuid:5f0c1c55-0000-4000-8000-0000000000bb"))
+    hub.send_confirmation(bob)
+    (tmp_path / "hub.log").write_text("x registered bob@example.org\nother line\n", encoding="utf-8")
+    hub.delete_user(bob["id"])
+    carol = hub.register("carol@example.org", "Carol", "correct horse", consent=True)
+    assert carol["id"] != bob["id"]
+    import zipfile
+    with zipfile.ZipFile(hub.export(carol["id"])) as z:            # Carol's record is hers alone
+        assert [a["action"] for a in json.loads(z.read("activity.json"))] == ["registered"]
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert con.execute("SELECT COUNT(*) FROM installations").fetchone()[0] == 0
+    assert not list((tmp_path / "outbox").glob("*.txt"))
+    log_text = (tmp_path / "hub.log").read_text(encoding="utf-8")
+    assert "bob@example.org" not in log_text and "[deleted]" in log_text
+
+
+def test_an_old_database_gets_ids_that_are_never_reused(tmp_path):
+    old_schema = hubdb.SCHEMA.replace("id INTEGER PRIMARY KEY AUTOINCREMENT,", "id INTEGER PRIMARY KEY,")
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        con.executescript(old_schema)
+        con.execute("PRAGMA user_version = 1")
+        for i in (1, 2):
+            con.execute("INSERT INTO users (id, email, name, consent_version, consent_at, created_at) VALUES "
+                        "(?, ?, 'X', 'v', 0, 0)", (i, "u%d@example.org" % i))
+        con.execute("INSERT INTO audit (at, user_id, actor, action) VALUES (0, 7, 'user', 'account deleted')")
+    hub = Hub(tmp_path)
+    assert hub.user(2)["email"] == "u2@example.org"
+    assert hub.register("new@example.org", "New", "correct horse", consent=True)["id"] == 8
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == hubdb.SCHEMA_VERSION
+        assert "AUTOINCREMENT" in con.execute("SELECT sql FROM sqlite_master WHERE name = 'users'").fetchone()[0]
+
+
+def test_one_use_codes_work_once_even_at_the_same_moment(tmp_path):
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    code = hub.new_code("confirm", ada["id"])
+    won = []
+
+    def take():
+        try:
+            won.append(hub.take_code("confirm", code))
+        except HubError:
+            pass
+
+    threads = [threading.Thread(target=take) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(won) == 1
+
+
+def test_passwords_resets_and_names(tmp_path):
+    hub = Hub(tmp_path)
+    ada = hub.register("ada@example.org", "Ada", "correct horse", consent=True)
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert con.execute("SELECT iterations FROM users").fetchone()[0] == hubdb.ITERATIONS == 600_000
+        salt = bytes(16)
+        con.execute("UPDATE users SET password_hash = ?, salt = ?, iterations = 200000",
+                    (hubdb._hash("correct horse", salt, 200_000), salt.hex()))
+    hub.authenticate("ada@example.org", "correct horse")      # an older hash is redone at the next sign-in
+    with sqlite3.connect(str(tmp_path / "hub.sqlite3")) as con:
+        assert con.execute("SELECT iterations FROM users").fetchone()[0] == 600_000
+    assert hub.authenticate("ada@example.org", "correct horse")["id"] == ada["id"]
+
+    token, _ = connected(hub, ada)
+    hub.start_reset("ada@example.org")
+    code = last_code(hub, "/reset/new")
+    with pytest.raises(HubError):
+        hub.finish_reset(code, "short")                       # a password that won't do keeps the link working
+    hub.finish_reset(code, "a better password")
+    assert hub.app(token) is None                             # a reset by mail disconnects every Kelvin
+
+    for bad in ("NUL .txt", "CON .csv", "aux.log", "plot.png "):
+        with pytest.raises(HubError):
+            file_parts(bad)
+    assert file_parts("plot 1.png") == ["plot 1.png"]
+    for bad in ("http://[", " http://127.0.0.1:8770/cb", "http://127.0.0.1:8770/c b", "http://127.0.0.1:99999/cb",
+                "http://127.0.0.1:8770/cb\x00"):
+        with pytest.raises(HubError):
+            loopback(bad)

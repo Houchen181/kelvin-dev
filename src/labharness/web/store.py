@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .memory import KINDS, PROJECT_KINDS, SAME, similarity
+from .rules import merge, normalize, restrictive
 
 _ID = re.compile(r"^[0-9a-f]{12}$")
 _PROJECT_ID = re.compile(r"^p[0-9a-f]{8}$")
@@ -67,6 +68,7 @@ class ChatStore:
                 self.root.mkdir(parents=True, exist_ok=True)
             self._index_path = self.root / "_projects.json"
             self._temp: Dict[str, Dict[str, Any]] = {}  # incognito chats: this process only
+            self._kept_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
 
     def _path(self, chat_id: str) -> Path:
         if not _ID.match(chat_id or ""):
@@ -97,7 +99,30 @@ class ChatStore:
         path = self._path(chat_id)
         if not path.exists():
             raise KeyError("no chat %r" % chat_id)
-        return json.loads(path.read_text(encoding="utf-8"))
+        return self._with_kept(json.loads(path.read_text(encoding="utf-8")), self._kept())
+
+    def _kept(self) -> Dict[str, Any]:
+        """The marks and rules chats keep from projects they were in (the index's "marks" and "stamped"), read again
+        only when the index changes."""
+        try:
+            st = self._index_path.stat()
+            key: Any = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return {"marks": {}, "stamped": {}}
+        if self._kept_cache is None or self._kept_cache[0] != key:
+            index = self._read_index()
+            self._kept_cache = (key, {"marks": index["marks"], "stamped": index["stamped"]})
+        return self._kept_cache[1]
+
+    @staticmethod
+    def _with_kept(chat: Dict[str, Any], kept: Dict[str, Any]) -> Dict[str, Any]:
+        """A chat with what it keeps from projects it left: never shared on the hub, and still under their rules."""
+        cid = chat.get("id")
+        for m in kept["marks"].get(cid, []):
+            chat[m] = True
+        if cid in kept["stamped"]:
+            chat["rules"] = merge(chat.get("rules"), kept["stamped"][cid])
+        return chat
 
     def save(self, chat: Dict[str, Any]) -> None:
         chat["updated"] = time.time()
@@ -120,8 +145,8 @@ class ChatStore:
             path.unlink()
         with self._lock:
             index = self._read_index()
-            filed, marked = index["assign"].pop(chat_id, None), index["marks"].pop(chat_id, None)
-            if filed is not None or marked is not None:
+            kept = [index[k].pop(chat_id, None) for k in ("assign", "marks", "stamped")]
+            if any(k is not None for k in kept):
                 self._write_index(index)
 
     def list(self) -> List[Dict[str, Any]]:
@@ -135,6 +160,7 @@ class ChatStore:
                 chat = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
+            self._with_kept(chat, index)
             out.append({"id": chat["id"], "title": chat.get("title", "Chat"), "updated": chat.get("updated", 0),
                         "model": chat.get("model"), "project": assign.get(chat["id"]),
                         "rules": chat.get("rules"), **{m: True for m in index["marks"].get(chat["id"], [])}})
@@ -177,9 +203,17 @@ class ChatStore:
         general.setdefault("summary", "")
         marks = {c: [m for m in ms if m in SHARING[1:]] for c, ms in (data.get("marks") or {}).items()
                  if isinstance(ms, list)}   # chats that left an unshared project (never shared on the hub)
-        return {"projects": projects, "assign": assign, "global_notes": notes, "general": general, "marks": marks}
+        stamped = {}   # the rules of model-limited projects, kept by their chats wherever they go
+        for c, r in (data.get("stamped") or {}).items():
+            try:
+                stamped[c] = normalize(r) if isinstance(r, dict) else None
+            except ValueError:
+                stamped[c] = {"providers": [], "literature": False}   # unreadable: the strictest
+        return {"projects": projects, "assign": assign, "global_notes": notes, "general": general, "marks": marks,
+                "stamped": {c: r for c, r in stamped.items() if r}}
 
     def _write_index(self, index: Dict[str, Any]) -> None:
+        self._kept_cache = None
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = self._index_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
@@ -284,13 +318,16 @@ class ChatStore:
             self._write_index(index)
 
     def set_rules(self, project_id: str, rules: Any) -> Dict[str, Any]:
-        """Which model providers may see this project, and whether literature search may be used."""
-        from .rules import normalize
+        """Which model providers may see this project, and whether literature search may be used. Its chats keep
+        limits set now, wherever they are filed later (and so are never shared on the hub)."""
         rules = normalize(rules)   # ValueError for unknown providers
         with self._lock:
             index = self._read_index()
             project = self._find(index, project_id)
             project["rules"] = rules
+            for chat_id, pid in index["assign"].items():
+                if pid == project_id:
+                    self._keep_rules(index, chat_id, project)
             self._write_index(index)
         return project
 
@@ -345,10 +382,17 @@ class ChatStore:
 
     @staticmethod
     def _keep_marks(index: Dict[str, Any], chat_id: str, project: Optional[Dict[str, Any]]) -> None:
-        """A chat leaving an unpublished or confidential project keeps that mark, so it is never shared later."""
+        """A chat leaving an unpublished or confidential project keeps that mark, and one leaving a model-limited
+        project keeps its rules, so it is never shared later (nor read by a model the rules exclude)."""
         marks = [m for m in SHARING[1:] if project and project.get(m)]
         if marks:
             index["marks"][chat_id] = sorted(set(index["marks"].get(chat_id, [])) | set(marks))
+        ChatStore._keep_rules(index, chat_id, project)
+
+    @staticmethod
+    def _keep_rules(index: Dict[str, Any], chat_id: str, project: Optional[Dict[str, Any]]) -> None:
+        if project and restrictive(project.get("rules")):
+            index["stamped"][chat_id] = merge(index["stamped"].get(chat_id), project["rules"])
 
     def delete_project(self, project_id: str) -> None:
         """The project and its memory go; its conversations stay, unfiled (and unshared, if it was)."""

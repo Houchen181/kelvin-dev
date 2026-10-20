@@ -105,6 +105,9 @@ def test_connecting_a_kelvin_through_the_browser_then_syncing(tmp_path):
     form = {k: v[0] for k, v in parse_qs(urlsplit(path).query).items()}
     r = client.post("/connect", data=dict(form, csrf=csrf(page), lab=str(lab["id"]), action="allow"),
                     follow_redirects=False)
+    assert r.status_code == 400 and "code=" not in r.headers.get("location", "")   # no password, no code
+    r = client.post("/connect", data=dict(form, csrf=csrf(page), lab=str(lab["id"]), action="allow",
+                                          password="correct horse"), follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"].startswith(CALLBACK + "?")
     query = {k: v[0] for k, v in parse_qs(urlsplit(r.headers["location"]).query).items()}
     assert query["state"] == pending["state"] and query["code"]
@@ -200,3 +203,120 @@ def test_operator_page_needs_the_operator_key(tmp_path):
     assert "disabled" in r.text
     assert client.get("/api/admin/stats").status_code == 401
     assert client.get("/api/admin/stats", headers={"X-Operator-Key": key}).json()["people"] == 1
+
+
+def connect_form(client, inst="urn:uuid:5f0c1c55-0000-4000-8000-0000000000aa", person=""):
+    kelvin = HubClient("http://127.0.0.1:8780", http=through(client))
+    url, pending = kelvin.begin(CALLBACK, inst, "Shared PC", "win32", "0.3.8")
+    path = url[len("http://127.0.0.1:8780"):] + ("&person=" + person if person else "")
+    page = client.get(path)
+    return kelvin, pending, page, {k: v[0] for k, v in parse_qs(urlsplit(path).query).items()}
+
+
+def test_connecting_needs_the_password_of_the_account_signed_in(tmp_path):
+    """Review P5: on a shared PC the browser may still be signed in as someone else."""
+    hub, client = make(tmp_path)
+    register(client, "ben@example.org", "Ben", "bens password")    # Ben used this browser last
+    kelvin, pending, page, form = connect_form(client, person="Ada")
+    assert "Ben" in page.text and "ben@example.org" in page.text and "used by <b>Ada</b>" in page.text
+    assert "Not Ben? Sign in as yourself" in page.text
+    r = client.post("/connect", data=dict(form, csrf=csrf(page), action="allow", password="adas password"),
+                    follow_redirects=False)
+    assert r.status_code == 400 and "the password of ben@example.org" in r.text   # Ada can't take Ben's
+    r = client.post("/signout", data={"csrf": csrf(page), "next": "/connect?" + urlsplit(str(page.url)).query},
+                    follow_redirects=False)
+    assert r.headers["location"].startswith("/connect?")              # "Not Ben?" goes back to the request
+    r = client.get(r.headers["location"], follow_redirects=False)
+    assert r.headers["location"].startswith("/signin?next=%2Fconnect%3F")
+    assert hub.connections(1) == []
+
+
+def test_bodies_are_capped_before_they_are_read(tmp_path, monkeypatch):
+    """Review S1."""
+    from labharness.hub import server
+    hub, client = make(tmp_path)
+    big = b"email=a%40b.c&password=" + b"x" * (70 * 1024)
+    assert client.post("/signin", content=big, headers={"Content-Type": "application/x-www-form-urlencoded"}
+                       ).status_code == 413
+    assert client.post("/api/token", content=b"{" + b" " * (20 * 1024) + b"}").status_code == 413
+
+    def chunks():   # no Content-Length: refused while it streams in
+        for _ in range(100):
+            yield b"x" * 1024
+    assert client.post("/register", content=chunks(),
+                       headers={"Content-Type": "application/x-www-form-urlencoded"}).status_code == 413
+    register(client)
+    kelvin, pending, page, form = connect_form(client)
+    r = client.post("/connect", data=dict(form, csrf=csrf(page), action="allow", password="correct horse"),
+                    follow_redirects=False)
+    kelvin.finish({k: v[0] for k, v in parse_qs(urlsplit(r.headers["location"]).query).items()}, pending)
+    monkeypatch.setattr(server, "MAX_SYNC", 1000)
+    r = client.post("/api/sync", content=b'{"chats": []' + b" " * 2000 + b"}",
+                    headers={"Authorization": "Bearer " + kelvin.token})
+    assert r.status_code == 413
+    r = client.put("/api/sync/runs/run1/files/a.csv", content=chunks(), headers={"Authorization": "Bearer " + kelvin.token})
+    assert r.status_code == 411                                         # uploads need a Content-Length
+
+
+def test_odd_times_never_break_the_account_page(tmp_path):
+    """Review S2: even times already stored before the check came in."""
+    import sqlite3
+    hub, client = make(tmp_path)
+    register(client)
+    lab_page = client.post("/labs", data={"name": "L", "csrf": csrf(client.get("/account"))})
+    assert lab_page.status_code == 200
+    kelvin, pending, page, form = connect_form(client)
+    r = client.post("/connect", data=dict(form, csrf=csrf(page), action="allow", password="correct horse",
+                                          lab=str(hub.labs_of(1)[0]["id"])), follow_redirects=False)
+    kelvin.finish({k: v[0] for k, v in parse_qs(urlsplit(r.headers["location"]).query).items()}, pending)
+    kelvin.push(chats=[{"id": "aaaaaaaaaaaa", "title": "t", "messages": [], "updated": 1e300}],
+                runs=[{"id": "run1", "created": -1}])
+    with sqlite3.connect(str(tmp_path / "hub" / "hub.sqlite3")) as con:
+        con.execute("UPDATE chats SET updated_at = 1e300")
+        con.execute("UPDATE runs SET created_at = -1e12")
+    assert client.get("/account").status_code == 200
+
+
+def test_exports_are_rate_limited(tmp_path):
+    """Review S3: each export can be gigabytes."""
+    hub, client = make(tmp_path)
+    register(client)
+    assert client.get("/account/export").status_code == 200
+    r = client.get("/account/export")
+    assert r.status_code == 429 and "once every 10 minutes" in r.text
+
+
+def test_a_new_operator_key_ends_the_old_ones_sessions(tmp_path):
+    """Review S5: `kelvin-hub operator-key` runs in another process while the hub serves."""
+    hub, client = make(tmp_path)
+    old_key = hub.ensure_operator_key().read_text(encoding="utf-8").split()[-1]
+    page = client.post("/admin/signin", data={"key": old_key})
+    assert "Recent activity" in page.text
+    new_key = Hub(tmp_path / "hub").new_operator_key().read_text(encoding="utf-8").split()[-1]   # another process
+    assert "Operator key" in client.get("/admin").text                # the old session is over
+    r = client.post("/admin/signin", data={"key": old_key})
+    assert r.status_code == 400 and "Recent activity" not in r.text
+    assert client.get("/api/admin/stats", headers={"X-Operator-Key": old_key}).status_code == 401
+    assert "Recent activity" in client.post("/admin/signin", data={"key": new_key}).text
+
+
+def test_an_account_can_be_deleted_without_agreeing_to_new_terms(tmp_path):
+    hub, client = make(tmp_path)
+    register(client)
+    hub.config["consent_version"] = "2027-01-01"
+    assert client.get("/account", follow_redirects=False).headers["location"].startswith("/consent")
+    assert "delete your account" in client.get("/consent").text
+    page = client.get("/account/delete")
+    assert page.status_code == 200
+    r = client.post("/account/delete", data={"csrf": csrf(page), "password": "correct horse", "sure": "yes"})
+    assert "deleted" in r.text and hub.stats()["people"] == 0
+
+
+def test_reset_answers_the_same_whether_or_not_the_account_exists(tmp_path):
+    hub, client = make(tmp_path)
+    register(client)
+    a = client.post("/reset", data={"email": "ada@example.org"})
+    b = client.post("/reset", data={"email": "nobody@example.org"})
+    assert a.status_code == b.status_code == 200 and a.text == b.text
+    mails = [m.read_text(encoding="utf-8") for m in (tmp_path / "hub" / "outbox").glob("*.txt")]
+    assert sum("/reset/new?code=" in m for m in mails) == 1            # sent after the answer, to Ada only
