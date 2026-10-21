@@ -5,7 +5,7 @@
 <h1 align="center">Kelvin</h1>
 <p align="center"><b>The coolest cat in the lab.</b><br>An AI lab assistant for experimental physicists that plans, measures and logs, and asks before it drives your sample harder.</p>
 
-<p align="center"><a href="https://github.com/Houchen181/kelvin/releases/latest/download/Kelvin-Setup.exe"><b>⬇ Download Kelvin for Windows</b></a> (latest version, Windows 10/11)<br><a href="https://github.com/Houchen181/kelvin/releases/latest">macOS, and what's new</a></p>
+<p align="center"><a href="https://github.com/Houchen181/kelvin/releases/download/private-latest/Kelvin-Setup-private.exe"><b>⬇ Download Kelvin for Windows</b></a> (the newest private build, Windows 10/11)<br><a href="https://github.com/Houchen181/kelvin/releases/latest">macOS</a> (the latest public release) · <a href="https://github.com/Houchen181/kelvin/releases">what's new</a></p>
 
 ---
 
@@ -55,8 +55,8 @@ Only people can change the lab config, the approval mode or which lab Kelvin con
 
 ## Get started
 
-- **Windows 10/11:** run [`Kelvin-Setup.exe`](https://github.com/Houchen181/kelvin/releases/latest/download/Kelvin-Setup.exe); no admin rights needed. It isn't code-signed yet: if Windows warns you, choose **More info → Run anyway**.
-- **macOS (Apple silicon):** move `Kelvin.app` from the [latest release](https://github.com/Houchen181/kelvin/releases/latest)'s zip to Applications. The first time, right-click it and choose **Open**.
+- **Windows 10/11:** run [`Kelvin-Setup-private.exe`](https://github.com/Houchen181/kelvin/releases/download/private-latest/Kelvin-Setup-private.exe), the newest private build; no admin rights needed. It isn't code-signed yet: if Windows warns you, choose **More info → Run anyway**.
+- **macOS (Apple silicon):** move `Kelvin.app` from the [latest public release](https://github.com/Houchen181/kelvin/releases/latest)'s zip to Applications (there is no private macOS build). The first time, right-click it and choose **Open**.
 
 Kelvin opens on a simulated lab with a demo model, so you can try it right away. Add an API key in Settings, or sign in with ChatGPT, to use a real model. It keeps itself up to date, replacing the installed copy, so there is only ever one Kelvin on a computer.
 
