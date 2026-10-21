@@ -14,10 +14,21 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 | Beyond limits, or a blocked command | Refused |
 
 - Raw strings are matched against the card. A raw string that sets a drive is treated as a drive. One that touches a drive's command family but can't be parsed is sent to a human. Blocked and reset families come from the card.
-- A plan is dry-run on twins first, approved once as a range, and then run.
+- A plan that drives the sample is dry-run on twins first, approved once as a range, and then run. A plan that only measures or configures runs at once: it can't harm the sample.
 - Stopping a plan (the Stop button, or the agent's own abort) runs its `on_abort` steps. By default, every drive the plan touched goes back to safe, or holds where the lab config's `safe_actions` says to hold. A guard trip sends that drive back to safe.
 - Approvals come from an `Approver`, a human-facing object the agent never sees.
 - An instrument whose card is a draft (no one has reviewed it yet) keeps its outputs simulation-only on real hardware, and every change to its settings asks a person, since its measure and drive tags are unchecked. Reading it is free.
+
+### Checked like an experiment, not tested like code
+
+Language models are trained largely on programming, where every step is tested and checked again. At the bench that only costs time, so Kelvin keeps the checks that protect the sample and drops the rest:
+- **Instruments are checked before use, not before every scan.** A run checks the instruments it uses: identity, error queue, readings, drives inside limits. An instrument that passed is not asked again for 10 minutes, so a series of scans or a queue doesn't stop to re-check. A plan that drives the sample always checks now, and an instrument whose run failed is checked again next time. **health_check** always checks.
+- **One dry run, where it matters.** Only plans that drive the sample are dry-run, once, inside the run itself. A queue is dry-run as a whole when it starts, not again scan by scan.
+- **The agent works like an experimentalist.** Its instructions tell it to:
+  - run a plan directly, with no separate validate or simulate first and no test or verification scans;
+  - not read a value again to confirm it, since every set and get reports what the instrument says;
+  - not try variations to get past a refusal or failure, but stop and say what happened;
+  - not write code or re-analyse data unless asked.
 
 ### Auto mode
 

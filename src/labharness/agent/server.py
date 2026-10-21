@@ -29,8 +29,9 @@ You are connected to a physics lab through Kelvin.
 - A person may switch on auto mode. Then drive changes and runs that stay well inside the lab's limits (and pass
   a clean dry run) go ahead without asking; lab_status says when it is on. Only a person can switch it.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. Do not try to work around a refusal; tell the user.
-- For sweeps, write a plan and call simulate_plan, then run_plan: one approval, dry run first, everything logged.
-  run_plan analyses the data itself; report its assessment and key numbers (with uncertainties) rather than raw rows.
+- For sweeps, write a plan and call run_plan directly. It checks the plan, health-checks the instruments it uses,
+  dry-runs it if it drives the sample, asks once for its drive ranges, runs, logs and analyses the data. Report its
+  assessment and key numbers (with uncertainties) rather than raw rows.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - Before an involved scan on a real instrument (buffers, triggering, sweep or list modes, fast acquisition, ranges,
   filters, settling), read its manual: instrument_info, then search_manual for the commands and their limits. Work
@@ -57,6 +58,20 @@ You are connected to a physics lab through Kelvin.
   (pasted, or read_examples on a file or folder the person names), read card_guide, and write the card from that
   text only. check_card until it is valid; try_card on the instrument (it only reads) and compare the readings with
   what the person sees; fix and try again; then save_card. A person adds it to the lab and reviews it.
+- Work like an experimentalist at the bench, not like a programmer testing code:
+  - One plan answers one question. Don't stage checks around it: no validate_plan or simulate_plan before run_plan
+    (use them only when the person asks what a plan would do or how long it takes), no test or verification scans,
+    no running the same plan again to make sure.
+  - set_value and get_value report the value read back, and a run reports its data and analysis: don't read values
+    again to confirm them.
+  - Check an instrument before you first use it, not before every step; health_check again only after an error or
+    an alarm.
+  - When a command or a run fails or is refused, don't try variations to get past it. Say what happened and what you
+    suggest, and let the person decide.
+  - Don't write code, scripts or tests, or re-analyse data in code, unless the person asks: use run_plan's analysis
+    and analyze.
+  - Plan the whole measurement, run it, report. A coarse scan before a fine one is good practice when it saves time;
+    the physics decides how many measurements there are, not a habit of testing.
 - Reply to the user briefly: the result first, then the next step."""
 
 READ = ToolAnnotations(readOnlyHint=True)
@@ -212,12 +227,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def health_check(instruments: Optional[List[str]] = None) -> str:
-        """Identity, error queue, sanity readings and drives inside limits, for all or some instruments."""
+        """Identity, error queue, sanity readings and drives inside limits, for all or some instruments. run_plan
+        already checks the instruments a plan uses; call this when one misbehaves, after an alarm, or when asked."""
         return rt.health(instruments)
 
     @server.tool(annotations=READ, structured_output=False)
     def validate_plan(plan: str) -> str:
-        """Check a plan (YAML text) and say what it would need approval for. Format:
+        """Check a plan (YAML text) without running it and say what it would need approval for: only when the person
+        asks (run_plan checks plans itself). Format:
         plan: name / preconditions: ["tc.T_sample < 2.5"] / setup: {instr.param: value} /
         sweep: {instr.param: {from, to, step} | {from, to, points} | {from, to, points, log: true} | {values: [...]},
                 plus optional back: true (there and back), settle: s,
@@ -229,13 +246,16 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def simulate_plan(plan: str) -> str:
-        """Dry-run a plan (YAML text) on a simulated copy of the lab. The real lab is not touched."""
+        """Dry-run a plan (YAML text) on a simulated copy of the lab, when the person asks what it would do or how
+        long it takes (run_plan dry-runs plans that drive the sample by itself). The real lab is not touched."""
         return rt.simulate(plan)
 
     @server.tool(annotations=ACT, structured_output=False)
     def run_plan(plan: str) -> str:
-        """Run a plan (YAML text): validate, health check, dry run, one human approval for its drive
-        ranges, run, log, then analyse automatically. Returns the assessment, key results and the run id."""
+        """Run a plan (YAML text): validate, health check (of instruments not checked in the last 10 minutes), a
+        dry run if it drives the sample, one human approval for its drive ranges, run, log, then analyse
+        automatically. Call it directly, without validate_plan or simulate_plan first. Returns the assessment, key
+        results and the run id."""
         return rt.run(plan)
 
     @server.tool(annotations=READ, structured_output=False)

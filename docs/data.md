@@ -4,7 +4,7 @@ How measurements are written, run and analysed, where the results are kept, and 
 
 ## Plans
 
-A plan is a short YAML file. The agent writes it, Kelvin dry-runs it on the twins, asks once for its drive ranges, runs it and records every point.
+A plan is a short YAML file. The agent writes it and runs it. Kelvin then checks the instruments it uses, dry-runs it on the twins if it drives the sample, asks once for its drive ranges, runs it and records every point.
 
 ```yaml
 plan: field_gate_map

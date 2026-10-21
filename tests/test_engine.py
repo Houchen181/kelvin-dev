@@ -242,3 +242,58 @@ def test_event_log_keeps_every_line_from_many_threads(tmp_path):
         t.join()
     lines = (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1600 and sorted(json.loads(l)["seq"] for l in lines) == list(range(1, 1601))
+
+
+MEASURE_ONLY = """
+plan: noise_check
+setup: { lockin.tc: 0.1 }
+repeat: 3
+measure: [lockin.X, tc.T_sample]
+"""
+
+
+def test_a_plan_that_only_measures_is_not_rehearsed(make_engine, monkeypatch):
+    """Measuring and configuring can't harm the sample, so such a plan runs at once; a plan that drives is still
+    dry-run first."""
+    engine, gate, approver = make_engine([True])
+    assert engine.drive_values(load_plan(MEASURE_ONLY)) == {}
+    rehearsed, real = [], engine.simulate
+    monkeypatch.setattr(engine, "simulate", lambda plan: rehearsed.append(1) or real(plan))
+    report = engine.run(MEASURE_ONLY)
+    assert report.ok, report.message
+    assert report.dry_run is None and rehearsed == [] and approver.requests == []
+    report = engine.run(GATE_SWEEP)
+    assert report.ok and report.dry_run is not None and rehearsed == [1]
+
+
+def test_instruments_are_checked_before_use_not_before_every_scan(lab, make_engine, monkeypatch):
+    from labharness import engine as engine_module
+    engine, gate, approver = make_engine([True])
+    checked, real = [], lab.health_check
+    monkeypatch.setattr(lab, "health_check", lambda names=None: checked.append(sorted(names or [])) or real(names))
+    assert engine.run(MEASURE_ONLY).ok and engine.run(MEASURE_ONLY).ok
+    assert checked == [["lockin", "tc"]]                                  # once, not again for the second scan
+    engine.preflight(["lockin"], fresh=True)                              # asked for: always checks
+    assert checked[-1] == ["lockin"]
+    monkeypatch.setattr(engine_module, "HEALTHY_FOR", -1.0)               # a while later: checked again
+    assert engine.run(MEASURE_ONLY).ok and checked[-1] == ["lockin", "tc"]
+    monkeypatch.setattr(engine_module, "HEALTHY_FOR", 600.0)
+    n = len(checked)
+    assert engine.run(GATE_SWEEP).ok                                     # a plan that drives always checks now
+    assert len(checked) == n + 1 and "smu" in checked[-1]
+
+
+def test_an_instrument_that_failed_is_checked_again(lab, make_engine):
+    engine, gate, approver = make_engine([])
+    assert engine.run(MEASURE_ONLY).ok
+    lab.instruments["lockin"].backend.fault = "offline"                  # it dies after its check
+    assert engine.run(MEASURE_ONLY).status != "done"                     # the scan just stops
+    report = engine.run(MEASURE_ONLY)
+    assert report.status == "refused" and "preflight failed: lockin FAIL" in report.message
+
+
+def test_the_agent_is_told_to_work_like_an_experimentalist():
+    pytest.importorskip("mcp")
+    from labharness.agent.server import INSTRUCTIONS
+    assert "not like a programmer" in INSTRUCTIONS and "call run_plan directly" in INSTRUCTIONS
+    assert "simulate_plan, then run_plan" not in INSTRUCTIONS

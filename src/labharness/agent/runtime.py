@@ -469,7 +469,8 @@ class LabRuntime:
         return declined
 
     def health(self, instruments: Optional[List[str]] = None) -> str:
-        return self._do("health check", lambda: "\n".join(str(r) for r in self.engine.preflight(instruments)))
+        return self._do("health check", lambda: "\n".join(
+            str(r) for r in self.engine.preflight(instruments, fresh=True)))   # asked for: always checks again
 
     def wait(self, seconds: float) -> str:
         seconds = max(0.0, min(float(seconds), MAX_WAIT_S))
@@ -939,7 +940,8 @@ class LabRuntime:
                     if item.kind == "plan":
                         plan = self._plan(item.text)
                         meta = self._attribute(plan, item.project, item.incognito, item.unshared, item.legacy)
-                        report = self.engine.run(plan, meta=dict(meta, queue={
+                        # Start dry-ran the whole queue in order for its one approval: not again for each scan
+                        report = self.engine.run(plan, dry_run=False, meta=dict(meta, queue={
                             "item": item.id, "position": position, "note": item.note}))
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():

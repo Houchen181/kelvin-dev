@@ -124,3 +124,15 @@ def test_queues_are_saved_and_loaded(tmp_path):
     assert "added 2 items from overnight" in rt.queue_load("overnight")
     assert [i.note for i in rt.queue.items] == ["first", ""]
     assert "overnight" in rt.queue_view()["saved"]
+
+
+def test_queued_scans_are_not_dry_run_again(tmp_path, monkeypatch):
+    """Start dry-runs the whole queue in order for its one approval; each scan then runs without another."""
+    rt = runtime(tmp_path, [True])
+    rt.queue_add(SWEEP)
+    rt.queue_add(FIELD)
+    rehearsed, real = [], rt.engine.simulate
+    monkeypatch.setattr(rt.engine, "simulate", lambda plan: rehearsed.append(1) or real(plan))
+    assert rt.queue_start().startswith("queue started")
+    rt._queue_thread.join(120)
+    assert [i.status for i in rt.queue.items] == ["done", "done"] and rehearsed == []

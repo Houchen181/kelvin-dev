@@ -17,6 +17,10 @@ from .eventlog import EventLog, RunStore
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
 from .plans import Plan, PlanError, Stabilize, Step, load_plan
 
+# An instrument that passed its health check is checked again only after this long (or after a run on it fails):
+# checked before it is used, as at the bench, not before every scan of a series or a queue.
+HEALTHY_FOR = 600.0
+
 
 class _Abort(Exception):
     pass
@@ -53,6 +57,7 @@ class RunEngine:
         # called with {"event": "start" | "point" | "end", ...} so a UI can follow a run live
         self.progress: Optional[Callable[[Dict[str, Any]], None]] = None
         self.analyze = True
+        self._healthy: Dict[str, float] = {}   # instrument -> when (monotonic) it last passed a health check
 
     def _emit(self, **event: Any) -> None:
         if self.progress is not None:
@@ -143,10 +148,22 @@ class RunEngine:
                 out.setdefault(key, []).append(value)
         return out
 
-    def preflight(self, names: Optional[List[str]] = None):
-        results = self.lab.health_check(names)
-        self.gate.log.write("preflight", by=self.gate.operator, ok=all(r.ok for r in results),
-                            results=[str(r) for r in results])
+    def preflight(self, names: Optional[List[str]] = None, fresh: bool = False):
+        """Health-check these instruments (all if none are named). One that passed within HEALTHY_FOR seconds is not
+        asked again unless fresh (a person's or the agent's own health check always asks)."""
+        wanted = list(names) if names else list(self.lab.instruments)
+        now = time.monotonic()
+        todo = wanted if fresh else [n for n in wanted if now - self._healthy.get(n, float("-inf")) > HEALTHY_FOR]
+        results = self.lab.health_check(todo) if todo else []
+        for r in results:
+            if r.ok:
+                self._healthy[r.instr] = now
+            else:
+                self._healthy.pop(r.instr, None)
+        if todo:
+            self.gate.log.write("preflight", by=self.gate.operator, ok=all(r.ok for r in results),
+                                results=[str(r) for r in results],
+                                recent=sorted(set(wanted) - set(todo)) or None)
         return results
 
     # ------------------------------------------------------------------ dry run and run
@@ -172,7 +189,10 @@ class RunEngine:
         errors = self.validate(plan)
         if errors:
             return self._refuse(plan.name, "plan invalid: " + "; ".join(errors[:5]))
-        bad = [r for r in self.preflight(plan.requires) if not r.ok]
+        drives = self.drive_values(plan)
+        # a plan that drives the sample always checks its instruments now; one that only measures trusts a check
+        # from the last HEALTHY_FOR seconds (if one has died since, its reading fails and the scan just stops)
+        bad = [r for r in self.preflight(plan.requires, fresh=bool(drives)) if not r.ok]
         if bad:
             return self._refuse(plan.name, "preflight failed: " + "; ".join(str(r) for r in bad))
         for cond in plan.preconditions:
@@ -181,11 +201,11 @@ class RunEngine:
                 _, spec = self.lab.resolve(cond.key)
                 return self._refuse(plan.name, "precondition %s not met (now %s)" % (cond.text, spec.show(actual)))
         sim = None
-        if dry_run:
+        if dry_run and drives:   # rehearse what drives the sample; measuring and configuring can't harm it
             sim = self.simulate(plan)
             if sim.status == "refused":
                 return self._refuse(plan.name, "refused by %s" % sim.message, sim)
-        items, grants, problems = self.gate.plan_approval(self.drive_values(plan))
+        items, grants, problems = self.gate.plan_approval(drives)
         if problems:
             return self._refuse(plan.name, "; ".join(problems), sim)
         if items:
@@ -205,6 +225,9 @@ class RunEngine:
                 return report
         report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta)
         report.dry_run = sim
+        if report.status != "done":   # something went wrong on them: check them again before the next run
+            for name in plan.requires:
+                self._healthy.pop(name, None)
         return report
 
     def _refuse(self, name: str, why: str, sim: Optional[RunReport] = None) -> RunReport:
