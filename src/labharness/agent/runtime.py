@@ -508,13 +508,13 @@ class LabRuntime:
             return "\n".join(lines)
         return self._do("dry run", run)
 
-    def run(self, plan_text: str) -> str:
+    def run(self, plan_text: str, dry_run: bool = False) -> str:
         def run() -> str:
             try:
                 plan = self._plan(plan_text)
             except PlanError as e:
                 return "invalid plan: %s" % e
-            report = self.engine.run(plan, meta=self._attribute(plan))
+            report = self.engine.run(plan, dry_run=dry_run, meta=self._attribute(plan))
             made = self._auto_report(report.run_id)
             if report.run_id:
                 summary = (report.analysis or {}).get("assessment") or report.message
@@ -839,9 +839,10 @@ class LabRuntime:
             twin.clock.sleep(step.wait)
         return twin.clock.now() - t0, problems
 
-    def queue_start(self, by: str = "agent") -> str:
-        """Check and dry-run every waiting item in order, ask a person once for every drive range, then run the
-        queue in the background. Returns at once after the approval; queue_show follows it."""
+    def queue_start(self, by: str = "agent", dry_run: bool = False) -> str:
+        """Check every waiting item, ask a person once for every drive range, then run the queue in the background.
+        With dry_run, the whole queue is first run in order on the simulated lab (for its time, or a person who
+        wants to see it). Returns at once after the approval; queue_show follows it."""
         with self.queue.lock:
             if self.queue.state in ("running", "pausing"):
                 return "the queue is already running\n" + self.queue.text()
@@ -861,17 +862,18 @@ class LabRuntime:
             lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
-            duration, failed = self._rehearse(items)
-            if failed:
-                return "the queue did not start; its dry run failed:\n" + "\n".join(failed[:8])
+            duration = None
+            if dry_run:
+                duration, failed = self._rehearse(items)
+                if failed:
+                    return "the queue did not start; its dry run failed:\n" + "\n".join(failed[:8])
             scans = sum(1 for i in items if i.kind == "plan")
             steps = len(items) - scans
-            title = "Run the queue: %d scan%s%s, ~%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
-                steps, "" if steps == 1 else "s") if steps else "", _dur(duration))
+            title = "Run the queue: %d scan%s%s%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
+                steps, "" if steps == 1 else "s") if steps else "", ", ~%s" % _dur(duration) if duration else "")
             if lines:
                 request = ApprovalRequest(title, lines + [
-                    "This approval covers every item now waiting. Each scan is still dry-run before it runs, and "
-                    "anything outside these ranges asks again."])
+                    "This approval covers every item now waiting; anything outside these ranges asks again."])
                 if not self.gate.ask(request):
                     note = " (%s)" % request.note if request.note else ""
                     self.gate.log.write("queue_declined", by=by)
@@ -879,7 +881,8 @@ class LabRuntime:
             with self.queue.lock:
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()
-            self.gate.log.write("queue_start", by=by, items=len(items), expected_s=round(duration))
+            self.gate.log.write("queue_start", by=by, items=len(items),
+                                expected_s=round(duration) if duration else None)
             self._queue_thread = threading.Thread(target=self._queue_loop, args=(grants, by), daemon=True,
                                                   name="kelvin-queue")
             self._queue_thread.start()
@@ -940,8 +943,7 @@ class LabRuntime:
                     if item.kind == "plan":
                         plan = self._plan(item.text)
                         meta = self._attribute(plan, item.project, item.incognito, item.unshared, item.legacy)
-                        # Start dry-ran the whole queue in order for its one approval: not again for each scan
-                        report = self.engine.run(plan, dry_run=False, meta=dict(meta, queue={
+                        report = self.engine.run(plan, meta=dict(meta, queue={
                             "item": item.id, "position": position, "note": item.note}))
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():

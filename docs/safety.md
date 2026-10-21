@@ -14,7 +14,7 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 | Beyond limits, or a blocked command | Refused |
 
 - Raw strings are matched against the card. A raw string that sets a drive is treated as a drive. One that touches a drive's command family but can't be parsed is sent to a human. Blocked and reset families come from the card.
-- A plan that drives the sample is dry-run on twins first, approved once as a range, and then run. A plan that only measures or configures runs at once: it can't harm the sample.
+- A plan is approved once as a range (if it drives the sample) and then run. Its caution comes from the limits, the approval, ramps and guard readings, so it isn't dry-run first. A dry run on twins is there when someone asks for one (`simulate_plan`, or `dry_run` on a run or a queue), and in auto mode (below).
 - Stopping a plan (the Stop button, or the agent's own abort) runs its `on_abort` steps. By default, every drive the plan touched goes back to safe, or holds where the lab config's `safe_actions` says to hold. A guard trip sends that drive back to safe.
 - Approvals come from an `Approver`, a human-facing object the agent never sees.
 - An instrument whose card is a draft (no one has reviewed it yet) keeps its outputs simulation-only on real hardware, and every change to its settings asks a person, since its measure and drive tags are unchecked. Reading it is free.
@@ -23,7 +23,7 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 
 Language models are trained largely on programming, where every step is tested and checked again. At the bench that only costs time, so Kelvin keeps the checks that protect the sample and drops the rest:
 - **Instruments are checked before use, not before every scan.** A run checks the instruments it uses: identity, error queue, readings, drives inside limits. An instrument that passed is not asked again for 10 minutes, so a series of scans or a queue doesn't stop to re-check. A plan that drives the sample always checks now, and an instrument whose run failed is checked again next time. **health_check** always checks.
-- **One dry run, where it matters.** Only plans that drive the sample are dry-run, once, inside the run itself. A queue is dry-run as a whole when it starts, not again scan by scan.
+- **No routine dry runs.** Not even a plan that drives the sample is dry-run on its own: what a dry run would predict, the limits, the approval and the guard readings catch on the real run, which goes back to safe if a guard trips. A dry run happens when the person or the agent asks for one, for instance to see how long a long plan or a queue takes, and in auto mode, where no person looks at the run.
 - **The agent works like an experimentalist.** Its instructions tell it to:
   - run a plan directly, with no separate validate or simulate first and no test or verification scans;
   - not read a value again to confirm it, since every set and get reports what the instrument says;
@@ -37,7 +37,7 @@ A person can switch approvals from **Ask before drive changes** to **Auto for lo
 In auto mode, a drive change or a run goes ahead without asking when all of these hold:
 - Every drive stays within `auto_fraction` (default 25%) of the way from its safe value to its lab limit. Kelvin judges the target's distance from safe, not the step size, so creeping up in small steps doesn't get around the rule.
 - Switches (outputs, ranges) move at most one step from safe.
-- For a run, the dry run finishes cleanly.
+- For a run, its dry run finishes cleanly. In auto mode a run is dry-run first, since no person looks at it.
 - The lab config doesn't exclude the instrument.
 
 Anything else asks as usual, and the request says why auto mode didn't cover it. Each auto-approval shows in the conversation with its reasons and is written to the event log. Limits, interlocks, guard readings and Stop work the same in both modes.

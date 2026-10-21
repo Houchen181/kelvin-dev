@@ -90,7 +90,7 @@ def test_a_failure_pauses_the_queue_and_leaves_the_rest_waiting(tmp_path):
 def test_the_queue_refuses_to_start_when_its_dry_run_fails(tmp_path):
     rt = runtime(tmp_path, [])
     rt.queue.add(SWEEP.replace("plan: gate_sweep", "plan: cold_only\npreconditions: [\"magnet.B > 5\"]"))
-    out = rt.queue_start()
+    out = rt.queue_start(dry_run=True)                          # a dry run, because asked for
     assert out.startswith("the queue did not start") and "precondition" in out and rt.queue.state == "idle"
 
 
@@ -126,13 +126,14 @@ def test_queues_are_saved_and_loaded(tmp_path):
     assert "overnight" in rt.queue_view()["saved"]
 
 
-def test_queued_scans_are_not_dry_run_again(tmp_path, monkeypatch):
-    """Start dry-runs the whole queue in order for its one approval; each scan then runs without another."""
+def test_a_queue_is_not_dry_run_unless_asked(tmp_path, monkeypatch):
+    """One approval for the whole queue, from its plans' drive ranges; no dry run of the queue or of its scans."""
     rt = runtime(tmp_path, [True])
     rt.queue_add(SWEEP)
     rt.queue_add(FIELD)
-    rehearsed, real = [], rt.engine.simulate
-    monkeypatch.setattr(rt.engine, "simulate", lambda plan: rehearsed.append(1) or real(plan))
+    rehearsed, real_sim, real_queue = [], rt.engine.simulate, rt._rehearse
+    monkeypatch.setattr(rt.engine, "simulate", lambda plan: rehearsed.append("scan") or real_sim(plan))
+    monkeypatch.setattr(rt, "_rehearse", lambda items: rehearsed.append("queue") or real_queue(items))
     assert rt.queue_start().startswith("queue started")
     rt._queue_thread.join(120)
     assert [i.status for i in rt.queue.items] == ["done", "done"] and rehearsed == []

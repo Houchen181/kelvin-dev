@@ -82,7 +82,7 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/scpi.py` | SCPI command templates (short/long forms, optional nodes, compound commands) |
 | `src/labharness/labconfig.py` | Lab config (lab limits, rates, guards, interlocks, trust) and project envelopes |
 | `src/labharness/gate.py` | The safety gate |
-| `src/labharness/plans.py`, `engine.py` | Plan format; validate → preflight (reused for 10 min for measuring plans) → dry run (plans that drive) → approve → run → log |
+| `src/labharness/plans.py`, `engine.py` | Plan format; validate → preflight (reused for 10 min for measuring plans) → approve → run → log; a dry run only when asked or in auto mode |
 | `src/labharness/reports/` | Reports: gathering runs and the log (`collect.py`), shared plot layout (`chart.py`), the PDF and PowerPoint writers |
 | `src/labharness/web/remote.py`, `qr.py`, `static/mobile.*` | Phone access: pairing, device roles, the network listener, QR codes, the phone page |
 | `src/labharness/monitor.py`, `notify.py` | Watches and alarms on a background thread; in-app notices and the optional webhook |

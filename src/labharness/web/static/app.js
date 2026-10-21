@@ -2692,7 +2692,7 @@
     example.addEventListener("click", () => { $("queue-text").value = QUEUE_STEP; $("queue-text").focus(); });
     add.addEventListener("click", queueAddOrSave);
     $("queue-start").addEventListener("click", async () => {
-      $("queue-msg").textContent = "Checking and dry-running every waiting item… then approve the queue once.";
+      $("queue-msg").textContent = "Checking every waiting item… then approve the queue once.";
       $("queue-start").disabled = true;
       await queueOp({ op: "start" });
       $("queue-start").disabled = false;

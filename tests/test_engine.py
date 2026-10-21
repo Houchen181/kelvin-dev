@@ -53,7 +53,7 @@ def test_dry_run_leaves_the_lab_untouched(lab, make_engine):
 def test_dry_run_predicts_a_trip_and_the_real_run_aborts_safely(lab, make_engine):
     engine, gate, approver = make_engine([True])
     plan = GATE_SWEEP.replace("to: 5", "to: 14")
-    report = engine.run(plan)
+    report = engine.run(plan, dry_run=True)                  # asked for a dry run
     assert "tripped" in str(approver.requests[0])           # the human saw the predicted trip
     assert report.status == "aborted" and "tripped" in report.message
     assert lab.read("smu", "V") == 0 and lab.read("smu", "output") is False
@@ -252,18 +252,32 @@ measure: [lockin.X, tc.T_sample]
 """
 
 
-def test_a_plan_that_only_measures_is_not_rehearsed(make_engine, monkeypatch):
-    """Measuring and configuring can't harm the sample, so such a plan runs at once; a plan that drives is still
-    dry-run first."""
-    engine, gate, approver = make_engine([True])
+def test_no_plan_is_dry_run_unless_asked(lab, make_engine, monkeypatch):
+    """Not even one that drives the sample: its caution is the limits, one approval, ramps and guard readings. A dry
+    run happens when asked, and in auto mode, where nobody approves and the dry run stands in for the person's look."""
+    engine, gate, approver = make_engine([True, True, True])
     assert engine.drive_values(load_plan(MEASURE_ONLY)) == {}
     rehearsed, real = [], engine.simulate
     monkeypatch.setattr(engine, "simulate", lambda plan: rehearsed.append(1) or real(plan))
     report = engine.run(MEASURE_ONLY)
-    assert report.ok, report.message
-    assert report.dry_run is None and rehearsed == [] and approver.requests == []
+    assert report.ok and report.dry_run is None and approver.requests == []
     report = engine.run(GATE_SWEEP)
+    assert report.ok, report.message
+    assert report.dry_run is None and rehearsed == [] and len(approver.requests) == 1   # one approval, no rehearsal
+    assert "21 points" in str(approver.requests[0])
+    report = engine.run(GATE_SWEEP, dry_run=True)
     assert report.ok and report.dry_run is not None and rehearsed == [1]
+    gate.auto = True
+    engine.run(GATE_SWEEP)
+    assert rehearsed == [1, 1]
+
+
+def test_without_a_dry_run_a_trip_still_ends_safely(lab, make_engine):
+    """What a dry run would have predicted, the guard readings catch on the real run."""
+    engine, gate, approver = make_engine([True])
+    report = engine.run(GATE_SWEEP.replace("to: 5", "to: 14"))
+    assert report.status == "aborted" and "tripped" in report.message and report.dry_run is None
+    assert lab.read("smu", "V") == 0 and lab.read("smu", "output") is False
 
 
 def test_instruments_are_checked_before_use_not_before_every_scan(lab, make_engine, monkeypatch):
@@ -296,4 +310,4 @@ def test_the_agent_is_told_to_work_like_an_experimentalist():
     pytest.importorskip("mcp")
     from labharness.agent.server import INSTRUCTIONS
     assert "not like a programmer" in INSTRUCTIONS and "call run_plan directly" in INSTRUCTIONS
-    assert "simulate_plan, then run_plan" not in INSTRUCTIONS
+    assert "simulate_plan, then run_plan" not in INSTRUCTIONS and "not a routine" in INSTRUCTIONS

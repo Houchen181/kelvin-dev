@@ -181,7 +181,10 @@ class RunEngine:
         report.message = "dry run: " + report.message
         return report
 
-    def run(self, plan: Any, dry_run: bool = True, meta: Optional[Dict[str, Any]] = None) -> RunReport:
+    def run(self, plan: Any, dry_run: bool = False, meta: Optional[Dict[str, Any]] = None) -> RunReport:
+        """Validate, check the instruments, ask once for the drive ranges, run, log, analyse. No dry run unless asked
+        (dry_run), or in auto mode for a run nobody approves: there the dry run stands in for the person's look.
+        Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal."""
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan)
         except PlanError as e:
@@ -200,14 +203,14 @@ class RunEngine:
             if not ok:
                 _, spec = self.lab.resolve(cond.key)
                 return self._refuse(plan.name, "precondition %s not met (now %s)" % (cond.text, spec.show(actual)))
+        items, grants, problems = self.gate.plan_approval(drives)
+        if problems:
+            return self._refuse(plan.name, "; ".join(problems))
         sim = None
-        if dry_run and drives:   # rehearse what drives the sample; measuring and configuring can't harm it
+        if dry_run or (items and self.gate.auto):
             sim = self.simulate(plan)
             if sim.status == "refused":
                 return self._refuse(plan.name, "refused by %s" % sim.message, sim)
-        items, grants, problems = self.gate.plan_approval(drives)
-        if problems:
-            return self._refuse(plan.name, "; ".join(problems), sim)
         if items:
             title = "Run plan %s: %d points" % (plan.name, plan.points)
             if sim is not None:

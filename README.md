@@ -9,13 +9,12 @@
 
 ---
 
-You ask in plain words. Kelvin turns the request into a measurement plan for your instruments, rehearses it on simulated copies of them, asks you before anything drives the sample harder, runs it, and fits the result. Every command and approval is logged.
+You ask in plain words. Kelvin turns the request into a measurement plan for your instruments, asks you before anything drives the sample harder, runs it, and fits the result. It works like an experimentalist, not a programmer: no staged checks, test runs or code unless you ask (it can still rehearse a plan on simulated copies of the instruments when you want). Every command and approval is logged.
 
 ```text
 You     Sweep the gate from 0 to 5 V and record the lock-in signal.
 Kelvin  Plan gate_sweep: smu.V from 0 to 5 V in 0.1 V steps; read lockin.X and smu.I; back to 0 V after.
-        Dry run on the simulated instruments: fine, 51 points, about 40 s.
-        Approve?  smu.output off → on,  smu.V 0 → 5 V (your limit ±10 V), ramped.
+        Approve?  51 points.  smu.output off → on,  smu.V 0 → 5 V (your limit ±10 V), ramped.
 You     Approve
 Kelvin  Done. lockin.X has a peak at 2.41 ± 0.02 V, FWHM 0.38 ± 0.05 V.
         Plot, data and fit in runs/20261018-153012-gate_sweep/

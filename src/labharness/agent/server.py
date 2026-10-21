@@ -30,8 +30,9 @@ You are connected to a physics lab through Kelvin.
   a clean dry run) go ahead without asking; lab_status says when it is on. Only a person can switch it.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. Do not try to work around a refusal; tell the user.
 - For sweeps, write a plan and call run_plan directly. It checks the plan, health-checks the instruments it uses,
-  dry-runs it if it drives the sample, asks once for its drive ranges, runs, logs and analyses the data. Report its
-  assessment and key numbers (with uncertainties) rather than raw rows.
+  asks once for its drive ranges, runs, logs and analyses the data. Report its assessment and key numbers (with
+  uncertainties) rather than raw rows. A dry run (simulate_plan, or run_plan with dry_run: true) is not a routine
+  step, even for a plan that drives: only when the person asks, or to estimate how long a long plan takes.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - Before an involved scan on a real instrument (buffers, triggering, sweep or list modes, fast acquisition, ranges,
   filters, settling), read its manual: instrument_info, then search_manual for the commands and their limits. Work
@@ -251,12 +252,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.simulate(plan)
 
     @server.tool(annotations=ACT, structured_output=False)
-    def run_plan(plan: str) -> str:
-        """Run a plan (YAML text): validate, health check (of instruments not checked in the last 10 minutes), a
-        dry run if it drives the sample, one human approval for its drive ranges, run, log, then analyse
-        automatically. Call it directly, without validate_plan or simulate_plan first. Returns the assessment, key
-        results and the run id."""
-        return rt.run(plan)
+    def run_plan(plan: str, dry_run: bool = False) -> str:
+        """Run a plan (YAML text): validate, health check (of instruments not checked in the last 10 minutes), one
+        human approval for its drive ranges, run, log, then analyse automatically. Call it directly, without
+        validate_plan or simulate_plan first. dry_run: true runs it on the simulated lab first (only when the person
+        asks, or to show how long it takes). Returns the assessment, key results and the run id."""
+        return rt.run(plan, dry_run=bool(dry_run))
 
     @server.tool(annotations=READ, structured_output=False)
     def queue_show() -> str:
@@ -283,10 +284,11 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.queue_change(action, item, position)
 
     @server.tool(annotations=ACT, structured_output=False)
-    def queue_start() -> str:
-        """Start the queue: check every waiting item, dry-run them all in order on the simulated lab, ask a person
-        once for every drive range they use, then run them one after another in the background."""
-        return rt.queue_start()
+    def queue_start(dry_run: bool = False) -> str:
+        """Start the queue: check every waiting item, ask a person once for every drive range they use, then run
+        them one after another in the background. dry_run: true first runs the whole queue in order on the simulated
+        lab (only when the person asks, or to say how long it takes)."""
+        return rt.queue_start(dry_run=bool(dry_run))
 
     @server.tool(annotations=ACT, structured_output=False)
     def queue_pause() -> str:
