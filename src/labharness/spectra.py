@@ -145,7 +145,7 @@ _shamrock_users = [0]   # spectrographs open: the library is initialized once fo
 
 def load_shamrock() -> Any:
     """Andor's spectrograph library, from Solis or the Andor SDK (or wherever Windows finds it), its calls declared."""
-    if sys.platform != "win32":
+    if sys.platform != "win32" or not hasattr(ctypes, "WinDLL"):
         raise AdapterError("Andor's spectrograph library runs on Windows")
     bits = "64" if ctypes.sizeof(ctypes.c_void_p) == 8 else "32"
     folders = [os.path.join(os.environ.get(v, ""), sub) for v in ("ProgramFiles", "ProgramFiles(x86)")
@@ -263,7 +263,7 @@ def discover_shamrock(module: Any = None) -> List[Tuple[str, str]]:
         return []
     try:
         lib = module if module is not None else load_shamrock()
-    except AdapterError:
+    except Exception:   # not installed here (or not Windows): nothing to list
         return []
     try:
         if lib.ShamrockInitialize(b"") != SHAMROCK_OK:

@@ -68,7 +68,7 @@ class AvailableData(ctypes.Structure):
 
 def load_picam() -> Any:
     """Picam.dll from PICam's runtime folder (or wherever Windows finds it), its functions declared."""
-    if sys.platform != "win32":
+    if sys.platform != "win32" or not hasattr(ctypes, "WinDLL"):
         raise AdapterError("PICam (Princeton Instruments cameras) runs on Windows")
     folders = [os.path.join(os.environ.get(v, ""), RUNTIME) for v in ("ProgramFiles", "ProgramFiles(x86)")]
     for f in folders:
@@ -266,7 +266,7 @@ def discover_picam(module: Any = None) -> List[Tuple[str, str]]:
         return []
     try:
         lib = module if module is not None else load_picam()
-    except AdapterError:
+    except Exception:   # not installed here (or not Windows): nothing to list
         return []
     try:
         if lib.Picam_InitializeLibrary() != 0:
