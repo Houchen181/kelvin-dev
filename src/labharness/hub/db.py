@@ -65,6 +65,7 @@ DEFAULTS: Dict[str, Any] = {
     "base_url": "http://127.0.0.1:8780",
     "consent_version": CONSENT_VERSION,
     "require_confirmed_email": False,   # True once mail works: unconfirmed people can sign in but not connect a Kelvin
+    "sharing": False,                   # labs, connected Kelvins and shared work; off: Kelvin accounts only
     "max_file_mb": 200,
     "quota_gb_per_user": 5,
     "backups_kept": 30,
@@ -1405,13 +1406,38 @@ class Hub:
         stats["last_backup"] = backups[-1].name if backups else None
         return stats
 
+    @property
+    def sharing(self) -> bool:
+        """Do people's Kelvins share work into labs here? Off (the default), the hub keeps Kelvin accounts only."""
+        return bool(self.config.get("sharing"))
+
+    @staticmethod
+    def _like(query: Any) -> str:
+        return "%%%s%%" % str(query or "").strip().replace("%", "").replace("_", "")
+
     def find_users(self, query: Any = "", limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-        like = "%%%s%%" % str(query or "").strip().replace("%", "").replace("_", "")
+        """People for the operator, newest first, each with their labs, the computers they are signed in on and the
+        Kelvin version they used last."""
+        like = self._like(query)
         with self.connect() as con:
-            rows = con.execute("SELECT u.*, (SELECT COUNT(*) FROM lab_members m WHERE m.user_id = u.id) AS labs"
+            rows = con.execute("SELECT u.*, (SELECT COUNT(*) FROM lab_members m WHERE m.user_id = u.id) AS labs,"
+                               " (SELECT COUNT(*) FROM tokens t WHERE t.user_id = u.id AND t.kind = 'app') AS computers,"
+                               " (SELECT i.version FROM tokens t JOIN installations i ON i.id = t.installation_id"
+                               "  WHERE t.user_id = u.id AND t.kind = 'app' ORDER BY t.last_used DESC LIMIT 1) AS kelvin"
                                " FROM users u WHERE u.email LIKE ? OR u.name LIKE ? ORDER BY u.created_at DESC"
                                " LIMIT ? OFFSET ?", (like, like, limit, offset)).fetchall()
-        return [dict(_public(r), labs=r["labs"]) for r in rows]
+        return [dict(_public(r), labs=r["labs"], computers=r["computers"], kelvin=r["kelvin"] or "") for r in rows]
+
+    def count_users(self, query: Any = "") -> int:
+        like = self._like(query)
+        with self.connect() as con:
+            return con.execute("SELECT COUNT(*) FROM users WHERE email LIKE ? OR name LIKE ?", (like, like)).fetchone()[0]
+
+    def activity_of(self, user_id: int, n: int = 200) -> List[Dict[str, Any]]:
+        """The hub's record of one account, newest first."""
+        with self.connect() as con:
+            return [dict(r) for r in con.execute("SELECT * FROM audit WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                                                 (user_id, n))]
 
     def set_disabled(self, user_id: int, disabled: bool, ip: Optional[str] = None) -> None:
         with self.connect() as con:

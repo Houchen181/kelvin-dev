@@ -1,8 +1,14 @@
 # The Kelvin hub
 
-The hub is one server for Kelvin users in every lab. It keeps everyone's **Kelvin account**: one email and password that signs a person in to Kelvin on every computer ([portal.md](portal.md#kelvin-accounts-one-account-every-computer)). The operator page lists everyone. It is built for a few thousand people (about 5,000): one SQLite file, with run files on disk.
+The hub is the Kelvin team's server for **Kelvin accounts**: one email and password that signs a person in to Kelvin on every computer ([portal.md](portal.md#kelvin-accounts-one-account-every-computer)). It is the owners' tool, not a place for users: the **owner console** (`/admin`) shows everyone's account, the computers each signs in on, and what happened to it. It is built for a few thousand people (about 5,000): one SQLite file.
 
-The hub can also keep people's shared work: they join their labs and connect each Kelvin they use, which then shares their work there with their labmates. **That is switched off for now** (`HUB_SHARING = False` in `web/app.py`): Kelvin uses the hub only to sign people in.
+**What users see:** only what an account needs. That is creating one (in Kelvin, or on the hub), the email confirmation and password reset links, and a short account page: name and ORCID iD, password, export and delete. The hub keeps no one's work, and no user sees another.
+
+**Sharing, switched off:** the hub can also keep people's shared work: labs with join codes, Kelvins connected to share into them, shared projects, chats and runs. That is built and tested but off, on both sides:
+- On the hub, `"sharing": false` in `hub.json` (the default). Those pages and API calls answer 404, and the account page and owner console leave them out.
+- In Kelvin, `HUB_SHARING = False` in `web/app.py`.
+
+The sections below on sharing describe it for when it is switched on.
 
 **Status:**
 - **Built and tested:** the server, its database, a Kelvin's client (`hub/client.py`), Kelvin's sign-in with Kelvin accounts (`central.py`), and sharing (Settings → **Account** → Kelvin hub, and syncing in the background: `web/hubsync.py`; switched off).
@@ -158,9 +164,16 @@ The hub's folder:
 
 **Backups:** the daily copy covers the database only. Back up `files/` with the rest of the machine.
 
-## The operator page
+## The owner console
 
-`/admin` asks for the operator key. It is the Kelvin team's, not an account or a role. The page shows the counts, finds people by name or email, disables and re-enables accounts (a disabled account can't sign in, and its Kelvins are disconnected), shows the recent activity, and backs up the database. `GET /api/admin/stats` with an `X-Operator-Key` header gives the counts as JSON.
+`/admin` asks for the operator key. It is the Kelvin team's, not an account or a role. No user sees any of this.
+- **The hub:** people, confirmed, disabled, active in 30 days, computers, sign-ins, the database's size and the last backup. **Back up the database now** makes a backup at once.
+- **People:** everyone, newest first, 200 to a page (**Older** and **Newer**), and searchable by name or email. Each row shows whether the email is confirmed, how many computers the person is signed in on, the Kelvin version they last used, when they joined and when they were last seen. **Disable** stops an account from signing in and ends its sign-ins on every computer; **Enable** undoes it.
+- **Download everyone (CSV):** `kelvin-people.csv`, one row per person: id, name, email, ORCID iD, email confirmed, joined, last seen, disabled, computers, Kelvin version, terms agreed. It never includes a password or its hash.
+- **A person's page** (`/admin/users/<id>`, from their name): the account, the computers they sign in to Kelvin on (name, system, Kelvin version, first sign-in, last used), and the hub's record of the account (sign-ins, changes, resets, with IP addresses), newest first.
+- **Recent activity:** the last 60 entries of the hub's record, each linked to its account.
+
+`GET /api/admin/stats` with an `X-Operator-Key` header gives the counts as JSON.
 
 ## Putting it online
 

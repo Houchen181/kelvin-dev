@@ -73,6 +73,7 @@ def through(client, calls=None):
 def the_hub(tmp_path, email="ada@example.org", lab="Smith Lab"):
     """The hub, and the person's browser on it: registered, signed in, in a lab."""
     hub = Hub(tmp_path / "hub")
+    hub.config["sharing"] = True
     browser = TestClient(hub_app(hub, hosts=["testserver"], backups=False))
     r = browser.post("/register", data={"name": email.split("@")[0].title(), "email": email,
                                         "password": "correct horse", "consent": "yes"}, follow_redirects=False)
