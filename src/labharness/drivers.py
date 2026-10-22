@@ -668,6 +668,25 @@ LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc
          "anc300": ("positioners", "ANC300"), "anc350": ("positioners", "ANC350")}   # they import this module
 
 
+LIBRARIES = (("nidaqmx", "nidaqmx.system"), ("seabreeze", "seabreeze.spectrometers"), ("pypylon", "pypylon.pylon"),
+             ("pylablib", "pylablib.devices.Attocube"), ("pylablib Andor", "pylablib.devices.Andor"))
+
+
+def instrument_libraries(problems: Optional[Dict[str, str]] = None) -> List[str]:
+    """The makers' Python libraries this Kelvin can load (the private app build brings them); why the others don't
+    go to `problems`."""
+    import importlib
+    out = []
+    for name, module in LIBRARIES:
+        try:
+            importlib.import_module(module)
+            out.append(name)
+        except Exception as e:
+            if problems is not None:
+                problems[name] = "%s: %s" % (type(e).__name__, str(e).splitlines()[0][:160] if str(e) else "")
+    return out
+
+
 def discover_libraries() -> List[Tuple[str, str]]:
     """(address, identity) of the instruments behind the vendor libraries installed here: NI DAQ cards, Ocean
     spectrometers, Andor spectrographs and sCMOS cameras, Basler cameras, attocube ANC350s. Each library only lists

@@ -32,6 +32,13 @@ PACKAGES = [
     ("zeroconf", "zeroconf", ()),                  # network instruments: mDNS (LXI) adverts
     ("ifaddr", "ifaddr", ()),
     ("pypdf", "pypdf", ()),                        # reading instrument manuals
+    # the makers' instrument libraries: only the private build installs them (release.yml); skipped otherwise
+    ("nidaqmx", "nidaqmx", ()),                    # NI DAQ cards (NI-DAQmx itself is NI's installer)
+    ("seabreeze", "seabreeze", ()),                # Ocean Insight spectrometers
+    ("pypylon", "pypylon", ()),                    # Basler cameras, with the pylon runtime
+    ("pylablib.devices.Attocube", "pylablib", ()), # attocube ANC300 / ANC350
+    ("pylablib.devices.Andor", "pylablib", ()),    # Andor Shamrock / Kymera spectrographs
+    ("pylablib.core", "pylablib", ()),
 ]
 if sys.platform == "win32":
     PACKAGES += [("clr_loader", "clr_loader", ()), ("pythonnet", "pythonnet", ())]
@@ -47,7 +54,8 @@ for package, dist, skip in PACKAGES:
         print("skipping", package, e)
         continue
     try:
-        datas += copy_metadata(dist)
+        # the makers' libraries look up their dependencies by metadata (nidaqmx: nitypes...), so bring theirs too
+        datas += copy_metadata(dist, recursive=dist in ("nidaqmx", "seabreeze", "pylablib"))
     except Exception:
         pass
 

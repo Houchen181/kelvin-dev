@@ -211,6 +211,7 @@ def discover_shamrock(module: Any = None) -> List[Tuple[str, str]]:
         except Exception:
             return []
     try:
-        return [("shamrock://%d" % i, "Andor,Shamrock,%d" % i) for i in range(module.get_spectrographs_number())]
+        count = getattr(module, "get_shamrock_spectrographs_number", None) or module.get_spectrographs_number
+        return [("shamrock://%d" % i, "Andor,Shamrock,%d" % i) for i in range(int(count()))]
     except Exception:
         return []
