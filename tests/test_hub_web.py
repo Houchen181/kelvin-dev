@@ -464,6 +464,8 @@ def test_kelvin_signs_in_with_its_own_api(tmp_path):
     ada = {"name": "Ada", "email": "ada@example.org", "password": "correct horse", "installation": kelvin}
     r = client.post("/api/register", json=ada)
     assert r.status_code == 400 and "terms" in r.json()["error"]              # consent is required
+    r = client.post("/api/signin", json={"email": "a@b.org", "password": "x", "installation": {"installation": "u"}})
+    assert r.status_code == 400 and '"installation": {"id"' in r.json()["error"]   # says what shape it wants
     r = client.post("/api/register", json=dict(ada, consent=True))
     assert r.status_code == 200 and r.json()["access_token"].startswith("khub_")
     assert r.json()["user"] == {"name": "Ada", "email": "ada@example.org", "email_confirmed": False}

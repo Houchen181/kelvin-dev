@@ -889,7 +889,12 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         return body
 
     def kelvin_of(body: Dict[str, Any]) -> Dict[str, str]:
+        """The JSON API's {"installation": {"id", "name", "platform", "version"}} (/connect's query has the id as
+        installation=, the rest beside it)."""
         i = body.get("installation") if isinstance(body.get("installation"), dict) else {}
+        if not i.get("id"):
+            raise HubError("Kelvin didn't say which installation it is: send \"installation\": {\"id\", \"name\", "
+                           "\"platform\", \"version\"}.")
         return installation({"installation": i.get("id"), "name": i.get("name"), "platform": i.get("platform"),
                              "version": i.get("version")})
 

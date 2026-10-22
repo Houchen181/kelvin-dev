@@ -51,6 +51,7 @@ The hub can also keep people's shared work: they join their labs and connect eac
 Kelvin's sign-in screen talks to the hub with JSON (`central.py`; routes `api_signin`, `api_register`, `api_reset` and `api_password` in `hub/server.py`):
 
 - **`POST /api/signin`** `{email, password, installation: {id, name, platform, version}}` returns `{access_token, user: {name, email, email_confirmed}, needs_consent, account_url}`.
+  - **The installation's shape:** an object whose `id` is the Kelvin's installation id, for example `{"id": "urn:uuid:…", "name": "Lab PC", "platform": "win32", "version": "0.3.12"}`. This differs from `/connect`, whose query sends the id as `installation=`. Without an `id` the hub answers 400.
   - **The token:** one per account and installation; signing in again replaces it. Kelvin keeps it in the person's settings, encrypted with their password, to change the password later.
   - **The installation** is recorded as a connected Kelvin, without a lab, so the account page lists the computers.
   - **Limits:** a wrong password is 401, and counts toward the same limits as the sign-in page (10 per email or address in 15 minutes, then 429). A disabled account is 403. So is an unconfirmed one, once `require_confirmed_email` is on.
