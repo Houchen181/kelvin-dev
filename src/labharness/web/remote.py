@@ -26,9 +26,10 @@ ROLES = ("watch", "control")
 CODE_TTL = 600
 MAX_FAILURES = 5          # wrong codes within FAILURE_WINDOW lock pairing
 FAILURE_WINDOW = 600
+API = 1                   # what the Kelvin phone app can count on; raise it when a route it uses changes
 
 # What a paired device may do. Anything not listed is for this computer only.
-_WATCH = [("GET", r"/api/(state|live|me|runs|runs/[^/]+)"),
+_WATCH = [("GET", r"/api/(state|live|me|runs|runs/[^/]+|runs/[^/]+/files/[^/]+)"),
           ("POST", r"/api/(stop|runs/stop|alarms/[^/]+/ack|approvals/[^/]+|me/forget)")]
 _CONTROL = _WATCH + [
     ("GET", r"/api/(bootstrap|chats|chats/[^/]+|projects|projects/[^/]+|memory|settings|lab|mode|watches|reports"

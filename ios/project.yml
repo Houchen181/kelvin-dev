@@ -1,0 +1,88 @@
+# The Kelvin iPhone app: a remote for Kelvin on a lab computer. Generate the Xcode project on a Mac with
+#   brew install xcodegen && cd ios && xcodegen generate && open Kelvin.xcodeproj
+# (Kelvin.xcodeproj and Support/Info.plist are generated; edit this file instead.)
+name: Kelvin
+options:
+  bundleIdPrefix: io.github.houchen181
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""          # your Apple team id, for a phone or TestFlight
+packages:
+  KelvinKit:
+    path: KelvinKit
+targets:
+  Kelvin:
+    type: application
+    platform: iOS
+    sources:
+      - path: Kelvin
+    dependencies:
+      - package: KelvinKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.houchen181.kelvin
+        PRODUCT_NAME: Kelvin
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: Support/Info.plist
+      properties:
+        CFBundleDisplayName: Kelvin
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSCameraUsageDescription: Kelvin scans the pairing code that the Kelvin computer shows.
+        NSLocalNetworkUsageDescription: Kelvin connects to the Kelvin computer in your lab over the local network.
+        # Kelvin's phone listener speaks plain http on the lab network or inside Tailscale (which encrypts it).
+        # iOS 17 and later need these to reach an IP address: local networking for the lab, Tailscale's range and names.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSExceptionDomains:
+            100.64.0.0/10:
+              NSExceptionAllowsInsecureHTTPLoads: true
+            ts.net:
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: true
+        ITSAppUsesNonExemptEncryption: false
+  KelvinTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: KelvinTests
+    dependencies:
+      - target: Kelvin
+      - package: KelvinKit
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.houchen181.kelvin.tests
+schemes:
+  Kelvin:
+    build:
+      targets:
+        Kelvin: all
+        KelvinTests: [test]
+    test:
+      targets:
+        - KelvinTests
+      gatherCoverageData: false

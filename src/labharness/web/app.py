@@ -10,6 +10,7 @@ import asyncio
 import hmac
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -23,6 +24,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from .._version import __version__
 from ..accounts import Accounts, cipher_for, has_legacy
 from ..agent.approval import WebApprover
 from ..agent.runtime import LabRuntime
@@ -42,7 +44,7 @@ from . import review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
 from .qr import QR
-from .remote import ROLES, Remote, addresses, allowed, remote_host_ok
+from .remote import API as PHONE_API, ROLES, Remote, addresses, allowed, remote_host_ok
 from .providers.base import Provider
 from .settings import Settings
 from .store import ChatStore
@@ -1072,7 +1074,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def me(request: Request) -> Response:
         k = request.scope.get("kelvin") or {}
         d = k.get("device") or {}
-        return JSONResponse({"role": k.get("role") or "owner", "name": d.get("name"), "lab": runtime.lab.config.name})
+        out = {"role": k.get("role") or "owner", "name": d.get("name"), "lab": runtime.lab.config.name}
+        if d:   # for the Kelvin phone app: which computer this is, and its other addresses (Tailscale away from the lab)
+            out.update(computer=socket.gethostname(), version=__version__, api=PHONE_API,
+                       addresses=[a["url"] for a in addresses(remote.port)] if remote.port else [])
+        return JSONResponse(out)
 
     # ------------------------------------------------------------------ reports
 

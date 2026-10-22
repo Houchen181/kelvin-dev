@@ -120,7 +120,11 @@ def test_pairing_and_roles(app):
         assert phone.post("/api/pair", json={"code": r["code"]}).status_code == 403   # once only
         assert local.get("/api/devices/pairing/" + r["code"], headers=owner).json()["device"]
         ctl = {"X-Kelvin-Token": paired["token"]}
-        assert phone.get("/api/me", headers=ctl).json() == {"role": "control", "name": "Ana's phone", "lab": "Virtual Lab"}
+        me = phone.get("/api/me", headers=ctl).json()
+        assert {k: me[k] for k in ("role", "name", "lab", "api")} ==             {"role": "control", "name": "Ana's phone", "lab": "Virtual Lab", "api": 1}
+        assert me["computer"] == socket.gethostname() and me["version"]
+        assert all(u.startswith("http://") and u.endswith(":8771") for u in me["addresses"])
+        assert "computer" not in local.get("/api/me", headers=owner).json()   # only a paired app needs it
         assert phone.get("/api/state", headers=ctl).status_code == 200
         assert phone.get("/api/chats", headers=ctl).status_code == 200
         denied = phone.post("/api/settings", json={"learn": "off"}, headers=ctl)
@@ -133,6 +137,8 @@ def test_pairing_and_roles(app):
         assert phone.post("/api/approvals/r1", json={"approve": True}, headers=watch).status_code == 403
         assert phone.post("/api/approvals/r1", json={"approve": False}, headers=watch).status_code == 409   # no such request
         assert phone.post("/api/runs/stop", json={}, headers=watch).status_code == 200
+        assert phone.get("/api/runs/nope/files/report.pdf", headers=watch).status_code == 404   # allowed; no such run
+        assert phone.post("/api/runs/nope/files/report.pdf/open", json={}, headers=watch).status_code == 403
 
         view = local.get("/api/phone", headers=owner).json()
         assert [(d["name"], d["role"]) for d in view["devices"]] == [("Ana's phone", "control"), ("Lab tablet", "watch")]
