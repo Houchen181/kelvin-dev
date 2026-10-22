@@ -104,6 +104,15 @@ Check on a run from the coffee room, or answer an approval from home. Phone acce
 
 The phone then opens Kelvin's phone page: alarms with **Got it**, requests with **Approve** (control) or **Decline**, the run in progress with its progress and **Stop**, the instruments, and recent notices. A control phone can also open the full portal.
 
+**Kelvin for iPhone** does the same as a native app, and more. Pair it by scanning the same QR code, or by typing the address and code. It can be paired with several Kelvin computers, keeps each one's token in the iPhone's Keychain, and tries the address that worked last first and then the others, so it moves between the lab network and Tailscale by itself. Its tabs:
+
+- **Lab:** alarms, requests waiting for you, the run in progress with a live plot and **Stop**, the instruments (drives not at their safe value in orange), recent notices.
+- **Chat** (control phones): your conversations, a new or incognito chat, the answer as it arrives with Kelvin's steps, and requests to approve right there.
+- **Runs:** recent runs with their plots, and their report and data to open on the phone.
+- **Computers:** switch between computers, pair another, unpair.
+
+The app tells you about new requests and alarms while it is open. For alerts while it is closed, add an ntfy topic under Notifications. Building the app: [ios.md](ios.md).
+
 Settings, instruments, the lab config, the approval mode and pairing work only on the Kelvin computer. Remove a phone in Settings, or with **Forget this phone** on the phone itself.
 
 Each person pairs their own phones, and a phone works while its person is signed in on the Kelvin computer: it sees that person's chats and runs, never someone else's.

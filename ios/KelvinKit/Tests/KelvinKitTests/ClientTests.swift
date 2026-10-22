@@ -16,9 +16,11 @@ final class Scripted: Transport, @unchecked Sendable {
     private(set) var asked: [URLRequest] = []
     private let lock = NSLock()
 
-    func on(_ key: String, _ status: Int = 200, _ body: String) {
+    func on(_ key: String, _ status: Int, _ body: String) {
         replies[key] = Reply(status: status, body: body)
     }
+
+    func on(_ key: String, _ body: String) { on(key, 200, body) }
 
     private func reply(_ request: URLRequest) throws -> (Data, HTTPURLResponse) {
         lock.lock()

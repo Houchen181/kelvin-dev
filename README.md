@@ -70,6 +70,7 @@ Also included: sign-in for everyone in the lab, each with their own chats, keys,
 - [Safety](docs/safety.md): the rules in full, auto mode, watches
 - [Other AI agents](docs/agents.md): Claude Code, Codex or Gemini CLI over MCP
 - [Development](docs/development.md): running from source, tests, releases
+- [Kelvin for iPhone](docs/ios.md): building the iPhone app
 - [Vision](VISION.md) and [architecture](ARCHITECTURE.md): the goals and the design
 
 To run from source (Python 3.10 or later):

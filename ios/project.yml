@@ -70,8 +70,7 @@ targets:
     sources:
       - path: KelvinTests
     dependencies:
-      - target: Kelvin
-      - package: KelvinKit
+      - target: Kelvin              # KelvinKit comes with the app (linking it here too would make two copies)
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
