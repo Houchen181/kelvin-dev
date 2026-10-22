@@ -265,19 +265,43 @@ class Flow:
                 self.c.text(MARGIN + key_w, self.y - size * 0.3, line, size)
         self.y += 4
 
-    def table(self, t: Table, size: float = 8.5) -> None:
+    @staticmethod
+    def _natural(t: Table, size: float) -> List[float]:
+        return [max([measure(t.header[i], size, "bold")] + [measure(r[i] if i < len(r) else "", size) for r in t.rows])
+                + 12 for i in range(len(t.header))]
+
+    def tables(self, ts: Sequence[Table], size: float = 8.5, gap: float = 18) -> None:
+        """Tables two side by side where both fit in half the width (short fit tables), else one under another."""
+        half = (WIDTH - gap) / 2
+        lh = size * 1.3
+        i = 0
+        while i < len(ts):
+            pair = list(ts[i:i + 2])
+            if len(pair) == 2 and all(sum(self._natural(t, size)) <= half for t in pair):
+                self.need(max((size * 1.5 + 3 if t.title else 0) + (len(t.rows) + 1) * (lh + 5) + 6 for t in pair))
+                y0, ends = self.y, []
+                for k, t in enumerate(pair):
+                    self.y = y0
+                    self.table(t, size, MARGIN + k * (half + gap), half)
+                    ends.append(self.y)
+                self.y = max(ends)
+                i += 2
+            else:
+                self.table(ts[i], size)
+                i += 1
+
+    def table(self, t: Table, size: float = 8.5, x0: float = MARGIN, width: float = WIDTH) -> None:
         cols = len(t.header)
         if not cols:
             return
-        natural = [max([measure(t.header[i], size, "bold")] + [measure(r[i] if i < len(r) else "", size) for r in t.rows])
-                   + 12 for i in range(cols)]
+        natural = self._natural(t, size)
         total = sum(natural)
-        widths = natural if total <= WIDTH else [w * WIDTH / total for w in natural]
+        widths = natural if total <= width else [w * width / total for w in natural]
         lh = size * 1.3
         if t.title:
             self.need(lh * 3)
             self.y += size * 1.5
-            self.c.text(MARGIN, self.y, t.title, size, "bold", MUTED)
+            self.c.text(x0, self.y, t.title, size, "bold", MUTED)
             self.y += 3
 
         def row(cells: Sequence[str], font: str, fill: Optional[str]) -> None:
@@ -285,14 +309,14 @@ class Flow:
             h = lh * max(len(w) for w in wrapped) + 5
             self.need(h)
             if fill:
-                self.c.rect(MARGIN, self.y, sum(widths), h, fill=fill)
-            x = MARGIN
+                self.c.rect(x0, self.y, sum(widths), h, fill=fill)
+            x = x0
             for i, lines in enumerate(wrapped):
                 for j, line in enumerate(lines):
                     self.c.text(x + 5, self.y + 2 + lh * (j + 1) - size * 0.3, line, size, font)
                 x += widths[i]
             self.y += h
-            self.c.line(MARGIN, self.y, MARGIN + sum(widths), self.y, GRID, 0.6)
+            self.c.line(x0, self.y, x0 + sum(widths), self.y, GRID, 0.6)
 
         row(t.header, "bold", "f1f3f6")
         for r in t.rows:
@@ -312,7 +336,9 @@ class Flow:
                 geo = layout(chart, w, h, lambda s, size: measure(s, size), 7.5 if per_row > 1 else 8)
                 draw_chart(self.c, geo, MARGIN + j * (w + gap), self.y)
             self.y += h + 8
-        captions = sorted({c.caption for c in charts if c.caption})
+        captions = list(dict.fromkeys(c.caption for c in charts if c.caption))   # in the charts' order
+        if len(captions) > 1 and all(c.startswith("Dashed: ") for c in captions):   # one line: "Dashed: a; b."
+            captions = ["Dashed: " + "; ".join(c[len("Dashed: "):].rstrip(".") for c in captions) + "."]
         for cap in captions:
             self.para(cap, 8, "italic", MUTED, gap=2)
 

@@ -552,17 +552,11 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         else:
             connection[key] = kind(value)
     on_connect = [str(c) for c in data.get("on_connect") or []]
-    for c in on_connect:  # connecting must never move a drive (except to its safe value: OFF,1)
+    for c in on_connect:  # connecting leaves the instrument as it is: it may only set up the connection itself
         for spec in params.values():
-            if spec.is_drive and spec.set_cmd is not None and spec.family().match(c) is not None:
-                text = spec.set_cmd.match(c)
-                try:
-                    to_safe = text is not None and spec.safe is not None and spec.distance(spec.from_wire(text)) == 0
-                except (ValueError, TypeError):
-                    to_safe = False
-                if not to_safe:
-                    err("on_connect", "%r would set the drive %s; connecting may only configure, or bring a drive to "
-                        "its safe value" % (c, spec.name))
+            if spec.set_cmd is not None and spec.family().match(c) is not None:
+                err("on_connect", "%r would set %s; connecting leaves every setting as it is (on_connect may only set "
+                    "up the connection: listen mode, headers, a driver's wiring)" % (c, spec.name))
     manual_url = str(data.get("manual_url") or "").strip()
     if manual_url and not re.match(r"^https://[^\s/]+\.[^\s/]+/\S*$", manual_url):
         err("manual_url", "must be an https:// address of the maker's manual")

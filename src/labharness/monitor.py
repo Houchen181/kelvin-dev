@@ -116,6 +116,8 @@ class Monitor:
                 unit = ""
             view = w.view(unit)
             view["then"] = ["%s.%s %s" % (i, p, self._show("%s.%s" % (i, p), v)) for i, p, v in w.then]
+            inst = self.lab.instruments.get(w.key.split(".")[0])
+            view["paused"] = inst is not None and not inst.enabled   # switched off: nothing is read, so not watched
             out.append(view)
         return out
 
@@ -159,6 +161,9 @@ class Monitor:
                 continue
             w.last_read = now
             instr = w.key.split(".")[0]
+            if instr in self.lab.instruments and not self.lab.instruments[instr].enabled:
+                w.value = None   # switched off: nothing is sent to it, so nothing to watch (and no alarm)
+                continue
             try:
                 value = self.lab.read(*w.key.split(".", 1))
             except Exception as e:
@@ -240,7 +245,7 @@ class Monitor:
     def _check_errors(self, now: float) -> None:
         """Real instruments' own error queues, once a minute (lab time)."""
         for name, inst in self.lab.instruments.items():
-            if inst.simulated or inst.card.error_query is None:
+            if inst.simulated or inst.card.error_query is None or not inst.enabled:
                 continue
             if now - self._last_error_check.get(name, -1e18) < ERROR_CHECK_EVERY:
                 continue

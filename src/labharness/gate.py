@@ -312,8 +312,11 @@ class SafetyGate:
         for key, values in drive_values.items():
             inst, spec = self.lab.resolve(key)
             current = self._current(inst, spec)
-            d0 = spec.distance(current)
-            away = [v for v in values if not _same(spec, v, current) and spec.distance(v) >= d0]
+            if current is None:   # unknown (no read-back): every value but safe counts as driving harder
+                away = [v for v in values if spec.distance(v) > 0]
+            else:
+                d0 = spec.distance(current)
+                away = [v for v in values if not _same(spec, v, current) and spec.distance(v) >= d0]
             if not away:
                 continue
             problem = self._away_problem(inst, spec)
@@ -367,9 +370,15 @@ class SafetyGate:
                         return self._done(Result(False, "declined", key, value=target, message="declined: %s stays %s%s"
                                                  % (key, spec.show(current), note)), "set", by)
                 res = self._move(inst, spec, current, target, away=False, wait=wait, how=None)
+            elif current is None and spec.distance(target) == 0:   # unknown, to its safe value: always allowed
+                res = self._move(inst, spec, current, target, away=False, wait=wait, how="to safe")
+            elif current is None and spec.ramp == "gate" and spec.numeric:
+                return self._done(Result(False, "refused", key, value=target, message=(
+                    "refused: Kelvin can't read %s back and hasn't set it since connecting, so it can't ramp from "
+                    "where it is; set it to its safe value (%s) first" % (key, spec.show(spec.safe)))), "set", by)
             elif _same(spec, current, target):
                 res = Result(True, "no-change", key, value=target, message="%s already %s" % (key, spec.show(target)))
-            elif spec.distance(target) < spec.distance(current):
+            elif current is not None and spec.distance(target) < spec.distance(current):
                 res = self._move(inst, spec, current, target, away=False, wait=wait, how="toward safe")
             else:
                 problem = self._away_problem(inst, spec)
@@ -408,8 +417,10 @@ class SafetyGate:
         return res
 
     def _current(self, inst: Instrument, spec: ParamSpec) -> Any:
-        if spec.get_cmd is None and not spec.is_drive and spec.name not in inst._last and spec.default is None:
-            return None   # a setting with no read-back (a laser's target wavelength) that nobody has set yet
+        """The value now; None when unknown: no read-back and not set since Kelvin connected (Kelvin leaves an
+        instrument as it finds it, so a drive is never assumed to be at its card's default)."""
+        if spec.get_cmd is None and spec.name not in inst._last and (spec.is_drive or spec.default is None):
+            return None
         return inst.read(spec.name)
 
     def _limit_problem(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
@@ -429,9 +440,16 @@ class SafetyGate:
         if self.lab.config.observe_only and not inst.simulated:
             return ("%s: Kelvin set this lab up on its own, so drives stay at safe until a person reviews the limits "
                     "in Lab setup and unlocks them" % key)
+        off = set(self.lab.switched_off)
+        for g in inst.guards(spec.name):   # nothing would watch it: a switched-off instrument is never read
+            if g.instr in off:
+                return "%s: its guard %s is on %s, which is switched off in the Lab panel" % (key, g.key, g.instr)
         for lock in self.lab.config.interlocks:
             if lock.drive != key:
                 continue
+            if lock.require.key.split(".")[0] in off:
+                return "interlock: %s needs %s, but %s is switched off in the Lab panel" % (
+                    key, lock.require.text, lock.require.key.split(".")[0])
             ok, actual = lock.require.check(self.lab.read)
             if not ok:
                 _, cspec = self.lab.resolve(lock.require.key)
@@ -453,12 +471,12 @@ class SafetyGate:
     def _guard_text(self, inst: Instrument, spec: ParamSpec) -> str:
         parts = []
         for g in inst.guards(spec.name):
-            unit = self.lab.instrument(g.instr).spec(g.param).unit
+            unit = self.lab.instruments[g.instr].spec(g.param).unit
             parts.append("|%s| > %s%s" % (g.key, num(g.max_abs), " " + unit if unit else ""))
         return "stops if " + " or ".join(parts) if parts else ""
 
     def _eta(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any) -> Optional[float]:
-        if not spec.numeric:
+        if not spec.numeric or current is None:
             return None
         if spec.ramp == "gate":
             return abs(target - current) / inst.rate(spec.name)
@@ -489,9 +507,9 @@ class SafetyGate:
         for dep_name in spec.enables:  # a switch that applies other drives to the sample
             dep = inst.spec(dep_name)
             dep_now = self._current(inst, dep)
-            if dep.distance(dep_now) == 0:
+            if dep_now is not None and dep.distance(dep_now) == 0:
                 continue
-            if away:  # switching on: park the drive at safe first so nothing jumps
+            if away or dep_now is None:  # switching on: park the drive at safe first so nothing jumps
                 inst.write(dep.name, dep.safe)
                 notes.append("%s set to %s first" % (dep.name, dep.show(dep.safe)))
             else:     # switching off: bring the drive down gently first
@@ -500,7 +518,7 @@ class SafetyGate:
                     return r
                 notes.append("%s ramped to %s first" % (dep.name, dep.show(dep.safe)))
         t0 = clock.now()
-        if spec.ramp == "gate" and spec.numeric:
+        if spec.ramp == "gate" and spec.numeric and current is not None:   # unknown: only ever straight to safe
             stop = self._ramp(inst, spec, current, target, watch=away, gen=gen)
             if stop is not None:
                 return stop

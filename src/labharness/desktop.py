@@ -197,7 +197,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
 
     port = args.port or _free_port()
     # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time
-    lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10)
+    lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10, settings.switched_off)
     # people sign in, each to their own data folder; until someone does, what happens is the lab's (~/Kelvin/lab).
     # The self-test checks the app, not a person, so it runs without accounts.
     accounts = None if args.self_test else Accounts(home)

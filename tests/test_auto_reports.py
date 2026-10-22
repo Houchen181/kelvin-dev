@@ -35,13 +35,13 @@ def test_every_run_gets_its_report_in_its_own_folder(tmp_path):
     out = rt.run(SWEEP)
     run_id = rt.runs_index(1)[0]["run_id"]
     names = [f["name"] for f in rt.run_files(run_id)]
-    assert names == ["report.pdf", "report.pptx", "data.csv"]
-    assert "saved in the run folder: data.csv, report.pdf and report.pptx" in out
+    assert names == ["report.pdf", "report.pptx", "data.csv", "conditions.csv"]
+    assert "saved in the run folder: data.csv, conditions.csv, report.pdf and report.pptx" in out
     assert (rt._run_dir(run_id) / "report.pdf").read_bytes().startswith(b"%PDF")
     rt.auto_report = "off"                                                   # only when asked
     rt.run(SWEEP)
     second = rt.runs_index(1)[0]["run_id"]
-    assert [f["name"] for f in rt.run_files(second)] == ["data.csv"]         # the data is always kept
+    assert [f["name"] for f in rt.run_files(second)] == ["data.csv", "conditions.csv"]   # the data is always kept
     with pytest.raises(KeyError):
         rt.run_file(run_id, "../events.jsonl")
     with pytest.raises(KeyError):
@@ -57,7 +57,7 @@ def test_a_queue_ends_with_one_report_of_all_its_runs(tmp_path):
     rt._queue_thread.join(120)
     assert [i.status for i in rt.queue.items] == ["done", "done"]
     for item in rt.queue.items:
-        assert [f["name"] for f in rt.run_files(item.run_id)] == ["report.pdf", "data.csv"]
+        assert [f["name"] for f in rt.run_files(item.run_id)] == ["report.pdf", "data.csv", "conditions.csv"]
     reports = [r["name"] for r in rt.reports_index()]
     assert len(reports) == 1 and "Queue_of" in reports[0] and reports[0].endswith(".pdf")
 

@@ -8,7 +8,7 @@ manual: "MOGLabs Agile RF Synthesizer & AOM driver XRF421, rev 1.8.5, Appendix C
 manual_url: "https://santec-inst.files.svdcdn.com/production/Files/Tutorials/RF-generators-synthesizers/MOGLabs_XRF_manual.pdf"
 notes:
   - "Ethernet: raw TCP port 7802 (address TCPIP0::<ip>::7802::SOCKET), or its USB virtual COM port. Every command answers OK or ERR, and Kelvin checks each set's reply."
-  - "Kelvin switches the channel off when it connects (OFF,ch), so it knows the RF is off; it comes on only through Kelvin, after approval. Fast on/off for pulses comes from the pulse generator on the DE15 CHx-OFF pin."
+  - "Kelvin leaves the channel as it finds it when it connects. The RF on/off state has no read-back, so until Kelvin sets it, it is unknown: switching it on needs approval, and switching it off always goes ahead. Fast on/off for pulses comes from the pulse generator on the DE15 CHx-OFF pin."
   - "LIMIT is the hardware power cap (default +30 dBm on amplified models): Kelvin never raises it. Keep 50 ohm on each output."
   - "Frequencies in MHz (20-400 MHz on XRF/ARF; 10-200 MHz on the QRF). The power read-back format is not shown in the manual: check it on your unit."
 identify:
@@ -19,8 +19,6 @@ connection:
   set_reply: "^OK"
 vars:
   ch: { default: "1", label: "Channel (1 or 2; 1-4 on a QRF)" }
-on_connect: ["OFF,{ch}"]
-
 parameters:
   output:
     label: RF output

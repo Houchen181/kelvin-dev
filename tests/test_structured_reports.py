@@ -48,18 +48,23 @@ def test_every_run_records_its_project_and_device(tmp_path):
     assert rt._load_mounted() == {} and rt.mounted == {}                       # unmounted: nothing kept
 
 
-def test_the_scan_report_has_a_fixed_outline(tmp_path):
+def test_the_scan_report_is_one_short_page(tmp_path):
     rt, _ = runtime(tmp_path)
     rt.mount("p1", D3)
     rt.run(SWEEP)
     folder = rt._run_dir(rt.runs_index(1)[0]["run_id"])
-    pages = check_pdf(folder / "report.pdf")
+    assert check_pdf(folder / "report.pdf") == 1
     text = " ".join(pdf_strings(folder / "report.pdf"))
-    for want in ("SCAN REPORT", "gate_sweep on D3", "Project", "Graphene", "1. Result", "2. Plots", "3. Method",
-                 "4. Conditions", "5. Approvals and alarms", "6. Appendix", "data.csv: every point as a table"):
+    for want in ("SCAN REPORT", "gate_sweep on D3", "Graphene", "Result", "Conditions", "Swept", "Measured",
+                 "Approvals and alarms", "data.csv (every point)", "conditions.csv"):
         assert want in text, want
+    for gone in ("Contents", "1. Result", "Appendix", "plan: gate_sweep", "Next:"):   # the plan is in plan.yaml
+        assert gone not in text, gone
+    assert text.count("approved: Run plan gate_sweep") == 1                     # its approval, once
+    rows = list(csv.reader(open(folder / "conditions.csv", encoding="utf-8")))
+    assert rows[0] == ["instrument", "parameter", "start", "end"] and ["smu", "output", "off", "on"] in rows
     slides = check_pptx(folder / "report.pptx")
-    assert "SCAN REPORT" in slides[0] and any(s.startswith("1. Result") for s in slides) and pages >= 1
+    assert "SCAN REPORT" in slides[0] and "has a peak" in slides[0] and len(slides) <= 5
 
 
 def test_a_project_folder_with_its_master_and_device_reports(tmp_path):

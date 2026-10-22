@@ -45,6 +45,7 @@ wait: 300                                                          # then wait 5
 Every run is saved as it is measured, with nothing to click. It gets its own folder, named by date, time and plan, such as `runs/20261018-015328-gate_sweep/`. Each folder holds:
 - `plan.yaml`: what was asked for.
 - `snapshot_start.json` and `snapshot_end.json`: every instrument setting at the start and at the end.
+- `conditions.csv`: the same as a table (instrument, parameter, start, end), so the scan report can stay short.
 - `data.jsonl`: every point, traces included, written point by point.
 - `data.csv`: the same points as a table (every axis and scalar reading), for Origin, MATLAB, Python or Excel. Each trace reading gets its own `<reading>.csv` with `i, x, value`, where `i` is the point's row in `data.csv`.
 - `meta.json`: status, points, duration and warnings.
@@ -74,7 +75,7 @@ Kelvin keeps three kinds of report up to date by itself, following **project →
 
 | Report | Covers | Sections |
 |---|---|---|
-| **Scan report** | one run | 1 Result (assessment, fitted values with uncertainties, next step) · 2 Plots with fits · 3 Method · 4 Conditions at the start · 5 Approvals and alarms · 6 Appendix (plan and files) |
+| **Scan report** | one run | One page: Result (Kelvin's assessment, plots with fits, fitted values with uncertainties, any issue) · Conditions (what was swept, set and measured; the plan's instruments' other settings as found; drives elsewhere away from safe; what was left changed) · Approvals and alarms. A last line names the files with the rest: `data.csv`, `conditions.csv`, `plan.yaml`, `analysis.json`. |
 | **Device report** | one sample, all its scans | 1 The device (material, geometry, contacts) · 2 Mount history · 3 Results by measurement · 4 Trends across repeated scans · 5 Ranges explored · 6 Problems · 7 Scan index |
 | **Master report** | the whole project | 1 Summary · 2 Goals and decisions (project notes) · 3 Devices compared · 4 Main results and figures · 5 Timeline · 6 Open questions and issues · 7 References · 8 Index |
 

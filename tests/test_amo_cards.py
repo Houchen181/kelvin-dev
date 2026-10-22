@@ -57,8 +57,8 @@ instruments:
 
 def test_an_amo_bench_through_the_gate(bench, tmp_path):
     lab = build_lab(AMO_LAB)
-    assert bench.devices["TCPIP0::10.0.0.30::7802::SOCKET"].sent[0] == "OFF,2"   # switched off on connect: a known state
-    assert bench.devices["ASRL7::INSTR"].sent[0] == "V3 0"
+    assert bench.devices["TCPIP0::10.0.0.30::7802::SOCKET"].sent == []   # connecting leaves them as they are
+    assert bench.devices["ASRL7::INSTR"].sent == []
     gate = gate_for(lab, tmp_path, [True] * 8)
     assert gate.set("mw", "frequency", 2.87e9).ok
     assert gate.set("mw", "mod_type", "pulse").ok and gate.set("mw", "pulse_source", "external").ok
@@ -66,11 +66,14 @@ def test_an_amo_bench_through_the_gate(bench, tmp_path):
     assert gate.set("mw", "output", True).ok                             # asked first
     assert gate.set("mw", "power", 5).action == "refused"                # the lab's 0 dBm cap
     assert gate.set("mw", "power", -10).ok
-    assert gate.set("aom", "output", True).ok
+    assert gate.set("aom", "output", True).ok                            # unknown (no read-back): asked first
     assert "ON,2" in bench.devices["TCPIP0::10.0.0.30::7802::SOCKET"].sent
     assert gate.set("aom", "frequency", 80).ok and lab.read("aom", "frequency") == pytest.approx(80)
     assert "(approved)" in gate.raw("aom", "ON,2,POW").message             # an unlisted variant still counts as the switch
     assert gate.raw("aom", "LIMIT,2,36").action == "refused"
+    r = gate.set("dds", "amplitude", 500)
+    assert r.action == "refused" and "safe value" in r.message           # unknown and ramped: from 0, not a jump
+    assert gate.set("dds", "amplitude", 0).ok                            # to safe: no question
     assert gate.set("dds", "amplitude", 500).ok and lab.read("dds", "amplitude") == 500   # remembered: no read-back
     assert gate.set("dds", "amplitude", 2000).action == "refused"         # 1023 is full scale
     assert gate.set("dg", "delay_A", 1e-6).ok and gate.set("dg", "trigger_source", "internal").ok
@@ -78,9 +81,9 @@ def test_an_amo_bench_through_the_gate(bench, tmp_path):
     assert gate.raw("dg", "*CAL?").action == "refused"
 
 
-def test_a_connect_command_may_only_bring_a_drive_to_safe():
+def test_connecting_may_not_set_any_parameter():
     card = load_yaml(open(builtin_registry().get("moglabs/xrf").source, encoding="utf-8"))
-    card = dict(card, id="test/xrf", on_connect=["ON,{ch}"])
-    with pytest.raises(CardError, match="safe value"):
-        parse_card(card, "test")
-    assert parse_card(dict(card, on_connect=["OFF,{ch}", "FREQ,{ch},80"]), "test").on_connect == ["OFF,1", "FREQ,1,80"]
+    card = dict(card, id="test/xrf")
+    for command in ("ON,{ch}", "OFF,{ch}", "FREQ,{ch},80"):              # not even to safe, not even a setting
+        with pytest.raises(CardError, match="leaves every setting as it is"):
+            parse_card(dict(card, on_connect=[command]), "test")

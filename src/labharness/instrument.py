@@ -12,25 +12,46 @@ from .cards import Card, ParamSpec
 from .labconfig import Guard, InstrumentConfig
 
 
+OFF_TEXT = "%s is switched off in the Lab panel: Kelvin sends it nothing until a person switches it on"
+
+
+class InstrumentOff(RuntimeError):
+    """A command for an instrument a person switched off (Lab panel)."""
+
+
+class OffBackend:
+    """Stands in for a switched-off instrument's connection: it sends nothing, and refuses every command."""
+    simulated = False
+
+    def __init__(self, name: str):
+        self.name = name
+
+    def write(self, command: str) -> None:
+        raise InstrumentOff(OFF_TEXT % self.name)
+
+    def query(self, command: str) -> str:
+        raise InstrumentOff(OFF_TEXT % self.name)
+
+    def close(self) -> None:
+        pass
+
+
 class Instrument:
     def __init__(self, name: str, card: Card, backend: Any, config: InstrumentConfig):
         self.name = name
         self.card = card
         self.backend = backend
         self.config = config
-        self._last: Dict[str, Any] = {}
-        for command in card.on_connect:   # sent on connecting: a parameter with no read-back is known from the start
-            for spec in card.params.values():
-                text = spec.set_cmd.match(command) if spec.get_cmd is None and spec.set_cmd is not None else None
-                if text is not None:
-                    try:
-                        self._last[spec.name] = spec.from_wire(text)
-                    except (ValueError, TypeError):
-                        pass
+        self._last: Dict[str, Any] = {}   # what Kelvin set, for parameters with no read-back
 
     @property
     def simulated(self) -> bool:
         return bool(getattr(self.backend, "simulated", False))
+
+    @property
+    def enabled(self) -> bool:
+        """False when a person switched it off in the Lab panel: then nothing is sent to it."""
+        return not isinstance(self.backend, OffBackend)
 
     @property
     def trust(self) -> str:

@@ -3,14 +3,15 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .cards import Card, CardRegistry, ParamSpec, num
 from .clock import SimClock
-from .instrument import Instrument
+from .instrument import OFF_TEXT, Instrument, OffBackend
 from .labconfig import LabConfig
 
 BackendFactory = Callable[[str, Card, str], Any]
+SwitchedOff = Callable[[str], Iterable[str]]   # a lab's name -> the instruments a person switched off in it
 
 
 @dataclass
@@ -31,27 +32,61 @@ def real_backend_factory(name: str, card: Card, address: str) -> Any:
 
 class Lab:
     def __init__(self, config: LabConfig, registry: CardRegistry, backend_factory: BackendFactory,
-                 clock: Any, world: Any = None):
+                 clock: Any, world: Any = None, switched_off: Optional[SwitchedOff] = None):
+        """switched_off: the instruments a person switched off (Lab panel). They are never connected, so nothing,
+        not even the connecting, is sent to them."""
         self.config = config
         self.registry = registry
         self.clock = clock
         self.world = world
+        self._factory = backend_factory
+        self._parked: Dict[str, Any] = {}   # connections set aside unclosed when switched off (closing would send)
+        off = set(switched_off(config.name)) if switched_off else set()
         self.instruments: Dict[str, Instrument] = {}
         for name, ic in config.instruments.items():
             card = registry.get(ic.card).bind(ic.vars)   # with this installation's sensor or channel names
-            self.instruments[name] = Instrument(name, card, backend_factory(name, card, ic.address), ic)
+            backend = OffBackend(name) if name in off else backend_factory(name, card, ic.address)
+            self.instruments[name] = Instrument(name, card, backend, ic)
 
     def instrument(self, name: str) -> Instrument:
+        """The instrument to talk to; a switched-off one is refused (KeyError, so the gate refuses the command)."""
         try:
-            return self.instruments[name]
+            inst = self.instruments[name]
         except KeyError:
             raise KeyError("no instrument %r (have: %s)" % (name, ", ".join(self.instruments)))
+        if not inst.enabled:
+            raise KeyError(OFF_TEXT % name)
+        return inst
+
+    @property
+    def switched_off(self) -> List[str]:
+        return [name for name, inst in self.instruments.items() if not inst.enabled]
+
+    def switch(self, name: str, on: bool) -> None:
+        """Switch an instrument on or off for this lab. Off sends nothing: a plain VISA session is closed (that
+        sends the instrument nothing and frees it for other programs); a driver connection, whose closing could
+        send something (a pulse generator stops its outputs), is set aside as it is. On connects it again, or
+        takes back the connection set aside."""
+        inst = self.instruments[name]   # KeyError: not in this lab
+        if on == inst.enabled:
+            return
+        if not on:
+            backend, inst.backend = inst.backend, OffBackend(name)
+            if getattr(backend, "quiet_close", False):
+                backend.close()
+            else:
+                self._parked[name] = backend
+            return
+        backend = self._parked.pop(name, None)
+        inst.backend = backend if backend is not None else self._factory(name, inst.card, inst.config.address)
 
     def resolve(self, key: str) -> Tuple[Instrument, ParamSpec]:
         instr, dot, param = key.partition(".")
         if not dot:
             raise KeyError("expected instrument.parameter, got %r" % key)
-        inst = self.instrument(instr)
+        if instr not in self.instruments:
+            self.instrument(instr)   # says which instruments there are
+        inst = self.instruments[instr]   # what it is, even switched off: talking to it is refused, not knowing it
         return inst, inst.spec(param)
 
     def read(self, instr: str, param: str) -> Any:
@@ -61,6 +96,8 @@ class Lab:
         """Every readable scalar parameter of every instrument."""
         snap: Dict[str, Dict[str, Any]] = {}
         for name, inst in self.instruments.items():
+            if not inst.enabled:
+                continue
             values: Dict[str, Any] = {}
             for spec in inst.card.params.values():
                 if spec.type == "trace" or (spec.get_cmd is None and spec.name not in inst._last):
@@ -77,10 +114,13 @@ class Lab:
         the wrong instrument), does its error queue look clean, does every reading work, are the card's sanity
         checks fine, and are its drives inside the lab's limits? Only reads; never sets anything."""
         out = []
-        for name in names or list(self.instruments):
+        for name in names or [n for n, inst in self.instruments.items() if inst.enabled]:
             inst = self.instruments.get(name)
             if inst is None:
                 out.append(HealthResult(name, False, ["not in this lab"]))
+                continue
+            if not inst.enabled:
+                out.append(HealthResult(name, False, ["switched off in the Lab panel"]))
                 continue
             problems: List[str] = []
             try:
@@ -138,12 +178,16 @@ class Lab:
         from .sim.twin import World, sim_backend_factory
         clock = SimClock()
         world = World(clock, seed)
-        twin = Lab(self.config, self.registry, sim_backend_factory(world), clock, world)
+        off = set(self.switched_off)
+        twin = Lab(self.config, self.registry, sim_backend_factory(world), clock, world, lambda _: off)
         for name, inst in self.instruments.items():
+            if name in off:
+                continue
             twin.instruments[name].backend.load_state(self._state_of(inst))
             twin.instruments[name]._last = dict(inst._last)
         return twin
 
     def close(self) -> None:
+        """Connections set aside when their instrument was switched off stay as they are: closing could send."""
         for inst in self.instruments.values():
             inst.close()

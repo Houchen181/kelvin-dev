@@ -312,8 +312,8 @@ def prepare(home: Any, lab: Any, lock: Any, found: Optional[Dict[str, Dict[str, 
     from overlapping with anything else Kelvin does with the instruments."""
     report: Dict[str, Any] = {}
     for name, inst in lab.instruments.items():
-        if inst.simulated or (names is not None and name not in names):
-            continue
+        if inst.simulated or not inst.enabled or (names is not None and name not in names):
+            continue   # switched off in the Lab panel: nothing is sent to it, not even who-are-you
         card, address = inst.card, inst.config.address
         seen = (found or {}).get(address) or {}
         entry: Dict[str, Any] = {}

@@ -1,13 +1,15 @@
 """Structured reports: a document is a fixed list of numbered sections, the same for every report of a kind.
 
 The three kinds (kinds.py) follow the project -> device (sample) -> scan hierarchy:
-    scan     one run          Result, Plots, Method, Conditions, Approvals and alarms, Appendix
+    scan     one run          Result, Conditions, Approvals and alarms, In the run's folder (compact: one page)
     device   one sample       The device, Mount history, Results by measurement, Trends, Ranges explored,
                               Problems, Scan index
     project  the whole study  Summary, Goals and decisions, Devices compared, Main results, Timeline,
                               Open questions and issues, References, Index
 A section that has nothing to show still appears, with a line saying so, so readers always find things in the same
-place. The PDF has one heading per section; the slides one or more slides per section, numbered the same way."""
+place. The PDF has one heading per section; the slides one or more slides per section, numbered the same way.
+A compact document (the scan report) is short instead: no contents, no numbers, and only the sections that have
+something to say."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -46,6 +48,8 @@ class Document:
     simulated: bool
     facts: List[Tuple[str, str]] = field(default_factory=list)   # the key facts under the title
     sections: List[Section] = field(default_factory=list)
+    compact: bool = False   # short: no contents, no numbers, no empty sections (the scan report)
+    note: str = ""          # a muted line at the end (compact): where the rest is
 
 
 KIND_LABEL = {"scan": "Scan report", "device": "Device report", "project": "Master report"}
@@ -53,7 +57,40 @@ KIND_LABEL = {"scan": "Scan report", "device": "Device report", "project": "Mast
 
 # ------------------------------------------------------------------ PDF
 
+def _compact_pdf(doc: Document, path: Path) -> int:
+    flow = P.Flow(doc.title)
+    flow.y += 12
+    flow.c.text(P.MARGIN, flow.y, KIND_LABEL.get(doc.kind, "Report").upper(), 8, "bold", "2a78d6")
+    flow.y += 17
+    flow.c.text(P.MARGIN, flow.y, doc.title, 18, "bold")
+    flow.y += 4
+    flow.para(doc.subtitle, 9.5, color=MUTED, gap=0)
+    flow.para("%s%s" % (doc.lab, " (simulated instruments)" if doc.simulated else ""), 8.5, color=MUTED, gap=2)
+    for s in doc.sections:
+        if s.is_empty:
+            continue
+        flow.rule()
+        flow.heading(s.title, 11.5, before=2)
+        for p in s.paras:
+            flow.para(p, 10, gap=4)
+        for b in s.bullets:
+            flow.para(b, 9.5, bullet="•", gap=2)
+        if s.facts:
+            flow.kv(s.facts, 9, key_w=96)
+        if s.charts:
+            flow.charts(s.charts, height=160)
+        flow.tables(s.tables)
+        if s.code:
+            flow.code(s.code)
+    if doc.note:
+        flow.rule()
+        flow.para(doc.note, 8, color=MUTED, gap=0)
+    return flow.finish(path, "%s: %s" % (KIND_LABEL.get(doc.kind, "Report"), doc.title))
+
+
 def write_document_pdf(doc: Document, path: Path) -> int:
+    if doc.compact:
+        return _compact_pdf(doc, path)
     flow = P.Flow(doc.title)
     flow.y += 12
     flow.c.text(P.MARGIN, flow.y, KIND_LABEL.get(doc.kind, "Report").upper(), 8.5, "bold", "2a78d6")
@@ -101,7 +138,7 @@ def write_document_pdf(doc: Document, path: Path) -> int:
 # ------------------------------------------------------------------ slides
 
 def _section_slides(s: X.Slide, sec: Section, number: int, n: int, footer: str, page: int) -> List[X.Slide]:
-    title = "%d. %s" % (number, sec.title)
+    title = "%d. %s" % (number, sec.title) if number else sec.title
     slides: List[X.Slide] = []
     text: List[X.Para] = [X._clip(p, 400) for p in sec.paras[:3]]
     text += [X._clip(b, 160) for b in sec.bullets[:10]]
@@ -158,7 +195,65 @@ def _section_slides(s: X.Slide, sec: Section, number: int, n: int, footer: str, 
     return slides
 
 
+def _compact_pptx(doc: Document, path: Path) -> int:
+    """A title slide that says the result in words, one slide per plot with its fitted values beside it, then the
+    other sections that have something to say."""
+    sections = [sec for sec in doc.sections if not sec.is_empty]
+    first = sections[0] if sections else None
+    label = KIND_LABEL.get(doc.kind, "Report")
+    s = X.Slide()
+    s.rect(0, 0, X.SLIDE_W, X.SLIDE_H, "F3F5F8")
+    s.rect(0, 0, 10, X.SLIDE_H, X.ACCENT)
+    s.text(70, 56, X.SLIDE_W - 140, 24, [[(label.upper(), {"bold": True, "color": X.ACCENT})]], 13, name="Kind")
+    s.text(70, 82, X.SLIDE_W - 140, 64, [[(doc.title, {"bold": True})]], 34, anchor="b", shrink=True, name="Title")
+    s.text(70, 152, X.SLIDE_W - 140, 44, [doc.subtitle], 15, MUTED, shrink=True, name="Subtitle")
+    if first is not None:
+        words = [X._clip(p, 500) for p in first.paras[:2]] + [X._clip(b, 200) for b in first.bullets[:4]]
+        s.text(70, 214, X.SLIDE_W - 140, X.SLIDE_H - 290, words, 18, space=8, shrink=True, name="Result")
+    s.text(70, X.SLIDE_H - 76, X.SLIDE_W - 140, 40, ["%s%s" % (doc.lab, " (simulated instruments)" if doc.simulated
+                                                                  else "")] + ([doc.note] if doc.note else []),
+           11, MUTED, space=2, shrink=True, name="Lab")
+    slides: List[X.Slide] = [s]
+    footer = "%s  ·  %s" % (label, doc.title)
+    rest = [sec for sec in sections if sec is not first]
+    if len(rest) > 1 and not any(sec.charts or sec.tables or sec.code for sec in rest) and \
+            sum(len(sec.facts) + len(sec.bullets) + len(sec.paras) for sec in rest) <= 10:   # one slide for the words
+        rest = [Section(rest[0].title + "; " + "; ".join(sec.title.lower() for sec in rest[1:]),
+                        paras=[p for sec in rest for p in sec.paras], bullets=[b for sec in rest for b in sec.bullets],
+                        facts=[f for sec in rest for f in sec.facts])]
+    for sec in [first] + rest if first is not None else []:
+        if sec is not first:
+            slides += _section_slides(X.Slide(), sec, 0, len(sections), footer, len(slides) + 1)
+            continue
+        tables = list(sec.tables)
+        for chart in sec.charts:
+            subject = chart.title.split(" (")[0]
+            t = next((t for t in tables if t.title.split(" vs ")[0] == subject), None)
+            if t is not None:
+                tables.remove(t)
+            sl = X.Slide()
+            y = X._frame(sl, chart.title, chart.caption, len(slides) + 1, footer)
+            if t is None:
+                sl.chart(chart, X.M, y + 4, X.SLIDE_W - 2 * X.M, X.SLIDE_H - y - 48, 11)
+            else:
+                right_x = 600.0
+                sl.chart(chart, X.M, y + 4, right_x - X.M - 24, X.SLIDE_H - y - 48, 10)
+                shown = Table(t.header[:3], [r[:3] for r in t.rows[:10]], t.title)
+                sl.table(right_x, y + 4, X._table_widths(shown, X.SLIDE_W - X.M - right_x, 12), shown, 12, 22)
+            slides.append(sl)
+        for t in tables[:3]:
+            sl = X.Slide()
+            y = X._frame(sl, t.title or sec.title, "", len(slides) + 1, footer)
+            shown = Table(t.header, t.rows[:int((X.SLIDE_H - y - 50) // 22) - 1], "")
+            sl.table(X.M, y, X._table_widths(shown, X.SLIDE_W - 2 * X.M, 12), shown, 12, 22)
+            slides.append(sl)
+    X.save_slides(slides, path, doc.title)
+    return len(slides)
+
+
 def write_document_pptx(doc: Document, path: Path) -> int:
+    if doc.compact:
+        return _compact_pptx(doc, path)
     slides: List[X.Slide] = []
     s = X.Slide()
     s.rect(0, 0, X.SLIDE_W, X.SLIDE_H, "F3F5F8")

@@ -134,7 +134,7 @@ class AutoSetup:
                 why = rt.lab_info.get("error") or ("You chose the virtual lab in Lab setup" if self.lab_file.exists()
                                                     or self.settings.get("lab") == "virtual" else "")
                 return self._done(why or "Using the virtual lab")
-            names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated)
+            names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated and i.enabled)
             self._set("reading", message="Reading the settings of %s" % ", ".join(names),
                       instruments=names, observe_only=rt.lab.config.observe_only)
             for name, ic in rt.lab.config.instruments.items():   # manuals found while writing cards: no second download
@@ -215,7 +215,7 @@ class AutoSetup:
                       "(or press Use my lab in Lab setup)" % names)
             return False
         try:
-            lab = build_lab(self.lab_file, None, 0, registry)
+            lab = build_lab(self.lab_file, None, 0, registry, getattr(self.settings, "switched_off", None))
         except Exception as e:
             self._set("done", found=len(matched), message="Found %s but could not connect: %s"
                       % (names, profiles._first_line(e)))

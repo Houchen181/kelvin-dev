@@ -81,7 +81,8 @@ Example scripts that send text (inst.write("SOUR:VOLT 1"), inst.query("MEAS:VOLT
 
 Instruments whose commands start with the value ("ON,1" / "OFF,1"): set: "{value},{ch}" with bool_text: ["ON", "OFF"]
 (quote the words: YAML reads a bare ON as true). Settings with no read-back: leave out get; Kelvin remembers what
-it set, and on_connect may switch such a drive to its safe value so its state is known from the start.
+it set, and treats the value as unknown until then. Connecting leaves the instrument as it is: on_connect may only
+set up the connection (listen mode, headers), never a parameter.
 
 Rules: use only commands that are in the manual text you were given; never invent a command, a limit or a reply
 format. If the manual does not say, leave the parameter out and mention it. Block calibration, firmware, sensor
