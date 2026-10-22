@@ -14,10 +14,11 @@ like a SCPI instrument. The address names the driver:
     lib://COM4?python=...&path=...        the maker's Python module or DLL, as its example scripts use it (library.py)
     nidaq://Dev1                          National Instruments DAQ cards through NI-DAQmx (daq.py)
     seabreeze://<serial>                  Ocean Insight spectrometers through python-seabreeze (spectra.py)
-    shamrock://0                          Andor Shamrock / Kymera spectrographs through pylablib (spectra.py)
+    shamrock://0                          Andor Shamrock / Kymera spectrographs through Andor's DLL (spectra.py)
+    picam://<serial>                      Princeton Instruments cameras (PyLoN...) through PICam's DLL (princeton.py)
     pylon://<serial>                      Basler cameras through pypylon (cameras.py)
     andor://0?sdk=3                       Andor cameras through Andor's pyAndorSDK3 / pyAndorSDK2 (cameras.py)
-    anc300://COM5, anc350://0             attocube positioners through pylablib (positioners.py)
+    anc300://COM5, anc350://0             attocube positioners: the ANC300's command line, the ANC350 through pylablib
 
 The vendor libraries are optional: `pip install zhinst-core` or `pip install MultiPyVu` on the computer that runs
 Kelvin. Without them Kelvin says what to install."""
@@ -33,7 +34,7 @@ from .adapters import AdapterError
 from .cards import Card
 
 SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib",
-           "nidaq", "seabreeze", "shamrock", "pylon", "andor", "anc300", "anc350")
+           "nidaq", "seabreeze", "shamrock", "picam", "pylon", "andor", "anc300", "anc350")
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -664,12 +665,13 @@ MODULES: Dict[str, Any] = {}   # tests put fake vendor libraries here
 LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc", "Qick"),
          "lib": ("library", "LibraryInstrument"), "nidaq": ("daq", "NIDAQ"),
          "seabreeze": ("spectra", "OceanSpectrometer"), "shamrock": ("spectra", "AndorSpectrograph"),
+         "picam": ("princeton", "PicamCamera"),
          "pylon": ("cameras", "BaslerCamera"), "andor": ("cameras", "AndorCamera"),
          "anc300": ("positioners", "ANC300"), "anc350": ("positioners", "ANC350")}   # they import this module
 
 
 LIBRARIES = (("nidaqmx", "nidaqmx.system"), ("seabreeze", "seabreeze.spectrometers"), ("pypylon", "pypylon.pylon"),
-             ("pylablib", "pylablib.devices.Attocube"), ("pylablib Andor", "pylablib.devices.Andor"))
+             ("pylablib", "pylablib.devices.Attocube"))
 
 
 def instrument_libraries(problems: Optional[Dict[str, str]] = None) -> List[str]:
@@ -688,16 +690,18 @@ def instrument_libraries(problems: Optional[Dict[str, str]] = None) -> List[str]
 
 
 def discover_libraries() -> List[Tuple[str, str]]:
-    """(address, identity) of the instruments behind the vendor libraries installed here: NI DAQ cards, Ocean
-    spectrometers, Andor spectrographs and sCMOS cameras, Basler cameras, attocube ANC350s. Each library only lists
-    what it sees; nothing is opened or set."""
+    """(address, identity) of the instruments behind the vendor libraries installed here: NI DAQ cards, Princeton
+    Instruments cameras, Andor spectrographs and sCMOS cameras, Ocean spectrometers, Basler cameras, attocube ANC350s.
+    Each library only lists what it sees; nothing is opened or set."""
     from .cameras import discover_andor, discover_pylon
     from .daq import discover_nidaq
     from .positioners import discover_attocube
+    from .princeton import discover_picam
     from .spectra import discover_seabreeze, discover_shamrock
-    return (discover_nidaq(MODULES.get("nidaq")) + discover_seabreeze(MODULES.get("seabreeze"))
-            + discover_shamrock(MODULES.get("shamrock")) + discover_pylon(MODULES.get("pylon"))
-            + discover_andor(MODULES) + discover_attocube(MODULES.get("anc350")))
+    return (discover_nidaq(MODULES.get("nidaq")) + discover_picam(MODULES.get("picam"))
+            + discover_shamrock(MODULES.get("shamrock")) + discover_andor(MODULES)
+            + discover_seabreeze(MODULES.get("seabreeze")) + discover_pylon(MODULES.get("pylon"))
+            + discover_attocube(MODULES.get("anc350")))
 
 
 def open_driver(name: str, card: Card, address: str) -> DriverBackend:

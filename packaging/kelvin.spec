@@ -32,13 +32,10 @@ PACKAGES = [
     ("zeroconf", "zeroconf", ()),                  # network instruments: mDNS (LXI) adverts
     ("ifaddr", "ifaddr", ()),
     ("pypdf", "pypdf", ()),                        # reading instrument manuals
-    # the makers' instrument libraries: only the private build installs them (release.yml); skipped otherwise
+    # the makers' instrument libraries: only the private build installs them (release.yml); skipped otherwise.
+    # The rest need no Python package (PICam, Andor's spectrograph DLL, the ANC300's command line) or are for
+    # installs from source (seabreeze, pypylon, pylablib)
     ("nidaqmx", "nidaqmx", ()),                    # NI DAQ cards (NI-DAQmx itself is NI's installer)
-    ("seabreeze", "seabreeze", ()),                # Ocean Insight spectrometers
-    ("pypylon", "pypylon", ()),                    # Basler cameras, with the pylon runtime
-    ("pylablib.devices.Attocube", "pylablib", ()), # attocube ANC300 / ANC350
-    ("pylablib.devices.Andor", "pylablib", ()),    # Andor Shamrock / Kymera spectrographs
-    ("pylablib.core", "pylablib", ()),
 ]
 if sys.platform == "win32":
     PACKAGES += [("clr_loader", "clr_loader", ()), ("pythonnet", "pythonnet", ())]
@@ -55,7 +52,7 @@ for package, dist, skip in PACKAGES:
         continue
     try:
         # the makers' libraries look up their dependencies by metadata (nidaqmx: nitypes...), so bring theirs too
-        datas += copy_metadata(dist, recursive=dist in ("nidaqmx", "seabreeze", "pylablib"))
+        datas += copy_metadata(dist, recursive=dist == "nidaqmx")
     except Exception:
         pass
 
@@ -68,7 +65,10 @@ a = Analysis(
     datas=datas,
     binaries=binaries,
     hiddenimports=hiddenimports,
-    excludes=["tkinter", "pytest", "PyInstaller"],
+    excludes=["tkinter", "pytest", "PyInstaller",
+              # libraries for instruments the app doesn't carry (Kelvin from source has them), whatever this
+              # computer has installed
+              "seabreeze", "pypylon", "pylablib", "scipy", "pandas"],
     noarchive=False,
 )
 # pypylon brings Basler's image-processing plugins (vTools, ~230 MB); Kelvin only grabs frames, so they stay out

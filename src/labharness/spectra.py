@@ -3,13 +3,17 @@
     seabreeze://<serial>     Ocean Insight / Ocean Optics USB spectrometers (USB2000+, USB4000, Flame, HR4000, QE Pro,
                              Maya...) through python-seabreeze (pip install seabreeze; seabreeze_os_setup once for its
                              USB driver). seabreeze:// is the first one found.
-    shamrock://<index>       Andor Shamrock and Kymera spectrographs (also monochromators) through pylablib
-                             (pip install pylablib) and Andor's spectrograph SDK. shamrock:// is the first.
+    shamrock://<index>       Andor Shamrock and Kymera spectrographs (also monochromators) through Andor's
+                             spectrograph library (atspectrograph or ShamrockCIF DLL, installed with Solis or the
+                             Andor SDK), called directly. shamrock:// is the first.
 
 Connecting changes nothing on either: a spectrometer keeps its integration time until Kelvin sets one (it can't be
 read back, so Kelvin shows it once it has set it); a spectrograph keeps its grating, wavelength, slits and shutter."""
 from __future__ import annotations
 
+import ctypes
+import os
+import sys
 import time
 import urllib.parse
 from typing import Any, List, Optional, Tuple
@@ -130,7 +134,48 @@ def discover_seabreeze(module: Any = None) -> List[Tuple[str, str]]:
             for d in _devices(module)]
 
 
-# ------------------------------------------------------------------ Andor Shamrock / Kymera (pylablib)
+# ------------------------------------------------------------------ Andor Shamrock / Kymera (Andor's DLL)
+
+SHAMROCK_OK = 20202
+SLITS = {"input_side": 1, "input_direct": 2, "output_side": 3, "output_direct": 4}
+INPUT_FLIPPER, OUTPUT_FLIPPER = 1, 2
+SHUTTER_OPEN = 1   # 0 closed, 1 open, 2 BNC
+_shamrock_users = [0]   # spectrographs open: the library is initialized once for all (a scan leaves it alone meanwhile)
+
+
+def load_shamrock() -> Any:
+    """Andor's spectrograph library, from Solis or the Andor SDK (or wherever Windows finds it), its calls declared."""
+    if sys.platform != "win32":
+        raise AdapterError("Andor's spectrograph library runs on Windows")
+    bits = "64" if ctypes.sizeof(ctypes.c_void_p) == 8 else "32"
+    folders = [os.path.join(os.environ.get(v, ""), sub) for v in ("ProgramFiles", "ProgramFiles(x86)")
+               for sub in ("Andor SOLIS", os.path.join("Andor SOLIS", "Shamrock"), "Andor SDK",
+                           os.path.join("Andor SDK", "Shamrock64"))]
+    for f in folders:
+        if os.path.isdir(f):
+            os.add_dll_directory(f)
+    names = ["atspectrograph.dll", "ShamrockCIF%s.dll" % bits, "ShamrockCIF.dll"]
+    for name in [os.path.join(f, n) for f in folders for n in names] + names:
+        try:
+            lib = ctypes.WinDLL(name)
+            break
+        except OSError:
+            continue
+    else:
+        raise AdapterError("Andor's spectrograph library isn't here (atspectrograph.dll or ShamrockCIF): install Andor "
+                           "Solis or the Andor SDK")
+    i, f, p = ctypes.c_int, ctypes.c_float, ctypes.POINTER
+    for fn, args in (("ShamrockInitialize", [ctypes.c_char_p]), ("ShamrockClose", []),
+                     ("ShamrockGetNumberDevices", [p(i)]), ("ShamrockGetSerialNumber", [i, ctypes.c_char_p]),
+                     ("ShamrockGetWavelength", [i, p(f)]), ("ShamrockSetWavelength", [i, f]),
+                     ("ShamrockGetGrating", [i, p(i)]), ("ShamrockSetGrating", [i, i]),
+                     ("ShamrockGetAutoSlitWidth", [i, i, p(f)]), ("ShamrockSetAutoSlitWidth", [i, i, f]),
+                     ("ShamrockGetShutter", [i, p(i)]), ("ShamrockSetShutter", [i, i]),
+                     ("ShamrockGetFlipperMirror", [i, i, p(i)]), ("ShamrockSetFlipperMirror", [i, i, i])):
+        func = getattr(lib, fn)
+        func.argtypes, func.restype = args, ctypes.c_uint
+    return lib
+
 
 class AndorSpectrograph(DriverBackend):
     """Paths: wavelength (centre, nm), grating (1-based), slit_input (input side slit width, um, motorized slits
@@ -138,80 +183,99 @@ class AndorSpectrograph(DriverBackend):
 
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
         super().__init__(name, card, address)
-        if module is None:
-            try:
-                from pylablib.devices import Andor as module   # type: ignore
-            except ImportError as e:
-                raise AdapterError("%s needs pylablib and Andor's spectrograph SDK: pip install pylablib (the SDK "
-                                   "comes with Andor Solis or the Andor SDK)" % name) from e
         target = _target(address) or "0"
         try:
             self.idx = int(target)
         except ValueError:
             raise AdapterError("%s: a spectrograph address is shamrock://<index>, e.g. shamrock://0" % name)
+        self.lib = module if module is not None else load_shamrock()
+        if not _shamrock_users[0]:
+            self._call("ShamrockInitialize", b"")   # opens Andor's link; sets nothing on the spectrograph
+        _shamrock_users[0] += 1
+        n = ctypes.c_int()
         try:
-            self.dev = module.ShamrockSpectrograph(self.idx)   # opens a handle; changes nothing
-        except Exception as e:
-            raise AdapterError("%s: could not open spectrograph %d: %s" % (name, self.idx, e)) from e
+            self._call("ShamrockGetNumberDevices", ctypes.byref(n))
+            if not 0 <= self.idx < n.value:
+                raise AdapterError("%s: no spectrograph %d (Andor's library sees %d)" % (name, self.idx, n.value))
+        except AdapterError:
+            self.close()
+            raise
+
+    def _call(self, fn: str, *args: Any) -> None:
+        code = getattr(self.lib, fn)(*args)
+        if code != SHAMROCK_OK:
+            raise AdapterError("%s: Andor %s failed (code %s)" % (self.name, fn.replace("Shamrock", ""), code))
 
     def get(self, path: str) -> Any:
-        try:
+        if path in ("wavelength", "slit_input"):
+            v = ctypes.c_float()
             if path == "wavelength":
-                return self.dev.get_wavelength() * 1e9
-            if path == "grating":
-                return int(self.dev.get_grating())
-            if path == "slit_input":
-                return self.dev.get_slit_width("input_side") * 1e6
-            if path == "shutter":
-                return 1 if self.dev.get_shutter() == "opened" else 0
-            if path == "flipper_output":
-                return 1 if self.dev.get_flipper_port("output") == "side" else 0
-        except AdapterError:
-            raise
-        except Exception as e:
-            raise AdapterError("%s: %s: %s" % (self.name, path, str(e).splitlines()[0])) from e
+                self._call("ShamrockGetWavelength", self.idx, ctypes.byref(v))
+            else:
+                self._call("ShamrockGetAutoSlitWidth", self.idx, SLITS["input_side"], ctypes.byref(v))
+            return float(v.value)
+        n = ctypes.c_int()
+        if path == "grating":
+            self._call("ShamrockGetGrating", self.idx, ctypes.byref(n))
+            return n.value
+        if path == "shutter":
+            self._call("ShamrockGetShutter", self.idx, ctypes.byref(n))
+            return 1 if n.value == SHUTTER_OPEN else 0
+        if path == "flipper_output":
+            self._call("ShamrockGetFlipperMirror", self.idx, OUTPUT_FLIPPER, ctypes.byref(n))
+            return n.value
         raise AdapterError("%s: no %r" % (self.name, path))
 
     def set(self, path: str, value: Any) -> None:
-        try:
-            if path == "wavelength":
-                self.dev.set_wavelength(float(value) * 1e-9)
-            elif path == "grating":
-                self.dev.set_grating(int(value))
-            elif path == "slit_input":
-                self.dev.set_slit_width("input_side", float(value) * 1e-6)
-            elif path == "shutter":
-                self.dev.set_shutter("opened" if value else "closed")
-            elif path == "flipper_output":
-                self.dev.set_flipper_port("output", "side" if value else "direct")
-            else:
-                raise AdapterError("%s: %r can't be set" % (self.name, path))
-        except AdapterError:
-            raise
-        except Exception as e:
-            raise AdapterError("%s: %s: %s" % (self.name, path, str(e).splitlines()[0])) from e
+        if path == "wavelength":
+            self._call("ShamrockSetWavelength", self.idx, ctypes.c_float(float(value)))
+        elif path == "grating":
+            self._call("ShamrockSetGrating", self.idx, int(value))
+        elif path == "slit_input":
+            self._call("ShamrockSetAutoSlitWidth", self.idx, SLITS["input_side"], ctypes.c_float(float(value)))
+        elif path == "shutter":
+            self._call("ShamrockSetShutter", self.idx, SHUTTER_OPEN if value else 0)
+        elif path == "flipper_output":
+            self._call("ShamrockSetFlipperMirror", self.idx, OUTPUT_FLIPPER, 1 if value else 0)
+        else:
+            raise AdapterError("%s: %r can't be set" % (self.name, path))
 
     def identity(self) -> str:
+        buf = ctypes.create_string_buffer(64)
         try:
-            return "Andor,Shamrock,%s" % self.dev.get_device_info().serial_number
-        except Exception:
+            self._call("ShamrockGetSerialNumber", self.idx, buf)
+            return "Andor,Shamrock,%s" % buf.value.decode(errors="replace")
+        except AdapterError:
             return "Andor,Shamrock,%d" % self.idx
 
     def close(self) -> None:
-        try:
-            self.dev.close()
-        except Exception:
-            pass
+        _shamrock_users[0] = max(0, _shamrock_users[0] - 1)
+        if not _shamrock_users[0]:
+            try:
+                self.lib.ShamrockClose()
+            except Exception:
+                pass
 
 
 def discover_shamrock(module: Any = None) -> List[Tuple[str, str]]:
-    if module is None:
-        try:
-            from pylablib.devices import Andor as module   # type: ignore
-        except Exception:
-            return []
+    """Andor spectrographs, counted by Andor's library (nothing moves). Left alone while Kelvin has one open."""
+    if _shamrock_users[0]:
+        return []
     try:
-        count = getattr(module, "get_shamrock_spectrographs_number", None) or module.get_spectrographs_number
-        return [("shamrock://%d" % i, "Andor,Shamrock,%d" % i) for i in range(int(count()))]
+        lib = module if module is not None else load_shamrock()
+    except AdapterError:
+        return []
+    try:
+        if lib.ShamrockInitialize(b"") != SHAMROCK_OK:
+            return []
+        n = ctypes.c_int()
+        if lib.ShamrockGetNumberDevices(ctypes.byref(n)) != SHAMROCK_OK:
+            return []
+        return [("shamrock://%d" % i, "Andor,Shamrock,%d" % i) for i in range(n.value)]
     except Exception:
         return []
+    finally:
+        try:
+            lib.ShamrockClose()
+        except Exception:
+            pass

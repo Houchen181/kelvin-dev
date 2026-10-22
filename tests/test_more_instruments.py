@@ -163,58 +163,52 @@ class FakePylon:
         self.TlFactory = SimpleNamespace(GetInstance=lambda: tl)
 
 
-class FakeAttocube:
-    """pylablib's Attocube module: an ANC300 with axes 1-2, an ANC350 on USB."""
+class FakeANC300:
+    """An ANC300's command line (axes 1-2): answers each command with lines ending in OK, as the controller does."""
+
+    def __init__(self):
+        self.opened, self.sent, self.closed = [], [], 0
+        self.mode, self.offset, self.voltage = {1: "gnd", 2: "stp"}, {1: 0.0, 2: 0.0}, {1: 30.0, 2: 30.0}
+        fake = self
+
+        class Link:
+            def __init__(self, target, pwd=None):
+                fake.opened.append(target)
+
+            def command(self, line, timeout=None):
+                fake.sent.append(line)
+                words = line.split()
+                cmd, axis = words[0], int(words[1]) if len(words) > 1 else 0
+                if cmd == "getm":
+                    return ["mode = %s" % fake.mode[axis]]
+                if cmd == "setm":
+                    fake.mode[axis] = words[2]
+                elif cmd == "getv":
+                    return ["voltage = %.6f V" % fake.voltage[axis]]
+                elif cmd == "setv":
+                    fake.voltage[axis] = float(words[2])
+                elif cmd == "getf":
+                    return ["frequency = 1000 Hz"]
+                elif cmd in ("geta", "geto"):
+                    return ["voltage = %.6f V" % fake.offset[axis]]
+                elif cmd == "seta":
+                    fake.offset[axis] = float(words[2])
+                elif cmd == "getcser":
+                    return ["ANC300B-C-1234"]
+                return []
+
+            def close(self):
+                fake.closed += 1
+
+        self.Link = Link
+
+
+class FakeANC350:
+    """pylablib's Attocube module, for the ANC350 on USB."""
 
     def __init__(self):
         lib = self
-        self.opened, self.calls = [], []
-
-        class ANC300:
-            def __init__(self, conn, pwd=None):
-                lib.opened.append(conn)
-                self.mode, self.offset, self.voltage = {1: "gnd", 2: "stp"}, {1: 0.0, 2: 0.0}, {1: 30.0, 2: 30.0}
-
-            def get_mode(self, axis):
-                return self.mode[axis]
-
-            def set_mode(self, axis, mode):
-                self.mode[axis] = mode
-                return mode
-
-            def get_voltage(self, axis):
-                return self.voltage[axis]
-
-            def set_voltage(self, axis, v):
-                self.voltage[axis] = v
-
-            def get_frequency(self, axis):
-                return 1000.0
-
-            def set_frequency(self, axis, f):
-                pass
-
-            def get_offset(self, axis):
-                return self.offset[axis]
-
-            def set_offset(self, axis, v):
-                lib.calls.append(("offset", axis, v))
-                self.offset[axis] = v
-
-            def get_output(self, axis):
-                return self.offset[axis]
-
-            def move_by(self, axis, steps):
-                lib.calls.append(("move_by", axis, steps))
-
-            def wait_move(self, axis, timeout=30.0):
-                lib.calls.append(("wait", axis))
-
-            def get_device_info(self):
-                return SimpleNamespace(serial="ANC300B-C-1234", version="1.0")
-
-            def close(self):
-                lib.calls.append("closed")
+        self.calls = []
 
         class ANC350:
             def __init__(self, conn=0):
@@ -239,8 +233,104 @@ class FakeAttocube:
             def close(self):
                 pass
 
-        self.ANC300, self.ANC350 = ANC300, ANC350
+        self.ANC350 = ANC350
         self.get_usb_devices_number_ANC350 = lambda: 1
+
+
+def _out(arg):
+    """What a ctypes.byref(...) argument points to (the fakes of a DLL write their answers there)."""
+    return arg._obj
+
+
+class FakeShamrockDLL:
+    """Andor's spectrograph DLL: one Shamrock, its calls returning 20202 (success)."""
+
+    def __init__(self):
+        self.wl, self.grating, self.slit, self.shutter, self.flipper = 500.0, 1, 100.0, 0, 0
+        self.calls = []
+
+    def __getattr__(self, name):
+        def call(*args):
+            self.calls.append(name)
+            if name == "ShamrockGetNumberDevices":
+                _out(args[0]).value = 1
+            elif name == "ShamrockGetWavelength":
+                _out(args[1]).value = self.wl
+            elif name == "ShamrockSetWavelength":
+                self.wl = args[1].value
+            elif name == "ShamrockGetGrating":
+                _out(args[1]).value = self.grating
+            elif name == "ShamrockSetGrating":
+                self.grating = args[1]
+            elif name == "ShamrockGetAutoSlitWidth":
+                assert args[1] == 1          # the input side slit
+                _out(args[2]).value = self.slit
+            elif name == "ShamrockGetShutter":
+                _out(args[1]).value = self.shutter
+            elif name == "ShamrockSetShutter":
+                self.shutter = args[1]
+            elif name == "ShamrockGetFlipperMirror":
+                _out(args[2]).value = self.flipper
+            elif name == "ShamrockGetSerialNumber":
+                args[1].value = b"SR-0123"
+            return 20202
+        return call
+
+
+class FakePicamDLL:
+    """Princeton Instruments' Picam.dll: one PyLoN whose 4x3 chip reads 1..12, its calls returning 0 (success)."""
+
+    def __init__(self):
+        import ctypes
+        from labharness import princeton as P
+        self.P, self.ctypes = P, ctypes
+        self.floats = {P.EXPOSURE: 100.0, P.SETPOINT: -120.0, P.TEMPERATURE: -119.5, P.ADC_SPEED: 0.1}
+        self.ints = {P.TEMPERATURE_STATUS: 2, P.ADC_GAIN: 2, P.SHUTTER: 1, P.READOUT_STRIDE: 24, P.PIXEL_BIT_DEPTH: 16}
+        self.roi = (0, 4, 1, 0, 3, 1)
+        self.committed, self.calls, self.keep = False, [], []
+        self.ids = (P.CameraID * 1)(P.CameraID(1, 1, b"PyLoN 400BR eXcelon", b"1234567"))
+
+    def __getattr__(self, name):
+        P, ct = self.P, self.ctypes
+
+        def call(*args):
+            self.calls.append(name)
+            if name == "Picam_GetAvailableCameraIDs":
+                _out(args[0]).contents = self.ids[0]
+                _out(args[1]).value = 1
+            elif name in ("Picam_OpenCamera", "Picam_OpenFirstCamera"):
+                _out(args[-1]).value = 1234
+            elif name == "Picam_GetCameraID":
+                _out(args[1]).sensor_name, _out(args[1]).serial_number = b"PyLoN 400BR eXcelon", b"1234567"
+            elif name in ("Picam_GetParameterFloatingPointValue", "Picam_ReadParameterFloatingPointValue"):
+                _out(args[2]).value = self.floats[args[1]]
+            elif name == "Picam_SetParameterFloatingPointValue":
+                self.floats[args[1]], self.committed = args[2], False
+            elif name in ("Picam_GetParameterIntegerValue", "Picam_ReadParameterIntegerValue"):
+                _out(args[2]).value = self.ints[args[1]]
+            elif name == "Picam_SetParameterIntegerValue":
+                self.ints[args[1]], self.committed = args[2], False
+            elif name == "Picam_GetParameterRoisValue":
+                roi = P.Roi(*self.roi)
+                rois = P.Rois(ct.pointer(roi), 1)
+                self.keep += [roi, rois]
+                _out(args[2]).contents = rois
+            elif name == "Picam_SetParameterRoisValue":
+                r = _out(args[2]).roi_array[0]
+                self.roi = (r.x, r.width, r.x_binning, r.y, r.height, r.y_binning)
+                self.committed = False
+            elif name == "Picam_CommitParameters":
+                self.committed = True
+            elif name == "Picam_AreParametersCommitted":
+                _out(args[1]).value = 1 if self.committed else 0
+            elif name == "Picam_Acquire":
+                assert self.committed                    # PICam acquires only with its settings sent
+                buf = (ct.c_uint16 * 12)(*range(1, 13))
+                self.keep.append(buf)
+                _out(args[3]).initial_readout = ct.addressof(buf)
+                _out(args[3]).readout_count = 1
+            return 0
+        return call
 
 
 # ------------------------------------------------------------------ DAQ
@@ -377,19 +467,77 @@ instruments:
 
 
 def test_attocube_positioners(tmp_path):
-    lib = MODULES["anc300"] = MODULES["anc350"] = FakeAttocube()
+    anc300, anc350 = FakeANC300(), FakeANC350()
+    MODULES.update(anc300=anc300.Link, anc350=anc350)
     lab = build_lab(ANC_LAB)
-    assert lib.opened == ["COM5"]                                        # two axes, one connection
+    assert anc300.opened == ["COM5"] and anc300.sent == []              # two axes, one link; nothing sent yet
     gate = gate_for(lab, tmp_path, [True, True])
     assert lab.read("x", "mode") == "gnd" and lab.read("y", "mode") == "stp"   # as they were
-    assert gate.set("x", "steps", 25).ok and ("move_by", 1, 25) in lib.calls and ("wait", 1) in lib.calls
-    assert gate.set("x", "steps", 15).ok and ("move_by", 1, -10) in lib.calls and lab.read("x", "steps") == 15
+    assert lab.read("x", "voltage") == 30.0 and lab.read("x", "frequency") == 1000.0
+    assert gate.set("x", "steps", 25).ok and anc300.sent[-2:] == ["stepu 1 25", "stepw 1"]
+    assert gate.set("x", "steps", 15).ok and anc300.sent[-2:] == ["stepd 1 10", "stepw 1"]
+    assert lab.read("x", "steps") == 15
     assert gate.set("x", "offset", 60).action == "refused"               # the lab's 40 V
-    assert gate.set("x", "offset", 2).ok and ("offset", 1, 2.0) in lib.calls   # asked, then ramped
+    assert gate.set("x", "offset", 2).ok and anc300.offset[1] == 2.0      # asked, then ramped
+    assert lab.instrument("x").backend.identity() == "attocube,ANC300,ANC300B-C-1234"
     assert lab.read("fine", "position") == pytest.approx(1.0)              # um
-    assert gate.set("fine", "position", 5).ok and ("move_to", 0, pytest.approx(5e-6)) in lib.calls
+    assert gate.set("fine", "position", 5).ok and ("move_to", 0, pytest.approx(5e-6)) in anc350.calls
     lab.close()
-    assert lib.calls.count("closed") == 1                                 # the shared connection, once
+    assert anc300.closed == 1                                            # the shared link, once
+
+
+def test_the_anc300_command_line():
+    """The real link's parsing, on canned bytes: telnet options and the echo dropped, OK and ERROR read."""
+    from labharness.positioners import Link, _value
+
+    class FakeLink(Link):
+        def __init__(self, chunks):
+            self.buf, self.timeout, self.chunks, self.sent = b"", 1.0, list(chunks), []
+
+        def _send(self, line):
+            self.sent.append(line)
+
+        def _chunk(self):
+            return self.chunks.pop(0) if self.chunks else b""
+
+    link = FakeLink([b"\xff\xfb\x01getv 1\r\nvoltage = 30.000000 V\r\n", b"OK\r\n"])
+    assert _value(link.command("getv 1")) == "30.000000"
+    link = FakeLink([b"Axis not in computer control mode\r\nERROR\r\n"])
+    with pytest.raises(Exception, match="computer control"):
+        link.command("stepu 1 10")
+
+
+def test_an_andor_spectrograph_through_andors_dll(tmp_path):
+    dll = MODULES["shamrock"] = FakeShamrockDLL()
+    lab = build_lab("lab: S\ninstruments:\n  spg: {card: andor/shamrock, address: 'shamrock://0'}\n")
+    assert dll.calls == ["ShamrockInitialize", "ShamrockGetNumberDevices"]   # opening moves nothing
+    gate = gate_for(lab, tmp_path)
+    assert lab.read("spg", "wavelength") == 500.0 and lab.read("spg", "grating") == 1
+    assert gate.set("spg", "wavelength", 632.8).ok and dll.wl == pytest.approx(632.8, abs=1e-3)
+    assert gate.set("spg", "shutter", True).ok and dll.shutter == 1 and lab.read("spg", "shutter") is True
+    assert lab.read("spg", "slit_input") == 100.0
+    assert lab.instrument("spg").backend.identity() == "Andor,Shamrock,SR-0123"
+    lab.close()
+    assert dll.calls[-1] == "ShamrockClose"
+
+
+def test_a_pylon_camera_through_picam(tmp_path):
+    from labharness import princeton
+    dll = MODULES["picam"] = FakePicamDLL()
+    lab = build_lab("lab: P\ninstruments:\n  ccd: {card: princeton/picam, address: 'picam://1234567'}\n")
+    assert [c for c in dll.calls if "Set" in c or "Commit" in c] == []   # opening sets nothing
+    gate = gate_for(lab, tmp_path)
+    assert lab.read("ccd", "exposure") == pytest.approx(0.1) and lab.read("ccd", "temperature") == -119.5
+    assert lab.read("ccd", "temperature_status") == "locked" and lab.read("ccd", "adc_gain") == "medium"
+    assert lab.read("ccd", "roi") == "0,4,1,0,3,1"
+    assert lab.read("ccd", "spectrum") == [15.0, 18.0, 21.0, 24.0]        # each column's three rows summed
+    assert lab.read("ccd", "max") == 12.0
+    assert gate.set("ccd", "exposure", 2).ok and dll.floats[princeton.EXPOSURE] == 2000.0 and dll.committed
+    assert gate.set("ccd", "roi", "0,4,1,0,3,3").ok and dll.roi == (0, 4, 1, 0, 3, 3)   # the chip binned to a row
+    assert lab.instrument("ccd").backend.identity() == "Princeton Instruments,PyLoN 400BR eXcelon,1234567"
+    assert "image" in lab.instrument("ccd").spec("frame").show(lab.read("ccd", "frame"))
+    lab.close()
+    assert dll.calls[-2:] == ["Picam_CloseCamera", "Picam_UninitializeLibrary"]
 
 
 class Port:
@@ -494,10 +642,11 @@ instruments:
 
 
 def test_scans_find_them_through_their_libraries():
-    MODULES.update(nidaq=FakeNIDAQ(), seabreeze=FakeSeabreeze(), pylon=FakePylon(), anc350=FakeAttocube())
+    MODULES.update(nidaq=FakeNIDAQ(), picam=FakePicamDLL(), shamrock=FakeShamrockDLL(), seabreeze=FakeSeabreeze(),
+                   pylon=FakePylon(), anc350=FakeANC350())
     reg = builtin_registry()
     found = dict(discover_libraries())
-    assert set(found) == {"nidaq://Dev1", "seabreeze://USB4F0001", "pylon://40012345", "anc350://0"}
     assert {a: match_card(i, reg).id for a, i in found.items()} == {
-        "nidaq://Dev1": "ni/daqmx", "seabreeze://USB4F0001": "ocean/spectrometer", "pylon://40012345": "basler/camera",
+        "nidaq://Dev1": "ni/daqmx", "picam://1234567": "princeton/picam", "shamrock://0": "andor/shamrock",
+        "seabreeze://USB4F0001": "ocean/spectrometer", "pylon://40012345": "basler/camera",
         "anc350://0": "attocube/anc350"}
