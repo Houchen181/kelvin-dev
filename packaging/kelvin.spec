@@ -71,6 +71,10 @@ a = Analysis(
     excludes=["tkinter", "pytest", "PyInstaller"],
     noarchive=False,
 )
+# pypylon brings Basler's image-processing plugins (vTools, ~230 MB); Kelvin only grabs frames, so they stay out
+UNUSED = ("pylonDataProcessingPlugins", "DataProcessingPluginsB")
+a.binaries = [b for b in a.binaries if not any(part in b[0].replace("\\", "/").split("/") for part in UNUSED)]
+a.datas = [d for d in a.datas if not any(part in d[0].replace("\\", "/").split("/") for part in UNUSED)]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
