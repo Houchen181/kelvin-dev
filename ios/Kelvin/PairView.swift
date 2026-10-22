@@ -189,8 +189,8 @@ final class ScannerController: UIViewController {
         layer.frame = view.layer.bounds
         view.layer.insertSublayer(layer, at: 0)
         preview = layer
-        let session = self.session
-        DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
+        let camera = session
+        DispatchQueue.global(qos: .userInitiated).async { camera.startRunning() }
     }
 
     override func viewDidLayoutSubviews() {
@@ -200,8 +200,8 @@ final class ScannerController: UIViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        let session = self.session
-        DispatchQueue.global(qos: .userInitiated).async { if session.isRunning { session.stopRunning() } }
+        let camera = session
+        DispatchQueue.global(qos: .userInitiated).async { if camera.isRunning { camera.stopRunning() } }
     }
 
     private func say(_ text: String) {
