@@ -6,6 +6,7 @@ struct ChatListView: View {
     @ObservedObject var session: LabSession
     @State var chats: [ChatSummary] = []
     @State var failure: String?
+    @State var opened: ChatSummary?
 
     var body: some View {
         List {
@@ -46,6 +47,9 @@ struct ChatListView: View {
             }
         }
         .navigationTitle("Chat")
+        .navigationDestination(isPresented: Binding(get: { opened != nil }, set: { if !$0 { opened = nil } })) {
+            if let c = opened { ChatView(session: session, chat: c, incognito: c.incognito) }
+        }
         .task { await load() }
         .refreshable { await load() }
         .failure($failure)
@@ -55,6 +59,7 @@ struct ChatListView: View {
     func load() async {
         do {
             chats = try await session.chats()
+            if let c = chats.first(where: { Launch.open($0.id) }) { opened = c }
         } catch {
             failure = error.localizedDescription
         }

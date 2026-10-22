@@ -34,6 +34,23 @@ struct RootView: View {
             PairView()
                 .environmentObject(app)
         }
+        .onAppear {
+            if Launch.demo && app.current == nil { app.startDemo() }
+        }
+    }
+}
+
+/// Launch arguments, for screenshots: -KelvinDemo YES -KelvinTab runs -KelvinOpen <a run or chat id>.
+enum Launch {
+    static var demo: Bool { UserDefaults.standard.bool(forKey: "KelvinDemo") }
+    static var tab: String { UserDefaults.standard.string(forKey: "KelvinTab") ?? "lab" }
+    private static var opened = false
+
+    /// True once, for the run or chat named in the launch arguments.
+    static func open(_ id: String) -> Bool {
+        guard !opened, UserDefaults.standard.string(forKey: "KelvinOpen") == id else { return false }
+        opened = true
+        return true
     }
 }
 
@@ -41,20 +58,25 @@ struct RootView: View {
 struct LabTabs: View {
     @ObservedObject var session: LabSession
     @Environment(\.scenePhase) var phase
+    @State var tab = Launch.tab
 
     var body: some View {
-        TabView {
+        TabView(selection: $tab) {
             NavigationStack { LabView(session: session) }
                 .tabItem { Label("Lab", systemImage: "gauge.with.dots.needle.33percent") }
                 .badge(session.state?.waiting ?? 0)
+                .tag("lab")
             if session.role.canChat {
                 NavigationStack { ChatListView(session: session) }
                     .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
+                    .tag("chat")
             }
             NavigationStack { RunsView(session: session) }
                 .tabItem { Label("Runs", systemImage: "chart.xyaxis.line") }
+                .tag("runs")
             NavigationStack { ComputersView(session: session) }
                 .tabItem { Label("Computers", systemImage: "desktopcomputer") }
+                .tag("computers")
         }
         .onAppear { session.resume() }
         .onDisappear { session.pause() }
@@ -87,6 +109,8 @@ struct WelcomeView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+            Button("Try a demo lab") { app.startDemo() }
+                .buttonStyle(.bordered)
             Spacer()
             Text("On the Kelvin computer, open Settings → Phone, switch on Phone access, and press Pair a phone.")
                 .font(.footnote)

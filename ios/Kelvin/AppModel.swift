@@ -30,6 +30,24 @@ final class AppModel: ObservableObject {
         return s
     }
 
+    /// The demo lab answers inside the app; every other computer over the network.
+    func transport(for c: Computer) -> Transport {
+        c.addresses.contains(DemoTransport.address) ? DemoTransport.shared : transport
+    }
+
+    /// Add the demo lab (again) and show it.
+    func startDemo() {
+        let c = Computer(lab: "Demo lab", host: "DEMO", phoneName: "This phone", role: "control",
+                         addresses: [DemoTransport.address])
+        tokens.save("demo", for: c.id)
+        if let old = list.add(c) {
+            tokens.delete(old)
+            sessions[old]?.pause()
+            sessions[old] = nil
+        }
+        save()
+    }
+
     func select(_ id: UUID) {
         list.selected = id
         save()
@@ -64,7 +82,7 @@ final class AppModel: ObservableObject {
     /// Forget a computer on this phone, and unpair the phone on the computer too if it answers.
     func remove(_ c: Computer) async {
         if let token = tokens.token(for: c.id) {
-            _ = try? await reach(c.addresses, token: token, transport: transport) { try await $0.forget() }
+            _ = try? await reach(c.addresses, token: token, transport: transport(for: c)) { try await $0.forget() }
         }
         tokens.delete(c.id)
         sessions[c.id]?.pause()
@@ -97,7 +115,7 @@ final class LabSession: ObservableObject {
     init(computer: Computer, app: AppModel) {
         self.computer = computer
         self.app = app
-        transport = app.transport
+        transport = app.transport(for: computer)
         tokens = app.tokens
     }
 

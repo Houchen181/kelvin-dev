@@ -8,6 +8,7 @@ struct RunsView: View {
     @State var runs: [RunSummary] = []
     @State var failure: String?
     @State var loaded = false
+    @State var opened: RunSummary?
 
     var body: some View {
         List {
@@ -30,6 +31,9 @@ struct RunsView: View {
             }
         }
         .navigationTitle("Runs")
+        .navigationDestination(isPresented: Binding(get: { opened != nil }, set: { if !$0 { opened = nil } })) {
+            if let r = opened { RunDetailView(session: session, summary: r) }
+        }
         .task { await load() }
         .refreshable { await load() }
         .failure($failure)
@@ -40,6 +44,7 @@ struct RunsView: View {
         do {
             runs = try await session.runs()
             loaded = true
+            if let r = runs.first(where: { Launch.open($0.runID) }) { opened = r }
         } catch {
             failure = error.localizedDescription
         }
