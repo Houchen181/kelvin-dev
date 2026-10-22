@@ -100,8 +100,9 @@ class Lab:
                 continue
             values: Dict[str, Any] = {}
             for spec in inst.card.params.values():
-                if spec.type == "trace" or (spec.get_cmd is None and spec.name not in inst._last):
-                    continue
+                if spec.type in ("trace", "image") or spec.acquires or (spec.get_cmd is None and
+                                                                        spec.name not in inst._last):
+                    continue   # traces, frames and acquisitions are read when asked or measured, not to look
                 try:
                     values[spec.name] = inst.read(spec.name)
                 except Exception as e:  # a snapshot must never stop a run
@@ -136,8 +137,8 @@ class Lab:
                 if err:
                     problems.append("instrument reports %s" % err)
                 dead = []
-                for spec in card.params.values():  # every reading once (traces are slow; skipped)
-                    if spec.kind != "measure" or spec.get_cmd is None or spec.type == "trace":
+                for spec in card.params.values():  # every reading once (traces are slow, frames are files: skipped)
+                    if spec.kind != "measure" or spec.get_cmd is None or spec.type in ("trace", "image"):
                         continue
                     try:
                         inst.read(spec.name)

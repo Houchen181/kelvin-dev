@@ -1,0 +1,54 @@
+card: 1
+id: andor/shamrock
+model: Andor Shamrock / Kymera spectrograph (also as a monochromator)
+vendor: Andor (Oxford Instruments)
+kind: monochromator
+status: community
+manual: "pylablib: Andor Shamrock spectrographs (ShamrockSpectrograph); Andor spectrograph SDK"
+notes:
+  - "Address shamrock://<index> (shamrock://0 for the first). Needs pip install pylablib and Andor's spectrograph SDK (installed with Andor Solis or the Andor SDK). Close Solis first."
+  - "Connecting changes nothing: the grating, wavelength, slits and shutter stay as they are."
+  - "The input slit width works on motorized slits only. Grating numbers start at 1."
+identify:
+  idn: "^Andor,Shamrock"
+  example: "Andor,Shamrock,SR-0123"
+
+parameters:
+  wavelength:
+    label: Centre wavelength
+    kind: measure
+    unit: nm
+    set: "SET wavelength {value}"
+    get: "GET wavelength"
+    limits: [0, 10000]
+    description: The grating's centre (or, used as a monochromator, output) wavelength; its range depends on the grating
+  grating:
+    label: Grating
+    kind: measure
+    type: int
+    set: "SET grating {value}"
+    get: "GET grating"
+    limits: [1, 6]
+  slit_input:
+    label: Input slit
+    kind: measure
+    unit: um
+    set: "SET slit_input {value}"
+    get: "GET slit_input"
+    limits: [10, 2500]
+  shutter:
+    label: Shutter
+    kind: measure
+    type: bool
+    words: [open, closed]
+    set: "SET shutter {value}"
+    get: "GET shutter"
+  flipper_output:
+    label: Output port
+    kind: measure
+    type: bool
+    words: [side, direct]
+    set: "SET flipper_output {value}"
+    get: "GET flipper_output"
+display:
+  headline: wavelength

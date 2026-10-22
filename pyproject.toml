@@ -19,6 +19,10 @@ hardware = ["pyvisa>=1.13", "pyvisa-py>=0.7", "pyserial>=3.5", "pyusb>=1.2", "li
             "zeroconf>=0.130", "pypdf[crypto]>=4"]
 zhinst = ["zhinst-core"]        # Zurich Instruments lock-ins through LabOne
 qd = ["MultiPyVu"]              # Quantum Design PPMS, DynaCool, VersaLab, MPMS3 through MultiVu
+nidaq = ["nidaqmx"]             # National Instruments DAQ cards (with NI-DAQmx installed)
+ocean = ["seabreeze"]           # Ocean Insight spectrometers
+basler = ["pypylon"]            # Basler cameras
+pylablib = ["pylablib"]         # attocube ANC300/ANC350, Andor Shamrock/Kymera spectrographs
 desktop = ["kelvin-lab[web,hardware]", "pywebview>=5"]
 hub = ["starlette", "uvicorn"]  # the Kelvin hub server (accounts across labs): `kelvin-hub`
 dev = ["pytest>=6", "httpx", "pypdf>=4"]

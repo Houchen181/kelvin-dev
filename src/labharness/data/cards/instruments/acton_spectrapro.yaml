@@ -1,0 +1,57 @@
+card: 1
+id: princeton/spectrapro
+model: Princeton Instruments (Acton) SpectraPro monochromator / spectrograph (SP-2150i, SP-2300i, SP-2500i, SP-2750i)
+vendor: Princeton Instruments (Acton Research)
+kind: monochromator
+status: community
+manual: "Acton Research SpectraPro-2500i Operating Instructions, Rev 3.08.29, Section IV-B: the command level (pp. 11-14). Choose your PDF in Lab setup."
+notes:
+  - "RS-232 at 9600 baud, 8N1, or the USB port, which shows up as a COM port: serial://COM4. Commands end with a carriage return; each answer ends with ok. Close the Monochromator Control Software first."
+  - "The value comes before the command (546.7 GOTO); the monochromator echoes characters on RS-232, and Kelvin reads its answer around the echo."
+  - "A wavelength move takes up to tens of seconds: Kelvin waits for its ok. GRATING assumes the right turret is set (TURRET); grating numbers run 1-9 over three turrets."
+  - "INSTALL, UNINSTALL, INIT-... and RESTORE FACTORY SETTINGS rewrite the monochromator's memory. Kelvin refuses them in their one-value forms; never send the longer forms (e.g. 1-120-500 5 INSTALL) by hand."
+identify:
+  query: "MODEL"
+  idn: "SP-?\\d{3,4}"
+  example: "MODEL SP-2558  ok"
+connection: { baud_rate: 9600, data_bits: 8, stop_bits: 1, parity: none, write_termination: "\r", read_termination: "\r\n", timeout_ms: 30000, set_reply: "ok\\s*$" }
+
+parameters:
+  wavelength:
+    label: Wavelength
+    kind: measure
+    unit: nm
+    set: "{value} GOTO"
+    get: "?NM"
+    parse: '([-0-9.]+)\s*nm(?!/)'
+    limits: [0, 3000]
+    description: Goes there at full speed; the range a grating reaches depends on its groove density
+  scan_rate:
+    label: Scan rate
+    kind: measure
+    unit: nm/min
+    set: "{value} NM/MIN"
+    get: "?NM/MIN"
+    parse: '([0-9.]+)\s*nm/min'
+    limits: [0.01, 10000]
+    description: The rate for NM (constant-rate) moves
+  grating:
+    label: Grating
+    kind: measure
+    type: int
+    set: "{value} GRATING"
+    get: "?GRATING"
+    parse: '(\d+)\s+ok'
+    limits: [1, 9]
+  turret:
+    label: Turret
+    kind: measure
+    type: int
+    get: "?TURRET"
+    parse: '(\d+)\s+ok'
+display:
+  headline: wavelength
+raw:
+  blocked: ["RESTORE", "BLAZE", "{value} INSTALL", "{value} UNINSTALL", "{value} SELECT-GRATING", "{value} G/MM",
+            "{value} INIT-OFFSET", "{value} INIT-GADJUST", "{value} INIT-SP500-GADJUST", "{value} INIT-GRATING",
+            "{value} INIT-WAVELENGTH", "{value} INIT-SRATE"]

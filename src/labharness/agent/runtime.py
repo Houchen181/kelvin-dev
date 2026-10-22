@@ -15,7 +15,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import yaml
 
-from ..cards import ParamSpec, num
+from .. import frames
+from ..cards import ParamSpec, num, trace_x
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
@@ -135,6 +136,7 @@ class LabRuntime:
         self.approver = approver
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        frames.FOLDER = self.data_dir / "frames"   # camera frames read outside a run
         self.events_path = self.data_dir / "events.jsonl"
         self.user: Optional[str] = None             # the person signed in to the portal (accounts.py), if any
         self.shared_log: Optional[Path] = None      # the lab's instrument log, everyone's events; set by the app
@@ -198,12 +200,9 @@ class LabRuntime:
                 for m in self.live["measures"]:
                     if m["kind"] == "trace" and isinstance(row.get(m["key"]), list):
                         ys = row[m["key"]]
-                        x0, x1 = row.get(m["key"] + ".axis") or (0, len(ys) - 1)
                         step = max(1, -(-len(ys) // 400))
-                        n = len(ys)
                         self.live["trace"] = {"key": m["key"], "unit": m["unit"], "x_unit": m.get("x_unit", ""),
-                                              "x": [x0 + (x1 - x0) * i / max(1, n - 1) for i in range(0, n, step)],
-                                              "y": ys[::step]}
+                                              "x": trace_x(row, m["key"], len(ys))[::step], "y": ys[::step]}
                 self.live["done"], self.live["eta_s"], self.live["phase"] = event["done"], event["eta_s"], "measuring"
             elif event["event"] == "phase":  # after the last point: final values, or the stop/abort steps
                 self.live["phase"], self.live["eta_s"] = event["phase"], event.get("eta_s")
@@ -375,6 +374,7 @@ class LabRuntime:
                 self.gate.log.write("data_folder", by=by, moved_to=str(new),
                                     note="what stays here was not moved" if move else "earlier data stay here")
             self.data_dir = new
+            frames.FOLDER = new / "frames"
             self.queue.move_to(new / "queue.json")
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
@@ -412,6 +412,7 @@ class LabRuntime:
                 self.gate.log.write("signed_out", user=self.user)
             self.user = user
             self.data_dir = new
+            frames.FOLDER = new / "frames"
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
             self.engine.store = RunStore(new / "runs")
@@ -999,7 +1000,7 @@ class LabRuntime:
             return e.args[0]
         if not rows:
             return "run %s has no data" % run_id
-        cols = columns or [k for k in rows[0] if not k.endswith(".axis")]
+        cols = columns or [k for k in rows[0] if not k.endswith(".axis") and not k.endswith(".x")]
         missing = [c for c in cols if c not in rows[0]]
         if missing:
             return "unknown columns %s (have: %s)" % (", ".join(missing), ", ".join(rows[0]))
@@ -1031,14 +1032,14 @@ class LabRuntime:
             return "%s is not a trace column" % column
         n = len(values)
         step = max(1, -(-n // max(2, int(max_points))))
-        axis = rows[row].get(column + ".axis")
+        axis = rows[row].get(column + ".axis") or rows[row].get(column + ".x")
         spec = self._spec(column)
         lines = ["%s row %d: %s%s" % (run_id, row, trace_summary(spec, values) if spec else "%d points" % n,
                                       "" if step == 1 else "; every %dth point shown" % step)]
         if axis:
-            x0, x1 = axis
+            xs = trace_x(rows[row], column, n)
             lines.append("x,y")
-            lines += ["%.12g,%.6g" % (x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1), values[i]) for i in range(0, n, step)]
+            lines += ["%.12g,%.6g" % (xs[i], values[i]) for i in range(0, n, step)]
         else:
             lines.append("index,y")
             lines += ["%d,%.6g" % (i, values[i]) for i in range(0, n, step)]
@@ -1399,7 +1400,8 @@ class LabRuntime:
         if dg is None:
             raise KeyError("run %s has not finished" % run_id)
         part = self._collector().run(run_id, self.gate.log.events())
-        files = {p.name for p in d.iterdir() if p.is_file()} | {"report." + f for f in self._formats(fmt)}
+        files = {p.name for p in d.iterdir() if p.is_file() or p.name == "frames"} | \
+            {"report." + f for f in self._formats(fmt)}
         doc = report_kinds.scan_document(part, dg, files, dg.lab or self.lab.config.name, dg.simulated)
         return self._write_doc(doc, d / "report", fmt)
 

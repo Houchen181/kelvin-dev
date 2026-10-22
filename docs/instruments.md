@@ -78,7 +78,34 @@ More instruments with a library of their own:
 - `pulsestreamer://<ip>` for a Swabian Pulse Streamer (`pip install pulsestreamer`), `pulseblaster://0?clock=500` for a SpinCore PulseBlaster (SpinCore's `spinapi`), and `timetagger://<serial>?click=1&gate=2` for a Swabian Time Tagger (Swabian's installer). A scan finds the Swabian devices.
 - `qick://<name server>:8888/<proxy name>` for an RFSoC board running QICK, through its Pyro4 server (`pip install qick Pyro4`, tProc v2 firmware). Kelvin plays one generator as a continuous tone or as pulses and reads I/Q from one readout. A tone keeps playing after a program ends, so Kelvin stops every generator (`reset_gens`) when the output goes off and when it disconnects.
 
-Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app; install Kelvin from source to use them (`pip install "kelvin-lab[desktop,zhinst]"` or `[desktop,qd]`). These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.
+**DAQ cards, spectrometers, monochromators, cameras and nanopositioners.**
+
+| Instrument | Address | Library (on the computer that runs Kelvin) | Card |
+|---|---|---|---|
+| National Instruments DAQ (USB-600x, USB-62xx, PCIe/PXIe-63xx, cDAQ) | `nidaq://Dev1?terminal=rse` | NI-DAQmx and `pip install nidaqmx` | `ni/daqmx` |
+| Ocean Insight spectrometer (USB2000+, USB4000, Flame, HR4000, QE Pro, Maya) | `seabreeze://<serial>` | `pip install seabreeze` | `ocean/spectrometer` |
+| Andor Shamrock / Kymera spectrograph | `shamrock://0` | Andor's spectrograph SDK and `pip install pylablib` | `andor/shamrock` |
+| Princeton Instruments (Acton) SpectraPro monochromator | `serial://COM4` | none (text commands) | `princeton/spectrapro` |
+| Basler camera | `pylon://<serial>` | `pip install pypylon` | `basler/camera` |
+| Andor sCMOS camera (Zyla, Neo, Sona, Marana) | `andor://0?sdk=3` | Andor SDK3 and its pyAndorSDK3 | `andor/scmos` (draft) |
+| Andor CCD / EMCCD camera (iXon, Newton, iDus) | `andor://0?sdk=2` | Andor SDK2 and its pyAndorSDK2 | `andor/ccd` (draft) |
+| attocube ANC300 (open loop, scanner offset) | `anc300://COM5` or `anc300://<ip>` | `pip install pylablib` | `attocube/anc300` |
+| attocube ANC350 (closed loop) | `anc350://0` | attocube's USB driver and `pip install pylablib` | `attocube/anc350` |
+| PI piezo scanner controllers (GCS: E-727, E-709, E-712...) | `TCPIP0::<ip>::50000::SOCKET` | none (GCS text commands) | `pi/gcs-piezo` |
+| Thorlabs MDT693A / MDT694A piezo controller | `serial://COM6` | none (text commands) | `thorlabs/mdt69xa` |
+
+- **Scans find them:** the NI devices, Ocean spectrometers, Andor spectrographs and sCMOS cameras, Basler cameras and ANC350s, through their libraries, which only list what they see. Add the others by address. Andor SDK2 cameras aren't listed, because finding one means initializing it, which resets it.
+- **Connecting changes nothing,** as for every instrument. The exceptions are in the SDKs themselves, and the cards say so: Andor's SDK2 starts each session from its own defaults.
+- **Camera frames are files.** A frame is a reading of type `image`: a run saves each one as `frames/<point>_<reading>.npy` in its folder (NumPy's format; `numpy.load` reads it), and `data.csv` names the file. Mean, max, min and sum are readings of a frame: one taken just before is used, otherwise a new one.
+- **Spectra keep their wavelengths.** A spectrum is recorded with the wavelengths it was taken at (they aren't evenly spaced), and goes to its own CSV with them.
+- **Taken only when asked:** readings that run an acquisition (a frame, its statistics, a spectrum's peak, a DAQ counter) are marked `acquires: true`. The Lab panel and the conditions recorded with each run leave them out; plans and commands take them.
+- **One axis per lab entry** for the positioners and PI controllers, with `vars: { axis: ... }`. Entries on the same attocube controller share one connection.
+- **High voltages are drives:** an ANC300's DC offset and an MDT69x's axis voltages rise only with approval, ramped, and go back to 0 V as their safe value. Positions (ANC350, PI) are like a stage: part of the measurement, inside the limits the lab sets.
+- **Outputs without read-back:** a DAQ's analog and digital outputs, a spectrometer's integration time. These are unknown until Kelvin sets them, and nothing is assumed. For outputs: switching to safe always goes ahead, any other value asks you, and a ramped one starts from safe.
+- **Not yet verified on hardware:** the Andor camera cards are drafts, written from Andor's SDK functions without a camera at hand. Check them against Solis, then mark them reviewed. The others follow their makers' documentation (the Acton commands are from its manual, the attocube and Shamrock calls from pylablib's source), but haven't met real hardware yet either, so watch the first runs.
+- **For a model that isn't here** (a Newport Cornerstone, a Horiba monochromator, a Hamamatsu or Thorlabs camera, a SmarAct or Mad City Labs stage): Kelvin writes a card from its manual or the maker's example scripts (see [Cards for new instruments](#cards-for-new-instruments)).
+
+Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app; install Kelvin from source to use them (`pip install "kelvin-lab[desktop,zhinst]"`, or the extras `qd`, `nidaq`, `ocean`, `basler`, `pylablib`; Andor's pyAndorSDK2/3 come with Andor's SDK). These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.
 
 **Instruments on the network with their own protocol.** No vendor software is needed; the address says how to talk:
 - `http://<ip>:<port>/<base>` (or `https://`) for an instrument with a web API, such as a Light Conversion PHAROS (`http://<ip>:20022/v1`). Card commands are the method, the path and a JSON body: `GET /Basic/ActualOutputPower`, `PUT /Basic/TargetAttenuatorPercentage {value}`. Add `?auth_env=NAME` for a bearer token kept in that environment variable, or `?insecure=1` for a self-signed certificate.
@@ -212,3 +239,10 @@ raw:
   blocked: ["CALibration", "SYSTem:FIRMware"]
   reset: ["*RST"]
 ```
+
+More that a card can say:
+- **`type: image`:** a camera frame, kept as a file (its driver answers with the file's path).
+- **`axis: { values: wavelengths }`:** a trace's x values are another trace, recorded with it. `axis: { start: f_start, stop: f_stop }` is for evenly spaced ones.
+- **`acquires: true`:** the reading runs an acquisition, so Kelvin takes it only when asked or measured.
+- **`connection: { echo: true }`:** the instrument echoes each command as a line, which Kelvin reads and drops before the answer.
+- **Commands that aren't SCPI-shaped** (`?NM`, `%`, `{value} NM/MIN`): matched as written, ignoring case.

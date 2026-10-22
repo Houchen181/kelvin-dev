@@ -1,0 +1,79 @@
+card: 1
+id: andor/ccd
+model: Andor CCD / EMCCD camera (iXon, Newton, iDus, Luca, Clara) through Andor SDK2
+vendor: Andor (Oxford Instruments)
+kind: camera
+status: draft
+manual: "Andor SDK2 (pyAndorSDK2, atmcd): Initialize, GetDetector, SetExposureTime, SetReadMode, StartAcquisition, GetAcquiredData, GetTemperatureF, CoolerON, SetTemperature"
+notes:
+  - "Address andor://<index>?sdk=2 (andor://0?sdk=2). Needs Andor's SDK2 and its pyAndorSDK2 (pip install it from the SDK's Python folder). Close Solis first: one program at a time."
+  - "Draft: written from Andor's SDK2 functions without a camera at hand. Check each reading against Solis before relying on it, then mark it reviewed."
+  - "Andor's SDK2 starts every session from its own defaults (cooler off): that is the SDK's doing; Kelvin sets nothing more until asked. Each frame or spectrum is a single scan, set up just before it."
+  - "Spectrum is a full vertical binning readout (one value per column), for Newton and iDus cameras on a spectrograph; its x axis is the column."
+  - "Turn the cooler off and let the camera warm above -20 C before quitting Kelvin: with the cooler on, Kelvin leaves Andor's session open rather than shut it down cold."
+identify:
+  idn: "^Andor,(DU|DV|DZ|DX|iXon|Newton|iDus|Luca|Clara)"
+  example: "Andor,DU897_BV,12345"
+
+parameters:
+  frame:
+    label: Frame
+    kind: measure
+    type: image
+    get: "GET frame"
+  spectrum:
+    label: Spectrum (full vertical binning)
+    kind: measure
+    type: trace
+    unit: counts
+    get: "GET spectrum"
+  mean:
+    label: Mean
+    kind: measure
+    unit: counts
+    get: "GET mean"
+    acquires: true
+  max:
+    label: Max
+    kind: measure
+    unit: counts
+    get: "GET max"
+    acquires: true
+  sum:
+    label: Sum
+    kind: measure
+    unit: counts
+    get: "GET sum"
+    acquires: true
+  exposure:
+    label: Exposure
+    kind: measure
+    unit: s
+    set: "SET exposure {value}"
+    get: "GET exposure"
+    limits: [0.00001, 600]
+  temperature:
+    label: Sensor temperature
+    kind: measure
+    unit: C
+    get: "GET temperature"
+  temperature_status:
+    label: Cooling
+    kind: measure
+    type: str
+    get: "GET temperature_status"
+  cooler:
+    label: Cooler
+    kind: measure
+    type: bool
+    set: "SET cooler {value}"
+    get: "GET cooler"
+  setpoint:
+    label: Cooling setpoint
+    kind: measure
+    unit: C
+    set: "SET setpoint {value}"
+    limits: [-100, 20]
+    description: The SDK can't report it back; Kelvin shows it once it has set it
+display:
+  headline: temperature

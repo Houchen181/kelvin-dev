@@ -1,0 +1,55 @@
+card: 1
+id: thorlabs/mdt69xa
+model: Thorlabs MDT693A / MDT694A open-loop piezo controller (3-axis / 1-axis high-voltage piezo driver)
+vendor: Thorlabs
+kind: positioner
+status: community
+manual: "MDT693A / MDT694A serial commands, as pylablib's Thorlabs MDT69xA driver uses them: XV<volts>, XR?, %, echo"
+notes:
+  - "USB (a virtual COM port) or RS-232: serial://COM6 at 115200 baud. It echoes each command; Kelvin reads the echo before the answer. The MDT693B / MDT694B use other commands: they need their own card."
+  - "Each axis is a high voltage on a piezo (up to the range switch: 75, 100 or 150 V): it rises only with approval, ramped, and goes back to 0 V as its safe value. Tighten the limits in the lab config to what your piezo takes."
+connection: { baud_rate: 115200, write_termination: "\r", read_termination: "\r", timeout_ms: 3000, echo: true }
+
+parameters:
+  x:
+    label: X voltage
+    kind: drive
+    unit: V
+    set: "XV{value}"
+    get: "XR?"
+    parse: '\[\s*([-0-9.]+)\s*\]'
+    limits: [0, 150]
+    safe: 0
+    ramp: gate
+    max_rate: 10
+  y:
+    label: Y voltage
+    kind: drive
+    unit: V
+    set: "YV{value}"
+    get: "YR?"
+    parse: '\[\s*([-0-9.]+)\s*\]'
+    limits: [0, 150]
+    safe: 0
+    ramp: gate
+    max_rate: 10
+  z:
+    label: Z voltage
+    kind: drive
+    unit: V
+    set: "ZV{value}"
+    get: "ZR?"
+    parse: '\[\s*([-0-9.]+)\s*\]'
+    limits: [0, 150]
+    safe: 0
+    ramp: gate
+    max_rate: 10
+  range:
+    label: Voltage range
+    kind: measure
+    unit: V
+    get: "%"
+    parse: '\[\s*([-0-9.]+)\s*\]'
+    description: The front-panel range switch (75, 100 or 150 V)
+display:
+  headline: x

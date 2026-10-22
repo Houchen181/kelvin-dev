@@ -11,6 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from . import frames
 from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
@@ -79,9 +80,10 @@ class RunEngine:
         for instr, param in plan.measure:
             key = "%s.%s" % (instr, param)
             spec = self.lab.resolve(key)[1]
-            m = {"key": key, "unit": spec.unit, "kind": "trace" if spec.type == "trace" else "scalar"}
-            if spec.axis:
-                m["x_unit"] = unit("%s.%s" % (instr, spec.axis[0]))
+            m = {"key": key, "unit": spec.unit, "kind": "trace" if spec.type == "trace" else
+                 "image" if spec.type == "image" else "scalar"}
+            if spec.axis or spec.x_values:
+                m["x_unit"] = unit("%s.%s" % (instr, spec.axis[0] if spec.axis else spec.x_values))
             measures.append(m)
         return {"axes": axes, "measures": measures}
 
@@ -312,9 +314,13 @@ class RunEngine:
                     for instr, param in plan.measure:
                         key = "%s.%s" % (instr, param)
                         row[key] = lab.read(instr, param)
-                        trace_axis = lab.instrument(instr).spec(param).axis
-                        if trace_axis:  # record the trace's x-axis as it was when measured
-                            row[key + ".axis"] = [lab.read(instr, trace_axis[0]), lab.read(instr, trace_axis[1])]
+                        mspec = lab.instrument(instr).spec(param)
+                        if mspec.axis:  # record the trace's x-axis as it was when measured
+                            row[key + ".axis"] = [lab.read(instr, mspec.axis[0]), lab.read(instr, mspec.axis[1])]
+                        elif mspec.x_values:   # its x values (a spectrometer's wavelengths), as they were then
+                            row[key + ".x"] = lab.read(instr, mspec.x_values)
+                        if mspec.type == "image" and row[key] and rec.path is not None:   # the frame's file
+                            row[key] = frames.keep(row[key], rec.path, key, n)
                     rec.add(row)
                     n += 1
                     self._emit(event="point", run_id=rec.run_id, done=n, total=plan.points, row=row, eta_s=time_left(n))

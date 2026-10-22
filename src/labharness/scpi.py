@@ -4,7 +4,8 @@ Cards write commands in manual notation: the leading capitals of a mnemonic
 are its short form, the whole word is its long form, and [ ] marks an
 optional node. "SOURce[:VOLTage]:LEVel {value}" therefore matches
 "SOUR:LEV 5", ":source:voltage:level 5" and "SOUR:VOLT:LEV 5".
-Instruments that do not speak SCPI can use literal templates like "V{value}".
+Instruments that do not speak SCPI can use literal templates like "V{value}"; a command that isn't SCPI-shaped at
+all ("?NM", "%", "NM/MIN") is matched as written, ignoring case.
 """
 from __future__ import annotations
 
@@ -54,6 +55,14 @@ def _rest(rest: str) -> str:
     return "".join(out)
 
 
+def _parses(header: str) -> bool:
+    try:
+        _header(header)
+        return True
+    except ValueError:
+        return False
+
+
 class Template:
     """One command pattern from a card. `prefix=True` matches a header and
     everything below it (used for blocked and reset command families)."""
@@ -68,9 +77,12 @@ class Template:
             self._re = re.compile(r"^\s*(?P<value>[A-Za-z0-9_.+-]+)" + _rest(lead.group(1)) + r"\s*$", re.I | re.S)
             return
         self._lead = None
-        m = _SPLIT.match(text or "")
-        if not m:
+        if not (text or "").strip():
             raise ValueError("empty command template")
+        m = _SPLIT.match(text)
+        if not m or (not set("[]") & set(m.group(1)) and not _parses(m.group(1))):
+            self._literal(text, prefix)
+            return
         head, rest = m.group(1), m.group(2)
         if rest.count("{value}") > 1:
             raise ValueError("only one {value} allowed in %r" % text)
@@ -82,6 +94,18 @@ class Template:
         # a header never runs into a letter: VOLT must not match the start of VOLTage:ILIMit (but SLVL5 is SLVL 5)
         pattern = r"^\s*:?" + _header(head) + r"(?![A-Za-z])"
         pattern += r"(?=$|[\s:?;,])" if prefix else _rest(rest) + r"\s*$"   # ',': COMMAND,ch,value instruments
+        self._re = re.compile(pattern, re.IGNORECASE | re.S)
+
+    def _literal(self, text: str, prefix: bool) -> None:
+        """A command that isn't SCPI-shaped (Acton's ?NM and NM/MIN, Thorlabs' %): matched as written."""
+        text = text.strip()
+        if text.count("{value}") > 1:
+            raise ValueError("only one {value} allowed in %r" % text)
+        self.text, self.prefix = text, prefix
+        self.has_value = "{value}" in text
+        self.is_query = "?" in text
+        self.header = re.split(r"[\s{]", text, maxsplit=1)[0]
+        pattern = r"^\s*" + (re.escape(self.header) + r"(?=$|[\s;,])" if prefix else _rest(text) + r"\s*$")
         self._re = re.compile(pattern, re.IGNORECASE | re.S)
 
     def match(self, command: str) -> Optional[str]:

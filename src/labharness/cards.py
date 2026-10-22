@@ -17,11 +17,12 @@ from .scpi import Template
 from .yamlio import load_yaml
 
 KINDS = ("measure", "drive")
-TYPES = ("float", "int", "bool", "enum", "str", "trace")
+TYPES = ("float", "int", "bool", "enum", "str", "trace", "image")   # image: a camera frame, kept as a file
 RAMPS = ("gate", "instrument", "none")
 STATUSES = ("community", "lab-verified", "draft")
 CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate": int, "data_bits": int,
                    "stop_bits": float, "parity": str, "timeout_ms": int, "query_delay": float, "write_only": bool,
+                   "echo": bool,  # the instrument echoes each command as a line: read and dropped before the reply
                    "ack": str,   # ack: the line an instrument sends after every command (e.g. "OK"), read and checked
                    "set_reply": str}   # a regex every set command's reply must match (e.g. ":VALID$"); read after each set
 VAR_NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
@@ -88,12 +89,14 @@ class ParamSpec:
     enables: Tuple[str, ...] = ()                  # drives this switch applies to the sample
     bool_text: Tuple[str, str] = ("1", "0")
     axis: Optional[Tuple[str, str]] = None         # trace x-axis: (start param, stop param)
+    x_values: Optional[str] = None                 # or a trace of x values (a spectrometer's wavelengths)
     applies_when: Optional[str] = None             # drive that must be on for this one to reach the sample
     label: str = ""                                # human name, e.g. "Compliance"
     words: Optional[Tuple[str, str]] = None        # how a bool reads, e.g. ("open", "closed")
     field: Optional[int] = None                    # reply is comma-separated: take this element (0-based)
     parse: Optional[str] = None                    # regex whose first group is the value in a verbose reply
     read_when: Optional[str] = None                # only query while this switch is on (some reads turn outputs on)
+    acquires: bool = False                         # reading runs an acquisition (a frame, a count): only when asked
     description: str = ""
 
     @property
@@ -165,7 +168,7 @@ class ParamSpec:
             return str((self.values or {})[value])
         if self.type == "trace":
             return ",".join("%.6g" % x for x in value)
-        return str(value)
+        return str(value)   # an image: the path of its file
 
     def from_wire(self, text: str) -> Any:
         text = text.strip()
@@ -179,7 +182,7 @@ class ParamSpec:
                 text = parts[self.field]
         if self.type == "trace":
             return [float(x) for x in text.split(",") if x.strip()]
-        if self.type == "str":
+        if self.type in ("str", "image"):
             return text
         return self.coerce(text)
 
@@ -191,6 +194,8 @@ class ParamSpec:
             return on if value else off
         if self.type == "trace":
             return "trace (%d points)" % len(value)
+        if self.type == "image":
+            return "image %s" % (str(value).replace("\\", "/").rsplit("/", 1)[-1] if value else "(none)")
         if self.numeric and isinstance(value, (int, float)):
             return si(value, self.unit)
         return str(value) + (" " + self.unit if self.unit and self.numeric else "")
@@ -268,6 +273,16 @@ class Card:
     @property
     def getters(self) -> List[ParamSpec]:
         return sorted((p for p in self.params.values() if p.get_cmd is not None), key=lambda p: -len(p.get_cmd.text))
+
+
+def trace_x(row: Dict[str, Any], key: str, n: int) -> List[float]:
+    """The x values of a trace in a recorded row: the values recorded with it (a spectrometer's wavelengths), or
+    evenly spaced between the start and stop recorded with it, or the point index."""
+    xs = row.get(key + ".x")
+    if isinstance(xs, list) and len(xs) == n:
+        return [float(x) for x in xs]
+    x0, x1 = row.get(key + ".axis") or (0, n - 1)
+    return [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(n)]
 
 
 def _is_number(x: Any) -> bool:
@@ -353,6 +368,11 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
             spec.field = p["field"]
     if p.get("read_when") is not None:
         spec.read_when = str(p["read_when"])
+    if p.get("acquires") is not None:
+        if not isinstance(p["acquires"], bool):
+            err(path + ".acquires", "must be true or false")
+        else:
+            spec.acquires = p["acquires"]
     if p.get("parse") is not None:
         try:
             re.compile(str(p["parse"]))
@@ -367,8 +387,10 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
             spec.words = (str(words[0]), str(words[1]))
     axis = p.get("axis")
     if axis is not None:
-        if typ != "trace" or not isinstance(axis, dict) or not axis.get("start") or not axis.get("stop"):
-            err(path + ".axis", "only traces have an axis: {start: param, stop: param}")
+        if typ == "trace" and isinstance(axis, dict) and axis.get("values") and len(axis) == 1:
+            spec.x_values = str(axis["values"])
+        elif typ != "trace" or not isinstance(axis, dict) or not axis.get("start") or not axis.get("stop"):
+            err(path + ".axis", "only traces have an axis: {start: param, stop: param} or {values: param}")
         else:
             spec.axis = (str(axis["start"]), str(axis["stop"]))
     if spec.ramp not in RAMPS:
@@ -502,6 +524,9 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         for ax in spec.axis or ():
             if ax not in params or params[ax].get_cmd is None or not params[ax].numeric:
                 err(path + ".axis", "%r is not a readable numeric parameter" % ax)
+        if spec.x_values and (spec.x_values not in params or params[spec.x_values].type != "trace"
+                              or params[spec.x_values].get_cmd is None):
+            err(path + ".axis", "%r is not a readable trace on this card" % spec.x_values)
 
     drives = [n for n, s in params.items() if s.is_drive]
     seq = [str(n) for n in (data.get("safe_sequence") or [])]

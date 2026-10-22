@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from ._version import __version__
+from .cards import trace_x
 
 
 def _jsonable(v: Any) -> Any:
@@ -169,7 +170,7 @@ def write_csv(folder: Path, rows: List[Dict[str, Any]]) -> List[str]:
     traces: List[str] = []
     for r in rows:
         for k, v in r.items():
-            if k.endswith(".axis"):
+            if k.endswith(".axis") or k.endswith(".x"):
                 continue
             target = traces if isinstance(v, list) else scalars
             if k not in scalars and k not in traces:
@@ -190,10 +191,8 @@ def write_csv(folder: Path, rows: List[Dict[str, Any]]) -> List[str]:
                 ys = r.get(key)
                 if not isinstance(ys, list):
                     continue
-                x0, x1 = r.get(key + ".axis") or (0, len(ys) - 1)
-                step = (x1 - x0) / (len(ys) - 1) if len(ys) > 1 else 0
-                for j, y in enumerate(ys):
-                    w.writerow([r.get("i", n), "%.12g" % (x0 + step * j), y])
+                for x, y in zip(trace_x(r, key, len(ys)), ys):
+                    w.writerow([r.get("i", n), "%.12g" % x, y])
         written.append(name)
     return written
 

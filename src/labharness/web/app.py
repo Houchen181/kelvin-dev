@@ -29,6 +29,7 @@ from ..agent.runtime import LabRuntime
 from ..agent.server import build_server
 from ..adapters import AdapterError
 from ..autosetup import AutoSetup, log as setup_log, unlock as unlock_lab
+from ..cards import trace_x
 from .. import autocard
 from .. import profiles
 from ..clock import ScaledClock, SimClock
@@ -1583,9 +1584,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 continue
             ys = rows[-1][m["key"]]
             step = max(1, -(-len(ys) // TRACE_POINTS))
-            x0, x1 = rows[-1].get(m["key"] + ".axis") or (0, len(ys) - 1)
-            n = len(ys)
-            xs = [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(0, n, step)]
+            xs = trace_x(rows[-1], m["key"], len(ys))[::step]
             traces.append({"key": m["key"], "unit": m["unit"], "x": xs, "y": ys[::step], "x_unit": m.get("x_unit", ""),
                            "row": len(rows) - 1})
         def read_json(name: str) -> Any:

@@ -12,6 +12,12 @@ like a SCPI instrument. The address names the driver:
     qick://10.0.0.50:8888/myqick          RFSoC boards running QICK, through its Pyro4 server (rfsoc.py)
     http://10.0.0.7:20022/v1              instruments with a web API, e.g. a PHAROS laser (webapi.py)
     lib://COM4?python=...&path=...        the maker's Python module or DLL, as its example scripts use it (library.py)
+    nidaq://Dev1                          National Instruments DAQ cards through NI-DAQmx (daq.py)
+    seabreeze://<serial>                  Ocean Insight spectrometers through python-seabreeze (spectra.py)
+    shamrock://0                          Andor Shamrock / Kymera spectrographs through pylablib (spectra.py)
+    pylon://<serial>                      Basler cameras through pypylon (cameras.py)
+    andor://0?sdk=3                       Andor cameras through Andor's pyAndorSDK3 / pyAndorSDK2 (cameras.py)
+    anc300://COM5, anc350://0             attocube positioners through pylablib (positioners.py)
 
 The vendor libraries are optional: `pip install zhinst-core` or `pip install MultiPyVu` on the computer that runs
 Kelvin. Without them Kelvin says what to install."""
@@ -26,7 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from .adapters import AdapterError
 from .cards import Card
 
-SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib")
+SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib",
+           "nidaq", "seabreeze", "shamrock", "pylon", "andor", "anc300", "anc350")
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -60,6 +67,8 @@ def _number(text: str) -> Any:
 def _fmt(v: Any) -> str:
     if isinstance(v, str):
         return v
+    if isinstance(v, (list, tuple)):   # a trace: a spectrum, its wavelengths
+        return ",".join("%.8g" % float(x) for x in v)
     if isinstance(v, bool):
         return "1" if v else "0"
     if isinstance(v, int):
@@ -653,7 +662,23 @@ DRIVERS = {"zhinst": Zhinst, "qd": MultiVu, "pulsestreamer": PulseStreamer, "pul
            "timetagger": TimeTagger, "http": HttpInstrument, "https": HttpInstrument}
 MODULES: Dict[str, Any] = {}   # tests put fake vendor libraries here
 LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc", "Qick"),
-         "lib": ("library", "LibraryInstrument")}   # they import this module
+         "lib": ("library", "LibraryInstrument"), "nidaq": ("daq", "NIDAQ"),
+         "seabreeze": ("spectra", "OceanSpectrometer"), "shamrock": ("spectra", "AndorSpectrograph"),
+         "pylon": ("cameras", "BaslerCamera"), "andor": ("cameras", "AndorCamera"),
+         "anc300": ("positioners", "ANC300"), "anc350": ("positioners", "ANC350")}   # they import this module
+
+
+def discover_libraries() -> List[Tuple[str, str]]:
+    """(address, identity) of the instruments behind the vendor libraries installed here: NI DAQ cards, Ocean
+    spectrometers, Andor spectrographs and sCMOS cameras, Basler cameras, attocube ANC350s. Each library only lists
+    what it sees; nothing is opened or set."""
+    from .cameras import discover_andor, discover_pylon
+    from .daq import discover_nidaq
+    from .positioners import discover_attocube
+    from .spectra import discover_seabreeze, discover_shamrock
+    return (discover_nidaq(MODULES.get("nidaq")) + discover_seabreeze(MODULES.get("seabreeze"))
+            + discover_shamrock(MODULES.get("shamrock")) + discover_pylon(MODULES.get("pylon"))
+            + discover_andor(MODULES) + discover_attocube(MODULES.get("anc350")))
 
 
 def open_driver(name: str, card: Card, address: str) -> DriverBackend:
