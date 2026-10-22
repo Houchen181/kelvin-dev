@@ -33,10 +33,42 @@
       <span class="hint">With a password, your API keys are encrypted with it. Nobody can reset a forgotten one: there is no administrator.</span>
       <div class="signin-actions"><button id="new-back" class="link" type="button">Back</button><button class="btn primary" type="submit">Create account</button></div>
     </form>
+    <form id="central-signin" class="signin-form" hidden>
+      <label for="c-email">Email</label>
+      <input id="c-email" type="email" autocomplete="email" spellcheck="false">
+      <label for="c-password">Password</label>
+      <input id="c-password" type="password" autocomplete="current-password">
+      <div class="signin-actions"><button id="c-forgot" class="link" type="button">Forgot your password?</button><button class="btn primary" type="submit">Sign in</button></div>
+    </form>
+    <form id="central-new" class="signin-form" hidden>
+      <label for="cn-name">Your name</label>
+      <input id="cn-name" autocomplete="name" maxlength="80">
+      <label for="cn-email">Email</label>
+      <input id="cn-email" type="email" autocomplete="email" spellcheck="false">
+      <label for="cn-password">Password <span class="muted">(8 characters or more)</span></label>
+      <input id="cn-password" type="password" autocomplete="new-password">
+      <label class="check"><input id="cn-consent" type="checkbox"><span>I agree to the hub's <a id="cn-terms" target="_blank" rel="noopener noreferrer">terms</a> and <a id="cn-privacy" target="_blank" rel="noopener noreferrer">privacy notice</a></span></label>
+      <div class="signin-actions"><button id="cn-back" class="link" type="button">Back</button><button class="btn primary" type="submit">Create account</button></div>
+    </form>
+    <div id="central-link" class="signin-form" hidden>
+      <p>This computer has Kelvin accounts from before. Is one of them yours? It keeps its chats, data and API keys.</p>
+      <div id="link-people" class="signin-people"></div>
+      <label id="link-pass-label" for="link-password" hidden>Its password on this computer</label>
+      <input id="link-password" type="password" autocomplete="off" hidden>
+      <div class="signin-actions"><button id="link-none" class="link" type="button">None of these: start fresh</button><button id="link-go" class="btn primary" type="button" hidden>Use it</button></div>
+    </div>
+    <form id="central-rekey" class="signin-form" hidden>
+      <p>Your password changed since you last signed in on this computer. Give your old password once to keep your API keys here, or skip and add them again in Settings.</p>
+      <label for="rekey-old">Old password</label>
+      <input id="rekey-old" type="password" autocomplete="off">
+      <div class="signin-actions"><button id="rekey-skip" class="link" type="button">Skip</button><button class="btn primary" type="submit">Keep my keys</button></div>
+    </form>
     <button id="signin-add" class="link" type="button">Add a person</button>
+    <button id="central-create" class="link" type="button" hidden>Create a Kelvin account</button>
     <p id="signin-msg" class="signin-msg" role="status"></p>
     <div id="signin-busy" class="signin-busy" hidden><span id="signin-busy-text"></span><button id="signin-stop" class="btn small" type="button">Stop it</button></div>
-    <p class="muted small signin-foot">Everyone here is equal. Each person has their own chats, projects, memory, API keys, data folder and record. The instruments, their cards and the lab's instrument log are shared.</p>
+    <p id="signin-foot" class="muted small signin-foot">Everyone here is equal. Each person has their own chats, projects, memory, API keys, data folder and record. The instruments, their cards and the lab's instrument log are shared.</p>
+    <p class="muted small signin-foot"><span id="central-hub-text">Accounts on this computer only.</span> <button id="central-hub-edit" class="link" type="button">Use a Kelvin hub</button></p>
   </div>
 </div>
 
@@ -258,8 +290,9 @@
           <h3 class="set-title">Account</h3>
           <div id="account-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your account</span><span id="account-status" class="hint"></span></div>
-            <span class="hint">Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.</span>
+            <span id="account-hint" class="hint">Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.</span>
             <div class="key-row pw-row"><input id="pw-old" type="password" autocomplete="current-password" placeholder="Current password"><input id="pw-new" type="password" autocomplete="new-password" placeholder="New password (empty: none)"><button id="pw-change" class="btn small" type="button">Change</button></div>
+            <div class="chatgpt-row"><a id="account-hub-link" class="link soft" target="_blank" rel="noopener noreferrer" hidden>Your account on the Kelvin hub</a><span id="account-hub-text" class="hint"></span><button id="account-hub-edit" class="link soft" type="button">change</button></div>
           </div>
           <div id="hub-field" class="field">
             <div class="field-row"><span class="field-label">Your hub account</span><span id="hub-status" class="hint"></span></div>
@@ -643,7 +676,7 @@
       <div class="checks"><label class="check"><input id="project-literature" type="checkbox"> Literature search (the search words leave this computer)</label></div>
       <span class="hint">For confidential work, allow only local models and switch off literature search. A chat that ran under these rules keeps them, even if it is moved out of the project or the project is deleted.</span>
     </div>
-    <div class="field">
+    <div id="project-sharing-field" class="field">
       <label class="field-label" for="project-sharing">On the Kelvin hub</label>
       <select id="project-sharing">
         <option value="">Shared, with its chats and runs</option>

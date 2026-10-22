@@ -26,13 +26,14 @@ ENV = {
 }
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
 # secrets Kelvin keeps itself, never shown or set from the browser: the Kelvin hub's token (hubsync.py)
-SEALED = SECRET | {"hub_token"}
+SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
+       "account_hub",
        "hub_installation"}
 
 
@@ -42,6 +43,63 @@ def _load(path: Optional[Path]) -> Dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def reseal(folder: Any, old: Any, new: Any) -> int:
+    """Re-encrypt a person's keys (settings.json) and ChatGPT sign-in (chatgpt.json) from one password's cipher to
+    another's (None: not encrypted): after a password change, or when a local account is linked to a central one.
+    Keys sealed for neither stay as they are. Returns how many were re-encrypted."""
+    folder = Path(folder)
+    turned = [0]
+
+    def turn(value: Any) -> Any:
+        if not value:
+            return value
+        if _sealed(value):
+            plain = old.decrypt(value) if old is not None else None
+            if plain is None or _sealed(plain):
+                return value   # sealed for another password: kept as it is
+        else:
+            plain = value
+        turned[0] += 1
+        return new.encrypt(str(plain)) if new is not None else plain
+
+    path = folder / "settings.json"
+    data = _load(path)
+    if data:
+        for name in SEALED:
+            if data.get(name):
+                data[name] = turn(data[name])
+        for s in data.get("services") or []:
+            if isinstance(s, dict) and s.get("api_key"):
+                s["api_key"] = turn(s["api_key"])
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    path = folder / "chatgpt.json"
+    signin = _load(path)
+    if signin:
+        if "sealed" in signin:
+            inner = old.decrypt(signin["sealed"]) if old is not None else None
+            signin = json.loads(inner) if inner and not _sealed(inner) else None
+        if signin is not None:
+            turned[0] += 1
+            out = {"sealed": new.encrypt(json.dumps(signin))} if new is not None else signin
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(out, indent=1), encoding="utf-8")
+            os.replace(tmp, path)
+    return turned[0]
+
+
+def unreadable(folder: Any, cipher: Any) -> int:
+    """How many of a person's keys (and their ChatGPT sign-in) this cipher can't open: sealed with another password."""
+    folder = Path(folder)
+    shut = lambda v: _sealed(v) and (cipher is None or cipher.decrypt(v) is None)   # noqa: E731
+    data = _load(folder / "settings.json")
+    n = sum(1 for name in SECRET | {"account_token", "hub_token"} if shut(data.get(name)))
+    n += sum(1 for s in data.get("services") or [] if isinstance(s, dict) and shut(s.get("api_key")))
+    signin = _load(folder / "chatgpt.json")
+    return n + (1 if "sealed" in signin and shut(signin["sealed"]) else 0)
 
 
 def _sealed(value: Any) -> bool:
@@ -208,6 +266,26 @@ class Settings:
             "claude_code_path": self._user.get("claude_code_path", ""),
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
         }
+
+    @property
+    def account_hub(self) -> str:
+        """The Kelvin hub this computer's people sign in to (central accounts), if one is set here."""
+        return str(self._lab.get("account_hub") or "")
+
+    def set_account_hub(self, url: str) -> None:
+        if url:
+            self._lab["account_hub"] = url
+        else:
+            self._lab.pop("account_hub", None)
+        self._save()
+
+    def put_secret(self, name: str, value: Optional[str]) -> None:
+        """A credential of the person's that the browser never sets (the hub's token for them)."""
+        if value:
+            self._user[name] = value
+        else:
+            self._user.pop(name, None)
+        self._save()
 
     @property
     def updates(self) -> str:

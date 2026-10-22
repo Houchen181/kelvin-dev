@@ -880,6 +880,99 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error("invalid_grant", 400, error_description=str(err))
         return JSONResponse(result)
 
+    # ------------------------------------------------------------------ Kelvin's own sign-in (central accounts)
+
+    async def json_body(request: Request) -> Dict[str, Any]:
+        body = json.loads(await read_body(request, MAX_TOKEN))
+        if not isinstance(body, dict):
+            raise HubError("send a JSON object")
+        return body
+
+    def kelvin_of(body: Dict[str, Any]) -> Dict[str, str]:
+        i = body.get("installation") if isinstance(body.get("installation"), dict) else {}
+        return installation({"installation": i.get("id"), "name": i.get("name"), "platform": i.get("platform"),
+                             "version": i.get("version")})
+
+    async def api_signin(request: Request) -> Response:
+        """Kelvin's sign-in: {email, password, installation: {id, name, platform, version}} -> a token for this
+        Kelvin and who the person is. Same lockouts as the sign-in page."""
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        keys = ("signin:" + str(body.get("email") or "").strip().lower(), "signin-ip:" + who(request))
+        if any(signin_tries.blocked(k) for k in keys):
+            return api_error("Too many tries. Wait 15 minutes, or reset your password.", 429)
+        try:
+            result = await call(hub.sign_in_app, body.get("email"), body.get("password"), kelvin_of(body),
+                                ip_of(request))
+        except (TooMuch, Busy) as err:
+            return api_error(str(err), err.status)
+        except HubError as err:
+            if str(err).startswith("Wrong email or password"):
+                for k in keys:
+                    signin_tries.hit(k)
+                return api_error(str(err), 401)
+            return api_error(str(err), 403 if "disabled" in str(err) or "Confirm" in str(err) else 400)
+        signin_tries.clear(keys[0])
+        return JSONResponse(result)
+
+    async def api_register(request: Request) -> Response:
+        """Kelvin's Create account: {name, email, password, consent: true, orcid?, installation} -> the account, a
+        confirmation mail, and a token for this Kelvin. Same limits as the registration page."""
+        try:
+            body = await json_body(request)
+            inst = kelvin_of(body)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        if form_tries.blocked("register:" + who(request)):
+            return api_error("Too many new accounts from this address. Try again later.", 429)
+        ip = ip_of(request) or "?"
+        try:
+            user = await call(hub.register, body.get("email"), body.get("name"), body.get("password"),
+                              body.get("consent") is True, body.get("orcid") or "", ip)
+        except HubError as err:
+            return api_error(str(err))
+        form_tries.hit("register:" + who(request))
+        await call(hub.send_confirmation, user)
+        try:
+            return JSONResponse(await call(hub.sign_in_app, body.get("email"), body.get("password"), inst, ip))
+        except HubError as err:   # e.g. the hub wants the email confirmed first
+            return api_error(str(err), 403, registered=True)
+
+    async def api_reset(request: Request) -> Response:
+        """{email}: mail a link to choose a new password. Answers the same whether or not the account exists."""
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        response = JSONResponse({"ok": True})
+        if not form_tries.blocked("reset:" + who(request)):
+            form_tries.hit("reset:" + who(request))
+            response.background = BackgroundTask(hub.start_reset, body.get("email"), ip_of(request) or "?")
+        return response
+
+    async def api_password(request: Request) -> Response:
+        """{old, new}: change the password of the person signed in to this Kelvin. Their Kelvins stay signed in."""
+        app = await app_of(request)
+        if app is None:
+            return api_error("not connected", 401)
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        key = "signin:" + app["user"]["email"]
+        if signin_tries.blocked(key):
+            return api_error("Too many tries. Wait 15 minutes, or reset your password.", 429)
+        try:
+            await call(hub.change_password, app["user"]["id"], body.get("old"), body.get("new"), None, ip_of(request))
+        except HubError as err:
+            if str(err).startswith("Wrong email or password"):
+                signin_tries.hit(key)
+                return api_error("Wrong current password.", 401)
+            return api_error(str(err))
+        return JSONResponse({"ok": True})
+
     async def me(request: Request) -> Response:
         app = await app_of(request)
         if app is None:
@@ -1120,6 +1213,10 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/admin/backup", operator_action(admin_backup), methods=["POST"]),
         Route("/api/health", health),
         Route("/api/token", token, methods=["POST", "DELETE"]),
+        Route("/api/signin", api_signin, methods=["POST"]),
+        Route("/api/register", api_register, methods=["POST"]),
+        Route("/api/reset", api_reset, methods=["POST"]),
+        Route("/api/password", api_password, methods=["POST"]),
         Route("/api/me", me),
         Route("/api/sync", sync, methods=["POST"]),
         Route("/api/sync/runs/{run_id}/files/{name:path}", run_file_upload, methods=["PUT"]),

@@ -132,7 +132,7 @@ def test_sign_in_gives_each_person_their_own_things(tmp_path):
     assert s["accounts_on"] and s["user"] is None and s["accounts"] == [] and s["legacy"]
 
     r = client.post("/api/accounts", headers=h, json={"name": "Ada", "password": "pw1234"})
-    assert r.status_code == 200 and r.json()["user"] == {"name": "Ada", "password": True}
+    assert r.status_code == 200 and r.json()["user"] == {"name": "Ada", "password": True, "email": None, "central": False}
     boot = client.get("/api/bootstrap", headers=h).json()
     assert [c["title"] for c in boot["chats"]] == ["Old chat"]     # the first account takes over the old chats
     assert boot["account"]["user"]["name"] == "Ada"

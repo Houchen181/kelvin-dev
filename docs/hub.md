@@ -1,8 +1,13 @@
 # The Kelvin hub
 
-Kelvin keeps accounts per computer ([portal.md](portal.md#signing-in)). The hub is one server for Kelvin users in every lab. People register once, join their labs and connect each Kelvin they use. Their Kelvins then share their work there with their labmates. It is built for a few thousand people (about 5,000): one SQLite file, with run files on disk.
+The hub is one server for Kelvin users in every lab. It keeps everyone's **Kelvin account**: one email and password that signs a person in to Kelvin on every computer ([portal.md](portal.md#kelvin-accounts-one-account-every-computer)). The operator page lists everyone. It is built for a few thousand people (about 5,000): one SQLite file, with run files on disk.
 
-**Status:** the server, its database, a Kelvin's client (`hub/client.py`) and the Kelvin app's side (Settings → **Account** → Kelvin hub, and syncing in the background: `web/hubsync.py`) are built and tested. The terms and privacy notice are drafts.
+The hub can also keep people's shared work: they join their labs and connect each Kelvin they use, which then shares their work there with their labmates. **That is switched off for now** (`HUB_SHARING = False` in `web/app.py`): Kelvin uses the hub only to sign people in.
+
+**Status:**
+- **Built and tested:** the server, its database, a Kelvin's client (`hub/client.py`), Kelvin's sign-in with Kelvin accounts (`central.py`), and sharing (Settings → **Account** → Kelvin hub, and syncing in the background: `web/hubsync.py`; switched off).
+- **Drafts:** the terms and privacy notice.
+- **To do:** putting the hub on the internet for good. Kelvin's built-in hub address (`central.DEFAULT_HUB`) stays empty until then.
 
 ## What is shared
 
@@ -32,7 +37,7 @@ Kelvin keeps accounts per computer ([portal.md](portal.md#signing-in)). The hub 
 - **Passwords:** PBKDF2-SHA256 with 600,000 iterations, as OWASP suggests.
   - **Older hashes:** a hash made with fewer is redone at the person's next sign-in, unless the password changed meanwhile.
   - **Timing:** checking it takes as long as a current one, as does checking an email that has no account. Browser sessions, app tokens and one-use codes are stored only as their SHA-256. A one-use code works once, even when two requests bring it at the same moment.
-- **Email:** the hub sends a confirmation link, and password reset links. Until an SMTP server is set, these go to `outbox/` in the hub's folder for the operator to pass on. `"require_confirmed_email": true` then stops unconfirmed people from connecting a Kelvin or sharing.
+- **Email:** the hub sends a confirmation link, and password reset links. Until an SMTP server is set, or when sending fails, these go to `outbox/` in the hub's folder for the operator to pass on. `"require_confirmed_email": true` then stops unconfirmed people from connecting a Kelvin or sharing.
 - **Resetting a password:** the reset page gives the same answer, and as fast, whether or not the account exists; the mail goes out after the answer. A new password that won't do leaves the link working. A reset signs out every browser and disconnects every Kelvin of the account. A password change in the account page signs out the other browsers but keeps the Kelvins connected.
 - **Labs have no owner.** Anyone can make a lab. Everyone in it sees its join code (like `K7Q2-9XMB-4TRA`) and can pass it on. A lab nobody is in any more is deleted.
 - **Your data:** **Export everything** on the account page downloads a zip of the account, labs, connections, everything shared and the hub's record of the account's activity. It can be made once every 10 minutes.
@@ -41,9 +46,25 @@ Kelvin keeps accounts per computer ([portal.md](portal.md#signing-in)). The hub 
   - **Timing:** it waits for the person's sync or upload in progress, so no file lands afterwards.
   - **The log:** `hub.log` never has addresses. The activity record keeps only that account number N was deleted, without addresses or details. Account numbers are never reused. Database backups keep a deleted account until they age out (30 days by default).
 
+## Signing in to Kelvin
+
+Kelvin's sign-in screen talks to the hub with JSON (`central.py`; routes `api_signin`, `api_register`, `api_reset` and `api_password` in `hub/server.py`):
+
+- **`POST /api/signin`** `{email, password, installation: {id, name, platform, version}}` returns `{access_token, user: {name, email, email_confirmed}, needs_consent, account_url}`.
+  - **The token:** one per account and installation; signing in again replaces it. Kelvin keeps it in the person's settings, encrypted with their password, to change the password later.
+  - **The installation** is recorded as a connected Kelvin, without a lab, so the account page lists the computers.
+  - **Limits:** a wrong password is 401, and counts toward the same limits as the sign-in page (10 per email or address in 15 minutes, then 429). A disabled account is 403. So is an unconfirmed one, once `require_confirmed_email` is on.
+- **`POST /api/register`** `{name, email, password, consent: true, orcid?, installation}` makes the account, mails the confirmation link, and signs in as above. When the hub wants the address confirmed first, it answers 403 with `registered: true`. Registrations count toward the same limit as the registration page.
+- **`POST /api/reset`** `{email}` mails a reset link and always answers `{ok: true}`, so nobody can probe for accounts.
+- **`POST /api/password`** `{old, new}`, with the token, changes the password. Kelvins stay signed in, as with a change on the account page. A reset by mail ends every token.
+
+Kelvin, for its part:
+- **Unreachable:** a network error, a 404, any 5xx (such as a tunnel's 530), or an answer that isn't JSON means the hub can't be reached now. Kelvin then checks the password against the hash it kept at the person's last sign-in on this computer. A hub that answers no (401, 403, 429) is never overruled by that hash.
+- **Wrong passwords** wait a second before Kelvin answers.
+
 ## Connecting a Kelvin
 
-This works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page:
+Sharing work, switched off for now. This works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page:
 
 1. Kelvin opens `<hub>/connect` in the browser, with a PKCE challenge (S256), a state, its own installation id, name, platform and version, and its loopback callback `http://127.0.0.1:<port>/...`. The hub sends the browser back to nothing else.
 2. The person signs in, chooses which lab the Kelvin shares into, types their hub password, and presses **Connect**.
@@ -180,13 +201,17 @@ Kelvin accepts a hub address on the internet only with https.
 | Call | What it does |
 |---|---|
 | `GET /api/health` | `{"ok": true, "hub": version}` |
+| `POST /api/signin` | Kelvin's sign-in: `{"email", "password", "installation"}` → `{"access_token", "user", "needs_consent", "account_url"}` |
+| `POST /api/register` | Kelvin's Create account: `{"name", "email", "password", "consent": true, "orcid"?, "installation"}` → as `signin` |
+| `POST /api/reset` | `{"email"}`: mail a reset link → always `{"ok": true}` |
+| `POST /api/password` | `{"old", "new"}`: change the password |
 | `POST /api/token` | `{"grant_type": "authorization_code", "code", "code_verifier", "redirect_uri"}` → `{"access_token", "user", "lab"}` |
 | `DELETE /api/token` | Disconnect this Kelvin |
 | `GET /api/me` | The person, their labs, the lab this Kelvin shares into, `needs_consent` |
 | `POST /api/sync` | `{"projects": [...], "chats": [...], "runs": [...], "removed": {"projects", "chats", "runs"}}`, at most 500 of each → counts, plus what was refused and why. 413 over 64 MB |
 | `PUT /api/sync/runs/{run}/files/{name}` | One run file, as the raw body with a `Content-Length` (send the run first). Errors: 411 without a length, 413 over the size or the person's share, 429 with 2 uploads already running |
 
-Every call but `health` and `token` needs `Authorization: Bearer <token>`. Items are keyed by the Kelvin's own ids:
+Every call but `health`, `token`, `signin`, `register` and `reset` needs `Authorization: Bearer <token>`. Items are keyed by the Kelvin's own ids:
 - projects: `id`, `name`, and `shared`, `unpublished`, `confidential`, `rules` as in Kelvin;
 - chats: `id`, `project`, `title`, `messages` (up to 5 MB), `updated`, and `incognito`, `shared`, `unpublished`, `confidential`, `rules`;
 - runs: `id`, `project`, `device`, `meta` (up to 256 kB), `created`, and `incognito`, `unpublished`, `confidential` (also read from `meta`).

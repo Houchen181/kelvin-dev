@@ -24,6 +24,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Route
 
 from ..accounts import Accounts, cipher_for, has_legacy
+from .. import central
 from ..agent.approval import WebApprover
 from ..agent.runtime import LabRuntime
 from ..agent.server import build_server
@@ -49,7 +50,9 @@ from .store import ChatStore
 STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
-SIGNED_OUT = {"/api/session", "/api/accounts", "/api/stop", "/api/runs/stop"}
+SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/stop", "/api/runs/stop"}
+# sharing work with the Kelvin hub (hubsync.py) is switched off for now: the hub is for accounts only (central.py)
+HUB_SHARING = False
 # Claude Code bridge: locked while Claude works the screen, so its clicks never answer for a person
 LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
                           "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/phone",
@@ -285,7 +288,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if auto_setup:   # find and set up connected instruments (or say why not: switched off, a lab chosen...)
             setup.start("start")
         hub.wake = asyncio.Event()
-        tasks.append(asyncio.ensure_future(hub_loop()))
+        if HUB_SHARING:
+            tasks.append(asyncio.ensure_future(hub_loop()))
         try:
             yield
         finally:
@@ -328,6 +332,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             "settings": settings.public(), "active": agent.active, "can_quit": on_quit is not None,
             "account": session_data(),
             "claude_code": claude_code_enabled(),
+            "hub_sharing": HUB_SHARING,
             "update": update_summary(updater, settings.updates),
         })
 
@@ -348,11 +353,146 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         user = session["user"]
         listed = accounts.list()
         busy = running_for()
+        on = central_on()
         return {"accounts_on": True, "accounts": listed,
-                "user": {"name": user["name"], "password": bool(user.get("hash"))} if user else None,
+                "user": {"name": user.get("display") or user["name"], "password": bool(user.get("hash")),
+                         "email": user.get("email"), "central": bool(user.get("email"))} if user else None,
                 "suggest": "" if listed else suggested_name(),
                 "busy": busy, "busy_user": runtime.user if busy else None,
-                "legacy": not listed and has_legacy(home)}
+                "legacy": not listed and has_legacy(home),
+                "central": on, "hub": hub_address(), "account_url": hub_address() + "/account" if on else None,
+                "unlinked": accounts.unlinked() if on else []}
+
+    # ------------------------------------------------------------------ central Kelvin accounts (central.py)
+
+    def hub_address() -> str:
+        return settings.account_hub or central.DEFAULT_HUB
+
+    def central_on() -> bool:
+        """People sign in with their central Kelvin account, once this computer knows the hub (else local
+        accounts, as before)."""
+        return accounts is not None and bool(hub_address())
+
+    def central_sign_in(email: str, password: str, link: Optional[str] = None, link_password: str = "",
+                        old_password: str = "", answer: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Sign a person in with their central Kelvin account: the hub checks the password (or, when Kelvin can't
+        reach it, the verifier this computer kept from their last sign-in here). The first time on this computer they
+        may take over an account from before central accounts (link), keeping its chats, data and keys; otherwise
+        they get a new one here. Keys sealed with a password changed elsewhere are re-sealed when the old password is
+        given (old_password), else they stay unreadable. Raises PermissionError (wrong password, too many tries),
+        ConnectionError (offline, never signed in here), ValueError or RuntimeError (Kelvin busy)."""
+        email = " ".join(str(email or "").split()).lower()
+        if not email or not password:
+            raise ValueError("Give your email and password.")
+        account = accounts.find_email(email)
+        online = True
+        if answer is None:
+            try:
+                answer = central.Central(hub_address()).sign_in(email, password, settings.installation_id())
+            except central.Unreachable as e:
+                online = False
+                if account is None:
+                    raise ConnectionError("%s The first sign-in on a computer needs the hub; after that, Kelvin "
+                                          "signs you in here offline too." % e)
+                if not accounts.matches(account["name"], password):
+                    raise PermissionError("Wrong password. (Kelvin can't reach the hub now, so it checked the "
+                                          "password this computer knows.)")
+            except central.CentralError as e:
+                if e.status in (401, 403, 429):
+                    raise PermissionError(str(e))
+                raise ValueError(str(e))
+        display = ((answer or {}).get("user") or {}).get("name") or ""
+        if account is None:   # their first sign-in on this computer
+            choices = accounts.unlinked()
+            if choices and link is None:
+                return {"link": choices}
+            if link:
+                try:
+                    previous = accounts.find(link)
+                except KeyError:
+                    raise ValueError("There is no account %s on this computer." % link)
+                if previous.get("email"):   # already someone's Kelvin account
+                    raise ValueError("%s is already linked to a Kelvin account." % link)
+                if previous.get("hash") and not accounts.matches(link, link_password):
+                    raise PermissionError("That isn't the password of %s on this computer." % link)
+                account = accounts.link(link, email, display)
+                before = link_password if previous.get("hash") else ""
+            else:
+                first = not accounts.list()
+                account = accounts.create_central(display or email, email, password, first and has_legacy(home))
+                if first:
+                    settings.adopt(accounts.settings_path(account))
+                before = ""
+        elif accounts.matches(account["name"], password):
+            before = password
+        elif old_password and accounts.matches(account["name"], old_password):
+            before = old_password
+        else:
+            before = None   # changed elsewhere, and the old one not given: what was sealed with it stays sealed
+        if before is not None and before != password:
+            from .settings import reseal
+            reseal(accounts.dir(account), cipher_for(before, account) if before else None,
+                   cipher_for(password, accounts.find(account["name"])))
+        account = accounts.set_verifier(account["name"], password)
+        if display and account.get("display") != display:
+            account = accounts.link(account["name"], email, display)
+        sign_in(account, password)
+        if online and answer and answer.get("access_token"):
+            settings.put_secret("account_token", answer["access_token"])   # encrypted with their password
+        from .settings import unreadable
+        return {"signed_in": True, "offline": not online,
+                "keys_sealed": before is None and unreadable(accounts.dir(account), settings.cipher) > 0,
+                "needs_consent": bool((answer or {}).get("needs_consent")),
+                "account_url": (answer or {}).get("account_url") or hub_address() + "/account"}
+
+    async def central_call(fn: Any, *args: Any) -> Response:
+        """Run a central sign-in step and say how it went, as the sign-in screen expects."""
+        try:
+            result = await asyncio.to_thread(fn, *args)
+        except PermissionError as e:
+            await asyncio.sleep(1)   # no fast guessing
+            return error(401, str(e))
+        except ConnectionError as e:
+            return error(503, str(e))
+        except ValueError as e:
+            return error(400, str(e))
+        except (RuntimeError, OSError) as e:
+            return error(409, str(e))
+        if result.get("link"):
+            return JSONResponse(dict(session_data(), link=result["link"]))
+        return JSONResponse(dict(session_data(), **result))
+
+    async def session_reset(request: Request) -> Response:
+        """POST {email}: the hub mails a link to choose a new password (it says the same whether or not the account
+        exists)."""
+        if not central_on():
+            return error(404, "This computer has no Kelvin hub for accounts.")
+        email = str((await request.json()).get("email") or "")
+        try:
+            await asyncio.to_thread(central.Central(hub_address()).reset, email)
+        except central.Unreachable as e:
+            return error(503, str(e))
+        except central.CentralError as e:
+            return error(e.status if e.status in (400, 429) else 400, str(e))
+        return JSONResponse({"ok": True})
+
+    async def session_hub(request: Request) -> Response:
+        """POST {url}: the Kelvin hub this computer's people sign in to ("" for accounts on this computer only). By
+        someone signed in; signed out, only until someone has signed in here with a central account (so nobody can
+        quietly point the sign-in screen at a hub of their own)."""
+        if accounts is None:
+            return error(404, "Kelvin runs without accounts here.")
+        if session["user"] is None and any(a.get("email") for a in accounts.list()):
+            return error(401, "Sign in to change the Kelvin hub people here sign in to.")
+        url = str((await request.json()).get("url") or "").strip().rstrip("/")
+        if url:
+            from ..hub.client import HubClientError, check_url
+            try:
+                url = check_url(url)
+            except HubClientError as e:
+                return error(400, str(e))
+        settings.set_account_hub(url)
+        return JSONResponse(session_data())
 
     def sign_in(account: Dict[str, Any], password: str) -> None:
         """Serve this person: their settings and keys, chats, ChatGPT sign-in, data folder and record. The
@@ -407,6 +547,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return JSONResponse(session_data())
         if request.method == "POST":
             body = await request.json()
+            if central_on():
+                return await central_call(central_sign_in, str(body.get("email") or ""),
+                                          str(body.get("password") or ""),
+                                          body.get("link") if body.get("link") is not None else None,
+                                          str(body.get("link_password") or ""), str(body.get("old_password") or ""))
             try:
                 account = await asyncio.to_thread(accounts.verify, str(body.get("name") or ""),
                                                   str(body.get("password") or ""))
@@ -429,6 +574,21 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(409, problem)
         body = await request.json()
         password = str(body.get("password") or "")
+        if central_on():   # a central Kelvin account, made on the hub, then signed in here
+            email = str(body.get("email") or "")
+            try:
+                answer = await asyncio.to_thread(central.Central(hub_address()).register, str(body.get("name") or ""),
+                                                 email, password, body.get("consent") is True,
+                                                 settings.installation_id())
+            except central.Unreachable as e:
+                return error(503, str(e))
+            except central.CentralError as e:
+                if isinstance(e.body, dict) and e.body.get("registered"):   # the hub wants the email confirmed first
+                    return JSONResponse(dict(session_data(), registered=True, message=str(e)))
+                return error(e.status if e.status in (400, 429) else 400, str(e))
+            return await central_call(central_sign_in, email, password,
+                                      body.get("link") if body.get("link") is not None else None,
+                                      str(body.get("link_password") or ""), "", answer)
         first = not accounts.list()
         try:
             account = await asyncio.to_thread(accounts.create, str(body.get("name") or ""), password,
@@ -451,6 +611,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if accounts is None or user is None:
             return error(404, "Nobody is signed in.")
         body = await request.json()
+        if user.get("email") and central_on():
+            if request.method == "DELETE":
+                return error(400, "Your Kelvin account is on the hub: delete it on your account page there.")
+            return await asyncio.to_thread(central_password, user, str(body.get("old") or ""),
+                                           str(body.get("new") or ""))
         if request.method == "DELETE":
             try:
                 await asyncio.to_thread(accounts.remove, user["name"], str(body.get("password") or ""))
@@ -473,6 +638,55 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if signin.data:
             signin._save()
         return JSONResponse(session_data())
+
+    def central_password(user: Dict[str, Any], old: str, new: str) -> Response:
+        """Change a central account's password on the hub, then here: the verifier, and the keys re-sealed with it."""
+        token = settings.get("account_token")
+        if not token:
+            return error(409, "Sign in once while Kelvin can reach the hub, then change your password.")
+        try:
+            central.Central(hub_address()).change_password(token, old, new)
+        except central.Unreachable as e:
+            return error(503, "%s Your password can only change while Kelvin reaches the hub." % e)
+        except central.CentralError as e:
+            return error(400 if e.status not in (401, 429) else e.status, str(e))
+        from .settings import reseal
+        before = cipher_for(old, user)
+        account = accounts.set_verifier(user["name"], new)
+        session["user"] = account
+        cipher = cipher_for(new, account)
+        settings._save()   # what is in memory first, then the files re-sealed with the new password
+        reseal(accounts.dir(account), before, cipher)
+        settings.use(accounts.settings_path(account), cipher)
+        signin.use(accounts.dir(account), cipher)
+        return JSONResponse(session_data())
+
+    async def account_rekey(request: Request) -> Response:
+        """POST {old}: the signed-in person's keys still sealed with a password from before (changed on another
+        computer, or reset by mail) are sealed again with the current one."""
+        user = session["user"]
+        if accounts is None or user is None:
+            return error(404, "Nobody is signed in.")
+        old = str((await request.json()).get("old") or "")
+        if not old:
+            return error(400, "Give your old password.")
+        if accounts.matches(user["name"], old):
+            return error(400, "That is your password now; give the one from before.")
+
+        def turn() -> int:
+            from .settings import reseal
+            settings._save()   # everything readable now is sealed with the current password first
+            if signin.data:
+                signin._save()
+            n = reseal(accounts.dir(user), cipher_for(old, user), settings.cipher)
+            settings.use(accounts.settings_path(user), settings.cipher)
+            signin.use(accounts.dir(user), settings.cipher)
+            return n
+
+        n = await asyncio.to_thread(turn)
+        if not n:
+            await asyncio.sleep(1)   # no fast guessing
+        return JSONResponse(dict(session_data(), rekeyed=n))
 
     async def claude_code_view(request: Request) -> Response:
         """Claude Code bridge (temporary): is it part of this Kelvin, is `claude` here, and is it signed in?"""
@@ -825,6 +1039,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def hub_connect(request: Request) -> Response:
         """POST {url}: open the hub's connect page in the browser; it comes back to /hub/callback on this address."""
+        if not HUB_SHARING:
+            return error(404, "Sharing with the Kelvin hub is switched off for now.")
         body = await request.json()
         port = request.url.port or 80
         try:
@@ -841,6 +1057,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def hub_sync(request: Request) -> Response:
         """Sync now, and say how it went."""
+        if not HUB_SHARING:
+            return error(404, "Sharing with the Kelvin hub is switched off for now.")
         if not hub.connected:
             return error(409, "Kelvin is not connected to the hub.")
         await asyncio.to_thread(hub.sync_once)
@@ -1680,6 +1898,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/bootstrap", bootstrap),
         Route("/api/session", session_view, methods=["GET", "POST", "DELETE"]),
         Route("/api/accounts", accounts_view, methods=["POST"]),
+        Route("/api/session/reset", session_reset, methods=["POST"]),
+        Route("/api/session/hub", session_hub, methods=["POST"]),
+        Route("/api/account/rekey", account_rekey, methods=["POST"]),
         Route("/api/account", account_view, methods=["POST", "DELETE"]),
         Route("/api/lab-log", lab_log),
         Route("/api/claude-code", claude_code_view),

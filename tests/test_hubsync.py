@@ -35,6 +35,14 @@ except ImportError:
     CRYPTO = False
 
 HUB = "http://127.0.0.1:8780"
+
+
+@pytest.fixture(autouse=True)
+def sharing_on(monkeypatch):
+    """Sharing work with the hub is switched off in Kelvin for now (the hub is for accounts); these tests keep it
+    working for when it comes back."""
+    monkeypatch.setattr(web_app, "HUB_SHARING", True)
+
 SWEEP = """plan: gate_sweep
 setup: { lockin.amplitude: 0.05, smu.output: on }
 sweep: { smu.V: {from: 0, to: 2, step: 0.5} }

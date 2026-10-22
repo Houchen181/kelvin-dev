@@ -99,8 +99,10 @@ class Accounts:
         os.replace(tmp, self.path)
 
     def list(self) -> List[Dict[str, Any]]:
-        """For the sign-in screen: names, and whether each has a password; never the hashes."""
-        return [{"name": a["name"], "password": bool(a.get("hash")), "created": a.get("created")} for a in self._read()]
+        """For the sign-in screen: names (and the email and name of a central account), and whether each has a
+        password; never the hashes."""
+        return [{"name": a["name"], "password": bool(a.get("hash")), "created": a.get("created"),
+                 "email": a.get("email") or None, "display": a.get("display") or None} for a in self._read()]
 
     def find(self, name: str) -> Dict[str, Any]:
         for a in self._read():
@@ -169,6 +171,54 @@ class Accounts:
         self.verify(name, password)
         with self._lock:
             self._write([a for a in self._read() if a["name"].lower() != name.lower()])
+
+    # ------------------------------------------------------------------ central Kelvin accounts (central.py)
+
+    def find_email(self, email: Any) -> Optional[Dict[str, Any]]:
+        """The account on this computer that this central Kelvin account signs in to, if there is one."""
+        e = str(email or "").strip().lower()
+        return next((a for a in self._read() if e and a.get("email") == e), None)
+
+    def unlinked(self) -> List[str]:
+        """Accounts from before central accounts: someone signing in centrally for the first time may take one over."""
+        return [a["name"] for a in self._read() if not a.get("email")]
+
+    def matches(self, name: str, password: str) -> bool:
+        """Is this the password this computer knows for the account? (Never true for one without a password.)"""
+        try:
+            return bool(self.verify(name, password).get("hash"))
+        except (ValueError, KeyError):
+            return False
+
+    def link(self, name: str, email: str, display: str = "") -> Dict[str, Any]:
+        """Tie an account on this computer to a central Kelvin account: its chats, data and keys stay."""
+        with self._lock:
+            accounts = self._read()
+            account = next(a for a in accounts if a["name"].lower() == name.lower())
+            account["email"] = str(email).strip().lower()
+            if display:
+                account["display"] = str(display)[:80]
+            self._write(accounts)
+        return account
+
+    def create_central(self, display: str, email: str, password: str, adopt_legacy: bool = False) -> Dict[str, Any]:
+        """This computer's account for a central Kelvin account signing in here for the first time."""
+        email = str(email).strip().lower()
+        taken = {a["name"].lower() for a in self._read()}
+        name = " ".join(str(display or "").split())[:40]
+        if not name or name.lower() in taken or not NAME.match(name):
+            name = email[:40] if email[:40].lower() not in taken else email[:34] + "-" + secrets.token_hex(2)
+        account = self.create(name, password, adopt_legacy)
+        return self.link(account["name"], email, display)
+
+    def set_verifier(self, name: str, password: str) -> Dict[str, Any]:
+        """Remember this password for the account (after the hub accepted it), so it also works here offline."""
+        with self._lock:
+            accounts = self._read()
+            account = next(a for a in accounts if a["name"].lower() == name.lower())
+            self._set_password(account, password)
+            self._write(accounts)
+        return account
 
     # ------------------------------------------------------------------ where each person's things are
 

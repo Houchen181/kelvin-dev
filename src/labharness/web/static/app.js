@@ -92,9 +92,131 @@
   // ------------------------------------------------------------------ who is using Kelvin (accounts)
   const initials = (name) => String(name).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
 
+  function hubLink(session, text, edit) {   // which Kelvin hub people sign in to on this computer ("" = accounts here only)
+    $(text).textContent = session.central ? "Kelvin hub: " + String(session.hub).replace(/^https?:\/\//, "")
+      : "Accounts on this computer only.";
+    $(edit).textContent = session.central ? "change" : "Use a Kelvin hub";
+    $(edit).onclick = async () => {
+      const url = prompt("The Kelvin hub people sign in to on this computer (https://…). Leave it empty for accounts on this computer only.", session.hub || "");
+      if (url === null) return;
+      try { await api("/api/session/hub", { body: { url: url.trim() } }); location.reload(); } catch (e) { toast(e.message); }
+    };
+  }
+
+  function showCentral(session) {   // central Kelvin accounts: one account, every computer (central.py)
+    const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
+    const parts = ["signin-people", "signin-pass", "signin-new", "signin-add", "central-signin", "central-new", "central-link",
+      "central-rekey", "central-create"];
+    const view = (mode) => {   // signin | new | link | rekey
+      const shown = { signin: ["signin-people", "central-signin", "central-create"], new: ["central-new"], link: ["central-link"],
+        rekey: ["central-rekey"] }[mode];
+      for (const id of parts) $(id).hidden = !shown.includes(id);
+      $("signin-title").textContent = { signin: "Sign in to Kelvin", new: "Create a Kelvin account", link: "Welcome to this computer",
+        rekey: "Keep your API keys?" }[mode];
+      $("signin-sub").textContent = mode === "signin" ? "Your Kelvin account works on every computer." : "";
+      if (mode === "signin") (($("c-email").value ? $("c-password") : $("c-email"))).focus();
+      if (mode === "new") $("cn-name").focus();
+      if (mode === "rekey") $("rekey-old").focus();
+    };
+    $("signin-foot").textContent = "After you've signed in on a computer once, your password works there offline too. Your chats, data and API keys stay on each computer.";
+    $("cn-terms").href = session.hub + "/terms";
+    $("cn-privacy").href = session.hub + "/privacy";
+    const known = (session.accounts || []).filter((a) => a.email);
+    $("signin-people").replaceChildren(...known.map((p) => {
+      const name = p.display || p.name;
+      const b = h("button", { class: "person", type: "button" }, h("span", { class: "avatar" }, initials(name)), h("span", {}, name));
+      b.addEventListener("click", () => { $("c-email").value = p.email; $("c-password").value = ""; $("c-password").focus(); });
+      return b;
+    }));
+    let pending = null;   // what was sent, to send again with the chosen account from before
+    const after = (r) => {
+      if (r.link) {   // made on the hub (or signed in there): which account here is theirs is all that's left
+        pending = { path: "/api/session", body: { email: pending.body.email, password: pending.body.password } };
+        showLink(r.link);
+        return;
+      }
+      if (r.registered) { say(r.message || "Check your email to confirm your address, then sign in.", false); view("signin"); return; }
+      if (r.keys_sealed) { view("rekey"); return; }
+      location.reload();
+    };
+    const send = async (extra) => {
+      say(pending.path === "/api/accounts" ? "Making your account…" : "Signing in…");
+      try { after(await api(pending.path, { body: Object.assign({}, pending.body, extra || {}) })); } catch (e) { say(e.message, true); }
+    };
+    const showLink = (names) => {
+      let chosen = null;
+      say("");
+      $("link-people").replaceChildren(...names.map((n) => {
+        const b = h("button", { class: "person", type: "button" }, h("span", { class: "avatar" }, initials(n)), h("span", {}, n));
+        b.addEventListener("click", () => {
+          chosen = n;
+          for (const x of $("link-people").children) x.classList.toggle("on", x === b);
+          const p = (session.accounts || []).find((a) => a.name === n);
+          $("link-pass-label").hidden = $("link-password").hidden = !(p && p.password);
+          $("link-go").hidden = false;
+          if (p && p.password) $("link-password").focus();
+        });
+        return b;
+      }));
+      $("link-go").onclick = () => chosen && send({ link: chosen, link_password: $("link-password").value });
+      $("link-none").onclick = () => send({ link: "" });
+      view("link");
+    };
+    $("central-signin").onsubmit = (e) => {
+      e.preventDefault();
+      pending = { path: "/api/session", body: { email: $("c-email").value, password: $("c-password").value } };
+      send();
+    };
+    $("central-new").onsubmit = (e) => {
+      e.preventDefault();
+      if (!$("cn-consent").checked) { say("Agree to the hub's terms to make an account.", true); return; }
+      pending = { path: "/api/accounts", body: { name: $("cn-name").value, email: $("cn-email").value, password: $("cn-password").value, consent: true } };
+      send();
+    };
+    $("central-create").onclick = () => { say(""); view("new"); };
+    $("cn-back").onclick = () => { say(""); view("signin"); };
+    $("c-forgot").onclick = async () => {
+      const email = $("c-email").value.trim();
+      if (!email) { say("Type your email first.", true); return; }
+      try { await api("/api/session/reset", { body: { email } }); say("If there's a Kelvin account for " + email + ", the hub sent it a link to choose a new password."); }
+      catch (e) { say(e.message, true); }
+    };
+    $("central-rekey").onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api("/api/account/rekey", { body: { old: $("rekey-old").value } });
+        if (r.rekeyed) location.reload(); else say("That isn't your old password, or there was nothing to keep.", true);
+      } catch (err) { say(err.message, true); }
+    };
+    $("rekey-skip").onclick = () => location.reload();
+    view("signin");
+  }
+
   function showSignIn(session) {
     $("signin").hidden = false;
     for (const slot of $("signin").querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
+    hubLink(session, "central-hub-text", "central-hub-edit");
+    // signed out, the hub can only change until someone has signed in here with a central account (app.py session_hub)
+    $("central-hub-edit").hidden = (session.accounts || []).some((a) => a.email);
+    if (session.central) {
+      showCentral(session);
+    } else {
+      showLocal(session);
+    }
+    const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
+    const busy = (s) => {
+      $("signin-busy").hidden = !s.busy;
+      $("signin-busy-text").textContent = s.busy ? (s.busy_user ? s.busy_user + "'s work: " : "") + s.busy : "";
+    };
+    busy(session);
+    $("signin-stop").onclick = async () => {   // anyone may stop what runs: safety never waits for a password
+      try { await api("/api/runs/stop", { body: { queue: true } }); say("Stopping: the step in progress ends, then everything goes safe."); }
+      catch (e) { say(e.message, true); }
+      setTimeout(async () => { try { busy(await api("/api/session")); } catch (e) { /* keep what is shown */ } }, 4000);
+    };
+  }
+
+  function showLocal(session) {   // accounts on this computer only (no Kelvin hub set)
     const people = session.accounts || [];
     let chosen = null;
     const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
@@ -131,16 +253,6 @@
     $("signin-back").onclick = () => view("people");
     $("new-back").onclick = () => view("people");
     $("signin-add").onclick = () => view("new");
-    const busy = (s) => {
-      $("signin-busy").hidden = !s.busy;
-      $("signin-busy-text").textContent = s.busy ? (s.busy_user ? s.busy_user + "'s work: " : "") + s.busy : "";
-    };
-    busy(session);
-    $("signin-stop").onclick = async () => {   // anyone may stop what runs: safety never waits for a password
-      try { await api("/api/runs/stop", { body: { queue: true } }); say("Stopping: the step in progress ends, then everything goes safe."); }
-      catch (e) { say(e.message, true); }
-      setTimeout(async () => { try { busy(await api("/api/session")); } catch (e) { /* keep what is shown */ } }, 4000);
-    };
     view(people.length ? "people" : "new");
   }
 
@@ -154,8 +266,16 @@
     if (!on) return;
     $("account-avatar").textContent = initials(a.user.name);
     $("account-name").textContent = a.user.name;
-    $("account-status").textContent = a.user.name + (a.user.password ? " · password set" : " · no password");
-    $("pw-old").hidden = !a.user.password;
+    $("account-status").textContent = a.user.central ? a.user.email + " · Kelvin account"
+      : a.user.name + (a.user.password ? " · password set" : " · no password");
+    $("pw-old").hidden = !a.user.password && !a.user.central;
+    $("pw-new").placeholder = a.user.central ? "New password (8 characters or more)" : "New password (empty: none)";
+    $("account-hub-link").hidden = !(a.user.central && a.account_url);
+    if (a.account_url) $("account-hub-link").href = a.account_url;
+    hubLink(a, "account-hub-text", "account-hub-edit");
+    $("account-hint").textContent = a.user.central
+      ? "One Kelvin account, on the Kelvin hub, signs you in on every computer; after a first sign-in on a computer it works there offline too. Your settings, API keys, chats, projects, memory, data folder and record stay on each computer, and your API keys are encrypted with your password. The instruments, their cards, the lab switches below and the lab's instrument log are everyone's. Forgot your password? Sign out and choose \"Forgot your password?\"."
+      : "Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.";
   }
 
   async function signOut() {
@@ -3737,6 +3857,7 @@
     for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
     S.settings = boot.settings;
     S.claudeCode = !!boot.claude_code;   // Claude Code bridge (temporary)
+    $("hub-field").hidden = $("project-sharing-field").hidden = !boot.hub_sharing;   // off for now: the hub is for accounts
     showUpdate(boot.update);
     $("update-go").addEventListener("click", installUpdate);
     $("update-check").addEventListener("click", checkUpdate);

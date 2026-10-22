@@ -455,3 +455,51 @@ def test_a_sync_is_read_off_the_event_loop(tmp_path, monkeypatch):
         r = client.post("/api/sync", json={"chats": [{"id": "aaaaaaaaaaaa", "title": "off-the-loop-probe",
                                                       "messages": []}]}, headers=bearer)
     assert r.status_code == 200 and where == ["a worker thread"]
+
+
+def test_kelvin_signs_in_with_its_own_api(tmp_path):
+    """Central Kelvin accounts: Kelvin's own sign-in screen talks JSON to these (central.py)."""
+    hub, client = make(tmp_path)
+    kelvin = {"id": "urn:uuid:one", "name": "Lab PC", "platform": "win32", "version": "0.4.0"}
+    ada = {"name": "Ada", "email": "ada@example.org", "password": "correct horse", "installation": kelvin}
+    r = client.post("/api/register", json=ada)
+    assert r.status_code == 400 and "terms" in r.json()["error"]              # consent is required
+    r = client.post("/api/register", json=dict(ada, consent=True))
+    assert r.status_code == 200 and r.json()["access_token"].startswith("khub_")
+    assert r.json()["user"] == {"name": "Ada", "email": "ada@example.org", "email_confirmed": False}
+    assert "/confirm?code=" in next((tmp_path / "hub" / "outbox").glob("*.txt")).read_text(encoding="utf-8")
+    assert client.post("/api/register", json=dict(ada, consent=True)).status_code == 400   # one account per email
+
+    r = client.post("/api/signin", json={"email": "ADA@example.org ", "password": "nope nope", "installation": kelvin})
+    assert r.status_code == 401
+    r = client.post("/api/signin", json={"email": "ADA@example.org ", "password": "correct horse",
+                                         "installation": kelvin})
+    assert r.status_code == 200
+    token = r.json()["access_token"]
+    auth = {"Authorization": "Bearer " + token}
+    assert client.get("/api/me", headers=auth).json()["email"] == "ada@example.org"
+    r = client.post("/api/password", headers=auth, json={"old": "wrong", "new": "battery staple"})
+    assert r.status_code == 401
+    assert client.post("/api/password", json={"old": "correct horse", "new": "battery staple"}).status_code == 401
+    r = client.post("/api/password", headers=auth, json={"old": "correct horse", "new": "battery staple"})
+    assert r.status_code == 200
+    assert client.get("/api/me", headers=auth).status_code == 200              # this Kelvin stays signed in
+
+    assert client.post("/api/reset", json={"email": "nobody@example.org"}).json() == {"ok": True}   # says nothing
+    assert client.post("/api/reset", json={"email": "ada@example.org"}).json() == {"ok": True}
+    mails = "".join(p.read_text(encoding="utf-8") for p in (tmp_path / "hub" / "outbox").glob("*.txt"))
+    assert mails.count("/reset/new?code=") == 1
+
+    hub.set_disabled(hub.authenticate("ada@example.org", "battery staple")["id"], True)
+    r = client.post("/api/signin", json={"email": "ada@example.org", "password": "battery staple",
+                                         "installation": kelvin})
+    assert r.status_code == 403
+    for _ in range(10):
+        client.post("/api/signin", json={"email": "ada@example.org", "password": "guess", "installation": kelvin})
+    r = client.post("/api/signin", json={"email": "ada@example.org", "password": "battery staple",
+                                         "installation": kelvin})
+    assert r.status_code == 429                                               # no fast guessing
+
+    hub.config["require_confirmed_email"] = True
+    r = client.post("/api/register", json=dict(ada, email="ben@example.org", name="Ben", consent=True))
+    assert r.status_code == 403 and r.json()["registered"] and "Confirm" in r.json()["error"]

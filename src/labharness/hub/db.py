@@ -648,8 +648,8 @@ class Hub:
         """Send through the SMTP server in hub.json (password from KELVIN_HUB_SMTP_PASSWORD), or, with none set,
         drop the message in outbox/ for the operator. Never raises: a failed mail is logged."""
         m = self.config.get("mail") or {}
-        try:
-            if m.get("smtp_host"):
+        if m.get("smtp_host"):
+            try:
                 import smtplib
                 from email.message import EmailMessage
                 msg = EmailMessage()
@@ -661,12 +661,15 @@ class Hub:
                     if m.get("username"):
                         s.login(m["username"], os.environ.get("KELVIN_HUB_SMTP_PASSWORD", ""))
                     s.send_message(msg)
-            else:
-                path = self.home / "outbox" / ("%s-%019d-%s.txt" % (time.strftime("%Y%m%d-%H%M%S"), time.time_ns(),
-                                                                     secrets.token_hex(3)))   # in the order sent
-                path.write_text("To: %s\nSubject: %s\n\n%s\n" % (to, subject, body), encoding="utf-8")
-        except Exception as e:   # the address stays out of the log; SMTP errors can quote it
-            log.error("could not send a mail (%s)", type(e).__name__)
+                return
+            except Exception as e:   # the address stays out of the log; SMTP errors can quote it
+                log.error("could not send a mail (%s); it is in outbox/ for the operator", type(e).__name__)
+        try:   # no mail server, or it failed: the operator passes it on
+            path = self.home / "outbox" / ("%s-%019d-%s.txt" % (time.strftime("%Y%m%d-%H%M%S"), time.time_ns(),
+                                                                 secrets.token_hex(3)))   # in the order sent
+            path.write_text("To: %s\nSubject: %s\n\n%s\n" % (to, subject, body), encoding="utf-8")
+        except OSError as e:
+            log.error("could not keep a mail in outbox/ (%s)", type(e).__name__)
 
     def send_confirmation(self, user: Dict[str, Any]) -> None:
         code = self.new_code("confirm", user["id"])
@@ -744,6 +747,31 @@ class Hub:
             con.execute("DELETE FROM tokens WHERE token_hash = ? AND kind = 'web'", (sha(str(token or "")),))
 
     # ------------------------------------------------------------------ connected Kelvins
+
+    def sign_in_app(self, email: Any, password: Any, inst: Dict[str, str], ip: Optional[str] = None) -> Dict[str, Any]:
+        """Kelvin's own sign-in with a central Kelvin account: the password is checked here, and this Kelvin gets a
+        token for the person (one per person and Kelvin: signing in again replaces it). Kelvin sees the password, so
+        it can sign the person in offline later and keep their API keys encrypted with it. Shares nothing."""
+        user = self.authenticate(email, password, ip)
+        if self.config.get("require_confirmed_email") and not user.get("email_confirmed_at"):
+            raise HubError("Confirm your email address first (see the message we sent you).")
+        token, now = "khub_" + secrets.token_urlsafe(32), time.time()
+        with self._person(user["id"]), self.connect() as con:
+            con.execute("INSERT INTO installations (id, name, platform, version, created_at, last_seen)"
+                        " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET name = excluded.name,"
+                        " platform = excluded.platform, version = excluded.version, last_seen = excluded.last_seen",
+                        (inst["id"], inst["name"], inst["platform"], inst["version"], now, now))
+            con.execute("DELETE FROM tokens WHERE kind = 'app' AND user_id = ? AND installation_id = ?",
+                        (user["id"], inst["id"]))
+            con.execute("INSERT INTO tokens (user_id, kind, token_hash, installation_id, created_at, last_used)"
+                        " VALUES (?, 'app', ?, ?, ?, ?)", (user["id"], sha(token), inst["id"], now, now))
+            con.execute("UPDATE users SET last_seen = ? WHERE id = ?", (now, user["id"]))
+            self.audit(con, "app", "signed in from Kelvin", user["id"], {"installation": inst["id"],
+                                                                          "name": inst["name"]}, ip)
+        return {"access_token": token, "token_type": "Bearer",
+                "user": {"name": user["name"], "email": user["email"],
+                         "email_confirmed": bool(user.get("email_confirmed_at"))},
+                "needs_consent": self.needs_consent(user), "account_url": self.base_url + "/account"}
 
     def connect_code(self, user: Dict[str, Any], redirect_uri: str, challenge: str, installation: Dict[str, Any],
                      lab_id: Optional[int], previous: Optional[List[str]] = None) -> str:
