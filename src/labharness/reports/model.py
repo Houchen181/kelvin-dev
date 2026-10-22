@@ -27,6 +27,8 @@ class RunPart:
     results: List[Table] = field(default_factory=list)
     issues: List[str] = field(default_factory=list)
     conditions: List[Tuple[str, str]] = field(default_factory=list)   # instrument, its values at the start
+    away: List[str] = field(default_factory=list)                     # drives away from safe at the start
+    found: List[Tuple[str, str]] = field(default_factory=list)        # the plan's instruments: settings it left alone
     changes: List[str] = field(default_factory=list)                  # drives that ended somewhere else
     events: List[Tuple[str, str]] = field(default_factory=list)       # time, approvals, trips, alarms
 

@@ -100,6 +100,9 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "report %s (%s run%s)" % (e.get("name"), e.get("runs"), "" if e.get("runs") == 1 else "s")
     elif kind == "lab_changed":
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
+    elif kind == "instrument_switched":
+        text = "%s switched %s%s" % (e.get("instrument"), "on" if e.get("on") else "off",
+                                     "" if e.get("on") else ": Kelvin sends it nothing")
     elif kind in ("signed_in", "signed_out"):
         text = kind.replace("_", " ")
     elif kind == "computer_task":
@@ -277,7 +280,12 @@ class LabRuntime:
 
     def _status_lines(self) -> List[str]:
         lines = []
+        for name in self.lab.switched_off:
+            lines.append("%s: switched off in the Lab panel; Kelvin sends it nothing (only a person switches it on)"
+                         % name)
         for name, values in self._status.items():
+            if name not in self.lab.instruments or not self.lab.instruments[name].enabled:
+                continue
             card = self.lab.instruments[name].card
             parts = []
             for pname, v in values.items():
@@ -470,7 +478,8 @@ class LabRuntime:
 
     def health(self, instruments: Optional[List[str]] = None) -> str:
         return self._do("health check", lambda: "\n".join(
-            str(r) for r in self.engine.preflight(instruments, fresh=True)))   # asked for: always checks again
+            [str(r) for r in self.engine.preflight(instruments, fresh=True)]   # asked for: always checks again
+            + ([] if instruments else ["%s switched off (not checked)" % n for n in self.lab.switched_off])))
 
     def wait(self, seconds: float) -> str:
         seconds = max(0.0, min(float(seconds), MAX_WAIT_S))
@@ -530,8 +539,8 @@ class LabRuntime:
                 lines += self._preview(plan, report.rows)
             lines += ["warning: " + w for w in report.warnings]
             if made:
-                lines.append("saved in the run folder: data.csv, %s (made automatically; use make_report only for "
-                             "another selection or wording)" % " and ".join(made))
+                lines.append("saved in the run folder: data.csv, conditions.csv, %s (made automatically; use "
+                             "make_report only for another selection or wording)" % " and ".join(made))
             if report.run_id and report.rows:
                 lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
             return "\n".join(lines)
@@ -1043,8 +1052,14 @@ class LabRuntime:
     def instruments(self) -> List[Dict[str, Any]]:
         """Each instrument for the lab panel: its readings, outputs (drives) and settings, and a state."""
         out = []
-        for name, values in dict(self._status).items():
-            card = self.lab.instruments[name].card
+        status = dict(self._status)
+        for name, inst in self.lab.instruments.items():
+            card = inst.card
+            if not inst.enabled:
+                out.append({"name": name, "model": card.model, "kind": card.kind, "state": "off", "enabled": False,
+                            "active": 0, "headline": None, "readings": [], "drives": [], "settings": []})
+                continue
+            values = status.get(name, {})
             readings, drives, settings = [], [], []
             errors = away = 0
             for pname, value in values.items():
@@ -1071,10 +1086,27 @@ class LabRuntime:
                     settings.append(item)
             headline = card.headline if card.headline in values else (readings[0]["name"] if readings else None)
             readings.sort(key=lambda r: r["name"] != headline)
-            out.append({"name": name, "model": card.model, "kind": card.kind,
+            out.append({"name": name, "model": card.model, "kind": card.kind, "enabled": True,
                         "state": "error" if errors else "active" if away else "safe", "active": away,
                         "headline": headline, "readings": readings, "drives": drives, "settings": settings})
         return out
+
+    def switch_instrument(self, name: str, on: bool, by: str) -> None:
+        """A person switches an instrument on or off for this lab (Lab panel). Off: Kelvin sends it nothing at all
+        (lab.py Lab.switch). Not while a plan or the queue runs. Raises KeyError, RuntimeError, or AdapterError when
+        switching on cannot connect."""
+        with self.lock:
+            if name not in self.lab.instruments:
+                raise KeyError("no instrument %r in %s" % (name, self.lab.config.name))
+            live = self.live or {}
+            if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
+                raise RuntimeError("A plan or the queue is running; stop it first, then switch %s %s."
+                                   % (name, "on" if on else "off"))
+            if self.lab.instruments[name].enabled == on:
+                return
+            self.lab.switch(name, on)
+            self.gate.log.write("instrument_switched", by=by, instrument=name, on=on)
+            self._refresh()
 
     # ------------------------------------------------------------------ instruments on this computer
 
@@ -1528,7 +1560,7 @@ class LabRuntime:
 
     def run_files(self, run_id: str) -> List[Dict[str, Any]]:
         d = self._run_dir(run_id)
-        order = {"report.pdf": 0, "report.pptx": 1, "data.csv": 2}
+        order = {"report.pdf": 0, "report.pptx": 1, "data.csv": 2, "conditions.csv": 3}
         files = [p for p in d.iterdir() if p.is_file() and p.suffix in (".pdf", ".pptx", ".csv")]
         return [{"name": p.name, "size": p.stat().st_size} for p in sorted(files, key=lambda p: (order.get(p.name, 3), p.name))]
 

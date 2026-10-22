@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from .cards import CardRegistry, load_card
 from .clock import RealClock, ScaledClock, SimClock
-from .lab import Lab
+from .lab import Lab, SwitchedOff
 from .labconfig import Envelope, LabConfig, load_envelope, load_lab_config
 from .sim.twin import World, sim_backend_factory
 
@@ -46,20 +46,22 @@ def lab_registry(home: Any = None) -> CardRegistry:
 
 
 def build_virtual_lab(clock: Any = None, seed: int = 0, config: Optional[Any] = None,
-                      registry: Optional[CardRegistry] = None) -> Lab:
+                      registry: Optional[CardRegistry] = None, switched_off: Optional[SwitchedOff] = None) -> Lab:
     clock = clock or SimClock()
     registry = registry or builtin_registry()
     cfg = load_lab_config(config or DATA / "virtual_lab.yaml", registry)
     world = World(clock, seed)
-    return Lab(cfg, registry, sim_backend_factory(world), clock, world)
+    return Lab(cfg, registry, sim_backend_factory(world), clock, world, switched_off)
 
 
 def is_simulated(config: LabConfig) -> bool:
     return all(ic.address.startswith("sim://") for ic in config.instruments.values())
 
 
-def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[CardRegistry] = None) -> Lab:
+def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[CardRegistry] = None,
+              switched_off: Optional[SwitchedOff] = None) -> Lab:
     """A lab from a lab config whose instruments may be real (VISA/serial addresses) or simulated (sim://).
+    switched_off: the instruments a person switched off in the Lab panel, never connected.
 
     With any real instrument the lab runs on real time: ramps and settling are timed by the clock, so a sped-up
     simulation clock would ramp real hardware too fast. Asking for one is refused."""
@@ -84,7 +86,7 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
         return backend
 
     try:
-        return Lab(cfg, registry, factory, clock, world)
+        return Lab(cfg, registry, factory, clock, world, switched_off)
     except Exception:
         for backend in opened:  # one instrument failed: let go of the ones already opened
             backend.close()
@@ -95,7 +97,8 @@ def demo_envelope(lab: Lab) -> Envelope:
     return load_envelope(DATA / "demo_project.yaml", lab.config, lab.registry)
 
 
-def open_home_lab(home: Any, choice: str = "auto", speed: float = 10) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
+def open_home_lab(home: Any, choice: str = "auto", speed: float = 10,
+                  switched_off: Optional[SwitchedOff] = None) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
     """The lab an installed Kelvin controls: the user's own lab.yaml in `home` if there is one (unless they chose
     the virtual lab), otherwise the virtual lab at `speed`x real time. If the user's lab cannot be connected, Kelvin
     still starts, on the virtual lab, and says why."""
@@ -104,8 +107,9 @@ def open_home_lab(home: Any, choice: str = "auto", speed: float = 10) -> Tuple[L
     registry = lab_registry(home)
     if choice != "virtual" and path.exists():
         try:
-            return build_lab(path, registry=registry), None, dict(info, kind="file")
+            return build_lab(path, registry=registry, switched_off=switched_off), None, dict(info, kind="file")
         except Exception as e:
             info["error"] = "Your lab (%s) could not be connected: %s" % (path.name, str(e).splitlines()[0])
-    lab = build_virtual_lab(clock=ScaledClock(speed) if speed else SimClock(), registry=registry)
+    lab = build_virtual_lab(clock=ScaledClock(speed) if speed else SimClock(), registry=registry,
+                            switched_off=switched_off)
     return lab, demo_envelope(lab), info

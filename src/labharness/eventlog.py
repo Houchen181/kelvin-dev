@@ -90,12 +90,14 @@ class EventLog:
 
 
 class RunRecord:
-    """One run: plan.yaml, snapshot_start/end.json, data.jsonl, meta.json."""
+    """One run: plan.yaml, snapshot_start/end.json, data.jsonl, meta.json; at the end data.csv (and one CSV per
+    trace reading) and conditions.csv (every instrument setting at the start and the end)."""
 
     def __init__(self, run_id: str, path: Optional[Path], plan: Dict[str, Any], operator: str):
         self.run_id = run_id
         self.path = path
         self.rows: List[Dict[str, Any]] = []
+        self.snapshots: Dict[str, Dict[str, Any]] = {}
         self.meta: Dict[str, Any] = {"run_id": run_id, "plan": plan.get("plan"), "operator": operator,
                                      "started": _now(), "labharness": __version__}
         if path:
@@ -105,6 +107,7 @@ class RunRecord:
 
     def snapshot(self, kind: str, data: Dict[str, Any]) -> None:
         self.meta["snapshot_" + kind] = True
+        self.snapshots[kind] = data
         if self.path:
             with open(self.path / ("snapshot_%s.json" % kind), "w", encoding="utf-8") as f:
                 json.dump(_jsonable(data), f, indent=1, default=str)
@@ -125,8 +128,37 @@ class RunRecord:
         self.meta["finished"] = _now()
         if self.path:
             write_csv(self.path, self.rows)
+            if self.snapshots:
+                write_conditions(self.path, self.snapshots.get("start") or {}, self.snapshots.get("end") or {})
             with open(self.path / "meta.json", "w", encoding="utf-8") as f:
                 json.dump(self.meta, f, indent=1)
+
+
+def write_conditions(folder: Path, start: Dict[str, Any], end: Dict[str, Any]) -> None:
+    """conditions.csv: instrument, parameter, its value at the start and at the end (as the instrument gave it, in
+    the card's units), one row per setting or reading, so the scan report needs to show only what bears on it."""
+    import csv
+    rows = []
+    for inst in list(dict.fromkeys(list(start) + list(end))):
+        a, b = start.get(inst) or {}, end.get(inst) or {}
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            continue
+        for name in list(dict.fromkeys(list(a) + list(b))):
+            if isinstance(a.get(name), list) or isinstance(b.get(name), list):
+                continue   # traces are in the data
+            rows.append([inst, name, _cell(a.get(name)), _cell(b.get(name))])
+    with open(folder / "conditions.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["instrument", "parameter", "start", "end"])
+        w.writerows(rows)
+
+
+def _cell(v: Any) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "on" if v else "off"
+    return "%.12g" % v if isinstance(v, float) else str(v)
 
 
 def write_csv(folder: Path, rows: List[Dict[str, Any]]) -> List[str]:

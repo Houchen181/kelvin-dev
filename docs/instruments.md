@@ -68,7 +68,7 @@ Real hardware gets the same gate as the virtual lab, and a few protections of it
 - **Measuring never powers anything up.** On some source-meters a reading command switches the output on, so those readings are only taken while the output is already on (`read_when`).
 - **No speed-up on real time.** A lab with any real instrument runs on real time, so ramps keep their rates.
 - **Risky commands stay locked.** Commands that change what readings mean, or that bypass the instrument's own protection, are blocked in the card: sensor curves, coil constants, persistent-switch heaters, current limits, and DMM resistance modes that push current into a device.
-- **Connecting only configures.** A card's `on_connect` commands are checked never to touch a drive.
+- **Connecting changes nothing.** Kelvin leaves every instrument as it finds it: no reset, no default values. A card's `on_connect` commands may only set up the connection itself (listen mode, headers, a driver's wiring); a card whose `on_connect` would set any parameter is refused. A drive with no read-back (an RF switch, a DDS amplitude) is unknown until Kelvin sets it: switching it to its safe value always goes ahead, anything else needs approval, and a ramped one first goes to safe.
 
 **Instruments behind vendor software.** Some instruments are not driven with text commands but through their maker's library. Kelvin has drivers for two of them; the address says which:
 - `zhinst://dev1234` for a Zurich Instruments lock-in, through LabOne's Python API (`pip install zhinst-core`). Add `?host=...&port=8004&interface=1GbE` if the data server runs elsewhere. A scan finds these devices through LabOne.

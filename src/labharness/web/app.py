@@ -1228,7 +1228,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             body, use, by = {"yaml": unlock_lab(lab_file.read_text(encoding="utf-8"))}, None, "human (portal, unlocked)"
         try:
             if use == "virtual":
-                lab, envelope, info = await asyncio.to_thread(open_home_lab, lab_file.parent, "virtual")
+                lab, envelope, info = await asyncio.to_thread(open_home_lab, lab_file.parent, "virtual", 10,
+                                                              settings.switched_off)
             else:
                 text = str(body.get("yaml") or "") if use != "mine" else (
                     lab_file.read_text(encoding="utf-8") if lab_file.exists() else "")
@@ -1236,7 +1237,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     return error(400, "There is no lab config yet; scan for instruments or write one first.")
                 registry = lab_registry(lab_file.parent)   # Kelvin's cards and the user's own
                 load_lab_config(text, registry)   # check it before touching any instrument
-                lab = await asyncio.to_thread(build_lab, text, None, 0, registry)
+                lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off)
                 envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
                 if use != "mine":
                     tmp = lab_file.with_suffix(".tmp")
@@ -1344,6 +1345,24 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, "That command is too long.")
         result = await asyncio.to_thread(runtime.terminal, instrument, op, arg, body.get("value"))
         return JSONResponse(result)
+
+    async def instrument_switch(request: Request) -> Response:
+        """POST {on}: a person switches an instrument on or off for this lab. Off, Kelvin sends it nothing at all:
+        no command, no reading, no health check, no going safe, until a person switches it on again."""
+        name = request.path_params["name"]
+        on = (await request.json()).get("on") is True
+        try:
+            await asyncio.to_thread(runtime.switch_instrument, name, on, "human (portal)")
+        except KeyError as e:
+            return error(404, e.args[0])
+        except RuntimeError as e:
+            if isinstance(e, AdapterError):
+                return error(400, "%s could not be connected: %s" % (name, str(e).splitlines()[0]))
+            return error(409, str(e))
+        except (OSError, ValueError) as e:
+            return error(400, "%s could not be connected: %s" % (name, str(e).splitlines()[0] if str(e) else e))
+        settings.set_switched_off(runtime.lab.config.name, runtime.lab.switched_off)
+        return JSONResponse({"ok": True, "instruments": runtime.instruments()})
 
     async def instrument_open(request: Request) -> Response:
         """Open an instrument's folder, or its manual, on this computer."""
@@ -1721,6 +1740,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/data-folder", data_folder, methods=["GET", "POST"]),
         Route("/api/instruments/{name}/manual", instrument_manual, methods=["POST", "PUT"]),
         Route("/api/instruments/{name}/open", instrument_open, methods=["POST"]),
+        Route("/api/instruments/{name}/switch", instrument_switch, methods=["POST"]),
         Route("/api/instruments/draft", draft_view, methods=["POST"]),
         Route("/api/instruments/card", card_for_found, methods=["POST"]),
         Route("/api/settings", settings_view, methods=["GET", "POST"]),
@@ -1834,10 +1854,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.lab:  # an explicit lab config: simulated ones run at --speed, real ones on real time
         simulated = is_simulated(load_lab_config(args.lab, builtin_registry()))
         lab = build_lab(args.lab, clock=(SimClock() if args.speed == 0 else ScaledClock(args.speed)) if simulated else None,
-                        seed=args.seed)
+                        seed=args.seed, switched_off=settings.switched_off)
         envelope = None
     else:   # the user's lab.yaml next to the settings, if they have one; otherwise the virtual lab
-        lab, envelope, info = open_home_lab(Path(args.settings).parent, settings.get("lab") or "auto", args.speed)
+        lab, envelope, info = open_home_lab(Path(args.settings).parent, settings.get("lab") or "auto", args.speed,
+                                            settings.switched_off)
     home = Path(args.settings).parent
     accounts = None if (args.no_accounts or args.data_dir) else Accounts(home)   # people sign in (accounts.py)
     if accounts is not None:

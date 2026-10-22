@@ -98,6 +98,7 @@ def apply_serial_settings(res: Any, settings: Dict[str, Any]) -> None:
 
 class VisaBackend:
     simulated = False
+    quiet_close = True   # closing the session sends the instrument nothing
 
     def __init__(self, name: str, card: Card, address: str, rm: Any = None,
                  overrides: Optional[Dict[str, Any]] = None):

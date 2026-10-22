@@ -35,9 +35,10 @@ def _when(started: Optional[str], finished: Optional[str]) -> str:
         return started or ""
     if a is None:
         return ""
-    text = a.strftime("%b %d %Y, %H:%M").replace(" 0", " ")
-    if b is not None:
-        text += "–" + (b.strftime("%H:%M") if b.date() == a.date() else b.strftime("%b %d, %H:%M").replace(" 0", " "))
+    text = "%s %d %d, %s" % (a.strftime("%b"), a.day, a.year, a.strftime("%H:%M"))
+    if b is not None and b.strftime("%Y%m%d%H%M") != a.strftime("%Y%m%d%H%M"):   # a span, unless one minute
+        text += "–" + (b.strftime("%H:%M") if b.date() == a.date()
+                       else "%s %d, %s" % (b.strftime("%b"), b.day, b.strftime("%H:%M")))
     return text
 
 
@@ -130,6 +131,8 @@ class Collector:
         start = _read_json(d / "snapshot_start.json") or {}
         end = _read_json(d / "snapshot_end.json") or {}
         part.conditions = self._conditions(start)
+        part.away = self._away(start)
+        part.found = self._found(start, plan)
         part.changes = self._changes(start, end)
         t0, t1 = meta.get("started"), meta.get("finished")
         if t0:
@@ -137,7 +140,7 @@ class Collector:
                            and t0 <= str(e.get("wall", "")) <= (t1 or "9999")]
             asked = [e for e in events if e.get("type") == "ask" and str(e.get("wall", "")) <= t0
                      and "Run plan %s" % part.plan in str(e.get("request", ""))]
-            if asked:   # the plan's own approval comes just before it starts
+            if asked and self._line(asked[-1]) not in part.events:   # its approval, just before (or as) it starts
                 part.events.insert(0, self._line(asked[-1]))
         return part
 
@@ -197,7 +200,8 @@ class Collector:
                     if fit:
                         model = fit["fit"].get("model") or "model"
                         series.append(Series("fit", fit["fit"]["x"], fit["fit"]["y"], fit=True, color=color))
-                caption = "Dashed: %s fit%s." % (model, "s" if outer and len(groups) > 1 else "") if model else ""
+                caption = ("Dashed: %s fit%s to %s." % (model, "s" if outer and len(groups) > 1 else "", m["key"])
+                           if model else "")
                 charts.append(Chart(m["key"], xa["key"], xa.get("unit", ""), m.get("unit", ""), series, caption))
         for m in [m for m in measures if m.get("kind") == "trace"]:
             last = next((r for r in reversed(rows) if isinstance(r.get(m["key"]), list)), None)
@@ -214,7 +218,7 @@ class Collector:
             x_unit = m.get("x_unit", "")
             charts.append(Chart(m["key"] + (" (last of %d)" % len(rows) if len(rows) > 1 else ""),
                                 "frequency" if x_unit == "Hz" else "x", x_unit, m.get("unit", ""), series,
-                                "Dashed: %s fit." % fit["fit"].get("model", "model") if fit else ""))
+                                "Dashed: %s fit to %s." % (fit["fit"].get("model", "model"), m["key"]) if fit else ""))
         return charts[:MAX_CHARTS]
 
     def _results(self, analysis: Dict[str, Any]) -> List[Table]:
@@ -257,6 +261,43 @@ class Collector:
                 away = spec is not None and spec.is_drive and spec.distance(v) > 0
                 parts.append("%s %s%s" % (name, self._show(key, v), "*" if away else ""))
             out.append((inst, ", ".join(parts)))
+        return out
+
+    def _found(self, snapshot: Dict[str, Any], plan: Dict[str, Any]) -> List[Tuple[str, str]]:
+        """The plan's instruments: each setting the plan neither set nor swept, as Kelvin found it (no readings)."""
+        named: List[str] = []
+        for part in ("setup", "sweep", "after"):
+            if isinstance(plan.get(part), dict):
+                named += [str(k) for k in plan[part]]
+        named += [str(m) for m in plan.get("measure") or [] if isinstance(m, str)]
+        touched = {k for part in ("setup", "sweep") if isinstance(plan.get(part), dict) for k in map(str, plan[part])}
+        out = []
+        for inst in dict.fromkeys(k.split(".")[0] for k in named):
+            values = snapshot.get(inst)
+            if not isinstance(values, dict):
+                continue
+            parts = []
+            for name, v in values.items():
+                key = "%s.%s" % (inst, name)
+                spec = self._spec(key)
+                if (spec is None or spec.set_cmd is None or key in touched or isinstance(v, list) or v is None
+                        or (isinstance(v, str) and v.startswith("ERROR"))):
+                    continue
+                parts.append("%s %s" % (name, self._show(key, v)))
+            if parts:
+                out.append((inst, ", ".join(parts)))
+        return out
+
+    def _away(self, snapshot: Dict[str, Any]) -> List[str]:
+        out = []
+        for inst, values in snapshot.items():
+            for name, v in (values.items() if isinstance(values, dict) else []):
+                if isinstance(v, list) or v is None or (isinstance(v, str) and v.startswith("ERROR")):
+                    continue
+                key = "%s.%s" % (inst, name)
+                spec = self._spec(key)
+                if spec is not None and spec.is_drive and spec.distance(v) > 0:
+                    out.append("%s %s" % (key, self._show(key, v)))
         return out
 
     def _changes(self, start: Dict[str, Any], end: Dict[str, Any]) -> List[str]:

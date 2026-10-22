@@ -33,7 +33,7 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
-       "hub_installation"}
+       "hub_installation", "instruments_off"}
 
 
 def _load(path: Optional[Path]) -> Dict[str, Any]:
@@ -296,6 +296,25 @@ class Settings:
         """Phone access on or off, and its port."""
         from .remote import PHONE_PORT
         return self._lab.get("phone") == "on", int(self._lab.get("phone_port") or PHONE_PORT)
+
+    def switched_off(self, lab: str) -> List[str]:
+        """The instruments a person switched off in this lab (Lab panel): Kelvin sends them nothing. Everyone's,
+        like the instruments."""
+        off = self._lab.get("instruments_off")
+        names = off.get(str(lab)) if isinstance(off, dict) else None
+        return [str(n) for n in names] if isinstance(names, list) else []
+
+    def set_switched_off(self, lab: str, names: List[str]) -> None:
+        off = dict(self._lab.get("instruments_off") or {})
+        if names:
+            off[str(lab)] = sorted(set(names))
+        else:
+            off.pop(str(lab), None)
+        if off:
+            self._lab["instruments_off"] = off
+        else:
+            self._lab.pop("instruments_off", None)
+        self._save()
 
     def set_phone(self, on: bool, port: int) -> None:
         if not 1024 <= int(port) <= 65535:

@@ -802,7 +802,8 @@
   }
 
   // the files Kelvin keeps in a run's folder: its report, slides and data, opened on this computer
-  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "data.csv": "Data (CSV)" };
+  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "data.csv": "Data (CSV)",
+    "conditions.csv": "Conditions (CSV)" };
   function runFiles(tab, box) {
     const files = (tab.final && tab.final.files) || [];
     const base = "/api/runs/" + encodeURIComponent(tab.runId);
@@ -2350,7 +2351,9 @@
     const open = OPEN.has(inst.name);
     const head = inst.readings.find((r) => r.name === inst.headline);
     const [hv, hu] = head ? splitValue(head.value) : ["", ""];
-    const stateText = inst.state === "error" ? "not responding" : inst.state === "active" ? inst.active + " active" : "safe";
+    const off = inst.enabled === false;
+    const stateText = off ? "switched off" : inst.state === "error" ? "not responding"
+      : inst.state === "active" ? inst.active + " active" : "safe";
     const chev = icon("chev"); chev.classList.add("chev");
     const count = inst.state === "active" ? h("span", { class: "inst-count" }, String(inst.active))
       : inst.state === "error" ? h("span", { class: "inst-count err" }, "!") : h("span", { class: "inst-count none" });
@@ -2365,13 +2368,28 @@
       if (open) OPEN.delete(inst.name); else OPEN.add(inst.name);
       renderInstruments();
     });
-    const item = h("div", { class: "inst " + inst.state + (open ? " open" : "") }, row);
+    // on/off for this experiment: off, Kelvin sends it nothing at all until a person switches it on (lab.py)
+    const sw = h("button", { class: "inst-switch", type: "button", role: "switch", "aria-checked": String(!off),
+      "aria-label": "Use " + inst.name, title: off ? "Switched off: Kelvin sends " + inst.name + " nothing. Switch it on to use it."
+        : "On: Kelvin may use " + inst.name + ". Switch it off to keep Kelvin from sending it anything." });
+    sw.addEventListener("click", async () => {
+      sw.disabled = true;
+      try {
+        const r = await api("/api/instruments/" + encodeURIComponent(inst.name) + "/switch", { body: { on: off } });
+        PANEL.instruments = r.instruments;
+      } catch (e) { toast(e.message); }
+      renderInstruments();
+    });
+    const item = h("div", { class: "inst " + inst.state + (open ? " open" : "") }, h("div", { class: "inst-head" }, row, sw));
     const on = inst.drives.filter((d) => d.away);
-    if (inst.state === "error") item.append(h("div", { class: "inst-sub" }, "Not responding"));
+    if (off) item.append(h("div", { class: "inst-sub" }, "Off: Kelvin sends it nothing"));
+    else if (inst.state === "error") item.append(h("div", { class: "inst-sub" }, "Not responding"));
     else if (on.length && !open) item.append(h("div", { class: "inst-sub" }, on.map((d) => d.label + " " + d.value).join(" · ")));
     if (!open) return item;
     const card = item;
     const body = h("div", { class: "inst-body" });
+    if (off) body.append(h("div", { class: "hint" }, "Kelvin sends it no command and reads nothing from it: no checks, "
+      + "no alarms, and plans that use it are refused. Switch it on to use it again."));
     const others = inst.readings.filter((r) => r.name !== inst.headline);
     if (others.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Readings"), ...others.map((r) => kv(r))));
     if (inst.drives.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Outputs"), ...inst.drives.map((d) => kv(d))));
@@ -2394,11 +2412,13 @@
   function renderInstruments() {
     const all = PANEL.instruments;
     const q = PANEL.filter.trim().toLowerCase();
-    const shown = all.filter((i) => (!PANEL.activeOnly || i.state !== "safe") &&
+    const shown = all.filter((i) => (!PANEL.activeOnly || i.state === "active" || i.state === "error") &&
       (!q || (i.name + " " + i.model + " " + i.kind).toLowerCase().includes(q)));
     const active = all.filter((i) => i.state === "active").length;
     const errors = all.filter((i) => i.state === "error").length;
-    $("inst-summary").textContent = all.length + " · " + active + " active" + (errors ? " · " + errors + " not responding" : "");
+    const off = all.filter((i) => i.state === "off").length;
+    $("inst-summary").textContent = all.length + " · " + active + " active" + (errors ? " · " + errors + " not responding" : "")
+      + (off ? " · " + off + " off" : "");
     $("seg-active").textContent = "Active" + (active + errors ? " (" + (active + errors) + ")" : "");
     for (const b of document.querySelectorAll("#inst-seg button")) {
       const on = (b.dataset.v === "active") === PANEL.activeOnly;
@@ -2491,12 +2511,16 @@
     S.noticeSeen = newest;
   }
   function renderWatches(watches, status) {
-    $("watch-summary").textContent = watches.length ? watches.filter((w) => w.alarm).length + " alarm · " + watches.length + " watched" : "";
+    const paused = watches.filter((w) => w.paused).length;
+    $("watch-summary").textContent = watches.length ? watches.filter((w) => w.alarm).length + " alarm · "
+      + (watches.length - paused) + " watched" + (paused ? " · " + paused + " paused" : "") : "";
     $("watch-list").replaceChildren(...(watches.length ? watches.map((w) => {
       const remove = w.source === "lab" ? h("span", { class: "tag", title: "From the lab config; change it there" }, "lab")
         : rowButton("x", "Stop watching", async () => { try { await api("/api/watches/" + w.id, { method: "DELETE" }); } catch (e) { toast(e.message); } pollState(); });
-      return h("li", { class: "watch" + (w.alarm ? " alarm" : "") }, h("span", { class: "dot" + (w.alarm ? " bad" : " on") }),
-        h("span", { class: "watch-rule" }, w.rule, w.then.length ? h("span", { class: "watch-then" }, " → " + w.then.join(", ")) : null),
+      return h("li", { class: "watch" + (w.alarm ? " alarm" : ""), title: w.paused ? "Paused: its instrument is switched off, so nothing is read" : null },
+        h("span", { class: "dot" + (w.alarm ? " bad" : w.paused ? "" : " on") }),
+        h("span", { class: "watch-rule" }, w.rule, w.paused ? h("span", { class: "watch-then" }, " (paused: instrument off)")
+          : w.then.length ? h("span", { class: "watch-then" }, " → " + w.then.join(", ")) : null),
         h("span", { class: "watch-src" }, w.source === "agent" ? "Kelvin" : ""), remove);
     }) : [h("li", { class: "inst-empty" }, "Nothing is watched. Add a reading to be told when it leaves its range.")]));
     const sel = $("watch-key");

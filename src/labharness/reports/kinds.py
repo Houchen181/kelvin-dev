@@ -20,11 +20,9 @@ from .chart import Chart, Series, Table
 from .document import Document, Section
 from .model import RunPart
 
-FILE_NOTES = {"data.csv": "every point as a table", "data.jsonl": "every point, traces included",
-              "report.pdf": "this report", "report.pptx": "this report as slides",
-              "plan.yaml": "what was asked for", "meta.json": "status, points, duration, project and device",
-              "analysis.json": "the automatic fit and assessment",
-              "snapshot_start.json": "every instrument setting at the start", "snapshot_end.json": "and at the end"}
+# what the scan report points to for everything it leaves out, in this order
+FILE_NOTES = {"data.csv": "every point", "conditions.csv": "every instrument setting, at the start and the end",
+              "plan.yaml": "the plan as run", "analysis.json": "the fits in full"}
 
 
 def _read_json(path: Path) -> Any:
@@ -228,37 +226,37 @@ def _index(ds: Sequence[Digest], with_device: bool, limit: int = 300) -> Table:
 # ------------------------------------------------------------------ the scan report
 
 def scan_document(part: RunPart, d: Digest, files: Iterable[str], lab: str, simulated: bool) -> Document:
-    facts = [("Project", d.project_name or "General"), ("Device", d.device_name or "not recorded"),
-             ("Run", d.run_id), ("When", part.when), ("Duration", part.duration), ("Points", part.points),
-             ("Status", part.status if not part.reason else "%s: %s" % (part.status, part.reason)),
-             ("Started by", part.operator)]
+    """One page: what was measured and what came out, and the conditions that bear on it. The rest stays in the
+    run's folder, named at the end: every point, every instrument setting at the start and the end, the plan, the
+    fits in full."""
+    done, _, planned = part.points.partition(" of ")
+    bits = [d.project_name or "General", part.when + (" (%s)" % part.duration if part.duration else ""),
+            "%s points" % (done if done == planned else part.points)]
+    if part.status != "done":
+        bits.append(part.status + (": " + part.reason if part.reason else ""))
+    bits.append("started by " + part.operator)
     if d.queue:
-        facts.append(("Queue", "item %s%s" % (d.queue.get("position", "?"),
-                                            ", " + d.queue["note"] if d.queue.get("note") else "")))
-    result = Section("Result", "Kelvin's automatic assessment and fitted values, with one-standard-error uncertainties",
-                     paras=[part.assessment] if part.assessment else [],
-                     bullets=(["Next: " + part.next] if part.next else []) + ["Issue: " + i for i in part.issues],
-                     tables=list(part.results), empty="No automatic assessment for this run.")
-    plots = Section("Plots", "measured points; fitted curves dashed", charts=list(part.charts),
-                    empty="No plot: this run recorded %s points." % part.points)
-    method = Section("Method", "what was swept, set and measured",
-                     facts=[(k, v) for k, v in (("Swept", "; ".join(part.sweep)), ("Measured", ", ".join(part.measured)),
-                                                ("Set up", "; ".join(part.setup))) if v],
-                     empty="The plan swept nothing.")
-    conditions = Section("Conditions", "every instrument at the start (* = a drive away from safe)",
-                         tables=[Table(["Instrument", "At the start"], [list(c) for c in part.conditions])]
-                         if part.conditions else [],
-                         bullets=["Left changed: " + c for c in part.changes], empty="No instrument snapshot was kept.")
-    safety = Section("Approvals and alarms", "who approved what, and anything that tripped",
-                     facts=list(part.events), empty="No approvals, trips or alarms during this run.")
-    names = sorted(files)
-    appendix = Section("Appendix", "the plan as run, and the files in the run's folder",
-                       code=part.plan_text,
-                       bullets=["%s: %s" % (n, FILE_NOTES.get(n, "a trace reading as a table" if n.endswith(".csv") else ""))
-                                for n in names])
+        bits.append("queue item %s" % d.queue.get("position", "?"))
+    result = Section("Result", paras=[part.assessment] if part.assessment else [],
+                     bullets=["Issue: " + i for i in part.issues], charts=list(part.charts), tables=list(part.results))
+    used = {name for name, _ in part.found} | {k.split(".")[0] for k in part.measured}
+    facts = [(k, v) for k, v in (("Swept", "; ".join(part.sweep)), ("Set", "; ".join(part.setup)),
+                                ("Measured", ", ".join(part.measured))) if v]
+    facts += [(name, "as found: " + values) for name, values in part.found]
+    elsewhere = [a for a in part.away if a.split(".")[0] not in used]
+    if elsewhere:   # what else was on while it ran (a field, a temperature, a laser)
+        facts.append(("Also not at safe", "; ".join(elsewhere)))
+    if part.changes:
+        facts.append(("Left changed", "; ".join(part.changes)))
+    conditions = Section("Conditions", facts=facts)
+    events = Section("Approvals and alarms", facts=list(part.events))
+    files = set(files)
+    names = [n for n in FILE_NOTES if n in files] + sorted(n for n in files if n.endswith(".csv") and n not in FILE_NOTES)
+    note = ("In the run's folder: " + "; ".join(
+        "%s (%s)" % (n, FILE_NOTES.get(n, "a trace reading, every point")) for n in names) + ".") if names else ""
     return Document("scan", "%s on %s" % (part.plan, d.device_name) if d.device_name else part.plan,
-                    "%s  ·  %s" % (d.project_name or "General", part.when), _now(), lab, simulated, facts,
-                    [result, plots, method, conditions, safety, appendix])
+                    "  ·  ".join(bits), _now(), lab, simulated, [], [result, conditions, events], compact=True,
+                    note=note)
 
 
 # ------------------------------------------------------------------ the device report

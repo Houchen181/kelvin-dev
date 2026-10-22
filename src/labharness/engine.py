@@ -94,6 +94,8 @@ class RunEngine:
         for name in plan.requires:
             if name not in lab.instruments:
                 errors.append("unknown instrument %r" % name)
+            elif not lab.instruments[name].enabled:
+                errors.append("%s is switched off in the Lab panel; a person switches it on there to use it" % name)
 
         def settable(instr: str, param: str, where: str):
             try:
@@ -151,7 +153,7 @@ class RunEngine:
     def preflight(self, names: Optional[List[str]] = None, fresh: bool = False):
         """Health-check these instruments (all if none are named). One that passed within HEALTHY_FOR seconds is not
         asked again unless fresh (a person's or the agent's own health check always asks)."""
-        wanted = list(names) if names else list(self.lab.instruments)
+        wanted = list(names) if names else [n for n, i in self.lab.instruments.items() if i.enabled]
         now = time.monotonic()
         todo = wanted if fresh else [n for n in wanted if now - self._healthy.get(n, float("-inf")) > HEALTHY_FOR]
         results = self.lab.health_check(todo) if todo else []

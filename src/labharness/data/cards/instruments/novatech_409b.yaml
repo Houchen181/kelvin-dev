@@ -8,8 +8,8 @@ manual: "Model 409B Instruction Manual, Rev 2.05b (firmware 2.1 or later), seria
 manual_url: "https://www.novatechsales.com/docs/409b_man.pdf"
 notes:
   - "RS-232 (or the USB option's virtual COM port) at 19200 baud, 8N1. Each command answers OK or an error (?0-?S), which Kelvin checks. It ignores commands for about 500 ms after power-up."
-  - "Four sine outputs (0-3), up to 171 MHz, about 1 Vpp (+4 dBm) into 50 ohm at full scale; amplitude is 0-1023 of full scale, 0 is off. Kelvin sets the amplitude to 0 when it connects, so it knows the output is off."
-  - "The 409B has no read-back of single values in plain numbers, so Kelvin remembers what it last set."
+  - "Four sine outputs (0-3), up to 171 MHz, about 1 Vpp (+4 dBm) into 50 ohm at full scale; amplitude is 0-1023 of full scale, 0 is off. Kelvin leaves the outputs as it finds them when it connects."
+  - "The 409B has no read-back of single values in plain numbers, so Kelvin remembers what it last set. Until it sets the amplitude, the amplitude is unknown: Kelvin then asks before any value but 0."
 identify:
   query: "Q"
 connection:
@@ -22,8 +22,6 @@ connection:
   set_reply: "^OK"
 vars:
   ch: { default: "0", label: "Output (0-3)" }
-on_connect: ["V{ch} 0"]
-
 parameters:
   amplitude:
     label: Amplitude
