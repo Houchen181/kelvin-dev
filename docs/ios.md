@@ -15,6 +15,7 @@ How people use it is in [portal.md](portal.md#phone-and-remote-access). This pag
 | `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (paired computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Demo.swift` (the demo lab) and the screens. |
 | `ios/KelvinTests/` | App tests: pairing, the Keychain, falling back to the Tailscale address, a chat, notifications. |
 | `.github/workflows/ios.yml` | CI: KelvinKit's tests on Linux; when they pass, the app's build and tests on the iOS Simulator (macOS runner). |
+| `.github/workflows/ios-testflight.yml` | On a tag `ios-v*`: builds with the newest Xcode, signs with an App Store Connect API key and uploads to TestFlight. |
 
 The app needs iOS 16. It uses only Apple's frameworks (SwiftUI, Charts, AVFoundation for the QR scanner, QuickLook for reports).
 
@@ -49,13 +50,44 @@ KelvinKit alone, on any machine with Swift:
 swift test --package-path ios/KelvinKit
 ```
 
-## TestFlight and the App Store
+## TestFlight
 
-Needs an Apple Developer Program membership (99 USD a year) and a Mac with the current Xcode, or a CI job that signs:
+People install the app through TestFlight: you send a link, they install Apple's TestFlight app and tap it. Up to 10,000 people; each build works for 90 days. It needs an Apple Developer Program membership (99 USD a year). No Mac is needed: `.github/workflows/ios-testflight.yml` builds, signs and uploads on GitHub's Mac when a tag such as `ios-v0.1.0` is pushed.
 
-1. In App Store Connect, add the app with the bundle id `io.github.houchen181.kelvin` (or change `PRODUCT_BUNDLE_IDENTIFIER` to one of yours).
-2. Set `DEVELOPMENT_TEAM`, raise `CURRENT_PROJECT_VERSION` for each upload, then Product → Archive → Distribute App → TestFlight.
-3. For external testers, Apple's beta review asks why the app uses plain http: it connects to the user's own lab computer on the local network or inside Tailscale (which encrypts the traffic), and never to a public server.
+### Once: the account
+
+1. **Enroll** at [developer.apple.com/programs/enroll](https://developer.apple.com/programs/enroll/) as an individual, with an Apple ID that has two-factor authentication. Use your legal name, and pay the 99 USD. Apple usually confirms within 48 hours. The Apple Developer app on an iPhone enrolls fastest.
+2. **Team ID:** [developer.apple.com/account](https://developer.apple.com/account) → Membership details.
+3. **Register the app id:** Certificates, Identifiers & Profiles → Identifiers → + → App IDs → App, with the explicit bundle id `io.github.houchen181.kelvin` and the description Kelvin. It needs no capabilities.
+4. **The app in App Store Connect:** [appstoreconnect.apple.com](https://appstoreconnect.apple.com) → Apps → + → New App. Choose iOS, a name, English, the bundle id above, the SKU `kelvin-ios` and full access. The name must be unique on the App Store, and "Kelvin" is probably taken, so try something like "Kelvin Lab". The app still shows as Kelvin on the home screen.
+5. **The API key for CI:** App Store Connect → Users and Access → Integrations → App Store Connect API → Team Keys → +. Name it Kelvin CI with **Admin** access, so the CI can make the distribution certificate itself. Download the `.p8` file; Apple offers it only once. Note its Key ID and the Issuer ID shown above the list.
+6. **Give them to GitHub yourself.** Never paste them into a chat. In a terminal, from the repository folder, run each command; it asks for the value without showing it:
+
+   ```bash
+   gh secret set APPLE_TEAM_ID
+   ```
+
+   ```bash
+   gh secret set ASC_KEY_ID
+   ```
+
+   ```bash
+   gh secret set ASC_ISSUER_ID
+   ```
+
+   ```bash
+   gh secret set ASC_KEY_P8 < "C:/path/to/AuthKey_XXXXXXXXXX.p8"
+   ```
+
+   Then keep the `.p8` file somewhere safe, or delete it: a new key can be made at any time.
+
+### Each release
+
+1. Push a tag `ios-v<version>` on the commit to ship. The build number is the workflow's run number, so it always goes up.
+2. App Store Connect processes the build for 10 to 30 minutes, then it appears under TestFlight.
+3. **You and your team** (App Store Connect users, up to 100): add yourselves as internal testers. This needs no review.
+4. **Everyone else:** create an external group and switch on its public link. Under Test Information, fill in a short description, a feedback email and, for the reviewer, "No lab computer needed: tap Try a demo lab". The first build of each version goes through Apple's beta review, which usually takes about a day. Then send people the link.
+5. If the reviewer asks why the app uses plain http: it connects only to the user's own lab computer, on the local network or inside Tailscale (which encrypts the traffic), never to a public server.
 
 ## Security notes
 

@@ -32,7 +32,11 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - run: xcodebuild -version
+      - name: Use the newest Xcode (the one TestFlight uploads are built with)
+        run: |
+          ls -d /Applications/Xcode*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -iv beta | sort -V | tail -1)"
+          xcodebuild -version
       - run: brew install xcodegen
       - run: xcodegen generate --spec ios/project.yml
       - name: Pick an iPhone simulator
