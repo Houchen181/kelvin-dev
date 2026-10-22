@@ -4,13 +4,15 @@ A native iPhone and iPad app that is a remote for Kelvin on a lab computer: the 
 
 How people use it is in [portal.md](portal.md#phone-and-remote-access). This page is for building it.
 
+**Try a demo lab** on the welcome screen adds a made-up lab that answers inside the app: a run in progress, a request, an alarm, past runs and a chat. It is for trying the app before pairing, and for App Review, which has no Kelvin computer. CI screenshots it on every change (the `ios-screenshots` artifact of the iOS app workflow).
+
 ## What's where
 
 | Path | What |
 |---|---|
 | `ios/project.yml` | The Xcode project, as an [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. `Kelvin.xcodeproj` and `Support/Info.plist` are generated from it and not committed. |
 | `ios/KelvinKit/` | A Swift package with no UI and only Foundation: pairing links, the phone API client, the models, the chat stream and transcript, plot data. Its tests run on Linux too. |
-| `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (paired computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications) and the screens. |
+| `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (paired computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Demo.swift` (the demo lab) and the screens. |
 | `ios/KelvinTests/` | App tests: pairing, the Keychain, falling back to the Tailscale address, a chat, notifications. |
 | `.github/workflows/ios.yml` | CI: KelvinKit's tests on Linux; when they pass, the app's build and tests on the iOS Simulator (macOS runner). |
 

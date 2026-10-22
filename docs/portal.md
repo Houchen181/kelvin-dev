@@ -111,7 +111,7 @@ The phone then opens Kelvin's phone page: alarms with **Got it**, requests with 
 - **Runs:** recent runs with their plots, and their report and data to open on the phone.
 - **Computers:** switch between computers, pair another, unpair.
 
-The app tells you about new requests and alarms while it is open. For alerts while it is closed, add an ntfy topic under Notifications. Building the app: [ios.md](ios.md).
+Without a lab computer at hand, **Try a demo lab** shows a made-up one inside the app. The app tells you about new requests and alarms while it is open. For alerts while it is closed, add an ntfy topic under Notifications. Building the app: [ios.md](ios.md).
 
 Settings, instruments, the lab config, the approval mode and pairing work only on the Kelvin computer. Remove a phone in Settings, or with **Forget this phone** on the phone itself.
 
