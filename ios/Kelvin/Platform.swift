@@ -48,25 +48,35 @@ struct URLSessionTransport: Transport {
     }
 }
 
-/// Each computer's token, in the Keychain: on this phone only, readable once it has been unlocked after a restart.
-enum Keychain {
-    static let service = "Kelvin pairing"
+/// Where each computer's token is kept.
+protocol TokenStore {
+    func save(_ token: String, for id: UUID)
+    func token(for id: UUID) -> String?
+    func delete(_ id: UUID)
+}
 
-    private static func query(_ id: UUID) -> [String: Any] {
+/// Tokens in the Keychain: on this phone only, readable once it has been unlocked after a restart.
+struct Keychain: TokenStore {
+    var service = "Kelvin pairing"
+
+    private func query(_ id: UUID) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: service,
          kSecAttrAccount as String: id.uuidString]
     }
 
-    static func save(_ token: String, for id: UUID) {
+    func save(_ token: String, for id: UUID) { store(token, for: id) }
+
+    @discardableResult
+    func store(_ token: String, for id: UUID) -> OSStatus {
         SecItemDelete(query(id) as CFDictionary)
         var add = query(id)
         add[kSecValueData as String] = Data(token.utf8)
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(add as CFDictionary, nil)
+        return SecItemAdd(add as CFDictionary, nil)
     }
 
-    static func token(for id: UUID) -> String? {
+    func token(for id: UUID) -> String? {
         var q = query(id)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -75,7 +85,7 @@ enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
-    static func delete(_ id: UUID) {
+    func delete(_ id: UUID) {
         SecItemDelete(query(id) as CFDictionary)
     }
 }

@@ -1,4 +1,5 @@
 import KelvinKit
+import Security
 import XCTest
 @testable import Kelvin
 
@@ -35,11 +36,19 @@ final class Script: Transport, @unchecked Sendable {
     }
 }
 
+final class Tokens: TokenStore {
+    var kept: [UUID: String] = [:]
+    func save(_ token: String, for id: UUID) { kept[id] = token }
+    func token(for id: UUID) -> String? { kept[id] }
+    func delete(_ id: UUID) { kept[id] = nil }
+}
+
 @MainActor
 final class AppTests: XCTestCase {
     let lan = URL(string: "http://192.168.1.50:8771")!
     let tail = URL(string: "http://100.101.7.9:8771")!
     lazy var defaults = UserDefaults(suiteName: "kelvin-tests-\(UUID().uuidString)")!
+    let tokens = Tokens()
 
     let me = """
     {"role": "control", "name": "Ana's phone", "lab": "Cryostat lab", "computer": "LAB-PC", "version": "0.3.15", "api": 1,
@@ -49,29 +58,26 @@ final class AppTests: XCTestCase {
     func paired(_ script: Script) async throws -> (AppModel, Computer) {
         script.on("POST /api/pair", "{\"token\": \"secret-token\", \"name\": \"Ana's phone\", \"role\": \"control\"}")
         script.on("GET /api/me", me)
-        let app = AppModel(transport: script, defaults: defaults)
-        let c = try await app.pair(at: lan, code: "123456")
-        let id = c.id
-        addTeardownBlock { Keychain.delete(id) }
-        return (app, c)
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        return (app, try await app.pair(at: lan, code: "123456"))
     }
 
-    func testPairingKeepsTheTokenInTheKeychainOnly() async throws {
+    func testPairingKeepsTheTokenOutOfThePlainSettings() async throws {
         let (app, c) = try await paired(Script())
-        XCTAssertEqual(Keychain.token(for: c.id), "secret-token")
+        XCTAssertEqual(tokens.token(for: c.id), "secret-token")
         XCTAssertEqual(c.lab, "Cryostat lab")
         XCTAssertEqual(c.addresses, [lan, tail])
         XCTAssertEqual(app.current?.id, c.id)
         let kept = String(decoding: defaults.data(forKey: "kelvin.computers") ?? Data(), as: UTF8.self)
         XCTAssertTrue(kept.contains("LAB-PC"))
         XCTAssertFalse(kept.contains("secret-token"))                          // never in the plain settings
-        XCTAssertEqual(AppModel(transport: Script(), defaults: defaults).current?.id, c.id)   // kept across launches
+        XCTAssertEqual(AppModel(transport: Script(), defaults: defaults, tokens: tokens).current?.id, c.id)   // kept
     }
 
     func testAWrongCodeSaysSo() async {
         let script = Script()
         script.on("POST /api/pair", 403, "{\"error\": \"That code is wrong or has expired.\"}")
-        let app = AppModel(transport: script, defaults: defaults)
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
         do {
             try await app.pair(at: lan, code: "000000")
             XCTFail("paired with a wrong code")
@@ -126,6 +132,19 @@ final class AppTests: XCTestCase {
         XCTAssertFalse(chat.transcript.answering)
         XCTAssertEqual(chat.draft, "")
         XCTAssertTrue(script.asked.contains("192.168.1.50 POST /api/chats"))
+    }
+
+    func testTheKeychain() throws {
+        let keychain = Keychain(service: "Kelvin tests")
+        let id = UUID()
+        let status = keychain.store("secret-token", for: id)
+        if status == errSecMissingEntitlement { throw XCTSkip("no Keychain in an unsigned simulator build") }
+        XCTAssertEqual(status, errSecSuccess)
+        XCTAssertEqual(keychain.token(for: id), "secret-token")
+        keychain.save("newer", for: id)
+        XCTAssertEqual(keychain.token(for: id), "newer")
+        keychain.delete(id)
+        XCTAssertNil(keychain.token(for: id))
     }
 
     func testNotificationsOnlyForWhatIsNew() throws {

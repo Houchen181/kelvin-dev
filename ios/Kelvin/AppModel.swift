@@ -8,12 +8,15 @@ final class AppModel: ObservableObject {
     @Published var pairing = false
 
     let transport: Transport
+    let tokens: TokenStore
     private let defaults: UserDefaults
     private let key = "kelvin.computers"
     private var sessions: [UUID: LabSession] = [:]
 
-    init(transport: Transport = URLSessionTransport.shared, defaults: UserDefaults = .standard) {
+    init(transport: Transport = URLSessionTransport.shared, defaults: UserDefaults = .standard,
+         tokens: TokenStore = Keychain()) {
         self.transport = transport
+        self.tokens = tokens
         self.defaults = defaults
         list = ComputerList.decode(defaults.data(forKey: key))
     }
@@ -37,12 +40,12 @@ final class AppModel: ObservableObject {
     func pair(at base: URL, code: String) async throws -> Computer {
         let result = try await KelvinClient(base: base, token: nil, transport: transport).pair(code: code)
         var c = Computer(lab: base.host ?? "Kelvin", phoneName: result.name, role: result.role, addresses: [base])
-        Keychain.save(result.token, for: c.id)
+        tokens.save(result.token, for: c.id)
         if let me = try? await KelvinClient(base: base, token: result.token, transport: transport).me() {
             c.update(with: me, used: base)
         }
         if let old = list.add(c) {
-            Keychain.delete(old)
+            tokens.delete(old)
             sessions[old]?.pause()
             sessions[old] = nil
         }
@@ -60,10 +63,10 @@ final class AppModel: ObservableObject {
 
     /// Forget a computer on this phone, and unpair the phone on the computer too if it answers.
     func remove(_ c: Computer) async {
-        if let token = Keychain.token(for: c.id) {
+        if let token = tokens.token(for: c.id) {
             _ = try? await reach(c.addresses, token: token, transport: transport) { try await $0.forget() }
         }
-        Keychain.delete(c.id)
+        tokens.delete(c.id)
         sessions[c.id]?.pause()
         sessions[c.id] = nil
         list.remove(c.id)
@@ -86,6 +89,7 @@ final class LabSession: ObservableObject {
 
     private weak var app: AppModel?
     private let transport: Transport
+    private let tokens: TokenStore
     private var client: KelvinClient?
     private var loop: Task<Void, Never>?
     static let every: UInt64 = 3_000_000_000
@@ -94,6 +98,7 @@ final class LabSession: ObservableObject {
         self.computer = computer
         self.app = app
         transport = app.transport
+        tokens = app.tokens
     }
 
     var role: Role { computer.access }
@@ -149,7 +154,7 @@ final class LabSession: ObservableObject {
     /// A client at an address that answers: the one that worked last, else each address in turn.
     func ready() async throws -> KelvinClient {
         if let client { return client }
-        guard let token = Keychain.token(for: computer.id) else {
+        guard let token = tokens.token(for: computer.id) else {
             throw KelvinError(.unpaired, "This phone is not paired with \(computer.lab) any more. Pair it again.")
         }
         let (c, me) = try await reach(computer.addresses, token: token, transport: transport) { try await $0.me() }

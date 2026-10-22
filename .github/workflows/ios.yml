@@ -45,11 +45,12 @@ jobs:
           print(next(d["udid"] for k in runtimes for d in devices[k] if d["name"].startswith("iPhone")))')
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
       - name: Build and test
+        # Signed to run locally (no team needed on the simulator), so the app may use the Keychain.
         run: |
           set -o pipefail
           xcodebuild test -project ios/Kelvin.xcodeproj -scheme Kelvin \
             -destination "id=${{ steps.sim.outputs.udid }}" \
-            CODE_SIGNING_ALLOWED=NO 2>&1 | tee build.log | grep -E "error:|warning: .*(Kelvin|KelvinKit)/|Test Case|Executed|BUILD|TEST" || true
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee build.log | grep -E "error:|warning: .*(Kelvin|KelvinKit)/|Test Case|Executed|BUILD|TEST" || true
           grep -q "TEST SUCCEEDED" build.log
       - if: failure()
         uses: actions/upload-artifact@v4
