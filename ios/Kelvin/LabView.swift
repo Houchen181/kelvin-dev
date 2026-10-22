@@ -182,7 +182,7 @@ struct RunSection: View {
                 ProgressView(value: run.fraction)
                 Text(Format.progress(run)).font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
                 Button(role: .destructive) { confirmStop = true } label: {
-                    Label("Stop", systemImage: "stop.fill")
+                    Label("Stop", systemImage: "stop.fill").foregroundStyle(.red)
                 }
                 .buttonStyle(.bordered)
                 .tint(.red)

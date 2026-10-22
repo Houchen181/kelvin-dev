@@ -173,7 +173,11 @@ struct RouteLabel: View {
     let url: URL?
 
     var body: some View {
-        if let url {
+        if url == DemoTransport.address {
+            Label("Inside this app", systemImage: "iphone")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let url {
             let route = Route(url)
             Label("\(route.rawValue) · \(url.host ?? "")",
                   systemImage: route.encrypted ? "lock.fill" : "wifi")
