@@ -432,6 +432,8 @@
               <label class="check"><input id="phone-on" type="checkbox"> On</label></div>
             <span class="hint">Paired phones can see the lab, runs and alarms, stop a run and decline requests; phones you allow to control can also chat and approve. Settings, instruments and the lab config stay on this computer.</span>
             <span id="phone-status" class="hint phone-status"></span>
+            <div id="firewall-row" class="field-row" hidden><span id="firewall-status" class="hint"></span>
+              <button id="firewall-allow" class="btn small" type="button">Let phones through</button></div>
             <div class="pair-row">
               <input id="pair-name" type="text" maxlength="40" placeholder="Phone name" aria-label="Phone name">
               <select id="pair-role" aria-label="What the phone may do">
@@ -443,6 +445,7 @@
             <div id="pair-box" class="pair-box" hidden></div>
             <ul id="device-list" class="memory-notes"></ul>
             <span class="hint">Away from the lab, install <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on this computer and the phone; Kelvin then shows its Tailscale address too, and the connection is encrypted. Plain Wi-Fi traffic is not, so on a shared network prefer Tailscale.</span>
+            <span class="hint"><b>Phone can't connect?</b> It must be on the same Wi-Fi as this computer, and the computer's firewall must let it in. Many university, housing and hotel Wi-Fi networks keep devices apart; on those, use Tailscale on both.</span>
           </div>
         </section>
         <section class="set-page" data-page="updates" hidden>

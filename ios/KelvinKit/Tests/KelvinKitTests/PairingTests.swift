@@ -13,6 +13,15 @@ final class PairingTests: XCTestCase {
         XCTAssertNil(Pairing.parse("http://192.168.1.50:8771/pair#12345")?.code)       // five digits is no code
     }
 
+    func testTheCodeCarriesKelvinsOtherAddresses() {
+        let link = Pairing.parse("http://100.101.7.9:8771/pair#042137&also=192.168.1.20:8771,10.0.0.5:9000")
+        XCTAssertEqual(link?.code, "042137")
+        XCTAssertEqual(link?.addresses.map(\.absoluteString),
+                       ["http://100.101.7.9:8771", "http://192.168.1.20:8771", "http://10.0.0.5:9000"])
+        XCTAssertEqual(Pairing.parse("http://192.168.1.20:8771/pair#042137")?.addresses.count, 1)
+        XCTAssertEqual(Pairing.parse("http://192.168.1.20:8771/pair#042137&also=")?.code, "042137")
+    }
+
     func testNotAKelvinCode() {
         XCTAssertNil(Pairing.parse("WIFI:S:lab;T:WPA;P:secret;;"))
         XCTAssertNil(Pairing.parse("https://example.com/some/page"))
@@ -40,7 +49,10 @@ final class PairingTests: XCTestCase {
 
     func testRoutes() {
         func route(_ s: String) -> Route { Route(URL(string: s)!) }
-        XCTAssertEqual(route("http://100.101.7.9:8771"), .tailscale)
+        XCTAssertEqual(route("http://100.101.7.9:8771"), .lab)          // 100.64/10 alone: maybe a carrier's Wi-Fi
+        let tail = URL(string: "http://100.101.7.9:8771")!
+        XCTAssertEqual(Route(tail, kinds: ["http://100.101.7.9:8771": "tailscale"]), .tailscale)   // Kelvin says so
+        XCTAssertEqual(Route(URL(string: "http://100.103.144.14:8771")!, kinds: ["http://100.103.144.14:8771": "network"]), .lab)
         XCTAssertEqual(route("http://lab-pc.tail1234.ts.net:8771"), .tailscale)
         XCTAssertEqual(route("http://192.168.1.50:8771"), .lab)
         XCTAssertEqual(route("http://10.0.4.2:8771"), .lab)

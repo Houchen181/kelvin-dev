@@ -10,6 +10,7 @@ public struct Computer: Codable, Equatable, Identifiable, Sendable {
     public var addresses: [URL]         // where to try, the one that last worked first
     public var paired: Date
     public var version: String?
+    public var kinds: [String: String]?   // what Kelvin says each address is (see Route)
 
     public init(id: UUID = UUID(), lab: String, host: String? = nil, phoneName: String, role: String,
                 addresses: [URL], paired: Date = Date(), version: String? = nil) {
@@ -24,6 +25,8 @@ public struct Computer: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var access: Role { Role(role) }
+
+    public func route(_ url: URL) -> Route { Route(url, kinds: kinds) }
 
     /// "Cryostat lab" or, when two computers share a lab name, "Cryostat lab (LAB-PC-2)".
     public func title(among all: [Computer]) -> String {
@@ -40,6 +43,7 @@ public struct Computer: Codable, Equatable, Identifiable, Sendable {
         version = me.version ?? version
         let told = me.addresses.compactMap { URL(string: $0) }
         addresses = Computer.ordered([used] + told + addresses)
+        if !me.kinds.isEmpty { kinds = (kinds ?? [:]).merging(me.kinds) { _, new in new } }
     }
 
     /// Remember which address worked, so the next connection tries it first.

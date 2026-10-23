@@ -102,6 +102,8 @@ Check on a run from the coffee room, or answer an approval from home. Phone acce
    - **Control:** also chat with Kelvin and approve requests.
 3. On the phone, scan the QR code, or open the address and type the 6-digit code. The code works once, for 10 minutes, and repeated wrong codes lock pairing for a while.
 
+**If the phone can't reach Kelvin:** it must be on the same Wi-Fi, and the computer's firewall must let it in. On Windows, press **Let phones through** in Settings → Phone: Windows asks you to allow it. Many university, housing and hotel Wi-Fi networks keep devices apart; on those, install Tailscale on both and pair again. The QR code holds every address Kelvin has, and the iPhone app tries each.
+
 The phone then opens Kelvin's phone page: alarms with **Got it**, requests with **Approve** (control) or **Decline**, the run in progress with its progress and **Stop**, the instruments, and recent notices. A control phone can also open the full portal.
 
 **Kelvin for iPhone** does the same as a native app, and more. Pair it by scanning the same QR code, or by typing the address and code. It can be paired with several Kelvin computers, keeps each one's token in the iPhone's Keychain, and tries the address that worked last first and then the others, so it moves between the lab network and Tailscale by itself. Its tabs:

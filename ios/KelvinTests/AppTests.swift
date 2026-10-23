@@ -74,6 +74,19 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(AppModel(transport: Script(), defaults: defaults, tokens: tokens).current?.id, c.id)   // kept
     }
 
+    func testPairingTriesEveryAddressInTheCode() async throws {
+        let script = Script()
+        script.on("POST /api/pair", "{\"token\": \"secret-token\", \"name\": \"Ana's phone\", \"role\": \"control\"}")
+        script.on("GET /api/me", me)
+        script.unreachable = ["192.168.1.50"]                                 // not on the lab's Wi-Fi
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        let link = try XCTUnwrap(Pairing.parse("http://192.168.1.50:8771/pair#123456&also=100.101.7.9:8771"))
+        let c = try await app.pair(at: link.addresses, code: try XCTUnwrap(link.code))
+        XCTAssertEqual(c.addresses.first, tail)
+        XCTAssertEqual(tokens.token(for: c.id), "secret-token")
+        XCTAssertEqual(script.asked.filter { $0.hasSuffix("POST /api/pair") }.count, 2)   // reached Kelvin only once
+    }
+
     func testAWrongCodeSaysSo() async {
         let script = Script()
         script.on("POST /api/pair", 403, "{\"error\": \"That code is wrong or has expired.\"}")

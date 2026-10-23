@@ -120,9 +120,13 @@ final class ComputerTests: XCTestCase {
         var c = Computer(lab: "Virtual Lab", phoneName: "Phone", role: "watch", addresses: [lan])
         let me = try decode(Me.self, """
         {"role": "control", "name": "Ana's phone", "lab": "Cryostat lab", "computer": "LAB-PC", "version": "0.3.15",
-         "api": 1, "addresses": ["http://100.101.7.9:8771", "http://192.168.1.50:8771"]}
+         "api": 1, "addresses": ["http://100.101.7.9:8771", "http://192.168.1.50:8771"],
+         "routes": [{"url": "http://100.101.7.9:8771", "kind": "tailscale"}, {"url": "http://192.168.1.50:8771", "kind": "network"}]}
         """)
+        XCTAssertEqual(c.route(tail), .lab)                                     // before Kelvin said what it is
         c.update(with: me, used: lan)
+        XCTAssertEqual(c.route(tail), .tailscale)
+        XCTAssertTrue(c.route(tail).encrypted)
         XCTAssertEqual(c.addresses, [lan, tail])
         XCTAssertEqual([c.lab, c.host, c.phoneName, c.role, c.version], ["Cryostat lab", "LAB-PC", "Ana's phone", "control", "0.3.15"])
         c.worked(at: tail)

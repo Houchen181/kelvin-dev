@@ -26,7 +26,8 @@ Voice input uses on-device recognition only (`requiresOnDeviceRecognition`). Whe
 The phone listener (`src/labharness/web/remote.py`) and the routes a paired device may call:
 
 - `POST /api/pair {code}` → `{token, name, role}`. Every later request carries `X-Kelvin-Token`.
-- `GET /api/me` → role, phone name, lab, and for the app: `computer`, `version`, `api` (1) and `addresses` (where the phone listener is: the lab network and Tailscale). The app keeps them and tries the address that worked last first.
+- `GET /api/me` → role, phone name, lab, and for the app: `computer`, `version`, `api` (1), `addresses` (where the phone listener is: the lab network and Tailscale) and `routes` (each address with its kind: `tailscale`, `network` or `public`). The app keeps them, tries the address that worked last first, and calls a connection encrypted only when Kelvin says the address is Tailscale's: some Wi-Fi networks (Xfinity's) hand out addresses in Tailscale's range 100.64.0.0/10 too.
+- The pairing QR code holds `http://<address>:<port>/pair#<code>&also=<host:port>,…`: the first address, then the others that fit. The app tries each in turn; only a computer that answers sees the code.
 - Watch and control: `GET /api/state`, `/api/live?since=n`, `/api/runs`, `/api/runs/{id}`, `/api/runs/{id}/files/{name}`; `POST /api/approvals/{id}` (control only for approving), `/api/alarms/{id}/ack`, `/api/runs/stop`, `/api/stop`, `/api/me/forget`.
 - Control: `GET /api/bootstrap` (models), `/api/chats`, `/api/chats/{id}`; `POST /api/chats {model, incognito}`, `/api/chats/{id}/turn {text, model}` (the answer streams back as one JSON event per line).
 

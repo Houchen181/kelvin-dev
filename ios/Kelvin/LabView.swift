@@ -19,7 +19,7 @@ struct LabView: View {
                         HStack(spacing: 10) {
                             if s.simulated { Text("Simulated").font(.caption.bold()).foregroundStyle(.orange) }
                             if s.observeOnly { Text("Observe only").font(.caption.bold()).foregroundStyle(.secondary) }
-                            RouteLabel(url: session.connected)
+                            RouteLabel(url: session.connected, kinds: session.computer.kinds)
                         }
                     }
                 }

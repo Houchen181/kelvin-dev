@@ -15,6 +15,7 @@ struct PairView: View {
     @State var working = false
     @State var failure: String?
     @State var lastScan: String?
+    @State var retry: PairingLink?        // a scanned code whose computer didn't answer
 
     var body: some View {
         NavigationStack {
@@ -58,7 +59,12 @@ struct PairView: View {
                     Section { HStack(spacing: 10) { ProgressView(); Text("Pairing…") } }
                 }
                 if let failure {
-                    Section { Text(failure).foregroundStyle(.red) }
+                    Section {
+                        Text(failure).foregroundStyle(.red)
+                        if let link = retry, let code = link.code, !working {
+                            Button("Try again") { Task { await pair(addresses: link.addresses, code: code) } }
+                        }
+                    }
                 }
             }
             .navigationTitle("Pair with Kelvin")
@@ -69,7 +75,8 @@ struct PairView: View {
         }
     }
 
-    /// A QR code came into view. The same code is tried once: a wrong one must not count against pairing again.
+    /// A QR code came into view. The same code is tried once by itself (a wrong one must not count against pairing
+    /// again); when the computer didn't answer, Try again tries it once more.
     @MainActor
     func found(_ text: String) {
         guard !working, text != lastScan else { return }
@@ -84,7 +91,7 @@ struct PairView: View {
             failure = "That code holds Kelvin's address but no pairing code: type the 6 digits."
             return
         }
-        Task { await pair(base: link.base, code: code) }
+        Task { await pair(addresses: link.addresses, code: code, link: link) }
     }
 
     @MainActor
@@ -93,21 +100,30 @@ struct PairView: View {
             failure = "That is not an address. Type it as Kelvin shows it, e.g. 192.168.1.20:8771."
             return
         }
-        await pair(base: base, code: code)
+        await pair(addresses: [base], code: code)
     }
 
     @MainActor
-    func pair(base: URL, code: String) async {
+    func pair(addresses: [URL], code: String, link: PairingLink? = nil) async {
         working = true
         failure = nil
         defer { working = false }
         do {
-            try await app.pair(at: base, code: code)
+            try await app.pair(at: addresses, code: code)
             dismiss()
+        } catch let e as KelvinError where e.kind == .unreachable {
+            if let link { retry = link }
+            failure = e.message + " " + PairView.unreachable
         } catch {
+            retry = nil
             failure = error.localizedDescription
         }
     }
+
+    static let unreachable = "Is this phone on the same Wi-Fi as the computer, with phone access on there? On Windows, "
+        + "press Let phones through in Kelvin's Settings → Phone. If iOS asked to find devices on your local network, "
+        + "allow it (Settings → Kelvin → Local Network). Many university, housing and hotel Wi-Fi networks keep devices "
+        + "apart: then install Tailscale on both and pair with the code Kelvin shows."
 }
 
 /// The camera, reporting each QR code it sees.

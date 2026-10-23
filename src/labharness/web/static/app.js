@@ -2214,6 +2214,10 @@
       : v.listening ? "Phones can reach Kelvin at " + (where.join(", ") || "this computer's address, port " + v.port) + "."
       : v.on ? "Starting…" : "Off: only this computer can use Kelvin.";
     $("pair-start").disabled = !v.listening;
+    $("firewall-row").hidden = !v.firewall;
+    $("firewall-status").textContent = v.firewall === "allowed" ? "Windows Firewall lets phones reach Kelvin."
+      : "Windows Firewall may stop phones from reaching Kelvin.";
+    $("firewall-allow").hidden = v.firewall === "allowed";
     $("device-list").replaceChildren(...v.devices.map((d) => h("li", { class: "memory-note" },
       h("span", { class: "memory-kind" }, d.role),
       h("div", { class: "memory-body" }, h("span", {}, d.name),
@@ -2227,6 +2231,13 @@
     $("phone-status").textContent = $("phone-on").checked ? "Starting…" : "Stopping…";
     try { renderPhone(await api("/api/phone", { body: { on: $("phone-on").checked, port: PHONE.view ? PHONE.view.port : undefined } })); }
     catch (e) { $("phone-status").textContent = e.message; }
+  }
+  async function allowFirewall() {
+    $("firewall-allow").disabled = true;
+    $("firewall-status").textContent = "Windows asks for permission now…";
+    try { renderPhone(await api("/api/phone/firewall", { body: {} })); toast("Phones can reach Kelvin through Windows Firewall now."); }
+    catch (e) { $("firewall-status").textContent = e.message; }
+    $("firewall-allow").disabled = false;
   }
   async function startPairing() {
     clearInterval(PHONE.pairTimer);
@@ -3824,6 +3835,7 @@
     $("data-use").addEventListener("click", useDataFolder);
     $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));
     $("pair-start").addEventListener("click", startPairing);
+    $("firewall-allow").addEventListener("click", allowFirewall);
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }
       if (!e.target.closest(".msg-actions")) for (const m of document.querySelectorAll(".review-menu")) m.hidden = true;

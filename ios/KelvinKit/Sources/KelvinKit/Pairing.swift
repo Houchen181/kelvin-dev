@@ -1,22 +1,28 @@
 import Foundation
 
-/// Where a Kelvin computer is, and (from its QR code) the one-time pairing code.
+/// Where a Kelvin computer is, and (from its QR code) the one-time pairing code and its other addresses.
 public struct PairingLink: Equatable, Sendable {
     public var base: URL
     public var code: String?
+    public var others: [URL]
 
-    public init(base: URL, code: String?) {
+    public init(base: URL, code: String?, others: [URL] = []) {
         self.base = base
         self.code = code
+        self.others = others
     }
+
+    /// Every address to try, the first one first.
+    public var addresses: [URL] { [base] + others.filter { $0 != base } }
 }
 
 public enum Pairing {
     /// The port of Kelvin's phone listener unless its Settings say otherwise.
     public static let defaultPort = 8771
 
-    /// Read a pairing QR code. Kelvin's holds http://<address>:<port>/pair#<6-digit code>; a link to the phone page
-    /// (/m) or to the bare address works too, without a code.
+    /// Read a pairing QR code. Kelvin's holds http://<address>:<port>/pair#<6-digit code>, from Kelvin 0.3.16 with
+    /// its other addresses after it (#<code>&also=<host:port>,<host:port>); a link to the phone page (/m) or to the
+    /// bare address works too, without a code.
     public static func parse(_ text: String) -> PairingLink? {
         guard let c = URLComponents(string: text.trimmingCharacters(in: .whitespacesAndNewlines)),
               let scheme = c.scheme?.lowercased(), scheme == "http" || scheme == "https",
@@ -27,7 +33,11 @@ public enum Pairing {
         b.percentEncodedHost = c.percentEncodedHost
         b.port = c.port ?? (scheme == "http" ? defaultPort : nil)
         guard let base = b.url else { return nil }
-        return PairingLink(base: base, code: c.fragment.map(digits).flatMap { isCode($0) ? $0 : nil })
+        let parts = (c.fragment ?? "").split(separator: "&").map(String.init)
+        let code = parts.first.map(digits).flatMap { isCode($0) ? $0 : nil }
+        let also = parts.dropFirst().first { $0.hasPrefix("also=") }.map { String($0.dropFirst(5)) } ?? ""
+        let others = also.split(separator: ",").compactMap { address(scheme + "://" + $0) }
+        return PairingLink(base: base, code: code, others: others)
     }
 
     /// An address a person typed: "192.168.1.20", "192.168.1.20:8771", "lab-pc.tail1234.ts.net", or a whole link.
@@ -55,7 +65,15 @@ public enum Route: String, Equatable, Sendable {
     case lab = "Lab network"
     case other = "Internet"
 
-    public init(_ url: URL) {
+    /// `kinds`: what Kelvin said each address is (url -> tailscale, network or public), which beats guessing:
+    /// 100.64.0.0/10 is Tailscale's, but some Wi-Fi networks (Xfinity's) hand out those addresses too.
+    public init(_ url: URL, kinds: [String: String]? = nil) {
+        switch kinds?[url.absoluteString] {
+        case "tailscale"?: self = .tailscale; return
+        case "network"?: self = .lab; return
+        case "public"?: self = .other; return
+        default: break
+        }
         let host = (url.host ?? "").lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
         if host.hasSuffix(".ts.net") {
             self = .tailscale
@@ -63,7 +81,7 @@ public enum Route: String, Equatable, Sendable {
             self = .lab
         } else if let ip = ipv4(host) {
             if ip.0 == 100 && (64...127).contains(ip.1) {
-                self = .tailscale                                   // 100.64.0.0/10
+                self = .lab              // 100.64.0.0/10 without Kelvin's word: maybe Tailscale, so claim no encryption
             } else if ip.0 == 10 || ip.0 == 172 && (16...31).contains(ip.1) || ip.0 == 192 && ip.1 == 168 {
                 self = .lab
             } else {

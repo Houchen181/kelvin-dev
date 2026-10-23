@@ -29,8 +29,9 @@ public struct Me: Decodable, Equatable, Sendable {
     public var version: String?
     public var api: Int?
     public var addresses: [String]
+    public var kinds: [String: String]       // url -> tailscale, network or public (Kelvin 0.3.16 and later)
 
-    enum CodingKeys: String, CodingKey { case role, name, lab, computer, version, api, addresses }
+    enum CodingKeys: String, CodingKey { case role, name, lab, computer, version, api, addresses, routes }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -41,6 +42,9 @@ public struct Me: Decodable, Equatable, Sendable {
         version = c.maybe(.version)
         api = c.maybe(.api)
         addresses = c.value(.addresses, or: [])
+        let routes: [JSONValue] = c.value(.routes, or: [])
+        kinds = Dictionary(routes.compactMap { r in r["url"]?.string.flatMap { u in r["kind"]?.string.map { (u, $0) } } },
+                           uniquingKeysWith: { a, _ in a })
     }
 }
 

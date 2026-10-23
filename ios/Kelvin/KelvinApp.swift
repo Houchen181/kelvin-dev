@@ -171,6 +171,7 @@ enum Format {
 /// Where the connection goes, as a small label: green on Tailscale, orange on a plain network.
 struct RouteLabel: View {
     let url: URL?
+    var kinds: [String: String]? = nil
 
     var body: some View {
         if url == DemoTransport.address {
@@ -178,7 +179,7 @@ struct RouteLabel: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         } else if let url {
-            let route = Route(url)
+            let route = Route(url, kinds: kinds)
             Label("\(route.rawValue) · \(url.host ?? "")",
                   systemImage: route.encrypted ? "lock.fill" : "wifi")
                 .font(.caption)

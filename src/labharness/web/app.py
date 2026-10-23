@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import hmac
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -44,10 +45,13 @@ from . import review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
 from .qr import QR
-from .remote import API as PHONE_API, ROLES, Remote, addresses, allowed, remote_host_ok
+from .remote import (API as PHONE_API, ROLES, Remote, addresses, allow_through_firewall, allowed, firewall_state,
+                     pairing_link, remote_host_ok)
 from .providers.base import Provider
 from .settings import Settings
 from .store import ChatStore
+
+log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/kelvin.log
 
 STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
@@ -1004,7 +1008,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         on, port = settings.phone
         live = remote.port
         return {"on": on, "port": port, "listening": live is not None, "error": remote.error,
-                "addresses": addresses(live or port), "devices": settings.device_views(), "roles": list(ROLES)}
+                "addresses": addresses(live or port), "devices": settings.device_views(), "roles": list(ROLES),
+                "firewall": firewall_state() if live is not None else None}
 
     async def start_phone() -> None:
         on, port = settings.phone
@@ -1015,6 +1020,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             await remote.start(guard, port)
         except OSError as e:
             remote.error = "Could not listen on port %d: %s" % (port, e.strerror or e)
+        if remote.port is not None:
+            log.info("phone access on: %s", ", ".join("%s (%s)" % (a["url"], a["kind"]) for a in addresses(remote.port))
+                     or "port %d" % remote.port)
 
     async def phone(request: Request) -> Response:
         """GET: phone access and paired devices. POST {on, port}: switch phone access (this computer only)."""
@@ -1025,7 +1033,17 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             except (TypeError, ValueError) as e:
                 return error(400, str(e))
             await start_phone()
-        return JSONResponse(phone_view())
+        return JSONResponse(await asyncio.to_thread(phone_view))
+
+    async def phone_firewall(request: Request) -> Response:
+        """Ask Windows to let phones through its firewall (Windows shows its own permission prompt; this computer only)."""
+        if remote.port is None:
+            return error(400, "Switch on phone access first.")
+        ok, said = await asyncio.to_thread(allow_through_firewall, remote.port, sys.executable)
+        log.info("phone access, firewall: %s", said)
+        if not ok:
+            return error(409, said)
+        return JSONResponse(await asyncio.to_thread(phone_view))
 
     async def devices(request: Request) -> Response:
         """POST {name, role}: a one-time pairing code (and QR code) for a new phone."""
@@ -1036,9 +1054,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             p = remote.start_pairing(str(body.get("name") or ""), str(body.get("role") or "watch"))
         except ValueError as e:
             return error(400, str(e))
-        urls = [a["url"] + "/pair#" + p.code for a in addresses(remote.port)]
+        bases = [a["url"] for a in addresses(remote.port)]
+        urls = [u + "/pair#" + p.code for u in bases]
         return JSONResponse({"code": p.code, "name": p.name, "role": p.role, "expires_in": int(p.expires - time.time()),
-                             "urls": urls, "qr": QR(urls[0]).svg(5) if urls else None})
+                             "urls": urls, "qr": QR(pairing_link(bases, p.code)).svg(5) if bases else None})
 
     async def pairing(request: Request) -> Response:
         state = remote.pairing_state(request.path_params["code"])
@@ -1076,8 +1095,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         d = k.get("device") or {}
         out = {"role": k.get("role") or "owner", "name": d.get("name"), "lab": runtime.lab.config.name}
         if d:   # for the Kelvin phone app: which computer this is, and its other addresses (Tailscale away from the lab)
+            found = addresses(remote.port) if remote.port else []
             out.update(computer=socket.gethostname(), version=__version__, api=PHONE_API,
-                       addresses=[a["url"] for a in addresses(remote.port)] if remote.port else [])
+                       addresses=[a["url"] for a in found], routes=[{"url": a["url"], "kind": a["kind"]} for a in found])
         return JSONResponse(out)
 
     # ------------------------------------------------------------------ reports
@@ -1679,6 +1699,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/me/forget", forget_me, methods=["POST"]),
         Route("/api/pair", pair, methods=["POST"]),
         Route("/api/phone", phone, methods=["GET", "POST"]),
+        Route("/api/phone/firewall", phone_firewall, methods=["POST"]),
         Route("/auth/callback", auth_callback),
         Route("/api/chatgpt", chatgpt_view),
         Route("/api/chatgpt/signin", chatgpt_signin, methods=["POST"]),

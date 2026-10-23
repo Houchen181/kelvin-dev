@@ -42,7 +42,7 @@ struct ComputersView: View {
                 LabeledContent("Name", value: c.phoneName)
                 Text(c.access.summary).foregroundStyle(.secondary)
                 if let v = c.version { LabeledContent("Kelvin", value: v) }
-                RouteLabel(url: session.connected)
+                RouteLabel(url: session.connected, kinds: session.computer.kinds)
             }
             if c.addresses != [DemoTransport.address] {
             Section {
@@ -50,7 +50,7 @@ struct ComputersView: View {
                     HStack {
                         Text(url.absoluteString).font(.footnote.monospaced())
                         Spacer()
-                        Text(Route(url).rawValue).font(.caption).foregroundStyle(.secondary)
+                        Text(c.route(url).rawValue).font(.caption).foregroundStyle(.secondary)
                     }
                 }
             } header: {

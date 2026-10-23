@@ -44,7 +44,7 @@
     $("dash").hidden = true;
     $("pair").hidden = false;
     $("sub").textContent = "not paired";
-    const code = (location.hash.match(/^#(\d{6})$/) || [])[1];
+    const code = (location.hash.match(/^#(\d{6})(?:&|$)/) || [])[1];   // the app's QR adds &also=<other addresses>
     if (code) $("code").value = code;
     if (location.hash) history.replaceState(null, "", location.pathname);
   }

@@ -56,8 +56,18 @@ final class AppModel: ObservableObject {
     /// Offer the pairing code, keep the token, and learn the computer's name and other addresses.
     @discardableResult
     func pair(at base: URL, code: String) async throws -> Computer {
-        let result = try await KelvinClient(base: base, token: nil, transport: transport).pair(code: code)
-        var c = Computer(lab: base.host ?? "Kelvin", phoneName: result.name, role: result.role, addresses: [base])
+        try await pair(at: [base], code: code)
+    }
+
+    /// Pair at the first of `addresses` that answers (a pairing code holds every address Kelvin has).
+    @discardableResult
+    func pair(at addresses: [URL], code: String) async throws -> Computer {
+        let (client, result) = try await reach(addresses, token: nil, transport: transport, timeout: 8) {
+            try await $0.pair(code: code)
+        }
+        let base = client.base
+        var c = Computer(lab: base.host ?? "Kelvin", phoneName: result.name, role: result.role,
+                         addresses: [base] + addresses.filter { $0 != base })
         tokens.save(result.token, for: c.id)
         if let me = try? await KelvinClient(base: base, token: result.token, transport: transport).me() {
             c.update(with: me, used: base)
