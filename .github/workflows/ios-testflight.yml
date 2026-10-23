@@ -25,13 +25,10 @@ jobs:
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check the secrets are there
+      - name: Check the secrets, and write the API key for this job only
         env:
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-        run: |
-          for name in APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8; do
-            [ -n "${!name}" ] || { echo "::error::The repository secret $name is missing (see docs/ios.md)"; exit 1; }
-          done
+        run: python3 .github/scripts/asc_key.py "$RUNNER_TEMP/AuthKey.p8"
       - name: Use the newest Xcode (App Store Connect takes builds from Xcode 26 or later)
         run: |
           xcode=$(ls -d /Applications/Xcode_*.app | grep -iv beta | sort -V | tail -1)
@@ -46,12 +43,6 @@ jobs:
         run: |
           echo "version=${GITHUB_REF_NAME#ios-v}" >> "$GITHUB_OUTPUT"
           echo "build=${{ github.run_number }}" >> "$GITHUB_OUTPUT"
-      - name: The API key, for this job only
-        env:
-          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
-        run: |
-          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
-          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
       - name: Archive
         # Archived unsigned; the export below signs it for the App Store (an App Store profile needs no devices).
         run: |
