@@ -130,7 +130,7 @@ final class LabSession: ObservableObject {
     }
 
     var role: Role { computer.access }
-    var route: Route? { connected.map(Route.init) }
+    var route: Route? { connected.map { computer.route($0) } }
 
     /// Look every few seconds until paused.
     func resume() {
