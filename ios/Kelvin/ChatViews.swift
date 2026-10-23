@@ -68,6 +68,7 @@ struct ChatListView: View {
 
 struct ChatView: View {
     @StateObject var model: ChatModel
+    @StateObject var voice = Dictation()
 
     init(session: LabSession, chat: ChatSummary?, incognito: Bool) {
         _model = StateObject(wrappedValue: ChatModel(session: session, chat: chat, incognito: incognito))
@@ -105,7 +106,8 @@ struct ChatView: View {
                 proxy.scrollTo("end", anchor: .bottom)
             }
         }
-        .safeAreaInset(edge: .bottom) { Composer(model: model) }
+        .safeAreaInset(edge: .bottom) { Composer(model: model, voice: voice) }
+        .onDisappear { voice.cancel() }
         .navigationTitle(model.transcript.title)
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
@@ -115,10 +117,35 @@ struct ChatView: View {
 
 struct Composer: View {
     @ObservedObject var model: ChatModel
+    @ObservedObject var voice: Dictation
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
-            TextField("Message Kelvin", text: $model.draft, axis: .vertical)
+        VStack(alignment: .leading, spacing: 4) {
+            if let p = voice.problem {
+                Text(p).font(.caption).foregroundStyle(.red)
+            }
+            HStack(alignment: .bottom, spacing: 8) {
+                fields
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    @ViewBuilder
+    private var fields: some View {
+            Button {
+                voice.toggle(typed: model.draft) { model.draft = $0 }
+            } label: {
+                Image(systemName: voice.listening ? "mic.fill" : "mic")
+                    .font(.title2)
+                    .foregroundStyle(voice.listening ? Color.red : Color.accentColor)
+                    .frame(width: 32, height: 34)
+            }
+            .disabled(model.transcript.answering)
+            .accessibilityLabel(voice.listening ? "Stop listening" : "Talk")
+            TextField(voice.listening ? "Listening…" : "Message Kelvin", text: $model.draft, axis: .vertical)
                 .lineLimit(1...6)
                 .textFieldStyle(.roundedBorder)
             if model.transcript.answering {
@@ -131,6 +158,7 @@ struct Composer: View {
                 .accessibilityLabel("Stop")
             } else {
                 Button {
+                    voice.cancel()
                     model.send()
                 } label: {
                     Image(systemName: "arrow.up.circle.fill").font(.title)
@@ -138,10 +166,6 @@ struct Composer: View {
                 .disabled(model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityLabel("Send")
             }
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(.bar)
     }
 }
 

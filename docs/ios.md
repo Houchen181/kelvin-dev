@@ -12,12 +12,14 @@ How people use it is in [portal.md](portal.md#phone-and-remote-access). This pag
 |---|---|
 | `ios/project.yml` | The Xcode project, as an [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. `Kelvin.xcodeproj` and `Support/Info.plist` are generated from it and not committed. |
 | `ios/KelvinKit/` | A Swift package with no UI and only Foundation: pairing links, the phone API client, the models, the chat stream and transcript, plot data. Its tests run on Linux too. |
-| `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (paired computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Demo.swift` (the demo lab) and the screens. |
+| `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (paired computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Dictation.swift` (voice input), `Demo.swift` (the demo lab) and the screens. |
 | `ios/KelvinTests/` | App tests: pairing, the Keychain, falling back to the Tailscale address, a chat, notifications. |
 | `.github/workflows/ios.yml` | CI: KelvinKit's tests on Linux; when they pass, the app's build and tests on the iOS Simulator (macOS runner). |
 | `.github/workflows/ios-testflight.yml` | On a tag `ios-v*`: builds with the newest Xcode, signs with an App Store Connect API key and uploads to TestFlight. |
 
-The app needs iOS 16. It uses only Apple's frameworks (SwiftUI, Charts, AVFoundation for the QR scanner, QuickLook for reports).
+The app needs iOS 16. It uses only Apple's frameworks (SwiftUI, Charts, AVFoundation for the QR scanner, Speech for voice input, QuickLook for reports).
+
+Voice input uses on-device recognition only (`requiresOnDeviceRecognition`). Where the iPhone can't recognize the language on the phone itself, the mic button says so, and the app doesn't fall back to Apple's servers. Voice only fills the message box; it never sends or approves anything.
 
 ## The API it uses
 

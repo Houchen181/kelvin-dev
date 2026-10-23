@@ -107,7 +107,7 @@ The phone then opens Kelvin's phone page: alarms with **Got it**, requests with 
 **Kelvin for iPhone** does the same as a native app, and more. Pair it by scanning the same QR code, or by typing the address and code. It can be paired with several Kelvin computers, keeps each one's token in the iPhone's Keychain, and tries the address that worked last first and then the others, so it moves between the lab network and Tailscale by itself. Its tabs:
 
 - **Lab:** alarms, requests waiting for you, the run in progress with a live plot and **Stop**, the instruments (drives not at their safe value in orange), recent notices.
-- **Chat** (control phones): your conversations, a new or incognito chat, the answer as it arrives with Kelvin's steps, and requests to approve right there.
+- **Chat** (control phones): your conversations, a new or incognito chat, the answer as it arrives with Kelvin's steps, and requests to approve right there. Tap the microphone to talk instead of typing: the iPhone turns your words into text itself, the audio never leaves it, and you check the message before sending.
 - **Runs:** recent runs with their plots, and their report and data to open on the phone.
 - **Computers:** switch between computers, pair another, unpair.
 
