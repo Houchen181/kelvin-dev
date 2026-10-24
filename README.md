@@ -5,7 +5,7 @@
 <h1 align="center">Kelvin</h1>
 <p align="center"><b>The coolest cat in the lab.</b><br>An AI lab assistant for experimental physicists that plans, measures and logs, and asks before it drives your sample harder.</p>
 
-<p align="center"><a href="https://github.com/Houchen181/kelvin/releases/download/private-latest/Kelvin-Setup-private.exe"><b>⬇ Download Kelvin for Windows</b></a> (the newest private build, Windows 10/11)<br><a href="https://github.com/Houchen181/kelvin/releases/latest">macOS</a> (the latest public release) · <a href="https://github.com/Houchen181/kelvin/releases">what's new</a></p>
+<p align="center"><a href="https://github.com/Houchen181/kelvin/releases/download/private-latest/Kelvin-Setup-private.exe"><b>⬇ Download Kelvin 0.3.17 for Windows</b></a> (the newest private build, Windows 10/11)<br><a href="https://github.com/Houchen181/kelvin/releases/latest">macOS</a> (the latest public release) · <a href="https://github.com/Houchen181/kelvin/releases">what's new</a></p>
 
 ---
 
@@ -51,7 +51,9 @@ Every command goes through one gate, whether it comes from Kelvin, another AI ag
 | Drive away from safe | Checked against your limits, approved by a person, ramped and watched |
 | Beyond the limits, or blocked | Refused |
 
-Only people can change the lab config, the approval mode or which lab Kelvin controls.
+Each sample can have its own limits too: give a gate's dielectric and thickness and Kelvin keeps it well below breakdown, stops a ramp when the leakage rises, and writes the caps into the source itself. Press **Hands on the sample** before you rewire, and everything that reaches it stays at safe until you unlock.
+
+Only people can change the lab config, the approval mode, a sample's limits or which lab Kelvin controls.
 
 ## Get started
 
@@ -70,6 +72,7 @@ Also included: sign-in for everyone in the lab, each with their own chats, keys,
 - [Safety](docs/safety.md): the rules in full, auto mode, watches
 - [Other AI agents](docs/agents.md): Claude Code, Codex or Gemini CLI over MCP
 - [Development](docs/development.md): running from source, tests, releases
+- [Kelvin for iPhone](docs/ios.md): building the iPhone app
 - [Vision](VISION.md) and [architecture](ARCHITECTURE.md): the goals and the design
 
 To run from source (Python 3.10 or later):

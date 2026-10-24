@@ -107,6 +107,7 @@ class VisaBackend:
         self.resource = resource_name(address)
         conn = dict(card.connection, **(overrides or {}))
         self.ack = conn.get("ack")
+        self.echo = bool(conn.get("echo"))
         self.set_reply = re.compile(conn["set_reply"]) if conn.get("set_reply") else None
         self.write_only = bool(conn.get("write_only"))
         self.query_delay = float(conn.get("query_delay", 0.0))
@@ -137,6 +138,8 @@ class VisaBackend:
     def write(self, command: str) -> None:
         with self.lock:
             self.res.write(command)
+            if self.echo:
+                self.res.read()   # the command, echoed
             if self.ack:
                 self._check_ack(command)
             elif self.set_reply is not None:   # instruments that answer every set (e.g. Oxford Mercury: ...:VALID)
@@ -148,7 +151,14 @@ class VisaBackend:
         if self.write_only:
             raise AdapterError("%s does not answer queries (write-only); Kelvin uses the last value it set" % self.name)
         with self.lock:
-            if self.query_delay:
+            if self.echo:
+                self.res.write(command)
+                self.res.read()   # the command, echoed
+                if self.query_delay:
+                    import time
+                    time.sleep(self.query_delay)
+                reply = str(self.res.read())
+            elif self.query_delay:
                 reply = str(self.res.query(command, delay=self.query_delay))
             else:
                 reply = str(self.res.query(command))

@@ -1,0 +1,93 @@
+name: iOS app
+
+# The iPhone app (ios/). KelvinKit's tests run on Linux first; only when they pass does the app build and run its
+# tests on a macOS runner with the iOS Simulator (macOS minutes cost ten times Linux ones on a private repository).
+on:
+  push:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  pull_request:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kit:
+    name: KelvinKit (Linux)
+    runs-on: ubuntu-latest
+    container: swift:5.10
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path ios/KelvinKit
+
+  app:
+    name: App (iOS Simulator)
+    needs: kit
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use the newest Xcode (the one TestFlight uploads are built with)
+        run: |
+          ls -d /Applications/Xcode*.app
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | grep -iv beta | sort -V | tail -1)"
+          xcodebuild -version
+      - run: brew install xcodegen
+      - run: xcodegen generate --spec ios/project.yml
+      - name: Pick an iPhone simulator
+        id: sim
+        run: |
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          runtimes = sorted((k for k in devices if "iOS" in k), reverse=True)
+          print(next(d["udid"] for k in runtimes for d in devices[k] if d["name"].startswith("iPhone")))')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      - name: Build and test
+        # Signed to run locally (no team needed on the simulator), so the app may use the Keychain.
+        run: |
+          set -o pipefail
+          xcodebuild test -project ios/Kelvin.xcodeproj -scheme Kelvin \
+            -destination "id=${{ steps.sim.outputs.udid }}" -derivedDataPath build/dd \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= 2>&1 | tee build.log \
+            | grep -E "error:|/ios/[^ ]*: warning:|Test Case .*(passed|failed|skipped)|Executed|[*][*] (BUILD|TEST)" || true
+          grep -q "TEST SUCCEEDED" build.log
+      - name: Screenshots of the demo lab
+        run: |
+          udid=${{ steps.sim.outputs.udid }}
+          app=io.github.houchen181.kelvin
+          mkdir -p shots
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl install "$udid" build/dd/Build/Products/Debug-iphonesimulator/Kelvin.app
+          shot() {   # name, appearance, tab, what to open
+            xcrun simctl ui "$udid" appearance "$2"
+            xcrun simctl terminate "$udid" "$app" 2>/dev/null || true
+            xcrun simctl launch "$udid" "$app" -KelvinDemo YES -KelvinTab "$3" -KelvinOpen "$4"
+            sleep 8
+            xcrun simctl io "$udid" screenshot "shots/$1.png"
+          }
+          xcrun simctl launch "$udid" "$app"          # nothing paired yet: the welcome screen
+          sleep 6
+          xcrun simctl io "$udid" screenshot shots/0-welcome.png
+          shot 1-lab light lab ""
+          shot 2-lab-dark dark lab ""
+          shot 3-chat light chat demo-chat
+          shot 4-run light runs field-sweep-D3
+          shot 5-runs dark runs ""
+          shot 6-computers light computers ""
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-screenshots
+          path: shots
+          if-no-files-found: ignore
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build-log
+          path: build.log

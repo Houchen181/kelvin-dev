@@ -1,0 +1,73 @@
+card: 1
+id: ocean/spectrometer
+model: Ocean Insight (Ocean Optics) USB spectrometer (USB2000+, USB4000, Flame, HR4000, QE Pro, Maya...)
+vendor: Ocean Insight
+kind: spectrometer
+status: community
+manual: "python-seabreeze: Spectrometer.integration_time_micros, intensities, wavelengths"
+notes:
+  - "Address seabreeze://<serial> (seabreeze:// for the first). Needs pip install seabreeze, then seabreeze_os_setup once for its USB driver. Close OceanView first: one program at a time."
+  - "The integration time can't be read back: Kelvin shows it once it has set it, and leaves it as it is until then."
+  - "Each spectrum is recorded with its wavelengths (they aren't evenly spaced), and goes to its own CSV in the run's folder."
+identify:
+  idn: "^Ocean Insight,"
+  example: "Ocean Insight,USB4000,USB4F01234"
+
+parameters:
+  spectrum:
+    label: Spectrum
+    kind: measure
+    type: trace
+    unit: counts
+    get: "GET spectrum"
+    axis: { values: wavelengths }
+  wavelengths:
+    label: Wavelengths
+    kind: measure
+    type: trace
+    unit: nm
+    get: "GET wavelengths"
+  peak:
+    label: Peak
+    kind: measure
+    unit: counts
+    get: "GET peak"
+    acquires: true
+    description: The highest count of the latest spectrum (a new one if none was taken just now)
+  peak_wavelength:
+    label: Peak wavelength
+    kind: measure
+    unit: nm
+    get: "GET peak_wavelength"
+    acquires: true
+  integration:
+    label: Integration time
+    kind: measure
+    unit: s
+    set: "SET integration {value}"
+    limits: [0.000001, 600]
+    description: The spectrometer's own limits are checked too (they depend on the model)
+  averages:
+    label: Averages
+    kind: measure
+    type: int
+    set: "SET averages {value}"
+    get: "GET averages"
+    limits: [1, 10000]
+    default: 1
+  dark_correction:
+    label: Electric dark correction
+    kind: measure
+    type: bool
+    set: "SET dark_correction {value}"
+    get: "GET dark_correction"
+    default: off
+  nonlinearity_correction:
+    label: Nonlinearity correction
+    kind: measure
+    type: bool
+    set: "SET nonlinearity_correction {value}"
+    get: "GET nonlinearity_correction"
+    default: off
+display:
+  headline: averages

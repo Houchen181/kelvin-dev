@@ -1,0 +1,74 @@
+card: 1
+id: basler/camera
+model: Basler camera (ace, dart, boost, pulse...) through pylon
+vendor: Basler
+kind: camera
+status: community
+manual: "pypylon: InstantCamera, GrabOne; GenICam features ExposureTime / ExposureTimeAbs, Gain / GainRaw"
+notes:
+  - "Address pylon://<serial> (pylon:// for the first). Needs pip install pypylon (it brings the pylon runtime). Close pylon Viewer first: one program at a time."
+  - "Connecting changes nothing: exposure, gain, pixel format and region stay as they are."
+  - "A frame is kept as a .npy file: a run puts each in its frames/ folder and data.csv names it. Mean, max, min and sum are readings of a frame (one taken just before is used, else a new one)."
+  - "Gain is in dB on cameras with Gain, in raw steps on older ones with only GainRaw."
+identify:
+  idn: "^Basler,"
+  example: "Basler,acA1920-155um,40012345"
+
+parameters:
+  frame:
+    label: Frame
+    kind: measure
+    type: image
+    get: "GET frame"
+  mean:
+    label: Mean
+    kind: measure
+    unit: counts
+    get: "GET mean"
+    acquires: true
+  max:
+    label: Max
+    kind: measure
+    unit: counts
+    get: "GET max"
+    acquires: true
+  min:
+    label: Min
+    kind: measure
+    unit: counts
+    get: "GET min"
+    acquires: true
+  sum:
+    label: Sum
+    kind: measure
+    unit: counts
+    get: "GET sum"
+    acquires: true
+  exposure:
+    label: Exposure
+    kind: measure
+    unit: s
+    set: "SET exposure {value}"
+    get: "GET exposure"
+    limits: [0.000001, 10]
+  gain:
+    label: Gain
+    kind: measure
+    unit: dB
+    set: "SET gain {value}"
+    get: "GET gain"
+    limits: [0, 48]
+  width:
+    label: Width
+    kind: measure
+    type: int
+    unit: px
+    get: "GET width"
+  height:
+    label: Height
+    kind: measure
+    type: int
+    unit: px
+    get: "GET height"
+display:
+  headline: exposure

@@ -32,6 +32,10 @@ PACKAGES = [
     ("zeroconf", "zeroconf", ()),                  # network instruments: mDNS (LXI) adverts
     ("ifaddr", "ifaddr", ()),
     ("pypdf", "pypdf", ()),                        # reading instrument manuals
+    # the makers' instrument libraries: only the private build installs them (release.yml); skipped otherwise.
+    # The rest need no Python package (PICam, Andor's spectrograph DLL, the ANC300's command line) or are for
+    # installs from source (seabreeze, pypylon, pylablib)
+    ("nidaqmx", "nidaqmx", ()),                    # NI DAQ cards (NI-DAQmx itself is NI's installer)
 ]
 if sys.platform == "win32":
     PACKAGES += [("clr_loader", "clr_loader", ()), ("pythonnet", "pythonnet", ())]
@@ -47,7 +51,8 @@ for package, dist, skip in PACKAGES:
         print("skipping", package, e)
         continue
     try:
-        datas += copy_metadata(dist)
+        # the makers' libraries look up their dependencies by metadata (nidaqmx: nitypes...), so bring theirs too
+        datas += copy_metadata(dist, recursive=dist == "nidaqmx")
     except Exception:
         pass
 
@@ -60,9 +65,16 @@ a = Analysis(
     datas=datas,
     binaries=binaries,
     hiddenimports=hiddenimports,
-    excludes=["tkinter", "pytest", "PyInstaller"],
+    excludes=["tkinter", "pytest", "PyInstaller",
+              # libraries for instruments the app doesn't carry (Kelvin from source has them), whatever this
+              # computer has installed
+              "seabreeze", "pypylon", "pylablib", "scipy", "pandas"],
     noarchive=False,
 )
+# pypylon brings Basler's image-processing plugins (vTools, ~230 MB); Kelvin only grabs frames, so they stay out
+UNUSED = ("pylonDataProcessingPlugins", "DataProcessingPluginsB")
+a.binaries = [b for b in a.binaries if not any(part in b[0].replace("\\", "/").split("/") for part in UNUSED)]
+a.datas = [d for d in a.datas if not any(part in d[0].replace("\\", "/").split("/") for part in UNUSED)]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,

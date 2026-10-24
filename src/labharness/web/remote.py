@@ -4,19 +4,23 @@ The portal itself only listens on 127.0.0.1, where the access key works. Phone a
 network (off until the user switches it on). There, only paired devices' own tokens work, never the access key:
 - a device is paired with a one-time 6-digit code shown on this computer (the code expires in 10 minutes, and
   repeated wrong codes lock pairing for a while);
-- "watch" devices see the lab, runs and alarms, can stop a run and can decline (never approve) a request;
-- "control" devices can also chat with Kelvin and approve requests;
+- "watch" devices see the lab, runs and alarms, can stop a run, decline (never approve) a request and lock the lab
+  while hands are on the sample (never unlock it);
+- "control" devices can also chat with Kelvin, approve requests and unlock;
 - settings, the lab config, instruments, approval mode and pairing are for this computer only.
 Traffic on a plain Wi-Fi network is not encrypted, so away from a trusted network use a VPN such as Tailscale."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import hashlib
 import ipaddress
 import re
 import secrets
 import socket
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -26,10 +30,14 @@ ROLES = ("watch", "control")
 CODE_TTL = 600
 MAX_FAILURES = 5          # wrong codes within FAILURE_WINDOW lock pairing
 FAILURE_WINDOW = 600
+API = 1                   # what the Kelvin phone app can count on; raise it when a route it uses changes
+TAILNET = ipaddress.ip_network("100.64.0.0/10")   # Tailscale's addresses, and also carrier-grade NAT (e.g. Xfinity Wi-Fi)
+QR_BYTES = 100            # what Kelvin's QR codes hold (qr.py: version 6, level M)
+FIREWALL_RULE = "Kelvin phone access"
 
 # What a paired device may do. Anything not listed is for this computer only.
-_WATCH = [("GET", r"/api/(state|live|me|runs|runs/[^/]+)"),
-          ("POST", r"/api/(stop|runs/stop|alarms/[^/]+/ack|approvals/[^/]+|me/forget)")]
+_WATCH = [("GET", r"/api/(state|live|me|runs|runs/[^/]+|runs/[^/]+/files/[^/]+)"),
+          ("POST", r"/api/(stop|runs/stop|alarms/[^/]+/ack|approvals/[^/]+|me/forget|hands)")]
 _CONTROL = _WATCH + [
     ("GET", r"/api/(bootstrap|chats|chats/[^/]+|projects|projects/[^/]+|memory|settings|lab|mode|watches|reports"
             r"|reports/[^/]+)"),
@@ -52,13 +60,17 @@ def token_hash(token: str) -> str:
 
 
 def addresses(port: int) -> List[Dict[str, str]]:
-    """Where a phone can reach this computer: its addresses on the local network and on Tailscale."""
+    """Where a phone can reach this computer: its addresses on the local network and on Tailscale, Tailscale first.
+    The address of the default route is the network's, even inside 100.64.0.0/10: some Wi-Fi networks (Xfinity's)
+    hand those out too, and calling one Tailscale would claim an encryption that isn't there."""
     found = set()
+    primary = None
     with contextlib.suppress(OSError):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect(("10.255.255.255", 1))   # picks the interface of the default route; sends nothing
-            found.add(s.getsockname()[0])
+            primary = s.getsockname()[0]
+            found.add(primary)
         finally:
             s.close()
     with contextlib.suppress(OSError):
@@ -72,9 +84,60 @@ def addresses(port: int) -> List[Dict[str, str]]:
             continue
         if addr.is_loopback or addr.is_link_local:
             continue
-        kind = "tailscale" if addr in ipaddress.ip_network("100.64.0.0/10") else "network" if addr.is_private else "public"
+        if addr in TAILNET and ip != primary:
+            kind = "tailscale"
+        elif addr.is_private or addr in TAILNET:
+            kind = "network"
+        else:
+            kind = "public"
         out.append({"ip": ip, "kind": kind, "url": "http://%s:%d" % (ip, port)})
     return sorted(out, key=lambda a: ("tailscale", "network", "public").index(a["kind"]))
+
+
+def pairing_link(urls: List[str], code: str) -> str:
+    """What a pairing QR code holds: the first address with /pair#<code>, and the others after it (as many as fit), so
+    the Kelvin app can try each: http://100.101.7.9:8771/pair#123456&also=192.168.1.20:8771,10.0.0.5:8771"""
+    link = urls[0] + "/pair#" + code
+    others = [u.split("://", 1)[-1] for u in urls[1:]]
+    while others and len(link + "&also=" + ",".join(others)) > QR_BYTES:
+        others.pop()
+    return link + ("&also=" + ",".join(others) if others else "")
+
+
+def firewall_state() -> Optional[str]:
+    """On Windows: "allowed" when Kelvin's firewall rule for phones is there, "missing" when it isn't; else None."""
+    if sys.platform != "win32":
+        return None
+    try:
+        out = subprocess.run(["netsh", "advfirewall", "firewall", "show", "rule", "name=" + FIREWALL_RULE],
+                             capture_output=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return "allowed" if out.returncode == 0 else "missing"
+
+
+def allow_through_firewall(port: int, program: str) -> Tuple[bool, str]:
+    """Ask Windows (it shows its own permission prompt) to let phones reach this program on `port`, on any network.
+    Waits for the answer. (ok, what happened)."""
+    if sys.platform != "win32":
+        return False, "Only Windows has this firewall."
+    q = program.replace("'", "''")
+    script = ("Remove-NetFirewallRule -DisplayName '%s' -ErrorAction SilentlyContinue; "
+              "New-NetFirewallRule -DisplayName '%s' -Direction Inbound -Action Allow -Protocol TCP -LocalPort %d "
+              "-Program '%s' -Profile Any | Out-Null" % (FIREWALL_RULE, FIREWALL_RULE, int(port), q))
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    outer = ("try { $p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden "
+             "-ArgumentList '-NoProfile','-EncodedCommand','%s'; exit $p.ExitCode } catch { exit 5 }" % encoded)
+    try:
+        done = subprocess.run(["powershell", "-NoProfile", "-Command", outer], capture_output=True, timeout=300,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, "Could not ask Windows: %s" % e
+    if done.returncode == 5:
+        return False, "Windows didn't allow it (the permission prompt was declined)."
+    if firewall_state() == "allowed":
+        return True, "Windows Firewall now lets phones reach Kelvin on port %d." % port
+    return False, "Windows didn't add the rule (exit code %d)." % done.returncode
 
 
 def remote_host_ok(host: str) -> bool:

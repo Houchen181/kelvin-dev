@@ -23,8 +23,9 @@ from mcp import Client
 from ..agent.runtime import LabRuntime
 from ..agent.server import INSTRUCTIONS
 from ..gate import ApprovalRequest
-from .providers.base import Emit, ModelInfo, Provider
-from . import memory, review, rules as rulebook
+from ..protection import summary as protection_summary
+from .providers.base import Emit, ModelInfo, Provider, text_of
+from . import brevity, memory, review, rules as rulebook
 from .settings import Settings
 from .store import MAX_NOTE, ChatStore
 
@@ -152,7 +153,8 @@ ADD_DEVICE = {
 MOUNT_DEVICE = {
     "name": "mount_device",
     "description": "Record which sample is in the setup now, only when the person says so; every scan from now on is "
-                   "filed under it. An empty device records that nothing is mounted.",
+                   "filed under it, and its protection (set by a person) holds. An empty device records that nothing "
+                   "is mounted. While a protected device is mounted, only a person changes this.",
     "schema": {"type": "object", "required": ["device"], "properties": {
         "device": {"type": "string", "description": "The device's name (add_device first if it is new), or empty"}}},
 }
@@ -256,8 +258,9 @@ class ChatAgent:
         per message instead (see recall). A chat outside every project gets no project memory; an incognito chat
         gets no memory at all and cannot save any."""
         if chat.get("incognito"):
-            return {"system": SYSTEM + "\n\n" + INCOGNITO, "tools": self.tools, "project": None, "learn": False}
-        parts = [SYSTEM]
+            return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO]), "tools": self.tools,
+                    "project": None, "learn": False}
+        parts = [SYSTEM] + self._brevity()
         mine = self.settings.get("instructions") if self.settings else None
         if mine:
             parts.append("# The user's instructions for every conversation\n" + mine)
@@ -285,6 +288,40 @@ class ChatAgent:
             tools = [t for t in tools if t["name"] not in WEB_TOOLS]
         return {"system": "\n\n".join(parts), "tools": tools, "project": project["id"] if project else None,
                 "learn": learn, "rules": rules, "private": private}
+
+    # ------------------------------------------------------------------ short answers (brevity.py)
+
+    def _brevity(self) -> List[str]:
+        limit = self.settings.answer_words if self.settings else brevity.WORDS
+        return [brevity.RULE.format(words=limit)] if limit else []
+
+    async def _shorten(self, provider: Provider, model_id: str, request: str, message: Dict[str, Any],
+                       emit: Emit) -> None:
+        """Condense a finished answer that runs over the word budget, keeping the full one in the message ("full")."""
+        limit = self.settings.answer_words if self.settings else brevity.WORDS
+        answer = text_of(message.get("blocks") or []).strip()
+        n = brevity.words(answer)
+        if not limit or n <= limit:
+            return
+        await emit({"type": "condensing", "words": n})
+        try:
+            kind, said = await asyncio.wait_for(brevity.condense(provider, model_id, request, answer, limit),
+                                                brevity.TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:   # the model failed or took too long: the full answer stays
+            kind, said = "", ""
+        if kind == "keep":
+            message["kept"] = said or "the request needed it"
+            await emit({"type": "condensed", "kept": message["kept"], "words": n})
+            return
+        short = brevity.words(said)
+        if kind != "short" or not short or short >= n:
+            await emit({"type": "condensed"})
+            return
+        message["full"], message["full_words"] = answer, n
+        message["blocks"] = [b for b in message["blocks"] if b["type"] != "text"] + [{"type": "text", "text": said}]
+        await emit({"type": "condensed", "text": said, "words": short, "full_words": n})
 
     # ------------------------------------------------------------------ who may see a project
 
@@ -405,18 +442,32 @@ class ChatAgent:
                 d = self.store.add_device(pid, args.get("name"), args.get("material") or "", args.get("description") or "")
                 return "added device %s to %s" % (d["name"], self.project_info(pid)["name"]), False
             if name == "mount_device":
+                now = self.runtime.mounted or {}
+                if now.get("protection"):   # taking it out would lift its protection: a person's call
+                    return ("not changed: %s is mounted with protection a person set, so only a person changes "
+                            "what is mounted (Lab panel)" % now.get("device_name")), True
                 ref = str(args.get("device") or "").strip()
                 if not ref:
                     self.runtime.unmount(by="agent")
                     return "nothing is mounted now; scans are filed under the project only", False
                 d = self.store.find_device(pid, ref)
                 m = self.runtime.mount(pid, d, by="agent")
-                return "mounted %s (%s); every scan from now on is filed under it" % (m["device_name"],
-                                                                                    m["project_name"]), False
+                lines = ["mounted %s (%s); every scan from now on is filed under it" % (m["device_name"],
+                                                                                      m["project_name"])]
+                prot = protection_summary(d.get("protection") or {}, self.runtime.lab)
+                if prot:
+                    lines.append("its protection holds (a person set it): " + "; ".join(prot))
+                lines += m.get("caps") or []
+                return "\n".join(lines), False
             devices = self.store.devices(pid)
             m = self.runtime.mounted
-            lines = ["%s%s%s" % (d["name"], " (%s)" % d["material"] if d.get("material") else "",
-                                 ", retired" if d.get("retired") else "") for d in devices] or ["no devices yet"]
+            lines = []
+            for d in devices:
+                prot = protection_summary(d.get("protection") or {})
+                lines.append("%s%s%s%s" % (d["name"], " (%s)" % d["material"] if d.get("material") else "",
+                                           ", retired" if d.get("retired") else "",
+                                           "; protected: " + "; ".join(prot) if prot else ""))
+            lines = lines or ["no devices yet"]
             lines.append("mounted now: %s" % ("%s (%s)" % (m["device_name"], m["project_name"]) if m else "nothing"))
             return "\n".join(lines), False
         except (KeyError, ValueError) as e:
@@ -557,6 +608,19 @@ class ChatAgent:
         if result.stop_reason == "pause":
             return True
         if result.stop_reason != "tool_calls":
+            if result.stop_reason == "end":   # a finished answer, not one cut short: condensed if it runs long
+                self._stream_task = asyncio.ensure_future(
+                    self._shorten(provider, model_id, review.last_request(chat["messages"]), chat["messages"][-1],
+                                  emit))
+                try:
+                    await self._stream_task
+                except asyncio.CancelledError:
+                    if not self._stop:
+                        raise
+                    await emit({"type": "condensed"})   # stopped: the full answer stays
+                finally:
+                    self._stream_task = None
+                self.store.save(chat)
             await emit({"type": "turn_end", "reason": result.stop_reason})
             return False
 
@@ -569,8 +633,8 @@ class ChatAgent:
                 await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
                 if call["name"] == "remember" and context["learn"]:
                     content, is_error = self._remember(chat, context, call["input"])
-                elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):
-                    content, is_error = self._device_tool(chat, call["name"], call["input"])
+                elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):   # mounting may write caps
+                    content, is_error = await asyncio.to_thread(self._device_tool, chat, call["name"], call["input"])
                 elif call["name"] == "save_paper" and context["project"]:
                     content, is_error = await self._save_paper(chat, context, call["input"])
                 elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:
@@ -871,6 +935,8 @@ class ChatAgent:
             else:
                 out.append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
                             "blocks": [{"type": "text", "text": "(paused after %d steps)" % COMPARE_STEPS}]})
+            if result.stop_reason == "end":
+                await self._shorten(provider, model_id, review.last_request(base), out[-1], lane_emit)
             await lane_emit({"type": "lane_end", "reason": "end"})
             return {"model": key, "messages": out}
         except asyncio.CancelledError:

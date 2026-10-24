@@ -673,7 +673,7 @@
     $("runpane").hidden = !RUNS.open;
     $("toggle-runs").setAttribute("aria-pressed", String(RUNS.open));
     $("toggle-runs").classList.toggle("on", RUNS.open);
-    syncScrim();
+    fitLayout();
   }
   function openRun(runId, plan) {
     runTab(runId, plan);
@@ -830,9 +830,28 @@
     }) : [h("div", { class: "pane-menu-note" }, "No runs yet.")]));
   }
 
+  // The conversation keeps at least CHAT_MIN pixels. When the side panels need the room, the sidebar steps aside (the
+  // menu button brings it back over the page), and if that is not enough the lab panel floats over the runs pane.
+  // Below 1100 px both panels float anyway (app.css), below 820 px the sidebar too.
+  const CHAT_MIN = 520, SIDEBAR_W = 264, LAB_W = 380, RUNS_MIN = 340;
+  function fitLayout() {
+    const app = $("app"), w = window.innerWidth;
+    const floating = w <= 1100;
+    const runs = RUNS.open && !floating ? RUNS_MIN : 0;
+    const lab = S.labOpen && !floating ? LAB_W : 0;
+    const compact = w > 820 && SIDEBAR_W + CHAT_MIN + runs + lab > w;
+    app.classList.toggle("compact", compact);
+    app.classList.toggle("float-lab", lab > 0 && (compact ? 0 : SIDEBAR_W) + CHAT_MIN + runs + LAB_W > w);
+    if (!compact && w > 820) app.classList.remove("side-open");
+    if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width);
+    syncScrim();
+  }
   function setPaneWidth(w) {
-    const max = Math.max(360, window.innerWidth - 420);
-    const width = Math.round(Math.min(max, Math.max(340, w)));
+    const app = $("app"), vw = window.innerWidth;
+    const sidebar = vw <= 820 || app.classList.contains("compact") ? 0 : SIDEBAR_W;
+    const lab = S.labOpen && vw > 1100 && !app.classList.contains("float-lab") ? LAB_W : 0;
+    const max = Math.max(RUNS_MIN, vw - sidebar - lab - CHAT_MIN);
+    const width = Math.round(Math.min(max, Math.max(RUNS_MIN, w || 0)));
     $("runpane").style.width = width + "px";
     return width;
   }
@@ -870,7 +889,7 @@
       }
     });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("runs-menu").hidden = true; });
-    window.addEventListener("resize", () => { if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width); });
+    window.addEventListener("resize", fitLayout);
   }
 
   // the compact card a run leaves in the conversation; its data live in the runs pane
@@ -1048,16 +1067,22 @@
       return g;
     });
     sel.replaceChildren(new Option(groups.length ? "Nothing mounted" : "No devices yet: add one with New device…", ""), ...groups);
+    MOUNT.key = null;   // new options: choose the mounted one again
     showMounted(r.mounted);
   }
   function showMounted(m) {
+    showProtection(m);
     const key = m ? JSON.stringify([m.project || null, m.device]) : "";
     $("mount-summary").textContent = m ? m.device_name + " · " + m.project_name : "nothing mounted";
     if (key === MOUNT.key) return;
-    MOUNT.key = key;
     const sel = $("mount-select");
     if ([...sel.options].some((o) => o.value === key)) sel.value = key;
-    else if (m) loadMount();
+    else if (m && !MOUNT.loading) {   // a device added elsewhere (a conversation, the phone): load the list once
+      MOUNT.loading = true;
+      loadMount().finally(() => { MOUNT.loading = false; });
+      return;
+    } else if (!m) sel.value = "";
+    MOUNT.key = key;
   }
   async function mountChosen() {
     const v = $("mount-select").value;
@@ -1079,6 +1104,185 @@
       await loadMount();
       toast(d.name + " is mounted: scans from now on are filed under it.");
     } catch (e) { toast(e.message); }
+  }
+  // ------------------------------------------------------------------ protecting the sample
+  const PROT = { opts: null, mounted: null, hands: null, busy: null };
+  const numText = (v) => (v == null || v === "" || isNaN(+v) ? "" : String(+(+v).toPrecision(6)));
+  function showProtection(m) {
+    PROT.mounted = m || null;
+    const box = $("mount-protection");
+    box.hidden = !m;
+    if (!m) return;
+    const lines = m.protection_lines || [];
+    box.classList.toggle("on", lines.length > 0);
+    $("mp-state").replaceChildren(icon(lines.length ? "lock" : "warn"),
+      lines.length ? "Protected" : "Not protected: only the lab's limits hold");
+    $("mount-protect").textContent = lines.length ? "Change…" : "Protect this device…";
+    $("mp-lines").replaceChildren(...lines.map((l) => h("li", {}, l)),
+      ...(m.protection_missing || []).map((k) => h("li", { class: "bad" }, k + " is not in this lab")));
+  }
+  function showHands(hands) {
+    PROT.hands = hands || null;
+    $("hands-banner").hidden = !hands;
+    $("hands-locked").hidden = !hands;
+    $("hands-on").hidden = !!hands;
+    if (!hands) return;
+    const at = String(hands.since || "").slice(11, 16);
+    const who = String(hands.by || "").replace(/^human \((.*)\)$/, "$1");
+    $("hands-text").textContent = "Locked" + (at ? " at " + at : "") + (who && who !== "portal" ? " from " + who : "")
+      + ". Everything that reaches the sample stays at safe until you unlock; Kelvin can still read and measure.";
+  }
+  async function handsOn() {
+    if (PROT.busy && !confirm("Kelvin is " + PROT.busy + ". Stop it and bring everything that reaches the sample to safe?")) return;
+    $("hands-on").disabled = true;
+    try {
+      const r = await api("/api/hands", { body: { on: true } });
+      showHands(r.hands_on);
+      const said = r.lines.join("; ");
+      toast("Locked. " + said.charAt(0).toUpperCase() + said.slice(1));
+    } catch (e) { toast(e.message); }
+    finally { $("hands-on").disabled = false; }
+    pollState();
+  }
+  function openUnlock() {
+    const sel = $("hands-device");
+    sel.replaceChildren(...[...$("mount-select").children].map((n) => n.cloneNode(true)));
+    sel.value = $("mount-select").value;
+    for (const c of document.querySelectorAll(".hands-check")) c.checked = false;
+    $("hands-unlock").disabled = true;
+    $("hands-msg").textContent = "";
+    $("hands-dialog").showModal();
+  }
+  async function unlock() {
+    const v = $("hands-device").value, body = { on: false };
+    if (v !== $("mount-select").value) {
+      const [project, device] = v ? JSON.parse(v) : [null, ""];
+      Object.assign(body, { project, device: device || "" });
+    }
+    $("hands-unlock").disabled = true;
+    try {
+      const r = await api("/api/hands", { body });
+      $("hands-dialog").close();
+      showHands(r.hands_on);
+      MOUNT.key = "x";
+      showMounted(r.mounted);
+      toast("Unlocked." + (r.lines.length ? " " + r.lines.join("; ") : ""));
+    } catch (e) {
+      $("hands-msg").textContent = e.message;
+      $("hands-unlock").disabled = false;
+    }
+    pollState();
+  }
+  function pf(label, control) {
+    const name = h("span", {}, label);
+    return h("label", { class: "pf" }, name, control);
+  }
+  function driveSelect(value, keep) {
+    const s = h("select", { "data-k": "drive" });
+    for (const d of PROT.opts.drives.filter(keep)) s.append(new Option(d.label + (d.unit ? " (" + d.unit + ")" : ""), d.key));
+    if (value && ![...s.options].some((o) => o.value === value)) s.append(new Option(value + " (not in this lab)", value));
+    if (value) s.value = value;
+    return s;
+  }
+  const driveInfo = (key) => PROT.opts.drives.find((d) => d.key === key) || {};
+  function gateRow(g) {
+    const drive = driveSelect(g.drive, (d) => d.gate || d.key === g.drive);
+    const diel = h("select", { "data-k": "dielectric" }, ...PROT.opts.dielectrics.map((d) => new Option(d.name, d.name)),
+      new Option("Other", "other"));
+    diel.value = PROT.opts.dielectrics.some((d) => d.name === g.dielectric) ? g.dielectric : "other";
+    const thick = h("input", { type: "number", step: "any", min: "0", "data-k": "thickness_nm", value: numText(g.thickness_nm), placeholder: "nm" });
+    const limit = h("input", { type: "number", step: "any", min: "0", "data-k": "limit" });
+    const suggested = () => {
+      const f = (PROT.opts.dielectrics.find((d) => d.name === diel.value) || {}).field;
+      return f && +thick.value > 0 ? +(f * thick.value).toPrecision(6) : null;
+    };
+    if (g.limit != null && g.limit !== suggested()) limit.value = numText(g.limit);   // the person's own limit
+    const leak = h("select", { "data-k": "leak" }, new Option("No leakage reading", ""),
+      ...PROT.opts.readings.map((r) => new Option(r.key, r.key)));
+    leak.value = g.leak || "";
+    const leakMax = h("input", { type: "number", step: "any", min: "0", "data-k": "leak_nA", value: numText((g.leak_max || PROT.opts.leak_max) * 1e9) });
+    const rate = h("input", { type: "number", step: "any", min: "0", "data-k": "rate", value: numText(g.rate), placeholder: "the lab's" });
+    const note = h("span", { class: "pf-note" });
+    const limitLabel = pf("Limit ±", limit), rateLabel = pf("Ramp at most", rate);
+    const update = () => {
+      const s = suggested(), u = driveInfo(drive.value).unit || "V";
+      limit.placeholder = s != null ? String(s) : "needed";
+      limitLabel.firstChild.textContent = "Limit ± (" + u + ")";
+      rateLabel.firstChild.textContent = "Ramp at most (" + u + "/s)";
+      const mine = limit.value.trim();
+      note.classList.toggle("bad", s == null && !mine);
+      note.textContent = s != null ? "From " + numText(thick.value) + " nm " + diel.value + ": ±" + s + " " + u
+        + (mine ? "; yours holds: ±" + mine + " " + u : "")
+        : mine ? "" : "Give a limit, or a dielectric and its thickness";
+    };
+    for (const el of [diel, thick, limit]) el.addEventListener("input", update);
+    drive.addEventListener("change", () => { const d = driveInfo(drive.value); if (d.leak && !leak.value) leak.value = d.leak; update(); });
+    const row = h("div", { class: "prot-row gate" }, pf("Gate", drive), pf("Dielectric", diel), pf("Thickness (nm)", thick),
+      limitLabel, rowButton("x", "Remove this gate", () => row.remove()),
+      pf("Leakage reading", leak), pf("Stop above (nA)", leakMax), rateLabel, note);
+    update();
+    return row;
+  }
+  function limitRow(key, pair) {
+    const drive = driveSelect(key, () => true);
+    const lo = h("input", { type: "number", step: "any", "data-k": "lo", value: pair ? numText(pair[0]) : "" });
+    const hi = h("input", { type: "number", step: "any", "data-k": "hi", value: pair ? numText(pair[1]) : "" });
+    const loLabel = pf("From", lo), hiLabel = pf("To", hi);
+    const update = (fill) => {
+      const d = driveInfo(drive.value), u = d.unit ? " (" + d.unit + ")" : "";
+      loLabel.firstChild.textContent = "From" + u;
+      hiLabel.firstChild.textContent = "To" + u;
+      if (fill && d.limits) { lo.value = numText(d.limits[0]); hi.value = numText(d.limits[1]); }
+    };
+    drive.addEventListener("change", () => update(true));
+    const row = h("div", { class: "prot-row limit" }, pf("Drive", drive), loLabel, hiLabel,
+      rowButton("x", "Remove this limit", () => row.remove()));
+    update(!pair);
+    return row;
+  }
+  async function openProtection() {
+    const m = PROT.mounted;
+    if (!m) return;
+    try { PROT.opts = await api("/api/protection"); } catch (e) { toast(e.message); return; }
+    const p = m.protection || {};
+    $("protect-device").textContent = m.device_name;
+    $("protect-gates").replaceChildren(...(p.gates || []).map(gateRow));
+    $("protect-limits").replaceChildren(...Object.entries(p.limits || {}).map(([k, v]) => limitRow(k, v)));
+    const empty = !(p.gates || []).length && !Object.keys(p.limits || {}).length;
+    const first = PROT.opts.drives.find((d) => d.gate);
+    if (empty && first) $("protect-gates").append(gateRow({ drive: first.key, dielectric: "hBN", leak: first.leak }));
+    $("protect-clear").hidden = empty;
+    $("protect-msg").textContent = "";
+    $("protect-dialog").showModal();
+  }
+  function readProtection() {
+    const val = (row, k) => row.querySelector('[data-k="' + k + '"]').value.trim();
+    const gates = [...$("protect-gates").children].map((row) => {
+      const g = { drive: val(row, "drive"), dielectric: val(row, "dielectric") };
+      if (val(row, "thickness_nm")) g.thickness_nm = +val(row, "thickness_nm");
+      if (val(row, "limit")) g.limit = +val(row, "limit");
+      if (val(row, "leak")) g.leak = val(row, "leak");
+      if (val(row, "leak_nA")) g.leak_max = +val(row, "leak_nA") * 1e-9;
+      if (val(row, "rate")) g.rate = +val(row, "rate");
+      return g;
+    });
+    const limits = {};
+    for (const row of $("protect-limits").children) limits[val(row, "drive")] = [val(row, "lo"), val(row, "hi")];
+    return { gates, limits };
+  }
+  async function saveProtection(remove) {
+    const m = PROT.mounted;
+    if (remove && !confirm("Remove " + m.device_name + "'s protection? Only the lab's limits will hold.")) return;
+    $("protect-save").disabled = true;
+    try {
+      const r = await api("/api/projects/" + (m.project || "general") + "/devices/" + m.device,
+        { method: "PATCH", body: { protection: remove ? {} : readProtection() } });
+      $("protect-dialog").close();
+      toast(remove ? m.device_name + " is not protected any more."
+        : m.device_name + " is protected." + (r.caps.length ? " " + r.caps.join("; ") : ""));
+      pollState();
+    } catch (e) { $("protect-msg").textContent = e.message; }
+    finally { $("protect-save").disabled = false; }
   }
   async function makeReport() {
     const fmt = (document.querySelector('input[name="report-format"]:checked') || {}).value || "pdf";
@@ -1186,11 +1390,23 @@
   // ------------------------------------------------------------------ approvals
   // auto mode approved this without asking: show what ran and why, like an answered request
   function autoApproval(ev) {
-    return h("div", { class: "approval done auto", role: "group", "aria-label": ev.title },
-      h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title)),
+    const title = h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title));
+    const el = h("div", { class: "approval done auto", role: "group", "aria-label": ev.title }, title,
       h("ul", {}, ...ev.items.map((i) => h("li", {}, i))),
       h("div", { class: "approval-actions" }, h("span", { class: "verdict auto" }, "Auto-approved"),
         h("span", { class: "muted small" }, (ev.reasons || []).join("; "))));
+    foldable(el, title);
+    return el;
+  }
+  // a decided request shows one line; its title opens and closes the details
+  function foldable(el, title) {
+    title.setAttribute("role", "button");
+    title.setAttribute("tabindex", "0");
+    title.setAttribute("aria-expanded", "false");
+    title.title = "Show the details";
+    const flip = () => title.setAttribute("aria-expanded", String(el.classList.toggle("open")));
+    title.addEventListener("click", flip);
+    title.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
   }
 
   function makeApproval(ev) {
@@ -1199,8 +1415,8 @@
     const yes = h("button", { class: "btn primary", type: "button" }, "Approve");
     const no = h("button", { class: "btn", type: "button" }, "Decline");
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
-    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title },
-      h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title)),
+    const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title));
+    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title,
       h("ul", {}, ...ev.items.map((i) => h("li", {}, i))), actions);
     let left = ev.seconds_left;
     const tick = () => { count.textContent = left > 0 ? "Declines itself in " + left + " s" : ""; left -= 1; };
@@ -1212,6 +1428,7 @@
         clearInterval(timer);
         if (!card.decided) { verdict.textContent = text; verdict.className = "verdict " + (good ? "yes" : "no"); }
         actions.replaceChildren(verdict);
+        if (!el.classList.contains("done")) foldable(el, title);
         el.classList.add("done");
         card.decided = true;
         S.approvals.delete(ev.id);
@@ -1256,8 +1473,37 @@
     }
     resetText() { if (this.text) { this.text.remove(); this.text = null; this.buf = ""; } }
     endText() {
-      if (this.text) { cancelAnimationFrame(this.raf); this.raf = 0; this.text.innerHTML = md(this.buf); this.text.classList.remove("cursor"); }
+      if (this.text) {
+        cancelAnimationFrame(this.raf); this.raf = 0; this.text.innerHTML = md(this.buf); this.text.classList.remove("cursor");
+        this.last = { el: this.text, buf: this.buf };
+      }
       this.text = null;
+    }
+    condensing(words) {   // a long answer is being shortened (brevity.py)
+      this.endText();
+      if (this.pending) return;
+      this.pending = h("div", { class: "condense-note" }, h("span", { class: "spinner" }),
+        h("span", {}, "Condensing a long answer (" + words + " words)…"));
+      this.el.append(this.pending);
+    }
+    condensed(ev) {
+      this.endText();
+      if (this.pending) { this.pending.remove(); this.pending = null; }
+      if (ev.text && this.last) this.shorten(this.last, ev.text, this.last.buf, ev.full_words);
+      else if (ev.kept) this.keptWhole(ev.words, ev.kept);
+    }
+    shorten(last, short, full, fullWords) {
+      const shortHtml = md(short), fullHtml = md(full);
+      let open = false;
+      const label = () => (open ? "Show the short answer" : "Full answer (" + fullWords + " words)");
+      const toggle = h("button", { class: "link soft", type: "button" }, label());
+      toggle.addEventListener("click", () => { open = !open; last.el.innerHTML = open ? fullHtml : shortHtml; toggle.textContent = label(); });
+      last.el.innerHTML = shortHtml;
+      last.el.after(h("div", { class: "condense-note" }, h("span", {}, "Condensed by Kelvin"), toggle));
+    }
+    keptWhole(words, why) {
+      this.el.append(h("div", { class: "condense-note" },
+        "A long answer (" + (words ? words + " words" : "kept whole") + ")" + (why ? ": " + why : "") + "."));
     }
     addThinking(delta) {
       if (!this.thinking) {
@@ -1360,6 +1606,8 @@
         else if (b.type === "thinking") { reply.addThinking(b.text); reply.endThinking(); }
         else if (b.type === "tool_call") reply.toolStart(b.id, b.name, b.input);
       }
+      if (m.full && reply.last) reply.shorten(reply.last, reply.last.buf, m.full, m.full_words);
+      else if (m.kept) reply.keptWhole(0, m.kept);
       if (m.review) reply.answerReview(m.review);
     } else if (m.role === "tool") {
       for (const r of m.results) {
@@ -2334,6 +2582,10 @@
       : v.listening ? "Phones can reach Kelvin at " + (where.join(", ") || "this computer's address, port " + v.port) + "."
       : v.on ? "Starting…" : "Off: only this computer can use Kelvin.";
     $("pair-start").disabled = !v.listening;
+    $("firewall-row").hidden = !v.firewall;
+    $("firewall-status").textContent = v.firewall === "allowed" ? "Windows Firewall lets phones reach Kelvin."
+      : "Windows Firewall may stop phones from reaching Kelvin.";
+    $("firewall-allow").hidden = v.firewall === "allowed";
     $("device-list").replaceChildren(...v.devices.map((d) => h("li", { class: "memory-note" },
       h("span", { class: "memory-kind" }, d.role),
       h("div", { class: "memory-body" }, h("span", {}, d.name),
@@ -2347,6 +2599,13 @@
     $("phone-status").textContent = $("phone-on").checked ? "Starting…" : "Stopping…";
     try { renderPhone(await api("/api/phone", { body: { on: $("phone-on").checked, port: PHONE.view ? PHONE.view.port : undefined } })); }
     catch (e) { $("phone-status").textContent = e.message; }
+  }
+  async function allowFirewall() {
+    $("firewall-allow").disabled = true;
+    $("firewall-status").textContent = "Windows asks for permission now…";
+    try { renderPhone(await api("/api/phone/firewall", { body: {} })); toast("Phones can reach Kelvin through Windows Firewall now."); }
+    catch (e) { $("firewall-status").textContent = e.message; }
+    $("firewall-allow").disabled = false;
   }
   async function startPairing() {
     clearInterval(PHONE.pairTimer);
@@ -2443,6 +2702,8 @@
       case "run_progress": reply.runProgress(ev); break;
       case "computer_step": reply.computerStep(ev); break;
       case "note": reply.note(ev.text); break;
+      case "condensing": reply.condensing(ev.words); break;
+      case "condensed": reply.condensed(ev); break;
       case "memory": reply.memory(ev.notes); break;
       case "review_start": reply.reviewStart(ev); break;
       case "review": reply.review(ev); break;
@@ -2603,6 +2864,8 @@
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
     queueFromState(s.queue);
     showMounted(s.mounted);
+    showHands(s.hands_on);
+    PROT.busy = s.busy;
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
   function renderAlerts(alarms) {
@@ -3227,7 +3490,7 @@
   function toggleLab(open) {
     S.labOpen = open === undefined ? !S.labOpen : open;
     $("labpanel").hidden = !S.labOpen;
-    syncScrim();
+    fitLayout();
     if (S.labOpen) pollState();
   }
 
@@ -3699,6 +3962,9 @@
     fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
+    const words = S.settings ? S.settings.answer_words : 200, length = $("answer-words"), chosen = words ? String(words) : "off";
+    if (![...length.options].some((o) => o.value === chosen)) length.append(h("option", { value: chosen }, "At most " + words + " words"));
+    length.value = chosen;
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
     $("hub-old-runs").checked = !!(S.settings && S.settings.hub_old_runs);
@@ -3820,6 +4086,7 @@
     body.local_models = $("local-models").value.trim();
     body.default_model = $("default-model").value;
     body.reviewer = $("reviewer").value;
+    body.answer_words = $("answer-words").value;
     body.instructions = $("global-instructions").value;
     body.learn = $("learn").checked ? "on" : "off";
     body.hub_old_runs = $("hub-old-runs").checked ? "on" : "off";
@@ -3913,6 +4180,7 @@
     }));
     applyModels(boot.models.groups, boot.default_model);
     initRunsPane();
+    fitLayout();
     initTerminal();
     renderChats();
     showEmpty(true);
@@ -3945,6 +4213,7 @@
     $("data-use").addEventListener("click", useDataFolder);
     $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));
     $("pair-start").addEventListener("click", startPairing);
+    $("firewall-allow").addEventListener("click", allowFirewall);
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }
       if (!e.target.closest(".msg-actions")) for (const m of document.querySelectorAll(".review-menu")) m.hidden = true;
@@ -3975,6 +4244,19 @@
     $("open-report").addEventListener("click", openReport);
     $("mount-select").addEventListener("change", mountChosen);
     $("mount-new").addEventListener("click", newDevice);
+    $("mount-protect").addEventListener("click", openProtection);
+    $("protect-add-gate").addEventListener("click", () => $("protect-gates").append(gateRow({ dielectric: "hBN",
+      drive: (PROT.opts.drives.find((d) => d.gate) || {}).key, leak: (PROT.opts.drives.find((d) => d.gate) || {}).leak })));
+    $("protect-add-limit").addEventListener("click", () => $("protect-limits").append(limitRow((PROT.opts.drives[0] || {}).key)));
+    $("protect-save").addEventListener("click", () => saveProtection(false));
+    $("protect-clear").addEventListener("click", () => saveProtection(true));
+    $("hands-on").addEventListener("click", handsOn);
+    $("hands-done").addEventListener("click", openUnlock);
+    $("hands-done-panel").addEventListener("click", openUnlock);
+    $("hands-unlock").addEventListener("click", unlock);
+    for (const c of document.querySelectorAll(".hands-check")) c.addEventListener("change", () => {
+      $("hands-unlock").disabled = ![...document.querySelectorAll(".hands-check")].every((x) => x.checked);
+    });
     $("device-add").addEventListener("click", addDevice);
     $("summary-write").addEventListener("click", writeSummary);
     $("master-update").addEventListener("click", () => updateMaster(false));

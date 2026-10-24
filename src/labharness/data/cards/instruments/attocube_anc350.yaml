@@ -1,0 +1,52 @@
+card: 1
+id: attocube/anc350
+model: attocube ANC350 closed-loop positioner controller (one axis per lab entry)
+vendor: attocube systems
+kind: positioner
+status: community
+manual: "pylablib: attocube ANC350 (Attocube.ANC350): get_position, move_to, wait_move (positions in m)"
+notes:
+  - "Address anc350://<USB index> (anc350://0 for the first). Needs pip install pylablib and attocube's ANC350 USB driver, so Kelvin run from source (pip install -e .[pylablib]): the app doesn't bring pylablib. Close Daisy first."
+  - "One lab entry per axis, with vars: {axis: 0} (0-2): entries on the same controller share one connection."
+  - "Setting the position moves the axis there with the closed loop and waits until it is within 0.1 um (60 s at most). Set its limits in the lab config to the travel your positioner and sample allow."
+identify:
+  idn: "^attocube,ANC350"
+  example: "attocube,ANC350,1"
+vars:
+  axis: { default: "0", label: "Axis (0-2)" }
+
+parameters:
+  position:
+    label: Position
+    kind: measure
+    unit: um
+    set: "SET position{axis} {value}"
+    get: "GET position{axis}"
+    description: Read from the positioner's sensor
+  target_reached:
+    label: On target
+    kind: measure
+    type: bool
+    get: "GET target_reached{axis}"
+  enabled:
+    label: Axis output
+    kind: measure
+    type: bool
+    set: "SET enabled{axis} {value}"
+    get: "GET enabled{axis}"
+  voltage:
+    label: Step amplitude
+    kind: measure
+    unit: V
+    set: "SET voltage{axis} {value}"
+    get: "GET voltage{axis}"
+    limits: [0, 70]
+  frequency:
+    label: Step frequency
+    kind: measure
+    unit: Hz
+    set: "SET frequency{axis} {value}"
+    get: "GET frequency{axis}"
+    limits: [1, 5000]
+display:
+  headline: position

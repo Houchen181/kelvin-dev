@@ -20,6 +20,10 @@ jobs:
           python-version: "3.13"
       - name: Install
         run: python -m pip install -e ".[web,desktop]" "pyinstaller>=6"
+      - name: The makers' instrument libraries (private build)
+        if: startsWith(github.ref, 'refs/tags/private-v')
+        # NI DAQ cards; PICam, Andor's spectrograph DLL and the ANC300 need no Python package
+        run: python -m pip install nidaqmx
       - name: The tag matches the version
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
@@ -60,6 +64,10 @@ jobs:
           # the Claude Code bridge is in the private build only, never in a published one
           $private = "$env:GITHUB_REF" -like "refs/tags/private-v*"
           if ($private -ne ($log -match "Claude Code bridge on")) { throw "the Claude Code bridge is in the wrong build" }
+          # the private build brings the makers' instrument libraries, and they load
+          if ($private -and -not ($log -match "instrument libraries: nidaqmx")) {
+            throw "the instrument libraries are missing from the private build"
+          }
       - name: Uninstall it; Kelvin's own data go, measurements stay
         shell: pwsh
         run: |

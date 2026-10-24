@@ -10,7 +10,7 @@ import math
 from statistics import median
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .cards import si, si_parts
+from .cards import si, si_parts, trace_x
 
 FIT_POINTS = 200
 
@@ -612,9 +612,7 @@ def _trace_series(rows: List[Dict[str, Any]], m: Dict[str, str], x_axis: Optiona
         ys = r.get(m["key"])
         if not isinstance(ys, list) or len(ys) < 6:
             continue
-        x0, x1 = r.get(m["key"] + ".axis") or (0, len(ys) - 1)
-        n = len(ys)
-        xs = [x0 + (x1 - x0) * i / (n - 1) for i in range(n)]
+        xs = trace_x(r, m["key"], len(ys))
         s = analyze_curve(xs, ys, "frequency" if m.get("x_unit") == "Hz" else "x", m["key"], m.get("x_unit", ""), m["unit"], force)
         if x_axis is not None and len(rows) > 1:
             s["group"] = "%s = %s" % (x_axis["key"], si(r.get(x_axis["key"]), x_axis.get("unit", "")))

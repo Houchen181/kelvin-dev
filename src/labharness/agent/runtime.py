@@ -5,23 +5,26 @@ agent call and a plan never talk to an instrument at the same time. The approval
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import yaml
 
-from ..cards import ParamSpec, num
+from .. import frames
+from ..cards import ParamSpec, num, trace_x
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, Envelope
 from .. import carddraft
+from .. import protection
 from ..literature import Literature
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
@@ -135,6 +138,7 @@ class LabRuntime:
         self.approver = approver
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        frames.FOLDER = self.data_dir / "frames"   # camera frames read outside a run
         self.events_path = self.data_dir / "events.jsonl"
         self.user: Optional[str] = None             # the person signed in to the portal (accounts.py), if any
         self.shared_log: Optional[Path] = None      # the lab's instrument log, everyone's events; set by the app
@@ -162,6 +166,12 @@ class LabRuntime:
         self.queue = ScanQueue(self.data_dir / "queue.json")   # scans lined up to run one after another
         self.auto_report = "both"   # after each run (in its folder) and each queue (in reports/): both, pdf, pptx, off
         self.mounted: Dict[str, Any] = self._load_mounted()   # the sample in the setup now (project, device, since)
+        # a person's hands on the sample (who, since): every drive held at safe; the app keeps it across restarts
+        self.hands: Optional[Dict[str, Any]] = None
+        self.protection_missing: List[str] = []   # the mounted device's protection names what this lab lacks
+        # the mounted device's caps that are not in the instruments yet: written when Kelvin is next idle
+        self.caps_waiting = False
+        self._apply_protection(recheck=True)
         self.attribution: Dict[str, Any] = {}       # the project of the chat whose turn this is (portal), and incognito
         # what Kelvin knows about a project (name, devices, notes, references, summary); the portal sets this
         self.project_info: Callable[[Optional[str]], Dict[str, Any]] = default_project_info
@@ -198,12 +208,9 @@ class LabRuntime:
                 for m in self.live["measures"]:
                     if m["kind"] == "trace" and isinstance(row.get(m["key"]), list):
                         ys = row[m["key"]]
-                        x0, x1 = row.get(m["key"] + ".axis") or (0, len(ys) - 1)
                         step = max(1, -(-len(ys) // 400))
-                        n = len(ys)
                         self.live["trace"] = {"key": m["key"], "unit": m["unit"], "x_unit": m.get("x_unit", ""),
-                                              "x": [x0 + (x1 - x0) * i / max(1, n - 1) for i in range(0, n, step)],
-                                              "y": ys[::step]}
+                                              "x": trace_x(row, m["key"], len(ys))[::step], "y": ys[::step]}
                 self.live["done"], self.live["eta_s"], self.live["phase"] = event["done"], event["eta_s"], "measuring"
             elif event["event"] == "phase":  # after the last point: final values, or the stop/abort steps
                 self.live["phase"], self.live["eta_s"] = event["phase"], event.get("eta_s")
@@ -241,6 +248,7 @@ class LabRuntime:
                 return fn()
             finally:
                 self.busy = None
+                self._caps_if_waiting()
                 self._refresh()
         finally:
             self.lock.release()
@@ -273,10 +281,26 @@ class LabRuntime:
                              "without asking; the rest still wait for a human")
             lines += ["ALARM: %s%s" % (a.text, " (%s)" % "; ".join(a.actions) if a.actions else "")
                       for a in self.monitor.active()]
+            if self.hands:
+                lines.append("HANDS ON THE SAMPLE: %s is handling it (since %s); every drive stays at safe until a "
+                             "person unlocks it in the Lab panel" % (self.hands.get("by"), self.hands.get("since")))
+            lines += self._protection_lines()
             lines += self._status_lines()
             lines.append("* = drive away from its safe value")
             return "\n".join(lines)
         return self._do("reading status", run)
+
+    def _protection_lines(self) -> List[str]:
+        m = self.mounted or {}
+        prot = m.get("protection") or {}
+        if not prot:
+            return []
+        out = ["mounted device %s is protected (a person set this; it can't be changed or passed): %s" % (
+            m.get("device_name"), "; ".join(protection.summary(prot, self.lab)))]
+        if self.protection_missing:
+            out.append("this lab lacks %s, named in %s's protection" % (", ".join(self.protection_missing),
+                                                                       m.get("device_name")))
+        return out
 
     def _status_lines(self) -> List[str]:
         lines = []
@@ -375,6 +399,7 @@ class LabRuntime:
                 self.gate.log.write("data_folder", by=by, moved_to=str(new),
                                     note="what stays here was not moved" if move else "earlier data stay here")
             self.data_dir = new
+            frames.FOLDER = new / "frames"
             self.queue.move_to(new / "queue.json")
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
@@ -412,11 +437,13 @@ class LabRuntime:
                 self.gate.log.write("signed_out", user=self.user)
             self.user = user
             self.data_dir = new
+            frames.FOLDER = new / "frames"
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
             self.engine.store = RunStore(new / "runs")
             self.queue = ScanQueue(new / "queue.json")
             self.mounted = self._load_mounted()
+            self._apply_protection(recheck=True)
             self.attribution = {}
             self.data_problem = problem
             with self._live_lock:
@@ -523,13 +550,15 @@ class LabRuntime:
                 plan = self._plan(plan_text)
             except PlanError as e:
                 return "invalid plan: %s" % e
-            report = self.engine.run(plan, dry_run=dry_run, meta=self._attribute(plan))
+            meta = self._attribute(plan)
+            with self._device_protection(meta) as held:
+                report = self.engine.run(plan, dry_run=dry_run, meta=meta)
             made = self._auto_report(report.run_id)
             if report.run_id:
                 summary = (report.analysis or {}).get("assessment") or report.message
                 self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
                               summary[:300])
-            lines = []
+            lines = list(held)
             if report.dry_run is not None and report.status in ("done", "aborted"):
                 lines.append(report.dry_run.message)
             lines.append(report.message)
@@ -654,24 +683,165 @@ class LabRuntime:
             return {}
 
     def mount(self, project: Optional[str], device: Dict[str, Any], by: str = "human") -> Dict[str, Any]:
-        """Record which sample is in the setup now. Every run from here on belongs to it (and to its project)."""
+        """Record which sample is in the setup now. Every run from here on belongs to it (and to its project), and
+        its protection holds (protection.py): its limits, its gates' leakage guards, and the caps written into the
+        instruments ("caps" in the answer says what was written)."""
         info = self.project_info(project)
         self.mounted = {"project": project or None, "project_name": info.get("name") or "General",
                         "device": device.get("id"), "device_name": device.get("name"),
-                        "since": datetime.now().isoformat(timespec="seconds"), "by": by}
+                        "since": datetime.now().isoformat(timespec="seconds"), "by": by,
+                        "protection": device.get("protection") or {}}
         (self.data_dir / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
-        self.gate.log.write("mount", by=by, device=self.mounted["device_name"], project=self.mounted["project_name"])
-        return self.mounted
+        self.gate.log.write("mount", by=by, device=self.mounted["device_name"], project=self.mounted["project_name"],
+                            protection=protection.summary(self.mounted["protection"]) or None)
+        self._apply_protection()
+        caps = self._write_caps(by)
+        return dict(self.mounted, caps=caps)
+
+    def protect(self, device: Dict[str, Any], by: str = "human") -> List[str]:
+        """A person changed a device's protection: if it is the mounted one, it holds from now on. Returns the caps
+        written into the instruments."""
+        if not self.mounted or self.mounted.get("device") != device.get("id"):
+            return []
+        self.mounted["protection"] = device.get("protection") or {}
+        (self.data_dir / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
+        self.gate.log.write("protection", by=by, device=self.mounted.get("device_name"),
+                            protection=protection.summary(self.mounted["protection"]) or None)
+        self._apply_protection()
+        return self._write_caps(by)
 
     def unmount(self, by: str = "human") -> None:
         if self.mounted:
             self.gate.log.write("unmount", by=by, device=self.mounted.get("device_name"),
                                 project=self.mounted.get("project_name"))
         self.mounted = {}
+        self._apply_protection()
         try:
             (self.data_dir / "mounted.json").unlink()
         except OSError:
             pass
+
+    def _apply_protection(self, recheck: bool = False) -> None:
+        """Hold this lab's instruments to the mounted device's protection, and to a person's hands-on lock.
+        recheck: other instruments (Kelvin started, another lab, another person's sample), so the caps are checked
+        and written again when Kelvin is next idle, in case an instrument was reset meanwhile."""
+        prot = (self.mounted or {}).get("protection") or {}
+        self.protection_missing = protection.apply(self.lab, prot, (self.mounted or {}).get("device_name") or "")
+        self.lab.hands_on = self.hands
+        if recheck:
+            self.caps_waiting = bool(prot)
+
+    def _write_caps(self, by: str) -> List[str]:
+        """Write the mounted device's caps into the instruments. What can't be written yet (a plan holds the
+        instruments, a source isn't at 0, an instrument is switched off) waits: Kelvin writes it when it is next
+        idle (_caps_if_waiting)."""
+        prot = (self.mounted or {}).get("protection") or {}
+        self.caps_waiting = False
+        if not prot:
+            return []
+        if not self.lock.acquire(blocking=False):
+            self.caps_waiting = True
+            return ["the instruments' own caps are written when Kelvin is idle (now %s)" % (self.busy or "busy")]
+        try:
+            with self.gate.acting_as(by):
+                lines, done = protection.write_caps(self.gate, self.lab, prot)
+            self.caps_waiting = not done
+            return lines + protection.outside(self.lab, prot)
+        except Exception as e:
+            self.caps_waiting = True
+            return ["the instruments' own caps were not written: %s" % e]
+        finally:
+            self._refresh()
+            self.lock.release()
+
+    def _caps_if_waiting(self) -> None:
+        if self.caps_waiting and self.mounted:
+            self._write_caps("sample protection")
+
+    @contextlib.contextmanager
+    def _device_protection(self, meta: Dict[str, Any]) -> Iterator[List[str]]:
+        """A plan that names another device (device: D5, on the mounted chip) is held to that device's protection
+        too, for that run: the tighter of the two holds. Yields lines saying so (none when nothing changes)."""
+        m = self.mounted or {}
+        dev: Dict[str, Any] = {}
+        if meta.get("device") and meta.get("device") != m.get("device"):
+            dev = next((d for d in self.project_info(meta.get("project")).get("devices") or []
+                        if d.get("id") == meta.get("device")), {})
+        extra = dev.get("protection") or {}
+        if not extra:
+            yield []
+            return
+        both = protection.combine(m.get("protection") or {}, extra)
+        names = [n for n in (m.get("device_name") if m.get("protection") else None, dev.get("name")) if n]
+        ranges: Dict[Tuple[str, str], Any] = {}   # the sources' ranges as they were: put back after the run
+        for inst, param, _, _ in protection.caps(self.lab, both):
+            if inst.enabled and inst.card.range_owner(param) is not None:
+                try:
+                    ranges[(inst.name, param)] = inst.read(param)
+                except Exception:
+                    pass
+        protection.apply(self.lab, both, " and ".join(names))
+        try:
+            lines, _ = protection.write_caps(self.gate, self.lab, both)
+            yield ["held to %s's protection for this run: %s" % (dev.get("name"), "; ".join(
+                protection.summary(extra, self.lab)))] + lines
+        finally:
+            self._apply_protection()
+            for (name, param), value in ranges.items():   # only while the source is at safe (the gate's rule)
+                try:
+                    if value is not None and self.lab.instruments[name].read(param) != value:
+                        self.gate.set(name, param, value)
+                except Exception:
+                    pass
+
+    def mounted_view(self) -> Optional[Dict[str, Any]]:
+        """The mounted sample with its protection in words (the Lab panel and the phone)."""
+        if not self.mounted:
+            return None
+        return dict(self.mounted, protection_lines=protection.summary(self.mounted.get("protection") or {}, self.lab),
+                    protection_missing=self.protection_missing)
+
+    def keep_hands(self, hands: Optional[Dict[str, Any]]) -> None:
+        """At start: a hands-on lock that was on when Kelvin closed is on again."""
+        self.hands = hands or None
+        self.lab.hands_on = self.hands
+
+    # ------------------------------------------------------------------ hands on the sample
+
+    def hands_on(self, by: str) -> List[str]:
+        """A person is about to touch the sample (connect it, rewire, flip a breakout box): stop what runs, bring
+        everything that applies something to the sample (sources, excitations, light, RF) to safe with its outputs
+        off, and hold every drive where it is until a person unlocks (hands_off). Temperature, field and positions
+        stay as they are. Measuring still works. Waits for a stopped plan to finish its own safe-stop steps."""
+        self.hands = {"by": by, "since": datetime.now().isoformat(timespec="seconds")}
+        self.lab.hands_on = self.hands   # at once: nothing moves away from safe from here on, even before the stop lands
+        self.stop(by)
+        with self.lock:
+            lines: List[str] = []
+            kept: List[str] = []
+            with self.gate.acting_as(by):
+                for name, inst in self.lab.instruments.items():
+                    if not inst.enabled:
+                        continue
+                    if protection.applies_to_sample(inst.card):
+                        lines += [r.message for r in self.gate.to_safe(name)]
+                    else:
+                        kept.append(name)
+            lines = lines or ["everything that reaches the sample was already at safe"]
+            if kept:
+                lines.append("kept as they are (they don't touch the sample): %s" % ", ".join(kept))
+            self.gate.log.write("hands_on", by=by, steps=lines)
+            self._refresh()
+        return lines
+
+    def hands_off(self, by: str) -> List[str]:
+        """The person is done with the sample: drives may move again (each still within limits and approvals).
+        The mounted device's caps are written into the instruments again, in case one was replaced or reset."""
+        with self.lock:
+            self.hands = None
+            self.lab.hands_on = None
+            self.gate.log.write("hands_off", by=by)
+        return self._write_caps(by)
 
     def _attribute(self, plan: Plan, project: Optional[str] = None, incognito: Optional[bool] = None,
                    unshared: Optional[bool] = None, legacy: bool = False) -> Dict[str, Any]:
@@ -952,8 +1122,9 @@ class LabRuntime:
                     if item.kind == "plan":
                         plan = self._plan(item.text)
                         meta = self._attribute(plan, item.project, item.incognito, item.unshared, item.legacy)
-                        report = self.engine.run(plan, meta=dict(meta, queue={
-                            "item": item.id, "position": position, "note": item.note}))
+                        with self._device_protection(meta):
+                            report = self.engine.run(plan, meta=dict(meta, queue={
+                                "item": item.id, "position": position, "note": item.note}))
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
@@ -966,6 +1137,7 @@ class LabRuntime:
                 return False, str(e)
             finally:
                 self.busy = None
+                self._caps_if_waiting()
                 self._refresh()
 
     def _queue_step(self, item: Item) -> Tuple[bool, str]:
@@ -999,7 +1171,7 @@ class LabRuntime:
             return e.args[0]
         if not rows:
             return "run %s has no data" % run_id
-        cols = columns or [k for k in rows[0] if not k.endswith(".axis")]
+        cols = columns or [k for k in rows[0] if not k.endswith(".axis") and not k.endswith(".x")]
         missing = [c for c in cols if c not in rows[0]]
         if missing:
             return "unknown columns %s (have: %s)" % (", ".join(missing), ", ".join(rows[0]))
@@ -1031,14 +1203,14 @@ class LabRuntime:
             return "%s is not a trace column" % column
         n = len(values)
         step = max(1, -(-n // max(2, int(max_points))))
-        axis = rows[row].get(column + ".axis")
+        axis = rows[row].get(column + ".axis") or rows[row].get(column + ".x")
         spec = self._spec(column)
         lines = ["%s row %d: %s%s" % (run_id, row, trace_summary(spec, values) if spec else "%d points" % n,
                                       "" if step == 1 else "; every %dth point shown" % step)]
         if axis:
-            x0, x1 = axis
+            xs = trace_x(rows[row], column, n)
             lines.append("x,y")
-            lines += ["%.12g,%.6g" % (x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1), values[i]) for i in range(0, n, step)]
+            lines += ["%.12g,%.6g" % (xs[i], values[i]) for i in range(0, n, step)]
         else:
             lines.append("index,y")
             lines += ["%d,%.6g" % (i, values[i]) for i in range(0, n, step)]
@@ -1106,6 +1278,8 @@ class LabRuntime:
                 return
             self.lab.switch(name, on)
             self.gate.log.write("instrument_switched", by=by, instrument=name, on=on)
+            if on:
+                self._caps_if_waiting()
             self._refresh()
 
     # ------------------------------------------------------------------ instruments on this computer
@@ -1399,7 +1573,8 @@ class LabRuntime:
         if dg is None:
             raise KeyError("run %s has not finished" % run_id)
         part = self._collector().run(run_id, self.gate.log.events())
-        files = {p.name for p in d.iterdir() if p.is_file()} | {"report." + f for f in self._formats(fmt)}
+        files = {p.name for p in d.iterdir() if p.is_file() or p.name == "frames"} | \
+            {"report." + f for f in self._formats(fmt)}
         doc = report_kinds.scan_document(part, dg, files, dg.lab or self.lab.config.name, dg.simulated)
         return self._write_doc(doc, d / "report", fmt)
 
@@ -1692,6 +1867,7 @@ class LabRuntime:
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
             self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
             self.engine.progress = self._on_progress
+            self._apply_protection(recheck=True)
             self.lab_info = dict(info)
             running = self.monitor._thread is not None
             self.monitor.stop()
@@ -1782,7 +1958,8 @@ class LabRuntime:
         return {"lab": self.lab.config.name,
                 "simulated": all(i.simulated for i in self.lab.instruments.values()),
                 "busy": self.busy, "pending": pending, "history": history, "status": status, "queue": self.queue_view(),
-                "mounted": self.mounted or None,
+                "mounted": self.mounted_view(),
+                "hands_on": self.hands,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
                 "observe_only": self.lab.config.observe_only, "setup": self.setup_status, "survey": self.last_survey,

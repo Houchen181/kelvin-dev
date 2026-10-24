@@ -57,7 +57,7 @@ python -m venv .venv
 
 ## Releasing
 
-To publish a new version: bump the version in `src/labharness/_version.py` and `pyproject.toml`, then push a tag such as `v0.3.13`. GitHub builds both apps, tests them, and publishes the release. The tag must match the version.
+To publish a new version: bump the version in `src/labharness/_version.py`, `pyproject.toml` and the README's download button (`tests/test_version.py` fails if one is left behind), then push a tag such as `v0.3.17`. GitHub builds both apps, tests them, and publishes the release. The tag must match the version.
 
 Installed Kelvins find the release by themselves (`updater.py`): twice a day they look at this repository's releases, download the installer for their channel, check it against the SHA-256 digest GitHub reports for the file, and install it when Kelvin closes (or at once with **Restart to update**). While the repository is private, they reach it through the GitHub CLI (`gh`) signed in on that computer; anonymous checks start working once it is public. On macOS Kelvin only says a new version is out and links to it.
 
@@ -90,11 +90,12 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/eventlog.py` | Append-only event log; one folder per run (plan, snapshots, data, meta) |
 | `src/labharness/sim/` | Twins that answer the card's own commands, plus a toy sample |
 | `src/labharness/agent/` | MCP server (`server.py`), plain-text tool answers (`runtime.py`), approval page (`approval.py`, `ui.html`) |
-| `src/labharness/web/` | The portal: web API (`app.py`), chat loop (`agent.py`), one module per model provider (`providers/`), chats and settings, browser UI and the logo (`static/`) |
+| `src/labharness/web/` | The portal: web API (`app.py`), chat loop (`agent.py`), short answers (`brevity.py`), one module per model provider (`providers/`), chats and settings, browser UI and the logo (`static/`) |
 | `src/labharness/data/` | Cards for the virtual lab, its lab config and a demo envelope |
 | `src/labharness/hub/` | The Kelvin hub: online accounts across labs and the work Kelvins share (`db.py`), its web server and API (`server.py`, `kelvin-hub`), and a Kelvin's side of it (`client.py`; in the portal, `web/hubsync.py`: Settings → Account → Kelvin hub, and the background sync). See [hub.md](hub.md) |
 | `src/labharness/desktop.py` | The desktop app: the portal in a native window, one copy at a time, `--self-test` |
-| `packaging/` | PyInstaller recipe (`kelvin.spec`), Windows installer (`kelvin.iss`), app icons (`make_icons.py`, `icons/`) |
+| `packaging/` | PyInstaller recipe (`kelvin.spec`), Windows installer (`kelvin.iss`), app icons (`make_icons.py`, `icons/`, and the iPhone app's) |
+| `ios/` | Kelvin for iPhone: SwiftUI app, the KelvinKit package, XcodeGen spec. See [ios.md](ios.md) |
 
 ## Brand
 

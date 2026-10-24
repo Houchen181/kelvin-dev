@@ -13,7 +13,8 @@ from starlette.testclient import TestClient  # noqa: E402
 
 from labharness.web.app import create_app  # noqa: E402
 from labharness.web.qr import QR, format_bits, rs_divisor, rs_remainder  # noqa: E402
-from labharness.web.remote import MAX_FAILURES, allowed, remote_host_ok  # noqa: E402
+from labharness.web import remote  # noqa: E402
+from labharness.web.remote import MAX_FAILURES, allowed, pairing_link, remote_host_ok  # noqa: E402
 from test_web import Scripted, parts  # noqa: E402,F401
 
 
@@ -120,7 +121,15 @@ def test_pairing_and_roles(app):
         assert phone.post("/api/pair", json={"code": r["code"]}).status_code == 403   # once only
         assert local.get("/api/devices/pairing/" + r["code"], headers=owner).json()["device"]
         ctl = {"X-Kelvin-Token": paired["token"]}
-        assert phone.get("/api/me", headers=ctl).json() == {"role": "control", "name": "Ana's phone", "lab": "Virtual Lab"}
+        me = phone.get("/api/me", headers=ctl).json()
+        assert {k: me[k] for k in ("role", "name", "lab", "api")} == \
+            {"role": "control", "name": "Ana's phone", "lab": "Virtual Lab", "api": 1}
+        assert me["computer"] == socket.gethostname() and me["version"]
+        assert all(u.startswith("http://") and u.endswith(":8771") for u in me["addresses"])
+        assert [r["url"] for r in me["routes"]] == me["addresses"]
+        assert {r["kind"] for r in me["routes"]} <= {"tailscale", "network", "public"}
+        assert "computer" not in local.get("/api/me", headers=owner).json()   # only a paired app needs it
+        assert phone.post("/api/phone/firewall", json={}, headers=ctl).status_code == 403   # this computer only
         assert phone.get("/api/state", headers=ctl).status_code == 200
         assert phone.get("/api/chats", headers=ctl).status_code == 200
         denied = phone.post("/api/settings", json={"learn": "off"}, headers=ctl)
@@ -133,6 +142,8 @@ def test_pairing_and_roles(app):
         assert phone.post("/api/approvals/r1", json={"approve": True}, headers=watch).status_code == 403
         assert phone.post("/api/approvals/r1", json={"approve": False}, headers=watch).status_code == 409   # no such request
         assert phone.post("/api/runs/stop", json={}, headers=watch).status_code == 200
+        assert phone.get("/api/runs/nope/files/report.pdf", headers=watch).status_code == 404   # allowed; no such run
+        assert phone.post("/api/runs/nope/files/report.pdf/open", json={}, headers=watch).status_code == 403
 
         view = local.get("/api/phone", headers=owner).json()
         assert [(d["name"], d["role"]) for d in view["devices"]] == [("Ana's phone", "control"), ("Lab tablet", "watch")]
@@ -195,3 +206,56 @@ def test_the_network_listener_starts_and_stops(app):
         with pytest.raises(urllib.error.URLError):
             urllib.request.urlopen(base + "/m", timeout=3)
         assert local.post("/api/phone", json={"on": True, "port": 80}, headers=owner).status_code == 400
+
+
+# ------------------------------------------------------------------ reaching the computer
+
+class FakeSocket:
+    def __init__(self, *a):
+        pass
+
+    def connect(self, where):
+        pass
+
+    def getsockname(self):
+        return ("100.103.144.14", 50000)        # the default route: Xfinity Wi-Fi hands out 100.64.0.0/10 addresses
+
+    def close(self):
+        pass
+
+
+def test_a_carrier_network_is_not_tailscale(monkeypatch):
+    monkeypatch.setattr(remote.socket, "socket", FakeSocket)
+    monkeypatch.setattr(remote.socket, "getaddrinfo", lambda *a: [
+        (2, 1, 6, "", (ip, 0)) for ip in ("100.103.144.14", "100.101.7.9", "192.168.1.20", "127.0.0.1", "169.254.3.4")])
+    found = remote.addresses(8771)
+    assert [(a["ip"], a["kind"]) for a in found] == [
+        ("100.101.7.9", "tailscale"), ("100.103.144.14", "network"), ("192.168.1.20", "network")]
+    assert found[0]["url"] == "http://100.101.7.9:8771"
+
+
+def test_the_pairing_code_carries_every_address():
+    link = pairing_link(["http://100.101.7.9:8771", "http://192.168.1.20:8771"], "042137")
+    assert link == "http://100.101.7.9:8771/pair#042137&also=192.168.1.20:8771"
+    assert read_qr(QR(link))[0] == link
+    many = ["http://100.101.%d.200:8771" % i for i in range(10)]
+    full = pairing_link(many, "042137")
+    assert len(full) <= remote.QR_BYTES and full.startswith(many[0] + "/pair#042137&also=") and QR(full)
+    assert pairing_link(["http://192.168.1.20:8771"], "042137") == "http://192.168.1.20:8771/pair#042137"
+
+
+def test_letting_phones_through_the_firewall(app, monkeypatch):
+    guard, settings = app
+    owner = {"X-Kelvin-Token": settings.access_key}
+    monkeypatch.setattr(remote.sys, "platform", "linux")
+    assert remote.firewall_state() is None and remote.allow_through_firewall(8771, "Kelvin.exe")[0] is False
+    asked = []
+    monkeypatch.setattr("labharness.web.app.allow_through_firewall",
+                        lambda port, program: asked.append(port) or (len(asked) > 1, "declined" if len(asked) == 1 else "ok"))
+    with TestClient(guard) as local:
+        assert local.post("/api/phone/firewall", json={}, headers=owner).status_code == 400   # phone access is off
+        guard.remote.port = 8771
+        r = local.post("/api/phone/firewall", json={}, headers=owner)
+        assert r.status_code == 409 and r.json()["error"] == "declined"
+        r = local.post("/api/phone/firewall", json={}, headers=owner)
+        assert r.status_code == 200 and r.json()["listening"] and asked == [8771, 8771]

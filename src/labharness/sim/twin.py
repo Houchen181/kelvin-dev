@@ -112,7 +112,7 @@ class Twin:
                 v = next(iter(spec.values or {"": ""}))
             elif spec.type == "trace":
                 v = []
-            elif spec.type == "str":
+            elif spec.type in ("str", "image"):
                 v = ""
             else:
                 v = spec.limits[0] if spec.limits and spec.limits[0] > 0 else 0.0

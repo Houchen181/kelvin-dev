@@ -1,0 +1,63 @@
+card: 1
+id: pi/gcs-piezo
+model: Physik Instrumente (PI) piezo scanner controller with GCS commands (E-727, E-709, E-712, E-754, E-517...; one axis per lab entry)
+vendor: Physik Instrumente (PI)
+kind: positioner
+status: community
+manual: "PI General Command Set (GCS 2.0): MOV, MOV?, POS?, ONT?, SVO, SVO?, VEL, VEL?, ERR?"
+notes:
+  - "Over the network: TCPIP0::<ip>::50000::SOCKET. Over RS-232 or the USB serial port: the controller's baud rate (often 115200; set connection.baud_rate). Close PIMikroMove first."
+  - "One lab entry per axis, with vars: {axis: '1'} (the controller's axis name: 1, 2, 3 or A, B...)."
+  - "Positions are in the stage's units (um for most piezo stages). Moves need the servo on (closed loop); set position limits in the lab config to the travel your stage and sample allow."
+identify:
+  idn: "Physik Instrumente"
+  example: "(c)2015 Physik Instrumente (PI) GmbH & Co. KG, E-727, 0115032209, 01.004"
+connection: { read_termination: "\n", write_termination: "\n", timeout_ms: 5000 }
+error_query: "ERR?"
+vars:
+  axis: { default: "1", label: "Axis name (1, 2, 3 or A, B...)" }
+
+parameters:
+  position:
+    label: Target position
+    kind: measure
+    unit: um
+    set: "MOV {axis} {value}"
+    get: "MOV? {axis}"
+    parse: '=\s*([-+0-9.eE]+)'
+    ramp: instrument
+    readback: position_actual
+    tol: 0.01
+    timeout: 60
+    rate_param: velocity
+    description: Where the closed loop takes the axis; moving it is part of the measurement
+  position_actual:
+    label: Position
+    kind: measure
+    unit: um
+    get: "POS? {axis}"
+    parse: '=\s*([-+0-9.eE]+)'
+  on_target:
+    label: On target
+    kind: measure
+    type: bool
+    get: "ONT? {axis}"
+    parse: '=\s*([01])'
+  servo:
+    label: Servo (closed loop)
+    kind: measure
+    type: bool
+    set: "SVO {axis} {value}"
+    get: "SVO? {axis}"
+    parse: '=\s*([01])'
+  velocity:
+    label: Velocity
+    kind: measure
+    unit: um/s
+    set: "VEL {axis} {value}"
+    get: "VEL? {axis}"
+    parse: '=\s*([-+0-9.eE]+)'
+display:
+  headline: position_actual
+raw:
+  blocked: ["WPA", "RPA", "SPA", "SEP", "CCL", "ADD", "DEL", "IFS", "IFC", "WGO", "RST"]

@@ -1,0 +1,104 @@
+card: 1
+id: princeton/picam
+model: Teledyne Princeton Instruments camera through PICam (PyLoN, PIXIS, ProEM, BLAZE, KURO, SOPHIA)
+vendor: Teledyne Princeton Instruments
+kind: camera
+status: community
+manual: "PICam Programmer's Manual: Picam_OpenCamera, Picam_Acquire, parameters ExposureTime (ms), SensorTemperatureReading / SetPoint / Status, AdcSpeed, AdcAnalogGain, ShutterTimingMode, Rois"
+notes:
+  - "Address picam://<serial> (picam:// for the first). Needs Princeton Instruments' PICam (or LightField, which installs it); Kelvin calls Picam.dll directly, no Python package. Close LightField first: one program at a time."
+  - "PICam keeps a camera's settings on the computer: when a program opens it, they start from PICam's values, and the first acquisition sends them to the camera (LightField works the same way). Kelvin itself sets nothing until asked."
+  - "A PyLoN is cooled with liquid nitrogen: watch temperature and temperature_status (locked once it has reached the setpoint) before measuring."
+  - "Spectrum sums the frame's rows for each column: with the region of interest binned to one row on the chip (roi: x,width,1,y,height,height), it is exactly that row, read out with the lowest noise. Its x axis is the column; the spectrograph's calibration turns columns into wavelengths."
+  - "A frame is kept as a .npy file in the run's frames/ folder. Not yet tried on a camera: watch the first runs."
+identify:
+  idn: "^Princeton Instruments,"
+  example: "Princeton Instruments,PyLoN 400BR eXcelon,1234567"
+
+parameters:
+  frame:
+    label: Frame
+    kind: measure
+    type: image
+    get: "GET frame"
+  spectrum:
+    label: Spectrum (rows summed)
+    kind: measure
+    type: trace
+    unit: counts
+    get: "GET spectrum"
+  mean:
+    label: Mean
+    kind: measure
+    unit: counts
+    get: "GET mean"
+    acquires: true
+  max:
+    label: Max
+    kind: measure
+    unit: counts
+    get: "GET max"
+    acquires: true
+  sum:
+    label: Sum
+    kind: measure
+    unit: counts
+    get: "GET sum"
+    acquires: true
+  exposure:
+    label: Exposure
+    kind: measure
+    unit: s
+    set: "SET exposure {value}"
+    get: "GET exposure"
+    limits: [0, 3600]
+  temperature:
+    label: Sensor temperature
+    kind: measure
+    unit: C
+    get: "GET temperature"
+  temperature_status:
+    label: Temperature
+    kind: measure
+    type: str
+    get: "GET temperature_status"
+    description: locked once the sensor holds its setpoint
+  setpoint:
+    label: Temperature setpoint
+    kind: measure
+    unit: C
+    set: "SET setpoint {value}"
+    get: "GET setpoint"
+    limits: [-130, 30]
+  adc_speed:
+    label: Readout speed
+    kind: measure
+    unit: MHz
+    set: "SET adc_speed {value}"
+    get: "GET adc_speed"
+    limits: [0.001, 100]
+    description: Slower readout, lower noise; the camera offers a few speeds
+  adc_gain:
+    label: Analog gain
+    kind: measure
+    type: enum
+    values: { low: low, medium: medium, high: high }
+    set: "SET adc_gain {value}"
+    get: "GET adc_gain"
+  shutter:
+    label: Shutter
+    kind: measure
+    type: enum
+    values: { normal: normal, closed: closed, open: open }
+    set: "SET shutter {value}"
+    get: "GET shutter"
+    description: normal opens it for each exposure
+  roi:
+    label: Region of interest
+    kind: measure
+    type: str
+    set: "SET roi {value}"
+    get: "GET roi"
+    description: x,width,x_binning,y,height,y_binning in pixels; y_binning = height bins the whole chip into one row
+display:
+  headline: temperature

@@ -11,9 +11,9 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 | Measure / configure | Runs immediately and is logged |
 | Drive toward safe | Runs, ramped at the lab's rate |
 | Drive away from safe | Limits and interlocks are checked, then a human is asked (unless the project envelope, an approved plan or auto mode covers it). The change is ramped while guard readings are watched, and it goes back to safe if one trips |
-| Beyond limits, or a blocked command | Refused |
+| Beyond the lab's limits or the mounted device's, or a blocked command | Refused |
 
-- Raw strings are matched against the card. A raw string that sets a drive is treated as a drive. One that touches a drive's command family but can't be parsed is sent to a human. Blocked and reset families come from the card.
+- Raw strings are matched against the card. A raw string that sets a drive is treated as a drive, and one that changes a source's range follows the range rule below. One that touches a drive's command family but can't be parsed is sent to a human. Blocked and reset families come from the card.
 - A plan is approved once as a range (if it drives the sample) and then run. Its caution comes from the limits, the approval, ramps and guard readings, so it isn't dry-run first. A dry run on twins is there when someone asks for one (`simulate_plan`, or `dry_run` on a run or a queue), and in auto mode (below).
 - Stopping a plan (the Stop button, or the agent's own abort) runs its `on_abort` steps. By default, every drive the plan touched goes back to safe, or holds where the lab config's `safe_actions` says to hold. A guard trip sends that drive back to safe.
 - Approvals come from an `Approver`, a human-facing object the agent never sees.
@@ -52,6 +52,25 @@ instruments:
   laser:
     auto: never                     # a person approves every change on this instrument
 ```
+
+## Protecting the sample
+
+A finished device (a 2D heterostructure, a nanowire, a fragile flake) is often worth more than the setup. Most are lost to the same few accidents: a gate pushed past its dielectric's breakdown, a ramp that goes on while the leakage climbs, a spike when a source changes range or switches its output under bias, and a discharge while someone rewires. Kelvin guards against each.
+
+**Each device's own limits.** Mount the device in the Lab panel (**Sample**) and press **Protect this device…**. For each gate, give its dielectric and thickness: the limit is 0.3 V/nm for hBN and SiO₂ and 0.2 V/nm for Al₂O₃ and HfO₂, well below breakdown, unless you type your own. Add whatever else the sample can't take, such as a bias current or a laser power. While the device is mounted:
+- The tighter of its limits and the lab's holds. No approval, envelope or auto mode passes it, and a refusal names the device.
+- Each gate ramps no faster than its rate. It stops and goes back to 0 once its leakage reading passes its limit (1 nA unless you set another).
+- The source itself is capped where its card allows. Its range is fixed just above the limit with autorange off, and its current limit (compliance) is 10 times the leakage limit, so a breakdown can't pass more. These caps are written into the instrument, so they hold even if Kelvin or the computer stops. They are limits too: nothing raises them while the device is mounted. A cap that can't be written yet waits and is written as soon as it can: when the source is back at 0, the instrument is switched on, or the running plan ends.
+- A plan that names another device on the same chip (`device: D5`) is held to both devices' limits for that run.
+- Mounting a device, or changing its protection, while a drive sits outside the new limits says so. That drive may then only move back within them, or to safe.
+
+Only a person sets or changes a device's protection. Kelvin reads it (the lab status shows it), and while a protected device is mounted it can't change what is mounted.
+
+**No switching glitches.** A source's range, or its autorange switch, changes only while its level is at safe. The gate refuses it otherwise, whether it comes from a plan, the agent or a raw command. Outputs already switch cleanly: a drive is parked at safe before its output switches on, and ramped to safe before it switches off.
+
+**Hands on the sample.** Before you touch the sample (connect it, rewire, flip a breakout box), press **Hands on the sample** in the Lab panel or on your phone. Kelvin stops what runs and brings everything that applies something to the sample (sources, excitations, light, RF) to safe with its outputs off. Then every drive stays at safe until a person unlocks. Temperature, field and positions stay as they are, and Kelvin can still read and measure. The lock outlasts a restart of Kelvin. To unlock, choose the sample that is in the setup now and confirm it is wired as the next measurement needs and nobody is touching it; its protection holds from that moment. Any paired phone can lock; only one that can approve can unlock.
+
+A source's card names its range and current limit on its level (see [instruments.md](instruments.md#writing-a-card)).
 
 ## Watches and notifications
 

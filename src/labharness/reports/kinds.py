@@ -21,7 +21,8 @@ from .document import Document, Section
 from .model import RunPart
 
 # what the scan report points to for everything it leaves out, in this order
-FILE_NOTES = {"data.csv": "every point", "conditions.csv": "every instrument setting, at the start and the end",
+FILE_NOTES = {"data.csv": "every point", "frames": "each camera frame, as .npy",
+              "conditions.csv": "every instrument setting, at the start and the end",
               "plan.yaml": "the plan as run", "analysis.json": "the fits in full"}
 
 

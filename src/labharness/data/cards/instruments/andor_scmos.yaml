@@ -1,0 +1,64 @@
+card: 1
+id: andor/scmos
+model: Andor sCMOS camera (Zyla, Neo, Sona, Marana) through Andor SDK3
+vendor: Andor (Oxford Instruments)
+kind: camera
+status: draft
+manual: "Andor SDK3 (pyAndorSDK3): AndorSDK3, GetCamera, ExposureTime, SensorTemperature, SensorCooling, acquire"
+notes:
+  - "Address andor://<index>?sdk=3 (andor://0?sdk=3 for the first). Needs Andor's SDK3 and its pyAndorSDK3 (pip install it from the SDK's Python folder). Close Solis first."
+  - "Draft: written from Andor's SDK3 Python interface without a camera at hand. Check each reading against Solis before relying on it, then mark it reviewed."
+  - "Connecting opens the camera and sets nothing. A frame is kept as a .npy file in the run's frames/ folder."
+identify:
+  idn: "^Andor,(Zyla|Neo|Sona|Marana|sCMOS)"
+  example: "Andor,ZYLA-5.5-USB3,VSC-01234"
+
+parameters:
+  frame:
+    label: Frame
+    kind: measure
+    type: image
+    get: "GET frame"
+  mean:
+    label: Mean
+    kind: measure
+    unit: counts
+    get: "GET mean"
+    acquires: true
+  max:
+    label: Max
+    kind: measure
+    unit: counts
+    get: "GET max"
+    acquires: true
+  sum:
+    label: Sum
+    kind: measure
+    unit: counts
+    get: "GET sum"
+    acquires: true
+  exposure:
+    label: Exposure
+    kind: measure
+    unit: s
+    set: "SET exposure {value}"
+    get: "GET exposure"
+    limits: [0.00001, 30]
+  temperature:
+    label: Sensor temperature
+    kind: measure
+    unit: C
+    get: "GET temperature"
+  temperature_status:
+    label: Cooling
+    kind: measure
+    type: str
+    get: "GET temperature_status"
+  cooler:
+    label: Sensor cooling
+    kind: measure
+    type: bool
+    set: "SET cooler {value}"
+    get: "GET cooler"
+display:
+  headline: temperature

@@ -26,6 +26,25 @@ parameters:
     ramp: gate
     max_rate: 10
     ramp_step: 0.05
+    source_range: { param: V_range, auto: V_autorange, steps: [0.2, 2, 20, 200] }
+    current_limit: compliance_I
+  V_range:
+    label: Source range
+    kind: measure
+    unit: V
+    set: ":SOURce1:VOLTage:RANGe {value}"
+    get: ":SOURce1:VOLTage:RANGe?"
+    limits: [0.2, 200]
+    default: 20
+    description: The source's output range. Kelvin changes it only while V is at 0, and fixes it just above a mounted device's limit.
+  V_autorange:
+    label: Source autorange
+    kind: measure
+    type: bool
+    set: ":SOURce1:VOLTage:RANGe:AUTO {value}"
+    get: ":SOURce1:VOLTage:RANGe:AUTO?"
+    default: on
+    description: Lets the source pick its own range. A range change under bias can glitch the output, so a mounted device's protection keeps it off.
   compliance_I:
     label: Current compliance
     applies_when: output

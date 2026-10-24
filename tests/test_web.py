@@ -471,6 +471,7 @@ def test_incognito_is_offered_in_every_chat():
 def test_incognito_uses_and_keeps_no_memory(parts):
     _, settings, store = parts
     from labharness.web.agent import INCOGNITO, SYSTEM
+    from labharness.web.brevity import RULE
     p = store.create_project("Alpha")
     store.add_note(p["id"], "ALPHA-NOTE: sample is fragile", "quirk")
     store.remember("global", "Give fields in tesla", "preference")
@@ -483,7 +484,7 @@ def test_incognito_uses_and_keeps_no_memory(parts):
         chat = client.post("/api/chats", json={"model": "scripted:m1", "incognito": True}, headers=headers).json()
         assert chat["incognito"] is True and chat["title"] == "Incognito chat"
         events = stream_turn(client, headers, chat["id"], "what is a lock-in amplifier?", "scripted:m1")
-        assert bot.systems[-1] == SYSTEM + "\n\n" + INCOGNITO      # no instructions, no notes
+        assert bot.systems[-1] == "\n\n".join([SYSTEM, RULE.format(words=200), INCOGNITO])   # no instructions, no notes
         assert "remember" not in bot.tool_names[-1] and "set_value" in bot.tool_names[-1]
         assert not any(e["type"] == "memory" for e in events) and "<memory>" not in bot.prompts[-1][-1]
         events = stream_turn(client, headers, chat["id"], "remember that I like tesla", "scripted:m1")

@@ -149,7 +149,7 @@ def test_raw_drive_is_treated_as_a_drive(lab, make_gate):
 
 def test_raw_command_touching_a_drive_family_asks(make_gate):
     gate, approver = make_gate([False])
-    r = gate.raw("smu", "SOUR:VOLT:RANG 20")
+    r = gate.raw("smu", "SOUR:VOLT:PROT 20")
     assert r.action == "declined" and "touches drive V" in str(approver.requests[0])
 
 

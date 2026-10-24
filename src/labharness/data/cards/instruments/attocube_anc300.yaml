@@ -1,0 +1,67 @@
+card: 1
+id: attocube/anc300
+model: attocube ANC300 piezo positioner and scanner controller (one axis per lab entry)
+vendor: attocube systems
+kind: positioner
+status: community
+manual: "ANC300 user manual, command reference: getm/setm, getv/setv, getf/setf, geta/seta, geto, stepu/stepd, stepw"
+notes:
+  - "Address anc300://COM5 (USB or RS-232, 38400 baud) or anc300://<ip> over the network (TCP 7230; add ?pwd=... if its password isn't 123456). Kelvin speaks its command line directly, no Python package. Close Daisy or other software that holds the port."
+  - "One lab entry per axis, with vars: {axis: 1} (1-7): entries on the same controller share one connection."
+  - "Open loop: the controller can't say where an axis is. Steps counts the steps Kelvin made since it connected; setting it steps by the difference and waits until the axis stops."
+  - "Offset is the DC voltage on the piezo for fine scanning (modes offs, stp+, stp-; the ANM150 has none). It is ramped and asks before it rises; tighten its limit in the lab config to what your positioner takes at your temperature."
+identify:
+  idn: "^attocube,ANC300"
+  example: "attocube,ANC300,ANC300B-C-1234"
+vars:
+  axis: { default: "1", label: "Axis (1-7)" }
+
+parameters:
+  mode:
+    label: Mode
+    kind: measure
+    type: enum
+    values: { gnd: gnd, stp: stp, cap: cap, offs: offs, "stp+": "stp+", "stp-": "stp-", "off": "off", "in": "in", inp: inp }
+    set: "SET mode{axis} {value}"
+    get: "GET mode{axis}"
+    description: gnd grounds the axis; stp steps; offs holds the DC offset; stp+ and stp- step on top of the offset
+  steps:
+    label: Steps
+    kind: measure
+    type: int
+    set: "SET steps{axis} {value}"
+    get: "GET steps{axis}"
+    limits: [-10000000, 10000000]
+    description: "Steps made since Kelvin connected (open loop: a count, not a position)"
+  voltage:
+    label: Step amplitude
+    kind: measure
+    unit: V
+    set: "SET voltage{axis} {value}"
+    get: "GET voltage{axis}"
+    limits: [0, 150]
+    description: Use 30-60 V at room temperature, more when cold, as your positioner's manual says
+  frequency:
+    label: Step frequency
+    kind: measure
+    unit: Hz
+    set: "SET frequency{axis} {value}"
+    get: "GET frequency{axis}"
+    limits: [1, 10000]
+  offset:
+    label: DC offset
+    kind: drive
+    unit: V
+    set: "SET offset{axis} {value}"
+    get: "GET offset{axis}"
+    limits: [0, 150]
+    safe: 0
+    ramp: gate
+    max_rate: 5
+  output:
+    label: Output voltage
+    kind: measure
+    unit: V
+    get: "GET output{axis}"
+display:
+  headline: mode

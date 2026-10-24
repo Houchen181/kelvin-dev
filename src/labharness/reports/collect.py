@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 
 import yaml
 
-from ..cards import ParamSpec, num, si
+from ..cards import ParamSpec, num, si, trace_x
 from .chart import PALETTE, Chart, Series, Table
 from .model import Report, RunPart
 
@@ -181,7 +181,8 @@ class Collector:
         if axes and len(rows) > 1:
             xa = axes[-1]
             outer = axes[0] if len(axes) > 1 else None
-            for m in [m for m in measures if m.get("kind") != "trace"]:
+            for m in [m for m in measures if m.get("kind") not in ("trace", "image")   # frames are files
+                      and any(_numbers(r.get(m["key"])) for r in rows)]:
                 groups: Dict[Any, List[Dict[str, Any]]] = {}
                 for r in rows:
                     groups.setdefault(r.get(outer["key"]) if outer else None, []).append(r)
@@ -208,9 +209,7 @@ class Collector:
             if not last:
                 continue
             ys = last[m["key"]]
-            x0, x1 = last.get(m["key"] + ".axis") or (0, len(ys) - 1)
-            n = len(ys)
-            xs = [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(n)]
+            xs = trace_x(last, m["key"], len(ys))
             series = [Series(m["key"], xs, ys)]
             fit = next((f for f in fits if f["y"] == m["key"]), None)
             if fit:

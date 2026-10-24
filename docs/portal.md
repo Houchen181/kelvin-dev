@@ -45,6 +45,10 @@ Once a computer knows the [Kelvin hub](hub.md) (`account_hub` in `~/Kelvin/setti
   - **Which models:** Kelvin lists the newest models that can call tools (it needs tools), or the ones you name.
   - **OpenCode:** only its Chat Completions models are listed, because its Claude, GPT and Gemini models use other formats.
   - **Security:** keys can also come from environment variables such as `OPENROUTER_API_KEY`. Services on the internet need https.
+- **Short answers:** Kelvin keeps answers under 200 words, so you can judge one at a glance. Code and plans don't count.
+  - **Condensed:** an answer that still runs longer is condensed by the same model. Every number, unit, run ID, warning and question stays; background and restatements go. **Full answer** shows the whole one, and Kelvin keeps both.
+  - **Kept whole:** when you asked for the length (a full derivation, every step, a whole document), the answer stays long, with a note saying why.
+  - **Your choice:** Settings → Models → **Answer length**: 100, 200 or 400 words, or any length.
 - **Projects:** The sidebar groups conversations into projects, for example one per sample or experiment. Make a project with **+**, start a chat inside it with its **+**, and move a conversation with its **⋯** menu or by dragging it onto a project. Deleting a project keeps its conversations.
 - **Memory:** Kelvin learns from conversations, but keeps three levels that never mix:
   - **You, in every chat:** your instructions and the preferences and conventions Kelvin kept, such as units or how careful to be (Settings → Memory).
@@ -78,7 +82,7 @@ Once a computer knows the [Kelvin hub](hub.md) (`account_hub` in `~/Kelvin/setti
   - **Limits:** the reviewer never gets tools, so it can't touch the lab. Its advice doesn't replace the safety gate's limits or approvals. A model from another company gives a more independent view.
 - **Conversation:** Answers stream in Markdown. Each tool call is a step you can expand, and anything that drives the sample harder appears as an **Approve / Decline** card inside the conversation.
 - **Runs pane:** Measurements get their own pane beside the chat, like a terminal pane, with one tab per run. It opens when a plan starts, including plans started by another agent. While the plan runs, the pane shows a progress bar, the points done, the time left and plots that grow point by point, plus a Stop button. When the run ends, Kelvin analyses the data. The conversation gets a short card with the assessment and the next step. The pane shows the key results with uncertainties, buttons for the run's report, slides and CSV data (made automatically), the plots with their fits (hover for values), the table and the plan. Drag the pane's edge to resize it; open earlier runs from its clock button.
-- **Lab panel:** Shows the **Sample** mounted now (every scan is filed under it; change it when you change samples), live instrument values (drives away from safe are highlighted) and the activity log.
+- **Lab panel:** Shows the **Sample** mounted now (every scan is filed under it; change it when you change samples), its protection (**Protect this device…**: its gate limits, leakage stop and other limits, see [safety.md](safety.md#protecting-the-sample)), **Hands on the sample** (stops what runs and holds everything that reaches the sample at safe until you unlock), live instrument values (drives away from safe are highlighted) and the activity log.
   - **On/off switch on each instrument:** switch off the instruments that are not part of this experiment. Kelvin then sends a switched-off instrument nothing at all: no command, no reading, no health check, no alarm watch, no going to safe. Commands and plans that need it are refused and say why. The switch is kept for that lab, for everyone, until someone switches it back on, and the activity log records who switched it. Switching off frees a VISA instrument for other programs (Kelvin closes its session, which sends the instrument nothing); a driver connection is set aside unclosed, because closing some (pulse generators) would send a stop. Not while a plan or the queue runs.
 - **Safety:** Kelvin uses the same MCP tools and safety gate as external agents, so it has the same rules and no extra power. Only one conversation drives the lab at a time; Stop ends the current answer and any ramp.
 
@@ -115,7 +119,18 @@ Check on a run from the coffee room, or answer an approval from home. Phone acce
    - **Control:** also chat with Kelvin and approve requests.
 3. On the phone, scan the QR code, or open the address and type the 6-digit code. The code works once, for 10 minutes, and repeated wrong codes lock pairing for a while.
 
+**If the phone can't reach Kelvin:** it must be on the same Wi-Fi, and the computer's firewall must let it in. On Windows, press **Let phones through** in Settings → Phone: Windows asks you to allow it. Many university, housing and hotel Wi-Fi networks keep devices apart; on those, install Tailscale on both and pair again. The QR code holds every address Kelvin has, and the iPhone app tries each.
+
 The phone then opens Kelvin's phone page: alarms with **Got it**, requests with **Approve** (control) or **Decline**, the run in progress with its progress and **Stop**, the instruments, and recent notices. A control phone can also open the full portal.
+
+**Kelvin for iPhone** does the same as a native app, and more. Pair it by scanning the same QR code, or by typing the address and code. It can be paired with several Kelvin computers, keeps each one's token in the iPhone's Keychain, and tries the address that worked last first and then the others, so it moves between the lab network and Tailscale by itself. Its tabs:
+
+- **Lab:** alarms, requests waiting for you, the run in progress with a live plot and **Stop**, the instruments (drives not at their safe value in orange), recent notices.
+- **Chat** (control phones): your conversations, a new or incognito chat, the answer as it arrives with Kelvin's steps, and requests to approve right there. Tap the microphone to talk instead of typing: the iPhone turns your words into text itself, the audio never leaves it, and you check the message before sending.
+- **Runs:** recent runs with their plots, and their report and data to open on the phone.
+- **Computers:** switch between computers, pair another, unpair.
+
+Without a lab computer at hand, **Try a demo lab** shows a made-up one inside the app. The app tells you about new requests and alarms while it is open. For alerts while it is closed, add an ntfy topic under Notifications. Building the app: [ios.md](ios.md).
 
 Settings, instruments, the lab config, the approval mode and pairing work only on the Kelvin computer. Remove a phone in Settings, or with **Forget this phone** on the phone itself.
 

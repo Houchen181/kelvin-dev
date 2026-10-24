@@ -1,0 +1,115 @@
+card: 1
+id: ni/daqmx
+model: National Instruments DAQ card (USB-600x, USB-62xx, PCIe/PXIe-63xx, cDAQ) through NI-DAQmx
+vendor: National Instruments
+kind: daq
+status: community
+manual: "NI-DAQmx Python API (nidaqmx): Task, ai_channels, ao_channels, di/do_channels, ci_channels"
+notes:
+  - "Address nidaq://Dev1 (the device name NI MAX shows); add ?terminal=rse (or nrse, diff, pseudodiff) and &range=10 for the analog inputs. Needs NI's DAQmx driver and pip install nidaqmx."
+  - "Analog and digital outputs can't be read back through NI-DAQmx: Kelvin knows an output once it has set it. Until then setting it to 0 (off) always goes ahead, any other value asks you, and a sweep starts from 0."
+  - "This card has the channels nearly every NI multifunction device has: ai0-ai3, ao0-ao1, port0 lines 0-1 as outputs, lines 2-3 as inputs, and counter 0. Add more by copying a parameter (ai4: GET ai4)."
+identify:
+  idn: "^National Instruments,"
+  example: "National Instruments,USB-6001,1F2A3B4"
+
+parameters:
+  ai0:
+    label: Analog in 0
+    kind: measure
+    unit: V
+    get: "GET ai0"
+  ai1:
+    label: Analog in 1
+    kind: measure
+    unit: V
+    get: "GET ai1"
+  ai2:
+    label: Analog in 2
+    kind: measure
+    unit: V
+    get: "GET ai2"
+  ai3:
+    label: Analog in 3
+    kind: measure
+    unit: V
+    get: "GET ai3"
+  ao0:
+    label: Analog out 0
+    kind: drive
+    unit: V
+    set: "SET ao0 {value}"
+    limits: [-10, 10]
+    safe: 0
+    ramp: gate
+    max_rate: 1
+    description: An output voltage, e.g. a gate or a piezo; it holds its value until set again
+  ao1:
+    label: Analog out 1
+    kind: drive
+    unit: V
+    set: "SET ao1 {value}"
+    limits: [-10, 10]
+    safe: 0
+    ramp: gate
+    max_rate: 1
+  do0:
+    label: Digital out 0
+    kind: drive
+    type: bool
+    set: "SET do0 {value}"
+    safe: off
+    description: port0/line0; often a shutter or a laser's enable line
+  do1:
+    label: Digital out 1
+    kind: drive
+    type: bool
+    set: "SET do1 {value}"
+    safe: off
+    description: port0/line1
+  di2:
+    label: Digital in 2
+    kind: measure
+    type: bool
+    get: "GET di2"
+    description: port0/line2
+  di3:
+    label: Digital in 3
+    kind: measure
+    type: bool
+    get: "GET di3"
+    description: port0/line3
+  ctr0:
+    label: Counter 0 rate
+    kind: measure
+    unit: counts/s
+    get: "GET ctr0"
+    acquires: true
+    description: Edges on counter 0's input, counted for the integration time
+  samples:
+    label: Samples averaged
+    kind: measure
+    type: int
+    set: "SET samples {value}"
+    get: "GET samples"
+    limits: [1, 1000000]
+    default: 1
+    description: Each analog reading averages this many samples
+  rate:
+    label: Sample rate
+    kind: measure
+    unit: Hz
+    set: "SET rate {value}"
+    get: "GET rate"
+    limits: [1, 2000000]
+    default: 1000
+  integration:
+    label: Counting time
+    kind: measure
+    unit: s
+    set: "SET integration {value}"
+    get: "GET integration"
+    limits: [0.001, 60]
+    default: 0.1
+display:
+  headline: ai0

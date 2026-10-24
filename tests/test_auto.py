@@ -73,7 +73,7 @@ def test_limits_interlocks_and_raw_families_are_unchanged(lab, make_gate):
     assert gate.set("smu", "V", 20).action == "refused"                   # beyond the lab limit
     lab.instrument("tc").backend.load_state({"T_sample": 50.0})
     assert gate.set("magnet", "B", 0.2).action == "refused"               # interlock: sample too warm
-    assert gate.raw("smu", "SOUR:VOLT:RANG 20").action == "declined"      # unparseable drive family: always asks
+    assert gate.raw("smu", "SOUR:VOLT:PROT 20").action == "declined"      # unparseable drive family: always asks
     assert "touches drive V" in str(approver.requests[0])
     assert "(auto-approved)" in gate.raw("smu", "SOUR:VOLT 2").message      # a plain setting is judged like set
 

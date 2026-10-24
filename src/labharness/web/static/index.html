@@ -107,16 +107,16 @@
       <div id="chat-title" class="chat-title"></div>
       <div class="spacer"></div>
       <button id="toggle-incognito" class="pill" type="button" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg><span class="incog-text">Incognito</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg><span class="incog-text pill-text">Incognito</span>
       </button>
       <button id="toggle-term" class="pill" type="button" aria-label="Show the terminal" aria-pressed="false" title="Terminal: type to Kelvin, or send instruments their own commands (Ctrl+`)">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg><span class="term-text">Terminal</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg><span class="term-text pill-text">Terminal</span>
       </button>
       <button id="toggle-runs" class="pill" type="button" aria-label="Show the runs pane" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg>Runs<span id="runs-dot" class="live-dot" hidden></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg><span class="pill-text">Runs</span><span id="runs-dot" class="live-dot" hidden></span>
       </button>
       <button id="toggle-lab" class="pill" type="button" aria-label="Show the lab panel">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Lab<span id="lab-badge" class="badge" hidden>0</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span class="pill-text">Lab</span><span id="lab-badge" class="badge" hidden>0</span>
       </button>
     </header>
 
@@ -126,6 +126,11 @@
       <button id="update-go" class="btn small primary" type="button" hidden>Restart to update</button>
     </div>
     <div id="alerts" class="alerts" role="alert" hidden></div>
+    <div id="hands-banner" class="hands-banner" role="status" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg>
+      <div class="hb-body"><b>Hands on the sample</b><span id="hands-text"></span></div>
+      <button id="hands-done" class="btn small primary" type="button">Done: unlock…</button>
+    </div>
     <div id="scroller" class="scroller">
       <section id="empty" class="empty">
         <img class="hero-mark" src="/static/kelvin.svg" width="72" height="72" alt="Kelvin">
@@ -239,6 +244,12 @@
       <div class="inst-head-row"><h3>Sample</h3><span id="mount-summary" class="inst-summary"></span>
         <button id="mount-new" class="link soft" type="button">New device…</button></div>
       <select id="mount-select" class="mount-select" aria-label="The sample in the setup now"></select>
+      <div id="mount-protection" class="mount-protection" hidden>
+        <div class="mp-head"><span id="mp-state" class="mp-state"></span><button id="mount-protect" class="link soft" type="button">Protection…</button></div>
+        <ul id="mp-lines" class="mp-lines"></ul>
+      </div>
+      <button id="hands-on" class="btn small hands-btn" type="button" title="Before you touch the sample: Kelvin stops what runs, brings everything that reaches the sample to safe and keeps it there until you unlock"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg> Hands on the sample</button>
+      <div id="hands-locked" class="hands-locked" role="status" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg><span>Locked: hands on the sample</span><button id="hands-done-panel" class="btn small" type="button">Unlock…</button></div>
       <span class="hint mount-hint">Every scan is filed under this device and its project. Its report and the project's master report update after each scan.</span>
       <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span>
         <button id="open-lab-setup" class="link soft" type="button">Set up…</button></div>
@@ -371,6 +382,16 @@
             <select id="default-model" name="default_model"></select>
           </div>
           <div class="field">
+            <label for="answer-words">Answer length</label>
+            <select id="answer-words" name="answer_words">
+              <option value="100">Very short: at most 100 words</option>
+              <option value="200">Short: at most 200 words</option>
+              <option value="400">Longer: at most 400 words</option>
+              <option value="off">Any length</option>
+            </select>
+            <span class="hint">So you can judge an answer at a glance. A longer one is condensed, with the full answer a click away; one you asked to be long (a derivation, every step) stays whole. Code and plans don't count.</span>
+          </div>
+          <div class="field">
             <label for="reviewer">Second opinion on plans</label>
             <select id="reviewer" name="reviewer"></select>
             <span class="hint">Another model reviews every plan before it runs. If it advises stopping, Kelvin asks you first. Pick a model from a different company for a more independent view. Any answer can also get a second opinion from its button.</span>
@@ -465,6 +486,8 @@
               <label class="check"><input id="phone-on" type="checkbox"> On</label></div>
             <span class="hint">Paired phones can see the lab, runs and alarms, stop a run and decline requests; phones you allow to control can also chat and approve. Settings, instruments and the lab config stay on this computer.</span>
             <span id="phone-status" class="hint phone-status"></span>
+            <div id="firewall-row" class="field-row" hidden><span id="firewall-status" class="hint"></span>
+              <button id="firewall-allow" class="btn small" type="button">Let phones through</button></div>
             <div class="pair-row">
               <input id="pair-name" type="text" maxlength="40" placeholder="Phone name" aria-label="Phone name">
               <select id="pair-role" aria-label="What the phone may do">
@@ -476,6 +499,7 @@
             <div id="pair-box" class="pair-box" hidden></div>
             <ul id="device-list" class="memory-notes"></ul>
             <span class="hint">Away from the lab, install <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on this computer and the phone; Kelvin then shows its Tailscale address too, and the connection is encrypted. Plain Wi-Fi traffic is not, so on a shared network prefer Tailscale.</span>
+            <span class="hint"><b>Phone can't connect?</b> It must be on the same Wi-Fi as this computer, and the computer's firewall must let it in. Many university, housing and hotel Wi-Fi networks keep devices apart; on those, use Tailscale on both.</span>
           </div>
         </section>
         <section class="set-page" data-page="updates" hidden>
@@ -711,6 +735,64 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Cancel</button>
       <button id="save-project" class="btn primary" type="button">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="protect-dialog" class="dialog wide" aria-labelledby="protect-dialog-title">
+  <form id="protect-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="protect-dialog-title">Protect <span id="protect-device"></span></h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <p class="muted small">While this device is mounted, Kelvin keeps every drive within these limits, whatever a plan, a conversation or an approval asks; only a person changes them, here. Where the instrument allows, they are also written into it (its source range, autorange off, its current limit), so they hold even if Kelvin or the computer stops.</p>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Gates</span><span class="hint">Limit from the dielectric: 0.3 V/nm for hBN and SiO₂, 0.2 V/nm for Al₂O₃ and HfO₂, well below breakdown</span></div>
+      <div id="protect-gates" class="prot-rows"></div>
+      <button id="protect-add-gate" class="link soft prot-add" type="button">+ Add a gate</button>
+      <span class="hint">A ramp stops and goes back to 0 once the leakage passes its limit, and the source's own current limit is set to 10× that.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Other limits</span></div>
+      <div id="protect-limits" class="prot-rows"></div>
+      <button id="protect-add-limit" class="link soft prot-add" type="button">+ Add a limit</button>
+      <span class="hint">What else this sample can take, e.g. the bias current or the laser power.</span>
+    </div>
+    <footer class="dialog-foot">
+      <button id="protect-clear" class="btn ghost" type="button">Remove protection</button>
+      <span id="protect-msg" class="muted small"></span>
+      <div class="spacer"></div>
+      <button class="btn" value="cancel" type="submit">Cancel</button>
+      <button id="protect-save" class="btn primary" type="button">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="hands-dialog" class="dialog" aria-labelledby="hands-dialog-title">
+  <form id="hands-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="hands-dialog-title">Done with the sample?</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <p class="muted small">Once you unlock, Kelvin may move drives again, each still within its limits and approvals.</p>
+    <div class="field">
+      <label for="hands-device" class="field-label">The sample in the setup now</label>
+      <select id="hands-device" class="mount-select"></select>
+      <span class="hint">Its protection holds from the moment you unlock.</span>
+    </div>
+    <div class="field checks-col">
+      <label class="check wrap"><input type="checkbox" class="hands-check"> It is wired as the next measurement needs (cables, breakout box, grounding switches)</label>
+      <label class="check wrap"><input type="checkbox" class="hands-check"> Nobody is touching the setup</label>
+    </div>
+    <footer class="dialog-foot">
+      <span id="hands-msg" class="muted small"></span>
+      <div class="spacer"></div>
+      <button class="btn" value="cancel" type="submit">Keep locked</button>
+      <button id="hands-unlock" class="btn primary" type="button" disabled>Unlock</button>
     </footer>
   </form>
 </dialog>
