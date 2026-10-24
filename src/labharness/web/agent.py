@@ -23,8 +23,8 @@ from mcp import Client
 from ..agent.runtime import LabRuntime
 from ..agent.server import INSTRUCTIONS
 from ..gate import ApprovalRequest
-from .providers.base import Emit, ModelInfo, Provider
-from . import memory, review, rules as rulebook
+from .providers.base import Emit, ModelInfo, Provider, text_of
+from . import brevity, memory, review, rules as rulebook
 from .settings import Settings
 from .store import MAX_NOTE, ChatStore
 
@@ -256,8 +256,9 @@ class ChatAgent:
         per message instead (see recall). A chat outside every project gets no project memory; an incognito chat
         gets no memory at all and cannot save any."""
         if chat.get("incognito"):
-            return {"system": SYSTEM + "\n\n" + INCOGNITO, "tools": self.tools, "project": None, "learn": False}
-        parts = [SYSTEM]
+            return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO]), "tools": self.tools,
+                    "project": None, "learn": False}
+        parts = [SYSTEM] + self._brevity()
         mine = self.settings.get("instructions") if self.settings else None
         if mine:
             parts.append("# The user's instructions for every conversation\n" + mine)
@@ -285,6 +286,40 @@ class ChatAgent:
             tools = [t for t in tools if t["name"] not in WEB_TOOLS]
         return {"system": "\n\n".join(parts), "tools": tools, "project": project["id"] if project else None,
                 "learn": learn, "rules": rules, "private": private}
+
+    # ------------------------------------------------------------------ short answers (brevity.py)
+
+    def _brevity(self) -> List[str]:
+        limit = self.settings.answer_words if self.settings else brevity.WORDS
+        return [brevity.RULE.format(words=limit)] if limit else []
+
+    async def _shorten(self, provider: Provider, model_id: str, request: str, message: Dict[str, Any],
+                       emit: Emit) -> None:
+        """Condense a finished answer that runs over the word budget, keeping the full one in the message ("full")."""
+        limit = self.settings.answer_words if self.settings else brevity.WORDS
+        answer = text_of(message.get("blocks") or []).strip()
+        n = brevity.words(answer)
+        if not limit or n <= limit:
+            return
+        await emit({"type": "condensing", "words": n})
+        try:
+            kind, said = await asyncio.wait_for(brevity.condense(provider, model_id, request, answer, limit),
+                                                brevity.TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:   # the model failed or took too long: the full answer stays
+            kind, said = "", ""
+        if kind == "keep":
+            message["kept"] = said or "the request needed it"
+            await emit({"type": "condensed", "kept": message["kept"], "words": n})
+            return
+        short = brevity.words(said)
+        if kind != "short" or not short or short >= n:
+            await emit({"type": "condensed"})
+            return
+        message["full"], message["full_words"] = answer, n
+        message["blocks"] = [b for b in message["blocks"] if b["type"] != "text"] + [{"type": "text", "text": said}]
+        await emit({"type": "condensed", "text": said, "words": short, "full_words": n})
 
     # ------------------------------------------------------------------ who may see a project
 
@@ -557,6 +592,19 @@ class ChatAgent:
         if result.stop_reason == "pause":
             return True
         if result.stop_reason != "tool_calls":
+            if result.stop_reason == "end":   # a finished answer, not one cut short: condensed if it runs long
+                self._stream_task = asyncio.ensure_future(
+                    self._shorten(provider, model_id, review.last_request(chat["messages"]), chat["messages"][-1],
+                                  emit))
+                try:
+                    await self._stream_task
+                except asyncio.CancelledError:
+                    if not self._stop:
+                        raise
+                    await emit({"type": "condensed"})   # stopped: the full answer stays
+                finally:
+                    self._stream_task = None
+                self.store.save(chat)
             await emit({"type": "turn_end", "reason": result.stop_reason})
             return False
 
@@ -871,6 +919,8 @@ class ChatAgent:
             else:
                 out.append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
                             "blocks": [{"type": "text", "text": "(paused after %d steps)" % COMPARE_STEPS}]})
+            if result.stop_reason == "end":
+                await self._shorten(provider, model_id, review.last_request(base), out[-1], lane_emit)
             await lane_emit({"type": "lane_end", "reason": "end"})
             return {"model": key, "messages": out}
         except asyncio.CancelledError:

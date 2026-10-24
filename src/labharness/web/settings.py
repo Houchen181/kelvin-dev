@@ -29,11 +29,25 @@ SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webho
 SEALED = SECRET | {"hub_token"}
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
+                     "answer_words",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "hub_installation", "instruments_off"}
+
+ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
+
+
+def _answer_words(value: str) -> str:
+    """What is stored for the answer length: "off", or a number of words from 50 to 2000 ("" for the default)."""
+    if value.lower() in ("off", "0", "no", "false", "any"):
+        return "off"
+    try:
+        n = max(50, min(2000, int(float(value))))
+    except ValueError:
+        return ""
+    return "" if n == ANSWER_WORDS else str(n)
 
 
 def _load(path: Optional[Path]) -> Dict[str, Any]:
@@ -131,6 +145,8 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "hub_old_runs":  # also share runs from before Kelvin noted who made them: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
+            if name == "answer_words":  # how long answers may be before Kelvin condenses them (brevity.py)
+                value = _answer_words(value)
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "auto_report":  # a report after each run and queue: both (the default), pdf, pptx or off
@@ -196,6 +212,7 @@ class Settings:
             "learn": self.learning,
             "notify_kinds": self.notify_kinds,
             "reviewer": self._user.get("reviewer", ""),
+            "answer_words": self.answer_words,
             "literature": self._user.get("literature") != "off",
             "auto_setup": self._lab.get("auto_setup") != "off",
             "manuals": self._lab.get("manuals") != "off",
@@ -208,6 +225,14 @@ class Settings:
             "claude_code_path": self._user.get("claude_code_path", ""),
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
         }
+
+    @property
+    def answer_words(self) -> int:
+        """How many words an answer may have before Kelvin condenses it (brevity.py); 0: any length."""
+        value = self._user.get("answer_words")
+        if value == "off":
+            return 0
+        return int(value) if value and value.isdigit() else ANSWER_WORDS
 
     @property
     def updates(self) -> str:

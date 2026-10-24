@@ -338,6 +338,16 @@
             <select id="default-model" name="default_model"></select>
           </div>
           <div class="field">
+            <label for="answer-words">Answer length</label>
+            <select id="answer-words" name="answer_words">
+              <option value="100">Very short: at most 100 words</option>
+              <option value="200">Short: at most 200 words</option>
+              <option value="400">Longer: at most 400 words</option>
+              <option value="off">Any length</option>
+            </select>
+            <span class="hint">So you can judge an answer at a glance. A longer one is condensed, with the full answer a click away; one you asked to be long (a derivation, every step) stays whole. Code and plans don't count.</span>
+          </div>
+          <div class="field">
             <label for="reviewer">Second opinion on plans</label>
             <select id="reviewer" name="reviewer"></select>
             <span class="hint">Another model reviews every plan before it runs. If it advises stopping, Kelvin asks you first. Pick a model from a different company for a more independent view. Any answer can also get a second opinion from its button.</span>

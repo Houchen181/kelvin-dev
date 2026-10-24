@@ -1136,8 +1136,37 @@
     }
     resetText() { if (this.text) { this.text.remove(); this.text = null; this.buf = ""; } }
     endText() {
-      if (this.text) { cancelAnimationFrame(this.raf); this.raf = 0; this.text.innerHTML = md(this.buf); this.text.classList.remove("cursor"); }
+      if (this.text) {
+        cancelAnimationFrame(this.raf); this.raf = 0; this.text.innerHTML = md(this.buf); this.text.classList.remove("cursor");
+        this.last = { el: this.text, buf: this.buf };
+      }
       this.text = null;
+    }
+    condensing(words) {   // a long answer is being shortened (brevity.py)
+      this.endText();
+      if (this.pending) return;
+      this.pending = h("div", { class: "condense-note" }, h("span", { class: "spinner" }),
+        h("span", {}, "Condensing a long answer (" + words + " words)…"));
+      this.el.append(this.pending);
+    }
+    condensed(ev) {
+      this.endText();
+      if (this.pending) { this.pending.remove(); this.pending = null; }
+      if (ev.text && this.last) this.shorten(this.last, ev.text, this.last.buf, ev.full_words);
+      else if (ev.kept) this.keptWhole(ev.words, ev.kept);
+    }
+    shorten(last, short, full, fullWords) {
+      const shortHtml = md(short), fullHtml = md(full);
+      let open = false;
+      const label = () => (open ? "Show the short answer" : "Full answer (" + fullWords + " words)");
+      const toggle = h("button", { class: "link soft", type: "button" }, label());
+      toggle.addEventListener("click", () => { open = !open; last.el.innerHTML = open ? fullHtml : shortHtml; toggle.textContent = label(); });
+      last.el.innerHTML = shortHtml;
+      last.el.after(h("div", { class: "condense-note" }, h("span", {}, "Condensed by Kelvin"), toggle));
+    }
+    keptWhole(words, why) {
+      this.el.append(h("div", { class: "condense-note" },
+        "A long answer (" + (words ? words + " words" : "kept whole") + ")" + (why ? ": " + why : "") + "."));
     }
     addThinking(delta) {
       if (!this.thinking) {
@@ -1240,6 +1269,8 @@
         else if (b.type === "thinking") { reply.addThinking(b.text); reply.endThinking(); }
         else if (b.type === "tool_call") reply.toolStart(b.id, b.name, b.input);
       }
+      if (m.full && reply.last) reply.shorten(reply.last, reply.last.buf, m.full, m.full_words);
+      else if (m.kept) reply.keptWhole(0, m.kept);
       if (m.review) reply.answerReview(m.review);
     } else if (m.role === "tool") {
       for (const r of m.results) {
@@ -2334,6 +2365,8 @@
       case "run_progress": reply.runProgress(ev); break;
       case "computer_step": reply.computerStep(ev); break;
       case "note": reply.note(ev.text); break;
+      case "condensing": reply.condensing(ev.words); break;
+      case "condensed": reply.condensed(ev); break;
       case "memory": reply.memory(ev.notes); break;
       case "review_start": reply.reviewStart(ev); break;
       case "review": reply.review(ev); break;
@@ -3590,6 +3623,9 @@
     fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
+    const words = S.settings ? S.settings.answer_words : 200, length = $("answer-words"), chosen = words ? String(words) : "off";
+    if (![...length.options].some((o) => o.value === chosen)) length.append(h("option", { value: chosen }, "At most " + words + " words"));
+    length.value = chosen;
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
     $("hub-old-runs").checked = !!(S.settings && S.settings.hub_old_runs);
@@ -3711,6 +3747,7 @@
     body.local_models = $("local-models").value.trim();
     body.default_model = $("default-model").value;
     body.reviewer = $("reviewer").value;
+    body.answer_words = $("answer-words").value;
     body.instructions = $("global-instructions").value;
     body.learn = $("learn").checked ? "on" : "off";
     body.hub_old_runs = $("hub-old-runs").checked ? "on" : "off";

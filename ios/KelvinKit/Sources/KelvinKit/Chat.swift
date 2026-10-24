@@ -13,6 +13,7 @@ public enum ChatEvent: Equatable, Sendable {
     case note(String)
     case memory(count: Int)
     case error(String)
+    case condensed(text: String?, kept: String?, words: Int?, fullWords: Int?)   // a long answer shortened (or kept)
     case ended(reason: String)
     case other(String)
 
@@ -46,6 +47,9 @@ public enum ChatEvent: Equatable, Sendable {
             self = .memory(count: e["notes"]?.array?.count ?? 0)
         case "error":
             self = .error(e["message"]?.string ?? "Something went wrong.")
+        case "condensed":
+            self = .condensed(text: e["text"]?.string, kept: e["kept"]?.string, words: e["words"]?.int,
+                              fullWords: e["full_words"]?.int)
         case "turn_end":
             self = .ended(reason: e["reason"]?.string ?? "end")
         default:
@@ -67,6 +71,8 @@ public struct ChatLine: Identifiable, Equatable, Sendable {
     public var working = false           // a step still running, an answer still arriving
     public var approval: ApprovalRequest?
     public var answer: Answer?
+    public var full: String?             // an answer Kelvin condensed: the whole one
+    public var fullWords: Int?
 
     public init(id: String, kind: Kind, text: String, detail: String? = nil, failed: Bool = false,
                 working: Bool = false) {
@@ -101,6 +107,9 @@ public struct Transcript: Equatable, Sendable {
             case "user":
                 add(.user, m["text"]?.text ?? "")
             case "assistant":
+                let start = lines.count
+                defer { condensed(from: start, full: m["full"]?.string, fullWords: m["full_words"]?.int,
+                                  kept: m["kept"]?.string) }
                 for b in m["blocks"]?.array ?? [] {
                     switch b["type"]?.string {
                     case "text":
@@ -171,12 +180,34 @@ public struct Transcript: Equatable, Sendable {
             if count > 0 { add(.note, count == 1 ? "Kelvin recalled 1 note" : "Kelvin recalled \(count) notes") }
         case .error(let message):
             add(.error, message)
+        case .condensed(let text, let kept, let words, let fullWords):
+            if let text, let i = lines.indices.last(where: { lines[$0].kind == .assistant }) {
+                lines[i].full = lines[i].text
+                lines[i].fullWords = fullWords
+                lines[i].text = text
+            } else if let kept {
+                add(.note, Transcript.keptWhole(words, kept))
+            }
         case .ended(let reason):
             finish()
             if reason == "stopped" { add(.note, "Stopped.") }
         case .other:
             break
         }
+    }
+
+    /// A replayed answer that Kelvin condensed (its whole one is in "full"), or kept long (and why).
+    private mutating func condensed(from start: Int, full: String?, fullWords: Int?, kept: String?) {
+        if let full, let i = lines.indices.last(where: { $0 >= start && lines[$0].kind == .assistant }) {
+            lines[i].full = full
+            lines[i].fullWords = fullWords
+        } else if let kept {
+            add(.note, Transcript.keptWhole(nil, kept))
+        }
+    }
+
+    static func keptWhole(_ words: Int?, _ why: String) -> String {
+        "A long answer" + (words.map { " (\($0) words)" } ?? "") + (why.isEmpty ? "." : ": \(why).")
     }
 
     /// The answer is over (or the stream broke): nothing is "working" any more.

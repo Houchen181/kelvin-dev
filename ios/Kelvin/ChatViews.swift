@@ -185,8 +185,15 @@ struct LineView: View {
                     .textSelection(.enabled)
             }
         case .assistant:
-            Text(markdown(line.text))
-                .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(markdown(open ? line.full ?? line.text : line.text))
+                    .textSelection(.enabled)
+                if line.full != nil {   // Kelvin condensed a long answer: the whole one is a tap away
+                    Button(open ? "Show the short answer"
+                                : "Full answer" + (line.fullWords.map { " (\($0) words)" } ?? "")) { open.toggle() }
+                        .font(.caption)
+                }
+            }
         case .step:
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {

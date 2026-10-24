@@ -337,6 +337,8 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .link.soft:hover { color: var(--accent); }
 
 .note { color: var(--muted); font-size: 14px; }
+.condense-note { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 2px 0 6px; color: var(--muted); font-size: 13px; }
+.condense-note .spinner { width: 12px; height: 12px; }
 .callout { border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); background: var(--danger-soft); color: var(--text); border-radius: 12px; padding: 10px 14px; }
 
 /* plots */

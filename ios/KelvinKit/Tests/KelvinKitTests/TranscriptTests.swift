@@ -70,6 +70,49 @@ final class TranscriptTests: XCTestCase {
         XCTAssertEqual(t.lines.last?.text, "Stopped.")
     }
 
+    func testALongAnswerIsCondensedWithTheWholeOneKept() {
+        var t = Transcript()
+        t.say("How did the sweep go?")
+        t.apply(.text("A very long answer about the sweep."))
+        t.apply(ChatEvent(line: "{\"type\": \"condensing\", \"words\": 256}")!)
+        t.apply(ChatEvent(line: "{\"type\": \"condensed\", \"text\": \"Peak at 2.41 V.\", \"words\": 4, \"full_words\": 256}")!)
+        t.apply(.ended(reason: "end"))
+        XCTAssertEqual(t.lines.last?.text, "Peak at 2.41 V.")
+        XCTAssertEqual(t.lines.last?.full, "A very long answer about the sweep.")
+        XCTAssertEqual(t.lines.last?.fullWords, 256)
+
+        var kept = Transcript()
+        kept.say("Derive it in full")
+        kept.apply(.text("A long derivation."))
+        kept.apply(ChatEvent(line: "{\"type\": \"condensed\", \"kept\": \"you asked for every step\", \"words\": 412}")!)
+        XCTAssertEqual(kept.lines.map(\.kind), [.user, .assistant, .note])
+        XCTAssertEqual(kept.lines.last?.text, "A long answer (412 words): you asked for every step.")
+        XCTAssertNil(kept.lines[1].full)
+
+        var same = Transcript()
+        same.say("Hi")
+        same.apply(.text("Hello."))
+        same.apply(ChatEvent(line: "{\"type\": \"condensed\"}")!)                // condensing failed: nothing changes
+        XCTAssertEqual(same.lines.map(\.text), ["Hi", "Hello."])
+    }
+
+    func testACondensedAnswerReplays() throws {
+        let chat = try decode(ChatDetail.self, """
+        {"id": "c1", "title": "Sweep", "messages": [
+          {"role": "user", "text": "How did it go?"},
+          {"role": "assistant", "blocks": [{"type": "text", "text": "Peak at 2.41 V."}], "full": "A long answer.", "full_words": 256},
+          {"role": "user", "text": "Derive it"},
+          {"role": "assistant", "blocks": [{"type": "text", "text": "A long derivation."}], "kept": "you asked for every step"}]}
+        """)
+        let t = Transcript(chat)
+        XCTAssertEqual(t.lines.map(\.kind), [.user, .assistant, .user, .assistant, .note])
+        XCTAssertEqual(t.lines[1].text, "Peak at 2.41 V.")
+        XCTAssertEqual(t.lines[1].full, "A long answer.")
+        XCTAssertEqual(t.lines[1].fullWords, 256)
+        XCTAssertNil(t.lines[3].full)
+        XCTAssertEqual(t.lines[4].text, "A long answer: you asked for every step.")
+    }
+
     func testStepWords() {
         XCTAssertEqual(Steps.label("search_papers", .object(["query": .string("CrSBr magnons")])),
                        "Searched the literature for “CrSBr magnons”")
