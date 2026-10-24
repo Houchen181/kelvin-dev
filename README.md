@@ -5,7 +5,7 @@
 <h1 align="center">Kelvin</h1>
 <p align="center"><b>The coolest cat in the lab.</b><br>An AI lab assistant for experimental physicists that plans, measures and logs, and asks before it drives your sample harder.</p>
 
-<p align="center"><a href="https://github.com/Houchen181/kelvin/releases/download/private-latest/Kelvin-Setup-private.exe"><b>⬇ Download Kelvin 0.3.16 for Windows</b></a> (the newest private build, Windows 10/11)<br><a href="https://github.com/Houchen181/kelvin/releases/latest">macOS</a> (the latest public release) · <a href="https://github.com/Houchen181/kelvin/releases">what's new</a></p>
+<p align="center"><a href="https://github.com/Houchen181/kelvin/releases/download/private-latest/Kelvin-Setup-private.exe"><b>⬇ Download Kelvin 0.3.17 for Windows</b></a> (the newest private build, Windows 10/11)<br><a href="https://github.com/Houchen181/kelvin/releases/latest">macOS</a> (the latest public release) · <a href="https://github.com/Houchen181/kelvin/releases">what's new</a></p>
 
 ---
 
