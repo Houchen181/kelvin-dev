@@ -246,3 +246,19 @@ def test_kelvin_reads_protection_but_never_lifts_it(tmp_path):
         assert "D4; protected: Gate smu.V within ±6 V (20 nm hBN)" in ends[0]["content"]
         assert ends[1]["content"].startswith("not changed: D4 is mounted with protection a person set")
         assert rt.mounted["device_name"] == "D4"
+
+
+def test_a_yokogawa_gate_and_a_keithley_are_capped_too(tmp_path):
+    pytest.importorskip("mcp")
+    from labharness.agent.runtime import LabRuntime
+    from labharness.virtual_lab import build_lab
+    lab = build_lab("lab: Gate bench\ninstruments:\n  gs: { card: yokogawa/gs200, address: \"sim://gs\" }\n"
+                    "  k: { card: keithley/2400, address: \"sim://k\" }\n")
+    rt = LabRuntime(lab, ScriptedApprover([True] * 20), tmp_path / "data", None)
+    assert rt.gate.set("gs", "range", 30).ok
+    m = mount(rt, {"gates": [{"drive": "gs.level", "dielectric": "hBN", "thickness_nm": 20, "leak": "k.I"},
+                             {"drive": "k.V", "dielectric": "SiO2", "thickness_nm": 285, "leak": "k.I"}]})
+    assert m["caps"] == ["gs.range 30 V → 10 V", "k.V_autorange on → off", "k.compliance_I 100 µA → 10 nA (toward safe)"]
+    assert lab.instruments["k"].limits("V") == (-85.5, 85.5)
+    assert rt.gate.set("gs", "output", True).ok and rt.gate.set("gs", "level", 3).ok
+    assert "glitch" in rt.gate.set("gs", "range", 1).message

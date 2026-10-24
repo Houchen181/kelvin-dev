@@ -27,7 +27,7 @@ parameters:
     max_rate: 10
     ramp_step: 0.05
     description: Source voltage (voltage-source mode). The 2401 is limited to ±21 V; set lab limits.
-    source_range: { param: V_range, auto: V_autorange, steps: [0.2, 2, 20, 200, 1000] }
+    source_range: { param: V_range, auto: V_autorange, steps: [0.2, 2, 20, 200] }
     current_limit: compliance_I
   V_range:
     label: Source range
@@ -35,7 +35,7 @@ parameters:
     unit: V
     set: ":SOURce:VOLTage:RANGe {value}"
     get: ":SOURce:VOLTage:RANGe?"
-    limits: [0.2, 1000]
+    limits: [0.2, 210]
     default: 20
     description: The source's output range. Kelvin changes it only while V is at 0, and fixes it just above a mounted device's limit.
   V_autorange:
