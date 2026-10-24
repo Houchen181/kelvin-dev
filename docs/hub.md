@@ -69,6 +69,22 @@ Kelvin, for its part:
 - **Unreachable:** a network error, a 404, any 5xx (such as a tunnel's 530), or an answer that isn't JSON means the hub can't be reached now. Kelvin then checks the password against the hash it kept at the person's last sign-in on this computer. A hub that answers no (401, 403, 429) is never overruled by that hash.
 - **Wrong passwords** wait a second before Kelvin answers.
 
+## Phones through the hub
+
+A phone signed in to a person's Kelvin account reaches every Kelvin where that account is signed in, through the hub, with no pairing (`hub/relay.py`, and Kelvin's side `web/relay.py`).
+
+- **The Kelvin's side:** while someone is signed in to a Kelvin with their Kelvin account, that Kelvin keeps one WebSocket open to the hub (`/api/relay/kelvin`, with that sign-in's token). It goes out from the lab, so firewalls and Wi-Fi that keeps devices apart (many university, housing and hotel networks) don't stop it. Signing out there, or another person signing in, closes it. The person can switch it off in Settings → **Account**.
+- **The phone's side:** the phone signs in with `POST /api/signin` and `"platform": "ios"`, lists the account's Kelvins with `GET /api/relay/kelvins`, and calls Kelvin's phone routes on one through `/api/relay/kelvins/<id>/api/...`. Answers stream back as they come, a chat turn included.
+- **Who answers:** the Kelvin, as it would a paired phone of that person with control (`remote.py`): the same routes and refusals. Settings, the lab config, instruments and pairing stay on the computer.
+- **Unshared work stays off the hub.** The hub keeps nothing that passes through, but it sees it in passing: there is no end-to-end encryption yet. So Kelvin leaves the person's unshared work out of what the hub carries (unpublished, confidential and model-limited projects, incognito chats, and their runs): lists come without it (with an `X-Kelvin-Hidden` count), and asking for it is refused. The phone sees it when it reaches the Kelvin directly.
+- **Directly when possible:** through the hub, the phone asks for a token of its own (`POST /api/phone/direct`), when the Kelvin's phone access is on. It then tries the Kelvin's addresses first (lab network, Tailscale) and goes through the hub only when none answers. `DELETE /api/phone/direct` forgets that token; the app does it when the person signs out.
+- **Limits:** a phone's request is at most 1 MB; the Kelvin has 60 seconds to start answering, and an answer may go 15 minutes without a byte; one person has at most 16 requests through the hub at once. A phone's token never opens the Kelvin's side.
+- **The hub's memory:** which Kelvins are online is kept in memory. A restarted hub has none, and each Kelvin connects again by itself (within seconds, then backing off to 5 minutes while the hub can't be reached).
+
+On the Kelvin's socket, text frames are JSON: the Kelvin's `{"t": "hello", "name", "version", "direct"}` first; the hub's `{"t": "req", "id", "method", "path", "query", "type", "body" (base64), "phone": {"id", "name"}}` and `{"t": "cancel", "id"}`; the Kelvin's `{"t": "head", "id", "status", "headers"}`, then `{"t": "end", "id"}` or `{"t": "fail", "id", "message"}`. An answer's bytes come as binary frames: the request's id in 4 bytes, then the bytes.
+
+The hub needs the `websockets` package for this (the `hub` extra brings it), and its proxy must pass WebSockets through: Cloudflare Tunnel and Tailscale Funnel do.
+
 ## Connecting a Kelvin
 
 Sharing work, switched off for now. This works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page:
@@ -219,6 +235,10 @@ Kelvin accepts a hub address on the internet only with https.
 | `POST /api/register` | Kelvin's Create account: `{"name", "email", "password", "consent": true, "orcid"?, "installation"}` → as `signin` |
 | `POST /api/reset` | `{"email"}`: mail a reset link → always `{"ok": true}` |
 | `POST /api/password` | `{"old", "new"}`: change the password |
+| `POST /api/signout` | End this Kelvin's or phone's sign-in: its token stops working (204) |
+| `WS /api/relay/kelvin` | A signed-in Kelvin's connection for its person's phones (see Phones through the hub) |
+| `GET /api/relay/kelvins` | The account's Kelvins: `{"kelvins": [{"id", "name", "platform", "version", "online", "direct", "last_seen"}], "user"}` |
+| `* /api/relay/kelvins/{id}/api/...` | A phone's call to one of them, passed through. 503 with `offline: true` when it isn't online |
 | `POST /api/token` | `{"grant_type": "authorization_code", "code", "code_verifier", "redirect_uri"}` → `{"access_token", "user", "lab"}` |
 | `DELETE /api/token` | Disconnect this Kelvin |
 | `GET /api/me` | The person, their labs, the lab this Kelvin shares into, `needs_consent` |
@@ -235,6 +255,7 @@ Every call but `health`, `token`, `signin`, `register` and `reset` needs `Author
 - **New projects:** a new project's name and chats go up within two minutes, before it can be marked unpublished. Marking it later deletes them from the hub.
 - **Backups:** they keep deleted work for up to 30 days.
 - **Phones:** a paired phone with control can set a project back to Shared.
+- **Through the hub:** the hub can read what it passes between a phone and a Kelvin; unshared work never goes that way, but the rest does, in passing.
 - **Registration:** it says when an email already has an account.
 - **Quoting:** Kelvin's tools that read runs can quote an unshared run into a shared chat. The chat then carries the quote to the hub.
 - **Each sync** looks through everything for what changed.
@@ -246,3 +267,4 @@ Every call but `health`, `token`, `signin`, `register` and `reset` needs `Author
 - Signing in with ORCID or Google (the `external_identity` column is there for it).
 - Changing one's email address.
 - Where the hub runs for real, and its mail server.
+- End-to-end encryption between a phone and a Kelvin through the hub, and push notifications (APNs) through it.

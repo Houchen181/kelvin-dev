@@ -27,6 +27,7 @@ Once a computer knows the [Kelvin hub](hub.md) (`account_hub` in `~/Kelvin/setti
 - **Forgot your password?** On the sign-in screen: the hub mails a link to choose a new one. The old one still opens a computer that can't reach the hub, until it does.
 - **Name, email confirmation, export, delete:** on your account page on the hub (Settings → **Account** → **Your account on the Kelvin hub**).
 - **Which hub:** the sign-in screen and Settings → **Account** show it. Signed in, anyone can change it (empty: accounts on this computer only, as before). Signed out, it can only change until someone has signed in on this computer with a Kelvin account, so nobody can point the sign-in screen at a hub of their own.
+- **Your phone, with no pairing:** sign in to Kelvin for iPhone with the same Kelvin account. While you are signed in to a Kelvin computer, your phone reaches it through the hub, from any network ([hub.md](hub.md#phones-through-the-hub)). Unshared work (unpublished, confidential or model-limited projects, incognito chats and their runs) doesn't go through the hub; it opens when the phone reaches the computer directly. Settings → **Account** says whether your phone can reach this Kelvin now, and switches it off.
 - **For now** Kelvin shares no work with the hub: Settings → **Account** has no hub connection, and projects have no hub setting (`HUB_SHARING` in `web/app.py`).
 
 ## In the portal
@@ -123,12 +124,12 @@ Check on a run from the coffee room, or answer an approval from home. Phone acce
 
 The phone then opens Kelvin's phone page: alarms with **Got it**, requests with **Approve** (control) or **Decline**, the run in progress with its progress and **Stop**, the instruments, and recent notices. A control phone can also open the full portal.
 
-**Kelvin for iPhone** does the same as a native app, and more. Pair it by scanning the same QR code, or by typing the address and code. It can be paired with several Kelvin computers, keeps each one's token in the iPhone's Keychain, and tries the address that worked last first and then the others, so it moves between the lab network and Tailscale by itself. Its tabs:
+**Kelvin for iPhone** does the same as a native app, and more. With [Kelvin accounts](#kelvin-accounts-one-account-every-computer), sign in to it with your Kelvin account: it finds every Kelvin where you are signed in, through the Kelvin hub, with no pairing and from any network, and goes directly when it can. Without an account, pair it by scanning the same QR code, or by typing the address and code. It can be paired with several Kelvin computers, keeps each one's token in the iPhone's Keychain, and tries the address that worked last first and then the others, so it moves between the lab network and Tailscale by itself. Its tabs:
 
 - **Lab:** alarms, requests waiting for you, the run in progress with a live plot and **Stop**, the instruments (drives not at their safe value in orange), recent notices.
 - **Chat** (control phones): your conversations, a new or incognito chat, the answer as it arrives with Kelvin's steps, and requests to approve right there. Tap the microphone to talk instead of typing: the iPhone turns your words into text itself, the audio never leaves it, and you check the message before sending.
 - **Runs:** recent runs with their plots, and their report and data to open on the phone.
-- **Computers:** switch between computers, pair another, unpair.
+- **Computers:** your Kelvin account and its Kelvins, switch between computers, pair another, unpair, sign out.
 
 Without a lab computer at hand, **Try a demo lab** shows a made-up one inside the app. The app tells you about new requests and alarms while it is open. For alerts while it is closed, add an ntfy topic under Notifications. Building the app: [ios.md](ios.md).
 
