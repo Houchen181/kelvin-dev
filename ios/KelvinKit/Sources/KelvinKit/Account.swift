@@ -17,6 +17,10 @@ public struct Account: Codable, Equatable, Sendable {
     /// Where the Keychain keeps this phone's token on the hub.
     public static let tokenID = UUID(uuidString: "0B5E55ED-0000-4000-8000-00000000ACC7")!
 
+    /// The one Kelvin hub, for every Kelvin user in every lab (as central.DEFAULT_HUB in Kelvin). It moves with an
+    /// update of the app when the hub moves to its permanent server.
+    public static let defaultHub = URL(string: "https://kelvin.tail269ee5.ts.net")!
+
     public init(hub: URL, email: String, name: String, phoneID: String) {
         self.hub = hub
         self.email = email

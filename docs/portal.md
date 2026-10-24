@@ -18,7 +18,7 @@ Each person's things are in `~/Kelvin/users/<name>/`: `settings.json`, `chatgpt.
 
 ### Kelvin accounts: one account, every computer
 
-Once a computer knows the [Kelvin hub](hub.md) (`account_hub` in `~/Kelvin/settings.json`, or the hub built into Kelvin), people sign in with a **Kelvin account** instead: email and password, the same on every computer (`central.py`). The hub keeps only the accounts. Chats, data and API keys stay on each computer, as above.
+People sign in with a **Kelvin account**: email and password, the same on every computer in every lab (`central.py`). There is one [Kelvin hub](hub.md) for every Kelvin user, built into Kelvin (`central.DEFAULT_HUB`: `kelvin.tail269ee5.ts.net` for now, until it moves to its permanent server). It keeps only the accounts. Chats, data and API keys stay on each computer, as above.
 
 - **Create a Kelvin account** on the sign-in screen: name, email, a password of 8 characters or more, and agreeing to the hub's terms and privacy notice. The hub mails a link to confirm the address.
 - **First sign-in on a computer:** Kelvin asks the hub. If the computer has accounts from before, Kelvin asks whether one of them is yours. That one (with its password on this computer, if it had one) then keeps its chats, data and API keys. **None of these: start fresh** makes a new folder.
@@ -26,7 +26,7 @@ Once a computer knows the [Kelvin hub](hub.md) (`account_hub` in `~/Kelvin/setti
 - **Changing your password:** Settings → **Account**, while Kelvin reaches the hub. It changes on the hub, and your keys here are encrypted again with the new one. On another computer, the new password works the next time it reaches the hub. Your keys there were encrypted with the old one, so Kelvin asks for it once (**Keep my keys**). **Skip** leaves them unreadable; add them again in Settings.
 - **Forgot your password?** On the sign-in screen: the hub mails a link to choose a new one. The old one still opens a computer that can't reach the hub, until it does.
 - **Name, email confirmation, export, delete:** on your account page on the hub (Settings → **Account** → **Your account on the Kelvin hub**).
-- **Which hub:** the sign-in screen and Settings → **Account** show it. Signed in, anyone can change it (empty: accounts on this computer only, as before). Signed out, it can only change until someone has signed in on this computer with a Kelvin account, so nobody can point the sign-in screen at a hub of their own.
+- **One hub for everyone:** there is nothing to set up per lab. The sign-in screen and Settings → **Account** show the hub. `account_hub` in `~/Kelvin/settings.json` names another, only for development. Signed out, it can only change until someone has signed in on this computer with a Kelvin account, so nobody can point the sign-in screen at a hub of their own.
 - **Your phone, with no pairing:** sign in to Kelvin for iPhone with the same Kelvin account. While you are signed in to a Kelvin computer, your phone reaches it through the hub, from any network ([hub.md](hub.md#phones-through-the-hub)). Unshared work (unpublished, confidential or model-limited projects, incognito chats and their runs) doesn't go through the hub; it opens when the phone reaches the computer directly. Settings → **Account** says whether your phone can reach this Kelvin now, and switches it off.
 - **For now** Kelvin shares no work with the hub: Settings → **Account** has no hub connection, and projects have no hub setting (`HUB_SHARING` in `web/app.py`).
 

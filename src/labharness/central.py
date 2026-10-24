@@ -20,7 +20,10 @@ from ._version import __version__
 from .hub import client
 
 NETWORK = (OSError, HTTPException, ValueError)   # the hub can't be reached, or answered nonsense
-DEFAULT_HUB = ""   # the Kelvin hub every Kelvin signs in to, once it is on the internet; Settings can name another
+# The one Kelvin hub, for every Kelvin user in every lab. For now it runs on a lab workstation through Tailscale Funnel;
+# when it moves to its permanent server, an update changes this (and Account.defaultHub in the iPhone app). Settings
+# (account_hub) can name another, for development.
+DEFAULT_HUB = "https://kelvin.tail269ee5.ts.net"
 
 Http = Callable[..., Tuple[int, Any]]
 

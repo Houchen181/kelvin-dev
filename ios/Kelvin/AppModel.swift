@@ -29,8 +29,8 @@ final class AppModel: ObservableObject {
     /// This phone's token on the Kelvin hub, while signed in to the account.
     var accountToken: String? { account == nil ? nil : tokens.token(for: Account.tokenID) }
 
-    /// The hub's address last used for signing in (to fill in the next time).
-    var lastHub: String { defaults.string(forKey: "kelvin.hub") ?? "" }
+    /// The hub to sign in to: the one Kelvin hub, unless this phone signed in to another (development).
+    var lastHub: URL { defaults.string(forKey: "kelvin.hub").flatMap { URL(string: $0) } ?? Account.defaultHub }
 
     // ------------------------------------------------------------------ the Kelvin account
 

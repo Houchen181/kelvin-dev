@@ -1,6 +1,8 @@
 # The Kelvin hub
 
-The hub is the Kelvin team's server for **Kelvin accounts**: one email and password that signs a person in to Kelvin on every computer ([portal.md](portal.md#kelvin-accounts-one-account-every-computer)). It is the owners' tool, not a place for users: the **owner console** (`/admin`) shows everyone's account, the computers each signs in on, and what happened to it. It is built for a few thousand people (about 5,000): one SQLite file.
+The hub is the Kelvin team's server for **Kelvin accounts**: one email and password that signs a person in to Kelvin on every computer ([portal.md](portal.md#kelvin-accounts-one-account-every-computer)). There is one hub for every Kelvin user in every lab, built into Kelvin (`central.DEFAULT_HUB`) and the iPhone app (`Account.defaultHub`); labs run none of their own. It is the owners' tool, not a place for users: the **owner console** (`/admin`) shows everyone's account, the computers each signs in on, and what happened to it. It is built for a few thousand people (about 5,000): one SQLite file.
+
+**Where it runs:** `https://kelvin.tail269ee5.ts.net`, on a lab workstation through Tailscale Funnel, for now. That carries light traffic only (Funnel has fixed bandwidth limits), so before other labs join, the hub moves to an always-on server with its own domain ([Putting it online](#putting-it-online)), and an update of Kelvin and the iPhone app changes the address they have built in.
 
 **What users see:** only what an account needs. That is creating one (in Kelvin, or on the hub), the email confirmation and password reset links, and a short account page: name and ORCID iD, password, export and delete. The hub keeps no one's work, and no user sees another.
 
@@ -266,5 +268,5 @@ Every call but `health`, `token`, `signin`, `register` and `reset` needs `Author
 - Removing one file of a shared run from the hub. A run removed in Kelvin goes with all its files.
 - Signing in with ORCID or Google (the `external_identity` column is there for it).
 - Changing one's email address.
-- Where the hub runs for real, and its mail server.
+- The hub's permanent server (it runs on a lab workstation through Tailscale Funnel for now), and its mail server.
 - End-to-end encryption between a phone and a Kelvin through the hub, and push notifications (APNs) through it.

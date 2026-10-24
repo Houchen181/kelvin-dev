@@ -8,6 +8,7 @@ struct AccountView: View {
     @Environment(\.dismiss) var dismiss
     @Environment(\.openURL) var openURL
     @State var hub = ""
+    @State var otherHub = false        // the one Kelvin hub, unless the person names another (development)
     @State var email = ""
     @State var password = ""
     @State var working = false
@@ -25,20 +26,23 @@ struct AccountView: View {
                     SecureField("Password", text: $password)
                         .textContentType(.password)
                 } footer: {
-                    Text("Your Kelvin account: the one you sign in to Kelvin with on your lab computer.")
+                    Text("Your Kelvin account: the one you sign in to Kelvin with on your lab computer. One account "
+                         + "works in every lab.")
                 }
-                Section {
-                    TextField("Kelvin hub, e.g. kelvin.example.org", text: $hub)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } footer: {
-                    Text("The hub your lab's Kelvin uses for accounts: Settings → Account on the Kelvin computer shows it.")
+                if otherHub {
+                    Section {
+                        TextField("Kelvin hub, e.g. kelvin.example.org", text: $hub)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    } footer: {
+                        Text("Only for a test hub: every Kelvin user signs in to the same Kelvin hub.")
+                    }
                 }
                 Section {
                     Button("Sign in") { Task { await signIn() } }
-                        .disabled(working || email.isEmpty || password.isEmpty || Account.hubAddress(hub) == nil)
-                    if let url = Account.hubAddress(hub) {
+                        .disabled(working || email.isEmpty || password.isEmpty || chosen == nil)
+                    if let url = chosen {
                         Button("Create a Kelvin account") { openURL(url.appendingPathComponent("register")) }
                         Button("Forgot your password?") { openURL(url.appendingPathComponent("reset")) }
                     }
@@ -48,6 +52,14 @@ struct AccountView: View {
                 }
                 if let failure {
                     Section { Text(failure).foregroundStyle(.red) }
+                }
+                if !otherHub {
+                    Section {
+                        Button("Use a test hub") { otherHub = true }
+                            .font(.footnote)
+                    } footer: {
+                        Text("Kelvin hub: \(Account.defaultHub.host ?? "")")
+                    }
                 }
                 Section {
                     Text("Your phone then reaches every Kelvin where you are signed in with this account, from any "
@@ -63,13 +75,19 @@ struct AccountView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
             }
-            .onAppear { if hub.isEmpty { hub = app.lastHub.replacingOccurrences(of: "https://", with: "") } }
+            .onAppear {
+                if hub.isEmpty { hub = app.lastHub.absoluteString.replacingOccurrences(of: "https://", with: "") }
+                otherHub = app.lastHub != Account.defaultHub
+            }
         }
     }
 
+    /// The hub this sign-in goes to.
+    var chosen: URL? { otherHub ? Account.hubAddress(hub) : .some(Account.defaultHub) }
+
     @MainActor
     func signIn() async {
-        guard let url = Account.hubAddress(hub) else {
+        guard let url = chosen else {
             failure = "That is not a hub address. Type it as Kelvin shows it, e.g. kelvin.example.org."
             return
         }

@@ -31,7 +31,7 @@ The phone listener (`src/labharness/web/remote.py`) and the routes a paired devi
 - Watch and control: `GET /api/state`, `/api/live?since=n`, `/api/runs`, `/api/runs/{id}`, `/api/runs/{id}/files/{name}`; `POST /api/approvals/{id}` (control only for approving), `/api/alarms/{id}/ack`, `/api/runs/stop`, `/api/stop`, `/api/me/forget`, `/api/hands {on}` (the hands-on-the-sample lock: any phone can lock, control only can unlock). `/api/state` carries `mounted` (the sample, with `protection_lines`) and `hands_on` (who locked it and since when) from Kelvin 0.3.17; older Kelvins leave them out.
 - Control: `GET /api/bootstrap` (models), `/api/chats`, `/api/chats/{id}`; `POST /api/chats {model, incognito}`, `/api/chats/{id}/turn {text, model}` (the answer streams back as one JSON event per line).
 
-Through the Kelvin account (Kelvin 0.3.19 and later; see [hub.md](hub.md#phones-through-the-hub)):
+Through the Kelvin account (Kelvin 0.3.19 and later; see [hub.md](hub.md#phones-through-the-hub)), at the one Kelvin hub built into the app (`Account.defaultHub`; **Use a test hub** on the sign-in screen names another):
 
 - `POST <hub>/api/signin {email, password, installation: {id: "ios-<uuid>", name, platform: "ios", version}}` → the phone's token on the hub (in the Keychain, under `Account.tokenID`); `GET <hub>/api/relay/kelvins` → the account's Kelvins; `POST <hub>/api/signout` ends it.
 - The phone routes above, through `<hub>/api/relay/kelvins/<id>/api/...`, with `Authorization: Bearer <token>` (`KelvinClient(bearer: true)`, whose `base` is that path). A 503 with `offline: true` means that Kelvin isn't online.
