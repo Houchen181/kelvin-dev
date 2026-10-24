@@ -60,7 +60,8 @@ log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/ke
 STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
-SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/stop", "/api/runs/stop"}
+SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/accounts/remove",
+              "/api/stop", "/api/runs/stop"}
 # sharing work with the Kelvin hub (hubsync.py) is switched off for now: the hub is for accounts only (central.py)
 HUB_SHARING = False
 # Claude Code bridge: locked while Claude works the screen, so its clicks never answer for a person
@@ -374,7 +375,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                          "email": user.get("email"), "central": bool(user.get("email"))} if user else None,
                 "suggest": "" if listed else suggested_name(),
                 "busy": busy, "busy_user": runtime.user if busy else None,
-                "legacy": not listed and has_legacy(home),
+                "legacy": not listed and has_legacy(home) and not accounts.legacy_taken(),
                 "central": on, "hub": hub_address(), "account_url": hub_address() + "/account" if on else None,
                 "unlinked": accounts.unlinked() if on else [],
                 "relay": dict(relay_link.view(), on=settings.get("phone_relay") != "off") if on else None}
@@ -748,26 +749,82 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         settings._save()   # keys taken over from before accounts are encrypted now, if there is a password
         return JSONResponse(session_data())
 
+    def check_removal(account: Dict[str, Any], password: str, everywhere: bool) -> None:
+        """Whoever takes a person off this computer knows their password: the one this computer knows for them, or
+        with everywhere, the hub's, which then deletes their Kelvin account."""
+        if not everywhere:
+            accounts.verify(account["name"], password)
+        elif not account.get("email") or not central_on():
+            raise ValueError("%s has no Kelvin account here, only an account on this computer." % account["name"])
+        else:
+            central.Central(hub_address()).delete_account(account["email"], password)
+
+    def remove_person(account: Dict[str, Any], password: str, everywhere: bool) -> Dict[str, List[str]]:
+        """Off this computer as uninstalling would take them (uninstall.remove_person): their settings and API keys,
+        ChatGPT sign-in, chats, projects and memory go; their measurements stay."""
+        from ..uninstall import remove_person as wipe
+        gone = accounts.forget(account["name"])
+        report = wipe(accounts.dir(gone), accounts.chats_dir(gone), cipher_for(password, gone))
+        runtime.gate.log.write("account_removed", user=gone["name"], kelvin_account_deleted=everywhere)
+        return report
+
+    async def removal(account: Dict[str, Any], body: Dict[str, Any]) -> Response:
+        """Take someone off this computer (DELETE /api/account, or before signing in, POST /api/accounts/remove):
+        {password, everywhere}. everywhere: their Kelvin account on the hub is deleted too."""
+        busy = running_for()
+        if busy:
+            return error(409, busy)
+        everywhere = body.get("everywhere") is True
+        password = str(body.get("password") or "")
+        try:
+            await asyncio.to_thread(check_removal, account, password, everywhere)
+        except central.CentralError as e:
+            if e.status in (401, 429):
+                await asyncio.sleep(1)
+            return error(e.status if e.status in (401, 403, 404, 429) else 400, str(e))
+        except central.Unreachable as e:
+            return error(503, "%s Remove it from this computer only, or try again later." % e)
+        except ValueError as e:   # not the password this computer knows
+            await asyncio.sleep(1)
+            return error(401, str(e))
+        user = session["user"]
+        if user is not None and user["name"].lower() == account["name"].lower():
+            await asyncio.to_thread(sign_out)
+        report = await asyncio.to_thread(remove_person, account, password, everywhere)
+        return JSONResponse(dict(session_data(), removed=account["name"], everywhere=everywhere,
+                                 kept=report["kept"], failed=report["failed"]))
+
+    async def accounts_remove(request: Request) -> Response:
+        """Before anyone signs in: take someone off this computer with their password, and with everywhere, delete
+        their Kelvin account too."""
+        if accounts is None:
+            return error(404, "Kelvin runs without accounts here.")
+        if session["user"] is not None:
+            return error(409, "Someone is signed in: people are removed on the sign-in screen, or in their own "
+                              "Settings.")
+        body = await request.json()
+        try:
+            account = accounts.find(str(body.get("name") or ""))
+        except KeyError:
+            return error(404, "There is no %s on this computer." % str(body.get("name") or "such account"))
+        return await removal(account, body)
+
     async def account_view(request: Request) -> Response:
         """POST {old, new}: change (or set, or remove) the signed-in person's password; their keys are encrypted
-        again with it. DELETE {password}: forget the account (its folder stays on disk) and sign out."""
+        again with it. DELETE {password, everywhere}: take them off this computer (their measurements stay) and sign
+        out; with everywhere, their Kelvin account on the hub is deleted too."""
         user = session["user"]
         if accounts is None or user is None:
             return error(404, "Nobody is signed in.")
         body = await request.json()
-        if user.get("email") and central_on():
-            if request.method == "DELETE":
-                return error(400, "Your Kelvin account is on the hub: delete it on your account page there.")
-            return await asyncio.to_thread(central_password, user, str(body.get("old") or ""),
-                                           str(body.get("new") or ""))
         if request.method == "DELETE":
             try:
-                await asyncio.to_thread(accounts.remove, user["name"], str(body.get("password") or ""))
-            except ValueError as e:
-                await asyncio.sleep(1)
-                return error(401, str(e))
-            await asyncio.to_thread(sign_out)
-            return JSONResponse(session_data())
+                return await removal(accounts.find(user["name"]), body)
+            except KeyError:
+                return error(404, "Nobody is signed in.")
+        if user.get("email") and central_on():
+            return await asyncio.to_thread(central_password, user, str(body.get("old") or ""),
+                                           str(body.get("new") or ""))
         new = str(body.get("new") or "")
         try:
             account = await asyncio.to_thread(accounts.change_password, user["name"], str(body.get("old") or ""), new)
@@ -2139,6 +2196,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/bootstrap", bootstrap),
         Route("/api/session", session_view, methods=["GET", "POST", "DELETE"]),
         Route("/api/accounts", accounts_view, methods=["POST"]),
+        Route("/api/accounts/remove", accounts_remove, methods=["POST"]),
         Route("/api/session/reset", session_reset, methods=["POST"]),
         Route("/api/session/hub", session_hub, methods=["POST"]),
         Route("/api/account/rekey", account_rekey, methods=["POST"]),

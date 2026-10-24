@@ -106,13 +106,13 @@
   function showCentral(session) {   // central Kelvin accounts: one account, every computer (central.py)
     const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
     const parts = ["signin-people", "signin-pass", "signin-new", "signin-add", "central-signin", "central-new", "central-link",
-      "central-rekey", "central-create"];
-    const view = (mode) => {   // signin | new | link | rekey
-      const shown = { signin: ["signin-people", "central-signin", "central-create"], new: ["central-new"], link: ["central-link"],
-        rekey: ["central-rekey"] }[mode];
+      "central-rekey", "central-create", "signin-remove", "signin-remove-link"];
+    const view = (mode) => {   // signin | new | link | rekey | remove
+      const shown = { signin: ["signin-people", "central-signin", "central-create"].concat((session.accounts || []).length ? ["signin-remove-link"] : []),
+        new: ["central-new"], link: ["central-link"], rekey: ["central-rekey"], remove: ["signin-remove"] }[mode];
       for (const id of parts) $(id).hidden = !shown.includes(id);
       $("signin-title").textContent = { signin: "Sign in to Kelvin", new: "Create a Kelvin account", link: "Welcome to this computer",
-        rekey: "Keep your API keys?" }[mode];
+        rekey: "Keep your API keys?", remove: "Remove someone from this computer" }[mode];
       $("signin-sub").textContent = mode === "signin" ? "Your Kelvin account works on every computer." : "";
       if (mode === "signin") (($("c-email").value ? $("c-password") : $("c-email"))).focus();
       if (mode === "new") $("cn-name").focus();
@@ -189,7 +189,63 @@
       } catch (err) { say(err.message, true); }
     };
     $("rekey-skip").onclick = () => location.reload();
+    setupRemove(session, () => view("signin"), say);
+    $("signin-remove-link").onclick = () => { say(""); view("remove"); };
     view("signin");
+  }
+
+  // before signing in: take someone off this computer, with their password (app.py removal); their measurements stay
+  function setupRemove(session, back, say) {
+    const people = session.accounts || [];
+    let chosen = null;
+    const pick = (p, b) => {
+      chosen = p;
+      for (const x of $("remove-people").children) x.classList.toggle("on", x === b);
+      const name = p.display || p.name;
+      const kelvinAccount = !!(p.email && session.central);
+      $("remove-what").hidden = false;
+      $("remove-what").textContent = "Takes " + name + " off this computer: their settings, API keys, ChatGPT sign-in, chats, " +
+        "projects and memory. Their measurements (runs, reports and record) stay on disk." +
+        (kelvinAccount ? " Their Kelvin account stays for their other computers, unless you also delete it." : "");
+      $("remove-everywhere-row").hidden = !kelvinAccount;
+      $("remove-everywhere").checked = false;
+      $("remove-pass-label").hidden = $("remove-password").hidden = !p.password && !kelvinAccount;
+      $("remove-pass-label").textContent = name + "'s password";
+      $("remove-password").value = "";
+      $("remove-go").disabled = false;
+      if (!$("remove-password").hidden) $("remove-password").focus();
+    };
+    $("remove-people").replaceChildren(...people.map((p) => {
+      const name = p.display || p.name;
+      const b = h("button", { class: "person", type: "button" }, h("span", { class: "avatar" }, initials(name)), h("span", {}, name),
+        h("span", { class: "person-note" }, p.email || (p.password ? "on this computer" : "on this computer, no password")));
+      b.addEventListener("click", () => pick(p, b));
+      return b;
+    }));
+    for (const id of ["remove-what", "remove-everywhere-row", "remove-pass-label", "remove-password"]) $(id).hidden = true;
+    $("remove-go").disabled = true;
+    $("remove-back").onclick = () => { say(""); back(); };
+    $("signin-remove").onsubmit = async (e) => {
+      e.preventDefault();
+      if (!chosen) return;
+      const everywhere = $("remove-everywhere").checked;
+      const name = chosen.display || chosen.name;
+      if (!confirm(everywhere ? "Delete " + name + "'s Kelvin account on every computer, and remove them from this one? This can't be undone."
+        : "Remove " + name + " from this computer? Their measurements stay.")) return;
+      say(everywhere ? "Deleting the Kelvin account…" : "Removing…");
+      try {
+        const r = await api("/api/accounts/remove", { body: { name: chosen.name, password: $("remove-password").value, everywhere } });
+        showSignIn(r);
+        say(removedText(r));
+      } catch (err) { say(err.message, true); }
+    };
+  }
+
+  function removedText(r) {
+    const folder = (r.kept || [])[0] ? String(r.kept[0]).replace(/[\\/][^\\/]+$/, "") : "";
+    return (r.everywhere ? "Deleted " + r.removed + "'s Kelvin account and removed them from this computer."
+      : "Removed " + r.removed + " from this computer.") + (folder ? " Their measurements stay in " + folder + "." : "") +
+      ((r.failed || []).length ? " Kelvin couldn't delete: " + r.failed.join(", ") + "." : "");
   }
 
   function showSignIn(session) {
@@ -209,6 +265,9 @@
       $("signin-busy-text").textContent = s.busy ? (s.busy_user ? s.busy_user + "'s work: " : "") + s.busy : "";
     };
     busy(session);
+    let note = "";
+    try { note = sessionStorage.getItem("kelvin-signin-msg") || ""; sessionStorage.removeItem("kelvin-signin-msg"); } catch (e) { /* no storage */ }
+    if (note) say(note);
     $("signin-stop").onclick = async () => {   // anyone may stop what runs: safety never waits for a password
       try { await api("/api/runs/stop", { body: { queue: true } }); say("Stopping: the step in progress ends, then everything goes safe."); }
       catch (e) { say(e.message, true); }
@@ -220,13 +279,16 @@
     const people = session.accounts || [];
     let chosen = null;
     const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
-    const view = (mode) => {   // people | password | new
+    const view = (mode) => {   // people | password | new | remove
       $("signin-people").hidden = mode !== "people";
       $("signin-pass").hidden = mode !== "password";
       $("signin-new").hidden = mode !== "new";
       $("signin-add").hidden = mode !== "people";
+      $("signin-remove").hidden = mode !== "remove";
+      $("signin-remove-link").hidden = mode !== "people" || !people.length;
       $("new-back").hidden = !people.length;
-      $("signin-title").textContent = mode === "new" ? (people.length ? "Add a person" : "Welcome to Kelvin") : "Who's using Kelvin?";
+      $("signin-title").textContent = mode === "new" ? (people.length ? "Add a person" : "Welcome to Kelvin")
+        : mode === "remove" ? "Remove someone from this computer" : "Who's using Kelvin?";
       $("signin-sub").textContent = mode !== "new" ? "" : people.length ? "Anyone can add themselves; nobody's account is above another's."
         : session.legacy ? "Make your account. Your chats, runs and API keys from before come with it." : "Make your account to start.";
       say("");
@@ -253,6 +315,8 @@
     $("signin-back").onclick = () => view("people");
     $("new-back").onclick = () => view("people");
     $("signin-add").onclick = () => view("new");
+    setupRemove(session, () => view("people"), say);
+    $("signin-remove-link").onclick = () => view("remove");
     view(people.length ? "people" : "new");
   }
 
@@ -282,6 +346,13 @@
         "signed out": "the hub signed this computer out: sign in again", off: "off" })[relay.state] || relay.state;
       $("relay-status").title = relay.problem || "";
     }
+    const kelvinAccount = !!a.user.central;
+    $("account-delete-everywhere-row").hidden = !kelvinAccount;
+    $("account-delete-everywhere").checked = false;
+    $("account-delete-password").hidden = !a.user.password && !kelvinAccount;
+    $("account-delete-what").textContent = "Takes you off this computer: your settings, API keys, ChatGPT sign-in, chats, projects " +
+      "and memory. Your measurements (runs, reports and record) stay on disk." +
+      (kelvinAccount ? " Your Kelvin account stays for your other computers, unless you also delete it." : "");
     $("account-hint").textContent = a.user.central
       ? "One Kelvin account, on the Kelvin hub, signs you in on every computer; after a first sign-in on a computer it works there offline too. Your settings, API keys, chats, projects, memory, data folder and record stay on each computer, and your API keys are encrypted with your password. The instruments, their cards, the lab switches below and the lab's instrument log are everyone's. Forgot your password? Sign out and choose \"Forgot your password?\"."
       : "Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.";
@@ -297,6 +368,18 @@
   async function signOut() {
     try { await api("/api/session", { method: "DELETE" }); } catch (e) { /* the sign-in screen shows either way */ }
     location.reload();
+  }
+
+  async function deleteAccount() {
+    const everywhere = $("account-delete-everywhere").checked;
+    if (!confirm(everywhere ? "Delete your Kelvin account on every computer, and remove it from this one? This can't be undone."
+      : "Remove your account from this computer? Your measurements stay.")) return;
+    $("settings-msg").textContent = everywhere ? "Deleting your Kelvin account…" : "Removing…";
+    try {
+      const r = await api("/api/account", { method: "DELETE", body: { password: $("account-delete-password").value, everywhere } });
+      try { sessionStorage.setItem("kelvin-signin-msg", removedText(r)); } catch (e) { /* the sign-in screen shows either way */ }
+      location.reload();
+    } catch (e) { $("settings-msg").textContent = e.message; }
   }
 
   async function changePassword() {
@@ -4178,6 +4261,7 @@
     renderAccount();
     $("sign-out").addEventListener("click", signOut);
     $("pw-change").addEventListener("click", changePassword);
+    $("account-delete-go").addEventListener("click", deleteAccount);
     $("activity-all").addEventListener("click", () => {   // the lab's instrument log: everyone's activity, by name
       PANEL.everyone = !PANEL.everyone;
       $("activity-all").setAttribute("aria-pressed", String(PANEL.everyone));

@@ -103,6 +103,7 @@ People install the app through TestFlight: you send a link, they install Apple's
 - The token is in the Keychain (this device only, after first unlock); the list of computers in UserDefaults holds nothing secret.
 - App Transport Security: from iOS 17 the app needs `NSAllowsLocalNetworking` to reach a lab IP address, and exceptions for Tailscale's `100.64.0.0/10` and `*.ts.net`. Any other plain-http address is refused by iOS.
 - Unpairing in the app also unpairs the phone on the Kelvin computer when it answers.
+- **Delete Kelvin account…** (Computers → Kelvin account) deletes the account on the hub with its password (`POST /api/account/delete`), then signs the phone out, as App Review asks of an app that offers making an account. Each Kelvin computer keeps the person's chats and measurements until the account is removed there too.
 
 ## Next: through the hub
 

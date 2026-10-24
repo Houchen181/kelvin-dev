@@ -113,7 +113,7 @@ def test_an_account_from_before_joins_a_central_one_and_keeps_its_keys(tmp_path,
     assert "sk-ada" not in mine and "khub_" not in mine
     assert client.post("/api/session/hub", json={"url": ""}).status_code == 200   # she may change it, signed in
     client.post("/api/session/hub", json={"url": HUB})
-    assert client.request("DELETE", "/api/account", json={}).status_code == 400      # deleting is on the hub's account page
+    assert client.request("DELETE", "/api/account", json={}).status_code == 401      # her password, to take her off
 
     client.delete("/api/session")
     assert client.post("/api/session/hub", json={"url": ""}).status_code == 401   # not by just anyone now
@@ -191,3 +191,103 @@ def test_someone_new_on_a_computer_with_old_accounts_can_start_fresh(tmp_path, h
     h.register(cy["email"], "Cy", cy["password"], True)
     r = client.post("/api/session", json={"link": "Ben", "link_password": ben["password"], **cy})
     assert r.status_code == 400 and "already linked" in r.json()["error"]   # Ben's is Ben's
+
+
+@pytest.mark.skipif(not CRYPTO, reason="needs the cryptography package")
+def test_someone_is_removed_before_signing_in_and_their_measurements_stay(tmp_path, hub):
+    h, line = hub
+    client, settings = computer(tmp_path)
+    client.post("/api/session/hub", json={"url": HUB})
+    assert client.post("/api/accounts", json={"name": "Ada Lovelace", "consent": True, **ADA}).status_code == 200
+    folder = tmp_path / "users" / "Ada_Lovelace"
+    (folder / "data" / "runs" / "20261024-101500-sweep").mkdir(parents=True)          # a measurement of hers
+    client.delete("/api/session")
+    assert [a["name"] for a in client.get("/api/session").json()["accounts"]] == ["Ada Lovelace"]
+    r = client.post("/api/accounts/remove", json={"name": "Ada Lovelace", "password": "wrong pw!"})
+    assert r.status_code == 401 and (folder / "settings.json").exists()
+    r = client.post("/api/accounts/remove", json={"name": "Ada Lovelace", "password": ADA["password"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["accounts"] == [] and r.json()["removed"] == "Ada Lovelace" and not r.json()["everywhere"]
+    assert sorted(p.name for p in folder.iterdir()) == ["data"]                      # settings, keys and chats gone
+    assert any(k.endswith("runs") for k in r.json()["kept"])
+    assert h.authenticate(ADA["email"], ADA["password"])                            # her Kelvin account stays
+    r = client.post("/api/session", json=ADA)                                       # and signs her in here afresh,
+    assert r.status_code == 200 and r.json()["user"]["name"] == "Ada Lovelace"
+    mine = json.loads((tmp_path / "accounts.json").read_text())["accounts"][0]
+    assert mine["folder"] == "Ada_Lovelace_2"                                        # in a folder of her own again
+    assert client.post("/api/accounts/remove", json={"name": "Ada Lovelace"}).status_code == 409   # not while signed in
+
+
+@pytest.mark.skipif(not CRYPTO, reason="needs the cryptography package")
+def test_a_kelvin_account_is_deleted_everywhere_from_its_settings(tmp_path, hub):
+    h, line = hub
+    client, settings = computer(tmp_path)
+    client.post("/api/session/hub", json={"url": HUB})
+    client.post("/api/accounts", json={"name": "Ada Lovelace", "consent": True, **ADA})
+    r = client.request("DELETE", "/api/account", json={"password": "wrong pw!", "everywhere": True})
+    assert r.status_code == 401 and h.find_users(ADA["email"])                       # nothing deleted
+    line.up = False
+    r = client.request("DELETE", "/api/account", json={"password": ADA["password"], "everywhere": True})
+    assert r.status_code == 503 and "this computer only" in r.json()["error"]        # offline: say what still works
+    line.up = True
+    r = client.request("DELETE", "/api/account", json={"password": ADA["password"], "everywhere": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["user"] is None and r.json()["accounts"] == [] and r.json()["everywhere"]
+    assert not h.find_users(ADA["email"])                                           # gone on the hub
+    assert client.post("/api/session", json=ADA).status_code == 401                 # so on every computer
+
+
+def test_an_older_hub_says_where_to_delete_the_account(hub):
+    h, line = hub
+
+    def older(method, url, body=None, headers=None):   # a hub from before Delete account in the apps
+        return (404, {"error": "not found"}) if url.endswith("/api/account/delete") else line(method, url, body, headers)
+    with pytest.raises(central.CentralError) as no:
+        central.Central(HUB, http=older).delete_account(ADA["email"], ADA["password"])
+    assert no.value.status == 404 and HUB + "/account" in str(no.value)
+
+
+def test_kelvin_says_why_it_cant_reach_the_hub():
+    import socket
+    import ssl
+    import urllib.error
+    cert = ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    cert.verify_message = "unable to get local issuer certificate"
+    cases = [(cert, "doesn't trust the hub's certificate (unable to get local issuer certificate)"),
+             (socket.gaierror(11001, "getaddrinfo failed"), "can't look up the hub's address"),
+             (TimeoutError("timed out"), "didn't answer in time"),
+             (ConnectionRefusedError(10061, "refused"), "refused or cut off")]
+    for reason, said in cases:
+        def http(*a, reason=reason, **k):
+            raise urllib.error.URLError(reason)
+        with pytest.raises(central.Unreachable) as e:
+            central.Central(HUB, http=http).sign_in("a@b.c", "pw", "x")
+        assert said in str(e.value) and "URLError" not in str(e.value), str(e.value)
+
+
+def test_kelvin_trusts_its_own_list_of_certificates_too(monkeypatch):
+    pytest.importorskip("certifi")
+    import ssl
+    from labharness.hub import client
+    # a Windows that never fetched Let's Encrypt's root: its browser has its own list, and now Kelvin too
+    monkeypatch.setattr(ssl, "create_default_context", lambda *a, **k: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    names = {dict(x[0] for x in c["subject"]).get("commonName") for c in client.ssl_context().get_ca_certs()}
+    assert "ISRG Root X1" in names
+
+
+def test_removing_the_first_account_never_hands_its_data_from_before_to_someone_new(tmp_path):
+    old = tmp_path / "virtual-lab"
+    (old / "runs" / "20261017-225927-gate_sweep").mkdir(parents=True)              # runs from before accounts
+    client, settings = computer(tmp_path)
+    assert client.post("/api/accounts", json={"name": "Ada", "password": "pw1234"}).status_code == 200
+    assert json.loads((tmp_path / "accounts.json").read_text())["accounts"][0]["data"] == "virtual-lab"
+    client.delete("/api/session")
+    assert client.post("/api/accounts/remove", json={"name": "Ada", "password": "pw1234"}).status_code == 200
+    assert (old / "runs" / "20261017-225927-gate_sweep").is_dir()                  # her measurements stay
+    s = client.get("/api/session").json()
+    assert s["accounts"] == [] and not s["legacy"]                                  # nobody new is told they come along
+    assert client.post("/api/accounts", json={"name": "Ben", "password": ""}).status_code == 200
+    ben = json.loads((tmp_path / "accounts.json").read_text())["accounts"][0]
+    assert ben["name"] == "Ben" and "data" not in ben                               # his own folder, not hers
+    client.delete("/api/session")
+    assert client.post("/api/accounts/remove", json={"name": "Ben"}).status_code == 200   # no password: none asked

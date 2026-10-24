@@ -166,7 +166,16 @@ public struct HubClient: Sendable {
         _ = try? await call("POST", "/api/signout")
     }
 
-    func call(_ method: String, _ path: String, body: JSONValue? = nil) async throws -> JSONValue {
+    /// Delete the Kelvin account on the hub, for every computer and phone: with its password, as on the account page.
+    public func deleteAccount(email: String, password: String) async throws {
+        let body = JSONValue.object(["email": .string(email), "password": .string(password)])
+        _ = try await call("POST", "/api/account/delete", body: body,
+                           missing: "This Kelvin hub can't delete accounts from the app yet. Delete it on your account "
+                               + "page: " + hub.appendingPathComponent("account").absoluteString)
+    }
+
+    /// missing: what to say when the hub doesn't have this yet (an older hub answers 404).
+    func call(_ method: String, _ path: String, body: JSONValue? = nil, missing: String? = nil) async throws -> JSONValue {
         var r = URLRequest(url: hub.appendingPathComponent(String(path.dropFirst())),
                            cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
         r.httpMethod = method
@@ -191,6 +200,7 @@ public struct HubClient: Sendable {
             case 401: throw KelvinError(.unpaired, said ?? "Wrong email or password.")
             case 403: throw KelvinError(.forbidden, said ?? "The Kelvin hub said no.")
             case 429: throw KelvinError(.locked, said ?? "Too many tries. Wait 15 minutes.")
+            case 404 where missing != nil: throw KelvinError(.server, missing ?? "")
             default: throw KelvinError(.server, said ?? "The Kelvin hub answered HTTP \(response.statusCode).")
             }
         }

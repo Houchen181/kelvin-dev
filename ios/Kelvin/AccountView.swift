@@ -104,10 +104,12 @@ struct AccountView: View {
     }
 }
 
-/// The account in the Computers tab: who is signed in, the account's Kelvins, and signing out.
+/// The account in the Computers tab: who is signed in, the account's Kelvins, signing out and deleting the account.
 struct AccountSection: View {
     @EnvironmentObject var app: AppModel
     @State var confirming = false
+    @State var deleting = false
+    @State var password = ""
     @State var failure: String?
 
     var body: some View {
@@ -117,6 +119,10 @@ struct AccountSection: View {
                 LabeledContent("Kelvin hub", value: a.hub.host ?? a.hub.absoluteString)
                 Button("Look for my Kelvins") { attempt($failure) { try await app.lookForKelvins() } }
                 Button("Sign out", role: .destructive) { confirming = true }
+                Button("Delete Kelvin account…", role: .destructive) {
+                    password = ""
+                    deleting = true
+                }
             } header: {
                 Text("Kelvin account")
             } footer: {
@@ -126,6 +132,18 @@ struct AccountSection: View {
                 Button("Sign out", role: .destructive) { Task { await app.signOut() } }
             } message: {
                 Text("This phone stops reaching your Kelvins through the hub. Paired computers stay.")
+            }
+            .alert("Delete your Kelvin account?", isPresented: $deleting) {
+                SecureField("Password", text: $password)
+                Button("Delete", role: .destructive) {
+                    let typed = password
+                    password = ""
+                    attempt($failure) { try await app.deleteAccount(password: typed) }
+                }
+                Button("Cancel", role: .cancel) { password = "" }
+            } message: {
+                Text("This deletes \(a.email) on the Kelvin hub, for every computer and phone, and can't be undone. "
+                     + "Each Kelvin computer keeps your chats and measurements until you remove the account there too.")
             }
             .failure($failure)
         } else {

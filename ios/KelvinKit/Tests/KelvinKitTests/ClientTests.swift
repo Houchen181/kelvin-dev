@@ -144,6 +144,25 @@ final class ClientTests: XCTestCase {
         }
     }
 
+    func testAKelvinAccountIsDeletedWithItsPassword() async throws {
+        let t = Scripted()
+        t.on("POST /api/account/delete", "{\"deleted\": true}")
+        let hub = URL(string: "https://kelvin.example.org")!
+        try await HubClient(hub: hub, token: "khub_phone", transport: t).deleteAccount(email: "ada@example.org",
+                                                                                     password: "correct horse")
+        XCTAssertEqual(t.asked.first?.url?.path, "/api/account/delete")
+        XCTAssertEqual(t.body(0)?["email"], .string("ada@example.org"))
+        XCTAssertEqual(t.body(0)?["password"], .string("correct horse"))   // the password, never only the token
+        let older = Scripted()
+        older.on("POST /api/account/delete", 404, "Not Found")
+        do {
+            try await HubClient(hub: hub, transport: older).deleteAccount(email: "ada@example.org", password: "x")
+            XCTFail("an older hub deleted the account")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("https://kelvin.example.org/account"))
+        }
+    }
+
     func testTheHubSaysWhatIsWrong() async {
         let t = Scripted()
         t.on("POST /api/signin", 401, "{\"error\": \"Wrong email or password.\"}")

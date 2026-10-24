@@ -84,6 +84,13 @@ final class AppModel: ObservableObject {
         save()
     }
 
+    /// Delete the Kelvin account on the hub (its password), then sign this phone out of it.
+    func deleteAccount(password: String) async throws {
+        guard let account else { return }
+        try await HubClient(hub: account.hub, transport: transport).deleteAccount(email: account.email, password: password)
+        await signOut()
+    }
+
     /// What the hub last said about one of the account's Kelvins.
     func kelvin(_ c: Computer) -> HubKelvin? { kelvins.first { $0.id == c.kelvin } }
 

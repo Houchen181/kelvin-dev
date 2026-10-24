@@ -238,6 +238,7 @@ Kelvin accepts a hub address on the internet only with https.
 | `POST /api/reset` | `{"email"}`: mail a reset link → always `{"ok": true}` |
 | `POST /api/password` | `{"old", "new"}`: change the password |
 | `POST /api/signout` | End this Kelvin's or phone's sign-in: its token stops working (204) |
+| `POST /api/account/delete` | Delete the account from Kelvin or the iPhone app: `{email, password}`, the same as **Delete account** on the account page; the same lockouts as signing in |
 | `WS /api/relay/kelvin` | A signed-in Kelvin's connection for its person's phones (see Phones through the hub) |
 | `GET /api/relay/kelvins` | The account's Kelvins: `{"kelvins": [{"id", "name", "platform", "version", "online", "direct", "last_seen"}], "user"}` |
 | `* /api/relay/kelvins/{id}/api/...` | A phone's call to one of them, passed through. 503 with `offline: true` when it isn't online |

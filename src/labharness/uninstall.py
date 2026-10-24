@@ -37,8 +37,9 @@ def _people(home: Path) -> List[Path]:
     return sorted(p for p in users.iterdir() if p.is_dir()) if users.is_dir() else []
 
 
-def _revoke_chatgpt(home: Path, seconds: float = 10.0) -> str:
-    """Sign out of ChatGPT properly (the refresh token is revoked with OpenAI), not just forget the tokens."""
+def _revoke_chatgpt(home: Path, seconds: float = 10.0, cipher: Any = None) -> str:
+    """Sign out of ChatGPT properly (the refresh token is revoked with OpenAI), not just forget the tokens. cipher:
+    the person's, when their sign-in is sealed with their password."""
     if not (home / "chatgpt.json").exists():
         return ""
     result: Dict[str, Any] = {}
@@ -46,7 +47,10 @@ def _revoke_chatgpt(home: Path, seconds: float = 10.0) -> str:
     def go() -> None:
         try:
             from .web.chatgpt import SignIn
-            result["ok"] = SignIn(home).sign_out()
+            signin = SignIn(home)
+            if cipher is not None:
+                signin.use(home, cipher)
+            result["ok"] = signin.sign_out()
         except Exception as e:   # no network, or no web extra: the tokens are still deleted below
             result["error"] = str(e)
     t = threading.Thread(target=go, daemon=True)
@@ -60,6 +64,37 @@ def _remove(path: Path) -> None:
         shutil.rmtree(path)
     else:
         path.unlink()
+
+
+def remove_person(folder: Any, chats: Any, cipher: Any = None, revoke: bool = True) -> Dict[str, List[str]]:
+    """One person taken off this computer, as uninstalling would: their own Kelvin data in their folder (PERSON:
+    settings and API keys, the ChatGPT sign-in, revoked first, chats, projects and memory) and their chats wherever
+    they are (an account that took over what Kelvin kept before accounts has them in virtual-lab). Their measurements
+    stay. Returns what was removed and kept."""
+    folder, chats = Path(folder), Path(chats)
+    report: Dict[str, List[str]] = {"removed": [], "kept": [], "failed": [], "notes": []}
+    chosen = _chosen_data_folder(folder)   # a data folder they chose in Settings, read before their settings go
+    if revoke:
+        note = _revoke_chatgpt(folder, cipher=cipher)
+        if note:
+            report["notes"].append(note)
+    for path in [folder / n for n in PERSON] + ([chats] if chats != folder / "chats" else []):
+        if not path.exists():
+            continue
+        try:
+            _remove(path)
+            report["removed"].append(str(path))
+        except OSError as e:
+            report["failed"].append("%s (%s)" % (path, e.strerror or e))
+    data = chats.parent if chats != folder / "chats" else folder / "data"
+    report["kept"] = [str(data / n) for n in MEASUREMENTS if (data / n).exists()]
+    report["kept"] += [chosen] if chosen and Path(chosen).exists() else []
+    try:
+        if folder.is_dir() and not any(folder.iterdir()):
+            folder.rmdir()
+    except OSError:
+        pass
+    return report
 
 
 def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:

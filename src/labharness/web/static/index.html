@@ -63,8 +63,17 @@
       <input id="rekey-old" type="password" autocomplete="off">
       <div class="signin-actions"><button id="rekey-skip" class="link" type="button">Skip</button><button class="btn primary" type="submit">Keep my keys</button></div>
     </form>
+    <form id="signin-remove" class="signin-form" hidden>
+      <div id="remove-people" class="signin-people"></div>
+      <p id="remove-what" class="hint" hidden></p>
+      <label id="remove-everywhere-row" class="check" hidden><input id="remove-everywhere" type="checkbox"><span>Also delete their Kelvin account, on every computer. This can't be undone.</span></label>
+      <label id="remove-pass-label" for="remove-password" hidden>Their password</label>
+      <input id="remove-password" type="password" autocomplete="off" hidden>
+      <div class="signin-actions"><button id="remove-back" class="link" type="button">Back</button><button id="remove-go" class="btn danger" type="submit" disabled>Remove</button></div>
+    </form>
     <button id="signin-add" class="link" type="button">Add a person</button>
     <button id="central-create" class="link" type="button" hidden>Create a Kelvin account</button>
+    <button id="signin-remove-link" class="link" type="button" hidden>Remove someone from this computer</button>
     <p id="signin-msg" class="signin-msg" role="status"></p>
     <div id="signin-busy" class="signin-busy" hidden><span id="signin-busy-text"></span><button id="signin-stop" class="btn small" type="button">Stop it</button></div>
     <p id="signin-foot" class="muted small signin-foot">Everyone here is equal. Each person has their own chats, projects, memory, API keys, data folder and record. The instruments, their cards and the lab's instrument log are shared.</p>
@@ -304,6 +313,12 @@
             <span id="account-hint" class="hint">Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.</span>
             <div class="key-row pw-row"><input id="pw-old" type="password" autocomplete="current-password" placeholder="Current password"><input id="pw-new" type="password" autocomplete="new-password" placeholder="New password (empty: none)"><button id="pw-change" class="btn small" type="button">Change</button></div>
             <div class="chatgpt-row"><a id="account-hub-link" class="link soft" target="_blank" rel="noopener noreferrer" hidden>Your account on the Kelvin hub</a><span id="account-hub-text" class="hint"></span><button id="account-hub-edit" class="link soft" type="button">change</button></div>
+            <details id="account-delete" class="account-delete">
+              <summary>Delete this account…</summary>
+              <span id="account-delete-what" class="hint"></span>
+              <label id="account-delete-everywhere-row" class="check wrap" hidden><input id="account-delete-everywhere" type="checkbox"> Also delete my Kelvin account, on every computer. This can't be undone.</label>
+              <div class="key-row"><input id="account-delete-password" type="password" autocomplete="current-password" placeholder="Your password"><button id="account-delete-go" class="btn small danger" type="button">Delete</button></div>
+            </details>
           </div>
           <div id="relay-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>

@@ -45,8 +45,11 @@ def socket_url(hub: str) -> str:
 def _connect(url: str, token: str) -> Any:
     from websockets.asyncio.client import connect
     from .._version import __version__
+    from ..hub.client import ssl_context
+    secure = {"ssl": ssl_context()} if url.startswith("wss://") else {}   # Kelvin's own certificates too
     return connect(url, additional_headers={"Authorization": "Bearer " + token}, open_timeout=20,
-                   ping_interval=25, ping_timeout=25, max_size=2 ** 22, user_agent_header="Kelvin/" + __version__)
+                   ping_interval=25, ping_timeout=25, max_size=2 ** 22, user_agent_header="Kelvin/" + __version__,
+                   **secure)
 
 
 class RelayLink:

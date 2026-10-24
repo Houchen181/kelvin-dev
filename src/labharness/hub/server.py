@@ -1041,6 +1041,31 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error("not signed in", 401)
         return Response(status_code=204)
 
+    async def api_account_delete(request: Request) -> Response:
+        """Delete account from Kelvin or a phone: {email, password} -> the account deleted, as on the account page.
+        The password, never only a token: a computer that merely stayed signed in can't delete anyone. Same lockouts
+        as signing in."""
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        keys = ("signin:" + str(body.get("email") or "").strip().lower(), "signin-ip:" + who(request))
+        if any(signin_tries.blocked(k) for k in keys):
+            return api_error("Too many tries. Wait 15 minutes, or reset your password.", 429)
+        try:
+            user = await call(hub.authenticate, body.get("email"), body.get("password"), ip_of(request))
+        except (TooMuch, Busy) as err:
+            return api_error(str(err), err.status)
+        except HubError as err:
+            if str(err).startswith("Wrong email or password"):
+                for k in keys:
+                    signin_tries.hit(k)
+                return api_error(str(err), 401)
+            return api_error(str(err), 403)
+        signin_tries.clear(keys[0])
+        await call(hub.delete_user, user["id"], "user", ip_of(request))
+        return JSONResponse({"deleted": True})
+
     async def me(request: Request) -> Response:
         app = await app_of(request)
         if app is None:
@@ -1376,6 +1401,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/api/reset", api_reset, methods=["POST"]),
         Route("/api/password", api_password, methods=["POST"]),
         Route("/api/signout", api_signout, methods=["POST"]),
+        Route("/api/account/delete", api_account_delete, methods=["POST"]),
         *relay_routes,
         Route("/api/me", sharing_only(me)),
         Route("/api/sync", sharing_only(sync), methods=["POST"]),
