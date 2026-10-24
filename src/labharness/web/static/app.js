@@ -34,6 +34,7 @@
     pencil: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
     sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
+    copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
     // instrument kinds
     "source-meter": '<path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/>',
     "lock-in": '<path d="M2 12c2-6 4-6 6 0s4 6 6 0 4-6 6 0"/><path d="M2 20h20"/>',
@@ -1579,6 +1580,7 @@
     endText() {
       if (this.text) {
         cancelAnimationFrame(this.raf); this.raf = 0; this.text.innerHTML = md(this.buf); this.text.classList.remove("cursor");
+        this.text.dataset.src = this.buf;   // what Copy copies: the answer as written (Markdown)
         this.last = { el: this.text, buf: this.buf };
       }
       this.text = null;
@@ -1601,8 +1603,11 @@
       let open = false;
       const label = () => (open ? "Show the short answer" : "Full answer (" + fullWords + " words)");
       const toggle = h("button", { class: "link soft", type: "button" }, label());
-      toggle.addEventListener("click", () => { open = !open; last.el.innerHTML = open ? fullHtml : shortHtml; toggle.textContent = label(); });
+      toggle.addEventListener("click", () => {
+        open = !open; last.el.innerHTML = open ? fullHtml : shortHtml; last.el.dataset.src = open ? full : short; toggle.textContent = label();
+      });
       last.el.innerHTML = shortHtml;
+      last.el.dataset.src = short;
       last.el.after(h("div", { class: "condense-note" }, h("span", {}, "Condensed by Kelvin"), toggle));
     }
     keptWhole(words, why) {
@@ -1691,6 +1696,13 @@
     finish() {
       this.endText(); this.endThinking();
       for (const step of this.steps.values()) if (!step.done && step.unknown) { step.unknown(); step.done = true; }
+      if (!this.tools && this.el.querySelector(":scope > .md")) {   // Copy: the answer's text, as shown
+        const btn = h("button", { class: "link soft", type: "button", title: "Copy this answer" }, icon("copy"), "Copy");
+        btn.addEventListener("click", () => copyText([...this.el.querySelectorAll(":scope > .md")]
+          .map((e) => e.dataset.src || e.innerText).join("\n\n"), btn));
+        this.tools = h("div", { class: "msg-tools" }, btn);
+        this.el.append(this.tools);
+      }
     }
   }
 
@@ -1701,6 +1713,21 @@
   const toBottom = () => { scroller.scrollTop = scroller.scrollHeight; };
 
   function userBubble(text) { return h("div", { class: "msg user" }, h("div", { class: "bubble" }, text)); }
+
+  async function copyText(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {   // no clipboard access here: copy through a hidden text box
+      const box = h("textarea", { class: "copy-box" });
+      box.value = text;
+      document.body.append(box);
+      box.select();
+      try { document.execCommand("copy"); } finally { box.remove(); }
+    }
+    const said = btn.lastChild;
+    said.textContent = "Copied";
+    setTimeout(() => { said.textContent = "Copy"; }, 1500);
+  }
   function showEmpty(show) { $("empty").hidden = !show; thread.hidden = show; }
 
   function replayMessage(reply, m) {
@@ -2771,7 +2798,7 @@
         }));
       menu.hidden = false;
     });
-    reply.el.append(wrap);
+    (reply.tools || reply.el).append(wrap);
   }
   async function askReview(reply, wrap, model) {
     const pending = h("div", { class: "review pending" }, h("span", { class: "spinner" }),

@@ -128,7 +128,8 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
     import webview  # imported here so headless self-tests never need a GUI toolkit
 
     window = webview.create_window("Kelvin", url, width=1280, height=860, min_size=(420, 560),
-                                   background_color="#f6f8fb")
+                                   background_color="#f6f8fb",
+                                   text_select=True)   # pywebview blocks selecting text unless asked: chats are to copy
     if closer is not None:   # Restart to update closes the window like the person would
         closer["fn"] = window.destroy
 
