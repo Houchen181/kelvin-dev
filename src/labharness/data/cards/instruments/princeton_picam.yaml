@@ -10,7 +10,8 @@ notes:
   - "PICam keeps a camera's settings on the computer: when a program opens it, they start from PICam's values, and the first acquisition sends them to the camera (LightField works the same way). Kelvin itself sets nothing until asked."
   - "A PyLoN is cooled with liquid nitrogen: watch temperature and temperature_status (locked once it has reached the setpoint) before measuring."
   - "Spectrum sums the frame's rows for each column: with the region of interest binned to one row on the chip (roi: x,width,1,y,height,height), it is exactly that row, read out with the lowest noise. Its x axis is the column; the spectrograph's calibration turns columns into wavelengths."
-  - "A frame is kept as a .npy file in the run's frames/ folder. Not yet tried on a camera: watch the first runs."
+  - "With LightField on this computer, the camera and its spectrograph can also be used through LightField (Teledyne LightField, lightfield://<experiment>), with the spectrograph's grating, center wavelength and wavelength calibration. One route per camera."
+  - "A run keeps each frame in its run.h5. Not yet tried on a camera: watch the first runs."
 identify:
   idn: "^Princeton Instruments,"
   example: "Princeton Instruments,PyLoN 400BR eXcelon,1234567"

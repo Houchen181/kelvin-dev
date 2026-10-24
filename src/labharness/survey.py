@@ -60,6 +60,7 @@ class Survey:
     serial_ports: List[str] = field(default_factory=list)
     usb: List[Dict[str, Any]] = field(default_factory=list)  # instrument-like USB devices
     gpib_adapters: Optional[int] = None
+    libraries: List[str] = field(default_factory=list)      # what makers' programs saw (PICam, LightField), in words
     problems: List[str] = field(default_factory=list)       # things to fix, each with what to do
 
     def add(self, resource: str, how: str) -> None:
@@ -83,7 +84,7 @@ class Survey:
         out.append("USB instruments: " + (", ".join(usb) if usb else "none"))
         if self.gpib_adapters is not None:
             out.append("GPIB adapters: %s" % (self.gpib_adapters or "none"))
-        return out + ["To fix: " + p for p in self.problems]
+        return out + self.libraries + ["To fix: " + p for p in self.problems]
 
     def as_dict(self) -> Dict[str, Any]:
         return dict(asdict(self), lines=self.lines())

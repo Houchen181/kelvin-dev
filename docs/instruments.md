@@ -84,6 +84,7 @@ More instruments with a library of their own:
 |---|---|---|---|
 | National Instruments DAQ (USB-600x, USB-62xx, PCIe/PXIe-63xx, cDAQ) | `nidaq://Dev1?terminal=rse` | NI-DAQmx (the app brings nidaqmx) | `ni/daqmx` |
 | Teledyne Princeton Instruments camera (PyLoN, PIXIS, ProEM, BLAZE, KURO, SOPHIA) | `picam://<serial>` | PICam, or LightField which installs it | `princeton/picam` |
+| The same cameras with their spectrograph (IsoPlane, SpectraPro, HRS), through LightField | `lightfield://<experiment>` | LightField, with its license (the app brings pythonnet) | `princeton/lightfield` |
 | Princeton Instruments (Acton) SpectraPro monochromator | `serial://COM4` | nothing (text commands) | `princeton/spectrapro` |
 | Andor Shamrock / Kymera spectrograph | `shamrock://0` | Andor Solis or the Andor SDK | `andor/shamrock` |
 | Andor sCMOS camera (Zyla, Neo, Sona, Marana) | `andor://0?sdk=3` | Andor SDK3 and its pyAndorSDK3 | `andor/scmos` (draft) |
@@ -95,9 +96,12 @@ More instruments with a library of their own:
 | Ocean Insight spectrometer | `seabreeze://<serial>` | Kelvin from source with `seabreeze` | `ocean/spectrometer` |
 | Basler camera | `pylon://<serial>` | Kelvin from source with `pypylon` | `basler/camera` |
 
-- **The app brings only what it needs:** nidaqmx and numpy. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a Python library the app doesn't carry, so run Kelvin from source for them.
+- **The app brings only what it needs:** nidaqmx, numpy, and pythonnet for LightField's automation. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a Python library the app doesn't carry, so run Kelvin from source for them.
 
 - **Scans find them:** the NI devices, Princeton Instruments cameras, Andor spectrographs and sCMOS cameras (and, from source, Ocean spectrometers, Basler cameras and ANC350s), through their libraries, which only list what they see. Add the others by address. Andor SDK2 cameras aren't listed, because finding one means initializing it, which resets it.
+- **The scan says what PICam saw:** each camera that is free, each one open in another program (LightField, say), PICam missing, and whether LightField is installed. Kelvin never starts LightField by itself: add it in the Lab panel.
+- **Through LightField:** Kelvin starts LightField, a window you can watch and use, and loads the experiment saved there. It sets exposure, frames (averaged per reading), the grating (as LightField names it, or by grooves per mm), the center wavelength and the sensor setpoint, and waits while the spectrograph moves. Each reading captures without saving a file. A spectrum comes with LightField's wavelength calibration, for the frame's own columns and binning. One program per camera: close a LightField you opened yourself first, and don't add the same camera through PICam as well.
+- **PICam's errors in words:** a failure names what Kelvin was doing and PICam's own name for the error, such as "PICam couldn't open the camera: Device Open Elsewhere", with what helps.
 - **Connecting changes nothing,** as for every instrument. The exceptions are in the SDKs themselves, and the cards say so. Andor's SDK2 starts each session from its own defaults. PICam keeps a camera's settings on the computer, starting from its own values when a program opens the camera, and the first acquisition sends them.
 - **Camera frames are images in the run's data.** A frame is a reading of type `image`. While a run is measured, each frame waits as a `.npy` file in the run's `frames/` folder; when the run ends, they go into its `run.h5` (`frames/<reading>`, one image per point, compressed). Mean, max, min and sum are readings of a frame: one taken just before is used, otherwise a new one.
 - **Spectra keep their wavelengths.** A spectrum is recorded with the wavelengths it was taken at (they aren't evenly spaced), and `run.h5` keeps them with it (`traces/<reading>.x`).
@@ -107,7 +111,8 @@ More instruments with a library of their own:
 - **Outputs without read-back:** a DAQ's analog and digital outputs, a spectrometer's integration time. These are unknown until Kelvin sets them, and nothing is assumed. For outputs: switching to safe always goes ahead, any other value asks you, and a ramped one starts from safe.
 - **Not yet verified on hardware:** the Andor camera cards are drafts, written from Andor's SDK functions without a camera at hand. Check them against Solis, then mark them reviewed. The others follow their makers' documentation, but haven't met real hardware yet either, so watch the first runs:
   - the Acton commands are from its manual;
-  - the PICam parameters, the Shamrock calls and the ANC300 commands are from pylablib's open-source drivers.
+  - the PICam parameters, the Shamrock calls and the ANC300 commands are from pylablib's open-source drivers;
+  - the LightField calls are from Teledyne's automation interface as labs' own scripts use it.
 - **For a model that isn't here** (a Newport Cornerstone, a Horiba monochromator, a Hamamatsu or Thorlabs camera, a SmarAct or Mad City Labs stage): Kelvin writes a card from its manual or the maker's example scripts (see [Cards for new instruments](#cards-for-new-instruments)).
 
 Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app; install Kelvin from source to use them (`pip install "kelvin-lab[desktop,zhinst]"`, or the extras `qd`, `nidaq`, `ocean`, `basler`, `pylablib`; Andor's pyAndorSDK2/3 come with Andor's SDK). The private app brings nidaqmx. These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.

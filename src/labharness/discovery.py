@@ -185,7 +185,7 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
             out.append(Found(name, how="already in this lab", in_lab=in_lab[name]))
             continue
         out.append(identify(name, registry, rm, timeout_ms, usb))
-    from .drivers import MODULES, discover_libraries, discover_swabian, discover_zhinst
+    from .drivers import MODULES, discover_libraries, discover_swabian, discover_zhinst, library_notes
     # instruments behind vendor software: Zurich Instruments (LabOne), Swabian Pulse Streamers and Time Taggers,
     # NI DAQ cards, Ocean spectrometers, Andor and Basler cameras, Andor spectrographs, attocube ANC350s
     for address, idn in discover_zhinst(MODULES.get("zhinst")) + discover_swabian() + discover_libraries():
@@ -195,6 +195,7 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
         card = match_card(idn, registry)
         out.append(Found(address, idn, card.id if card else None, card.model if card else "", card.kind if card else "",
                          "found by its maker's library" if card else "no card for this model yet"))
+    looked.libraries = library_notes()
     return out, looked
 
 

@@ -16,6 +16,8 @@ like a SCPI instrument. The address names the driver:
     seabreeze://<serial>                  Ocean Insight spectrometers through python-seabreeze (spectra.py)
     shamrock://0                          Andor Shamrock / Kymera spectrographs through Andor's DLL (spectra.py)
     picam://<serial>                      Princeton Instruments cameras (PyLoN...) through PICam's DLL (princeton.py)
+    lightfield://<experiment>             Princeton Instruments cameras and spectrographs through LightField's
+                                          automation (lightfield.py)
     pylon://<serial>                      Basler cameras through pypylon (cameras.py)
     andor://0?sdk=3                       Andor cameras through Andor's pyAndorSDK3 / pyAndorSDK2 (cameras.py)
     anc300://COM5, anc350://0             attocube positioners: the ANC300's command line, the ANC350 through pylablib
@@ -34,7 +36,7 @@ from .adapters import AdapterError
 from .cards import Card
 
 SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib",
-           "nidaq", "seabreeze", "shamrock", "picam", "pylon", "andor", "anc300", "anc350")
+           "nidaq", "seabreeze", "shamrock", "picam", "lightfield", "pylon", "andor", "anc300", "anc350")
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -665,9 +667,21 @@ MODULES: Dict[str, Any] = {}   # tests put fake vendor libraries here
 LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc", "Qick"),
          "lib": ("library", "LibraryInstrument"), "nidaq": ("daq", "NIDAQ"),
          "seabreeze": ("spectra", "OceanSpectrometer"), "shamrock": ("spectra", "AndorSpectrograph"),
-         "picam": ("princeton", "PicamCamera"),
+         "picam": ("princeton", "PicamCamera"), "lightfield": ("lightfield", "LightFieldCamera"),
          "pylon": ("cameras", "BaslerCamera"), "andor": ("cameras", "AndorCamera"),
          "anc300": ("positioners", "ANC300"), "anc350": ("positioners", "ANC350")}   # they import this module
+
+
+def library_notes() -> List[str]:
+    """What the last scan saw through the makers' programs that say so, in words for its report: PICam (cameras
+    free, or open in another program) and LightField. Nothing on a computer without Teledyne Princeton software."""
+    from .lightfield import note as lightfield_note
+    from .princeton import LAST
+    lightfield = lightfield_note()
+    picam = LAST.get("picam") or ""
+    if picam.endswith("not installed here") and not lightfield:
+        picam = ""
+    return [n for n in (picam, lightfield) if n]
 
 
 LIBRARIES = (("nidaqmx", "nidaqmx.system"), ("seabreeze", "seabreeze.spectrometers"), ("pypylon", "pypylon.pylon"),
