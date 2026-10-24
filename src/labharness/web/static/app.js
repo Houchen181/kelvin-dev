@@ -553,7 +553,7 @@
     $("runpane").hidden = !RUNS.open;
     $("toggle-runs").setAttribute("aria-pressed", String(RUNS.open));
     $("toggle-runs").classList.toggle("on", RUNS.open);
-    syncScrim();
+    fitLayout();
   }
   function openRun(runId, plan) {
     runTab(runId, plan);
@@ -710,9 +710,28 @@
     }) : [h("div", { class: "pane-menu-note" }, "No runs yet.")]));
   }
 
+  // The conversation keeps at least CHAT_MIN pixels. When the side panels need the room, the sidebar steps aside (the
+  // menu button brings it back over the page), and if that is not enough the lab panel floats over the runs pane.
+  // Below 1100 px both panels float anyway (app.css), below 820 px the sidebar too.
+  const CHAT_MIN = 520, SIDEBAR_W = 264, LAB_W = 380, RUNS_MIN = 340;
+  function fitLayout() {
+    const app = $("app"), w = window.innerWidth;
+    const floating = w <= 1100;
+    const runs = RUNS.open && !floating ? RUNS_MIN : 0;
+    const lab = S.labOpen && !floating ? LAB_W : 0;
+    const compact = w > 820 && SIDEBAR_W + CHAT_MIN + runs + lab > w;
+    app.classList.toggle("compact", compact);
+    app.classList.toggle("float-lab", lab > 0 && (compact ? 0 : SIDEBAR_W) + CHAT_MIN + runs + LAB_W > w);
+    if (!compact && w > 820) app.classList.remove("side-open");
+    if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width);
+    syncScrim();
+  }
   function setPaneWidth(w) {
-    const max = Math.max(360, window.innerWidth - 420);
-    const width = Math.round(Math.min(max, Math.max(340, w)));
+    const app = $("app"), vw = window.innerWidth;
+    const sidebar = vw <= 820 || app.classList.contains("compact") ? 0 : SIDEBAR_W;
+    const lab = S.labOpen && vw > 1100 && !app.classList.contains("float-lab") ? LAB_W : 0;
+    const max = Math.max(RUNS_MIN, vw - sidebar - lab - CHAT_MIN);
+    const width = Math.round(Math.min(max, Math.max(RUNS_MIN, w || 0)));
     $("runpane").style.width = width + "px";
     return width;
   }
@@ -750,7 +769,7 @@
       }
     });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("runs-menu").hidden = true; });
-    window.addEventListener("resize", () => { if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width); });
+    window.addEventListener("resize", fitLayout);
   }
 
   // the compact card a run leaves in the conversation; its data live in the runs pane
@@ -1066,11 +1085,23 @@
   // ------------------------------------------------------------------ approvals
   // auto mode approved this without asking: show what ran and why, like an answered request
   function autoApproval(ev) {
-    return h("div", { class: "approval done auto", role: "group", "aria-label": ev.title },
-      h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title)),
+    const title = h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title));
+    const el = h("div", { class: "approval done auto", role: "group", "aria-label": ev.title }, title,
       h("ul", {}, ...ev.items.map((i) => h("li", {}, i))),
       h("div", { class: "approval-actions" }, h("span", { class: "verdict auto" }, "Auto-approved"),
         h("span", { class: "muted small" }, (ev.reasons || []).join("; "))));
+    foldable(el, title);
+    return el;
+  }
+  // a decided request shows one line; its title opens and closes the details
+  function foldable(el, title) {
+    title.setAttribute("role", "button");
+    title.setAttribute("tabindex", "0");
+    title.setAttribute("aria-expanded", "false");
+    title.title = "Show the details";
+    const flip = () => title.setAttribute("aria-expanded", String(el.classList.toggle("open")));
+    title.addEventListener("click", flip);
+    title.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
   }
 
   function makeApproval(ev) {
@@ -1079,8 +1110,8 @@
     const yes = h("button", { class: "btn primary", type: "button" }, "Approve");
     const no = h("button", { class: "btn", type: "button" }, "Decline");
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
-    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title },
-      h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title)),
+    const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title));
+    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title,
       h("ul", {}, ...ev.items.map((i) => h("li", {}, i))), actions);
     let left = ev.seconds_left;
     const tick = () => { count.textContent = left > 0 ? "Declines itself in " + left + " s" : ""; left -= 1; };
@@ -1092,6 +1123,7 @@
         clearInterval(timer);
         if (!card.decided) { verdict.textContent = text; verdict.className = "verdict " + (good ? "yes" : "no"); }
         actions.replaceChildren(verdict);
+        if (!el.classList.contains("done")) foldable(el, title);
         el.classList.add("done");
         card.decided = true;
         S.approvals.delete(ev.id);
@@ -3151,7 +3183,7 @@
   function toggleLab(open) {
     S.labOpen = open === undefined ? !S.labOpen : open;
     $("labpanel").hidden = !S.labOpen;
-    syncScrim();
+    fitLayout();
     if (S.labOpen) pollState();
   }
 
@@ -3840,6 +3872,7 @@
     }));
     applyModels(boot.models.groups, boot.default_model);
     initRunsPane();
+    fitLayout();
     initTerminal();
     renderChats();
     showEmpty(true);

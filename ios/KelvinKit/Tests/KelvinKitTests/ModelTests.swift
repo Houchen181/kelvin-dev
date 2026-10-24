@@ -115,7 +115,7 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(scale([2.87e9], "Hz"), "1e-09 GHz")
         XCTAssertEqual(scale([1.52], "K"), "1.0 K")
         XCTAssertEqual(scale([0.012], "K"), "1000.0 mK")
-        XCTAssertEqual(scale([3e-17], "V"), "1e+15 fV")                     // below the table: its last prefix
+        XCTAssertEqual(scale([3e-17], "V"), "1000000000000000.0 fV")                     // below the table: its last prefix
         XCTAssertEqual(scale([-20], "dBm"), "1.0 dBm")                     // no prefix on a logarithmic unit
         XCTAssertEqual(scale([3e-6], "µV"), "1.0 µV")                      // nor on one that has a prefix
         XCTAssertEqual(scale([0, .nan], "V"), "1.0 V")

@@ -323,7 +323,15 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .approval ul { margin: 0; padding-left: 20px; }
 .approval li { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .approval-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.approval.done { background: var(--panel); border-color: var(--line); }
+.approval.done { background: var(--panel); border-color: var(--line); padding: 7px 12px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; }
+/* a decided request is one line (what, and the answer); a click on it shows the details again */
+.approval.done .approval-title { grid-column: 1; grid-row: 1; cursor: pointer; min-width: 0; font-weight: 550; }
+.approval.done .approval-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval.done.open .approval-title > span { white-space: normal; }
+.approval.done .approval-actions { grid-column: 2; grid-row: 1; }
+.approval.done ul { grid-column: 1 / -1; grid-row: 2; }
+.approval.done:not(.open) ul, .approval.done:not(.open) .approval-actions .muted { display: none; }
+.approval.done .approval-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 .verdict { font-weight: 600; font-size: 14px; }
 .verdict.yes { color: var(--ok); } .verdict.no { color: var(--muted); }
 
@@ -766,6 +774,7 @@ body.resizing-v { cursor: row-resize; user-select: none; }
 .term-in input::placeholder { color: var(--term-dim); opacity: .7; }
 body.resizing .plot-svg { pointer-events: none; }
 .pane-head { display: flex; align-items: center; gap: 2px; min-height: 56px; padding: 0 8px 0 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.pane-head .btn { white-space: nowrap; flex: none; }
 .run-tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; align-self: stretch; align-items: flex-end; }
 .run-tabs::-webkit-scrollbar { display: none; }
 .run-tab { display: inline-flex; align-items: center; gap: 7px; max-width: 220px; padding: 8px 6px 9px 10px; border-radius: 8px 8px 0 0;
@@ -839,6 +848,17 @@ body.resizing .plot-svg { pointer-events: none; }
 .pill.on { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, var(--line-strong)); color: var(--accent); }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .3; } }
+
+/* ---------- fitting the side panels (fitLayout in app.js): the conversation keeps its room ---------- */
+.main { container-type: inline-size; }
+.app.compact .sidebar { position: fixed; left: 0; top: 0; bottom: 0; z-index: 30; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); }
+.app.compact.side-open .sidebar { transform: none; }
+.app.compact #toggle-sidebar { display: grid; }
+.app.float-lab .labpanel { position: fixed; right: 0; top: 0; bottom: 0; z-index: 30; box-shadow: var(--shadow); }
+@container (max-width: 640px) {
+  .pill .pill-text { display: none; }
+  .pill { padding-left: 9px; padding-right: 9px; }
+}
 
 /* ---------- narrow screens ---------- */
 @media (max-width: 1100px) {
