@@ -47,8 +47,9 @@ enum Launch {
     private static var opened = false
 
     /// True once, for the run or chat named in the launch arguments.
-    static func open(_ id: String) -> Bool {
-        guard !opened, UserDefaults.standard.string(forKey: "KelvinOpen") == id else { return false }
+    static func open(_ id: String) -> Bool {   // a chat id, or a run's id or plan name (field-sweep-D3)
+        guard !opened, let want = UserDefaults.standard.string(forKey: "KelvinOpen"), !want.isEmpty,
+              id == want || id.hasSuffix("-" + want) else { return false }
         opened = true
         return true
     }

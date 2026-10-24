@@ -8,7 +8,17 @@ typealias JSON = [String: Any]
 final class DemoTransport: Transport, @unchecked Sendable {
     static let shared = DemoTransport()
     static let address = URL(string: "http://demo.invalid")!
-    static let runID = "20261022-101500-iv-sweep-D3"
+    // run ids start with the time a run began: the demo's runs began just now, three hours ago and yesterday
+    static let runID = stamp(30, "iv-sweep-D3")
+    static let fieldRunID = stamp(3 * 3600, "field-sweep-D3")
+    static let cooldownRunID = stamp(26 * 3600, "cooldown")
+
+    private static func stamp(_ secondsAgo: TimeInterval, _ plan: String) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        return f.string(from: Date(timeIntervalSinceNow: -secondsAgo)) + "-" + plan
+    }
     static let total = 41
 
     private let lock = NSLock()
@@ -83,7 +93,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
         var first: JSON = [:]
         first["id"] = 1
         first["title"] = "field-sweep-D3 finished: 121 of 121 points"
-        first["at"] = now - 3600
+        first["at"] = now - 7200       // the field sweep began three hours ago and took an hour
         var second: JSON = [:]
         second["id"] = 2
         second["title"] = "Approved: smu.voltage to 0.5 V"
@@ -145,8 +155,8 @@ final class DemoTransport: Transport, @unchecked Sendable {
             return r
         }
         let list: [JSON] = [run(DemoTransport.runID, "iv-sweep-D3", running() ? "running" : "completed", nil),
-                            run("20261022-083000-field-sweep-D3", "field-sweep-D3", "completed", 121),
-                            run("20261021-170000-cooldown", "cooldown", "completed", 60)]
+                            run(DemoTransport.fieldRunID, "field-sweep-D3", "completed", 121),
+                            run(DemoTransport.cooldownRunID, "cooldown", "completed", 60)]
         return ["runs": list]
     }
 

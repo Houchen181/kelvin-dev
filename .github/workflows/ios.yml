@@ -77,7 +77,7 @@ jobs:
           shot 1-lab light lab ""
           shot 2-lab-dark dark lab ""
           shot 3-chat light chat demo-chat
-          shot 4-run light runs 20261022-083000-field-sweep-D3
+          shot 4-run light runs field-sweep-D3
           shot 5-runs dark runs ""
           shot 6-computers light computers ""
       - if: always()
