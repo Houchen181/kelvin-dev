@@ -580,6 +580,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         sign_in(account, password)
         if online and answer and answer.get("access_token"):
             settings.put_secret("account_token", answer["access_token"])   # encrypted with their password
+            relay_wake()   # sign_in's wake can reach the relay before the token is kept: look again with it
         from .settings import unreadable
         return {"signed_in": True, "offline": not online,
                 "keys_sealed": before is None and unreadable(accounts.dir(account), settings.cipher) > 0,

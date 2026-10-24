@@ -91,6 +91,13 @@ def lines(r):
 def test_a_phone_reaches_its_persons_kelvin_through_the_hub(tmp_path, hub, monkeypatch):
     h, url = hub
     monkeypatch.setattr(Remote, "bind_host", "127.0.0.1")   # no firewall asks
+    keep = Settings.put_secret
+
+    def keep_late(self, name, value):   # the hub's token kept a moment after sign-in woke the relay (a busy computer)
+        if name == "account_token":
+            time.sleep(0.3)
+        return keep(self, name, value)
+    monkeypatch.setattr(Settings, "put_secret", keep_late)
     bot = Scripted([[{"type": "text", "text": "The lab is idle."}]])
     client, settings, app = kelvin(tmp_path / "kelvin", bot)
     with client:
