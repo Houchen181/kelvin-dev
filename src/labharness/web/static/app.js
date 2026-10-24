@@ -947,16 +947,22 @@
       return g;
     });
     sel.replaceChildren(new Option(groups.length ? "Nothing mounted" : "No devices yet: add one with New device…", ""), ...groups);
+    MOUNT.key = null;   // new options: choose the mounted one again
     showMounted(r.mounted);
   }
   function showMounted(m) {
+    showProtection(m);
     const key = m ? JSON.stringify([m.project || null, m.device]) : "";
     $("mount-summary").textContent = m ? m.device_name + " · " + m.project_name : "nothing mounted";
     if (key === MOUNT.key) return;
-    MOUNT.key = key;
     const sel = $("mount-select");
     if ([...sel.options].some((o) => o.value === key)) sel.value = key;
-    else if (m) loadMount();
+    else if (m && !MOUNT.loading) {   // a device added elsewhere (a conversation, the phone): load the list once
+      MOUNT.loading = true;
+      loadMount().finally(() => { MOUNT.loading = false; });
+      return;
+    } else if (!m) sel.value = "";
+    MOUNT.key = key;
   }
   async function mountChosen() {
     const v = $("mount-select").value;
@@ -978,6 +984,185 @@
       await loadMount();
       toast(d.name + " is mounted: scans from now on are filed under it.");
     } catch (e) { toast(e.message); }
+  }
+  // ------------------------------------------------------------------ protecting the sample
+  const PROT = { opts: null, mounted: null, hands: null, busy: null };
+  const numText = (v) => (v == null || v === "" || isNaN(+v) ? "" : String(+(+v).toPrecision(6)));
+  function showProtection(m) {
+    PROT.mounted = m || null;
+    const box = $("mount-protection");
+    box.hidden = !m;
+    if (!m) return;
+    const lines = m.protection_lines || [];
+    box.classList.toggle("on", lines.length > 0);
+    $("mp-state").replaceChildren(icon(lines.length ? "lock" : "warn"),
+      lines.length ? "Protected" : "Not protected: only the lab's limits hold");
+    $("mount-protect").textContent = lines.length ? "Change…" : "Protect this device…";
+    $("mp-lines").replaceChildren(...lines.map((l) => h("li", {}, l)),
+      ...(m.protection_missing || []).map((k) => h("li", { class: "bad" }, k + " is not in this lab")));
+  }
+  function showHands(hands) {
+    PROT.hands = hands || null;
+    $("hands-banner").hidden = !hands;
+    $("hands-locked").hidden = !hands;
+    $("hands-on").hidden = !!hands;
+    if (!hands) return;
+    const at = String(hands.since || "").slice(11, 16);
+    const who = String(hands.by || "").replace(/^human \((.*)\)$/, "$1");
+    $("hands-text").textContent = "Locked" + (at ? " at " + at : "") + (who && who !== "portal" ? " from " + who : "")
+      + ". Everything that reaches the sample stays at safe until you unlock; Kelvin can still read and measure.";
+  }
+  async function handsOn() {
+    if (PROT.busy && !confirm("Kelvin is " + PROT.busy + ". Stop it and bring everything that reaches the sample to safe?")) return;
+    $("hands-on").disabled = true;
+    try {
+      const r = await api("/api/hands", { body: { on: true } });
+      showHands(r.hands_on);
+      const said = r.lines.join("; ");
+      toast("Locked. " + said.charAt(0).toUpperCase() + said.slice(1));
+    } catch (e) { toast(e.message); }
+    finally { $("hands-on").disabled = false; }
+    pollState();
+  }
+  function openUnlock() {
+    const sel = $("hands-device");
+    sel.replaceChildren(...[...$("mount-select").children].map((n) => n.cloneNode(true)));
+    sel.value = $("mount-select").value;
+    for (const c of document.querySelectorAll(".hands-check")) c.checked = false;
+    $("hands-unlock").disabled = true;
+    $("hands-msg").textContent = "";
+    $("hands-dialog").showModal();
+  }
+  async function unlock() {
+    const v = $("hands-device").value, body = { on: false };
+    if (v !== $("mount-select").value) {
+      const [project, device] = v ? JSON.parse(v) : [null, ""];
+      Object.assign(body, { project, device: device || "" });
+    }
+    $("hands-unlock").disabled = true;
+    try {
+      const r = await api("/api/hands", { body });
+      $("hands-dialog").close();
+      showHands(r.hands_on);
+      MOUNT.key = "x";
+      showMounted(r.mounted);
+      toast("Unlocked." + (r.lines.length ? " " + r.lines.join("; ") : ""));
+    } catch (e) {
+      $("hands-msg").textContent = e.message;
+      $("hands-unlock").disabled = false;
+    }
+    pollState();
+  }
+  function pf(label, control) {
+    const name = h("span", {}, label);
+    return h("label", { class: "pf" }, name, control);
+  }
+  function driveSelect(value, keep) {
+    const s = h("select", { "data-k": "drive" });
+    for (const d of PROT.opts.drives.filter(keep)) s.append(new Option(d.label + (d.unit ? " (" + d.unit + ")" : ""), d.key));
+    if (value && ![...s.options].some((o) => o.value === value)) s.append(new Option(value + " (not in this lab)", value));
+    if (value) s.value = value;
+    return s;
+  }
+  const driveInfo = (key) => PROT.opts.drives.find((d) => d.key === key) || {};
+  function gateRow(g) {
+    const drive = driveSelect(g.drive, (d) => d.gate || d.key === g.drive);
+    const diel = h("select", { "data-k": "dielectric" }, ...PROT.opts.dielectrics.map((d) => new Option(d.name, d.name)),
+      new Option("Other", "other"));
+    diel.value = PROT.opts.dielectrics.some((d) => d.name === g.dielectric) ? g.dielectric : "other";
+    const thick = h("input", { type: "number", step: "any", min: "0", "data-k": "thickness_nm", value: numText(g.thickness_nm), placeholder: "nm" });
+    const limit = h("input", { type: "number", step: "any", min: "0", "data-k": "limit" });
+    const suggested = () => {
+      const f = (PROT.opts.dielectrics.find((d) => d.name === diel.value) || {}).field;
+      return f && +thick.value > 0 ? +(f * thick.value).toPrecision(6) : null;
+    };
+    if (g.limit != null && g.limit !== suggested()) limit.value = numText(g.limit);   // the person's own limit
+    const leak = h("select", { "data-k": "leak" }, new Option("No leakage reading", ""),
+      ...PROT.opts.readings.map((r) => new Option(r.key, r.key)));
+    leak.value = g.leak || "";
+    const leakMax = h("input", { type: "number", step: "any", min: "0", "data-k": "leak_nA", value: numText((g.leak_max || PROT.opts.leak_max) * 1e9) });
+    const rate = h("input", { type: "number", step: "any", min: "0", "data-k": "rate", value: numText(g.rate), placeholder: "the lab's" });
+    const note = h("span", { class: "pf-note" });
+    const limitLabel = pf("Limit ±", limit), rateLabel = pf("Ramp at most", rate);
+    const update = () => {
+      const s = suggested(), u = driveInfo(drive.value).unit || "V";
+      limit.placeholder = s != null ? String(s) : "needed";
+      limitLabel.firstChild.textContent = "Limit ± (" + u + ")";
+      rateLabel.firstChild.textContent = "Ramp at most (" + u + "/s)";
+      const mine = limit.value.trim();
+      note.classList.toggle("bad", s == null && !mine);
+      note.textContent = s != null ? "From " + numText(thick.value) + " nm " + diel.value + ": ±" + s + " " + u
+        + (mine ? "; yours holds: ±" + mine + " " + u : "")
+        : mine ? "" : "Give a limit, or a dielectric and its thickness";
+    };
+    for (const el of [diel, thick, limit]) el.addEventListener("input", update);
+    drive.addEventListener("change", () => { const d = driveInfo(drive.value); if (d.leak && !leak.value) leak.value = d.leak; update(); });
+    const row = h("div", { class: "prot-row gate" }, pf("Gate", drive), pf("Dielectric", diel), pf("Thickness (nm)", thick),
+      limitLabel, rowButton("x", "Remove this gate", () => row.remove()),
+      pf("Leakage reading", leak), pf("Stop above (nA)", leakMax), rateLabel, note);
+    update();
+    return row;
+  }
+  function limitRow(key, pair) {
+    const drive = driveSelect(key, () => true);
+    const lo = h("input", { type: "number", step: "any", "data-k": "lo", value: pair ? numText(pair[0]) : "" });
+    const hi = h("input", { type: "number", step: "any", "data-k": "hi", value: pair ? numText(pair[1]) : "" });
+    const loLabel = pf("From", lo), hiLabel = pf("To", hi);
+    const update = (fill) => {
+      const d = driveInfo(drive.value), u = d.unit ? " (" + d.unit + ")" : "";
+      loLabel.firstChild.textContent = "From" + u;
+      hiLabel.firstChild.textContent = "To" + u;
+      if (fill && d.limits) { lo.value = numText(d.limits[0]); hi.value = numText(d.limits[1]); }
+    };
+    drive.addEventListener("change", () => update(true));
+    const row = h("div", { class: "prot-row limit" }, pf("Drive", drive), loLabel, hiLabel,
+      rowButton("x", "Remove this limit", () => row.remove()));
+    update(!pair);
+    return row;
+  }
+  async function openProtection() {
+    const m = PROT.mounted;
+    if (!m) return;
+    try { PROT.opts = await api("/api/protection"); } catch (e) { toast(e.message); return; }
+    const p = m.protection || {};
+    $("protect-device").textContent = m.device_name;
+    $("protect-gates").replaceChildren(...(p.gates || []).map(gateRow));
+    $("protect-limits").replaceChildren(...Object.entries(p.limits || {}).map(([k, v]) => limitRow(k, v)));
+    const empty = !(p.gates || []).length && !Object.keys(p.limits || {}).length;
+    const first = PROT.opts.drives.find((d) => d.gate);
+    if (empty && first) $("protect-gates").append(gateRow({ drive: first.key, dielectric: "hBN", leak: first.leak }));
+    $("protect-clear").hidden = empty;
+    $("protect-msg").textContent = "";
+    $("protect-dialog").showModal();
+  }
+  function readProtection() {
+    const val = (row, k) => row.querySelector('[data-k="' + k + '"]').value.trim();
+    const gates = [...$("protect-gates").children].map((row) => {
+      const g = { drive: val(row, "drive"), dielectric: val(row, "dielectric") };
+      if (val(row, "thickness_nm")) g.thickness_nm = +val(row, "thickness_nm");
+      if (val(row, "limit")) g.limit = +val(row, "limit");
+      if (val(row, "leak")) g.leak = val(row, "leak");
+      if (val(row, "leak_nA")) g.leak_max = +val(row, "leak_nA") * 1e-9;
+      if (val(row, "rate")) g.rate = +val(row, "rate");
+      return g;
+    });
+    const limits = {};
+    for (const row of $("protect-limits").children) limits[val(row, "drive")] = [val(row, "lo"), val(row, "hi")];
+    return { gates, limits };
+  }
+  async function saveProtection(remove) {
+    const m = PROT.mounted;
+    if (remove && !confirm("Remove " + m.device_name + "'s protection? Only the lab's limits will hold.")) return;
+    $("protect-save").disabled = true;
+    try {
+      const r = await api("/api/projects/" + (m.project || "general") + "/devices/" + m.device,
+        { method: "PATCH", body: { protection: remove ? {} : readProtection() } });
+      $("protect-dialog").close();
+      toast(remove ? m.device_name + " is not protected any more."
+        : m.device_name + " is protected." + (r.caps.length ? " " + r.caps.join("; ") : ""));
+      pollState();
+    } catch (e) { $("protect-msg").textContent = e.message; }
+    finally { $("protect-save").disabled = false; }
   }
   async function makeReport() {
     const fmt = (document.querySelector('input[name="report-format"]:checked') || {}).value || "pdf";
@@ -2559,6 +2744,8 @@
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
     queueFromState(s.queue);
     showMounted(s.mounted);
+    showHands(s.hands_on);
+    PROT.busy = s.busy;
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
   function renderAlerts(alarms) {
@@ -3936,6 +4123,19 @@
     $("open-report").addEventListener("click", openReport);
     $("mount-select").addEventListener("change", mountChosen);
     $("mount-new").addEventListener("click", newDevice);
+    $("mount-protect").addEventListener("click", openProtection);
+    $("protect-add-gate").addEventListener("click", () => $("protect-gates").append(gateRow({ dielectric: "hBN",
+      drive: (PROT.opts.drives.find((d) => d.gate) || {}).key, leak: (PROT.opts.drives.find((d) => d.gate) || {}).leak })));
+    $("protect-add-limit").addEventListener("click", () => $("protect-limits").append(limitRow((PROT.opts.drives[0] || {}).key)));
+    $("protect-save").addEventListener("click", () => saveProtection(false));
+    $("protect-clear").addEventListener("click", () => saveProtection(true));
+    $("hands-on").addEventListener("click", handsOn);
+    $("hands-done").addEventListener("click", openUnlock);
+    $("hands-done-panel").addEventListener("click", openUnlock);
+    $("hands-unlock").addEventListener("click", unlock);
+    for (const c of document.querySelectorAll(".hands-check")) c.addEventListener("change", () => {
+      $("hands-unlock").disabled = ![...document.querySelectorAll(".hands-check")].every((x) => x.checked);
+    });
     $("device-add").addEventListener("click", addDevice);
     $("summary-write").addEventListener("click", writeSummary);
     $("master-update").addEventListener("click", () => updateMaster(false));

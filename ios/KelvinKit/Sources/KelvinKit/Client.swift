@@ -127,6 +127,13 @@ public struct KelvinClient: Sendable {
         let _: JSONValue = try await call("POST", "/api/runs/stop", body: .object([:]))
     }
 
+    /// Hands on the sample (Kelvin 0.3.17 and later): Kelvin stops what runs and holds everything that reaches the
+    /// sample at safe until a person unlocks. Any paired phone can lock; unlocking needs one that can approve.
+    @discardableResult
+    public func hands(on: Bool) async throws -> HandsResult {
+        try await call("POST", "/api/hands", body: .object(["on": .bool(on)]))
+    }
+
     /// Stop the conversation Kelvin is answering, and decline what it asked.
     public func stopChat() async throws {
         let _: JSONValue = try await call("POST", "/api/stop", body: .object([:]))

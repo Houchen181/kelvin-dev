@@ -7,6 +7,9 @@
   change is low-risk → ramps while watching guard readings, and returns to
   safe if one trips.
 - Beyond limits, or blocked commands: refused.
+- A mounted device's protection (protection.py) narrows the limits and rates and adds its gates' leakage guards;
+  a source's range changes only while its level is at safe; while a person has their hands on the sample
+  (lab.hands_on), nothing moves away from safe.
 """
 from __future__ import annotations
 
@@ -198,7 +201,8 @@ class SafetyGate:
                 bits.append(spec.unit)
             lim = inst.limits(spec.name)
             if lim:
-                bits.append("[%s, %s]%s" % (num(lim[0]), num(lim[1]), " lab" if inst.limits_source(spec.name) == "lab" else ""))
+                src = inst.limits_source(spec.name)   # lab, vendor, or the mounted device's
+                bits.append("[%s, %s]%s" % (num(lim[0]), num(lim[1]), "" if src == "vendor" else " " + src))
             if spec.type == "enum":
                 bits.append("{%s}" % ", ".join(spec.values or {}))
             if spec.is_drive:
@@ -215,6 +219,19 @@ class SafetyGate:
 
     def status(self) -> Dict[str, Dict[str, Any]]:
         return self.lab.snapshot()
+
+    def to_safe(self, instr: str) -> List[Result]:
+        """Bring an instrument's drives to safe in its card's order (ramped, or held where the lab says so)."""
+        by = self._who()
+        try:
+            inst = self.lab.instrument(instr)
+        except KeyError as e:
+            return [self._done(Result(False, "refused", instr, message="refused: %s" % e.args[0]), "safe", by)]
+        try:
+            results = self._to_safe(inst, wait=True)
+        except Exception as e:
+            results = [Result(False, "error", instr, message="%s: instrument error: %s" % (instr, e))]
+        return [self._done(r, "safe", by) for r in results]
 
     def request_abort(self) -> None:
         self._stop_gen += 1
@@ -359,6 +376,12 @@ class SafetyGate:
             return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
         try:
             current = self._current(inst, spec)
+            owner = inst.card.range_owner(spec.name)
+            if owner is not None and not _same(spec, current, target):
+                problem = self._range_problem(inst, owner, spec, target)
+                if problem:
+                    return self._done(Result(False, "refused", key, value=target, message="refused: " + problem),
+                                      "set", by)
             if not spec.is_drive:
                 if inst.card.status == "draft" and not inst.simulated and not _same(spec, current, target):
                     # nobody has checked this card's measure/drive tags yet: a "setting" might reach the sample
@@ -433,8 +456,32 @@ class SafetyGate:
             inst.name, spec.name, spec.show(target), inst.limits_source(spec.name),
             num(lim[0]), num(lim[1]), " " + spec.unit if spec.unit else "")
 
+    def _range_problem(self, inst: Instrument, owner: ParamSpec, spec: ParamSpec, target: Any) -> Optional[str]:
+        """A source's range (or its autorange) changes only while the source's level is at safe: a range change
+        with a level applied can glitch the output. While a device's protection holds the range, autorange stays off."""
+        level = self._current(inst, owner)
+        if level is None or owner.distance(level) > 0:
+            return ("%s.%s changes only while %s.%s is at %s (now %s): changing a source's range with a level "
+                    "applied can glitch the output" % (inst.name, spec.name, inst.name, owner.name,
+                                                       owner.show(owner.safe), owner.show(level)))
+        if spec.name == owner.autorange_param and target and owner.name in inst.device_limits:
+            return ("%s keeps %s's range fixed while it is mounted (sample protection), so autorange stays off"
+                    % ("device " + inst.device_name if inst.device_name else "the mounted device", inst.name))
+        return None
+
+    def _hands_problem(self, what: str) -> Optional[str]:
+        """While a person has their hands on the sample, nothing moves away from safe."""
+        hands = getattr(self.lab, "hands_on", None)
+        if not hands:
+            return None
+        return ("%s: %s has hands on the sample (since %s), so every drive stays at safe until a person unlocks it "
+                "in the Lab panel" % (what, hands.get("by") or "someone", hands.get("since") or "now"))
+
     def _away_problem(self, inst: Instrument, spec: ParamSpec) -> Optional[str]:
         key = "%s.%s" % (inst.name, spec.name)
+        hands = self._hands_problem(key)
+        if hands:
+            return hands
         if inst.card.status == "draft" and not inst.simulated:
             return "%s: draft card; its drives stay simulation-only until a person reviews it" % key
         if self.lab.config.observe_only and not inst.simulated:
@@ -684,6 +731,9 @@ class SafetyGate:
                     return done(Result(True, "sent", target, message="%s: drives brought to safe, then sent %r" % (inst.name, cmd)))
             for spec in card.drives:
                 if spec.set_cmd is not None and self._prefix(spec).match(cmd) is not None:
+                    hands = self._hands_problem("%s.%s" % (inst.name, spec.name))
+                    if hands:
+                        return done(Result(False, "refused", target, message="refused: %r not sent; %s" % (cmd, hands)))
                     item = ("%s: %r touches drive %s but is not a plain %s setting, so limits can't be checked"
                             % (inst.name, cmd, spec.name, spec.name))
                     request = ApprovalRequest("Send raw command?", [item])
@@ -692,6 +742,9 @@ class SafetyGate:
                         return done(Result(False, "declined", target, message="declined: %r not sent%s" % (cmd, note)))
                     return self._send(inst, cmd, target, done, "approved")
             if card.status == "draft" and not inst.simulated:
+                hands = self._hands_problem(inst.name)
+                if hands:
+                    return done(Result(False, "refused", target, message="refused: %r not sent; %s" % (cmd, hands)))
                 item = "%s: %r is not on the (draft) card, so it can't be classified" % (inst.name, cmd)
                 if not self.ask(ApprovalRequest("Send raw command?", [item])):
                     return done(Result(False, "declined", target, message="declined: %r not sent" % cmd))

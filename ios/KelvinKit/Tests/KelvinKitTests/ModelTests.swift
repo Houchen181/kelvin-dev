@@ -39,6 +39,29 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(s.active)
     }
 
+    func testTheSampleItsProtectionAndTheLock() throws {
+        let s = try decode(LabState.self, """
+        {"lab": "Cryostat lab", "mounted": {"project": "p1", "project_name": "Graphene", "device": "d4",
+         "device_name": "D4", "since": "2026-10-24T13:40:00", "by": "human",
+         "protection": {"gates": []},
+         "protection_lines": ["Gate smu.V within ±6 V (20 nm hBN), stops above 1 nA on smu.I"],
+         "protection_missing": ["laser.power"]},
+         "hands_on": {"by": "human (phone Ana's iPhone)", "since": "2026-10-24T14:02:11"}}
+        """)
+        XCTAssertEqual(s.mounted, Mounted(device: "D4", project: "Graphene",
+                                          protection: ["Gate smu.V within ±6 V (20 nm hBN), stops above 1 nA on smu.I"],
+                                          missing: ["laser.power"]))
+        XCTAssertTrue(s.mounted?.isProtected == true)
+        XCTAssertEqual(s.handsOn?.summary, "Locked at 14:02 from Ana's iPhone")
+        XCTAssertEqual(HandsOn(by: "human (portal)", since: "").summary, "Locked from the Kelvin computer")
+        let free = try decode(LabState.self, "{\"mounted\": {\"device_name\": \"D5\"}, \"hands_on\": null}")
+        XCTAssertEqual(free.mounted?.project, "General")
+        XCTAssertFalse(free.mounted?.isProtected ?? true)
+        XCTAssertNil(free.handsOn)
+        XCTAssertTrue(Role.control.canUnlock)
+        XCTAssertFalse(Role.watch.canUnlock)
+    }
+
     func testAnOlderOrNewerKelvinStillReads() throws {
         let s = try decode(LabState.self, "{\"lab\": \"Virtual Lab\", \"something_new\": [1, 2]}")
         XCTAssertEqual(s.pending, [])

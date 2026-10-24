@@ -55,6 +55,7 @@ public enum Role: String, Sendable {
 
     public var canChat: Bool { self == .control }
     public var canApprove: Bool { self == .control }
+    public var canUnlock: Bool { self == .control }   // any phone can lock while hands are on the sample
 
     public var summary: String {
         self == .watch ? "Can watch, stop runs and decline requests" : "Can also chat and approve"
@@ -205,10 +206,12 @@ public struct LabState: Decodable, Equatable, Sendable {
     public var active: ActiveChat?
     public var approvalMode: String?
     public var observeOnly: Bool
+    public var mounted: Mounted?
+    public var handsOn: HandsOn?
 
     enum CodingKeys: String, CodingKey {
-        case lab, simulated, busy, pending, alarms, notices, status, live, active
-        case approvalMode = "approval_mode", observeOnly = "observe_only"
+        case lab, simulated, busy, pending, alarms, notices, status, live, active, mounted
+        case approvalMode = "approval_mode", observeOnly = "observe_only", handsOn = "hands_on"
     }
 
     public init(from decoder: Decoder) throws {
@@ -224,6 +227,8 @@ public struct LabState: Decodable, Equatable, Sendable {
         active = c.maybe(.active)
         approvalMode = c.maybe(.approvalMode)
         observeOnly = c.value(.observeOnly, or: false)
+        mounted = c.maybe(.mounted)
+        handsOn = c.maybe(.handsOn)
     }
 
     /// Instruments by name (JSON objects carry no order a decoder keeps).
@@ -240,6 +245,86 @@ public struct LabState: Decodable, Equatable, Sendable {
         if let busy, !busy.isEmpty { return "Kelvin is " + busy }
         if let live, live.running { return "Running " + live.plan }
         return "Kelvin is idle"
+    }
+}
+
+/// The sample in the setup now, and its protection in words (Kelvin 0.3.17 and later): the limits a person set for
+/// it, which nothing passes while it is mounted.
+public struct Mounted: Decodable, Equatable, Sendable {
+    public var device: String
+    public var project: String
+    public var protection: [String]
+    public var missing: [String]        // what its protection names that this lab doesn't have
+
+    enum CodingKeys: String, CodingKey {
+        case device = "device_name", project = "project_name", protection = "protection_lines"
+        case missing = "protection_missing"
+    }
+
+    public init(device: String, project: String, protection: [String] = [], missing: [String] = []) {
+        self.device = device
+        self.project = project
+        self.protection = protection
+        self.missing = missing
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        device = c.value(.device, or: "")
+        project = c.value(.project, or: "General")
+        protection = c.value(.protection, or: [])
+        missing = c.value(.missing, or: [])
+    }
+
+    public var isProtected: Bool { !protection.isEmpty }
+}
+
+/// A person's hands are on the sample: everything that reaches it stays at safe until a person unlocks.
+public struct HandsOn: Decodable, Equatable, Sendable {
+    public var by: String
+    public var since: String     // the computer's local time, 2026-10-24T14:02:11
+
+    enum CodingKeys: String, CodingKey { case by, since }
+
+    public init(by: String, since: String) {
+        self.by = by
+        self.since = since
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        by = c.value(.by, or: "")
+        since = c.value(.since, or: "")
+    }
+
+    /// Who locked it: the Kelvin computer, or a phone by its name.
+    public var who: String {
+        let phone = "human (phone "
+        if by == "human (portal)" { return "the Kelvin computer" }
+        if by.hasPrefix(phone) && by.hasSuffix(")") { return String(by.dropFirst(phone.count).dropLast()) }
+        return by.isEmpty ? "someone" : by
+    }
+
+    /// When, as the time of day: 14:02.
+    public var time: String {
+        guard let t = since.split(separator: "T").dropFirst().first, t.count >= 5 else { return "" }
+        return String(t.prefix(5))
+    }
+
+    public var summary: String { "Locked" + (time.isEmpty ? "" : " at " + time) + " from " + who }
+}
+
+/// POST /api/hands: the lock as it is now, and what Kelvin did.
+public struct HandsResult: Decodable, Equatable, Sendable {
+    public var handsOn: HandsOn?
+    public var lines: [String]
+
+    enum CodingKeys: String, CodingKey { case handsOn = "hands_on", lines }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        handsOn = c.maybe(.handsOn)
+        lines = c.value(.lines, or: [])
     }
 }
 

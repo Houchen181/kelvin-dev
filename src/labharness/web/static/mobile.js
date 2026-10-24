@@ -1,4 +1,5 @@
-// Kelvin on a phone: pairing, then alarms, approvals, the run in progress (with Stop) and the instruments.
+// Kelvin on a phone: pairing, then alarms, approvals, the sample (with the hands-on lock), the run in progress (with
+// Stop) and the instruments.
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
@@ -107,6 +108,27 @@
           if (confirm("Approve: " + r.title + "?")) await api("/api/approvals/" + r.id, { approve: true });
         }) : null,
         act("Decline", "", () => api("/api/approvals/" + r.id, { approve: false }))))));
+
+    const m = s.mounted || null, hands = s.hands_on || null;
+    if (changed("sample", [m && m.device_name, m && m.protection_lines, hands])) {
+      const rows = [h("h2", {}, m ? "Sample: " + m.device_name + " (" + m.project_name + ")" : "No sample mounted")];
+      if (m) rows.push(...((m.protection_lines || []).length ? m.protection_lines.map((l) => h("p", { class: "muted" }, l))
+        : [h("p", { class: "muted" }, "Not protected: only the lab's limits hold.")]));
+      if (hands) {
+        const who = String(hands.by || "").replace(/^human \((phone )?(.*)\)$/, "$2").replace(/^portal$/, "the Kelvin computer");
+        rows.push(h("p", { class: "lock" }, "Hands on the sample: locked at " + String(hands.since || "").slice(11, 16) + " from " + who),
+          h("p", { class: "muted" }, "Everything that reaches the sample stays at safe until a person unlocks."),
+          me && me.role !== "watch" ? h("div", { class: "row" }, act("Done: unlock", "primary", async () => {
+            if (confirm("Done with the sample? Check that it is wired as the next measurement needs and that nobody is touching the setup.")) await api("/api/hands", { on: false });
+          })) : h("p", { class: "muted" }, "Unlock on the Kelvin computer."));
+      } else {
+        rows.push(h("div", { class: "row" }, act("Hands on the sample", "", async () => {
+          if (confirm("Hands on the sample? Kelvin stops what runs and brings everything that reaches the sample to safe until a person unlocks.")) await api("/api/hands", { on: true });
+        })));
+      }
+      $("sample").className = "card" + (hands ? " locked" : "");
+      $("sample").replaceChildren(...rows);
+    }
 
     const live = s.live;
     const running = live && live.status === "running";

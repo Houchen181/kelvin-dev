@@ -112,6 +112,18 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(t.asked.map { $0.url!.path }, ["/api/approvals/r-7", "/api/alarms/a1/ack", "/api/runs/stop", "/api/stop"])
     }
 
+    func testHandsOnTheSample() async throws {
+        let t = Scripted()
+        t.on("POST /api/hands", "{\"hands_on\": {\"by\": \"human (phone Lab iPhone)\", \"since\": \"2026-10-24T14:02:11\"},"
+             + " \"lines\": [\"smu.V 3 V → 0 V, 6 s (safe state)\"], \"mounted\": null}")
+        let c = KelvinClient(base: base, token: "tok", transport: t)
+        let r = try await c.hands(on: true)
+        XCTAssertEqual(r.handsOn?.who, "Lab iPhone")
+        XCTAssertEqual(r.lines, ["smu.V 3 V → 0 V, 6 s (safe state)"])
+        XCTAssertEqual(t.body(0)?["on"], .bool(true))
+        XCTAssertEqual(t.asked.first?.url?.path, "/api/hands")
+    }
+
     func testFileNamesAreEncoded() async throws {
         let t = Scripted()
         t.on("GET /api/runs/20261022-101500-iv/files/report 2.pdf", "%PDF")

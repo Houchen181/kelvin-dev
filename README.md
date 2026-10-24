@@ -51,7 +51,9 @@ Every command goes through one gate, whether it comes from Kelvin, another AI ag
 | Drive away from safe | Checked against your limits, approved by a person, ramped and watched |
 | Beyond the limits, or blocked | Refused |
 
-Only people can change the lab config, the approval mode or which lab Kelvin controls.
+Each sample can have its own limits too: give a gate's dielectric and thickness and Kelvin keeps it well below breakdown, stops a ramp when the leakage rises, and writes the caps into the source itself. Press **Hands on the sample** before you rewire, and everything that reaches it stays at safe until you unlock.
+
+Only people can change the lab config, the approval mode, a sample's limits or which lab Kelvin controls.
 
 ## Get started
 

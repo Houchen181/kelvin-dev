@@ -14,7 +14,7 @@ def test_instruments_are_grouped_and_labelled(tmp_path):
     assert smu["model"] == "Virtual Source-Meter" and smu["kind"] == "source-meter"
     assert smu["headline"] == "I" and smu["readings"][0]["label"] == "Current"
     assert [d["label"] for d in smu["drives"]] == ["Voltage", "Compliance", "Output"]
-    assert [s["label"] for s in smu["settings"]] == ["Integration (NPLC)"]
+    assert [s["label"] for s in smu["settings"]] == ["Source range", "Source autorange", "Integration (NPLC)"]
     # it powers up with 100 µA compliance (above safe) but the output is off: armed, not active
     assert smu["state"] == "safe" and smu["active"] == 0
     compliance = next(d for d in smu["drives"] if d["name"] == "compliance_I")

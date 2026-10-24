@@ -39,6 +39,7 @@ from ..clock import ScaledClock, SimClock
 from ..discovery import add_to_config
 from ..labconfig import ConfigError, load_lab_config
 from .. import carddraft
+from .. import protection
 from ..virtual_lab import build_lab, builtin_ids, builtin_registry, is_simulated, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in
 from . import review, rules as rulebook
@@ -221,6 +222,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
+    runtime.keep_hands(settings.hands_on())               # a hands-on lock stays on across restarts
     default_data = home / "virtual-lab"                   # runs, record and reports unless the user chose a folder
     loop_ref: Dict[str, Any] = {}
     session: Dict[str, Any] = {"user": None}              # who is signed in (with accounts); everyone is equal
@@ -650,16 +652,57 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, str(e))
 
     async def device_view(request: Request) -> Response:
-        """PATCH {name, material, description, retired}."""
+        """PATCH {name, material, description, retired, protection}. protection is a person's (no agent tool
+        reaches it): the device's limits and gates (protection.py), checked against this lab ({} lifts it). If the
+        device is mounted it holds at once, and its caps are written into the instruments ("caps")."""
         try:
             body = await request.json()
-            d = store.update_device(project_key(request), request.path_params["device_id"],
-                                    **{k: body.get(k) for k in ("name", "material", "description", "retired")})
-            return JSONResponse(d)
+            fields = {k: body.get(k) for k in ("name", "material", "description", "retired")}
+            if "protection" in body:
+                fields["protection"] = protection.normalize(body.get("protection"), runtime.lab)
+            d = store.update_device(project_key(request), request.path_params["device_id"], **fields)
+            if "protection" not in body:
+                return JSONResponse(d)
+            caps = await asyncio.to_thread(runtime.protect, d, "human (portal)")
+            return JSONResponse(dict(d, caps=caps,
+                                     protection_lines=protection.summary(d.get("protection") or {}, runtime.lab)))
         except KeyError as e:
             return error(404, e.args[0])
         except ValueError as e:
             return error(400, str(e))
+
+    async def protection_view(request: Request) -> Response:
+        """What a device's protection can name in this lab: its drives (with a source's leakage reading) and the
+        dielectrics Kelvin has a rule for."""
+        return JSONResponse(protection.options(runtime.lab))
+
+    async def hands_view(request: Request) -> Response:
+        """POST {on: true}: a person's hands are on the sample (connecting it, rewiring, a breakout box): what runs
+        stops, every drive that reaches the sample goes to safe, and stays there until a person unlocks.
+        POST {on: false, project, device}: done; with device, that sample is mounted first ("" for none).
+        People only: no agent tool reaches this. A watch-only phone can lock, never unlock."""
+        body = await request.json()
+        k = request.scope.get("kelvin") or {}
+        by = "human (phone %s)" % k["device"].get("name") if k.get("device") else "human (portal)"
+        lines: List[str] = []
+        if body.get("on") is True:
+            lines = await asyncio.to_thread(runtime.hands_on, by)
+        else:
+            if role_of(request) == "watch":
+                return error(403, "This phone can lock, not unlock. Unlock on the Kelvin computer.")
+            if "device" in body and role_of(request) == "owner":
+                pid = body.get("project") or None
+                try:
+                    if body.get("device"):
+                        lines += (await asyncio.to_thread(runtime.mount, pid, store.find_device(pid, body["device"]),
+                                                          by)).get("caps") or []
+                    else:
+                        await asyncio.to_thread(runtime.unmount, by)
+                except KeyError as e:
+                    return error(404, e.args[0])
+            lines += await asyncio.to_thread(runtime.hands_off, by)
+        settings.set_hands_on(runtime.hands)
+        return JSONResponse({"hands_on": runtime.hands, "lines": lines, "mounted": runtime.mounted_view()})
 
     async def summary_view(request: Request) -> Response:
         """PUT {text}: the words that open the project's master report (empty: Kelvin's summary from the data).
@@ -703,19 +746,22 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def mount_view(request: Request) -> Response:
         """GET: the mounted sample and every project's devices to choose from. POST {project, device} mounts one
         (a person's choice); POST {} records that nothing is mounted."""
+        caps: List[str] = []
         if request.method == "POST":
             body = await request.json()
             pid = body.get("project") or None
             try:
                 if body.get("device"):
-                    runtime.mount(pid, store.find_device(pid, body["device"]), by="human")
+                    caps = (await asyncio.to_thread(runtime.mount, pid, store.find_device(pid, body["device"]),
+                                                    "human")).get("caps") or []
                 else:
-                    runtime.unmount(by="human")
+                    await asyncio.to_thread(runtime.unmount, "human")
             except KeyError as e:
                 return error(404, e.args[0])
         choices = [{"project": None, "name": "General", "devices": store.devices(None)}] + \
             [{"project": p["id"], "name": p["name"], "devices": p.get("devices") or []} for p in store.projects()]
-        return JSONResponse({"mounted": runtime.mounted or None, "choices": choices})
+        return JSONResponse({"mounted": runtime.mounted_view(), "choices": choices, "caps": caps,
+                             "hands_on": runtime.hands})
 
     async def reports_tree(request: Request) -> Response:
         return JSONResponse(dict(runtime.reports_tree(), folder=str(runtime.reports_dir)))
@@ -1743,6 +1789,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/projects/{project_id}/devices/{device_id}", device_view, methods=["PATCH"]),
         Route("/api/projects/{project_id}/summary", summary_view, methods=["PUT", "POST"]),
         Route("/api/mount", mount_view, methods=["GET", "POST"]),
+        Route("/api/protection", protection_view),
+        Route("/api/hands", hands_view, methods=["POST"]),
         Route("/api/memory", memory_view),
         Route("/api/memory/notes/{note_id}", memory_note, methods=["DELETE"]),
         Route("/api/stop", stop, methods=["POST"]),

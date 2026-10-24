@@ -23,6 +23,7 @@ from mcp import Client
 from ..agent.runtime import LabRuntime
 from ..agent.server import INSTRUCTIONS
 from ..gate import ApprovalRequest
+from ..protection import summary as protection_summary
 from .providers.base import Emit, ModelInfo, Provider, text_of
 from . import brevity, memory, review, rules as rulebook
 from .settings import Settings
@@ -152,7 +153,8 @@ ADD_DEVICE = {
 MOUNT_DEVICE = {
     "name": "mount_device",
     "description": "Record which sample is in the setup now, only when the person says so; every scan from now on is "
-                   "filed under it. An empty device records that nothing is mounted.",
+                   "filed under it, and its protection (set by a person) holds. An empty device records that nothing "
+                   "is mounted. While a protected device is mounted, only a person changes this.",
     "schema": {"type": "object", "required": ["device"], "properties": {
         "device": {"type": "string", "description": "The device's name (add_device first if it is new), or empty"}}},
 }
@@ -440,18 +442,32 @@ class ChatAgent:
                 d = self.store.add_device(pid, args.get("name"), args.get("material") or "", args.get("description") or "")
                 return "added device %s to %s" % (d["name"], self.project_info(pid)["name"]), False
             if name == "mount_device":
+                now = self.runtime.mounted or {}
+                if now.get("protection"):   # taking it out would lift its protection: a person's call
+                    return ("not changed: %s is mounted with protection a person set, so only a person changes "
+                            "what is mounted (Lab panel)" % now.get("device_name")), True
                 ref = str(args.get("device") or "").strip()
                 if not ref:
                     self.runtime.unmount(by="agent")
                     return "nothing is mounted now; scans are filed under the project only", False
                 d = self.store.find_device(pid, ref)
                 m = self.runtime.mount(pid, d, by="agent")
-                return "mounted %s (%s); every scan from now on is filed under it" % (m["device_name"],
-                                                                                    m["project_name"]), False
+                lines = ["mounted %s (%s); every scan from now on is filed under it" % (m["device_name"],
+                                                                                      m["project_name"])]
+                prot = protection_summary(d.get("protection") or {}, self.runtime.lab)
+                if prot:
+                    lines.append("its protection holds (a person set it): " + "; ".join(prot))
+                lines += m.get("caps") or []
+                return "\n".join(lines), False
             devices = self.store.devices(pid)
             m = self.runtime.mounted
-            lines = ["%s%s%s" % (d["name"], " (%s)" % d["material"] if d.get("material") else "",
-                                 ", retired" if d.get("retired") else "") for d in devices] or ["no devices yet"]
+            lines = []
+            for d in devices:
+                prot = protection_summary(d.get("protection") or {})
+                lines.append("%s%s%s%s" % (d["name"], " (%s)" % d["material"] if d.get("material") else "",
+                                           ", retired" if d.get("retired") else "",
+                                           "; protected: " + "; ".join(prot) if prot else ""))
+            lines = lines or ["no devices yet"]
             lines.append("mounted now: %s" % ("%s (%s)" % (m["device_name"], m["project_name"]) if m else "nothing"))
             return "\n".join(lines), False
         except (KeyError, ValueError) as e:
@@ -617,8 +633,8 @@ class ChatAgent:
                 await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
                 if call["name"] == "remember" and context["learn"]:
                     content, is_error = self._remember(chat, context, call["input"])
-                elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):
-                    content, is_error = self._device_tool(chat, call["name"], call["input"])
+                elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):   # mounting may write caps
+                    content, is_error = await asyncio.to_thread(self._device_tool, chat, call["name"], call["input"])
                 elif call["name"] == "save_paper" and context["project"]:
                     content, is_error = await self._save_paper(chat, context, call["input"])
                 elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:

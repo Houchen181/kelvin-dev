@@ -482,6 +482,11 @@ class ChatStore:
                 device["description"] = str(fields["description"]).strip()[:MAX_INSTRUCTIONS]
             if fields.get("retired") is not None:
                 device["retired"] = bool(fields["retired"])
+            if fields.get("protection") is not None:   # checked by protection.normalize; {} lifts it
+                if fields["protection"]:
+                    device["protection"] = fields["protection"]
+                else:
+                    device.pop("protection", None)
             self._write_index(index)
             return device
 

@@ -26,6 +26,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
     private var pending = true
     private var alarm = true
     private var stopped: Int?
+    private var hands: JSON?            // the hands-on-the-sample lock
 
     // ------------------------------------------------------------------ the lab
 
@@ -100,13 +101,21 @@ final class DemoTransport: Transport, @unchecked Sendable {
         second["at"] = now - 600
         s["notices"] = [first, second]
 
-        let volts = String(format: "%.3f V", -0.5 + Double(max(0, n - 1)) * 0.025)
+        var mounted: JSON = ["project": "demo-graphene", "project_name": "Graphene"]
+        mounted["device"] = "demo-d3"
+        mounted["device_name"] = "D3"
+        mounted["protection_lines"] = ["Gate smu.voltage within ±6 V (20 nm hBN), stops above 1 nA on smu.current",
+                                       "Capped in the instruments: smu.compliance ≤ 10 nA"]
+        s["mounted"] = mounted
+        if let hands { s["hands_on"] = hands }
+
+        let volts = hands != nil ? "0.000 V" : String(format: "%.3f V", -0.5 + Double(max(0, n - 1)) * 0.025)
         var status: [String: [JSON]] = [:]
         status["cryostat"] = [r("temperature", "1.52 K", false), r("setpoint", "1.50 K", false), r("heater", "0.8 %", false)]
         status["magnet"] = [r("field", "0.50 T", true), r("ramp_rate", "0.10 T/min", false)]
         status["lockin"] = [r("x", "3.21 µV", false), r("y", "0.08 µV", false), r("frequency", "13.333 Hz", false),
                             r("sensitivity", "10 µV", false)]
-        status["smu"] = [r("voltage", volts, running()), r("current", "18.7 nA", false), r("compliance", "1 µA", false)]
+        status["smu"] = [r("voltage", volts, running()), r("current", "18.7 nA", false), r("compliance", "10 nA", false)]
         s["status"] = status
 
         var live: JSON = [:]
@@ -276,6 +285,22 @@ final class DemoTransport: Transport, @unchecked Sendable {
         case ("POST", "/api/runs/stop"):
             stopped = done()
             return (200, ok)
+        case ("POST", "/api/hands"):
+            let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? JSON
+            var lines: [String] = []
+            if body?["on"] as? Bool == true {
+                if running() { stopped = done() }
+                let f = DateFormatter()
+                f.locale = Locale(identifier: "en_US_POSIX")
+                f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+                hands = ["by": "human (phone This phone)", "since": f.string(from: Date())]
+                lines = ["smu.voltage to 0 V (safe state)", "smu.output off (safe state)"]
+            } else {
+                hands = nil
+            }
+            var reply: JSON = ["lines": lines]
+            if let hands { reply["hands_on"] = hands } else { reply["hands_on"] = NSNull() }
+            return (200, reply)
         case ("POST", "/api/stop"), ("POST", "/api/me/forget"):
             return (200, ok)
         case ("GET", "/api/bootstrap"):

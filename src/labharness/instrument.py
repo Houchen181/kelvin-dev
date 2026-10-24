@@ -43,6 +43,11 @@ class Instrument:
         self.backend = backend
         self.config = config
         self._last: Dict[str, Any] = {}   # what Kelvin set, for parameters with no read-back
+        # the mounted device's protection (protection.py): it only ever narrows the lab's limits and rates
+        self.device_name: Optional[str] = None
+        self.device_limits: Dict[str, Tuple[float, float]] = {}
+        self.device_rates: Dict[str, float] = {}
+        self.device_guards: Dict[str, List[Guard]] = {}
 
     @property
     def simulated(self) -> bool:
@@ -92,16 +97,29 @@ class Instrument:
         return None if re.match(r"^\+?0\s*(,|$)", resp) else resp   # "0,No error", or a bare 0 (SRS LERR?)
 
     def limits(self, param: str) -> Optional[Tuple[float, float]]:
-        return self.config.limits.get(param) or self.spec(param).limits
+        """The lab's limits (or the card's), narrowed to the mounted device's: the tighter side always holds."""
+        base = self.config.limits.get(param) or self.spec(param).limits
+        dev = self.device_limits.get(param)
+        if dev is None:
+            return base
+        if base is None:
+            return dev
+        return max(base[0], dev[0]), min(base[1], dev[1])
 
     def limits_source(self, param: str) -> str:
+        dev = self.device_limits.get(param)
+        base = self.config.limits.get(param) or self.spec(param).limits
+        if dev is not None and (base is None or dev[0] > base[0] or dev[1] < base[1]):
+            return "device %s" % self.device_name if self.device_name else "device"
         return "lab" if param in self.config.limits else "vendor"
 
     def rate(self, param: str) -> Optional[float]:
-        return self.config.rates.get(param) or self.spec(param).max_rate
+        base = self.config.rates.get(param) or self.spec(param).max_rate
+        dev = self.device_rates.get(param)
+        return min(base, dev) if base and dev else (dev or base)
 
     def guards(self, param: str) -> List[Guard]:
-        return self.config.guards.get(param, [])
+        return self.config.guards.get(param, []) + self.device_guards.get(param, [])
 
     def close(self) -> None:
         close = getattr(self.backend, "close", None)

@@ -34,7 +34,7 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
-       "hub_installation", "instruments_off"}
+       "hub_installation", "instruments_off", "hands_on"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 
@@ -339,6 +339,18 @@ class Settings:
             self._lab["instruments_off"] = off
         else:
             self._lab.pop("instruments_off", None)
+        self._save()
+
+    def hands_on(self) -> Optional[Dict[str, Any]]:
+        """A person's hands-on-the-sample lock (who, since), kept across restarts: the setup's, not a person's."""
+        h = self._lab.get("hands_on")
+        return h if isinstance(h, dict) and h.get("since") else None
+
+    def set_hands_on(self, hands: Optional[Dict[str, Any]]) -> None:
+        if hands:
+            self._lab["hands_on"] = {"by": str(hands.get("by") or ""), "since": str(hands.get("since") or "")}
+        else:
+            self._lab.pop("hands_on", None)
         self._save()
 
     def set_phone(self, on: bool, port: int) -> None:

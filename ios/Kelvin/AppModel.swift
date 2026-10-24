@@ -212,6 +212,13 @@ final class LabSession: ObservableObject {
 
     func stopChat() async throws { try await ready().stopChat() }
 
+    /// Lock while hands are on the sample, or unlock. Returns what Kelvin did, in words.
+    func hands(on: Bool) async throws -> [String] {
+        let r = try await ready().hands(on: on)
+        await refresh()
+        return r.lines
+    }
+
     func runs() async throws -> [RunSummary] { try await ready().runs() }
 
     func run(_ id: String) async throws -> RunDetail { try await ready().run(id) }

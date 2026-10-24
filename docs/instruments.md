@@ -246,6 +246,7 @@ raw:
 ```
 
 More that a card can say:
+- **A source's range and current limit,** on its level, so a mounted device's protection can cap the instrument itself ([safety.md](safety.md#protecting-the-sample)): `source_range: { param: V_range, auto: V_autorange, steps: [0.2, 2, 20, 200] }` names its range setting, its autorange switch and the ranges it has, and `current_limit: compliance_I` its compliance. Kelvin changes the range only while the level is at safe.
 - **`type: image`:** a camera frame, kept as a file (its driver answers with the file's path).
 - **`axis: { values: wavelengths }`:** a trace's x values are another trace, recorded with it. `axis: { start: f_start, stop: f_stop }` is for evenly spaced ones.
 - **`acquires: true`:** the reading runs an acquisition, so Kelvin takes it only when asked or measured.

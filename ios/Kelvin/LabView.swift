@@ -25,6 +25,7 @@ struct LabView: View {
                             HStack(spacing: 8) {
                                 if s.simulated { Tag(text: "Simulated", color: .orange) }
                                 if s.observeOnly { Tag(text: "Observe only", color: .secondary) }
+                                if s.handsOn != nil { Tag(text: "Hands on", color: .orange) }
                                 RouteLabel(url: session.connected, kinds: session.computer.kinds)
                             }
                         }
@@ -43,6 +44,7 @@ struct LabView: View {
                         } }
                     }
                 }
+                Section("Sample") { SampleSection(session: session, mounted: s.mounted, hands: s.handsOn, failure: $failure) }
                 Section("Run") { RunSection(session: session, run: s.live, failure: $failure) }
                 Section("Instruments") {
                     if s.instruments.isEmpty { Text("No instruments").foregroundStyle(.secondary) }
@@ -180,6 +182,93 @@ struct ApprovalRow: View {
         attempt($failure) {
             defer { busy = false }
             try await answer(request, yes)
+        }
+    }
+}
+
+/// The sample in the setup, the limits that protect it, and the hands-on-the-sample lock.
+struct SampleSection: View {
+    @ObservedObject var session: LabSession
+    let mounted: Mounted?
+    let hands: HandsOn?
+    @Binding var failure: String?
+    @State var confirming = false
+    @State var busy = false
+
+    var body: some View {
+        if let m = mounted {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(m.device).font(.headline)
+                    Text(m.project).font(.subheadline).foregroundStyle(.secondary)
+                    Spacer()
+                    if m.isProtected {
+                        Label("Protected", systemImage: "lock.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.green)
+                    }
+                }
+                if m.isProtected {
+                    ForEach(m.protection, id: \.self) { Text($0).font(.footnote).foregroundStyle(.secondary) }
+                } else {
+                    Text("Not protected: only the lab's limits hold. Set this device's limits on the Kelvin computer.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                ForEach(m.missing, id: \.self) { Text("\($0) is not in this lab").font(.footnote).foregroundStyle(.red) }
+            }
+            .padding(.vertical, 2)
+        } else {
+            Text("Nothing mounted").foregroundStyle(.secondary)
+        }
+        if let hands {
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Hands on the sample", systemImage: "hand.raised.fill")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                Text(hands.summary + ". Everything that reaches the sample stays at safe until a person unlocks; "
+                     + "Kelvin can still read and measure.")
+                    .font(.footnote).foregroundStyle(.secondary)
+                if session.role.canUnlock {
+                    HStack {
+                        Button("Done: unlock") { confirming = true }
+                            .buttonStyle(.borderedProminent)
+                        if busy { ProgressView() }
+                    }
+                    .disabled(busy)
+                } else {
+                    Text("This phone can lock; unlock on the Kelvin computer.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 4)
+            .confirmationDialog("Done with the sample?", isPresented: $confirming, titleVisibility: .visible) {
+                Button("Unlock") { act(false) }
+            } message: {
+                Text("Check that it is wired as the next measurement needs and that nobody is touching the setup. "
+                     + "Drives may move again, each within its limits and approvals.")
+            }
+        } else {
+            HStack {
+                Button { confirming = true } label: { Label("Hands on the sample", systemImage: "hand.raised") }
+                    .buttonStyle(.bordered)
+                if busy { ProgressView() }
+            }
+            .disabled(busy)
+            .confirmationDialog("Hands on the sample?", isPresented: $confirming, titleVisibility: .visible) {
+                Button("Lock", role: .destructive) { act(true) }
+            } message: {
+                Text("Kelvin stops what runs, brings everything that reaches the sample to safe and keeps it there "
+                     + "until a person unlocks.")
+            }
+        }
+    }
+
+    @MainActor
+    private func act(_ lock: Bool) {
+        busy = true
+        attempt($failure) {
+            defer { busy = false }
+            _ = try await session.hands(on: lock)
         }
     }
 }

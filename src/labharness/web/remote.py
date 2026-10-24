@@ -4,8 +4,9 @@ The portal itself only listens on 127.0.0.1, where the access key works. Phone a
 network (off until the user switches it on). There, only paired devices' own tokens work, never the access key:
 - a device is paired with a one-time 6-digit code shown on this computer (the code expires in 10 minutes, and
   repeated wrong codes lock pairing for a while);
-- "watch" devices see the lab, runs and alarms, can stop a run and can decline (never approve) a request;
-- "control" devices can also chat with Kelvin and approve requests;
+- "watch" devices see the lab, runs and alarms, can stop a run, decline (never approve) a request and lock the lab
+  while hands are on the sample (never unlock it);
+- "control" devices can also chat with Kelvin, approve requests and unlock;
 - settings, the lab config, instruments, approval mode and pairing are for this computer only.
 Traffic on a plain Wi-Fi network is not encrypted, so away from a trusted network use a VPN such as Tailscale."""
 from __future__ import annotations
@@ -36,7 +37,7 @@ FIREWALL_RULE = "Kelvin phone access"
 
 # What a paired device may do. Anything not listed is for this computer only.
 _WATCH = [("GET", r"/api/(state|live|me|runs|runs/[^/]+|runs/[^/]+/files/[^/]+)"),
-          ("POST", r"/api/(stop|runs/stop|alarms/[^/]+/ack|approvals/[^/]+|me/forget)")]
+          ("POST", r"/api/(stop|runs/stop|alarms/[^/]+/ack|approvals/[^/]+|me/forget|hands)")]
 _CONTROL = _WATCH + [
     ("GET", r"/api/(bootstrap|chats|chats/[^/]+|projects|projects/[^/]+|memory|settings|lab|mode|watches|reports"
             r"|reports/[^/]+)"),

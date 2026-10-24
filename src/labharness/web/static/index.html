@@ -94,6 +94,11 @@
       <button id="update-go" class="btn small primary" type="button" hidden>Restart to update</button>
     </div>
     <div id="alerts" class="alerts" role="alert" hidden></div>
+    <div id="hands-banner" class="hands-banner" role="status" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg>
+      <div class="hb-body"><b>Hands on the sample</b><span id="hands-text"></span></div>
+      <button id="hands-done" class="btn small primary" type="button">Done: unlock…</button>
+    </div>
     <div id="scroller" class="scroller">
       <section id="empty" class="empty">
         <img class="hero-mark" src="/static/kelvin.svg" width="72" height="72" alt="Kelvin">
@@ -207,6 +212,12 @@
       <div class="inst-head-row"><h3>Sample</h3><span id="mount-summary" class="inst-summary"></span>
         <button id="mount-new" class="link soft" type="button">New device…</button></div>
       <select id="mount-select" class="mount-select" aria-label="The sample in the setup now"></select>
+      <div id="mount-protection" class="mount-protection" hidden>
+        <div class="mp-head"><span id="mp-state" class="mp-state"></span><button id="mount-protect" class="link soft" type="button">Protection…</button></div>
+        <ul id="mp-lines" class="mp-lines"></ul>
+      </div>
+      <button id="hands-on" class="btn small hands-btn" type="button" title="Before you touch the sample: Kelvin stops what runs, brings everything that reaches the sample to safe and keeps it there until you unlock"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg> Hands on the sample</button>
+      <div id="hands-locked" class="hands-locked" role="status" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg><span>Locked: hands on the sample</span><button id="hands-done-panel" class="btn small" type="button">Unlock…</button></div>
       <span class="hint mount-hint">Every scan is filed under this device and its project. Its report and the project's master report update after each scan.</span>
       <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span>
         <button id="open-lab-setup" class="link soft" type="button">Set up…</button></div>
@@ -691,6 +702,64 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Cancel</button>
       <button id="save-project" class="btn primary" type="button">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="protect-dialog" class="dialog wide" aria-labelledby="protect-dialog-title">
+  <form id="protect-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="protect-dialog-title">Protect <span id="protect-device"></span></h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <p class="muted small">While this device is mounted, Kelvin keeps every drive within these limits, whatever a plan, a conversation or an approval asks; only a person changes them, here. Where the instrument allows, they are also written into it (its source range, autorange off, its current limit), so they hold even if Kelvin or the computer stops.</p>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Gates</span><span class="hint">Limit from the dielectric: 0.3 V/nm for hBN and SiO₂, 0.2 V/nm for Al₂O₃ and HfO₂, well below breakdown</span></div>
+      <div id="protect-gates" class="prot-rows"></div>
+      <button id="protect-add-gate" class="link soft prot-add" type="button">+ Add a gate</button>
+      <span class="hint">A ramp stops and goes back to 0 once the leakage passes its limit, and the source's own current limit is set to 10× that.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Other limits</span></div>
+      <div id="protect-limits" class="prot-rows"></div>
+      <button id="protect-add-limit" class="link soft prot-add" type="button">+ Add a limit</button>
+      <span class="hint">What else this sample can take, e.g. the bias current or the laser power.</span>
+    </div>
+    <footer class="dialog-foot">
+      <button id="protect-clear" class="btn ghost" type="button">Remove protection</button>
+      <span id="protect-msg" class="muted small"></span>
+      <div class="spacer"></div>
+      <button class="btn" value="cancel" type="submit">Cancel</button>
+      <button id="protect-save" class="btn primary" type="button">Save</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="hands-dialog" class="dialog" aria-labelledby="hands-dialog-title">
+  <form id="hands-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="hands-dialog-title">Done with the sample?</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <p class="muted small">Once you unlock, Kelvin may move drives again, each still within its limits and approvals.</p>
+    <div class="field">
+      <label for="hands-device" class="field-label">The sample in the setup now</label>
+      <select id="hands-device" class="mount-select"></select>
+      <span class="hint">Its protection holds from the moment you unlock.</span>
+    </div>
+    <div class="field checks-col">
+      <label class="check wrap"><input type="checkbox" class="hands-check"> It is wired as the next measurement needs (cables, breakout box, grounding switches)</label>
+      <label class="check wrap"><input type="checkbox" class="hands-check"> Nobody is touching the setup</label>
+    </div>
+    <footer class="dialog-foot">
+      <span id="hands-msg" class="muted small"></span>
+      <div class="spacer"></div>
+      <button class="btn" value="cancel" type="submit">Keep locked</button>
+      <button id="hands-unlock" class="btn primary" type="button" disabled>Unlock</button>
     </footer>
   </form>
 </dialog>

@@ -98,6 +98,11 @@ class ParamSpec:
     read_when: Optional[str] = None                # only query while this switch is on (some reads turn outputs on)
     acquires: bool = False                         # reading runs an acquisition (a frame, a count): only when asked
     description: str = ""
+    # a source drive's own hardware settings, which protect the sample (protection.py):
+    range_param: Optional[str] = None              # its output range, fixed just above a device's limit
+    autorange_param: Optional[str] = None          # its autorange switch, kept off so the range can't grow
+    range_steps: Tuple[float, ...] = ()            # the ranges it has
+    current_limit: Optional[str] = None            # the source's own current limit (compliance)
 
     @property
     def title(self) -> str:
@@ -264,6 +269,13 @@ class Card:
     def drives(self) -> List[ParamSpec]:
         return [p for p in self.params.values() if p.is_drive]
 
+    def range_owner(self, name: str) -> Optional[ParamSpec]:
+        """The drive whose source range (or autorange switch) this parameter is, if any."""
+        for p in self.params.values():
+            if name in (p.range_param, p.autorange_param):
+                return p
+        return None
+
     @property
     def setters(self) -> List[ParamSpec]:
         """Parameters with a set command, most specific command first (OUTPut2 before OUTPut), so a command
@@ -379,6 +391,19 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
             spec.parse = str(p["parse"])
         except re.error as e:
             err(path + ".parse", "not a valid regex: %s" % e)
+    rng = p.get("source_range")
+    if rng is not None:
+        steps = rng.get("steps") if isinstance(rng, dict) else None
+        if (not isinstance(rng, dict) or not rng.get("param") or not isinstance(steps, list) or not steps
+                or not all(_is_number(x) and x > 0 for x in steps) or kind != "drive"):
+            err(path + ".source_range", "a drive's source range is {param: range parameter, auto: autorange switch "
+                                        "(optional), steps: [the ranges, ascending]}")
+        else:
+            spec.range_param = str(rng["param"])
+            spec.autorange_param = str(rng["auto"]) if rng.get("auto") else None
+            spec.range_steps = tuple(sorted(float(x) for x in steps))
+    if p.get("current_limit") is not None:
+        spec.current_limit = str(p["current_limit"])
     words = p.get("words")
     if words is not None:
         if typ != "bool" or not (isinstance(words, (list, tuple)) and len(words) == 2):
@@ -527,6 +552,17 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         if spec.x_values and (spec.x_values not in params or params[spec.x_values].type != "trace"
                               or params[spec.x_values].get_cmd is None):
             err(path + ".axis", "%r is not a readable trace on this card" % spec.x_values)
+        if spec.range_param is not None and (spec.range_param not in params or not params[spec.range_param].numeric
+                                             or params[spec.range_param].set_cmd is None):
+            err(path + ".source_range", "%r is not a settable numeric parameter on this card" % spec.range_param)
+        if spec.autorange_param is not None and (spec.autorange_param not in params
+                                                 or params[spec.autorange_param].type != "bool"
+                                                 or params[spec.autorange_param].set_cmd is None):
+            err(path + ".source_range", "%r is not a settable on/off parameter on this card" % spec.autorange_param)
+        if spec.current_limit is not None and (spec.current_limit not in params
+                                               or not params[spec.current_limit].is_drive
+                                               or not params[spec.current_limit].numeric):
+            err(path + ".current_limit", "%r is not a numeric drive on this card" % spec.current_limit)
 
     drives = [n for n, s in params.items() if s.is_drive]
     seq = [str(n) for n in (data.get("safe_sequence") or [])]
