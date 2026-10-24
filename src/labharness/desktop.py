@@ -62,6 +62,28 @@ def _running_copy(lock: Path) -> Optional[int]:
         return None
 
 
+def _run_file_ok() -> bool:
+    """A run recorded, kept as run.h5 and read back: h5py and its HDF5 library are in the app."""
+    import tempfile
+    from . import rundata
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            r = rundata.Recorder(folder)
+            r.write("start", {"plan": "plan: self_test\n", "meta": {"run_id": "self-test"}})
+            r.write("row", values={"i": 0, "t": 0.0, "x": [1.0, 2.0]})
+            r.write("finish", {"meta": {"run_id": "self-test", "status": "done", "points": 1}})
+            r.close()
+            try:
+                kept = rundata.finish(folder)
+            finally:
+                r.release()
+            return kept is not None and rundata.load(folder).rows[0]["x"] == [1.0, 2.0]
+    except Exception as e:
+        log.info("run.h5 self-test failed: %s", e)
+        return False
+
+
 def _self_test(port: int, key: str) -> int:
     base = "http://127.0.0.1:%d" % port
     with urllib.request.urlopen(base + "/", timeout=10) as r:
@@ -83,7 +105,7 @@ def _self_test(port: int, key: str) -> int:
     except ImportError:
         hardware = False
     if getattr(sys, "frozen", False):   # the app must bring them; a source checkout may be installed without them
-        page_ok = page_ok and hardware
+        page_ok = page_ok and hardware and _run_file_ok()
     from . import library
     bridge_ok = library.self_test()   # the helper for makers' libraries starts (Kelvin.exe --bridge) and answers
     page_ok = page_ok and bridge_ok
