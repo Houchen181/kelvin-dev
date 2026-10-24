@@ -6,13 +6,15 @@ agent call and a plan never talk to an instrument at the same time. The approval
 from __future__ import annotations
 
 import contextlib
+import csv
+import io
 import json
 import re
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import yaml
 
@@ -25,6 +27,7 @@ from ..lab import Lab
 from ..labconfig import Allowed, Envelope
 from .. import carddraft
 from .. import protection
+from .. import rundata
 from ..literature import Literature
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
@@ -34,6 +37,9 @@ from ..reports import Collector, pick_runs, write_pdf, write_pptx
 from ..reports import kinds as report_kinds
 from ..reports.document import write_document_pdf, write_document_pptx
 from ..yamlio import load_yaml
+
+if TYPE_CHECKING:
+    from ..catalog import Catalog
 
 MAX_WAIT_S = 3600
 
@@ -151,6 +157,8 @@ class LabRuntime:
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
         self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
+        self._catalog: Optional["Catalog"] = None    # every run in the data folder (catalog.py); see .catalog
+        self._tidy_lock = threading.Lock()
         self._live_lock = threading.Lock()
         self.lab_info: Dict[str, Any] = {"kind": "virtual" if all(i.simulated for i in lab.instruments.values()) else "file",
                                          "path": None, "error": None, "has_file": False}
@@ -406,6 +414,7 @@ class LabRuntime:
             self.gate.log = self._new_log()
             self.engine.store = RunStore(new / "runs")
             self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept))
+            self.tidy_later()
             return dict(self.data_summary(), moved=moved, kept=kept, previous=str(old))
         finally:
             self.lock.release()
@@ -451,6 +460,7 @@ class LabRuntime:
                 self.live = None
             if user:
                 self.gate.log.write("signed_in", user=user, data=str(new))
+            self.tidy_later()
         finally:
             self.lock.release()
 
@@ -569,8 +579,8 @@ class LabRuntime:
                 lines += self._preview(plan, report.rows)
             lines += ["warning: " + w for w in report.warnings]
             if made:
-                lines.append("saved in the run folder: data.csv, conditions.csv, %s (made automatically; use "
-                             "make_report only for another selection or wording)" % " and ".join(made))
+                lines.append("saved in the run folder: run.h5 (every point, trace, setting and fit) and %s (made "
+                             "automatically; use make_report only for another selection or wording)" % " and ".join(made))
             if report.run_id and report.rows:
                 lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
             return "\n".join(lines)
@@ -591,12 +601,11 @@ class LabRuntime:
         if model and model not in MODELS and model != "linear":
             return "unknown model %r (choose: linear, %s)" % (model, ", ".join(MODELS))
         try:
-            rows = self._rows(run_id)
-            meta = json.loads((self._run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
-            plan = self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8"))
+            rec = rundata.load(self._run_dir(run_id))
+            rows, meta = rec.rows, rec.meta
+            cols = self._columns(rec)
         except (KeyError, OSError, ValueError, PlanError) as e:
             return "cannot analyse %s: %s" % (run_id, e)
-        cols = self.engine.columns(plan)
         if column and column not in [m["key"] for m in cols["measures"]]:
             return "unknown column %r (have: %s)" % (column, ", ".join(m["key"] for m in cols["measures"]))
         a = analyze_run(rows, cols["axes"], cols["measures"], meta, force=model, only=column)
@@ -630,11 +639,18 @@ class LabRuntime:
         return d
 
     def _rows(self, run_id: str) -> List[Dict[str, Any]]:
-        path = self._run_dir(run_id) / "data.jsonl"
-        if not path.exists():
+        try:
+            return rundata.load(self._run_dir(run_id)).rows
+        except KeyError:
             return []
-        with open(path, encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+
+    def _columns(self, rec: rundata.Recorded) -> Dict[str, List[Dict[str, str]]]:
+        """A run's axes and readings with units: as it recorded them, else from its plan and this lab."""
+        cols = rec.columns or {}
+        if cols.get("axes") or cols.get("measures"):
+            if all(c.get("unit") is not None for c in cols.get("axes", []) + cols.get("measures", [])):
+                return cols
+        return self.engine.columns(self._plan(rec.plan_text))
 
     def runs_index(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Most recent runs first: run_id, plan, status, points, planned_points, reason."""
@@ -643,14 +659,16 @@ class LabRuntime:
         out = []
         for d in dirs:
             entry: Dict[str, Any] = {"run_id": d.name, "plan": d.name.split("-", 2)[-1], "status": "unfinished"}
-            try:
-                meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-                entry.update(status=meta.get("status"), points=meta.get("points"),
-                             planned_points=meta.get("planned_points"), reason=meta.get("reason"))
-            except (OSError, ValueError):
-                live = self.live_view(10 ** 9)
-                if live and live["run_id"] == d.name and live["status"] == "running":
-                    entry.update(status="running", points=live["done"], planned_points=live["total"])
+            live = self.live_view(10 ** 9)
+            if live and live["run_id"] == d.name and live["status"] == "running":
+                entry.update(status="running", points=live["done"], planned_points=live["total"])
+            else:
+                try:
+                    meta = rundata.meta(d)
+                    entry.update(status=meta.get("status") or "unfinished", points=meta.get("points"),
+                                 planned_points=meta.get("planned_points"), reason=meta.get("reason"))
+                except (KeyError, OSError, ValueError):
+                    pass
             out.append(entry)
         return out
 
@@ -663,6 +681,150 @@ class LabRuntime:
                 lines.append("%s: %s, %s/%s points%s" % (r["run_id"], r["status"], r["points"], r["planned_points"],
                                                          " (%s)" % r["reason"] if r.get("reason") else ""))
         return "\n".join(lines) or "no runs yet"
+
+    # ------------------------------------------------------------------ every run: kept as run.h5, in the catalog
+
+    @property
+    def catalog(self) -> "Catalog":
+        """The catalog of the runs in the data folder in use (it follows a change of folder or person)."""
+        from ..catalog import FILE, Catalog   # SQLite, only when a catalog is used
+        path = self.data_dir / FILE
+        if self._catalog is None or self._catalog.path != path:
+            self._catalog = Catalog(path)
+        return self._catalog
+
+    def _running_id(self) -> Optional[str]:
+        live = self.live_view(10 ** 9)
+        return live["run_id"] if live and live["status"] == "running" else None
+
+    def tidy_runs(self) -> Dict[str, int]:
+        """Keep every run in the data folder as run.h5 and in the catalog: runs a crash or a power cut ended
+        (status interrupted, with every point up to then) and runs from before run.h5 (their files move to legacy/
+        in the run folder). Kelvin does this when it starts and when the data folder or the person changes, in the
+        background. A run being recorded, by this Kelvin or another, is left alone."""
+        with self._tidy_lock:
+            root = self.data_dir / "runs"
+            done = {"interrupted": 0, "upgraded": 0, "failed": 0}
+            for d in sorted(d for d in root.iterdir() if d.is_dir()) if root.exists() else []:
+                try:
+                    if (d / rundata.RECORD).exists():
+                        if rundata.being_recorded(d) or (rundata.closed(d) and not rundata.have_h5()):
+                            continue
+                        crashed = not rundata.closed(d)
+                        rundata.finish(d)
+                        done["interrupted"] += crashed
+                    elif rundata.have_h5() and (d / "data.jsonl").exists() and not (d / rundata.RUN_FILE).exists():
+                        if rundata.upgrade(d, self._legacy_columns(d)):
+                            done["upgraded"] += 1
+                except Exception as e:   # that run stays as it is; the next start tries again
+                    done["failed"] += 1
+                    self.gate.log.write("run_not_kept", by="kelvin", run=d.name, error=str(e)[:300])
+            running = self._running_id()
+            self.catalog.sync(root, skip=[running] if running else ())
+            if done["interrupted"] or done["upgraded"]:
+                self.gate.log.write("runs_kept", by="kelvin", **done)
+            return done
+
+    def tidy_later(self) -> None:
+        """tidy_runs in the background."""
+        def tidy() -> None:
+            try:
+                self.tidy_runs()
+            except Exception:
+                pass
+        threading.Thread(target=tidy, name="kelvin-tidy-runs", daemon=True).start()
+
+    def _legacy_columns(self, folder: Path) -> Optional[Dict[str, Any]]:
+        """An older run's axes and readings with units, from its plan and this lab (None if they don't fit)."""
+        try:
+            return self.engine.columns(self._plan((folder / "plan.yaml").read_text(encoding="utf-8")))
+        except Exception:
+            return None
+
+    def _fresh_catalog(self) -> "Catalog":
+        """The catalog, after a look at the run folders if the last was over 30 s ago (cheap: unchanged runs are
+        not read again)."""
+        cat = self.catalog
+        cat.ready()
+        if time.monotonic() - cat.synced > 30 or not cat.synced:
+            running = self._running_id()
+            cat.sync(self.data_dir / "runs", skip=[running] if running else ())
+        return cat
+
+    def find_runs(self, text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
+                  since: str = "", until: str = "", quantity: str = "", limit: int = 20) -> str:
+        cat = self._fresh_catalog()
+        rows = cat.find(text, device, project, plan, status, since, until, quantity, limit)
+        total = cat.count()
+        lines = ["%d run%s, newest first (of %d in the data folder):" % (len(rows), "" if len(rows) == 1 else "s",
+                                                                          total) if rows else
+                 "no run matches (%d in the data folder)" % total]
+        for r in rows:
+            lines += self._run_lines(r)
+        running = self._running_id()
+        if running:
+            lines.append("running now: %s (in the catalog once it ends)" % running)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _run_lines(r: Dict[str, Any]) -> List[str]:
+        card = r.get("card") or {}
+        g = lambda v: "%g" % v if isinstance(v, (int, float)) and not isinstance(v, bool) else str(v)  # noqa: E731
+        about = [(r.get("started") or "")[:16].replace("T", " ")]
+        about += ["device " + r["device_name"]] if r.get("device_name") else []
+        about += ["project " + r["project_name"]] if r.get("project_name") else []
+        about += ["simulated"] if r.get("simulated") else []
+        lines = ["%s: %s, %s, %s points (%s)" % (r["run_id"], r.get("plan"), r.get("status"),
+                                                 card.get("points", r.get("points")), ", ".join(a for a in about if a))]
+        swept = ["%s %s→%s %s" % (a["key"], g(a.get("from", "?")), g(a.get("to", "?")), a.get("unit", ""))
+                 for a in card.get("swept") or []]
+        measured = ["%s [%s%s]" % (m["key"], m.get("unit") or "-", ", trace" if m.get("kind") == "trace" else
+                                   ", image" if m.get("kind") == "image" else "") for m in card.get("measured") or []]
+        if swept or measured:
+            lines.append("  swept %s; measured %s" % (", ".join(swept) or "nothing (a time series)",
+                                                     ", ".join(measured) or "-"))
+        held = card.get("held") or {}
+        if held:
+            lines.append("  held: " + ", ".join("%s %s" % kv for kv in list(held.items())[:6]))
+        if r.get("assessment"):
+            lines.append("  assessment: " + str(r["assessment"])[:240])
+        if r.get("reason") and r.get("status") != "done":
+            lines.append("  stopped: " + str(r["reason"])[:200])
+        return lines
+
+    def query_runs(self, sql: str) -> str:
+        cat = self._fresh_catalog()
+        try:
+            names, rows, more = cat.query(sql)
+        except ValueError as e:   # catalog.QueryError
+            return "query not run: %s" % e
+        out = io.StringIO()
+        w = csv.writer(out, lineterminator="\n")
+        w.writerow(names)
+        for row in rows:
+            w.writerow(["" if v is None else "%.6g" % v if isinstance(v, float) else v for v in row])
+        text = out.getvalue()
+        if not rows:
+            text += "(no rows)"
+        elif more:
+            text += "(the first %d rows only: narrow the query or use LIMIT/OFFSET)" % len(rows)
+        return text.rstrip("\n")
+
+    def describe_run(self, run_id: str) -> str:
+        """A run's card (what it swept and measured, with units and ranges, the conditions held, the fits, the
+        assessment and issues), the plan as it ran and its files."""
+        try:
+            d = self._run_dir(run_id)
+            card = rundata.card(d)
+            plan_text = rundata.load(d, with_rows=False).plan_text
+        except (KeyError, OSError, ValueError) as e:
+            return "cannot read %s: %s" % (run_id, e.args[0] if e.args else e)
+        lines = [yaml.safe_dump(card, sort_keys=False, allow_unicode=True, width=110).rstrip()]
+        if plan_text.strip():
+            lines += ["plan as run:", "  " + plan_text.strip().replace("\n", "\n  ")]
+        lines.append("files: %s" % (", ".join(f["name"] for f in self.run_files(run_id)) or "none yet"))
+        lines.append("numbers: get_run_data (columns, where), compute (expressions), get_trace (one trace)")
+        return "\n".join(lines)
 
     def stop_run(self) -> bool:
         """Stop the plan that is running (its on_abort steps then run). False if none is running."""
@@ -1170,40 +1332,118 @@ class LabRuntime:
         q.mark(item, "done", "; ".join(warnings))
         return True, ""
 
-    def run_data(self, run_id: str, columns: Optional[List[str]] = None, max_rows: int = 50) -> str:
+    def run_data(self, run_id: str, columns: Optional[List[str]] = None, max_rows: int = 50, where: str = "") -> str:
+        """A run's points as CSV, evenly thinned to max_rows; where: only the points meeting a condition (expr.py).
+        Traces show as trace[n] and are not read (get_trace reads one)."""
         try:
-            rows = self._rows(run_id)
-        except KeyError as e:
-            return e.args[0]
-        if not rows:
+            table = rundata.columns(self._run_dir(run_id))
+        except (KeyError, OSError, ValueError) as e:
+            return e.args[0] if e.args else str(e)
+        if not table.n:
             return "run %s has no data" % run_id
-        cols = columns or [k for k in rows[0] if not k.endswith(".axis") and not k.endswith(".x")]
-        missing = [c for c in cols if c not in rows[0]]
+        cols = columns or table.order
+        missing = [c for c in cols if c not in table.order]
         if missing:
-            return "unknown columns %s (have: %s)" % (", ".join(missing), ", ".join(rows[0]))
-        max_rows = max(1, int(max_rows))
-        step = max(1, -(-len(rows) // max_rows))
-        picked = rows[::step]
-        if picked[-1] is not rows[-1]:
-            picked.append(rows[-1])
+            return "unknown columns %s (have: %s)" % (", ".join(missing), ", ".join(table.order))
+        picked = list(range(table.n))
+        if where:
+            try:
+                picked = self._where(table, where)
+            except ValueError as e:
+                return "where not applied: %s" % e
+            if not picked:
+                return "no points of %s meet %s (of %d)" % (run_id, where, table.n)
+        step = max(1, -(-len(picked) // max(1, int(max_rows))))
+        shown = picked[::step]
+        if shown[-1] != picked[-1]:
+            shown.append(picked[-1])
+        head = "%s: %d rows%s%s" % (run_id, table.n, "; %d where %s" % (len(picked), where) if where else "",
+                                    "" if step == 1 else ", every %dth shown" % step)
+        return "\n".join([head, ",".join(cols)] + [",".join(table.cell(c, i) for c in cols) for i in shown])
 
-        def cell(v: Any) -> str:
-            if isinstance(v, list):
-                return "trace[%d]" % len(v)
-            if isinstance(v, float):
-                return "%.6g" % v
-            return str(v)
+    @staticmethod
+    def _where(table: rundata.Columns, where: str) -> List[int]:
+        """The points (indices) of a run meeting a condition such as "smu.V > 1 and tc.T < 5"."""
+        import numpy as np
+        from .. import expr
+        mask = np.asarray(expr.evaluate(where, table.number, np))
+        if mask.dtype != bool:
+            raise expr.ExprError("where needs a condition, e.g. smu.V > 1")
+        return [int(i) for i in np.flatnonzero(np.broadcast_to(mask, (table.n,)))]
 
-        head = "%s: %d rows%s" % (run_id, len(rows), "" if step == 1 else ", every %dth shown" % step)
-        return "\n".join([head, ",".join(cols)] + [",".join(cell(r.get(c)) for c in cols) for r in picked])
+    def compute(self, run_id: str, expression: str, where: str = "", max_rows: int = 50) -> str:
+        """An expression over a run's columns (expr.py): one number, or a value at each point shown against the
+        swept axes, with its minimum and maximum and where they are."""
+        import numpy as np
+        from .. import expr
+        try:
+            d = self._run_dir(run_id)
+            table = rundata.columns(d)
+            axes = [a["key"] for a in rundata.load(d, with_rows=False).columns.get("axes") or []]
+        except (KeyError, OSError, ValueError) as e:
+            return e.args[0] if e.args else str(e)
+        if not table.n:
+            return "run %s has no data" % run_id
+        picked = np.arange(table.n)
+        try:
+            if where:
+                picked = np.asarray(self._where(table, where), dtype=int)
+                if not picked.size:
+                    return "no points of %s meet %s (of %d)" % (run_id, where, table.n)
+            value = expr.evaluate(expression, lambda key: table.number(key)[picked], np)
+        except ValueError as e:
+            return "not computed: %s" % e
+        value = np.asarray(value, dtype=float)
+        scope = "%d points%s" % (picked.size, " where " + where if where else "")
+        if value.ndim == 0:
+            return "%s = %.6g (over %s)" % (expression, float(value), scope)
+        if value.ndim > 1:
+            return "not computed: the result has %d dimensions" % value.ndim
+        n = value.size
+        per_point = n == picked.size
+        axes = [a for a in axes if a in table.numbers]
+
+        def at(k: int) -> str:
+            if not per_point:
+                return "index %d" % k
+            p = int(picked[k])
+            return ", ".join("%s=%s" % (a, table.cell(a, p)) for a in axes) or "point %d" % p
+
+        lines = ["%s over %s: %d values" % (expression, scope, n)]
+        if np.isfinite(value).any():
+            lo, hi = int(np.nanargmin(value)), int(np.nanargmax(value))
+            lines.append("min %.6g at %s; max %.6g at %s; mean %.6g" % (value[lo], at(lo), value[hi], at(hi),
+                                                                          float(np.nanmean(value))))
+        else:
+            lines.append("no finite values")
+        step = max(1, -(-n // max(1, int(max_rows))))
+        shown = list(range(0, n, step))
+        if shown and shown[-1] != n - 1:
+            shown.append(n - 1)
+        if step > 1:
+            lines.append("every %dth value shown" % step)
+        if per_point:
+            lines.append(",".join(["i"] + axes + ["value"]))
+            lines += [",".join([table.cell("i", int(picked[k]))] + [table.cell(a, int(picked[k])) for a in axes] +
+                               ["%.6g" % value[k]]) for k in shown]
+        else:
+            lines.append("index,value")
+            lines += ["%d,%.6g" % (k, value[k]) for k in shown]
+        return "\n".join(lines)
 
     def trace(self, run_id: str, row: int, column: str, max_points: int = 200) -> str:
         try:
-            rows = self._rows(run_id)
+            one = rundata.trace_row(self._run_dir(run_id), column, int(row))   # that trace alone, from run.h5
         except KeyError as e:
-            return e.args[0]
-        if not 0 <= row < len(rows):
-            return "row must be 0…%d" % (len(rows) - 1)
+            return e.args[0] if e.args and str(e.args[0]).startswith("no run") else "%s is not a trace column" % column
+        except IndexError as e:
+            return "row must be 0…%d" % (e.args[0] - 1)
+        if one is None:   # a run not kept as run.h5 (being measured, or Kelvin's core alone)
+            rows = self._rows(run_id)
+            if not 0 <= row < len(rows):
+                return "row must be 0…%d" % (len(rows) - 1)
+            one = rows[row]
+        rows = {row: one}
         values = rows[row].get(column)
         if not isinstance(values, list):
             return "%s is not a trace column" % column
@@ -1507,7 +1747,7 @@ class LabRuntime:
 
         def columns(run_id: str) -> Optional[Dict[str, List[Dict[str, str]]]]:
             try:
-                return self.engine.columns(self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8")))
+                return self._columns(rundata.load(self._run_dir(run_id), with_rows=False))
             except Exception:   # the run's instruments are not in this lab any more
                 return None
 
@@ -1537,9 +1777,14 @@ class LabRuntime:
         return out
 
     def _auto_report(self, run_id: Optional[str]) -> List[str]:
-        """Every finished or stopped run gets its scan report in its own folder (report.pdf, report.pptx), and its
-        device and project reports are rewritten a little later, unless the person switched automatic reports off.
-        A report that cannot be written never fails the run."""
+        """Every finished or stopped run goes into the catalog and gets its scan report in its own folder
+        (report.pdf, report.pptx), and its device and project reports are rewritten a little later, unless the
+        person switched automatic reports off. A report that cannot be written never fails the run."""
+        if run_id:
+            try:
+                self.catalog.add(self._run_dir(run_id))
+            except Exception:
+                pass   # the catalog catches up at its next look at the run folders
         if not run_id or self.auto_report == "off":
             return []
         out: List[str] = []
@@ -1558,7 +1803,7 @@ class LabRuntime:
     def _collector(self) -> Collector:
         def columns(run_id: str) -> Optional[Dict[str, List[Dict[str, str]]]]:
             try:
-                return self.engine.columns(self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8")))
+                return self._columns(rundata.load(self._run_dir(run_id), with_rows=False))
             except Exception:   # the run's instruments are not in this lab any more
                 return None
         return Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line)
@@ -1579,8 +1824,7 @@ class LabRuntime:
         if dg is None:
             raise KeyError("run %s has not finished" % run_id)
         part = self._collector().run(run_id, self.gate.log.events())
-        files = {p.name for p in d.iterdir() if p.is_file() or p.name == "frames"} | \
-            {"report." + f for f in self._formats(fmt)}
+        files = {p.name for p in d.iterdir() if p.is_file()} | {"report." + f for f in self._formats(fmt)}
         doc = report_kinds.scan_document(part, dg, files, dg.lab or self.lab.config.name, dg.simulated)
         return self._write_doc(doc, d / "report", fmt)
 
@@ -1731,8 +1975,8 @@ class LabRuntime:
                 "custom": [rel(p) for p in files(root / "custom") + files(root)][:40]}
 
     def run_file(self, run_id: str, name: str) -> Path:
-        """A file a person may open from a run's folder: its reports and its CSV data. KeyError otherwise."""
-        if not re.fullmatch(r"[\w.-]+\.(pdf|pptx|csv)", name or "") or ".." in name:
+        """A file a person may open from a run's folder: its reports and its data (run.h5). KeyError otherwise."""
+        if not re.fullmatch(r"[\w.-]+\.(pdf|pptx|h5)", name or "") or ".." in name:
             raise KeyError("no file %r in run %s" % (name, run_id))
         path = self._run_dir(run_id) / name
         if not path.is_file():
@@ -1741,13 +1985,13 @@ class LabRuntime:
 
     def run_files(self, run_id: str) -> List[Dict[str, Any]]:
         d = self._run_dir(run_id)
-        order = {"report.pdf": 0, "report.pptx": 1, "data.csv": 2, "conditions.csv": 3}
-        files = [p for p in d.iterdir() if p.is_file() and p.suffix in (".pdf", ".pptx", ".csv")]
+        order = {"report.pdf": 0, "report.pptx": 1, rundata.RUN_FILE: 2}
+        files = [p for p in d.iterdir() if p.is_file() and p.suffix in (".pdf", ".pptx", ".h5")]
         return [{"name": p.name, "size": p.stat().st_size} for p in sorted(files, key=lambda p: (order.get(p.name, 3), p.name))]
 
     def _run_meta(self, run_id: str) -> Dict[str, Any]:
         try:
-            return json.loads((self._run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
+            return rundata.meta(self._run_dir(run_id))
         except (KeyError, OSError, ValueError):
             return {}
 

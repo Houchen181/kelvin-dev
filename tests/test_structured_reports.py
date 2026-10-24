@@ -56,13 +56,14 @@ def test_the_scan_report_is_one_short_page(tmp_path):
     assert check_pdf(folder / "report.pdf") == 1
     text = " ".join(pdf_strings(folder / "report.pdf"))
     for want in ("SCAN REPORT", "gate_sweep on D3", "Graphene", "Result", "Conditions", "Swept", "Measured",
-                 "Approvals and alarms", "data.csv (every point)", "conditions.csv"):
+                 "Approvals and alarms", "run.h5 (every point"):
         assert want in text, want
-    for gone in ("Contents", "1. Result", "Appendix", "plan: gate_sweep", "Next:"):   # the plan is in plan.yaml
+    for gone in ("Contents", "1. Result", "Appendix", "plan: gate_sweep", "Next:"):   # the plan is in run.h5
         assert gone not in text, gone
     assert text.count("approved: Run plan gate_sweep") == 1                     # its approval, once
-    rows = list(csv.reader(open(folder / "conditions.csv", encoding="utf-8")))
-    assert rows[0] == ["instrument", "parameter", "start", "end"] and ["smu", "output", "off", "on"] in rows
+    from labharness import rundata
+    kept = rundata.load(folder, with_rows=False).snapshots                      # every setting, start and end
+    assert kept["start"]["smu"]["output"] is False and kept["end"]["smu"]["output"] is True
     slides = check_pptx(folder / "report.pptx")
     assert "SCAN REPORT" in slides[0] and "has a peak" in slides[0] and len(slides) <= 5
 
@@ -102,12 +103,15 @@ def test_kinds_can_be_switched_off_and_runs_before_this_version_still_count(tmp_
     rt, _ = runtime(tmp_path)
     rt.run(SWEEP)
     old = rt.runs_index(1)[0]["run_id"]
-    meta = rt._run_dir(old) / "meta.json"
     import json
-    m = json.loads(meta.read_text(encoding="utf-8"))
-    for k in ("project", "project_name", "device", "device_name"):
-        m.pop(k)
-    meta.write_text(json.dumps(m), encoding="utf-8")                          # as Kelvin 0.3.4 wrote it
+    h5py = pytest.importorskip("h5py")
+    with h5py.File(rt._run_dir(old) / "run.h5", "r+") as f:                 # as Kelvin 0.3.4 kept it: no project
+        m = json.loads(f.attrs["meta_json"])
+        for k in ("project", "project_name", "device", "device_name"):
+            m.pop(k, None)
+            if k in f.attrs:
+                del f.attrs[k]
+        f.attrs["meta_json"] = json.dumps(m)
     rt.project_chat_runs = lambda pid: [old] if pid == "p1" else []          # a chat in the project ran it
     rt.report_kinds = {"scan", "project"}
     written = rt.refresh_reports(["p1"])

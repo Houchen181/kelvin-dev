@@ -1,4 +1,4 @@
-"""The lab notebook's raw record: an append-only event log and per-run folders."""
+"""The lab notebook's raw record: an append-only event log and per-run folders (each run's data: rundata.py)."""
 from __future__ import annotations
 
 import json
@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from ._version import __version__
-from .cards import trace_x
+from . import rundata
 
 
 def _jsonable(v: Any) -> Any:
@@ -91,8 +91,8 @@ class EventLog:
 
 
 class RunRecord:
-    """One run: plan.yaml, snapshot_start/end.json, data.jsonl, meta.json; at the end data.csv (and one CSV per
-    trace reading) and conditions.csv (every instrument setting at the start and the end)."""
+    """One run, recorded point by point in its folder's record.bin while it is measured (rundata.py: flushed at
+    once, synced to disk about once a second), and kept as run.h5 when it ends."""
 
     def __init__(self, run_id: str, path: Optional[Path], plan: Dict[str, Any], operator: str):
         self.run_id = run_id
@@ -101,100 +101,58 @@ class RunRecord:
         self.snapshots: Dict[str, Dict[str, Any]] = {}
         self.meta: Dict[str, Any] = {"run_id": run_id, "plan": plan.get("plan"), "operator": operator,
                                      "started": _now(), "labharness": __version__}
+        self._plan = plan
+        self._record: Optional[rundata.Recorder] = None
         if path:
             path.mkdir(parents=True)
-            with open(path / "plan.yaml", "w", encoding="utf-8") as f:
-                yaml.safe_dump(plan, f, sort_keys=False, allow_unicode=True)
+            self._record = rundata.Recorder(path)
+
+    def _write(self, kind: str, fields: Optional[Dict[str, Any]] = None, values: Optional[Dict[str, Any]] = None,
+               sync: bool = False) -> None:
+        if self._record is None:
+            return
+        if not getattr(self, "_started", False):   # the plan and who/where first, with the meta as it is by then
+            self._started = True
+            self._record.write("start", {"plan": yaml.safe_dump(self._plan, sort_keys=False, allow_unicode=True),
+                                         "meta": dict(self.meta)}, sync=True)
+        self._record.write(kind, fields, values, sync=sync)
+
+    def set_columns(self, columns: Dict[str, Any]) -> None:
+        """The run's axes and readings with their units (engine.columns)."""
+        self._write("columns", {"columns": columns})
+
+    def note(self, **fields: Any) -> None:
+        """More about the run as it goes (such as the conditions held)."""
+        self.meta.update({k: _jsonable(v) for k, v in fields.items()})
+        self._write("meta", {"meta": fields})
 
     def snapshot(self, kind: str, data: Dict[str, Any]) -> None:
         self.meta["snapshot_" + kind] = True
         self.snapshots[kind] = data
-        if self.path:
-            with open(self.path / ("snapshot_%s.json" % kind), "w", encoding="utf-8") as f:
-                json.dump(_jsonable(data), f, indent=1, default=str)
+        self._write("snapshot", {"kind": kind, "data": data})
 
     def add(self, row: Dict[str, Any]) -> None:
         self.rows.append(row)
-        if self.path:
-            with open(self.path / "data.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps({k: _jsonable(v) for k, v in row.items()}) + "\n")
+        self._write("row", values=row)
 
-    def save_json(self, name: str, data: Any) -> None:
-        if self.path:
-            with open(self.path / name, "w", encoding="utf-8") as f:
-                json.dump(_jsonable(data), f, indent=1, ensure_ascii=False)
+    def set_analysis(self, analysis: Dict[str, Any]) -> None:
+        self._write("analysis", {"analysis": analysis})
 
     def finish(self, **meta: Any) -> None:
+        """The run ended (done, stopped or failed): its record is closed and kept as run.h5. If that can't be
+        written now (no h5py, a full disk), the record stays, and Kelvin finishes it at its next start."""
         self.meta.update({k: _jsonable(v) for k, v in meta.items()})
         self.meta["finished"] = _now()
-        if self.path:
-            write_csv(self.path, self.rows)
-            if self.snapshots:
-                write_conditions(self.path, self.snapshots.get("start") or {}, self.snapshots.get("end") or {})
-            with open(self.path / "meta.json", "w", encoding="utf-8") as f:
-                json.dump(self.meta, f, indent=1)
-
-
-def write_conditions(folder: Path, start: Dict[str, Any], end: Dict[str, Any]) -> None:
-    """conditions.csv: instrument, parameter, its value at the start and at the end (as the instrument gave it, in
-    the card's units), one row per setting or reading, so the scan report needs to show only what bears on it."""
-    import csv
-    rows = []
-    for inst in list(dict.fromkeys(list(start) + list(end))):
-        a, b = start.get(inst) or {}, end.get(inst) or {}
-        if not isinstance(a, dict) or not isinstance(b, dict):
-            continue
-        for name in list(dict.fromkeys(list(a) + list(b))):
-            if isinstance(a.get(name), list) or isinstance(b.get(name), list):
-                continue   # traces are in the data
-            rows.append([inst, name, _cell(a.get(name)), _cell(b.get(name))])
-    with open(folder / "conditions.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["instrument", "parameter", "start", "end"])
-        w.writerows(rows)
-
-
-def _cell(v: Any) -> str:
-    if v is None:
-        return ""
-    if isinstance(v, bool):
-        return "on" if v else "off"
-    return "%.12g" % v if isinstance(v, float) else str(v)
-
-
-def write_csv(folder: Path, rows: List[Dict[str, Any]]) -> List[str]:
-    """The run's points as CSV, for any analysis program: data.csv (one row per point, every axis and scalar
-    reading) and one <reading>.csv per trace (i, x, value; i is the point's row in data.csv). Returns the files."""
-    import csv
-    scalars: List[str] = []
-    traces: List[str] = []
-    for r in rows:
-        for k, v in r.items():
-            if k.endswith(".axis") or k.endswith(".x"):
-                continue
-            target = traces if isinstance(v, list) else scalars
-            if k not in scalars and k not in traces:
-                target.append(k)
-    written = []
-    with open(folder / "data.csv", "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(scalars)
-        for r in rows:
-            w.writerow(["" if r.get(k) is None else r.get(k) for k in scalars])
-    written.append("data.csv")
-    for key in traces:
-        name = re.sub(r"[^\w.-]+", "_", key) + ".csv"
-        with open(folder / name, "w", encoding="utf-8", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["i", "x", key])
-            for n, r in enumerate(rows):
-                ys = r.get(key)
-                if not isinstance(ys, list):
-                    continue
-                for x, y in zip(trace_x(r, key, len(ys)), ys):
-                    w.writerow([r.get("i", n), "%.12g" % x, y])
-        written.append(name)
-    return written
+        if self._record is None:
+            return
+        self._write("finish", {"meta": dict(self.meta)}, sync=True)
+        self._record.close()
+        try:
+            rundata.finish(self.path)
+        except Exception as e:   # the record keeps every point; it becomes run.h5 at the next start
+            self.meta.setdefault("warnings", []).append("run.h5 not written yet: %s" % e)
+        finally:
+            self._record.release()
 
 
 class RunStore:

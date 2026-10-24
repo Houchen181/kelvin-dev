@@ -34,7 +34,7 @@ A drive change blocks its tool call until a person answers. Set the client's too
 Tools:
 - **The lab:** `lab_status`, `describe_instrument`, `instrument_info`, `search_manual`, `show_sequence`, `get_value`, `set_value`, `send_raw`, `undo_last`, `health_check`, `scan_instruments`, `watch`, `watches`, `unwatch`, `wait`.
 - **Plans and the queue:** `validate_plan`, `simulate_plan`, `run_plan`, `queue_show`, `queue_add`, `queue_edit`, `queue_change`, `queue_start`, `queue_pause`, `queue_save`, `queue_load`.
-- **Data:** `analyze_run`, `list_runs`, `get_run_data`, `get_trace`, `recent_events`, `make_report` (`kind`: runs, scan, device or project).
+- **Data:** `find_runs` and `query_runs` (every run in the data folder: filters, or read-only SQL over the catalog), `describe_run` (a run's card), `get_run_data` (with `where`), `compute` (arithmetic on a run's columns), `get_trace`, `analyze_run`, `list_runs`, `recent_events`, `make_report` (`kind`: runs, scan, device or project).
 - **New instruments:** `card_guide`, `check_card`, `read_examples`, `try_card`, `save_card`.
 - **Literature:** `search_papers`, `read_paper`.
 

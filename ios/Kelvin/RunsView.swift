@@ -87,9 +87,10 @@ struct RunDetailView: View {
             }
             if let d = detail {
                 plots(d)
-                if !d.files.isEmpty {
+                let files = d.files.filter { !$0.hasSuffix(".h5") }   // the data file is for a computer
+                if !files.isEmpty {
                     Section("Files") {
-                        ForEach(d.files, id: \.self) { name in
+                        ForEach(files, id: \.self) { name in
                             Button {
                                 open(name)
                             } label: {

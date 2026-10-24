@@ -24,6 +24,7 @@ PACKAGES = [
     ("openai", "openai", ()),
     ("google.genai", "google-genai", ()),
     ("yaml", "PyYAML", ()),
+    ("h5py", "h5py", ()),                          # each run's data file, run.h5 (rundata.py)
     ("pyvisa", "PyVISA", ()),                      # real instruments
     ("pyvisa_py", "PyVISA-py", ()),                # loaded by name when no vendor VISA is installed
     ("serial", "pyserial", ()),

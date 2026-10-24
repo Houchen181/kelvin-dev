@@ -42,16 +42,45 @@ wait: 300                                                          # then wait 5
 
 ## Your data
 
-Every run is saved as it is measured, with nothing to click. It gets its own folder, named by date, time and plan, such as `runs/20261018-015328-gate_sweep/`. Each folder holds:
-- `plan.yaml`: what was asked for.
-- `snapshot_start.json` and `snapshot_end.json`: every instrument setting at the start and at the end.
-- `conditions.csv`: the same as a table (instrument, parameter, start, end), so the scan report can stay short.
-- `data.jsonl`: every point, traces included, written point by point.
-- `data.csv`: the same points as a table (every axis and scalar reading), for Origin, MATLAB, Python or Excel. Each trace reading gets its own `<reading>.csv` with `i, x, value`, where `i` is the point's row in `data.csv`.
-- `meta.json`: status, points, duration and warnings.
-- `analysis.json`: the automatic fit and assessment.
+Every run is saved as it is measured, with nothing to click. It gets its own folder, named by date, time and plan, such as `runs/20261018-015328-gate_sweep/`, which holds:
+- `run.h5`: the run's data, in one HDF5 file. It holds every point, trace and camera frame, every instrument setting at the start and at the end, the plan as it ran, the automatic fits, and a short card saying what the run is.
 - `report.pdf` and `report.pptx`: the scan report, written as soon as the run ends (see [Reports](#reports)).
-- In `meta.json`, the run's **project** and **device** (the sample), which the device and master reports use.
+
+**Nothing measured is lost when a run is cut short.**
+- **While a plan runs,** each point goes into the run's record, `record.bin`, the moment it is measured. It is written at once with a checksum, and forced to disk at least once a second.
+- **When the run ends,** done or stopped, Kelvin writes `run.h5` from the record, checks it, and removes the record.
+- **If Kelvin or the computer stops in the middle of a run** (a crash, a power cut), the record keeps every point up to then. At most the point being measured is lost, or after a power cut the last second or so. A point cut off halfway is recognised and left out, so the rest always reads.
+- **The next time Kelvin starts,** it keeps such a run as `run.h5` with the status **interrupted** and the reason. A run that another Kelvin is still measuring is left alone.
+
+**Opening `run.h5`.** Any HDF5 reader opens it:
+- **Python:** `h5py.File("run.h5")["points/smu.V"][()]`
+- **MATLAB:** `h5read("run.h5", "/points/smu.V")`
+- **Others:** Igor Pro (HDF5 Browser), Origin (Import → HDF5), HDFView, Julia or R.
+
+```
+run.h5
+  (attributes)    the run: run_id, plan, status, started, finished, points, project, device...; meta_json has all of it
+  plan            the plan as it ran (YAML text)
+  points/<key>    one column per scalar: i, t, each swept axis and each reading; attributes unit, role, quantity
+  traces/<key>    one row per point (NaN-padded); <key>.x holds each point's x values, <key>.axis its start and stop
+  frames/<key>    camera frames, points × rows × columns, compressed
+  conditions/     start and end: every instrument setting (JSON text)
+  analysis        the automatic fits and assessment (JSON text)
+  card            the run in brief: what Kelvin's AI reads first (JSON text)
+```
+
+**Every run in one catalog.** `catalog.sqlite` in the data folder lists every run:
+- what it swept and measured, with units, ranges and the physical quantity (voltage, temperature, magnetic field...);
+- the conditions it was measured in;
+- its fitted results.
+
+Kelvin keeps it up to date by itself. It lets the AI answer questions across all your runs, such as "every field sweep on D3 below 2 K last month", without opening each one. Any SQLite tool opens it too. It is only an index: the runs stay the record, and if `catalog.sqlite` is deleted, Kelvin builds it again.
+
+**Asking about your data in a chat.** Kelvin's AI finds runs (`find_runs`, or `query_runs` for anything its filters can't ask), reads a run's card (`describe_run`), and reads or computes numbers (`get_run_data`, `compute`):
+- **Selecting points:** both reading tools take a condition, `where: smu.V > 1 and tc.T < 5`.
+- **`compute` works without writing code:** `lockin.X / smu.I` (a resistance), `deriv(lockin.X, smu.V)`, `mean(smu.I)`. It only does arithmetic on the run's columns.
+
+**Runs saved by Kelvin 0.3.19 or earlier** (`data.jsonl`, `meta.json`, `plan.yaml`, `data.csv`...). At its first start after the update, Kelvin writes each one as `run.h5` and moves its old files into `legacy/` in the run's folder. Nothing is deleted.
 
 Next to the run folders sit `events.jsonl`, your record of every command, reading, approval, refusal and alarm with who did it, and `reports/`. Each person has their own (see [Signing in](portal.md#signing-in)); the lab's instrument log, `~/Kelvin/instrument-log.jsonl`, has everyone's, each with their name.
 
@@ -75,7 +104,7 @@ Kelvin keeps three kinds of report up to date by itself, following **project →
 
 | Report | Covers | Sections |
 |---|---|---|
-| **Scan report** | one run | One page: Result (Kelvin's assessment, plots with fits, fitted values with uncertainties, any issue) · Conditions (what was swept, set and measured; the plan's instruments' other settings as found; drives elsewhere away from safe; what was left changed) · Approvals and alarms. A last line names the files with the rest: `data.csv`, `conditions.csv`, `plan.yaml`, `analysis.json`. |
+| **Scan report** | one run | One page: Result (Kelvin's assessment, plots with fits, fitted values with uncertainties, any issue) · Conditions (what was swept, set and measured; the plan's instruments' other settings as found; drives elsewhere away from safe; what was left changed) · Approvals and alarms. A last line names the file with the rest: `run.h5`. |
 | **Device report** | one sample, all its scans | 1 The device (material, geometry, contacts) · 2 Mount history · 3 Results by measurement · 4 Trends across repeated scans · 5 Ranges explored · 6 Problems · 7 Scan index |
 | **Master report** | the whole project | 1 Summary · 2 Goals and decisions (project notes) · 3 Devices compared · 4 Main results and figures · 5 Timeline · 6 Open questions and issues · 7 References · 8 Index |
 
@@ -85,7 +114,7 @@ A section with nothing to show yet still appears, with a line saying so.
 
 ```
 <data folder>/
-  runs/<run_id>/report.pdf, report.pptx    each scan's report, next to its data (data.csv, ...)
+  runs/<run_id>/report.pdf, report.pptx    each scan's report, next to its data (run.h5)
   reports/
     <project>/
       <project>_master.pdf / .pptx          the master report, always the latest
@@ -113,6 +142,6 @@ Work outside every project goes to a **General** project.
 - **In a chat:** "make a report of today's runs for my advisor". Kelvin's `make_report` covers the runs started in this conversation, or in all of the project's conversations, unless you name runs, a day, or the last N. It also rewrites a master or device report on request (`kind` project or device).
 - **In the Runs pane:** **Report…** opens the library of every report above, and below it makes a report of this run, the project's or chat's runs, today's runs, or the last five. These go to `reports/custom/`.
 
-**Settings → Reports** chooses PDF, PowerPoint or both (the default), or **Only when I ask**, and which of the three kinds Kelvin keeps up to date. The CSV data is always written. A report that can't be written never fails the run; the lab record notes it.
+**Settings → Reports** chooses PDF, PowerPoint or both (the default), or **Only when I ask**, and which of the three kinds Kelvin keeps up to date. The data (`run.h5`) is always written. A report that can't be written never fails the run; the lab record notes it.
 
 Slides are 16:9; the plots are native shapes and the results native tables, so you can edit them in PowerPoint, Keynote or Google Slides. Neither format needs extra software to write. Characters that the standard PDF fonts can't show are spelled out (Ω becomes "Ohm").

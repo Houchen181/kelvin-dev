@@ -800,6 +800,8 @@
     else if (!tab.final) v.count.textContent = tab.status === "missing" ? "This run's data could not be read." : "Finished · analysing…";
     else if (m.status === "done") v.count.textContent = "Finished · " + done + " points" + (m.duration_s != null ? " in " + durText(m.duration_s) : "");
     else if (m.status === "aborted") v.count.textContent = "Stopped after " + done + " of " + total + " points" + (m.reason ? ": " + m.reason : "");
+    else if (m.status === "interrupted") v.count.textContent = "Cut short after " + done + (m.planned_points ? " of " + m.planned_points : "") +
+      " points: Kelvin stopped while it measured (a crash or a power cut). Every point up to then is kept.";
     else v.count.textContent = "Not finished (" + done + " points recorded)";
     if (tab.final && !v.finalDrawn) {  // a finished run is drawn once
       v.finalDrawn = true;
@@ -957,8 +959,7 @@
   }
 
   // the files Kelvin keeps in a run's folder: its report, slides and data, opened on this computer
-  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "data.csv": "Data (CSV)",
-    "conditions.csv": "Conditions (CSV)" };
+  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "run.h5": "Data (HDF5)" };
   function runFiles(tab, box) {
     const files = (tab.final && tab.final.files) || [];
     const base = "/api/runs/" + encodeURIComponent(tab.runId);
@@ -1348,6 +1349,10 @@
       case "run_plan": return v("Running", "Ran") + " plan " + code(planName(a));
       case "list_runs": return v("Listing", "Listed") + " recent runs";
       case "get_run_data": return v("Reading", "Read") + " the data of run " + code(a.run_id);
+      case "find_runs": return v("Searching", "Searched") + " the runs" + (a.text ? " for " + code(a.text) : "");
+      case "query_runs": return v("Querying", "Queried") + " the catalog of runs";
+      case "describe_run": return v("Reading", "Read") + " the card of run " + code(a.run_id);
+      case "compute": return v("Computing", "Computed") + " " + code(a.expression || "") + " from run " + code(a.run_id);
       case "get_trace": return v("Reading", "Read") + " a trace from run " + code(a.run_id);
       case "recent_events": return v("Reading", "Read") + " the event log";
       case "wait": return v("Waiting", "Waited") + " " + esc(String(a.seconds)) + " s";

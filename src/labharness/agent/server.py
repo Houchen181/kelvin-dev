@@ -14,8 +14,9 @@ from typing import List, Optional
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
-from .. import carddraft
+from .. import carddraft, expr
 from .._version import __version__
+from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
 from ..clock import ScaledClock, SimClock
 from ..labconfig import load_envelope
 from ..virtual_lab import build_virtual_lab, demo_envelope
@@ -37,8 +38,11 @@ You are connected to a physics lab through Kelvin.
   uncertainties) rather than raw rows. A dry run (simulate_plan, or run_plan with dry_run: true) is not a routine
   step, even for a plan that drives: only when the person asks, or to estimate how long a long plan takes.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
-- A camera's frame is a file: measure cam.frame to keep images (each run puts them in its frames/ folder), and its
-  mean, max or sum for numbers to fit. A spectrum is recorded with its wavelengths.
+- A camera's frame is an image: measure cam.frame to keep images (each run keeps them in its run.h5), and its mean,
+  max or sum for numbers to fit. A spectrum is recorded with its wavelengths.
+- Every run is kept as one file (run.h5) and listed in a catalog of all runs. For questions about earlier data:
+  find_runs (query_runs for what its filters can't ask), describe_run for a run's card, then get_run_data or compute
+  for its numbers. Ask compute for a number or a derived column rather than reading every row.
 - Before an involved scan on a real instrument (buffers, triggering, sweep or list modes, fast acquisition, ranges,
   filters, settling), read its manual: instrument_info, then search_manual for the commands and their limits. Work
   from what the manual says, cite the page, and say so if it does not cover something.
@@ -77,8 +81,8 @@ You are connected to a physics lab through Kelvin.
     an alarm.
   - When a command or a run fails or is refused, don't try variations to get past it. Say what happened and what you
     suggest, and let the person decide.
-  - Don't write code, scripts or tests, or re-analyse data in code, unless the person asks: use run_plan's analysis
-    and analyze.
+  - Don't write code, scripts or tests, or re-analyse data in code, unless the person asks: use run_plan's analysis,
+    analyze and compute.
   - Plan the whole measurement, run it, report. A coarse scan before a fine one is good practice when it saves time;
     the physics decides how many measurements there are, not a habit of testing.
 - Reply to the user briefly: the result first, then the next step."""
@@ -321,13 +325,46 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def list_runs(limit: int = 10) -> str:
-        """Most recent runs with status and point counts."""
+        """Most recent runs with status and point counts (the one running now too)."""
         return rt.list_runs(limit)
 
     @server.tool(annotations=READ, structured_output=False)
-    def get_run_data(run_id: str, columns: Optional[List[str]] = None, max_rows: int = 50) -> str:
-        """A run's data as CSV (evenly thinned to max_rows; trace columns show as trace[n])."""
-        return rt.run_data(run_id, columns, max_rows)
+    def find_runs(text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
+                  since: str = "", until: str = "", quantity: str = "", limit: int = 20) -> str:
+        """Search every run in the data folder, newest first. Each comes with what it swept and measured (units,
+        ranges), the conditions held and its assessment. Filters are optional and combine: text (anywhere in the
+        run's card), device, project, plan (names, in part), status (done, aborted, interrupted), since and until
+        (2026-10-24, or 2026-10-24T15:00; inclusive), quantity (temperature, magnetic_field, voltage, current,
+        frequency, power... or a column such as smu.V). For questions these can't answer, query_runs."""
+        return rt.find_runs(text, device, project, plan, status, since, until, quantity, limit)
+
+    @server.tool(annotations=READ, structured_output=False, description=(
+        "Answer questions across runs with one read-only SQL query (SQLite SELECT) over the catalog of every run in "
+        "the data folder; up to %d rows come back as CSV. Tables:\n%s" % (QUERY_ROWS, SCHEMA_TEXT)))
+    def query_runs(sql: str) -> str:
+        return rt.query_runs(sql)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def describe_run(run_id: str) -> str:
+        """One run in brief, before reading its numbers: what it swept and measured (units, ranges, quantities), the
+        conditions held, the fitted results with uncertainties, the assessment and issues, the plan as it ran and
+        its files."""
+        return rt.describe_run(run_id)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def get_run_data(run_id: str, columns: Optional[List[str]] = None, max_rows: int = 50, where: str = "") -> str:
+        """A run's data as CSV, evenly thinned to max_rows (trace columns show as trace[n]; get_trace reads one).
+        where: only the points meeting a condition, e.g. "smu.V > 1 and tc.T < 5"."""
+        return rt.run_data(run_id, columns, max_rows, where)
+
+    @server.tool(annotations=READ, structured_output=False, description=(
+        "Compute from a run's columns without writing code: one number (mean(smu.I)), or a value at each point "
+        "shown against the swept axes with its minimum and maximum (lockin.X / smu.I, deriv(lockin.X, smu.V)). "
+        "Columns by their names (instrument.parameter, i, t) in the run's own units; arithmetic, comparisons, "
+        "and/or/not, a if cond else b, and the %s. where: only the points meeting a condition, applied first." %
+        expr.HELP))
+    def compute(run_id: str, expression: str, where: str = "", max_rows: int = 50) -> str:
+        return rt.compute(run_id, expression, where, max_rows)
 
     @server.tool(annotations=READ, structured_output=False)
     def get_trace(run_id: str, row: int, column: str, max_points: int = 200) -> str:
@@ -373,6 +410,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     runtime = LabRuntime(lab, approver, data_dir, envelope)
     runtime.cards_dir = Path.home() / "Kelvin" / "cards"
     runtime.monitor.start()
+    runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
     ui = ApprovalServer(runtime, port=args.ui_port).start()
 
     print("Kelvin: approval page %s" % ui.url, file=sys.stderr, flush=True)

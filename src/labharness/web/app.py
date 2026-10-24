@@ -41,6 +41,7 @@ from ..discovery import add_to_config
 from ..labconfig import ConfigError, load_lab_config
 from .. import carddraft
 from .. import protection
+from .. import rundata
 from ..virtual_lab import build_lab, builtin_ids, builtin_registry, is_simulated, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in
 from . import review, rules as rulebook
@@ -293,6 +294,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_literature()
         await start_phone()
         runtime.monitor.start()
+        runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
         if updater is not None:   # look for a newer Kelvin soon after start, then twice a day
             tasks.append(asyncio.ensure_future(update_loop()))
         if auto_setup:   # find and set up connected instruments (or say why not: switched off, a lab chosen...)
@@ -420,8 +422,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if live.get("run_id") == run_id and live.get("status") == "running":
             return unshared_meta(runtime.running_meta)
         try:
-            meta = json.loads((runtime.data_dir / "runs" / run_id / "meta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            meta = rundata.meta(runtime.data_dir / "runs" / run_id)
+        except (KeyError, OSError, ValueError):
             return False
         return unshared_meta(meta)
 
@@ -1567,12 +1569,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return FileResponse(path, media_type=media, filename=path.name)
 
     async def run_file(request: Request) -> Response:
-        """A run's report or CSV data, to download."""
+        """A run's report or its data (run.h5), to download."""
         try:
             path = runtime.run_file(request.path_params["run_id"], request.path_params["name"])
         except KeyError as e:
             return error(404, e.args[0])
-        media = {".pdf": "application/pdf", ".csv": "text/csv",
+        media = {".pdf": "application/pdf", ".h5": "application/x-hdf5",
                  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}[path.suffix]
         return FileResponse(path, media_type=media, filename="%s-%s" % (request.path_params["run_id"], path.name))
 
@@ -2013,9 +2015,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         trace column, and the automatic analysis."""
         run_id = request.path_params["run_id"]
         try:
-            rows = runtime._rows(run_id)
-            run_dir = runtime._run_dir(run_id)
-            cols = runtime.engine.columns(runtime._plan((run_dir / "plan.yaml").read_text(encoding="utf-8")))
+            rec = await asyncio.to_thread(rundata.load, runtime._run_dir(run_id))
+            rows = rec.rows
+            cols = runtime._columns(rec)
         except (KeyError, OSError, ValueError) as e:
             return error(404, str(e))
         axes = [{"key": a["key"], "unit": a["unit"]} for a in cols["axes"]]
@@ -2029,18 +2031,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             xs = trace_x(rows[-1], m["key"], len(ys))[::step]
             traces.append({"key": m["key"], "unit": m["unit"], "x": xs, "y": ys[::step], "x_unit": m.get("x_unit", ""),
                            "row": len(rows) - 1})
-        def read_json(name: str) -> Any:
-            try:
-                return json.loads((run_dir / name).read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return None
-
-        meta = read_json("meta.json") or {}
+        meta = rec.meta
         keys = [a["key"] for a in axes] + [m["key"] for m in scalars]
         return JSONResponse({"run_id": run_id, "plan": run_id.split("-", 2)[-1], "axes": axes, "scalars": scalars,
                              "rows": [{k: r.get(k) for k in keys} for r in rows], "traces": traces,
-                             "analysis": read_json("analysis.json"),
-                             "plan_text": (run_dir / "plan.yaml").read_text(encoding="utf-8"),
+                             "analysis": rec.analysis,
+                             "plan_text": rec.plan_text,
                              "meta": {k: meta.get(k) for k in ("status", "reason", "points", "planned_points",
                                                                 "duration_s", "warnings")},
                              "files": runtime.run_files(run_id)})

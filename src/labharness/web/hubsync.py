@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from .._version import __version__
+from .. import rundata
 from ..hub.client import PENDING_TTL, HubClient, HubClientError, Http, _http, check_url, collect
 from ..hub.db import INSTALLATION_ID, LOCAL_ID, MAX_BATCH, MAX_MESSAGES, MAX_META, HubError, file_parts
 from .store import GENERAL, ChatStore
@@ -135,8 +136,10 @@ def run_items(runs: Path, shared: Set[str], person: Optional[str] = None,
         if not LOCAL_ID.match(d.name):
             continue
         try:
-            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            meta = rundata.meta(d)
+        except (KeyError, OSError, ValueError):
+            continue
+        if meta.get("status") in (None, "running"):
             continue   # still running, or never finished
         if not isinstance(meta, dict) or meta.get("incognito") or meta.get("unshared"):
             continue   # from an incognito chat, or one that keeps unshared work's marks

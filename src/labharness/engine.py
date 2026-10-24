@@ -67,6 +67,44 @@ class RunEngine:
             except Exception:
                 pass  # a broken display must never stop an experiment
 
+    def held(self, plan: Plan, snapshot: Dict[str, Any]) -> Dict[str, str]:
+        """The conditions a run was taken in, with units: every drive away from its safe value that the plan
+        doesn't sweep, and the temperature and field readings (for the run's card and catalog)."""
+        swept = {a.key for a in plan.axes}
+        out: Dict[str, str] = {}
+        for name, values in (snapshot or {}).items():
+            inst = self.lab.instruments.get(name)
+            if inst is None or not isinstance(values, dict):
+                continue
+            for pname, v in values.items():
+                key = "%s.%s" % (name, pname)
+                if key in swept or isinstance(v, (list, dict)) or v is None:
+                    continue
+                try:
+                    spec = inst.spec(pname)
+                    if (spec.is_drive and spec.distance(v) > 0) or (not spec.is_drive and spec.unit in ("K", "T")):
+                        out[key] = spec.show(v)
+                except Exception:
+                    continue
+        return out
+
+    def units(self, snapshot: Dict[str, Any]) -> Dict[str, str]:
+        """The unit of every setting and reading in a snapshot (instrument.parameter: unit), so a run's conditions
+        read without the lab's cards."""
+        out: Dict[str, str] = {}
+        for name, values in (snapshot or {}).items():
+            inst = self.lab.instruments.get(name)
+            if inst is None or not isinstance(values, dict):
+                continue
+            for pname in values:
+                try:
+                    unit = inst.spec(pname).unit
+                except Exception:
+                    continue
+                if unit:
+                    out["%s.%s" % (name, pname)] = unit
+        return out
+
     def columns(self, plan: Plan) -> Dict[str, List[Dict[str, str]]]:
         """Axis and measured columns with units, as analysis and plots need them."""
         def unit(key: str) -> str:
@@ -272,9 +310,12 @@ class RunEngine:
         rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
         rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
         rec.meta.update(meta or {})   # e.g. which queue item this run was
-        rec.snapshot("start", lab.snapshot())
+        start = lab.snapshot()
+        rec.snapshot("start", start)
         gate.log.write("run_start", by=gate.operator, run=rec.run_id, plan=plan.name, points=plan.points)
         cols = self.columns(plan)
+        rec.set_columns(cols)
+        rec.note(units=self.units(start), planned_points=plan.points)
         self._emit(event="start", run_id=rec.run_id, plan=plan.name, total=plan.points, **cols)
         t0, wall0 = clock.now(), time.time()
         status, reason, n = "done", None, 0
@@ -295,6 +336,13 @@ class RunEngine:
             with gate.preapproved(grants):
                 for step in plan.setup:
                     apply(step.instr, step.param, step.value)
+                # the conditions it measured in: the settings at its start with the plan's setup applied
+                measuring = {name: dict(values) if isinstance(values, dict) else values for name, values in start.items()}
+                for step in plan.setup:
+                    if isinstance(measuring.get(step.instr), dict):
+                        measuring[step.instr][step.param] = step.value
+                rec.note(held=self.held(plan, measuring),
+                         setup={"%s.%s" % (s.instr, s.param): s.value for s in plan.setup})
                 prev: List[Any] = [None] * len(plan.axes)
                 for combo in itertools.product(*[a.values for a in plan.axes]):
                     for j, (axis, v) in enumerate(zip(plan.axes, combo)):
@@ -349,7 +397,7 @@ class RunEngine:
         if self.analyze and rec.rows:
             try:
                 analysis = analyze_run(rec.rows, cols["axes"], cols["measures"], meta)
-                rec.save_json("analysis.json", analysis)
+                rec.set_analysis(analysis)
             except Exception as e:  # analysis is a convenience; the data are already safe on disk
                 warnings.append("automatic analysis failed: %s" % e)
         rec.finish(**meta)

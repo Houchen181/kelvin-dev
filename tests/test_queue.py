@@ -67,8 +67,9 @@ def test_a_queue_is_approved_once_and_runs_in_order(tmp_path):
     assert [i.status for i in items] == ["done", "done", "done"], [(i.name, i.status, i.message) for i in items]
     assert rt.queue.state == "idle" and rt.queue.reason == "finished"
     assert items[0].run_id and items[2].run_id and items[1].run_id is None   # a step makes no run
-    meta = (rt.data_dir / "runs" / items[2].run_id / "meta.json").read_text(encoding="utf-8")
-    assert '"position": 3' in meta                              # each run says which queue item it was
+    from labharness import rundata
+    meta = rundata.meta(rt.data_dir / "runs" / items[2].run_id)
+    assert meta["queue"]["position"] == 3                       # each run says which queue item it was
     assert rt.queue_start() == "nothing is waiting in the queue"
 
 

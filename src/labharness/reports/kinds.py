@@ -21,9 +21,9 @@ from .document import Document, Section
 from .model import RunPart
 
 # what the scan report points to for everything it leaves out, in this order
-FILE_NOTES = {"data.csv": "every point", "frames": "each camera frame, as .npy",
-              "conditions.csv": "every instrument setting, at the start and the end",
-              "plan.yaml": "the plan as run", "analysis.json": "the fits in full"}
+FILE_NOTES = {"run.h5": "every point, trace and camera frame, every instrument setting at the start and the end, "
+                        "the plan and the fits in full (HDF5)",
+              "record.bin": "every point so far (it becomes run.h5)"}
 
 
 def _read_json(path: Path) -> Any:
@@ -111,13 +111,18 @@ class Digest:
 
 
 def digest(run_dir: Path) -> Optional[Digest]:
-    meta = _read_json(run_dir / "meta.json") or {}
-    if not meta:
-        return None
-    analysis = _read_json(run_dir / "analysis.json") or {}
+    from .. import rundata
     try:
-        plan = yaml.safe_load((run_dir / "plan.yaml").read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+        rec = rundata.load(run_dir, with_rows=False)
+    except (KeyError, OSError, ValueError):
+        return None
+    meta = rec.meta
+    if not meta or meta.get("status") in (None, "running"):
+        return None
+    analysis = rec.analysis or {}
+    try:
+        plan = yaml.safe_load(rec.plan_text) or {}
+    except yaml.YAMLError:
         plan = {}
     ranges: Dict[str, Tuple[float, float]] = {}
     try:
@@ -252,9 +257,8 @@ def scan_document(part: RunPart, d: Digest, files: Iterable[str], lab: str, simu
     conditions = Section("Conditions", facts=facts)
     events = Section("Approvals and alarms", facts=list(part.events))
     files = set(files)
-    names = [n for n in FILE_NOTES if n in files] + sorted(n for n in files if n.endswith(".csv") and n not in FILE_NOTES)
-    note = ("In the run's folder: " + "; ".join(
-        "%s (%s)" % (n, FILE_NOTES.get(n, "a trace reading, every point")) for n in names) + ".") if names else ""
+    names = [n for n in FILE_NOTES if n in files]
+    note = ("In the run's folder: " + "; ".join("%s (%s)" % (n, FILE_NOTES[n]) for n in names) + ".") if names else ""
     return Document("scan", "%s on %s" % (part.plan, d.device_name) if d.device_name else part.plan,
                     "  ·  ".join(bits), _now(), lab, simulated, [], [result, conditions, events], compact=True,
                     note=note)
