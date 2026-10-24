@@ -112,6 +112,55 @@ final class ClientTests: XCTestCase {
         XCTAssertEqual(t.asked.map { $0.url!.path }, ["/api/approvals/r-7", "/api/alarms/a1/ack", "/api/runs/stop", "/api/stop"])
     }
 
+    func testThroughTheKelvinHub() async throws {
+        let t = Scripted()
+        t.on("POST /api/signin", "{\"access_token\": \"khub_phone\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        t.on("GET /api/relay/kelvins", "{\"kelvins\": [{\"id\": \"lab-pc-1\", \"name\": \"LAB-PC\", \"platform\": \"win32\","
+             + " \"version\": \"0.3.19\", \"online\": true, \"direct\": false, \"last_seen\": 1761140000}]}")
+        t.on("GET /api/relay/kelvins/lab-pc-1/api/state", "{\"lab\": \"Cryostat lab\"}")
+        t.on("GET /api/relay/kelvins/lab-pc-1/api/me", 503, "{\"error\": \"That Kelvin is offline.\", \"offline\": true}")
+        let hub = URL(string: "https://kelvin.example.org")!
+        let phone = PhoneInfo(id: "ios-1", name: "iPhone", version: "0.1.3")
+        let (token, account) = try await HubClient(hub: hub, transport: t).signIn(email: "ada@example.org",
+                                                                                  password: "correct horse", phone: phone)
+        XCTAssertEqual(token, "khub_phone")
+        XCTAssertEqual(account, Account(hub: hub, email: "ada@example.org", name: "Ada", phoneID: "ios-1"))
+        XCTAssertEqual(t.body(0)?["installation"]?["platform"], .string("ios"))
+        XCTAssertNil(t.asked[0].value(forHTTPHeaderField: "Authorization"))
+        let kelvins = try await HubClient(hub: hub, token: token, transport: t).kelvins()
+        XCTAssertEqual(kelvins, [HubKelvin(id: "lab-pc-1", name: "LAB-PC", version: "0.3.19", lastSeen: 1761140000)])
+        XCTAssertEqual(t.asked[1].value(forHTTPHeaderField: "Authorization"), "Bearer khub_phone")
+        let c = KelvinClient(base: HubClient(hub: hub, transport: t).relayBase("lab-pc-1"), token: token, transport: t,
+                             bearer: true)
+        let state = try await c.state()
+        XCTAssertEqual(state.lab, "Cryostat lab")
+        XCTAssertEqual(t.asked.last?.url?.path, "/api/relay/kelvins/lab-pc-1/api/state")
+        XCTAssertNil(t.asked.last?.value(forHTTPHeaderField: "X-Kelvin-Token"))     // the hub's token, as a bearer
+        do {
+            _ = try await c.me()
+            XCTFail("an offline Kelvin answered")
+        } catch let e as KelvinError {
+            XCTAssertEqual(e.kind, .unreachable)                                  // so the app keeps trying
+        }
+    }
+
+    func testTheHubSaysWhatIsWrong() async {
+        let t = Scripted()
+        t.on("POST /api/signin", 401, "{\"error\": \"Wrong email or password.\"}")
+        let phone = PhoneInfo(id: "ios-1", name: "iPhone", version: "0.1.3")
+        do {
+            _ = try await HubClient(hub: URL(string: "https://kelvin.example.org")!, transport: t)
+                .signIn(email: "ada@example.org", password: "nope", phone: phone)
+            XCTFail("signed in with a wrong password")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Wrong email or password.")
+        }
+        XCTAssertEqual(Account.hubAddress(" kelvin.example.org/ ")?.absoluteString, "https://kelvin.example.org")
+        XCTAssertEqual(Account.hubAddress("http://127.0.0.1:8781")?.absoluteString, "http://127.0.0.1:8781")
+        XCTAssertNil(Account.hubAddress("http://kelvin.example.org"))              // plain http only on this phone
+        XCTAssertNil(Account.hubAddress("not a hub"))
+    }
+
     func testHandsOnTheSample() async throws {
         let t = Scripted()
         t.on("POST /api/hands", "{\"hands_on\": {\"by\": \"human (phone Lab iPhone)\", \"since\": \"2026-10-24T14:02:11\"},"

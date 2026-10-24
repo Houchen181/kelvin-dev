@@ -876,8 +876,10 @@ class Hub:
         if not token:
             return None
         with self.connect() as con:
-            row = con.execute("SELECT t.id AS token_id, t.installation_id, t.lab_id AS token_lab, t.last_used, u.*"
+            row = con.execute("SELECT t.id AS token_id, t.installation_id, t.lab_id AS token_lab, t.last_used,"
+                              " i.name AS installation_name, i.platform AS installation_platform, u.*"
                               " FROM tokens t JOIN users u ON u.id = t.user_id"
+                              " LEFT JOIN installations i ON i.id = t.installation_id"
                               " WHERE t.token_hash = ? AND t.kind = 'app'", (sha(str(token)),)).fetchone()
             if row is None or row["disabled_at"]:
                 return None
@@ -887,7 +889,27 @@ class Hub:
                 con.execute("UPDATE installations SET last_seen = ? WHERE id = ?", (now, row["installation_id"]))
                 con.execute("UPDATE users SET last_seen = ? WHERE id = ?", (now, row["id"]))
         return {"user": _public(row), "token_id": row["token_id"], "installation_id": row["installation_id"],
+                "installation": {"name": row["installation_name"] or "", "platform": row["installation_platform"] or ""},
                 "lab_id": row["token_lab"]}
+
+    def kelvins_of(self, user_id: int) -> List[Dict[str, Any]]:
+        """The Kelvins (not phones) this person is signed in to, the most recently seen first."""
+        with self.connect() as con:
+            rows = con.execute("SELECT i.id, i.name, i.platform, i.version, i.last_seen FROM tokens t"
+                               " JOIN installations i ON i.id = t.installation_id"
+                               " WHERE t.user_id = ? AND t.kind = 'app' AND i.platform NOT IN ('ios', 'android')"
+                               " ORDER BY i.last_seen DESC", (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def sign_out_app(self, token: Any, ip: Optional[str] = None) -> bool:
+        """A Kelvin or a phone signs out: its token stops working at once."""
+        app = self.app(token)
+        if app is None:
+            return False
+        with self.connect() as con:
+            con.execute("DELETE FROM tokens WHERE id = ?", (app["token_id"],))
+            self.audit(con, "app", "signed out", app["user"]["id"], {"installation": app["installation_id"]}, ip)
+        return True
 
     @staticmethod
     def _refile(con: sqlite3.Connection, user_id: int, installation_id: str, lab_id: Optional[int]) -> None:

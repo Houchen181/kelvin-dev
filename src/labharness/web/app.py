@@ -18,7 +18,7 @@ import time
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -47,6 +47,7 @@ from . import review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
 from .qr import QR
+from .relay import RelayLink
 from .remote import (API as PHONE_API, ROLES, Remote, addresses, allow_through_firewall, allowed, firewall_state,
                      pairing_link, remote_host_ok)
 from .providers.base import Provider
@@ -299,6 +300,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         hub.wake = asyncio.Event()
         if HUB_SHARING:
             tasks.append(asyncio.ensure_future(hub_loop()))
+        if accounts is not None:   # phones through the Kelvin hub, while someone is signed in with a Kelvin account
+            relay_link.wake = asyncio.Event()
+            tasks.append(asyncio.ensure_future(relay_link.run()))
         try:
             yield
         finally:
@@ -370,7 +374,133 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 "busy": busy, "busy_user": runtime.user if busy else None,
                 "legacy": not listed and has_legacy(home),
                 "central": on, "hub": hub_address(), "account_url": hub_address() + "/account" if on else None,
-                "unlinked": accounts.unlinked() if on else []}
+                "unlinked": accounts.unlinked() if on else [],
+                "relay": dict(relay_link.view(), on=settings.get("phone_relay") != "off") if on else None}
+
+    # ------------------------------------------------------------------ phones through the Kelvin hub (relay.py)
+
+    relay_app: Dict[str, Any] = {}
+
+    def relay_target() -> Optional[Tuple[str, str, str]]:
+        """(the hub, the person's token there, their name) while someone is signed in with a Kelvin account and
+        hasn't switched phones through the hub off (Settings -> Account)."""
+        user = session["user"]
+        if user is None or not central_on() or settings.get("phone_relay") == "off":
+            return None
+        token = settings.get("account_token")
+        return (hub_address(), token, user["name"]) if token else None
+
+    def relay_hello() -> Dict[str, Any]:
+        return {"name": socket.gethostname()[:80], "version": __version__, "direct": remote.port is not None}
+
+    def unshared_project(pid: Any) -> bool:
+        from ..hub.db import project_shared
+        if not pid or pid == "general":
+            return False
+        try:
+            return not project_shared(store.project(str(pid)))
+        except KeyError:
+            return True   # a project that is gone: Kelvin can't tell whether it was shared
+
+    def unshared_chat(chat_id: str) -> bool:
+        from ..hub.client import shareable_chat
+        try:
+            chat = store.load(chat_id)
+        except (KeyError, OSError, ValueError):
+            return False   # the portal says it isn't there
+        return not shareable_chat(chat) or unshared_project(store.project_of(chat_id))
+
+    def unshared_meta(meta: Any) -> bool:
+        if not isinstance(meta, dict):
+            return False
+        return bool(meta.get("incognito") or meta.get("unshared")) or unshared_project(meta.get("project"))
+
+    def unshared_run(run_id: str) -> bool:
+        live = runtime.live_view(10 ** 9) or {}
+        if live.get("run_id") == run_id and live.get("status") == "running":
+            return unshared_meta(runtime.running_meta)
+        try:
+            meta = json.loads((runtime.data_dir / "runs" / run_id / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return unshared_meta(meta)
+
+    NOT_THROUGH_HUB = ("That is unshared work (unpublished, confidential or limited to some models, or incognito), "
+                       "so it doesn't go through the Kelvin hub. Open it on the lab network or through Tailscale.")
+
+    def relay_private(method: str, path: str, body: bytes) -> Optional[str]:
+        """Why a phone's request through the Kelvin hub would reach unshared work (None: it doesn't). The hub sees
+        what passes through it, and unshared work never goes to the hub."""
+        parts = path.strip("/").split("/")   # ["api", "chats", <id>, ...]
+        kind = parts[1] if len(parts) > 1 else ""
+        if kind == "reports":
+            return "Reports open through the Kelvin hub from a run; the report library is on the Kelvin computer."
+        if kind == "chats" and len(parts) == 2 and method == "POST":
+            try:
+                ask = json.loads(body or b"{}")
+            except ValueError:
+                ask = {}
+            if isinstance(ask, dict) and (ask.get("incognito") or unshared_project(ask.get("project"))):
+                return NOT_THROUGH_HUB
+        if kind == "chats" and len(parts) > 2 and unshared_chat(parts[2]):
+            return NOT_THROUGH_HUB
+        if kind == "runs" and len(parts) > 2 and parts[2] != "stop" and unshared_run(parts[2]):
+            return NOT_THROUGH_HUB
+        if kind == "projects" and len(parts) > 2 and parts[2] != "general" and unshared_project(parts[2]):
+            return NOT_THROUGH_HUB
+        return None
+
+    def relay_trim(method: str, path: str, data: Any) -> Tuple[Any, int]:
+        """An answer through the Kelvin hub without unshared work, and how much was left out."""
+        from ..hub.client import shareable_chat
+        from ..hub.db import project_shared
+        hidden = 0
+
+        def chats(items: Any) -> Any:
+            nonlocal hidden
+            if not isinstance(items, list):
+                return items
+            kept = [c for c in items if isinstance(c, dict) and shareable_chat(c)
+                    and not unshared_project(c.get("project"))]
+            hidden += len(items) - len(kept)
+            return kept
+
+        def projects(items: Any) -> Any:
+            nonlocal hidden
+            if not isinstance(items, list):
+                return items
+            kept = [p for p in items if isinstance(p, dict) and project_shared(p)]
+            hidden += len(items) - len(kept)
+            return kept
+
+        if path == "/api/chats":
+            data = chats(data)
+        elif path == "/api/projects":
+            data = projects(data)
+        elif path == "/api/bootstrap" and isinstance(data, dict):
+            data = dict(data, chats=chats(data.get("chats")), projects=projects(data.get("projects")))
+        elif path == "/api/runs" and isinstance(data, dict) and isinstance(data.get("runs"), list):
+            kept = [r for r in data["runs"] if not unshared_run(str(r.get("run_id") or ""))]
+            hidden += len(data["runs"]) - len(kept)
+            data = dict(data, runs=kept)
+        elif path in ("/api/state", "/api/live") and isinstance(data, dict):
+            live = data.get("live") if path == "/api/state" else data
+            if isinstance(live, dict) and live.get("status") == "running" and unshared_meta(runtime.running_meta):
+                live = dict(live, plan="a scan of unshared work", rows=[], trace=None)
+                hidden += 1
+                data = dict(data, live=live) if path == "/api/state" else live
+            mounted = data.get("mounted") if path == "/api/state" else None
+            if isinstance(mounted, dict) and unshared_project(mounted.get("project")):
+                data = dict(data, mounted=dict(mounted, project_name="unshared work"))
+        return data, hidden
+
+    relay_link = RelayLink(lambda *a: relay_app["app"](*a), relay_target, relay_hello, relay_private, relay_trim)
+
+    def relay_wake() -> None:
+        """Someone signed in or out (often in a worker thread): the relay looks again at once."""
+        loop = loop_ref.get("loop")
+        if loop is not None:
+            loop.call_soon_threadsafe(relay_link.wake.set)
 
     # ------------------------------------------------------------------ central Kelvin accounts (central.py)
 
@@ -528,12 +658,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_literature()
         session["user"] = account
         hub.use(accounts.dir(account), account["name"])
+        relay_wake()
 
     def sign_out() -> None:
         """Nobody is signed in: the portal waits for the next person. A plan or queue still running goes on and is
         recorded as its person's; Kelvin turns to nobody's record when it ends (or at the next sign-in)."""
         agent.stop()   # a chat still answering ends with its person
         session["user"] = None
+        relay_wake()
         hub.use(None)
         settings.use(None)
         signin.use(nobody)
@@ -1299,6 +1431,25 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             await start_phone()
         return JSONResponse(await asyncio.to_thread(phone_view))
 
+    async def phone_direct(request: Request) -> Response:
+        """Only for a phone that came through the Kelvin hub (relay.py): POST gives it its own token for reaching this
+        computer directly, on the lab network or through Tailscale, when phone access is on; DELETE forgets it (the
+        phone signed out of the Kelvin account)."""
+        d = (request.scope.get("kelvin") or {}).get("device") or {}
+        if d.get("via") != "hub" or not d.get("id"):
+            return error(404, "not found")
+        if request.method == "DELETE":
+            return JSONResponse({"ok": settings.remove_phone(str(d["id"]))})
+        if remote.port is None:
+            return JSONResponse({"available": False,
+                                 "reason": "Phone access is off on the Kelvin computer, so your phone reaches it "
+                                           "through the Kelvin hub."})
+        device, token = remote.issue(str(d.get("name") or "Phone"), "control", str(d["id"]))
+        found = addresses(remote.port)
+        return JSONResponse({"available": True, "token": token, "name": device["name"],
+                             "computer": socket.gethostname(), "addresses": [a["url"] for a in found],
+                             "routes": [{"url": a["url"], "kind": a["kind"]} for a in found]})
+
     async def phone_firewall(request: Request) -> Response:
         """Ask Windows to let phones through its firewall (Windows shows its own permission prompt; this computer only)."""
         if remote.port is None:
@@ -1854,6 +2005,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             configure_notifications()
             configure_literature()
             agent.providers = make_providers(settings, demo, signin) if providers is None else providers
+            relay_wake()   # phones through the hub may have been switched on or off
         return JSONResponse({"settings": settings.public(), "models": await agent.models()})
 
     async def run_data(request: Request) -> Response:
@@ -1964,6 +2116,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/pair", pair, methods=["POST"]),
         Route("/api/phone", phone, methods=["GET", "POST"]),
         Route("/api/phone/firewall", phone_firewall, methods=["POST"]),
+        Route("/api/phone/direct", phone_direct, methods=["POST", "DELETE"]),
         Route("/auth/callback", auth_callback),
         Route("/api/chatgpt", chatgpt_view),
         Route("/api/chatgpt/signin", chatgpt_signin, methods=["POST"]),
@@ -2080,6 +2233,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             if any(isinstance(d, dict) and hmac.compare_digest(str(d.get("hash") or ""), h) for d in mine.get("devices") or []):
                 return a["name"]
         return None
+
+    relay_app["app"] = app
 
     guard = Guard(app, settings.access_key, hosts, remote,
                   signed_in=None if accounts is None else lambda: session["user"] is not None,

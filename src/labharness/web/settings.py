@@ -29,7 +29,7 @@ SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webho
 SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
-                     "answer_words",
+                     "answer_words", "phone_relay",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
@@ -199,6 +199,8 @@ class Settings:
             if name == "updates":  # keeping Kelvin up to date (updater.py): auto (the default), ask or off
                 value = value if value in ("ask", "off") else ""
             if name == "claude_code":  # Claude Code bridge (temporary): on unless off
+                value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "phone_relay":  # phones through the Kelvin hub (relay.py): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "hub_old_runs":  # also share runs from before Kelvin noted who made them: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
@@ -373,12 +375,27 @@ class Settings:
     def device_views(self) -> List[Dict[str, Any]]:
         return [{k: d.get(k) for k in ("id", "name", "role", "created", "last_seen")} for d in self.devices]
 
-    def add_device(self, name: str, role: str, token_hash: str) -> Dict[str, Any]:
+    def add_device(self, name: str, role: str, token_hash: str, phone: Optional[str] = None) -> Dict[str, Any]:
+        """phone: the id of a phone signed in to its person's Kelvin account, which got this token through the hub;
+        it replaces that phone's token from before."""
         device = {"id": "d" + secrets.token_hex(4), "name": name, "role": role, "hash": token_hash,
                   "created": time.time(), "last_seen": None}
-        self._user["devices"] = self.devices + [device]
+        kept = self.devices
+        if phone:
+            device["phone"] = phone
+            kept = [d for d in kept if d.get("phone") != phone]
+        self._user["devices"] = kept + [device]
         self._save()
         return device
+
+    def remove_phone(self, phone: str) -> bool:
+        """Forget the token a phone got through the hub (it signed out of the Kelvin account)."""
+        kept = [d for d in self.devices if d.get("phone") != phone]
+        if len(kept) == len(self.devices) or not phone:
+            return False
+        self._user["devices"] = kept
+        self._save()
+        return True
 
     def remove_device(self, device_id: str) -> None:
         kept = [d for d in self.devices if d["id"] != device_id]

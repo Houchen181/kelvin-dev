@@ -1,7 +1,8 @@
 import KelvinKit
 import SwiftUI
 
-/// The Kelvin computers this phone is paired with: switch between them, pair another, unpair.
+/// The Kelvin computers this phone works with, paired or through the Kelvin account: switch between them, pair
+/// another, unpair, sign in or out.
 struct ComputersView: View {
     @ObservedObject var session: LabSession
     @EnvironmentObject var app: AppModel
@@ -9,6 +10,7 @@ struct ComputersView: View {
 
     var body: some View {
         List {
+            AccountSection()
             Section {
                 ForEach(app.list.computers) { c in
                     Button {
@@ -17,15 +19,14 @@ struct ComputersView: View {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(c.title(among: app.list.computers)).foregroundStyle(Color.primary)
-                                Text([c.host, c.access == .watch ? "watch" : "control"].compactMap { $0 }.joined(separator: " · "))
-                                    .font(.caption).foregroundStyle(Color.secondary)
+                                Text(subtitle(c)).font(.caption).foregroundStyle(Color.secondary)
                             }
                             Spacer()
                             if c.id == app.current?.id { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
                         }
                     }
                     .swipeActions {
-                        Button("Unpair", role: .destructive) { removing = c }
+                        if !c.viaAccount { Button("Unpair", role: .destructive) { removing = c } }
                     }
                 }
                 Button {
@@ -34,7 +35,7 @@ struct ComputersView: View {
                     Label("Pair with a Kelvin computer", systemImage: "qrcode.viewfinder")
                 }
             } footer: {
-                Text("Swipe left to unpair one.")
+                Text("Swipe left to unpair a paired one.")
             }
 
             let c = session.computer
@@ -56,8 +57,11 @@ struct ComputersView: View {
             } header: {
                 Text("Addresses")
             } footer: {
-                Text("Kelvin tries these in turn, the one that worked last first. On a shared network prefer Tailscale: "
-                     + "plain Wi-Fi traffic is not encrypted.")
+                Text(c.viaAccount
+                     ? "Your phone tries these first, directly (on the lab network or through Tailscale), and goes "
+                       + "through the Kelvin hub when none answers."
+                     : "Kelvin tries these in turn, the one that worked last first. On a shared network prefer "
+                       + "Tailscale: plain Wi-Fi traffic is not encrypted.")
             }
             }
             Section("Notifications") {
@@ -67,6 +71,8 @@ struct ComputersView: View {
             }
         }
         .navigationTitle("Computers")
+        .refreshable { try? await app.lookForKelvins() }
+        .task { try? await app.lookForKelvins() }
         .confirmationDialog("Unpair \(removing?.lab ?? "")?", isPresented: Binding(get: { removing != nil },
                                                                                    set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible) {
@@ -76,5 +82,14 @@ struct ComputersView: View {
         } message: {
             Text("This phone stops working with that computer, and Kelvin there forgets it. Pairing again needs a new code.")
         }
+    }
+
+    func subtitle(_ c: Computer) -> String {
+        if c.viaAccount {
+            let k = app.kelvin(c)
+            return [c.host, k.map { $0.online ? "online" : "offline" }, "Kelvin account"].compactMap { $0 }
+                .joined(separator: " · ")
+        }
+        return [c.host, c.access == .watch ? "watch" : "control"].compactMap { $0 }.joined(separator: " · ")
     }
 }

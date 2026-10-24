@@ -305,6 +305,11 @@
             <div class="key-row pw-row"><input id="pw-old" type="password" autocomplete="current-password" placeholder="Current password"><input id="pw-new" type="password" autocomplete="new-password" placeholder="New password (empty: none)"><button id="pw-change" class="btn small" type="button">Change</button></div>
             <div class="chatgpt-row"><a id="account-hub-link" class="link soft" target="_blank" rel="noopener noreferrer" hidden>Your account on the Kelvin hub</a><span id="account-hub-text" class="hint"></span><button id="account-hub-edit" class="link soft" type="button">change</button></div>
           </div>
+          <div id="relay-field" class="field" hidden>
+            <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>
+            <label class="check wrap"><input id="relay-on" type="checkbox"> Let my phone reach this Kelvin through the hub while I'm signed in here</label>
+            <span class="hint">Sign in to the Kelvin app on your iPhone with this Kelvin account: it finds this computer with no pairing, from any network. The hub passes your phone's requests through and keeps none of them. Unshared work (unpublished, confidential or model-limited projects, incognito chats and their runs) doesn't go that way; it opens when your phone reaches this computer directly (phone access on, on the lab network or through Tailscale).</span>
+          </div>
           <div id="hub-field" class="field">
             <div class="field-row"><span class="field-label">Your hub account</span><span id="hub-status" class="hint"></span></div>
             <span class="hint">The hub is one server for Kelvin users in every lab. Connected, Kelvin shares your normal projects and unfiled chats there, with their runs and whole conversations, with the lab you choose. Never: projects marked unpublished or confidential (in each project's settings) or limited to some models, incognito chats and their runs, API keys, or ChatGPT and Claude Code sign-ins.</span>

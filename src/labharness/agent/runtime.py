@@ -173,6 +173,7 @@ class LabRuntime:
         self.caps_waiting = False
         self._apply_protection(recheck=True)
         self.attribution: Dict[str, Any] = {}       # the project of the chat whose turn this is (portal), and incognito
+        self.running_meta: Dict[str, Any] = {}      # the running plan's project and marks (_attribute), while it runs
         # what Kelvin knows about a project (name, devices, notes, references, summary); the portal sets this
         self.project_info: Callable[[Optional[str]], Dict[str, Any]] = default_project_info
         self.project_ids: Callable[[], List[Optional[str]]] = lambda: [None]   # None is the General workspace
@@ -762,6 +763,7 @@ class LabRuntime:
     def _device_protection(self, meta: Dict[str, Any]) -> Iterator[List[str]]:
         """A plan that names another device (device: D5, on the mounted chip) is held to that device's protection
         too, for that run: the tighter of the two holds. Yields lines saying so (none when nothing changes)."""
+        self.running_meta = meta   # whose the running plan is: phones through the hub leave unshared runs out
         m = self.mounted or {}
         dev: Dict[str, Any] = {}
         if meta.get("device") and meta.get("device") != m.get("device"):
@@ -769,7 +771,10 @@ class LabRuntime:
                         if d.get("id") == meta.get("device")), {})
         extra = dev.get("protection") or {}
         if not extra:
-            yield []
+            try:
+                yield []
+            finally:
+                self.running_meta = {}
             return
         both = protection.combine(m.get("protection") or {}, extra)
         names = [n for n in (m.get("device_name") if m.get("protection") else None, dev.get("name")) if n]
@@ -786,6 +791,7 @@ class LabRuntime:
             yield ["held to %s's protection for this run: %s" % (dev.get("name"), "; ".join(
                 protection.summary(extra, self.lab)))] + lines
         finally:
+            self.running_meta = {}
             self._apply_protection()
             for (name, param), value in ranges.items():   # only while the source is at safe (the gate's rule)
                 try:

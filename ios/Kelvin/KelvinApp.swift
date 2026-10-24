@@ -34,6 +34,10 @@ struct RootView: View {
             PairView()
                 .environmentObject(app)
         }
+        .sheet(isPresented: $app.signingIn) {
+            AccountView()
+                .environmentObject(app)
+        }
         .onAppear {
             if Launch.demo && app.current == nil { app.startDemo() }
         }
@@ -89,6 +93,7 @@ struct LabTabs: View {
 
 struct WelcomeView: View {
     @EnvironmentObject var app: AppModel
+    @State var failure: String?
 
     var body: some View {
         VStack(spacing: 18) {
@@ -99,27 +104,54 @@ struct WelcomeView: View {
                 .accessibilityHidden(true)
             Text("Kelvin")
                 .font(.largeTitle.bold())
-            Text("Watch your lab, answer Kelvin's requests and stop a run from your phone. The app talks to Kelvin on "
-                 + "your lab computer directly, on the lab network or through Tailscale.")
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-            Button {
-                app.pairing = true
-            } label: {
-                Label("Pair with a Kelvin computer", systemImage: "qrcode.viewfinder")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            Button("Try a demo lab") { app.startDemo() }
+            if let a = app.account {
+                Text("Signed in as \(a.email). Sign in to Kelvin on your lab computer with this account, and it "
+                     + "appears here.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Button {
+                    attempt($failure) { try await app.lookForKelvins() }
+                } label: {
+                    Label("Look for my Kelvins", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                Button("Sign out", role: .destructive) { Task { await app.signOut() } }
+                    .buttonStyle(.bordered)
+            } else {
+                Text("Watch your lab, answer Kelvin's requests and stop a run from your phone. Sign in with your "
+                     + "Kelvin account to reach your lab computer from anywhere, or pair with it directly.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Button {
+                    app.signingIn = true
+                } label: {
+                    Label("Sign in with your Kelvin account", systemImage: "person.crop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                Button {
+                    app.pairing = true
+                } label: {
+                    Label("Pair with a code", systemImage: "qrcode.viewfinder")
+                        .frame(maxWidth: .infinity)
+                }
                 .buttonStyle(.bordered)
+                .controlSize(.large)
+            }
+            Button("Try a demo lab") { app.startDemo() }
+                .buttonStyle(.borderless)
             Spacer()
-            Text("On the Kelvin computer, open Settings → Phone, switch on Phone access, and press Pair a phone.")
+            Text("Pairing works without an account: on the Kelvin computer, open Settings → Phone, switch on Phone "
+                 + "access, and press Pair a phone.")
                 .font(.footnote)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
         }
         .padding(24)
+        .failure($failure)
     }
 }
 
@@ -220,7 +252,7 @@ struct RouteLabel: View {
         } else if let url {
             let route = Route(url, kinds: kinds)
             Label("\(route.rawValue) · \(url.host ?? "")",
-                  systemImage: route.encrypted ? "lock.fill" : "wifi")
+                  systemImage: route == .hub ? "person.crop.circle" : route.encrypted ? "lock.fill" : "wifi")
                 .font(.caption)
                 .foregroundStyle(route.encrypted ? Color.green : Color.secondary)
         }

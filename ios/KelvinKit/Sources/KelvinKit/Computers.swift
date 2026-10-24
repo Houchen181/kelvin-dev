@@ -11,6 +11,10 @@ public struct Computer: Codable, Equatable, Identifiable, Sendable {
     public var paired: Date
     public var version: String?
     public var kinds: [String: String]?   // what Kelvin says each address is (see Route)
+    // Through the Kelvin account (Account.swift): the hub that reaches it, and its id there. Its addresses are then
+    // the direct ones, tried first, with the token it gave this phone through the hub.
+    public var hub: URL?
+    public var kelvin: String?
 
     public init(id: UUID = UUID(), lab: String, host: String? = nil, phoneName: String, role: String,
                 addresses: [URL], paired: Date = Date(), version: String? = nil) {
@@ -25,6 +29,15 @@ public struct Computer: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var access: Role { Role(role) }
+
+    /// Through the person's Kelvin account, rather than paired.
+    public var viaAccount: Bool { hub != nil && kelvin != nil }
+
+    /// The hub's way to this Kelvin, when it comes through the account.
+    public var relayBase: URL? {
+        guard let hub, let kelvin else { return nil }
+        return hub.appendingPathComponent("api/relay/kelvins").appendingPathComponent(kelvin)
+    }
 
     public func route(_ url: URL) -> Route { Route(url, kinds: kinds) }
 
@@ -108,5 +121,23 @@ public struct ComputerList: Codable, Equatable, Sendable {
 
     public mutating func update(_ c: Computer) {
         if let i = computers.firstIndex(where: { $0.id == c.id }) { computers[i] = c }
+    }
+
+    /// One of the account's Kelvins, as the hub lists it: a new one is added (and shown if nothing else is), one
+    /// this phone already has keeps its id, so its direct token stays.
+    @discardableResult
+    public mutating func account(_ k: HubKelvin, hub: URL) -> Computer {
+        if let i = computers.firstIndex(where: { $0.kelvin == k.id && $0.hub == hub }) {
+            if computers[i].host != k.name { computers[i].host = k.name }
+            if let v = k.version { computers[i].version = v }
+            return computers[i]
+        }
+        var c = Computer(lab: k.name, host: k.name, phoneName: "This phone", role: "control", addresses: [],
+                         version: k.version)
+        c.hub = hub
+        c.kelvin = k.id
+        computers.append(c)
+        if selected == nil || !computers.contains(where: { $0.id == selected }) { selected = c.id }
+        return c
     }
 }

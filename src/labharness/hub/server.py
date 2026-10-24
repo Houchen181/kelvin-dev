@@ -42,6 +42,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Redire
 from starlette.routing import Route
 
 from .._version import __version__
+from . import relay as relaying
 from .db import DEFAULTS, SESSION_TTL, Busy, Hub, HubError, TooMuch, installation, loopback, log, previous_ids
 
 COOKIE = "kelvin_hub"
@@ -1032,6 +1033,14 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error(str(err))
         return JSONResponse({"ok": True})
 
+    async def api_signout(request: Request) -> Response:
+        """A Kelvin or a phone signs out of the person's Kelvin account: its token stops working."""
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not token or not await call(hub.sign_out_app, token, ip_of(request)):
+            return api_error("not signed in", 401)
+        return Response(status_code=204)
+
     async def me(request: Request) -> Response:
         app = await app_of(request)
         if app is None:
@@ -1325,6 +1334,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if task:
             task.cancel()
 
+    relay, relay_routes = relaying.routes(hub, call, read_body, api_error)
     routes = [
         Route("/", home),
         Route("/kelvin.svg", logo),
@@ -1365,12 +1375,15 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/api/register", api_register, methods=["POST"]),
         Route("/api/reset", api_reset, methods=["POST"]),
         Route("/api/password", api_password, methods=["POST"]),
+        Route("/api/signout", api_signout, methods=["POST"]),
+        *relay_routes,
         Route("/api/me", sharing_only(me)),
         Route("/api/sync", sharing_only(sync), methods=["POST"]),
         Route("/api/sync/runs/{run_id}/files/{name:path}", sharing_only(run_file_upload), methods=["PUT"]),
         Route("/api/admin/stats", admin_stats),
     ]
     app = Starlette(routes=routes, lifespan=lifespan, exception_handlers={Exception: failed, HubError: failed})
+    app.state.relay = relay
     return Gate(app, hosts)
 
 

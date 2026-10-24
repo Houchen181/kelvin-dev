@@ -273,9 +273,25 @@
     $("account-hub-link").hidden = !(a.user.central && a.account_url);
     if (a.account_url) $("account-hub-link").href = a.account_url;
     hubLink(a, "account-hub-text", "account-hub-edit");
+    const relay = a.relay;
+    $("relay-field").hidden = !(a.user.central && relay);
+    if (relay) {
+      $("relay-on").checked = relay.on;
+      $("relay-status").textContent = !relay.on ? "off" : ({ online: "on: your phone can reach this Kelvin",
+        connecting: "connecting…", offline: "on, but the hub can't be reached now",
+        "signed out": "the hub signed this computer out: sign in again", off: "off" })[relay.state] || relay.state;
+      $("relay-status").title = relay.problem || "";
+    }
     $("account-hint").textContent = a.user.central
       ? "One Kelvin account, on the Kelvin hub, signs you in on every computer; after a first sign-in on a computer it works there offline too. Your settings, API keys, chats, projects, memory, data folder and record stay on each computer, and your API keys are encrypted with your password. The instruments, their cards, the lab switches below and the lab's instrument log are everyone's. Forgot your password? Sign out and choose \"Forgot your password?\"."
       : "Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.";
+  }
+
+  async function setRelay() {
+    try {
+      await api("/api/settings", { body: { phone_relay: $("relay-on").checked ? "on" : "off" } });
+      setTimeout(async () => { try { S.account = await api("/api/session"); renderAccount(); } catch (e) { /* keep */ } }, 1500);
+    } catch (e) { toast(e.message); }
   }
 
   async function signOut() {
@@ -4245,6 +4261,7 @@
     $("mount-select").addEventListener("change", mountChosen);
     $("mount-new").addEventListener("click", newDevice);
     $("mount-protect").addEventListener("click", openProtection);
+    $("relay-on").addEventListener("change", setRelay);
     $("protect-add-gate").addEventListener("click", () => $("protect-gates").append(gateRow({ dielectric: "hBN",
       drive: (PROT.opts.drives.find((d) => d.gate) || {}).key, leak: (PROT.opts.drives.find((d) => d.gate) || {}).leak })));
     $("protect-add-limit").addEventListener("click", () => $("protect-limits").append(limitRow((PROT.opts.drives[0] || {}).key)));

@@ -19,6 +19,7 @@ PACKAGES = [
     ("uvicorn", "uvicorn", ()),
     ("starlette", "starlette", ()),
     ("mcp", "mcp", ("mcp.cli",)),                  # the CLI needs typer, which Kelvin does not use
+    ("websockets", "websockets", ()),              # phones through the Kelvin hub (web/relay.py)
     ("anthropic", "anthropic", ("anthropic._vendor.httpx_aiohttp",)),
     ("openai", "openai", ()),
     ("google.genai", "google-genai", ()),

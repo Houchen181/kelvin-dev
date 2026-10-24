@@ -147,6 +147,47 @@ final class AppTests: XCTestCase {
         XCTAssertTrue(script.asked.contains("192.168.1.50 POST /api/chats"))
     }
 
+    func testTheKelvinAccountReachesItsKelvinsThroughTheHub() async throws {
+        let script = Script()
+        script.on("POST /api/signin", "{\"access_token\": \"khub_phone\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        script.on("GET /api/relay/kelvins", "{\"kelvins\": [{\"id\": \"lab-pc-1\", \"name\": \"LAB-PC\", \"platform\": \"win32\", \"online\": true}]}")
+        script.on("GET /api/relay/kelvins/lab-pc-1/api/me", "{\"role\": \"control\", \"name\": \"iPhone\", \"lab\": \"Cryostat lab\", \"computer\": \"LAB-PC\"}")
+        script.on("POST /api/relay/kelvins/lab-pc-1/api/phone/direct", "{\"available\": true, \"token\": \"direct-token\","
+                  + " \"addresses\": [\"http://192.168.1.50:8771\"], \"routes\": [{\"url\": \"http://192.168.1.50:8771\", \"kind\": \"network\"}]}")
+        script.on("GET /api/relay/kelvins/lab-pc-1/api/state", "{\"lab\": \"Cryostat lab\"}")
+        script.unreachable = ["192.168.1.50"]                                  // away from the lab
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        try await app.signIn(hub: URL(string: "https://kelvin.example.org")!, email: "ada@example.org", password: "pw")
+        let c = try XCTUnwrap(app.current)
+        XCTAssertTrue(c.viaAccount)
+        XCTAssertEqual(tokens.token(for: Account.tokenID), "khub_phone")
+        let kept = String(decoding: defaults.data(forKey: "kelvin.account") ?? Data(), as: UTF8.self)
+        XCTAssertTrue(kept.contains("ada@example.org") && !kept.contains("khub_phone"))
+        let session = app.session(for: c)
+        await session.refresh()
+        XCTAssertNil(session.problem)
+        XCTAssertEqual(session.route, .hub)
+        XCTAssertEqual(session.state?.lab, "Cryostat lab")
+        XCTAssertEqual(tokens.token(for: c.id), "direct-token")               // its own token, for the lab network
+        XCTAssertEqual(app.current?.addresses, [lan])
+
+        script.unreachable = []                                              // back in the lab: directly, no hub
+        script.on("GET /api/me", me)
+        script.on("GET /api/state", "{\"lab\": \"Cryostat lab\"}")
+        let later = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        let direct = later.session(for: try XCTUnwrap(later.current))
+        await direct.refresh()
+        XCTAssertEqual(direct.connected, lan)
+
+        script.on("DELETE /api/relay/kelvins/lab-pc-1/api/phone/direct", "{\"ok\": true}")
+        script.on("POST /api/signout", 204, "")
+        await app.signOut()
+        XCTAssertNil(app.account)
+        XCTAssertNil(app.current)
+        XCTAssertNil(tokens.token(for: Account.tokenID))
+        XCTAssertNil(tokens.token(for: c.id))
+    }
+
     func testTheKeychain() throws {
         let keychain = Keychain(service: "Kelvin tests")
         let id = UUID()

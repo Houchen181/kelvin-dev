@@ -93,10 +93,17 @@ struct ProblemRow: View {
             Label(problem.message, systemImage: problem.kind == .unreachable ? "wifi.exclamationmark" : "exclamationmark.triangle")
                 .foregroundStyle(problem.kind == .signedOut ? Color.secondary : Color.red)
             switch problem.kind {
+            case .unreachable where session.computer.viaAccount:
+                Text("Through your Kelvin account, your phone reaches this computer while Kelvin runs there with you "
+                     + "signed in.")
+                    .font(.footnote).foregroundStyle(.secondary)
             case .unreachable:
                 Text("Kelvin tries every address it knows for this computer, the one that worked last first. Away from "
                      + "the lab, switch on Tailscale.")
                     .font(.footnote).foregroundStyle(.secondary)
+            case .unpaired where session.computer.viaAccount:
+                Button("Sign in again") { app.signingIn = true }
+                    .buttonStyle(.bordered)
             case .unpaired:
                 Button("Pair again") { app.pairing = true }
                     .buttonStyle(.bordered)

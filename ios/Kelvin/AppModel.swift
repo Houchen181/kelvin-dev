@@ -1,16 +1,20 @@
 import Foundation
 import KelvinKit
 
-/// The paired computers and which one the app shows.
+/// The computers this phone works with (paired, or through the Kelvin account) and which one the app shows.
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var list: ComputerList
     @Published var pairing = false
+    @Published var signingIn = false
+    @Published private(set) var account: Account?
+    @Published private(set) var kelvins: [HubKelvin] = []     // the account's, as the hub last listed them
 
     let transport: Transport
     let tokens: TokenStore
     private let defaults: UserDefaults
     private let key = "kelvin.computers"
+    private let accountKey = "kelvin.account"
     private var sessions: [UUID: LabSession] = [:]
 
     init(transport: Transport = URLSessionTransport.shared, defaults: UserDefaults = .standard,
@@ -19,7 +23,69 @@ final class AppModel: ObservableObject {
         self.tokens = tokens
         self.defaults = defaults
         list = ComputerList.decode(defaults.data(forKey: key))
+        account = Account.decode(defaults.data(forKey: accountKey))
     }
+
+    /// This phone's token on the Kelvin hub, while signed in to the account.
+    var accountToken: String? { account == nil ? nil : tokens.token(for: Account.tokenID) }
+
+    /// The hub's address last used for signing in (to fill in the next time).
+    var lastHub: String { defaults.string(forKey: "kelvin.hub") ?? "" }
+
+    // ------------------------------------------------------------------ the Kelvin account
+
+    /// Sign in with the Kelvin account: keep the hub's token for this phone, and add the account's Kelvins.
+    func signIn(hub: URL, email: String, password: String) async throws {
+        let id = defaults.string(forKey: "kelvin.phoneID") ?? PhoneInfo.newID()
+        defaults.set(id, forKey: "kelvin.phoneID")
+        let phone = PhoneInfo(id: id, name: Device.name, version: Device.version)
+        let (token, signedIn) = try await HubClient(hub: hub, transport: transport)
+            .signIn(email: email.trimmingCharacters(in: .whitespaces), password: password, phone: phone)
+        tokens.save(token, for: Account.tokenID)
+        account = signedIn
+        defaults.set(signedIn.encoded(), forKey: accountKey)
+        defaults.set(hub.absoluteString, forKey: "kelvin.hub")
+        try? await lookForKelvins()
+        Notifier.shared.ask()
+    }
+
+    /// Ask the hub which Kelvins the account is signed in to, and add the new ones.
+    func lookForKelvins() async throws {
+        guard let account, let token = accountToken else { return }
+        do {
+            kelvins = try await HubClient(hub: account.hub, token: token, transport: transport).kelvins()
+        } catch let e as KelvinError where e.kind == .unpaired {
+            kelvins = []
+            throw e
+        }
+        for k in kelvins { list.account(k, hub: account.hub) }
+        save()
+    }
+
+    /// Sign this phone out of the account: each Kelvin forgets its direct token, the hub forgets this phone.
+    func signOut() async {
+        guard let account else { return }
+        let token = accountToken
+        for c in list.computers where c.hub == account.hub && c.viaAccount {
+            if let token, let base = c.relayBase {
+                _ = try? await KelvinClient(base: base, token: token, transport: transport, timeout: 5, bearer: true)
+                    .forgetDirect()
+            }
+            tokens.delete(c.id)
+            sessions[c.id]?.pause()
+            sessions[c.id] = nil
+            list.remove(c.id)
+        }
+        if let token { await HubClient(hub: account.hub, token: token, transport: transport).signOut() }
+        tokens.delete(Account.tokenID)
+        self.account = nil
+        kelvins = []
+        defaults.removeObject(forKey: accountKey)
+        save()
+    }
+
+    /// What the hub last said about one of the account's Kelvins.
+    func kelvin(_ c: Computer) -> HubKelvin? { kelvins.first { $0.id == c.kelvin } }
 
     var current: Computer? { list.current }
 
@@ -81,6 +147,9 @@ final class AppModel: ObservableObject {
         Notifier.shared.ask()
         return c
     }
+
+    /// A direct token a Kelvin gave this phone through the hub.
+    func keep(direct token: String, for c: Computer) { tokens.save(token, for: c.id) }
 
     /// What a session learned about its computer (its name, the address that worked).
     func update(_ c: Computer) {
@@ -179,9 +248,11 @@ final class LabSession: ObservableObject {
         }
     }
 
-    /// A client at an address that answers: the one that worked last, else each address in turn.
+    /// A client at an address that answers: the one that worked last, else each address in turn. Through the Kelvin
+    /// account: directly first, when the Kelvin gave this phone its own token for that, else through the hub.
     func ready() async throws -> KelvinClient {
         if let client { return client }
+        if let relay = computer.relayBase { return try await readyThroughAccount(relay) }
         guard let token = tokens.token(for: computer.id) else {
             throw KelvinError(.unpaired, "This phone is not paired with \(computer.lab) any more. Pair it again.")
         }
@@ -191,6 +262,48 @@ final class LabSession: ObservableObject {
         computer.update(with: me, used: c.base)
         app?.update(computer)
         return c
+    }
+
+    private func readyThroughAccount(_ relay: URL) async throws -> KelvinClient {
+        if let direct = tokens.token(for: computer.id), !computer.addresses.isEmpty {
+            do {   // on the lab network or Tailscale: faster, and unshared work opens too
+                let (c, me) = try await reach(computer.addresses, token: direct, transport: transport, timeout: 2.5) {
+                    try await $0.me()
+                }
+                client = c
+                connected = c.base
+                computer.update(with: me, used: c.base)
+                app?.update(computer)
+                return c
+            } catch let e as KelvinError where e.kind == .unpaired {
+                tokens.delete(computer.id)   // the Kelvin forgot it: ask for another through the hub
+            } catch {}
+        }
+        guard let token = app?.accountToken else {
+            throw KelvinError(.unpaired, "Sign in to your Kelvin account again.")
+        }
+        let c = KelvinClient(base: relay, token: token, transport: transport, timeout: 15, bearer: true)
+        let me = try await c.me()
+        client = c
+        connected = relay
+        if let name = me.lab, !name.isEmpty { computer.lab = name }
+        if let h = me.computer, !h.isEmpty { computer.host = h }
+        if let n = me.name, !n.isEmpty { computer.phoneName = n }
+        computer.role = me.role
+        computer.version = me.version ?? computer.version
+        computer.kinds = (computer.kinds ?? [:]).merging([relay.absoluteString: "hub"]) { _, new in new }
+        app?.update(computer)
+        if tokens.token(for: computer.id) == nil { await askDirect(c) }
+        return c
+    }
+
+    /// Through the hub, ask the Kelvin for a token of this phone's own, to reach it directly next time.
+    private func askDirect(_ c: KelvinClient) async {
+        guard let d = try? await c.direct(), d.available, let token = d.token else { return }
+        app?.keep(direct: token, for: computer)
+        computer.addresses = d.addresses.compactMap { URL(string: $0) }
+        computer.kinds = (computer.kinds ?? [:]).merging(d.kinds) { _, new in new }
+        app?.update(computer)
     }
 
     // ------------------------------------------------------------------ actions

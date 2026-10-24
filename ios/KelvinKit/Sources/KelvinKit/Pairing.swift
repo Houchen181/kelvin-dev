@@ -64,6 +64,7 @@ public enum Route: String, Equatable, Sendable {
     case tailscale = "Tailscale"
     case lab = "Lab network"
     case other = "Internet"
+    case hub = "Kelvin hub"
 
     /// `kinds`: what Kelvin said each address is (url -> tailscale, network or public), which beats guessing:
     /// 100.64.0.0/10 is Tailscale's, but some Wi-Fi networks (Xfinity's) hand out those addresses too.
@@ -72,6 +73,7 @@ public enum Route: String, Equatable, Sendable {
         case "tailscale"?: self = .tailscale; return
         case "network"?: self = .lab; return
         case "public"?: self = .other; return
+        case "hub"?: self = .hub; return
         default: break
         }
         let host = (url.host ?? "").lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
@@ -96,8 +98,9 @@ public enum Route: String, Equatable, Sendable {
         }
     }
 
-    /// Encrypted on the way: Tailscale is; a plain lab network or the internet over http is not.
-    public var encrypted: Bool { self == .tailscale }
+    /// Encrypted on the way: Tailscale is, and the Kelvin hub's https both ways (the hub itself sees what passes);
+    /// a plain lab network or the internet over http is not.
+    public var encrypted: Bool { self == .tailscale || self == .hub }
 }
 
 private func ipv4(_ host: String) -> (Int, Int, Int, Int)? {

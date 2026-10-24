@@ -62,6 +62,22 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(Role.watch.canUnlock)
     }
 
+    func testTheAccountsKelvins() throws {
+        let hub = URL(string: "https://kelvin.example.org")!
+        var list = ComputerList()
+        let first = list.account(HubKelvin(id: "urn:uuid:ce8e:1a2b", name: "LAB-PC", version: "0.3.19"), hub: hub)
+        XCTAssertTrue(first.viaAccount)
+        XCTAssertEqual(first.relayBase?.absoluteString.removingPercentEncoding,
+                       "https://kelvin.example.org/api/relay/kelvins/urn:uuid:ce8e:1a2b")
+        XCTAssertEqual(list.selected, first.id)
+        let again = list.account(HubKelvin(id: "urn:uuid:ce8e:1a2b", name: "LAB-PC-2"), hub: hub)
+        XCTAssertEqual(again.id, first.id)                                         // the same one, renamed
+        XCTAssertEqual(list.computers.map(\.host), ["LAB-PC-2"])
+        let relay = try XCTUnwrap(first.relayBase)
+        XCTAssertEqual(Route(relay, kinds: [relay.absoluteString: "hub"]), .hub)
+        XCTAssertTrue(Route.hub.encrypted)
+    }
+
     func testAnOlderOrNewerKelvinStillReads() throws {
         let s = try decode(LabState.self, "{\"lab\": \"Virtual Lab\", \"something_new\": [1, 2]}")
         XCTAssertEqual(s.pending, [])

@@ -1,6 +1,7 @@
 import Foundation
 import KelvinKit
 import Security
+import UIKit
 import UserNotifications
 
 /// Requests over URLSession. Two sessions: quick calls give up after 20 s of silence, so the next address gets its
@@ -46,6 +47,12 @@ struct URLSessionTransport: Transport {
         }
         return (http, stream)
     }
+}
+
+/// This phone, as the Kelvin hub shows it on the account page.
+enum Device {
+    static var name: String { UIDevice.current.name }
+    static var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "" }
 }
 
 /// Where each computer's token is kept.

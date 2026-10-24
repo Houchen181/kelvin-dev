@@ -229,6 +229,15 @@ class Remote:
         p.device = device["id"]
         return device, token
 
+    def issue(self, name: str, role: str, phone: str) -> Tuple[Dict[str, Any], str]:
+        """A token for a phone signed in to its person's Kelvin account, asked for through the hub: the hub vouches
+        for it, so no code. Replaces that phone's token from before."""
+        if role not in ROLES:
+            raise ValueError("role must be watch or control")
+        name = " ".join(str(name or "").split())[:40] or "Phone"
+        token = secrets.token_urlsafe(32)
+        return self.settings.add_device(name, role, token_hash(token), phone=phone), token
+
     def pairing_state(self, code: str) -> Optional[Dict[str, Any]]:
         p = self.pairings.get(code)
         if p is None:

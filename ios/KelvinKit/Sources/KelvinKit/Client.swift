@@ -33,13 +33,18 @@ public struct KelvinError: LocalizedError, Equatable, Sendable {
 
     public var errorDescription: String? { message }
 
-    /// Kelvin's answer to a request that failed: {"error": "...", "signin": true}.
-    static func from(status: Int, body: Data, paired: Bool) -> KelvinError {
+    /// Kelvin's answer to a request that failed: {"error": "...", "signin": true}. account: it came through the
+    /// Kelvin hub, which says itself why (signed out of the account, the Kelvin offline).
+    static func from(status: Int, body: Data, paired: Bool, account: Bool = false) -> KelvinError {
         let json = try? JSONDecoder().decode(JSONValue.self, from: body)
         let said = json?["error"]?.string
         switch status {
         case 401 where json?["signin"]?.bool == true:
             return KelvinError(.signedOut, said ?? "Nobody is signed in to Kelvin on its computer now.")
+        case 401 where account:
+            return KelvinError(.unpaired, said ?? "Sign in to your Kelvin account again.")
+        case 503 where json?["offline"]?.bool == true:
+            return KelvinError(.unreachable, said ?? "That Kelvin is offline.")
         case 401:
             return KelvinError(.unpaired, paired ? "This phone is no longer paired with Kelvin. Pair it again."
                                                  : (said ?? "Kelvin did not accept this phone."))
@@ -76,12 +81,16 @@ public struct KelvinClient: Sendable {
     public var token: String?
     public var transport: Transport
     public var timeout: TimeInterval
+    /// Through the Kelvin hub: base is the hub's way to one Kelvin (HubClient.relayBase), and token the phone's
+    /// token on the hub, sent as a bearer token.
+    public var bearer: Bool
 
-    public init(base: URL, token: String?, transport: Transport, timeout: TimeInterval = 10) {
+    public init(base: URL, token: String?, transport: Transport, timeout: TimeInterval = 10, bearer: Bool = false) {
         self.base = base
         self.token = token
         self.transport = transport
         self.timeout = timeout
+        self.bearer = bearer
     }
 
     // ------------------------------------------------------------------ the calls
@@ -134,6 +143,15 @@ public struct KelvinClient: Sendable {
         try await call("POST", "/api/hands", body: .object(["on": .bool(on)]))
     }
 
+    /// Through the hub only: a token of this phone's own for reaching that Kelvin directly (on the lab network or
+    /// through Tailscale), when its phone access is on.
+    public func direct() async throws -> DirectAccess { try await call("POST", "/api/phone/direct", body: .object([:])) }
+
+    /// Through the hub only: the Kelvin forgets the token direct() gave (the phone signed out of the account).
+    public func forgetDirect() async throws {
+        let _: JSONValue = try await call("DELETE", "/api/phone/direct")
+    }
+
     /// Stop the conversation Kelvin is answering, and decline what it asked.
     public func stopChat() async throws {
         let _: JSONValue = try await call("POST", "/api/stop", body: .object([:]))
@@ -168,7 +186,8 @@ public struct KelvinClient: Sendable {
         guard (200..<300).contains(response.statusCode) else {
             var body = ""
             for try await line in lines { body += line }
-            throw KelvinError.from(status: response.statusCode, body: Data(body.utf8), paired: token != nil)
+            throw KelvinError.from(status: response.statusCode, body: Data(body.utf8), paired: token != nil,
+                                   account: bearer)
         }
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -209,7 +228,7 @@ public struct KelvinClient: Sendable {
             throw KelvinError.unreachable(base, error)
         }
         guard (200..<300).contains(response.statusCode) else {
-            throw KelvinError.from(status: response.statusCode, body: data, paired: token != nil)
+            throw KelvinError.from(status: response.statusCode, body: data, paired: token != nil, account: bearer)
         }
         return data
     }
@@ -217,13 +236,21 @@ public struct KelvinClient: Sendable {
     func request(_ method: String, _ path: String, query: [String: String] = [:], body: JSONValue? = nil,
                  timeout: TimeInterval? = nil) -> URLRequest {
         var c = URLComponents(url: base, resolvingAgainstBaseURL: false) ?? URLComponents()
-        c.percentEncodedPath = path
+        var prefix = c.percentEncodedPath   // through the hub, Kelvin's routes follow the hub's path to it
+        if prefix.hasSuffix("/") { prefix.removeLast() }
+        c.percentEncodedPath = prefix + path
         c.queryItems = query.isEmpty ? nil : query.sorted { $0.key < $1.key }.map { URLQueryItem(name: $0.key, value: $0.value) }
         var r = URLRequest(url: c.url ?? base, cachePolicy: .reloadIgnoringLocalCacheData,
                            timeoutInterval: timeout ?? self.timeout)
         r.httpMethod = method
         r.setValue("application/json", forHTTPHeaderField: "Accept")
-        if let token { r.setValue(token, forHTTPHeaderField: "X-Kelvin-Token") }
+        if let token {
+            if bearer {
+                r.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+            } else {
+                r.setValue(token, forHTTPHeaderField: "X-Kelvin-Token")
+            }
+        }
         if let body {
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")
             r.httpBody = try? JSONEncoder().encode(body)
