@@ -71,6 +71,9 @@ jobs:
             sleep 8
             xcrun simctl io "$udid" screenshot "shots/$1.png"
           }
+          xcrun simctl launch "$udid" "$app"          # nothing paired yet: the welcome screen
+          sleep 6
+          xcrun simctl io "$udid" screenshot shots/0-welcome.png
           shot 1-lab light lab ""
           shot 2-lab-dark dark lab ""
           shot 3-chat light chat demo-chat

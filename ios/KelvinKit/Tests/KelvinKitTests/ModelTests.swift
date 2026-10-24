@@ -103,6 +103,29 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(d.runID, "r2")
     }
 
+    func testAxesInSIUnits() {
+        func scale(_ v: [Double], _ unit: String) -> String {
+            let (f, u) = SI.scale(v, unit: unit)
+            return "\(f) \(u)"
+        }
+        XCTAssertEqual(scale([3.1e-6, 2e-6], "V"), "1000000.0 µV")
+        XCTAssertEqual(scale([0.5, -0.2], "V"), "1000.0 mV")
+        XCTAssertEqual(scale([-4e-3], "A"), "1000.0 mA")
+        XCTAssertEqual(scale([1500, 200], "Hz"), "0.001 kHz")
+        XCTAssertEqual(scale([2.87e9], "Hz"), "1e-09 GHz")
+        XCTAssertEqual(scale([1.52], "K"), "1.0 K")
+        XCTAssertEqual(scale([0.012], "K"), "1000.0 mK")
+        XCTAssertEqual(scale([3e-17], "V"), "1e+15 fV")                     // below the table: its last prefix
+        XCTAssertEqual(scale([-20], "dBm"), "1.0 dBm")                     // no prefix on a logarithmic unit
+        XCTAssertEqual(scale([3e-6], "µV"), "1.0 µV")                      // nor on one that has a prefix
+        XCTAssertEqual(scale([0, .nan], "V"), "1.0 V")
+        let s = Series(x: Column(key: "magnet.field", unit: "T"), y: Column(key: "lockin.x", unit: "V"),
+                       points: [Point(x: -0.003, y: 3e-6), Point(x: 0.003, y: 2e-6)]).scaled()
+        XCTAssertEqual([s.x.label, s.y.label], ["magnet.field (mT)", "lockin.x (µV)"])
+        XCTAssertEqual(s.points[0].x, -3, accuracy: 1e-9)
+        XCTAssertEqual(s.points[1].y, 2, accuracy: 1e-9)
+    }
+
     func testTwoAxesPlotAgainstThePointNumber() {
         let x = Plot.xColumn([Column(key: "magnet.field", kind: "sweep"), Column(key: "smu.voltage", kind: "sweep")])
         XCTAssertEqual(x.key, "point")

@@ -14,14 +14,22 @@ struct LabView: View {
             }
             if let s = session.state {
                 Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(s.activity).font(.headline)
-                        HStack(spacing: 10) {
-                            if s.simulated { Text("Simulated").font(.caption.bold()).foregroundStyle(.orange) }
-                            if s.observeOnly { Text("Observe only").font(.caption.bold()).foregroundStyle(.secondary) }
-                            RouteLabel(url: session.connected, kinds: session.computer.kinds)
+                    HStack(alignment: .top, spacing: 12) {
+                        Circle()
+                            .fill(LabView.tone(s))
+                            .frame(width: 10, height: 10)
+                            .padding(.top, 6)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(s.activity).font(.headline)
+                            HStack(spacing: 8) {
+                                if s.simulated { Tag(text: "Simulated", color: .orange) }
+                                if s.observeOnly { Tag(text: "Observe only", color: .secondary) }
+                                RouteLabel(url: session.connected, kinds: session.computer.kinds)
+                            }
                         }
                     }
+                    .padding(.vertical, 2)
                 }
                 if !s.openAlarms.isEmpty {
                     Section("Alarms") {
@@ -62,6 +70,14 @@ struct LabView: View {
         .navigationTitle(session.state?.lab ?? session.computer.lab)
         .refreshable { await session.refresh() }
         .failure($failure)
+    }
+
+    /// Red for an alarm, orange while Kelvin waits for you, green while it works, grey when idle.
+    static func tone(_ s: LabState) -> Color {
+        if !s.openAlarms.isEmpty { return .red }
+        if !s.pending.isEmpty { return .orange }
+        if s.live?.running == true || !(s.busy ?? "").isEmpty { return .green }
+        return Color.secondary
     }
 }
 
@@ -124,11 +140,12 @@ struct ApprovalRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(request.title).font(.headline)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
+                Text(request.title).font(.headline)
+            }
             ForEach(Array(request.items.enumerated()), id: \.offset) { _, item in
-                Label(item, systemImage: "arrow.right")
-                    .font(.subheadline.monospacedDigit())
-                    .labelStyle(.titleOnly)
+                Text(item).font(.subheadline.monospacedDigit())
             }
             if let left = request.secondsLeft {
                 Text("About \(Format.duration(Double(max(30, (left + 29) / 30 * 30)))) left to answer")
@@ -178,7 +195,12 @@ struct RunSection: View {
     var body: some View {
         if let run, run.running {
             VStack(alignment: .leading, spacing: 8) {
-                Text(run.plan).font(.headline)
+                HStack(alignment: .firstTextBaseline) {
+                    Text(run.plan).font(.headline)
+                    Spacer()
+                    Text("\(Int((run.fraction * 100).rounded())) %").font(.subheadline.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
                 ProgressView(value: run.fraction)
                 Text(Format.progress(run)).font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
                 Button(role: .destructive) { confirmStop = true } label: {
@@ -194,7 +216,14 @@ struct RunSection: View {
                 Text("Its safe-stop steps run.")
             }
         } else if let run {
-            Text("Last: \(run.plan) (\(run.status), \(run.done) of \(run.total) points)").foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                RunStatusIcon(status: run.status)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(run.plan).font(.headline)
+                    Text("\(RunStatusIcon.word(run.status)) · \(run.done) of \(run.total) points")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
         } else {
             Text("No run yet.").foregroundStyle(.secondary)
         }
@@ -236,15 +265,27 @@ struct SeriesChart: View {
     let series: Series
 
     var body: some View {
-        Chart(Array(series.points.enumerated()), id: \.offset) { item in
-            LineMark(x: .value(series.x.label, item.element.x), y: .value(series.y.label, item.element.y))
+        let s = series.scaled()   // 4 µV, not 4.0E-6 V
+        Chart(Array(s.points.enumerated()), id: \.offset) { item in
+            LineMark(x: .value(s.x.label, item.element.x), y: .value(s.y.label, item.element.y))
                 .interpolationMethod(.linear)
+                .lineStyle(StrokeStyle(lineWidth: 2))
         }
-        .chartXAxisLabel(series.x.label)
-        .chartYAxisLabel(series.y.label)
+        .chartXScale(domain: SeriesChart.span(s.points.map(\.x)))
         .chartYScale(domain: .automatic(includesZero: false))
+        .chartXAxisLabel(s.x.label)
+        .chartYAxisLabel(s.y.label)
         .frame(height: 220)
         .padding(.vertical, 4)
+    }
+
+    /// The data's own range, so the axis doesn't run on past it.
+    static func span(_ values: [Double]) -> ClosedRange<Double> {
+        guard let lo = values.min(), let hi = values.max(), lo < hi else {
+            let v = values.first ?? 0
+            return (v - 1)...(v + 1)
+        }
+        return lo...hi
     }
 }
 
@@ -264,13 +305,21 @@ struct InstrumentRow: View {
                 .font(.subheadline)
             }
         } label: {
-            HStack {
+            HStack(spacing: 8) {
                 Text(instrument.name)
                 Spacer()
                 if instrument.failing {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
-                } else if instrument.away {
-                    Text("not at safe").font(.caption).foregroundStyle(.orange)
+                } else {
+                    if instrument.away {
+                        Image(systemName: "circle.fill")
+                            .font(.system(size: 7))
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("A drive is not at its safe value")
+                    }
+                    if let main = instrument.readings.first {
+                        Text(main.value).font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
+                    }
                 }
             }
         }

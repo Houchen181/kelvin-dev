@@ -17,15 +17,18 @@ struct RunsView: View {
                 NavigationLink {
                     RunDetailView(session: session, summary: r)
                 } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(r.plan).font(.headline)
-                        HStack(spacing: 6) {
-                            Text(r.status).foregroundStyle(r.status == "completed" ? Color.secondary : Color.orange)
-                            if let p = r.points, let planned = r.plannedPoints { Text("· \(p) of \(planned) points") }
-                            if let when = r.started { Text("· ") + Text(when, style: .relative) + Text(" ago") }
+                    HStack(spacing: 12) {
+                        RunStatusIcon(status: r.status)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(r.plan).font(.headline)
+                            HStack(spacing: 6) {
+                                Text(RunStatusIcon.word(r.status))
+                                if let p = r.points, let planned = r.plannedPoints { Text("· \(p) of \(planned) points") }
+                                if let when = r.started { Text("· ") + Text(when, style: .relative) + Text(" ago") }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -64,7 +67,13 @@ struct RunDetailView: View {
     var body: some View {
         List {
             Section {
-                LabeledContent("Status", value: detail?.meta?.status ?? summary.status)
+                let status = detail?.meta?.status ?? summary.status
+                LabeledContent("Status") {
+                    HStack(spacing: 6) {
+                        RunStatusIcon(status: status)
+                        Text(RunStatusIcon.word(status))
+                    }
+                }
                 if let p = detail?.meta?.points ?? summary.points {
                     LabeledContent("Points", value: "\(p) of \(detail?.meta?.plannedPoints ?? summary.plannedPoints ?? p)")
                 }

@@ -11,6 +11,7 @@ K = SIZE / 100.0                 # svg units -> pixels
 FROST, ICE, FLAKE = "#e8f2fc", "#2f6fb0", "#8cc4f2"
 OUT = Path(__file__).parent / "icons"
 IOS = Path(__file__).parent.parent / "ios" / "Kelvin" / "Assets.xcassets" / "AppIcon.appiconset"
+MARK = IOS.parent / "Mark.imageset"   # the mark on its rounded tile, for the app's welcome screen
 
 
 def p(x, y):
@@ -63,6 +64,11 @@ def main() -> None:
     IOS.mkdir(parents=True, exist_ok=True)
     draw(square=True).resize((1024, 1024), Image.LANCZOS).convert("RGB").save(IOS / "icon-1024.png")
     print("wrote", IOS / "icon-1024.png")
+    MARK.mkdir(parents=True, exist_ok=True)
+    draw().resize((288, 288), Image.LANCZOS).save(MARK / "mark.png")
+    (MARK / "Contents.json").write_text('{\n  "images" : [ { "filename" : "mark.png", "idiom" : "universal" } ],\n'
+                                        '  "info" : { "author" : "xcode", "version" : 1 }\n}\n', encoding="utf-8")
+    print("wrote", MARK / "mark.png")
 
 
 if __name__ == "__main__":

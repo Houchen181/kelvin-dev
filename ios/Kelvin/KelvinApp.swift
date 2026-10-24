@@ -92,9 +92,10 @@ struct WelcomeView: View {
     var body: some View {
         VStack(spacing: 18) {
             Spacer()
-            Image(systemName: "thermometer.snowflake")
-                .font(.system(size: 64))
-                .foregroundStyle(Color.accentColor)
+            Image("Mark")
+                .resizable()
+                .frame(width: 96, height: 96)
+                .accessibilityHidden(true)
             Text("Kelvin")
                 .font(.largeTitle.bold())
             Text("Watch your lab, answer Kelvin's requests and stop a run from your phone. The app talks to Kelvin on "
@@ -166,6 +167,43 @@ enum Format {
         if let eta = run.etaSeconds, eta > 0 { s += " · about \(duration(eta)) left" }
         return s
     }
+}
+
+/// A small coloured tag, such as Simulated.
+struct Tag: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.14), in: Capsule())
+    }
+}
+
+/// How a run ended, as an icon: done, still running, stopped, or failed.
+struct RunStatusIcon: View {
+    let status: String
+
+    var body: some View {
+        let look = RunStatusIcon.look(status)
+        Image(systemName: look.0).foregroundStyle(look.1).accessibilityLabel(RunStatusIcon.word(status))
+    }
+
+    static func look(_ status: String) -> (String, Color) {
+        switch status {
+        case "completed": return ("checkmark.circle.fill", .green)
+        case "running": return ("play.circle.fill", .accentColor)
+        case "stopped": return ("stop.circle.fill", .orange)
+        case "aborted", "failed", "error": return ("xmark.octagon.fill", .red)
+        default: return ("questionmark.circle", .secondary)
+        }
+    }
+
+    static func word(_ status: String) -> String { status.isEmpty ? "Unknown" : status.prefix(1).uppercased() + status.dropFirst() }
 }
 
 /// Where the connection goes, as a small label: green on Tailscale, orange on a plain network.
