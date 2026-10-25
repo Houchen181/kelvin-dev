@@ -4130,6 +4130,27 @@
     for (const p of document.querySelectorAll(".set-page")) p.hidden = p.dataset.page !== tab.dataset.page;
     $("set-pages").scrollTop = 0;
     store("lh.settingsPage", tab.dataset.page);
+    if (tab.dataset.page === "instruments") loadEnvironments();
+  }
+
+  // what Kelvin installed for instruments (envs.py), each with Remove
+  async function loadEnvironments() {
+    const list = $("env-list");
+    let rows = [];
+    try { rows = (await api("/api/environments")).environments; } catch (e) { list.replaceChildren(h("li", { class: "muted small" }, e.message)); return; }
+    if (!rows.length) { list.replaceChildren(h("li", { class: "muted small" }, "Nothing yet.")); return; }
+    list.replaceChildren(...rows.map((r) => {
+      const pkgs = Object.entries(r.packages).map(([n, v]) => n + " " + v).concat(r.files).join(", ") || "no packages";
+      const remove = h("button", { class: "link", type: "button" }, "Remove");
+      remove.addEventListener("click", async () => {
+        if (!confirm("Remove " + r.name + " (" + pkgs + ")? Instruments that use it stop connecting until it is installed again.")) return;
+        remove.disabled = true;
+        try { toast((await api("/api/environments", { body: { remove: r.name } })).message); } catch (e) { toast(e.message); }
+        loadEnvironments();
+      });
+      return h("li", {}, h("span", { class: "env-what" }, h("b", {}, r.name), " · Python " + r.python + " (" + r.bits + "-bit) · " + pkgs,
+        h("div", { class: "muted" }, r.mb + " MB" + (r.for.length ? " · for " + r.for.join(", ") : ""))), remove);
+    }));
   }
 
   function openSettings() {

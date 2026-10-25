@@ -22,6 +22,7 @@ like a SCPI instrument. The address names the driver:
     andor://0?sdk=3                       Andor cameras through Andor's pyAndorSDK3 / pyAndorSDK2 (cameras.py)
     anc300://COM5, anc350://0             attocube positioners: the ANC300's command line, the ANC350 through pylablib
     modbus://192.168.1.50?unit=1          Modbus TCP or RTU (modbus://COM5?unit=1&baud=9600): registers (modbus.py)
+    uvc://0, genicam://<serial>           USB video cameras (OpenCV), GenICam cameras (Harvesters) (cameras.py)
 
 The makers' libraries are not in the app: Kelvin installs the one an instrument needs into its drivers environment
 (envs.py) once a person approves, and says so when one is missing. From source, pip install them."""
@@ -38,7 +39,8 @@ from .adapters import AdapterError
 from .cards import Card
 
 SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib",
-           "nidaq", "seabreeze", "shamrock", "picam", "lightfield", "pylon", "andor", "anc300", "anc350", "modbus")
+           "nidaq", "seabreeze", "shamrock", "picam", "lightfield", "pylon", "andor", "anc300", "anc350", "modbus",
+           "uvc", "genicam")
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -673,7 +675,8 @@ LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc
          "picam": ("princeton", "PicamCamera"), "lightfield": ("lightfield", "LightFieldCamera"),
          "pylon": ("cameras", "BaslerCamera"), "andor": ("cameras", "AndorCamera"),
          "anc300": ("positioners", "ANC300"), "anc350": ("positioners", "ANC350"),
-         "modbus": ("modbus", "ModbusInstrument")}   # they import this module
+         "modbus": ("modbus", "ModbusInstrument"), "uvc": ("cameras", "UsbCamera"),
+         "genicam": ("cameras", "GenicamCamera")}   # they import this module
 
 
 def library_notes() -> List[str]:
@@ -696,7 +699,12 @@ PACKAGE_HINTS = ((("ni-daqmx",), "nidaqmx", "NI DAQ cards", "NI-DAQmx"),
                  (("basler", "pylon"), "pypylon", "Basler cameras", "Basler's pylon"),
                  (("time tagger",), "Swabian-TimeTagger", "Swabian Time Taggers", "Swabian's Time Tagger software"),
                  (("multivu",), "MultiPyVu", "Quantum Design systems", "MultiVu"),
-                 (("spinapi",), "spinapi", "SpinCore PulseBlasters", "SpinAPI"))
+                 (("spinapi",), "spinapi", "SpinCore PulseBlasters", "SpinAPI"),
+                 (("spinnaker",), "harvesters", "GenICam cameras (Teledyne FLIR)", "Spinnaker"),
+                 (("vimba",), "harvesters", "GenICam cameras (Allied Vision)", "Vimba"),
+                 (("ids", "peak"), "harvesters", "GenICam cameras (IDS)", "IDS peak"),
+                 (("kinesis",), "pythonnet", "Thorlabs motion controllers, through Kinesis' .NET library",
+                  "Thorlabs Kinesis"))
 
 
 def package_notes(programs: Optional[List[Dict[str, str]]] = None) -> List[str]:

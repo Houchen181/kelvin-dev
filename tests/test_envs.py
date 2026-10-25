@@ -396,3 +396,26 @@ def test_kelvin_reads_a_makers_package_without_calling_it(tmp_path):
     assert not (tmp_path / "made").exists()                      # no device was made, nothing called
     with pytest.raises(AdapterError, match="there is no environment cryo"):
         library.describe("acme_cryo", "cryo", tmp_path)
+
+
+def test_settings_lists_what_kelvin_installed_and_removes_it(kelvin, tmp_path, monkeypatch):
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+    from labharness.web import app as webapp
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    from test_web import Scripted
+    monkeypatch.setitem(envs.HOME, "path", tmp_path)
+    kelvin.approver.answers = [True]
+    kelvin.install_for_instrument("drivers", ["qick==0.2.436"], why="the RFSoC 4x2")
+    settings = Settings(tmp_path / "settings.json")
+    app = webapp.create_app(kelvin, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"],
+                            providers={"scripted": Scripted([])})
+    headers = {"X-Kelvin-Token": settings.access_key}
+    with TestClient(app) as client:
+        rows = client.get("/api/environments", headers=headers).json()["environments"]
+        assert [(r["name"], r["packages"], r["for"]) for r in rows] == [("drivers", {"qick": "0.2.436"},
+                                                                          ["the RFSoC 4x2"])]
+        assert client.post("/api/environments", json={"remove": "drivers"}, headers=headers).json()["ok"]
+        assert client.get("/api/environments", headers=headers).json()["environments"] == []
+        assert client.post("/api/environments", json={"remove": "drivers"}, headers=headers).status_code == 404

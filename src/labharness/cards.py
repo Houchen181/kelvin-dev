@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -106,6 +107,8 @@ class ParamSpec:
     parse: Optional[str] = None                    # regex whose first group is the value in a verbose reply
     read_when: Optional[str] = None                # only query while this switch is on (some reads turn outputs on)
     acquires: bool = False                         # reading runs an acquisition (a frame, a count): only when asked
+    get_before: List[str] = dataclasses.field(default_factory=list)   # sent first: arm, trigger, *OPC?
+    wait_s: Optional[float] = None                 # how long such a reading may take (its queries' timeout)
     description: str = ""
     # a source drive's own hardware settings, which protect the sample (protection.py):
     range_param: Optional[str] = None              # its output range, fixed just above a device's limit
@@ -237,6 +240,16 @@ class HealthCheck:
 
 
 @dataclass
+class Action:
+    """A named command with no value, as the manual gives it: trigger a measurement, arm an acquisition, fire a
+    burst. One that drives the sample (drives: true, a burst of the generator) asks a person, like a drive change."""
+    name: str
+    send: List[str]
+    label: str = ""
+    drives: bool = False
+
+
+@dataclass
 class Card:
     id: str
     model: str
@@ -266,6 +279,7 @@ class Card:
     data: Dict[str, Any] = field(default_factory=dict, repr=False)  # as written, to bind other values
     library: Dict[str, Any] = field(default_factory=dict)            # the maker's module or DLL (library.py)
     requires: List[str] = field(default_factory=list)   # the maker's Python packages its driver imports (envs.py)
+    actions: Dict[str, "Action"] = field(default_factory=dict)   # named commands: trigger, arm, fire a burst
 
     def bind(self, values: Optional[Dict[str, Any]]) -> "Card":
         """This card with its variables set for one instrument (which sensor, channel or output it uses)."""
@@ -363,7 +377,15 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
     if typ not in TYPES:
         err(path + ".type", "must be one of %s" % ", ".join(TYPES))
         typ = "float"
-    get_cmd = _template(p["get"], err, path + ".get") if p.get("get") else None
+    get = p.get("get")
+    get_before: List[str] = []
+    if isinstance(get, list):   # an acquisition: arm, trigger, wait (*OPC?), then fetch
+        if not get or not all(isinstance(c, str) and c.strip() for c in get):
+            err(path + ".get", "a command, or a list of commands whose last one reads the value")
+            get = None
+        else:
+            get_before, get = [c.strip() for c in get[:-1]], get[-1]
+    get_cmd = _template(get, err, path + ".get") if get else None
     set_cmd = _template(p["set"], err, path + ".set") if p.get("set") else None
     if set_cmd is not None and not set_cmd.has_value:
         err(path + ".set", "needs {value}")
@@ -421,6 +443,14 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
             spec.field = p["field"]
     if p.get("read_when") is not None:
         spec.read_when = str(p["read_when"])
+    spec.get_before = get_before
+    if get_before and p.get("acquires") is not True:
+        err(path + ".get", "a reading that sends commands first (arm, trigger) runs an acquisition: add acquires: true")
+    if p.get("wait") is not None:
+        if not _is_number(p["wait"]) or not 0 < float(p["wait"]) <= 3600:
+            err(path + ".wait", "the seconds the acquisition may take (up to 3600)")
+        else:
+            spec.wait_s = float(p["wait"])
     if p.get("acquires") is not None:
         if not isinstance(p["acquires"], bool):
             err(path + ".acquires", "must be true or false")
@@ -690,6 +720,13 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     if headline is not None and (headline not in params or params[headline].get_cmd is None):
         err("display.headline", "%r is not a readable parameter" % headline)
     library = _library(data.get("library"), params, identify, err)
+    actions = _actions(data.get("actions"), params, err)
+    for spec in params.values():   # a reading's arming commands only start the acquisition, never set anything
+        for c in spec.get_before:
+            for other in params.values():
+                if other.set_cmd is not None and other.family().match(c) is not None:
+                    err("parameters.%s.get" % spec.name, "%r would set %s; a reading's commands only arm, trigger and "
+                                                          "wait" % (c, other.name))
     if library and on_connect:
         err("on_connect", "a card with a library connects with library.open")
 
@@ -703,7 +740,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
         source=source, connection=connection, idn_query=str(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
-        on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library,
+        on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library, actions=actions,
         requires=[r.strip() for r in requires],
     )
 
@@ -712,6 +749,7 @@ LIB_TYPES = ("int8", "uint8", "int16", "uint16", "int32", "int", "uint32", "int6
 LIB_DENY = ("os", "sys", "subprocess", "shutil", "builtins", "importlib", "runpy", "ctypes", "socket", "pathlib",
             "pickle", "marshal", "multiprocessing", "code", "codeop", "webbrowser", "urllib", "http", "asyncio")
 # a function, or one on a sub-object of the library's object (attocube's network instruments: sample.getTemperature)
+NET_DENY = ("System", "Microsoft", "Windows", "Mono", "Python", "clr", "Internal", "MS", "Accessibility")
 LIB_PATH = r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*"
 LIB_CALL = re.compile(r"^\s*(SET|GET)\s+(" + LIB_PATH + r")(?![\w.])")
 LIB_READS = re.compile(r"^(get|is|has|query|read|measure|fetch|status|current|actual)", re.I)   # names that only read
@@ -731,8 +769,26 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
     name = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
     path_name = re.compile("^" + LIB_PATH + "$")
     out = dict(lib)
-    if bool(lib.get("module")) == bool(lib.get("dll")):
-        err("library", "name either module (a Python module) or dll (a DLL file), not both")
+    if len([k for k in ("module", "dll", "assembly", "com") if lib.get(k)]) != 1:
+        err("library", "name one of module (a Python module), dll (a DLL file), assembly (a .NET assembly, with its "
+                       "type) or com (a COM object's ProgID)")
+    if lib.get("assembly"):
+        files = lib["assembly"] if isinstance(lib["assembly"], list) else [lib["assembly"]]
+        if not all(isinstance(f, str) and re.match(r"^[A-Za-z0-9_.+-]+\.dll$", f, re.I) for f in files):
+            err("library.assembly", "the .NET assembly's file name (or a list of them) in the folder the address names")
+        typ = str(lib.get("type") or "")
+        if not path_name.match(typ) or typ.count(".") < 1 or typ.split(".")[0] in NET_DENY:
+            err("library.type", "the full name of the maker's .NET class, e.g. "
+                                "Thorlabs.MotionControl.KCube.DCServoCLI.KCubeDCServo")
+    if lib.get("com") is not None and not re.match(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){1,3}$", str(lib["com"])):
+        err("library.com", "the COM object's ProgID, as the maker's documentation gives it (Vendor.Object)")
+    create = lib.get("create")
+    if create is not None and not isinstance(create, bool) and not name.match(str(create)):
+        err("library.create", "true to make the object, or the name of the factory method that makes it")
+    properties = lib.get("properties") or []
+    if not isinstance(properties, list) or not all(isinstance(p, str) and path_name.match(p) for p in properties):
+        err("library.properties", "a list of the properties the card reads or sets without calling (Position)")
+        properties = []
     if lib.get("module"):
         mod = str(lib["module"])
         if not all(name.match(p) for p in mod.split(".")) or mod.split(".")[0] in LIB_DENY:
@@ -786,7 +842,7 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
         elif parts[0] == "wait" and (len(parts) != 2 or not re.match(r"^[0-9.]+$", parts[1])):
             err(path, "wait takes seconds, e.g. wait 10")
 
-    for key in ("open", "close"):
+    for key in ("setup", "open", "close"):
         for i, step in enumerate(lib.get(key) or []):
             check_call("library.%s[%d]" % (key, i), step)
     toggles = lib.get("toggles") or {}
@@ -813,6 +869,14 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
             fn = m.group(2)
             if fn in toggles:
                 continue
+            assigns = tmpl.text[m.end():].strip().startswith("=")
+            if fn in properties:   # read without calling; set as Name= {value}
+                if verb == "SET" and not assigns:
+                    err(path, "%s is a property: SET %s= {value}" % (fn, fn))
+                continue
+            if assigns:
+                err(path, "only a property under library.properties is set with =")
+                continue
             if known is not None and fn not in known:
                 err(path, "%s is not under library.functions" % fn)
             last = fn.rsplit(".", 1)[-1]   # sample.getTemperature reads as getTemperature
@@ -825,6 +889,36 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
         if not m or m.group(1).upper() != "GET" or not LIB_READS.match(m.group(2).rsplit(".", 1)[-1]):
             err("identify.query", "with a library, GET <a function that reads the model or serial number>")
     out["toggles"] = toggles
+    return out
+
+
+def _actions(raw: Any, params: Dict[str, ParamSpec], err: Callable[[str, str], None]) -> Dict[str, Action]:
+    """actions: {trigger: {send: "*TRG", label: ...}, fire: {send: ":BURS:FIRE", drives: true}}."""
+    out: Dict[str, Action] = {}
+    if raw is None:
+        return out
+    if not isinstance(raw, dict):
+        err("actions", "a mapping of name: {send, label, drives}")
+        return out
+    for name, spec in raw.items():
+        path = "actions.%s" % name
+        spec = {"send": spec} if isinstance(spec, (str, list)) else spec
+        if not re.match(r"^[a-z][a-z0-9_]{0,30}$", str(name)) or not isinstance(spec, dict):
+            err(path, "a lower-case name, with send: the command (or commands) as the manual gives them")
+            continue
+        send = spec.get("send")
+        send = [send] if isinstance(send, str) else send
+        if not send or not all(isinstance(c, str) and c.strip() and "{" not in c for c in send):
+            err(path + ".send", "the command, or a list of commands, with no {value}")
+            continue
+        for c in send:
+            for p in params.values():
+                if p.set_cmd is not None and p.family().match(c) is not None:
+                    err(path + ".send", "%r would set %s: set it as the parameter, with its limits" % (c, p.name))
+        if spec.get("drives") is not None and not isinstance(spec["drives"], bool):
+            err(path + ".drives", "true when it drives the sample (fires a burst, a pulse, a shutter)")
+        out[str(name)] = Action(str(name), [c.strip() for c in send], str(spec.get("label") or name),
+                                bool(spec.get("drives")))
     return out
 
 

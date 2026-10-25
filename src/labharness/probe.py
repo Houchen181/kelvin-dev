@@ -3,7 +3,8 @@ computer (USB devices, serial ports and network adapters, also those no driver c
 drivers are installed, and where their files are.
 
 Everything here only looks. On the network it reads what a port says by itself, asks *IDN? on the ports instruments
-use for SCPI, and loads a web page's title; it looks only at addresses on local networks, never the internet."""
+use for SCPI, and loads a web page's title; it looks only at addresses on local networks, never the internet. On a
+serial port it listens first, then asks only an identity query, at the speeds and framings instruments use."""
 from __future__ import annotations
 
 import concurrent.futures
@@ -288,6 +289,68 @@ def what_answers(f: Dict[str, Any]) -> str:
     if not bits:
         bits.append("open, says nothing by itself")
     return "port %d: %s; usually %s" % (port, "; ".join(bits), f["hint"])
+
+
+# ------------------------------------------------------------------ a serial port
+
+BAUDS = (9600, 19200, 57600, 115200, 38400, 4800, 2400, 1200)
+FRAMINGS = (("none", 8), ("odd", 7), ("even", 7))   # 8N1, and the 7-bit framings older controllers use (Lake Shore)
+
+
+def _printable(data: bytes) -> bool:
+    text = data.strip(b"\r\n\x00 ")
+    return len(text) >= 3 and sum(32 <= b < 127 or b in (9, 10, 13) for b in text) >= 0.9 * len(text)
+
+
+def _open_serial(port: str, baud: int, parity: str, bits: int, timeout: float) -> Any:
+    import serial   # pyserial, which Kelvin brings
+    return serial.Serial(port, baud, bytesize=bits, parity={"none": "N", "odd": "O", "even": "E"}[parity],
+                         stopbits=1, timeout=timeout)
+
+
+def inspect_serial(port: str, query: str = "*IDN?", bauds: Optional[Iterable[int]] = None, listen: float = 0.6,
+                   opener: Optional[Callable[..., Any]] = None) -> Dict[str, Any]:
+    """What an instrument on a serial port says: first what it sends by itself (some stream their readings), at each
+    speed; then its answer to an identity query at each speed and framing, stopping at the first clear answer.
+    Returns {port, streams: [(baud, text)], answer: {baud, parity, data_bits, reply} or None, tried}."""
+    opener = opener or _open_serial
+    out: Dict[str, Any] = {"port": port, "streams": [], "answer": None, "tried": 0}
+    speeds = list(bauds or BAUDS)
+    for baud in speeds:   # listening sends nothing
+        try:
+            s = opener(port, baud, "none", 8, listen)
+        except Exception as e:
+            out["error"] = str(e).splitlines()[0] if str(e) else type(e).__name__
+            return out
+        try:
+            said = s.read(512)
+        finally:
+            s.close()
+        if _printable(said):
+            out["streams"].append((baud, _clean(said, 160)))
+            break
+    for baud in speeds:
+        for parity, bits in FRAMINGS:
+            out["tried"] += 1
+            try:
+                s = opener(port, baud, parity, bits, 0.4)
+            except Exception:
+                continue
+            echo = False
+            try:
+                s.reset_input_buffer()
+                s.write((query + "\r\n").encode("ascii"))
+                reply = s.read_until(b"\n", 256)
+                if reply.strip() == query.encode("ascii").strip():   # it echoes the command, then answers
+                    echo, reply = True, s.read_until(b"\n", 256)
+            finally:
+                s.close()
+            if _printable(reply):
+                out["answer"] = {"baud": baud, "parity": parity, "data_bits": bits, "reply": _clean(reply, 200),
+                                 "echo": echo, "ending": "\r\n" if reply.endswith(b"\r\n") else
+                                 "\r" if reply.endswith(b"\r") else "\n"}
+                return out
+    return out
 
 
 # ------------------------------------------------------------------ what is plugged in

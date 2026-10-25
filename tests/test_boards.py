@@ -2,8 +2,10 @@
 line of code there, once a person approves it, and leaves a server it starts running."""
 import asyncio
 import socket
+import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -146,3 +148,72 @@ def test_board_addresses():
     assert boards.board_url("192.168.3.1") == "http://192.168.3.1:9090"
     assert boards.board_url("http://board.local:8888/lab") == "http://board.local:8888"
     assert boards.board_url("https://10.0.0.2") == "https://10.0.0.2:9090"
+
+
+class Channel:
+    def __init__(self, out):
+        self.chunks = [out]
+
+    def recv_ready(self):
+        return bool(self.chunks)
+
+    def recv(self, n):
+        return self.chunks.pop(0)
+
+    def recv_stderr_ready(self):
+        return False
+
+    def exit_status_ready(self):
+        return not self.chunks
+
+    def recv_exit_status(self):
+        return 0
+
+
+class SshClient:
+    made = []
+
+    def __init__(self):
+        SshClient.made.append(self)
+        self.signed_in = self.command = None
+
+    def load_host_keys(self, path):
+        pass
+
+    def set_missing_host_key_policy(self, policy):
+        pass
+
+    def connect(self, host, port, username, password, timeout, look_for_keys, allow_agent):
+        if password == "wrong":
+            raise Exception("Authentication failed.")
+        self.signed_in = (host, port, username, password, look_for_keys)
+
+    def save_host_keys(self, path):
+        open(path, "w").write("127.0.0.1 ssh-ed25519 AAAA...\n")
+
+    def exec_command(self, command):
+        self.command = command
+        return None, types.SimpleNamespace(channel=Channel(b"Starting Red Pitaya SCPI server\n")), None
+
+    def close(self):
+        pass
+
+
+def test_a_command_on_a_board_over_ssh(tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    from labharness.agent.runtime import LabRuntime
+    monkeypatch.setitem(sys.modules, "paramiko", types.SimpleNamespace(SSHClient=SshClient, AutoAddPolicy=lambda: None))
+    rt = LabRuntime(build_virtual_lab(), ScriptedApprover([True]), tmp_path / "data")
+    rt.home = tmp_path
+    said = rt.run_on_board("ssh://root@127.0.0.1", code="systemctl start redpitaya_scpi", password="root")
+    assert said == "done: Starting Red Pitaya SCPI server"
+    request = rt.approver.requests[0]
+    assert request.title == "Run a command on 127.0.0.1 over SSH?"
+    assert request.items[0] == "As root on 127.0.0.1:22:\nsystemctl start redpitaya_scpi"
+    assert "Signed in with the password given" in request.items[1] and "root" not in request.items[1]
+    assert SshClient.made[-1].signed_in == ("127.0.0.1", 22, "root", "root", False)
+    assert (tmp_path / "tools" / "known_hosts").is_file()              # the board's key, kept the first time
+    rt.approver.answers = [True]
+    assert "could not sign in to pi@127.0.0.1" in rt.run_on_board("ssh://pi@127.0.0.1:2222", code="ls", password="wrong")
+    assert "give the shell command" in rt.run_on_board("ssh://root@127.0.0.1", notebook="x.ipynb")
+    assert "on the internet" in rt.run_on_board("ssh://root@8.8.8.8", code="ls")

@@ -78,10 +78,15 @@ You are connected to a physics lab through Kelvin.
   yourself: web_search, read_web_page (a page's text and its links, PDFs first), save_manual (keeps the PDF, with the
   instrument's address), then draft_card with manual. Never use the screen to search or to download.
 - An instrument the scan doesn't find or doesn't identify: find out what it is yourself. inspect_address for one on
-  the network (what its ports answer), connected_devices for one plugged in (USB devices, also without a driver;
-  serial ports; this computer's networks), installed_software and find_maker_files for the maker's software, SDK,
-  examples and manual on this computer. Then how its maker talks to it (the manual, the maker's examples, the web)
-  decides the card: text commands give an ordinary card; a maker's Python package or DLL gives a library card.
+  the network (what its ports answer), inspect_serial for one on a serial port (its speed and framing),
+  connected_devices for one plugged in (USB devices, also without a driver; serial ports; this computer's networks),
+  installed_software and find_maker_files for the maker's software, SDK, examples and manual on this computer. Then how its maker talks to it (the manual, the maker's examples, the web)
+  decides the card: text commands give an ordinary card; a maker's Python package, DLL, .NET assembly (Thorlabs
+  Kinesis) or COM object gives a library card (library_api lists a package's, an assembly's or a COM object's
+  functions). Cameras: uvc://<index> for a USB webcam or microscope camera, genicam://<serial> for an industrial one
+  (card generic/usb-camera or generic/genicam-camera). A multimeter's buffer, a scope's single shot or an analyzer's
+  sweep is a reading that arms, triggers and waits (*OPC?) before it fetches; named actions (trigger, arm, fire) are
+  done with do_action, or at every point of a plan with trigger:.
 - What an instrument needs on this computer, Kelvin installs, never the app: install_for_instrument installs the
   maker's Python package (at the version the instrument needs) or the maker's files once the person approves, into
   the drivers environment for Kelvin's built-in drivers (a card's requires, or a driver saying a package is missing),
@@ -275,6 +280,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.add_instrument(address, card, name, connection, vars)
 
     @server.tool(annotations=ACT, structured_output=False)
+    def do_action(instrument: str, action: str) -> str:
+        """Do one of an instrument's named actions, as its card lists them (describe_instrument): trigger a
+        measurement, arm an acquisition, fire a burst. One that drives the sample asks the person first. In a plan,
+        trigger: [instrument.action] does them at every point, after settling, before measuring."""
+        return rt.do_action(instrument, action)
+
+    @server.tool(annotations=ACT, structured_output=False)
     def reconnect_instrument(instrument: str) -> str:
         """Connect an instrument of the lab that could not be connected (lab_status says why), once that is fixed:
         its package installed (install_for_instrument does this by itself), the instrument switched on or plugged in.
@@ -328,6 +340,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.inspect_address(address)
 
     @server.tool(annotations=READ, structured_output=False)
+    def inspect_serial(port: str, query: str = "*IDN?", baud: int = 0) -> str:
+        """What an instrument on a serial port is, when the scan didn't identify it: what it sends by itself (some
+        stream their readings), then its answer to an identity query at each speed and framing instruments use
+        (1200-115200 baud; 8N1, 7O1, 7E1), with the settings to add it with. query: the manual's identity query,
+        if not *IDN?; baud: the manual's speed. Only listens and asks that query."""
+        return rt.inspect_serial(port, query, baud)
+
+    @server.tool(annotations=READ, structured_output=False)
     def connected_devices() -> str:
         """Everything plugged into this computer, also what no driver claims: USB devices with the name each
         reports, its maker and driver (or that it has none), serial ports, and the networks this computer is on (a
@@ -374,14 +394,19 @@ def build_server(rt: LabRuntime) -> MCPServer:
         cell). address: the board (port 9090 unless given). password: the board's Jupyter password (PYNQ's default
         is xilinx). A cell still running after wait seconds (a server) is left running on the board. For QICK: the
         notebooks qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb, in two calls; the board's QICK version with
-        code "import qick; print(qick.__version__)"."""
+        code "import qick; print(qick.__version__)". A board or lab computer without Jupyter: address
+        ssh://user@host, code a shell command (this computer's SSH key signs in, or password; Red Pitaya's default is
+        root/root); a server is started in the background (nohup ... &)."""
         return rt.run_on_board(address, code, notebook, password, wait)
 
     @server.tool(annotations=READ, structured_output=False)
     def library_api(module: str, env: str = "") -> str:
-        """A maker's Python package as its programmer sees it: its classes (methods, properties) and functions with
-        their arguments and the first line of their documentation, from one of Kelvin's environments (env; default
-        drivers). For writing a library card when the maker gives no example scripts. Nothing in it is called."""
+        """A maker's library as its programmer sees it, for writing a library card when the maker gives no example
+        scripts; nothing in it is called. module: a Python package, from one of Kelvin's environments (env; default
+        drivers): its classes, methods, properties and functions with their arguments and documentation's first
+        line. Or a .NET assembly by its full path in the maker's folder (C:/Program Files/Thorlabs/Kinesis/
+        Thorlabs.MotionControl.KCube.DCServoCLI.dll): its types, methods with parameter types, properties and enums.
+        Or com:<ProgID>: a COM object's methods and properties (making it starts the maker's program)."""
         return rt.library_api(module, env)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True,

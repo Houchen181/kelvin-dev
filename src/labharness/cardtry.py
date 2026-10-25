@@ -68,6 +68,9 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
             row: Dict[str, Any] = {"name": spec.name, "label": spec.label or spec.name, "unit": spec.unit,
                                    "kind": spec.kind}
             why = unsafe(spec.get_cmd.render() if "{value}" not in spec.get_cmd.text else spec.get_cmd.text)
+            if spec.get_before and not why:
+                why = "this reading runs an acquisition (%s); try it with the instrument in the lab" % "; ".join(
+                    spec.get_before)
             if why:
                 row["skipped"] = why
                 out["readings"].append(row)

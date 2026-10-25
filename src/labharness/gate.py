@@ -186,6 +186,39 @@ class SafetyGate:
         last = results[-1]
         return Result(last.ok, last.action, instr, value=last.value, message="; ".join(r.message for r in results))
 
+    def act(self, instr: str, name: str, in_plan: bool = False) -> Result:
+        """One of the card's named actions (trigger, arm, fire a burst), sent as the card writes it. One that drives the
+        sample (drives: true) asks a person first, like a drive change, unless it is part of a plan they approved;
+        the hands-on lock stops it. Blocked commands are never sent."""
+        target = "%s.%s" % (instr, name)
+        try:
+            inst = self.lab.instrument(instr)
+        except KeyError as e:
+            return self._done(Result(False, "refused", target, message="refused: %s" % e.args[0]), "action")
+        action = inst.card.actions.get(name)
+        if action is None:
+            return self._done(Result(False, "refused", target, message="refused: %s has no action %s (it has: %s)" % (
+                instr, name, ", ".join(inst.card.actions) or "none")), "action")
+        for c in action.send:
+            if any(b.match(c) is not None for b in inst.card.blocked):
+                return self._done(Result(False, "refused", target, message="refused: %r is blocked on %s" % (c, instr)),
+                                  "action")
+        if action.drives:
+            hands = self._hands_problem(target)
+            if hands:
+                return self._done(Result(False, "refused", target, message="refused: %s" % hands), "action")
+            if not in_plan:
+                request = ApprovalRequest("%s: %s?" % (instr, action.label), [
+                    "%s sends %s, which drives the sample" % (target, " then ".join(repr(c) for c in action.send))])
+                if not self.ask(request):
+                    note = " (%s)" % request.note if request.note else ""
+                    return self._done(Result(False, "declined", target, message="declined: %s not done%s"
+                                             % (target, note)), "action")
+        said = inst.act(name)
+        return self._done(Result(True, "sent", target, value=said[-1] if said else None,
+                                 message="%s: %s%s" % (instr, action.label, " → " + said[-1] if said else "")),
+                          "action", None, instrument=instr, name=name)
+
     def undo(self) -> Result:
         if not self._undo:
             return Result(False, "refused", "", message="nothing to undo")
@@ -220,7 +253,12 @@ class SafetyGate:
                 bits.append(g)
             if spec.set_cmd is None:
                 bits.append("read-only")
+            if spec.get_before:
+                bits.append("runs an acquisition (%s), then reads" % "; ".join(spec.get_before))
             lines.append("  " + "  ".join(bits))
+        if card.actions:
+            lines.append("  actions (do_action, or a plan's trigger:): " + ", ".join(
+                "%s%s" % (n, " (drives the sample: asks first)" if a.drives else "") for n, a in card.actions.items()))
         return "\n".join(lines)
 
     def status(self) -> Dict[str, Dict[str, Any]]:

@@ -926,3 +926,10 @@ body.resizing .plot-svg { pointer-events: none; }
   .suggestions { grid-template-columns: 1fr; }
   .empty { padding-top: 8vh; }
 }
+
+/* Settings, Instruments: what Kelvin installed for instruments */
+.env-list { list-style: none; padding: 0; margin: 4px 0 6px; }
+.env-list li { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; padding: 6px 0;
+  border-bottom: 1px solid var(--line); }
+.env-list .env-what { font-size: 13px; overflow-wrap: anywhere; }
+.env-list .env-what .muted { font-size: 12px; }

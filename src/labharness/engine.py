@@ -131,6 +131,10 @@ class RunEngine:
         """Static checks; also converts values to each parameter's type."""
         errors: List[str] = []
         lab = self.lab
+        for instr, name in plan.trigger:
+            if instr in lab.instruments and name not in lab.instruments[instr].card.actions:
+                errors.append("trigger: %s has no action %s (it has: %s)" % (
+                    instr, name, ", ".join(lab.instruments[instr].card.actions) or "none"))
         for name in plan.requires:
             if name not in lab.instruments:
                 errors.append("unknown instrument %r" % name)
@@ -251,6 +255,10 @@ class RunEngine:
         items, grants, problems = self.gate.plan_approval(drives)
         if problems:
             return self._refuse(plan.name, "; ".join(problems))
+        firing = ["%s.%s (%s)" % (i, a, self.lab.instruments[i].card.actions[a].label) for i, a in plan.trigger
+                  if self.lab.instruments[i].card.actions[a].drives]
+        if firing:   # an action that drives the sample at every point: the person approves the run
+            items = list(items) + ["At every point, after settling: %s, which drive the sample" % ", ".join(firing)]
         sim = None
         # auto mode needs a clean dry run, unless a drive is on an instrument Kelvin isn't sure about (a person asks)
         could_auto = self.gate.auto and not any(self.gate.unsure(self.lab.resolve(k)[0]) for k in grants)
@@ -264,6 +272,8 @@ class RunEngine:
                 title += ", ~%s" % _dur(sim.duration_s) if sim.ok else "; %s" % sim.message
             request = ApprovalRequest(title, items)
             auto, why = self.gate.auto_plan(grants, sim)
+            if firing:
+                auto, why = False, list(why or []) + ["it fires %s" % ", ".join(firing)]
             if auto:
                 self.gate.auto_approve(request, why)
             elif why:
@@ -364,6 +374,12 @@ class RunEngine:
                     row: Dict[str, Any] = {"i": n, "t": round(clock.now() - t0, 6)}
                     for axis, v in zip(plan.axes, combo):
                         row[axis.key] = v
+                    for instr, action in plan.trigger:   # the cards' actions: arm, trigger, fire
+                        if lab.instrument(instr).simulated:
+                            continue   # a twin has no trigger to fire
+                        done = gate.act(instr, action, in_plan=True)
+                        if not done.ok:
+                            raise _Abort("%s.%s: %s" % (instr, action, done.message))
                     for instr, param in plan.measure:
                         key = "%s.%s" % (instr, param)
                         row[key] = lab.read(instr, param)

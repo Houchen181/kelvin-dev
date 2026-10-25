@@ -200,3 +200,63 @@ def test_makers_programs_and_files(tmp_path, monkeypatch):
     assert hits[0] == (str(tmp_path / "attocube" / "attoDRY"), "folder")
     assert (str(sdk / "attodry_example.py"), ".py, 18 B") in hits and len(hits) == 3
     assert probe.find_files("nothing-like-this", [tmp_path]) == []
+
+
+class SerialDevice:
+    """An instrument on a serial line: it answers only at its own speed and framing; at any other it hears noise."""
+
+    def __init__(self, baud, parity, bits, reply=b"", streams=b"", echo=False):
+        self.baud, self.parity, self.bits, self.reply, self.streams, self.echo = baud, parity, bits, reply, streams, echo
+        self.heard = []
+
+    def opener(self, port, baud, parity, bits, timeout):
+        device = self
+
+        class Port:
+            pending = []
+
+            def read(self, n):
+                if device.streams and (baud, parity, bits) == (device.baud, "none", 8):
+                    return device.streams
+                return b"\xfe\x81\x00" if device.streams else b""
+
+            def reset_input_buffer(self):
+                pass
+
+            def write(self, data):
+                device.heard.append((baud, parity, bits, data))
+                if (baud, parity, bits) == (device.baud, device.parity, device.bits):
+                    self.pending = ([data] if device.echo else []) + [device.reply]
+                else:
+                    self.pending = [b"\x8f\xf0\x13"]
+
+            def read_until(self, end, n):
+                return self.pending.pop(0) if self.pending else b""
+
+            def close(self):
+                pass
+        return Port()
+
+
+def test_a_serial_instrument_found_at_its_own_speed_and_framing(monkeypatch, tmp_path):
+    device = SerialDevice(57600, "odd", 7, b"LSCI,MODEL336,1234567,1.0\r\n", echo=True)
+    said = probe.inspect_serial("COM7", opener=device.opener, listen=0.01)
+    assert said["streams"] == [] and said["answer"]["baud"] == 57600 and said["answer"]["parity"] == "odd"
+    assert said["answer"]["echo"] is True and said["answer"]["reply"] == "LSCI,MODEL336,1234567,1.0"
+    assert all(data == b"*IDN?\r\n" for *_, data in device.heard)          # only the identity query, ever
+    gauge = SerialDevice(9600, "none", 8, streams=b"0, 1.2300E-03\r\n")
+    assert probe.inspect_serial("COM8", opener=gauge.opener, listen=0.01)["streams"] == [(9600, "0, 1.2300E-03")]
+
+    pytest.importorskip("mcp")
+    from labharness.agent.runtime import LabRuntime
+    from labharness.gate import ScriptedApprover
+    monkeypatch.setattr(probe, "_open_serial", device.opener)
+    rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")
+    text = rt.inspect_serial("COM7")
+    assert "COM7 answers *IDN? at 57600 baud, 7O1 (it echoes each command)" in text
+    assert "card lakeshore/336" in text and "add_instrument serial://COM7" in text
+    assert "serial://COM7" in rt.last_found
+    from labharness.adapters import resource_name
+    assert rt.found_info[resource_name("serial://COM7")]["serial"]["baud_rate"] == 57600
+    assert "only an identity query" in rt.inspect_serial("COM7", query="RST")
+    assert "is not a serial port" in rt.inspect_serial("GPIB0::5::INSTR")

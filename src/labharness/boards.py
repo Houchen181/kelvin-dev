@@ -4,11 +4,15 @@ has approved that code. QICK's Pyro4 name server and server are started this way
 (qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb), and the board's QICK version is read.
 
 It speaks Jupyter's own interfaces: the login page (a password, or a token), /api/contents for a notebook's cells,
-/api/kernels for a fresh Python kernel, and the kernel's websocket for running code and reading what it prints."""
+/api/kernels for a fresh Python kernel, and the kernel's websocket for running code and reading what it prints.
+
+Boards and lab computers without Jupyter (a Red Pitaya, a Raspberry Pi controller) take shell commands over SSH:
+ssh_run, through paramiko, which Kelvin installs once a person approves; this computer's SSH key, or a password."""
 from __future__ import annotations
 
 import http.cookiejar
 import json
+import os
 import re
 import time
 import urllib.error
@@ -166,3 +170,56 @@ def run(address: str, cells: List[str], password: str = "", token: str = "", sec
         if not done or re.search(r"^\w*Error: ", said, re.M):
             break
     return results
+
+
+def ssh_target(address: str) -> Tuple[str, str, int]:
+    """ssh://user@host[:port] -> (user, host, port); root and 22 when not given."""
+    u = urllib.parse.urlparse(address.strip())
+    if u.scheme != "ssh" or not u.hostname:
+        raise JupyterError("%r is not ssh://user@host" % address)
+    return u.username or "root", u.hostname, u.port or 22
+
+
+def ssh_run(address: str, command: str, password: str = "", seconds: float = 30.0, known_hosts: Any = None,
+            module: Any = None) -> Tuple[bool, str]:
+    """A shell command on a board or lab computer over SSH: (finished, what it printed, with its exit status when
+    not 0). This computer's SSH key signs in, or the password given. The board's host key is kept the first time
+    (known_hosts) and checked after. A command still running after `seconds` is left to the SSH session's end, which
+    stops it: a server is started in the background (nohup ... &)."""
+    if module is None:
+        try:
+            import paramiko as module   # type: ignore
+        except ImportError as e:
+            from . import envs
+            raise JupyterError("SSH needs paramiko: %s" % envs.missing("paramiko")) from e
+    user, host, port = ssh_target(address)
+    client = module.SSHClient()
+    if known_hosts is not None and os.path.isfile(str(known_hosts)):
+        client.load_host_keys(str(known_hosts))
+    client.set_missing_host_key_policy(module.AutoAddPolicy())   # kept the first time, checked after
+    try:
+        client.connect(host, port=port, username=user, password=password or None, timeout=15,
+                       look_for_keys=not password, allow_agent=not password)
+    except Exception as e:
+        raise JupyterError("could not sign in to %s@%s over SSH: %s" % (user, host, str(e).splitlines()[0] if str(e)
+                                                                        else type(e).__name__)) from e
+    try:
+        if known_hosts is not None:
+            os.makedirs(os.path.dirname(str(known_hosts)), exist_ok=True)
+            client.save_host_keys(str(known_hosts))
+        _, stdout, _ = client.exec_command(command)
+        channel, out = stdout.channel, []
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if channel.recv_ready():
+                out.append(channel.recv(65536).decode("utf-8", "replace"))
+            elif channel.recv_stderr_ready():
+                out.append(channel.recv_stderr(65536).decode("utf-8", "replace"))
+            elif channel.exit_status_ready():
+                status = channel.recv_exit_status()
+                return True, "".join(out) + ("(exit status %d)\n" % status if status else "")
+            else:
+                time.sleep(0.05)
+        return False, "".join(out)
+    finally:
+        client.close()

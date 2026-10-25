@@ -11,6 +11,7 @@
     repeat: 3                                # repeat the whole sweep (adds a `repeat` column)
     time: { every: 2, for: 600 }             # innermost time series (adds a `time` column)
     settle: 0.3
+    trigger: [dmm.arm, gen.fire]             # the card's actions, at every point, after settling, before measuring
     measure: [lockin.X, lockin.Y, smu.I]
     after:   { smu.V: 0 }
     on_abort: { smu.V: 0 }                   # default: every drive the plan touched goes to safe
@@ -26,7 +27,7 @@ from .labconfig import read_yaml
 
 MAX_POINTS = 1_000_000
 _KEYS = {"plan", "description", "device", "requires", "preconditions", "setup", "sweep", "repeat", "time",
-         "settle", "measure", "after", "on_abort"}
+         "settle", "measure", "after", "on_abort", "trigger"}
 
 
 class PlanError(ValueError):
@@ -84,6 +85,7 @@ class Plan:
     setup: List[Step] = field(default_factory=list)
     axes: List[Axis] = field(default_factory=list)
     measure: List[Tuple[str, str]] = field(default_factory=list)
+    trigger: List[Tuple[str, str]] = field(default_factory=list)   # the cards' actions, at every point
     settle: float = 0.0
     after: List[Step] = field(default_factory=list)
     on_abort: Optional[List[Step]] = None
@@ -248,6 +250,11 @@ def load_plan(source: Any) -> Plan:
         ip = _split(key, "measure", errors)
         if ip:
             measure.append(ip)
+    trigger = []
+    for key in data.get("trigger") or []:   # instrument.action, as the card names its actions
+        ip = _split(key, "trigger", errors)
+        if ip:
+            trigger.append(ip)
 
     preconditions = []
     for text in data.get("preconditions") or []:
@@ -266,12 +273,14 @@ def load_plan(source: Any) -> Plan:
         settle = 0.0
 
     plan = Plan(name=name, description=str(data.get("description", "")), preconditions=preconditions,
-                setup=setup, axes=axes, measure=measure, settle=settle, after=after, on_abort=on_abort,
+                setup=setup, axes=axes, measure=measure, trigger=trigger, settle=settle, after=after,
+                on_abort=on_abort,
                 source=data, device=" ".join(str(data.get("device") or "").split())[:60])
     if plan.points > MAX_POINTS:
         errors.append("plan has %d points (max %d)" % (plan.points, MAX_POINTS))
     used = [s.instr for s in plan.all_steps()] + [a.instr for a in plan.instrument_axes] \
-        + [a.stabilize.instr for a in axes if a.stabilize] + [i for i, _ in measure] + [c.instr for c in preconditions]
+        + [a.stabilize.instr for a in axes if a.stabilize] + [i for i, _ in measure] + [c.instr for c in preconditions] \
+        + [i for i, _ in trigger]
     plan.requires = [str(r) for r in data.get("requires") or []] or list(dict.fromkeys(used))
     if errors:
         raise PlanError(errors)

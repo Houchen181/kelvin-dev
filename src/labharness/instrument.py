@@ -98,9 +98,50 @@ class Instrument:
             if spec.default is not None:
                 return spec.default
             raise ValueError("%s.%s cannot be read" % (self.name, param))
+        if spec.get_before:
+            return self._acquire(spec)
         if spec.type == "trace":
             return self._trace(spec)
         return spec.from_wire(self.backend.query(spec.get_cmd.render()))
+
+    def _acquire(self, spec: ParamSpec) -> Any:
+        """A reading that runs an acquisition: its commands first (arm, trigger; *OPC? waits until it is done), then
+        the fetch, all in one go on the connection, with the time the card gives it."""
+        from .scpi import is_query
+        lock = getattr(self.backend, "lock", None)
+        held = lock if lock is not None and hasattr(lock, "_is_owned") else None   # re-entrant: hold it throughout
+        res = getattr(self.backend, "res", None)
+        before = getattr(res, "timeout", None)
+        if held is not None:
+            held.acquire()
+        try:
+            if spec.wait_s and before is not None:
+                res.timeout = spec.wait_s * 1000.0
+            for c in spec.get_before:
+                if is_query(c, bool(self.card.connection.get("enq"))):
+                    self.backend.query(c)   # *OPC?: answers when the acquisition is done
+                else:
+                    self.backend.write(c)
+            if spec.type == "trace":
+                return self._trace(spec)
+            return spec.from_wire(self.backend.query(spec.get_cmd.render()))
+        finally:
+            if spec.wait_s and before is not None:
+                res.timeout = before
+            if held is not None:
+                held.release()
+
+    def act(self, name: str) -> List[str]:
+        """Send one of the card's named actions; what queries among them answered."""
+        from .scpi import is_query
+        action = self.card.actions[name]
+        said = []
+        for c in action.send:
+            if is_query(c, bool(self.card.connection.get("enq"))):
+                said.append(self.backend.query(c).strip())
+            else:
+                self.backend.write(c)
+        return said
 
     def _trace(self, spec: ParamSpec) -> List[float]:
         """A trace: as text, or as a block of binary numbers (binary: on the card) where the connection can read one;

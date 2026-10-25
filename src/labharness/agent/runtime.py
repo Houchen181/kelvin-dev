@@ -139,14 +139,37 @@ def trace_summary(spec: ParamSpec, values: List[float]) -> str:
 
 
 def _runs_a_program(address: str) -> bool:
-    """A lib:// address that names a Python (python=) or a folder of files (path=), or none at all, runs a program
-    a person chose: only a person writes one (Lab setup); Kelvin uses it once it is in the lab. One that names an
-    environment Kelvin installed with a person's approval (env=, envs.py) Kelvin may try and add itself."""
+    """A lib:// address that names a Python (python=), a folder of files anywhere (path=), or neither, runs a
+    program a person chose: only a person writes one (Lab setup); Kelvin uses it once it is in the lab. One that
+    names an environment Kelvin installed with a person's approval (env=, envs.py), or the folder a maker's installer
+    put its library in (path= in Program Files, /Applications or /opt), Kelvin may try and add itself."""
     import urllib.parse
     if not address.strip().lower().startswith("lib://"):
         return False
     q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(address.strip()).query))
-    return bool(q.get("python") or q.get("path") or not q.get("env"))
+    if q.get("python"):
+        return True
+    if q.get("path"):
+        return not _installed_by_a_maker(q["path"])
+    return not q.get("env")
+
+
+def _installed_by_a_maker(folder: str) -> bool:
+    """A folder a maker's installer wrote: in Program Files (only an administrator writes there), /Applications or
+    /opt."""
+    import os
+    roots = [os.environ.get(k) for k in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    roots += ["/Applications", "/opt", "/Library/Frameworks"]
+    try:
+        path = Path(folder).resolve()
+    except (OSError, ValueError):
+        return False
+    for r in roots:
+        if r and Path(r).is_dir():
+            root = Path(r).resolve()
+            if path == root or root in path.parents:
+                return path != root
+    return False
 
 
 class LabRuntime:
@@ -2008,6 +2031,56 @@ class LabRuntime:
                 self.last_found.append(resource)   # found here: try_card and add_instrument may use it
         return "\n".join(lines)
 
+    def inspect_serial(self, port: str, query: str = "*IDN?", baud: int = 0) -> str:
+        """What an instrument on a serial port is: what it sends by itself (some stream readings), then its answer
+        to an identity query at the speeds and framings instruments use (or the one the manual gives). Only listens
+        and asks that query; a port an instrument of the lab uses is left alone."""
+        from .. import probe
+        from ..adapters import resource_name
+        from ..discovery import match_card
+        m = re.match(r"^(?:serial://)?(COM\d+|/dev/\S+)$", port.strip(), re.I) or \
+            re.match(r"^ASRL(\d+)::INSTR$", port.strip(), re.I)
+        if not m:
+            return "%r is not a serial port (COM5, /dev/ttyUSB0)" % port
+        name = m.group(1) if not m.group(1).isdigit() else "COM" + m.group(1)
+        address = "serial://" + name
+        for inst, ic in self.lab.config.instruments.items():
+            if resource_name(ic.address) == resource_name(address):
+                return "%s is %s's, in the lab: Kelvin leaves its connection alone" % (name, inst)
+        query = (query or "*IDN?").strip()
+        if "?" not in query or len(query) > 40:
+            return "only an identity query (with a ?, as the manual gives it) is sent to an instrument Kelvin doesn't know"
+        with self.lock:   # one thing at a time on the ports
+            res = probe.inspect_serial(name, query, [baud] if baud else None)
+        if res.get("error"):
+            return "could not open %s: %s (another program may have it open)" % (name, res["error"])
+        lines = []
+        for speed, text in res["streams"]:
+            lines.append("%s sends by itself at %d baud, 8N1: %r (an instrument that streams its readings)"
+                         % (name, speed, text))
+        a = res["answer"]
+        if a is None:
+            lines.append("nothing answered %s at %s, 8N1, 7O1 or 7E1 (%d tries). Check its cable (a null-modem one?) "
+                         "and that it is switched on; its manual gives its speed and its identity query (query=)"
+                         % (query, "%d baud" % baud if baud else "1200 to 115200 baud", res["tried"]))
+            return "\n".join(lines)
+        settings = {"baud_rate": a["baud"], "data_bits": a["data_bits"], "parity": a["parity"], "stop_bits": 1,
+                    "read_termination": a["ending"], "write_termination": "\r\n"}
+        if a["echo"]:
+            settings["echo"] = True
+        card = match_card(a["reply"], self.lab.registry)
+        framing = "%d%s1" % (a["data_bits"], a["parity"][0].upper())
+        lines.append("%s answers %s at %d baud, %s%s: %r → %s" % (
+            name, query, a["baud"], framing, " (it echoes each command)" if a["echo"] else "", a["reply"],
+            "card %s (%s): add_instrument %s" % (card.id, card.model, address) if card else
+            "no card matches it yet: draft_card %s, then add_instrument with connection %s" % (address, settings)))
+        if address not in self.last_found:
+            self.last_found.append(address)   # found here: try_card and add_instrument may use it
+        self.found_info[resource_name(address)] = {"address": address, "idn": a["reply"], "serial": settings,
+                                                   "card_id": card.id if card else None,
+                                                   "model": card.model if card else "", "kind": card.kind if card else ""}
+        return "\n".join(lines)
+
     def connected_devices(self) -> str:
         """Everything plugged into this computer: USB devices (with what each calls itself and its driver, also
         those no driver claims), serial ports, and the networks this computer is on."""
@@ -2173,6 +2246,13 @@ class LabRuntime:
                    "A library card uses it with lib://<address>?env=%s." % env,
                    "".join(" " + c for c in connected)))
 
+    def do_action(self, instrument: str, action: str) -> str:
+        """One of an instrument's named actions (its card's actions: trigger, arm, fire a burst). One that drives the
+        sample asks the person first."""
+        def run() -> str:
+            return self.gate.act(instrument, action).message
+        return self._do("%s.%s" % (instrument, action), run)
+
     def reconnect_instrument(self, name: str, by: str = "agent") -> str:
         """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package
         installed, the instrument switched on or plugged in). Connecting changes nothing on it."""
@@ -2222,13 +2302,44 @@ class LabRuntime:
                 return "%s (installed as a Python package)" % envs.site_packages(env, self.home)
             return str(envs.add_files(env, path, self.home))
 
+    def _run_over_ssh(self, address: str, command: str, notebook: str, password: str, wait: float) -> str:
+        """A shell command on a board or lab computer over SSH, once a person approves it."""
+        from .. import boards, envs, probe
+        try:
+            user, host, port = boards.ssh_target(address)
+            probe.local_ip(host)
+        except (ValueError, boards.JupyterError) as e:
+            return str(e)
+        if notebook or not (command or "").strip():
+            return "over SSH, give the shell command to run (code); notebooks run through a board's Jupyter"
+        wait = max(1.0, min(float(wait or 30), 300.0))
+        request = ApprovalRequest("Run a command on %s over SSH?" % host, [
+            "As %s on %s:%d:\n%s" % (user, host, port, command.strip()[:3000]),
+            "Signed in with %s. A command still running after %g s is stopped when Kelvin disconnects: a server is "
+            "started in the background (nohup ... &)." % ("the password given" if password else
+                                                         "this computer's SSH key", wait)])
+        if not self.gate.ask(request):
+            note = " (%s)" % request.note if request.note else ""
+            return "declined: nothing was run on %s%s" % (host, note)
+        try:
+            done, said = boards.ssh_run(address, command, password, wait, envs.root(self.home) / "tools" / "known_hosts")
+        except boards.JupyterError as e:
+            return "could not run it: %s" % e
+        self.gate.log.write("board_run", by="agent", board="ssh://%s@%s:%d" % (user, host, port), finished=[done])
+        said = said.strip()
+        return "%s%s" % ("done" if done else "still running after %g s, stopped when Kelvin disconnected" % wait,
+                         ": " + said[-2000:] if said else "")
+
     def run_on_board(self, address: str, code: str = "", notebook: str = "", password: str = "",
                      wait: float = 30) -> str:
         """Run code on a lab board through its Jupyter server (a PYNQ board for QICK, a Red Pitaya), as a notebook
         cell runs there: the code given, or one of the board's own notebooks, in a new kernel. Kelvin signs in first,
-        then a person approves the code. A cell still running after `wait` seconds (a server) is left running."""
+        then a person approves the code. A cell still running after `wait` seconds (a server) is left running.
+        An ssh://user@host address runs code as a shell command over SSH instead (a Red Pitaya, a Raspberry Pi)."""
         import urllib.parse
         from .. import boards, probe
+        if address.strip().lower().startswith("ssh://"):
+            return self._run_over_ssh(address, code, notebook, password, wait)
         try:
             url = boards.board_url(address)
             probe.local_ip(urllib.parse.urlparse(url).hostname or "")

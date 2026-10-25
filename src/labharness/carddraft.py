@@ -86,6 +86,13 @@ DLL instead of sending text): the card gets a library section, and each command 
   code (0 = fine), and functions: for each function the card calls, its C arguments (args: [float]) and the one value
   it writes back through a pointer (out: float; out: str for a char buffer followed by its length). Types: int8 uint8
   int16 uint16 int32 int uint32 int64 uint64 float double bool str. Take them from the header file; never guess.
+  Or a .NET library (Thorlabs Kinesis and many stages and cameras): assembly: [<its .dll files the examples
+  reference>], type: <the full name of the class>, setup: [<static calls the examples make first, by full name:
+  Thorlabs.MotionControl.DeviceManagerCLI.DeviceManagerCLI.BuildDeviceList>], create: <the factory method the
+  examples call (CreateKCubeDCServo), or true for a constructor>, create_args: ["{address}"], properties: [<the
+  properties the card reads or sets, such as Position>]. Kelvin passes values as each method's parameters want them
+  (a Decimal position, an enum by name). Or a COM object of an older maker's program: com: <its ProgID>, properties.
+  A property is read with get: "GET Position" and set with set: "SET Exposure= {value}".
 - library.open: the calls the examples make to connect, in order ({address} is what the lab's address names, such as
   a COM port or an IP address; add "wait 10" where the examples sleep before the instrument answers). library.close:
   the calls they end with.
@@ -100,8 +107,17 @@ DLL instead of sending text): the card gets a library section, and each command 
 - requires: [<the maker's Python packages the library imports, as pip names them>], when they come from PyPI.
 - Say in notes how to address it: lib://<port or IP>?env=<the environment install_for_instrument made for the
   library: its Python, 32-bit for a 32-bit DLL, with the maker's package or files in it>; or, where a person set the
-  library up themselves, lib://<port or IP>?python=<that Python>&path=<the folder with the maker's files>.
+  library up themselves, lib://<port or IP>?python=<that Python>&path=<the folder with the maker's files>. A .NET
+  library in the folder its maker's installer put it in: lib://<serial>?path=<that folder in Program Files>. A COM
+  object: lib://<a name>?env=<an environment with pywin32>.
 Example scripts that send text (inst.write("SOUR:VOLT 1"), inst.query("MEAS:VOLT?")) give ordinary command templates.
+
+Acquisitions and triggers (a multimeter's buffer, a scope's single shot, an analyzer's sweep): a reading whose
+commands arm, trigger and wait before the fetch is get: ["INIT", "*TRG", "*OPC?", "TRAC:DATA?"] with acquires: true
+and wait: <the seconds it may take>; *OPC? answers when the acquisition is done. Those commands only arm, trigger
+and wait: a setting (trigger source, sample count) is a parameter of its own. Named commands with no value go under
+actions: {trigger: {send: "*TRG", label: Trigger}, fire: {send: ":BURS:FIRE", label: Fire a burst, drives: true}}
+(drives: true when it drives the sample, which then asks a person); a plan does them at every point with trigger:.
 
 Instruments whose commands start with the value ("ON,1" / "OFF,1"): set: "{value},{ch}" with bool_text: ["ON", "OFF"]
 (quote the words: YAML reads a bare ON as true). Settings with no read-back: leave out get; Kelvin remembers what

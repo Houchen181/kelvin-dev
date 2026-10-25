@@ -1826,6 +1826,44 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                                        why="your lab's instruments", by="human (portal)")
         return JSONResponse({"ok": said.startswith("installed"), "message": said})
 
+    def environment_rows() -> List[Dict[str, Any]]:
+        from .. import envs
+        rows = []
+        for rec in envs.listing(home):
+            folder, size = envs.env_dir(rec["name"], home), 0
+            for root, _, files in os.walk(folder):
+                for f in files:
+                    try:
+                        size += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            rows.append({"name": rec["name"], "python": rec.get("python"), "bits": rec.get("bits", 64),
+                         "packages": rec.get("packages") or {}, "files": rec.get("files") or [],
+                         "for": rec.get("for") or [], "mb": round(size / 1e6, 1), "folder": str(folder)})
+        return rows
+
+    async def environments_view(request: Request) -> Response:
+        """GET: what Kelvin installed for instruments, each in its environment (envs.py). POST {remove: name}: a
+        person removes one in Settings; instruments that use it stop connecting until it is installed again."""
+        from .. import envs
+        if request.method == "GET":
+            return JSONResponse({"environments": await asyncio.to_thread(environment_rows)})
+        body = await request.json()
+        name = str(body.get("remove") or "")
+        problem = busy_problem()
+        if problem:
+            return error(409, problem)
+        try:
+            rec = envs.info(name, home)
+        except ValueError as e:
+            return error(400, str(e))
+        if rec is None:
+            return error(404, "There is no environment %s." % name)
+        whole = await asyncio.to_thread(envs.remove, name, home)
+        runtime.gate.log.write("environment_removed", by="human (portal)", env=name)
+        return JSONResponse({"ok": True, "message": "Removed %s%s." % (
+            name, "" if whole else "; some of its files are in use, and go when Kelvin next starts")})
+
     def instrument_folders() -> List[Dict[str, Any]]:
         out = []
         for name, inst in runtime.lab.instruments.items():
@@ -2295,6 +2333,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/lab", lab_view, methods=["GET", "POST"]),
         Route("/api/lab/install", lab_install, methods=["POST"]),
+        Route("/api/environments", environments_view, methods=["GET", "POST"]),
         Route("/api/reports", reports_view, methods=["GET", "POST"]),
         Route("/api/reports/tree", reports_tree),
         Route("/api/reports/refresh", reports_refresh, methods=["POST"]),

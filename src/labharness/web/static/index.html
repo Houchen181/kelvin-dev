@@ -430,6 +430,11 @@
             </div>
             <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows; until you review their limits, Kelvin asks you before each output change on them. When you name an instrument in a chat, Kelvin sets it up the same way. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website. Looking on the local network finds instruments that announce themselves (LXI); the first time, Windows may ask whether Kelvin may use the network: allow private networks. For an instrument it doesn't know, Kelvin finds the maker's manual and writes a draft card with your default model (it sends the maker, the model and the manual's command pages, never the serial number). Every setting and output change on a draft asks you until you review it.</span>
           </div>
+          <div class="field">
+            <div class="field-row"><span class="field-label">Installed for instruments</span></div>
+            <ul id="env-list" class="env-list"><li class="muted small">Nothing yet.</li></ul>
+            <span class="hint">The makers' packages and files Kelvin installed on this computer for your instruments, once you approved them, each in its own environment in ~/Kelvin/env (nothing system-wide). Removing one stops the instruments that use it from connecting until it is installed again. Uninstalling Kelvin removes them all.</span>
+          </div>
         </section>
         <section class="set-page" data-page="data" hidden>
           <h3 class="set-title">Data &amp; reports</h3>
