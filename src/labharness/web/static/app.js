@@ -3,7 +3,8 @@
   const token = decodeURIComponent(location.hash.slice(1));
   const $ = (id) => document.getElementById(id);
   const SVGNS = "http://www.w3.org/2000/svg";
-  const S = { compare: [], lastReply: null, chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map() };
+  const S = { compare: [], lastReply: null, chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map(),
+    steers: [] };   // what the person wrote while Kelvin works, until Kelvin reads it
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -2445,14 +2446,87 @@
   // ------------------------------------------------------------------ sending
   function setStreaming(on) {
     S.streaming = on;
-    const send = $("send");
-    send.classList.toggle("stop", on);
-    send.setAttribute("aria-label", on ? "Stop" : "Send");
+    $("input").placeholder = on ? "Add to what Kelvin is doing: it reads this after the step it is on" : askHint();
     updateSend();
   }
-  function updateSend() {
+  function updateSend() {   // while Kelvin works: Stop, or Send once something is typed (Kelvin reads it next step)
     const send = $("send");
-    send.disabled = !S.streaming && ((!$("input").value.trim() && !ATT.items.length) || !$("model").value);
+    const typed = !!$("input").value.trim();
+    const stop = S.streaming && !typed;
+    send.classList.toggle("stop", stop);
+    send.setAttribute("aria-label", stop ? "Stop" : "Send");
+    send.disabled = !S.streaming && ((!typed && !ATT.items.length) || !$("model").value);
+  }
+  // ------------------------------------------------------------------ /name: start a skill or a recipe
+  const SLASH = { items: null, shown: [], at: 0, for: null };
+  async function slashMenu() {
+    const m = /^\/([a-z0-9-]*)$/i.exec($("input").value);
+    if (!m) { closeSlash(); return; }
+    const project = currentProject() || "";
+    if (SLASH.items === null || SLASH.for !== project) {
+      SLASH.for = project;
+      try { SLASH.items = (await api("/api/know/menu?project=" + encodeURIComponent(project) + (S.incognito ? "&incognito=1" : ""))).items; }
+      catch (e) { SLASH.items = []; }
+    }
+    const typed = m[1].toLowerCase();
+    SLASH.shown = SLASH.items.filter((i) => i.name.startsWith(typed)).concat(
+      SLASH.items.filter((i) => !i.name.startsWith(typed) && i.name.includes(typed))).slice(0, 12);
+    SLASH.at = 0;
+    renderSlash();
+  }
+  function renderSlash() {
+    const menu = $("slash-menu");
+    if (!SLASH.shown.length) { menu.hidden = true; return; }
+    menu.replaceChildren(...SLASH.shown.map((it, k) => {
+      const b = h("button", { class: "slash-item" + (k === SLASH.at ? " on" : ""), type: "button", role: "option" },
+        h("b", {}, "/" + it.name), h("span", {}, (it.kind === "recipe" ? "recipe: " : "") + it.description));
+      b.addEventListener("mousedown", (e) => { e.preventDefault(); pickSlash(it); });
+      return b;
+    }));
+    menu.hidden = false;
+  }
+  function pickSlash(it) {
+    $("input").value = "/" + it.name + " ";
+    closeSlash(); autosize(); updateSend();
+    $("input").focus();
+  }
+  function closeSlash() { $("slash-menu").hidden = true; SLASH.shown = []; SLASH.items = null; }   // fresh next time
+  function slashKey(e) {   // the arrows, Enter, Tab and Esc work the menu while it is open
+    if ($("slash-menu").hidden || !SLASH.shown.length) return false;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      SLASH.at = (SLASH.at + (e.key === "ArrowDown" ? 1 : SLASH.shown.length - 1)) % SLASH.shown.length;
+      renderSlash();
+    } else if (e.key === "Enter" || e.key === "Tab") pickSlash(SLASH.shown[SLASH.at]);
+    else if (e.key === "Escape") closeSlash();
+    else return false;
+    e.preventDefault();
+    return true;
+  }
+  async function steerMessage(text) {   // written while Kelvin works: it reads it at its next step
+    if (!text || !S.chatId) return;
+    $("input").value = ""; autosize(); updateSend();
+    const el = userBubble(text, []);
+    el.classList.add("pending");
+    el.title = "Kelvin reads this after the step it is on";
+    thread.append(el);
+    toBottom();
+    const one = { text, el };
+    S.steers.push(one);
+    try { await api("/api/chats/" + S.chatId + "/steer", { body: { text } }); } catch (e) { one.late = true; }   // sent after
+  }
+  function steered(reply, texts, model) {   // Kelvin read them: they stand in the chat, and its answer goes on below
+    reply.finish();
+    for (const text of texts) {
+      const i = S.steers.findIndex((s) => s.text === text && !s.late);
+      if (i < 0) continue;
+      S.steers[i].el.classList.remove("pending");
+      S.steers[i].el.removeAttribute("title");
+      S.steers.splice(i, 1);
+    }
+    const next = new Reply(model);
+    const waiting = S.steers.find((s) => s.el.isConnected);
+    if (waiting) thread.insertBefore(next.el, waiting.el); else thread.append(next.el);
+    return next;
   }
 
   // ------------------------------------------------------------------ attached pictures and PDFs
@@ -2513,8 +2587,9 @@
 
   async function sendMessage(text) {
     text = text.trim();
+    if (S.streaming) return steerMessage(text);   // attachments wait for the next message
     if (!text && ATT.items.length) text = ATT.items.length > 1 ? "Look at the attached files." : "Look at the attached file.";
-    if (!text || S.streaming) return;
+    if (!text) return;
     const model = $("model").value;
     if (!model) { openSettings(); return; }
     const extra = S.compare.filter((k) => k !== model);
@@ -2536,7 +2611,7 @@
     $("input").placeholder = askHint();
     showEmpty(false);
     thread.append(userBubble(text, attachments));
-    const reply = new Reply(model);
+    let reply = new Reply(model);
     thread.append(reply.el);
     toBottom();
     setStreaming(true);
@@ -2563,7 +2638,10 @@
         while ((nl = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
-          if (line.trim()) handle(reply, JSON.parse(line));
+          if (!line.trim()) continue;
+          const ev = JSON.parse(line);
+          if (ev.type === "steered") reply = steered(reply, ev.texts || [], model);
+          else handle(reply, ev);
         }
       }
     } catch (e) {
@@ -2574,6 +2652,9 @@
       refreshChats();
       pollState();
       offerReview(reply);
+      const left = S.steers.splice(0);   // written too late for this answer: the next message
+      for (const s of left) s.el.remove();
+      if (left.length) sendMessage(left.map((s) => s.text).join("\n\n"));
     }
   }
 
@@ -2680,6 +2761,9 @@
       refreshChats();
       pollState();
       offerReview(S.lastReply);
+      const left = S.steers.splice(0);   // models being compared read nothing meanwhile: the next message
+      for (const s of left) s.el.remove();
+      if (left.length) sendMessage(left.map((s) => s.text).join("\n\n"));
     }
   }
   function compareLabel() {
@@ -4535,10 +4619,24 @@
       const body = h("pre", { class: "know-body", hidden: true }, it.body);
       const show = h("button", { class: "link soft", type: "button" }, "Show");
       show.addEventListener("click", () => { body.hidden = !body.hidden; show.textContent = body.hidden ? "Show" : "Hide"; });
-      const when = it.saved ? "kept " + new Date(it.saved * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : "comes with Kelvin";
-      const row = h("li", { class: "memory-note" }, h("span", { class: "memory-kind" }, it.kind),
+      const when = (it.saved ? "kept " + new Date(it.saved * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : "comes with Kelvin") +
+        (it.files && it.files.length ? " · " + it.files.length + (it.files.length === 1 ? " file" : " files") : "");
+      const on = h("input", { type: "checkbox", "aria-label": "Kelvin uses this " + it.kind });
+      on.checked = it.enabled !== false;
+      on.addEventListener("change", async () => {
+        try { await api("/api/know/" + it.kind + "/" + it.scope + "/" + encodeURIComponent(it.name), { body: { enabled: on.checked } }); it.enabled = on.checked; }
+        catch (e) { on.checked = !on.checked; msg.textContent = e.message; }
+      });
+      const extra = [];
+      if (it.kind === "skill") {
+        const get = h("button", { class: "link soft", type: "button", title: "As a .zip for Claude or another Kelvin" }, "Download");
+        get.addEventListener("click", () => downloadSkill(it));
+        extra.push(get);
+      }
+      const row = h("li", { class: "memory-note" + (it.enabled === false ? " off" : "") }, h("span", { class: "memory-kind" }, it.kind),
         h("div", { class: "memory-body" }, h("span", {}, h("b", {}, it.name), it.description ? " — " + it.description : ""),
-          h("span", { class: "memory-meta" }, when), show, body));
+          h("span", { class: "memory-meta" }, when), show, ...extra, body),
+        h("label", { class: "know-on", title: "Kelvin sees it (off: kept, but not offered)" }, on, "On"));
       if (it.scope !== "kelvin") {
         row.append(rowButton("trash", "Delete this " + it.kind, async () => {
           try { await api("/api/know/" + it.kind + "/" + it.scope + "/" + encodeURIComponent(it.name), { method: "DELETE" }); }
@@ -4548,6 +4646,33 @@
       }
       return row;
     }));
+  }
+  async function downloadSkill(it) {
+    try {
+      const res = await fetch("/api/skills/export/" + it.scope + "/" + encodeURIComponent(it.name), { headers: { "X-Kelvin-Token": token } });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const url = URL.createObjectURL(await res.blob());
+      const a = h("a", { href: url, download: it.name + ".zip" });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (e) { toast("Could not download the skill: " + e.message); }
+  }
+  async function addSkill(file, scope, after, msg, replace) {   // a skill packed for Claude: .zip, .skill or SKILL.md
+    if (!file) return;
+    msg.textContent = "Adding " + file.name + "…";
+    try {
+      const res = await fetch("/api/skills/import?scope=" + encodeURIComponent(scope) + (replace ? "&replace=1" : ""), {
+        method: "POST", body: file,
+        headers: { "X-Kelvin-Token": token, "X-File-Name": encodeURIComponent(file.name) } });
+      const r = await res.json().catch(() => ({}));
+      if (res.status === 409 && !replace) {
+        if (confirm(r.error + ". Replace it?")) return addSkill(file, scope, after, msg, true);
+        msg.textContent = ""; return;
+      }
+      if (!res.ok) throw new Error(r.error || "HTTP " + res.status);
+      msg.textContent = "Added the skill " + r.name + (r.files && r.files.length ? " with " + r.files.length + (r.files.length === 1 ? " file" : " files") : "") + ".";
+      after();
+    } catch (e) { msg.textContent = "Could not add the skill: " + e.message; }
   }
   function renderGlobalNotes(notes) {
     const list = $("global-notes");
@@ -4746,13 +4871,15 @@
 
     $("composer").addEventListener("submit", (e) => {
       e.preventDefault();
-      if (S.streaming) api("/api/stop", { body: {} }).catch(() => {});
+      if (S.streaming && !$("input").value.trim()) api("/api/stop", { body: {} }).catch(() => {});
       else sendMessage($("input").value);
     });
-    $("input").addEventListener("input", autosize);
+    $("input").addEventListener("input", () => { autosize(); updateSend(); slashMenu(); });
     $("input").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!S.streaming) sendMessage($("input").value); }
+      if (slashKey(e)) return;
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage($("input").value); }
     });
+    $("input").addEventListener("blur", () => setTimeout(closeSlash, 150));
     $("model").addEventListener("change", () => {
       store("lh.model", $("model").value); updateSend(); showPlanChip();
       S.compare = S.compare.filter((k) => k !== $("model").value); compareLabel();
@@ -4770,6 +4897,17 @@
     $("data-path").addEventListener("input", dataPathChanged);
     $("data-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("data-use").disabled) useDataFolder(); } });
     $("data-use").addEventListener("click", useDataFolder);
+    $("global-know-add").addEventListener("click", () => $("global-know-file").click());
+    $("global-know-file").addEventListener("change", (e) => {
+      const f = e.target.files[0]; e.target.value = "";
+      addSkill(f, "global", () => loadKnow("global", $("global-know"), $("global-know-count"), $("settings-msg")), $("settings-msg"));
+    });
+    $("project-know-add").addEventListener("click", () => $("project-know-file").click());
+    $("project-know-file").addEventListener("change", (e) => {
+      const f = e.target.files[0]; e.target.value = "";
+      const p = editingProject;
+      if (p) addSkill(f, p.id, () => loadKnow(p.id, $("project-know"), $("know-count"), $("project-msg")), $("project-msg"));
+    });
     $("data-choose").addEventListener("click", async () => {
       const path = await pickFolder($("data-path").value.trim());
       if (path) { $("data-path").value = path; dataPathChanged(); }

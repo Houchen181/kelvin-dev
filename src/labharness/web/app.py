@@ -69,7 +69,7 @@ HUB_SHARING = False
 LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
                           "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/folder",
                           "/api/phone", "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount",
-                          "/api/quit", "/api/update", "/api/hub")
+                          "/api/quit", "/api/update", "/api/hub", "/api/skills/", "/api/know/")
 
 
 def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -1327,13 +1327,60 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse({"items": [i.view() for i in items]})
 
     async def know_item(request: Request) -> Response:
-        """DELETE a skill or recipe the person kept (Kelvin's own stay)."""
+        """DELETE a skill or recipe the person kept (Kelvin's own stay). POST {enabled}: offer it to Kelvin, or no
+        longer (it stays kept; Kelvin's own can be switched off too)."""
         p = request.path_params
         try:
+            if request.method == "POST":
+                agent.know.switch(p["kind"], p["scope"], p["name"], bool((await request.json()).get("enabled")))
+                return JSONResponse({"ok": True})
             gone = agent.know.delete(p["kind"], p["scope"], p["name"])
         except KeyError as e:
             return error(404, e.args[0])
         return JSONResponse({"ok": gone}, status_code=200 if gone else 404)
+
+    async def know_menu(request: Request) -> Response:
+        """The skills and recipes a chat (in ?project=) can start with /name: the ones switched on."""
+        project = request.query_params.get("project") or None
+        items = [i for i in agent.know.items(project, request.query_params.get("incognito") == "1") if i.enabled]
+        return JSONResponse({"items": [{"kind": i.kind, "name": i.name, "description": i.description}
+                                       for i in sorted(items, key=lambda i: i.name)]})
+
+    async def skill_import(request: Request) -> Response:
+        """POST a skill packed as Claude's are (a .zip or .skill with SKILL.md, or a lone SKILL.md), the file's bytes
+        (X-File-Name: its name): kept for every project (?scope=global) or a project's chats (?scope=<project id>).
+        409 when there is one by its name (?replace=1 overwrites it)."""
+        from urllib.parse import unquote
+        scope = request.query_params.get("scope") or "global"
+        data = await request.body()
+        if not data:
+            return error(400, "The file is empty.")
+        if len(data) > ATTACH_MAX:
+            return error(413, "Kelvin takes skills up to %d MB." % (ATTACH_MAX // 2 ** 20))
+        try:
+            if scope != "global":
+                store.project(scope)
+            item = await asyncio.to_thread(agent.know.import_skill, scope, data,
+                                           unquote(request.headers.get("x-file-name", "")),
+                                           request.query_params.get("replace") == "1")
+        except KeyError as e:
+            return error(404, e.args[0])
+        except FileExistsError as e:
+            return error(409, str(e))
+        except ValueError as e:
+            return error(400, str(e))
+        runtime.gate.log.write("skill_added", by="human", skill=item.name, scope=scope, files=len(item.files))
+        return JSONResponse(item.view())
+
+    async def skill_export(request: Request) -> Response:
+        """A skill as a .zip Claude takes (<name>/SKILL.md and its files), to download."""
+        p = request.path_params
+        try:
+            name, data = await asyncio.to_thread(agent.know.export, p["scope"], p["name"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        return Response(data, media_type="application/zip",
+                        headers={"Content-Disposition": 'attachment; filename="%s"' % name, "Cache-Control": "no-store"})
 
     async def memory_note(request: Request) -> Response:
         try:
@@ -2270,6 +2317,18 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return StreamingResponse(events(), media_type="application/x-ndjson",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    async def steer(request: Request) -> Response:
+        """POST {text}: what the person wrote while Kelvin works on this chat; Kelvin reads it at its next step.
+        409 when Kelvin isn't working on it (the portal then sends it as a new message)."""
+        text = str((await request.json()).get("text") or "").strip()
+        if not text:
+            return error(400, "Say something first.")
+        if len(text) > 20000:
+            return error(400, "That message is too long.")
+        if not agent.steer(request.path_params["chat_id"], text):
+            return error(409, "Kelvin isn't working on this chat now: send it as a new message.")
+        return JSONResponse({"ok": True})
+
     def stream_events(work: Any) -> Response:
         """Run `work(emit)` to the end even if the browser goes away; stream its events as NDJSON."""
         queue: asyncio.Queue = asyncio.Queue()
@@ -2520,6 +2579,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/chats", chats, methods=["GET", "POST"]),
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
+        Route("/api/chats/{chat_id}/steer", steer, methods=["POST"]),
         Route("/api/chats/{chat_id}/compare", compare, methods=["POST"]),
         Route("/api/chats/{chat_id}/choose", choose, methods=["POST"]),
         Route("/api/chats/{chat_id}/review", second_opinion, methods=["POST"]),
@@ -2536,7 +2596,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/memory", memory_view),
         Route("/api/memory/notes/{note_id}", memory_note, methods=["DELETE"]),
         Route("/api/know", know_view),
-        Route("/api/know/{kind}/{scope}/{name}", know_item, methods=["DELETE"]),
+        Route("/api/know/menu", know_menu),
+        Route("/api/know/{kind}/{scope}/{name}", know_item, methods=["DELETE", "POST"]),
+        Route("/api/skills/import", skill_import, methods=["POST"]),
+        Route("/api/skills/export/{scope}/{name}", skill_export),
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/state", state),

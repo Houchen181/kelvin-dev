@@ -41,8 +41,12 @@ def to_messages(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     n = 0
     for m in history:
         if m["role"] == "user":   # PDFs and pictures first, then the words about them
-            out.append({"role": "user", "content": [_document(d) for d in m.get("documents") or []] +
-                        [_image(i) for i in m.get("images") or []] + [{"type": "text", "text": user_text(m)}]})
+            content = [_document(d) for d in m.get("documents") or []] + \
+                [_image(i) for i in m.get("images") or []] + [{"type": "text", "text": user_text(m)}]
+            if out and out[-1]["role"] == "user":   # written while Kelvin worked: after the tool results, one turn
+                out[-1]["content"] = list(out[-1]["content"]) + content
+            else:
+                out.append({"role": "user", "content": content})
         elif m["role"] == "assistant":
             if m.get("provider") == "anthropic" and m.get("raw"):
                 content = m["raw"]

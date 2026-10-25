@@ -30,7 +30,7 @@ from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
 from .providers.base import Emit, ModelInfo, Provider, text_of
 from . import brevity, compaction, memory, review, rules as rulebook
-from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
+from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
 from .wakeups import WAKE_ME, Waker
 from .settings import Settings
 from .store import MAX_NOTE, ChatStore
@@ -184,6 +184,36 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
     return sorted(ids)
 
 
+# Kelvin's rarer tools, loaded in a chat when it needs them (find_tools), so every step doesn't carry them all
+DEFERRED = {
+    "setting up instruments": ["scan_instruments", "connected_devices", "inspect_address", "inspect_serial",
+                               "add_instrument", "reconnect_instrument", "ask_to_switch_on"],
+    "writing and trying cards": ["card_guide", "draft_card", "check_card", "try_card", "save_card", "read_examples",
+                                 "find_maker_files", "library_api", "save_manual"],
+    "makers' software": ["install_for_instrument", "installed_software", "environments", "remove_environment"],
+    "editing and keeping the queue": ["queue_change", "queue_edit", "queue_pause", "queue_save", "queue_load"],
+    "watching readings": ["watch", "unwatch", "watches"],
+    "pulse boards and sequences": ["run_on_board", "show_sequence"],
+    "SQL on the catalog of runs": ["query_runs"],
+}
+DEFERRED_NAMES = {n for names in DEFERRED.values() for n in names}
+MAX_FOUND = 10
+# lookups that touch no instrument and change nothing: several in one step run side by side
+LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", "query_runs", "list_runs", "analyze_run",
+           "recent_events", "kelvin_help", "describe_instrument", "search_manual", "instrument_info", "card_guide",
+           "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
+           "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
+           "use_skill", "read_skill_file"}
+
+FIND_TOOLS = {
+    "name": "find_tools",
+    "description": "Load more of Kelvin's tools for a task (they are listed under 'More tools'): give their names, or "
+                   "words for what they do. They are yours from the next step on, for the rest of this chat.",
+    "schema": {"type": "object", "required": ["query"], "properties": {
+        "query": {"type": "string", "description": "Tool names, or the task, e.g. 'add_instrument, try_card' or "
+                                                   "'watch a reading'"}}},
+}
+
 LIST_FOLDER = {
     "name": "list_folder",
     "description": "List the files and subfolders in this chat's folder, the folder the person chose for this chat: "
@@ -330,6 +360,7 @@ class ChatAgent:
         self._lanes: List[asyncio.Future] = []
         self._images: Dict[str, List[Tuple[str, bytes]]] = {}   # pictures a tool call returned, by call id, until kept
         self._documents: Dict[str, List[Tuple[str, bytes]]] = {}   # and PDF pages to read whole: (name, bytes)
+        self._steer: Dict[str, List[str]] = {}   # what the person wrote while Kelvin worked, by chat, until read
         self.waker = Waker(self)   # chats continued later (wake_me), when the time or the lab says
         self.know = Know(store)    # skills and recipes (skills.py)
 
@@ -373,6 +404,77 @@ class ChatAgent:
     def _folder_tools(chat: Dict[str, Any]) -> List[Dict[str, Any]]:
         return [LIST_FOLDER, READ_FILE] if chat.get("folder") else []
 
+    def _lab_tools(self, chat: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """The lab's tools this chat has: all but the rarer ones it hasn't loaded (find_tools)."""
+        loaded = set(chat.get("tools") or [])
+        return [t for t in self.tools if t["name"] not in DEFERRED_NAMES or t["name"] in loaded]
+
+    def _more_tools(self, chat: Dict[str, Any]) -> str:
+        """The rarer tools, by what they are for, that this chat hasn't loaded yet."""
+        have = {t["name"] for t in self.tools}
+        loaded = set(chat.get("tools") or [])
+        lines = ["- %s: %s" % (what, ", ".join(n for n in names if n in have and n not in loaded))
+                 for what, names in DEFERRED.items() if any(n in have and n not in loaded for n in names)]
+        return ("# More tools\nKelvin has these too; find_tools loads them when a task needs them (one call for "
+                "several):\n" + "\n".join(lines)) if lines else ""
+
+    def _find_tools(self, chat: Dict[str, Any], context: Dict[str, Any], args: Any) -> Tuple[str, bool]:
+        """Load the rarer tools a task needs: by name, else by the words of their names, purposes and descriptions."""
+        query = str((args or {}).get("query") or "") if isinstance(args, dict) else ""
+        words = [w for w in re.findall(r"[a-z0-9_]+", query.lower()) if len(w) > 2]
+        by_name = {t["name"]: t for t in self.tools if t["name"] in DEFERRED_NAMES}
+        found = [by_name[w] for w in dict.fromkeys(words) if w in by_name]   # named: in the order asked
+        if not words or any(w not in by_name for w in words):
+            # words for a task: in a tool's name most, in what it is for next, in its description least
+            purpose = {n: what for what, names in DEFERRED.items() for n in names}
+            scored = []
+            for name, t in by_name.items():
+                score = sum(3 * name.count(w) + 2 * purpose[name].count(w) + t["description"].lower().count(w)
+                            for w in words)
+                if score:
+                    scored.append((score, name, t))
+            top = max((s for s, _, _ in scored), default=0)
+            found = (found + [t for s, _, t in sorted(scored, key=lambda x: (-x[0], x[1]))
+                              if s * 3 >= top and t not in found])[:MAX_FOUND]
+        if not found:
+            return "no tool for %r; the ones to load are listed under 'More tools'" % query, True
+        self._load_tools(chat, context, [t["name"] for t in found])
+        return "loaded, from the next step on:\n" + "\n".join(
+            "- %s: %s" % (t["name"], t["description"].split("\n")[0][:200]) for t in found), False
+
+    def _load_tools(self, chat: Dict[str, Any], context: Dict[str, Any], names: List[str]) -> None:
+        """These rarer tools from now on, in this turn and the chat's next ones."""
+        loaded = list(chat.get("tools") or [])
+        new = [n for n in names if n in DEFERRED_NAMES and n not in loaded]
+        if not new:
+            return
+        chat["tools"] = loaded + new
+        have = {t["name"] for t in context["tools"]}
+        context["tools"] = context["tools"] + [t for t in self.tools if t["name"] in new and t["name"] not in have]
+
+    # ------------------------------------------------------------------ what the person writes while Kelvin works
+
+    def steer(self, chat_id: str, text: str) -> bool:
+        """A message the person wrote while Kelvin works on this chat: Kelvin reads it at its next step. False when
+        Kelvin isn't working on this chat (then it is an ordinary message)."""
+        a = self.active
+        if not a or a.get("chat_id") != chat_id or a.get("compare") or not str(text or "").strip():
+            return False
+        self._steer.setdefault(chat_id, []).append(str(text).strip())
+        return True
+
+    async def _take_steer(self, chat: Dict[str, Any], emit: Emit) -> None:
+        """The messages the person wrote meanwhile, into the chat before the model's next step."""
+        waiting = self._steer.pop(chat["id"], [])
+        if not waiting:
+            return
+        for text in waiting:
+            chat["messages"].append({"role": "user", "text": text, "steer": True})
+        chat.pop("outside", None)   # the person wrote: what the chat read before no longer pauses auto mode
+        self.runtime.gate.outside_chat = None
+        self.store.save(chat)
+        await emit({"type": "steered", "texts": waiting})
+
     def context(self, chat: Dict[str, Any]) -> Dict[str, Any]:
         """The system prompt and tools for one turn in this chat. Only stable text goes here (Kelvin's rules, the
         user's instructions, the project's instructions), so the cached prompt prefix survives; notes are recalled
@@ -381,9 +483,11 @@ class ChatAgent:
         if chat.get("incognito"):   # not kept, so never continued later either; Kelvin's own skills only
             own = self.know.index(incognito=True)
             return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO] +
-                                           ([READ_GUIDE + "\n" + own] if own else []) + [self._folder(chat)]),
-                    "tools": self.tools + [CHAT_HISTORY] + ([USE_SKILL] if own else []) + self._folder_tools(chat),
-                    "project": None, "learn": False}
+                                           ([READ_GUIDE + "\n" + own] if own else []) + [self._folder(chat),
+                                                                                           self._more_tools(chat)]),
+                    "tools": self._lab_tools(chat) + [CHAT_HISTORY, FIND_TOOLS] + ([USE_SKILL, READ_SKILL_FILE]
+                                                                                    if own else []) +
+                    self._folder_tools(chat), "project": None, "learn": False}
         parts = [SYSTEM] + self._brevity()
         mine = self.settings.get("instructions") if self.settings else None
         if mine:
@@ -405,11 +509,12 @@ class ChatAgent:
         rules = self.chat_rules(chat)
         if rulebook.restrictive(rules):
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
+        parts.append(self._more_tools(chat))
         parts.append(self._folder(chat))   # last: it changes only when the person picks another folder
         private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
-        tools = self.tools + remember + ([SAVE_PAPER] if project else []) + [DEVICES, ADD_DEVICE, MOUNT_DEVICE,
-                                                                            CHAT_HISTORY, WAKE_ME, USE_SKILL]
+        tools = self._lab_tools(chat) + remember + ([SAVE_PAPER] if project else []) + [
+            DEVICES, ADD_DEVICE, MOUNT_DEVICE, CHAT_HISTORY, WAKE_ME, USE_SKILL, READ_SKILL_FILE, FIND_TOOLS]
         if project or not private:   # unshared work keeps what it learned in its project
             tools = tools + [SAVE_SKILL, SAVE_RECIPE]
         tools = tools + self._folder_tools(chat)
@@ -687,6 +792,7 @@ class ChatAgent:
                 message["attachments"] = attachments
             if not wake:   # the person is writing: what the chat read from the web before no longer pauses auto mode
                 chat.pop("outside", None)
+                self._slash(chat, message)
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
@@ -719,10 +825,12 @@ class ChatAgent:
             self.runtime.gate.in_chat = False
             self.active = None
             self._stream_task = None
+            self._steer.pop(chat_id, None)   # not read in time: the portal sends it as the next message
 
     async def _step(self, chat: Dict[str, Any], provider: Provider, model_id: str, context: Dict[str, Any],
                     emit: Emit) -> bool:
         """One model response plus its tool calls. Returns True if the turn continues."""
+        await self._take_steer(chat, emit)
         partial: List[str] = []
 
         async def relay(event: Dict[str, Any]) -> None:
@@ -787,73 +895,91 @@ class ChatAgent:
             await emit({"type": "turn_end", "reason": result.stop_reason})
             return False
 
-        results = []
-        for call in result.tool_calls:  # one at a time: the lab has one set of instruments
-            opinion: Optional[Dict[str, Any]] = None
-            kept: List[Dict[str, str]] = []
-            if self._stop:
-                content, is_error = "not run: the user pressed stop", True
-            else:
-                await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
-                if call["name"] == "remember" and context["learn"]:
-                    content, is_error = self._remember(chat, context, call["input"])
-                elif call["name"] == "wake_me" and not chat.get("incognito"):
-                    content, is_error = self.waker.add(chat["id"], call["input"])
-                elif call["name"] == "wait" and _seconds(call["input"]) > WAIT_S:   # other chats would wait too
-                    content, is_error = ("not waited: for more than %d s, call wake_me and end your answer, so other "
-                                         "chats can run meanwhile" % WAIT_S), True
-                elif call["name"] == "use_skill":
-                    content, is_error = self._use_skill(chat, context, call["input"])
-                elif call["name"] in ("save_skill", "save_recipe") and \
-                        call["name"] in {t["name"] for t in context["tools"]}:
-                    content, is_error = await self._keep_know(chat, context, call, emit)
-                elif call["name"] == "run_recipe" and isinstance(call["input"], dict) and \
-                        "\n" not in str(call["input"].get("recipe") or ""):   # a kept recipe, by its name
-                    named, problem = self._named_recipe(chat, context, call)
-                    content, is_error = (await self._call(named, emit)) if named else (problem, True)
-                elif call["name"] in ("list_folder", "read_file"):
-                    content, is_error = await self._folder_file(chat, provider, call)
-                elif call["name"] == "chat_history":
-                    query = str((call["input"] or {}).get("query") or "") if isinstance(call["input"], dict) else ""
-                    content, is_error = compaction.search(chat, query), False
-                elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):   # mounting may write caps
-                    content, is_error = await asyncio.to_thread(self._device_tool, chat, call["name"], call["input"])
-                elif call["name"] == "save_paper" and context["project"]:
-                    content, is_error = await self._save_paper(chat, context, call["input"])
-                elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:
-                    content, is_error = "not available: this project keeps its work off the internet", True
-                elif call["name"] == "web_search":
-                    content, is_error = await self._web_search(call["input"])
-                elif call["name"] == "make_report":
-                    content, is_error = await self._report(chat, call["input"])
-                elif call["name"] == "operate_computer":   # Claude Code bridge
-                    content, is_error = await self._operate_computer(call, emit)
-                elif call["name"] == "run_plan" and self.settings and self.settings.get("reviewer"):
-                    content, is_error, opinion = await self._reviewed_run(chat, call, emit)
-                else:
-                    content, is_error = await self._call(call, emit)
-                kept = self._keep_pictures(chat["id"], call["id"])
-                documents = self._keep_documents(chat["id"], call["id"])
-                await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
-                            "is_error": is_error, "run_id": run_id_of(content) if call["name"] == "run_plan" else None,
-                            "images": [k["file"] for k in kept] or None})
-            if call["name"] in OUTSIDE_TOOLS and not is_error and "<outside_text from=" in content:   # remembered
-                chat["outside"] = OUTSIDE_TOOLS[call["name"]]
-                self.runtime.gate.outside_chat = chat["outside"]
-            entry = {"id": call["id"], "name": call["name"], "content": content, "is_error": is_error}
-            if kept:
-                entry["images"] = kept   # the files, kept with the chat; the model gets them with each request
-            if documents:
-                entry["documents"] = documents   # PDF pages a model reads whole: kept the same way
-            if opinion:
-                entry["review"] = opinion   # shown again when the chat is reopened
-            results.append(entry)
+        results: List[Dict[str, Any]] = []
+        calls, i = result.tool_calls, 0
+        while i < len(calls):   # one at a time, as the lab has one set of instruments; lookups side by side
+            n = 1
+            while i + n < len(calls) and calls[i]["name"] in LOOKUPS and calls[i + n]["name"] in LOOKUPS:
+                n += 1
+            results += await asyncio.gather(*(self._run_call(chat, provider, context, call, emit)
+                                              for call in calls[i:i + n]))
+            i += n
         chat["messages"].append({"role": "tool", "results": results})
         self.store.save(chat)
         if self._stop:
             await emit({"type": "turn_end", "reason": "stopped"})
             return False
         return True
+
+    async def _run_call(self, chat: Dict[str, Any], provider: Provider, context: Dict[str, Any],
+                        call: Dict[str, Any], emit: Emit) -> Dict[str, Any]:
+        """One tool call, run; its result as the chat keeps it."""
+        opinion: Optional[Dict[str, Any]] = None
+        kept: List[Dict[str, str]] = []
+        documents: List[Dict[str, str]] = []
+        if self._stop:
+            content, is_error = "not run: the user pressed stop", True
+        else:
+            await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
+            if call["name"] in DEFERRED_NAMES:   # called by its name before find_tools: it is loaded now
+                self._load_tools(chat, context, [call["name"]])
+            if call["name"] == "find_tools":
+                content, is_error = self._find_tools(chat, context, call["input"])
+            elif call["name"] == "remember" and context["learn"]:
+                content, is_error = self._remember(chat, context, call["input"])
+            elif call["name"] == "wake_me" and not chat.get("incognito"):
+                content, is_error = self.waker.add(chat["id"], call["input"])
+            elif call["name"] == "wait" and _seconds(call["input"]) > WAIT_S:   # other chats would wait too
+                content, is_error = ("not waited: for more than %d s, call wake_me and end your answer, so other "
+                                     "chats can run meanwhile" % WAIT_S), True
+            elif call["name"] == "use_skill":
+                content, is_error = self._use_skill(chat, context, call["input"])
+            elif call["name"] in ("save_skill", "save_recipe") and \
+                    call["name"] in {t["name"] for t in context["tools"]}:
+                content, is_error = await self._keep_know(chat, context, call, emit)
+            elif call["name"] == "run_recipe" and isinstance(call["input"], dict) and \
+                    "\n" not in str(call["input"].get("recipe") or ""):   # a kept recipe, by its name
+                named, problem = self._named_recipe(chat, context, call)
+                content, is_error = (await self._call(named, emit)) if named else (problem, True)
+            elif call["name"] in ("list_folder", "read_file"):
+                content, is_error = await self._folder_file(chat, provider, call)
+            elif call["name"] == "read_skill_file":
+                content, is_error = await self._skill_file(chat, context, provider, call)
+            elif call["name"] == "chat_history":
+                query = str((call["input"] or {}).get("query") or "") if isinstance(call["input"], dict) else ""
+                content, is_error = compaction.search(chat, query), False
+            elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):   # mounting may write caps
+                content, is_error = await asyncio.to_thread(self._device_tool, chat, call["name"], call["input"])
+            elif call["name"] == "save_paper" and context["project"]:
+                content, is_error = await self._save_paper(chat, context, call["input"])
+            elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:
+                content, is_error = "not available: this project keeps its work off the internet", True
+            elif call["name"] == "web_search":
+                content, is_error = await self._web_search(call["input"])
+            elif call["name"] == "make_report":
+                content, is_error = await self._report(chat, call["input"])
+            elif call["name"] == "operate_computer":   # Claude Code bridge
+                content, is_error = await self._operate_computer(call, emit)
+            elif call["name"] == "run_plan" and self.settings and self.settings.get("reviewer"):
+                content, is_error, opinion = await self._reviewed_run(chat, call, emit)
+            else:
+                content, is_error = await self._call(call, emit)
+            kept = self._keep_pictures(chat["id"], call["id"])
+            documents = self._keep_documents(chat["id"], call["id"])
+            await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
+                        "is_error": is_error, "run_id": run_id_of(content) if call["name"] == "run_plan" else None,
+                        "images": [k["file"] for k in kept] or None})
+        if call["name"] in OUTSIDE_TOOLS and not is_error and "<outside_text from=" in content:   # remembered
+            chat["outside"] = OUTSIDE_TOOLS[call["name"]]
+            self.runtime.gate.outside_chat = chat["outside"]
+        entry = {"id": call["id"], "name": call["name"], "content": content, "is_error": is_error}
+        if kept:
+            entry["images"] = kept   # the files, kept with the chat; the model gets them with each request
+        if documents:
+            entry["documents"] = documents   # PDF pages a model reads whole: kept the same way
+        if opinion:
+            entry["review"] = opinion   # shown again when the chat is reopened
+        return entry
 
     async def _web_search(self, args: Any) -> Tuple[str, bool]:
         """Through the chat's own model service if it can search the web, else another that can (websearch.py)."""
@@ -1335,10 +1461,10 @@ class ChatAgent:
         item = self.know.find("skill", name, context["project"], bool(chat.get("incognito")))
         if item is None:
             names = [i.name for i in self.know.items(context["project"], bool(chat.get("incognito")))
-                     if i.kind == "skill"]
+                     if i.kind == "skill" and i.enabled]
             return "no skill %r here (there are: %s)" % (name, ", ".join(names) or "none"), True
         whose = {"kelvin": "Kelvin's own", "global": "the person's"}.get(item.scope, "this project's")
-        return "Skill %s (%s): %s\n\n%s" % (item.name, whose, item.description, item.body), False
+        return "Skill %s (%s): %s\n\n%s" % (item.name, whose, item.description, self.know.shown(item)), False
 
     def _named_recipe(self, chat: Dict[str, Any], context: Dict[str, Any],
                       call: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -1347,7 +1473,7 @@ class ChatAgent:
         item = self.know.find("recipe", name, context["project"], bool(chat.get("incognito")))
         if item is None:
             kept = [i.name for i in self.know.items(context["project"], bool(chat.get("incognito")))
-                    if i.kind == "recipe"]
+                    if i.kind == "recipe" and i.enabled]
             return None, "no kept recipe %r (kept: %s); give the recipe's YAML instead" % (
                 name, ", ".join(kept) or "none")
         return dict(call, input=dict(call["input"], recipe=item.body)), ""
@@ -1416,12 +1542,24 @@ class ChatAgent:
                     "message box"), True
         args = call["input"] if isinstance(call["input"], dict) else {}
         path = str(args.get("path") or "")
-        try:
-            if call["name"] == "list_folder":
+        if call["name"] == "list_folder":
+            try:
                 text = await asyncio.to_thread(folderfiles.listing, folder, path)
-                return OUTSIDE % ("the names in this chat's folder", text), False
-            asked = bool(args.get("figures"))
-            whole = asked and getattr(provider, "sees_pdfs", False)
+            except (ValueError, OSError) as e:   # FolderError is a ValueError
+                return "not read: %s" % (e.strerror if isinstance(e, OSError) and e.strerror else e), True
+            return OUTSIDE % ("the names in this chat's folder", text), False
+        text, is_error = await self._read_in(folder, call, provider)
+        return (text, True) if is_error else (OUTSIDE % ("%s, a file in this chat's folder" % path, text), False)
+
+    async def _read_in(self, folder: Any, call: Dict[str, Any], provider: Provider) -> Tuple[str, bool]:
+        """A file in this folder, read (folderfiles.py): pictures go to the person and to a model that sees them, PDF
+        pages whole to a model that reads PDFs (another gets their text)."""
+        from .. import folderfiles
+        args = call["input"] if isinstance(call["input"], dict) else {}
+        path = str(args.get("path") or "")
+        asked = bool(args.get("figures"))
+        whole = asked and getattr(provider, "sees_pdfs", False)
+        try:
             text, media = await asyncio.to_thread(folderfiles.read, folder, path, args.get("pages") or "",
                                                   int(args.get("start") or 0), whole)
         except (ValueError, OSError) as e:   # FolderError is a ValueError
@@ -1434,7 +1572,33 @@ class ChatAgent:
         pages = [data for mime, data in media if mime == folderfiles.PDF]
         if pages:
             self._documents[call["id"]] = [(Path(path).stem + " (pages).pdf", data) for data in pages]
-        return OUTSIDE % ("%s, a file in this chat's folder" % path, text), False
+        return text, False
+
+    def _slash(self, chat: Dict[str, Any], message: Dict[str, Any]) -> None:
+        """A message that starts with /name: the person starts that skill (its steps go with the message) or that
+        recipe (Kelvin runs it)."""
+        m = re.match(r"/([a-z0-9][a-z0-9-]*)(?=\s|$)", message["text"])
+        if not m:
+            return
+        project = None if chat.get("incognito") else self.store.project_of(chat["id"])
+        skill = self.know.find("skill", m.group(1), project, bool(chat.get("incognito")))
+        if skill is not None:
+            message["skill"] = {"name": skill.name, "body": self.know.shown(skill)}
+            return
+        recipe = self.know.find("recipe", m.group(1), project, bool(chat.get("incognito")))
+        if recipe is not None:
+            message["recipe"] = recipe.name
+
+    async def _skill_file(self, chat: Dict[str, Any], context: Dict[str, Any], provider: Provider,
+                          call: Dict[str, Any]) -> Tuple[str, bool]:
+        """read_skill_file: a file that comes with a skill this chat may use (part of the skill, as its steps are)."""
+        args = call["input"] if isinstance(call["input"], dict) else {}
+        item = self.know.find("skill", str(args.get("skill") or ""), context["project"], bool(chat.get("incognito")))
+        if item is None:
+            return "no skill %r here" % args.get("skill"), True
+        if item.folder is None or not item.files:
+            return "the skill %s comes with no files" % item.name, True
+        return await self._read_in(item.folder, call, provider)
 
     def _keep_documents(self, chat_id: str, call_id: str) -> List[Dict[str, str]]:
         """The PDF pages a tool call returned, kept with the chat: [{file, mime, name}]."""

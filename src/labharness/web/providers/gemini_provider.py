@@ -16,8 +16,12 @@ def to_contents(history: List[Dict[str, Any]]) -> List[types.Content]:
     out: List[types.Content] = []
     for m in history:
         if m["role"] == "user":   # PDFs and pictures (both inline data), then the words about them
-            out.append(types.Content(role="user", parts=[_picture(i) for i in (m.get("documents") or []) +
-                                                         (m.get("images") or [])] + [types.Part(text=user_text(m))]))
+            parts = [_picture(i) for i in (m.get("documents") or []) + (m.get("images") or [])] + \
+                [types.Part(text=user_text(m))]
+            if out and out[-1].role == "user":   # written while Kelvin worked: after the tool results, one turn
+                out[-1] = types.Content(role="user", parts=list(out[-1].parts or []) + parts)
+            else:
+                out.append(types.Content(role="user", parts=parts))
         elif m["role"] == "assistant":
             if m.get("provider") == "gemini" and m.get("raw"):
                 out.append(types.Content.model_validate(m["raw"]))  # keeps thought signatures

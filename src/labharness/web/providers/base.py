@@ -82,7 +82,12 @@ def user_text(message: Dict[str, Any]) -> str:
     Stored with the message, so earlier turns replay unchanged and the prompt cache holds."""
     from ..memory import block
     notes = message.get("memory")
-    text = block(notes, message.get("memory_project")) + "\n\n" + message["text"] if notes else message["text"]
+    own = message["text"]
+    if message.get("skill"):   # the person started a skill with /name: its steps come with the message
+        own = '<skill name="%s">\n%s\n</skill>\n\n%s' % (message["skill"]["name"], message["skill"]["body"], own)
+    elif message.get("recipe"):   # or a kept recipe
+        own = "(The person starts the kept recipe %s: run_recipe with its name.)\n\n%s" % (message["recipe"], own)
+    text = block(notes, message.get("memory_project")) + "\n\n" + own if notes else own
     if message.get("handoff"):   # the earlier turns, summarised (compaction.py)
         text = "<lab_handoff>\n%s\n</lab_handoff>\n\n%s" % (message["handoff"], text)
     if message.get("attached_text"):   # files the person attached (a PDF's text), set when the request is built
