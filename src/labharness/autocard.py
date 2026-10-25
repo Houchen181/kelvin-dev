@@ -6,13 +6,14 @@ manual's command reference with your model, and makes it safe to try whatever th
        text names the model; of those, the one with the most command syntax wins.
     2. The card. The model writes it from the command reference (the pages densest in commands), the card checker
        reviews it, and the model fixes what the checker found, once.
-    3. Safe to try. Status draft: on real hardware its outputs stay simulation-only and every setting change asks a
-       person (gate.py). No commands are sent on connect. Reads that start something (MEASure?, READ?, INITiate,
+    3. Safe to try. Status draft: on real hardware every setting and output change asks a person, saying the card
+       is a draft (gate.py). No commands are sent on connect. Reads that start something (MEASure?, READ?, INITiate,
        *TST?, *CAL?: on some instruments they switch an output on or run a self-test) are left out. The identity
-       pattern is checked against the instrument's own reply.
+       pattern is checked against the instrument's own reply; for an instrument that gave none (the person named
+       it), the manual's identity check stays as written, for try_card to test.
 
 Only the maker and the model name leave the computer (to your model and the maker's site), never the serial number.
-A person reviews the card against the manual and marks it reviewed before it can drive anything."""
+A person reviews the card against the manual and marks it reviewed; until then nothing on it changes without them."""
 from __future__ import annotations
 
 import re
@@ -180,15 +181,22 @@ def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: 
         changed.append("left out the commands on connect")
     ident = data.get("identify") if isinstance(data.get("identify"), dict) else {}
     pattern = str(ident.get("idn") or "")
-    try:
-        fits = bool(pattern) and re.search(pattern, idn, re.I) is not None
-    except re.error:
-        fits = False
-    if not fits:
-        ident["idn"] = "^%s\\s*,\\s*%s\\b" % (re.escape(maker), re.escape(model))
-        changed.append("set the identity pattern from the instrument's own reply")
-    ident["example"] = idn
-    data["identify"] = ident
+    if idn:
+        try:
+            fits = bool(pattern) and re.search(pattern, idn, re.I) is not None
+        except re.error:
+            fits = False
+        if not fits:
+            ident["idn"] = "^%s\\s*,\\s*%s\\b" % (re.escape(maker), re.escape(model))
+            changed.append("set the identity pattern from the instrument's own reply")
+        ident["example"] = idn
+    elif pattern:   # no reply to check it against: the manual's says, try_card tests it
+        changed.append("kept the manual's identity check (%s %r), untested: try_card tests it"
+                       % (ident.get("query") or "*IDN?", pattern))
+    if ident:
+        data["identify"] = ident
+    else:
+        data.pop("identify", None)
     params = data.get("parameters") if isinstance(data.get("parameters"), dict) else {}
     for name in list(params):
         p = params[name] if isinstance(params[name], dict) else {}
@@ -220,7 +228,8 @@ def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: 
 
 def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, ask: Ask) -> Tuple[str, List[str], str]:
     """Write the card with the model, check it, and have the model repair it once. Returns (card text, changes, model)."""
-    name = "%s %s (it answers *IDN? with %r)" % (maker, model, ",".join(idn.split(",")[:2]))
+    name = ("%s %s (it answers *IDN? with %r)" % (maker, model, ",".join(idn.split(",")[:2])) if idn else
+            "%s %s (as the person named it; Kelvin has no identity reply from it)" % (maker, model))
     answer, key = ask(carddraft.DRAFT_SYSTEM, carddraft.draft_prompt(command_excerpt(manual_pages), name))
     text, changed = make_safe(answer, maker, model, idn, url, key)
     card, problems, _ = carddraft.check(text)
@@ -235,13 +244,18 @@ def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, a
 
 def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: Optional[Fetch] = None,
               builtin_ids: Any = (), log: Callable[[str], None] = lambda m: None) -> Dict[str, Any]:
-    """For an instrument that answered but matches no card: find its manual, write its card, keep it as a draft.
-    Returns {card_id, model, kind, manual: {url, data, kind}, changed} or {error}."""
+    """For an instrument that matches no card: find its manual, write its card, keep it as a draft. Maker and model
+    come from its identity reply, else from found's maker and model (what the person said it is).
+    Returns {card_id, model, kind, manual: {url, data, kind}, changed, parameters} or {error}."""
     fetch = fetch or profiles.http_get
     idn = str(found.get("idn") or "")
-    maker, model = maker_model(idn)
+    maker, model = maker_model(idn) if idn else ("", "")
     if not maker or not model:
-        return {"error": "its identity reply %r does not say maker and model" % idn[:60]}
+        maker = maker or str(found.get("maker") or "").strip()
+        model = model or str(found.get("model") or "").strip()
+    if not maker or not model:
+        return {"error": "its identity reply %r does not say maker and model" % idn[:60] if idn else
+                "Kelvin needs the maker and the model to find the manual"}
     if ask is None:
         return {"error": "Kelvin needs a model to write the %s %s card: add an API key in Settings" % (maker, model)}
     asked: List[str] = []
@@ -260,5 +274,8 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
     except Exception as e:
         return {"error": "Kelvin could not write the %s %s card: %s" % (maker, model, profiles._first_line(e))}
     log("wrote %s from %s with %s (%s)" % (card.id, manual["url"], key, "; ".join(changed) or "as drafted"))
+    params = ", ".join("%s (%s%s)" % (p.name, "output" if p.is_drive else "setting" if p.set_cmd else "reading",
+                                      ", " + p.unit if p.unit else "") for p in card.params.values())
     return {"card_id": card.id, "model": card.model, "kind": card.kind, "changed": changed, "by": key,
-            "manual": {"url": manual["url"], "data": manual["data"], "kind": manual["kind"]}, "path": str(path)}
+            "manual": {"url": manual["url"], "data": manual["data"], "kind": manual["kind"]}, "path": str(path),
+            "parameters": params}

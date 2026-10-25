@@ -138,6 +138,12 @@ def trace_summary(spec: ParamSpec, values: List[float]) -> str:
     return "%d points; min %s%s at #%d; max %s%s at #%d" % (len(values), num(values[lo]), u, lo, num(values[hi]), u, hi)
 
 
+def _runs_a_program(address: str) -> bool:
+    """A lib:// address names a Python (python=) and a folder of the maker's files (path=) that Kelvin runs: only a
+    person writes one (Lab setup); Kelvin uses it once it is in the lab."""
+    return address.strip().lower().startswith("lib://")
+
+
 class LabRuntime:
     def __init__(self, lab: Lab, approver: Approver, data_dir: Any, envelope: Optional[Envelope] = None):
         self.lab = lab
@@ -171,6 +177,14 @@ class LabRuntime:
         self.scan_network = True                    # scans also look on the local network (a Settings switch)
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
+        self.found_info: Dict[str, Dict[str, Any]] = {}     # what it learnt of each, by VISA resource: identity, card
+        # the app's model writing a card from the maker's manual (autocard.make_card); None outside the Kelvin app
+        self.card_writer: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
+        self.manuals_found: Dict[str, Dict[str, Any]] = {}  # by VISA resource: the manual found while writing a card
+        # the app's part when Kelvin changes the lab itself ("added" an instrument, "switched" one on): keep it in
+        # Settings and give a new instrument its folder, settings and manual
+        self.lab_changed: Callable[[str], None] = lambda what: None
+        self.switched_off_for: Optional[Callable[[str], Iterable[str]]] = None   # who a person switched off, per lab
         self.queue = ScanQueue(self.data_dir / "queue.json")   # scans lined up to run one after another
         self.auto_report = "both"   # after each run (in its folder) and each queue (in reports/): both, pdf, pptx, off
         self.mounted: Dict[str, Any] = self._load_mounted()   # the sample in the setup now (project, device, since)
@@ -294,6 +308,11 @@ class LabRuntime:
                 lines.append("HANDS ON THE SAMPLE: %s is handling it (since %s); every drive stays at safe until a "
                              "person unlocks it in the Lab panel" % (self.hands.get("by"), self.hands.get("since")))
             lines += self._protection_lines()
+            unsure = [n for n, i in self.lab.instruments.items() if i.enabled and self.gate.unsure(i)]
+            if unsure:
+                lines.append("not reviewed by a person yet (Kelvin added it or drafted its card): %s. Every output "
+                             "change on %s asks the person, auto mode included" % (", ".join(unsure),
+                                                                                  "it" if len(unsure) == 1 else "them"))
             lines += self._status_lines()
             lines.append("* = drive away from its safe value")
             return "\n".join(lines)
@@ -314,7 +333,7 @@ class LabRuntime:
     def _status_lines(self) -> List[str]:
         lines = []
         for name in self.lab.switched_off:
-            lines.append("%s: switched off in the Lab panel; Kelvin sends it nothing (only a person switches it on)"
+            lines.append("%s: switched off in the Lab panel; Kelvin sends it nothing (ask_to_switch_on asks the person)"
                          % name)
         for name, values in self._status.items():
             if name not in self.lab.instruments or not self.lab.instruments[name].enabled:
@@ -1528,13 +1547,48 @@ class LabRuntime:
                 self._caps_if_waiting()
             self._refresh()
 
+    def ask_to_switch_on(self, name: str, why: str) -> str:
+        """Kelvin needs an instrument a person switched off: it asks them, and switches it on if they say yes.
+        Switching off stays a person's: it says the instrument is not part of the experiment."""
+        from ..adapters import AdapterError
+
+        def run() -> str:
+            inst = self.lab.instruments.get(name)
+            if inst is None:
+                return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
+            if inst.enabled:
+                return "%s is on" % name
+            live = self.live or {}
+            if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
+                return "not asked: a plan or the queue is running; ask when it has finished"
+            request = ApprovalRequest("Switch %s on?" % name, [
+                "Kelvin needs it: %s" % (why.strip() or "(no reason given)"),
+                "You switched it off in the Lab panel. On, Kelvin connects to it again and reads it; output changes "
+                "still ask you as usual."])
+            if not self.gate.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                return "declined: %s stays off%s" % (name, note)
+            try:
+                self.switch_instrument(name, True, "human (approved Kelvin's request)")
+            except (AdapterError, OSError, ValueError, RuntimeError) as e:
+                return "%s could not be connected: %s" % (name, str(e).splitlines()[0] if str(e) else e)
+            self.lab_changed("switched")
+            return "%s is on again (the person approved)" % name
+        return self._do("asking to switch %s on" % name, run)
+
     # ------------------------------------------------------------------ instruments on this computer
+
+    def _remember_scan(self, found: List[Any], looked: Any) -> None:
+        from ..adapters import resource_name
+        from ..survey import reason
+        self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
+        self.last_found = [f.address for f in found]
+        self.found_info = {resource_name(f.address): dict(vars(f)) for f in found}
 
     def scan_found(self) -> List[Dict[str, Any]]:
         """Connected instruments as data, each with a suggested name. Raises AdapterError without VISA.
         What the scan looked through, and why it found what it did, goes to last_survey."""
         from ..discovery import scan_survey
-        from ..survey import reason
         in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                   if not ic.address.startswith("sim://")}
         with self.lock:
@@ -1543,8 +1597,7 @@ class LabRuntime:
                 found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network)
             finally:
                 self.busy = None
-        self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
-        self.last_found = [f.address for f in found]
+        self._remember_scan(found, looked)
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
         out = []
         for f in found:
@@ -1663,18 +1716,43 @@ class LabRuntime:
         except (OSError, ValueError) as e:
             return "not read: %s" % e
 
+    def _saved_card(self, ref: str) -> Any:
+        """A card Kelvin has, by its id (Kelvin's own, or one in ~/Kelvin/cards); None if there is none."""
+        from ..virtual_lab import lab_registry
+        for registry in [self.lab.registry] + ([lab_registry(self.home)] if self.home is not None else []):
+            try:
+                return registry.get(ref)
+            except KeyError:
+                continue
+        return None
+
     def try_card(self, text: str, instrument: str) -> str:
-        """Kelvin's own try: only on an instrument a person put in the lab, or one the last scan found."""
+        """Kelvin's own try: on an instrument in the lab or one the last scan found; anywhere else a person says
+        yes first. `text` is the card's YAML, or the id of a card Kelvin has (one draft_card wrote)."""
         from .. import cardtry
         from ..adapters import AdapterError
-        card, problems, _ = carddraft.check(text)
+        ref = text.strip()
+        card = self._saved_card(ref) if ref and "\n" not in ref and len(ref) < 120 else None
         if card is None:
-            return "not valid:\n" + "\n".join("- " + p for p in problems)
+            card, problems, _ = carddraft.check(text)
+            if card is None:
+                return "not valid:\n" + "\n".join("- " + p for p in problems)
         targets = cardtry.addresses_for_agent(self.lab, self.last_found)
         address = targets.get(instrument)
+        if address is None and _runs_a_program(instrument):
+            return ("Kelvin tries a card only on an instrument in the lab or an address the scan found: a lib:// "
+                    "address names a program for Kelvin to run, so a person tries it in Lab, Cards")
+        if address is None and ("::" in instrument or "://" in instrument):
+            request = ApprovalRequest("Try a card on %s?" % instrument, [
+                "Kelvin's last scan did not find an instrument at %s. Trying the %s card asks it who it is and reads "
+                "its readings; it sets nothing." % (instrument, card.model)])
+            if not self.gate.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                return "declined: the person did not want Kelvin to try %s%s" % (instrument, note)
+            address = instrument
         if address is None:
-            return ("Kelvin tries a card only on an instrument in the lab or one the last scan found (%s). A person can "
-                    "try it on any address in Lab, Cards." % (", ".join(sorted(targets)) or "none yet: scan first"))
+            return ("Kelvin tries a card on an instrument in the lab or an address (the last scan found: %s)"
+                    % (", ".join(sorted(targets)) or "nothing yet: scan first"))
 
         def run() -> str:
             try:
@@ -1696,9 +1774,189 @@ class LabRuntime:
             return "not saved: %s" % e
         self.lab.registry.put(card)
         self.gate.log.write("card", by=by, card=card.id, status=card.status, file=path.name)
-        return "\n".join(["saved %s card %s as %s. A person adds it to the lab (Lab, Set up) and tries its readings; "
-                          "its drives stay simulation-only on real hardware until they mark it reviewed (Lab, Cards)."
+        return "\n".join(["saved %s card %s as %s. try_card it on the instrument, then add_instrument. Until a person "
+                          "marks it reviewed (Lab, Cards), every setting and output change on it asks them."
                           % (card.status, card.id, path)] + ["warning: " + w for w in warnings])
+
+    def draft_card(self, address: str, maker: str = "", model: str = "") -> str:
+        """A card for an instrument Kelvin has none for: Kelvin finds the maker's manual online, writes the card from
+        its command reference with the app's model, checks it and keeps it as a draft (autocard.py). The maker and
+        model come from the instrument's identity reply (the last scan), else from what the person said. Only they
+        leave the computer, never a serial number. Sends the instrument nothing."""
+        from ..adapters import resource_name
+        if self.card_writer is None:
+            return ("Kelvin writes cards from manuals in the Kelvin app. Here, write it yourself: the person gives the "
+                    "manual's text, then card_guide, check_card, try_card and save_card")
+        address = (address or "").strip()
+        found = self.found_info.get(resource_name(address), {}) if address else {}
+        idn = str(found.get("idn") or "")
+        if found.get("card_id"):
+            return "%s already matches card %s (%s): add_instrument" % (address, found["card_id"], found.get("model"))
+        if not idn and not (maker.strip() and model.strip()):
+            return ("%s did not answer who it is%s: give the maker and the model the person named"
+                    % (address or "the instrument", "" if found else " (or the last scan did not find it)"))
+        try:
+            r = self.card_writer({"address": address, "idn": idn, "maker": maker.strip(), "model": model.strip()})
+        except Exception as e:   # the model or the maker's site failed in a way autocard did not catch
+            r = {"error": str(e).splitlines()[0] if str(e) else type(e).__name__}
+        if r.get("error"):
+            return "no card yet: %s" % r["error"]
+        if r.get("manual") and address:
+            self.manuals_found[resource_name(address)] = r["manual"]
+        self.gate.log.write("card", by="agent", card=r["card_id"], status="draft", manual=(r.get("manual") or {}).get("url"))
+        lines = ["drafted card %s (%s, %s) from %s%s." % (r["card_id"], r["model"], r["kind"],
+                                                            (r.get("manual") or {}).get("url") or "its manual",
+                                                            "; " + "; ".join(r["changed"]) if r.get("changed") else "")]
+        if r.get("parameters"):
+            lines.append("parameters: " + r["parameters"])
+        lines.append("Next: try_card %s on %s and compare the readings with what the person sees; then "
+                     "add_instrument." % (r["card_id"], address or "the instrument"))
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ adding instruments to the lab
+
+    def add_instrument(self, address: str, card: str = "", name: str = "", connection: Optional[Dict[str, Any]] = None,
+                       card_vars: Optional[Dict[str, str]] = None, by: str = "agent") -> str:
+        """Kelvin adds an instrument connected to this computer to the lab (lab.yaml), marked added_by: kelvin, and
+        connects it; the others stay connected as they are. It reads and configures at once; until a person reviews
+        its limits, every output change on it asks them. An address the last scan did not find asks first; moving
+        Kelvin off a virtual lab the person chose asks too."""
+        from ..adapters import AdapterError, resource_name
+        from ..discovery import Found, add_to_config
+        from ..labconfig import ConfigError, load_lab_config
+        from ..virtual_lab import build_lab, lab_registry
+        if self.home is None:
+            return "not added: this Kelvin keeps no lab config (the Kelvin app does)"
+        address = (address or "").strip()
+        if not address or address.startswith("sim://"):
+            return "not added: give the address of an instrument connected to this computer (scan_instruments)"
+        lab_file = self.home / "lab.yaml"
+        registry = lab_registry(self.home)
+        found = self.found_info.get(resource_name(address), {})
+        card_id = (card or "").strip() or found.get("card_id") or ""
+        if not card_id:
+            return "not added: Kelvin has no card for %s yet%s; draft_card writes one from its manual" % (
+                address, " (it answered %r)" % found["idn"][:60] if found.get("idn") else "")
+        try:
+            the_card = registry.get(card_id)
+        except KeyError:
+            return "not added: there is no card %r (draft_card or save_card makes one)" % card_id
+
+        def run() -> str:
+            live = self.live or {}
+            if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
+                return "not added: a plan or the queue is running; add it when it has finished"
+            text = lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""
+            on_file = self.lab_info.get("kind") == "file"
+            if on_file and not text.strip():
+                return "not added: your lab config (lab.yaml) is gone; open Lab setup to make it again"
+            try:
+                current = self.lab.config if on_file else (load_lab_config(text, registry) if text.strip() else None)
+            except ConfigError as e:
+                return "not added: your lab config has problems (fix them in Lab setup): " + "; ".join(e.errors[:4])
+            except (ValueError, yaml.YAMLError) as e:
+                return "not added: your lab config can't be read (fix it in Lab setup): %s" % str(e).splitlines()[0]
+            taken = dict(current.instruments) if current is not None else {}
+            for n, ic in taken.items():
+                if resource_name(ic.address) == resource_name(address):
+                    off = on_file and n in self.lab.switched_off
+                    return "%s is in the lab already, as %s (card %s)%s" % (
+                        address, n, ic.card, "; it is switched off: ask_to_switch_on" if off else "")
+            try:   # names in the file too, should it have changed since Kelvin connected
+                listed = list(((load_yaml(text) or {}).get("instruments") or {}) if text.strip() else [])
+            except Exception:
+                listed = []
+            names = sorted(set(taken) | {str(n) for n in listed})
+            new = (name or "").strip() or Found(address, kind=the_card.kind).suggest_name(names)
+            if not new.isidentifier():
+                return "not added: %r can't be a name (letters, digits and _)" % new
+            if new in names:
+                return "not added: the lab has a %s already (%s); choose another name" % (new, ", ".join(names))
+            item = {"name": new, "card": the_card.id, "address": address, "added_by": "kelvin",
+                    "note": str(found.get("idn") or the_card.model)[:60],
+                    "connection": dict(connection or {}), "vars": {str(k): str(v) for k, v in (card_vars or {}).items()}}
+            try:
+                new_text = add_to_config(text, [item], registry)
+                cfg = load_lab_config(new_text, registry)
+            except ConfigError as e:
+                return "not added: " + "; ".join(x for x in e.errors[:4])
+            except (ValueError, StopIteration, yaml.YAMLError) as e:
+                why = str(e).splitlines()[0] if str(e) else type(e).__name__
+                return "not added: Kelvin couldn't fit its entry into your lab config (%s); add it in Lab setup" % why
+            ic = cfg.instruments.get(new)
+            if ic is None or ic.address != address or ic.card != the_card.id:
+                return "not added: the lab config changed while Kelvin was adding it; try again"
+            asks = []
+            if resource_name(address) not in {resource_name(a) for a in self.last_found}:
+                if _runs_a_program(address):
+                    return ("not added: a lib:// address names a program for Kelvin to run (python=, path=), so a "
+                            "person adds it in Lab setup; the card is ready for them")
+                asks.append("Kelvin's last scan did not find an instrument at %s. Kelvin would connect to it as %s "
+                            "(%s) and read it." % (address, new, the_card.model))
+            if not on_file and lab_file.exists() and not self.lab_info.get("error"):
+                asks.append("Kelvin is on the virtual lab, as you chose; adding %s moves it to your instruments "
+                            "(%s)." % (new, ", ".join(sorted(cfg.instruments))))
+            if asks:
+                request = ApprovalRequest("Add %s to the lab?" % new, asks + [
+                    "Every output change on it still asks you until you review its limits."])
+                if not self.gate.ask(request):
+                    note = " (%s)" % request.note if request.note else ""
+                    return "declined: the person did not want %s added%s" % (new, note)
+            try:   # on the person's lab: connect just this one; from the virtual lab: their whole lab, with it
+                lab = self.lab if on_file else build_lab(new_text, None, 0, registry, self.switched_off_for)
+                if on_file:
+                    lab.add(ic, the_card)
+            except (AdapterError, OSError, ValueError, RuntimeError) as e:
+                why = str(e).splitlines()[0] if str(e) else type(e).__name__
+                return "not added: Kelvin could not connect %s: %s" % (address if on_file else "your lab with it", why)
+
+            def undo() -> None:
+                if on_file:
+                    lab.remove(new)
+                else:
+                    lab.close()
+
+            health = lab.health_check([new])[0]
+            if any("does not match card" in p for p in health.problems):   # a wrong address: another instrument
+                undo()
+                return "not added: %s" % "; ".join(health.problems)
+            try:
+                lab_file.parent.mkdir(parents=True, exist_ok=True)
+                tmp = lab_file.with_suffix(".tmp")
+                tmp.write_text(new_text, encoding="utf-8")
+                tmp.replace(lab_file)
+            except OSError as e:
+                undo()
+                return "not added: Kelvin could not save the lab config: %s" % e
+            if not on_file:
+                info = {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
+                try:
+                    self.switch_lab(lab, None, info, "Kelvin (%s)" % by)
+                except RuntimeError as e:
+                    lab.close()
+                    return "added %s to your lab config, but Kelvin could not switch to it: %s" % (new, e)
+            self._apply_protection(recheck=True)
+            manual = self.manuals_found.pop(resource_name(address), None)
+            if manual:
+                from .. import profiles
+                try:
+                    profiles.store_manual(self.home, new, self.lab.instruments[new].card, manual["data"], manual["url"])
+                except Exception:
+                    pass   # the app's setup fetches it again
+            self.gate.log.write("instrument_added", by=by, instrument=new, card=the_card.id, address=address,
+                                lab=self.lab.config.name)
+            self.notifier("setup", "Kelvin added %s to the lab" % new,
+                          "%s at %s. Readings and settings work now; Kelvin asks you before each output change on it "
+                          "until you review its limits in Lab setup." % (the_card.model, address))
+            self.lab_changed("added")
+            lim = ", ".join("%s [%s, %s]%s" % (p.name, num(p.limits[0]), num(p.limits[1]), " " + p.unit if p.unit else "")
+                            for p in self.lab.instruments[new].card.drives if p.numeric and p.limits)
+            return ("added %s (%s, card %s%s) at %s to %s; health: %s. Its outputs keep the maker's limits%s until a "
+                    "person reviews them, and every output change on it asks them (auto mode doesn't cover it)."
+                    % (new, the_card.model, the_card.id, ", a draft" if the_card.status == "draft" else "", address,
+                       self.lab.config.name, "ok" if health.ok else "; ".join(health.problems),
+                       " (" + lim + ")" if lim else ""))
+        return self._do("adding an instrument", run)
 
     # ------------------------------------------------------------------ literature
 
@@ -2106,6 +2364,18 @@ class LabRuntime:
             lines.append("active alarm %s: %s" % (a.id, a.text))
         return "\n".join(lines) or "nothing is watched"
 
+    def mark_reviewed(self, by: str = "human") -> List[str]:
+        """A person reviewed the limits of the instruments Kelvin added (their lab config has no marks now, and
+        nothing else changed): from now on they count as the person's, with nothing to reconnect. Only the portal
+        calls this; no agent tool can."""
+        with self.lock:
+            names = self.lab.config.unreviewed()
+            for ic in self.lab.config.instruments.values():
+                ic.added_by = ""
+            self.lab.config.observe_only = False
+            self.gate.log.write("lab_reviewed", by=by, instruments=names)
+            return names
+
     def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human") -> List[str]:
         """Control another lab (the user's instruments, or the virtual lab). Refused while a plan runs. The approval
         mode goes back to asking, and the new lab is health-checked right away."""
@@ -2145,12 +2415,11 @@ class LabRuntime:
                 found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network)
             except AdapterError as e:
                 return str(e)
-            self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
-            self.last_found = [f.address for f in found]
+            self._remember_scan(found, looked)
             if not found:
                 return "\n".join([reason(found, looked)] + looked.lines())
             lines = [f.line() for f in found]
-            lines.append("Only a person can add an instrument to the lab (lab config); suggest it, do not assume it.")
+            lines.append("To use one the person asked for: add_instrument (one with no card: draft_card first).")
             return "\n".join(lines)
         return self._do("scanning for instruments", run)
 
@@ -2212,7 +2481,7 @@ class LabRuntime:
                 "hands_on": self.hands,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
-                "observe_only": self.lab.config.observe_only, "setup": self.setup_status, "survey": self.last_survey,
+                "unreviewed": self.lab.config.unreviewed(), "setup": self.setup_status, "survey": self.last_survey,
                 "watches": self.monitor.list(),
                 "alarms": [a.view() for a in self.monitor.alarms[:10]],
                 "notices": list(self.notifier.notices)[-20:],

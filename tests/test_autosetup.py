@@ -1,5 +1,6 @@
-"""Kelvin setting up connected instruments by itself: a lab locked to observing until a person reviews it, and each
-instrument's folder with its identity, connection, settings and manual (fetched once, then searched)."""
+"""Kelvin setting up connected instruments by itself: each marked as added by Kelvin (every output change asks a
+person until they review its limits), and each instrument's folder with its identity, connection, settings and manual
+(fetched once, then searched)."""
 import json
 import time
 
@@ -7,7 +8,7 @@ import pytest
 
 from labharness import build_virtual_lab, builtin_registry, demo_envelope, profiles
 from labharness.adapters import AdapterError, set_resource_manager
-from labharness.autosetup import LOCK, AutoSetup, draft_observed, unlock
+from labharness.autosetup import AutoSetup, draft_found, reviewed
 from labharness.cards import CardError, parse_card
 from labharness.gate import SafetyGate, ScriptedApprover
 from labharness.labconfig import ConfigError, load_lab_config
@@ -167,28 +168,38 @@ def test_a_sign_in_page_is_not_kept_as_the_manual(tmp_path, pdf):
     assert profiles.info(tmp_path, "dmm")["manual"]["added_by"] == "a person"
 
 
-# ------------------------------------------------------------------ observe only
+# ------------------------------------------------------------------ added by Kelvin: asks until reviewed
 
-def test_observe_only_lab_reads_and_configures_but_keeps_drives_at_safe(bench):
+def test_a_lab_kelvin_set_up_asks_before_every_output_change_until_reviewed(bench):
     reg = builtin_registry()
-    text = draft_observed(scanned(bench), reg)
-    assert LOCK in text and "widget" not in text.lower()        # only instruments Kelvin has cards for
+    text = draft_found(scanned(bench), reg)
+    assert text.count("added_by: kelvin") == 3 and "widget" not in text.lower()   # only instruments Kelvin has cards for
     cfg = load_lab_config(text, reg)
-    assert cfg.observe_only and set(cfg.instruments) == {"smu", "lockin", "tc"}
+    assert set(cfg.instruments) == {"smu", "lockin", "tc"} and sorted(cfg.unreviewed()) == ["lockin", "smu", "tc"]
     lab = build_lab(text, registry=reg)
-    gate = SafetyGate(lab, ScriptedApprover([True]))
+    approver = ScriptedApprover([False])
+    gate = SafetyGate(lab, approver)
     assert gate.get("smu", "I").ok and gate.set("lockin", "time_constant", "300 ms").ok      # reading, configuring
-    refused = gate.set("smu", "V", 1.0)
-    assert not refused.ok and "unlocks them" in refused.message
-    assert not gate.plan_approval({"smu.V": [0.0, 1.0]})[1]                            # nothing to grant either
+    declined = gate.set("smu", "V", 1.0)                                                # asks, saying why
+    assert declined.action == "declined" and "Kelvin added it to the lab itself" in approver.requests[0].items[-1]
+    items, grants, problems = gate.plan_approval({"smu.V": [0.0, 1.0]})
+    assert not problems and "isn't sure about smu" in items[0] and "smu.V" in grants
     assert drive_commands(bench) == []
 
-    opened = unlock(text)
-    assert "observe_only" not in opened and not load_lab_config(opened, reg).observe_only
+    opened = reviewed(text)
+    assert "added_by" not in opened and not load_lab_config(opened, reg).unreviewed()
     lab2 = build_lab(opened, registry=reg)
-    assert SafetyGate(lab2, ScriptedApprover([True])).set("smu", "V", 1.0).ok        # asks, as usual
+    approver2 = ScriptedApprover([True])
+    assert SafetyGate(lab2, approver2).set("smu", "V", 1.0).ok                      # asks, as usual
+    assert len(approver2.requests[0].items) == 1                                    # without the not-sure line
+    with pytest.raises(ConfigError, match="added_by"):
+        load_lab_config(text.replace("added_by: kelvin", "added_by: alice", 1), reg)
+
+    older = opened.replace("lab: My lab\n", "lab: My lab\nobserve_only: true   # older versions wrote this\n")
+    assert sorted(load_lab_config(older, reg).unreviewed()) == ["lockin", "smu", "tc"]   # the whole lab, as before
+    assert reviewed(older) == opened
     with pytest.raises(ConfigError, match="observe_only"):
-        load_lab_config(text.replace("observe_only: true", "observe_only: maybe"), reg)
+        load_lab_config(older.replace("observe_only: true", "observe_only: maybe"), reg)
 
 
 # ------------------------------------------------------------------ auto-setup
@@ -215,8 +226,9 @@ def test_first_start_sets_up_every_instrument_it_knows(tmp_path, bench, pdf):
     setup = AutoSetup(rt, settings, tmp_path, fetch=lambda url: fetched.append(url) or pdf)
     status = setup.run()
     assert status["state"] == "done", status
-    assert rt.lab_info["kind"] == "file" and rt.lab_info["auto"] and rt.lab.config.observe_only
-    assert settings["lab"] == "mine" and LOCK in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
+    assert rt.lab_info["kind"] == "file" and rt.lab_info["auto"]
+    assert sorted(rt.lab.config.unreviewed()) == ["lockin", "smu", "tc"] and status["unreviewed"]
+    assert settings["lab"] == "mine" and "added_by: kelvin" in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
     assert rt.setup_status is setup.status and "3 instruments set up" in status["message"]
     assert any(n["kind"] == "setup" for n in rt.notifier.notices)
 
@@ -232,7 +244,9 @@ def test_first_start_sets_up_every_instrument_it_knows(tmp_path, bench, pdf):
     info = rt.instrument_info("lockin")
     assert "Stanford" in info and "manual:" in info and "3 pages" in info and "settings read at" in info
     assert "[lockin manual, p. 2]" in rt.search_manual("lockin", "OFLT time constant")
-    assert "unlocks them" in rt.set("smu", "V", 1.0)
+    assert "not reviewed by a person yet" in rt.lab_status() and "not sure yet" in rt.describe("smu")
+    rt.gate.approver = ScriptedApprover([False])
+    assert rt.set("smu", "V", 1.0).startswith("declined") and "isn't sure about smu" in str(rt.gate.approver.requests[0])
     assert "no instrument" in rt.instrument_info("nope")
 
     # the next start: the lab is the user's now; Kelvin only refreshes the folders and never rewrites lab.yaml
@@ -264,7 +278,7 @@ def test_while_kelvin_is_busy_the_found_lab_waits_for_later(tmp_path, bench):
     assert (tmp_path / "lab.yaml").exists() and settings["lab"] == "mine"   # it opens on the next start
 
 
-def test_portal_sets_up_on_start_and_a_person_unlocks(tmp_path, bench, pdf, monkeypatch):
+def test_portal_sets_up_on_start_and_a_person_reviews_the_limits(tmp_path, bench, pdf, monkeypatch):
     pytest.importorskip("starlette")
     from labharness.web import app as webapp
     from labharness.web.settings import Settings
@@ -286,12 +300,13 @@ def test_portal_sets_up_on_start_and_a_person_unlocks(tmp_path, bench, pdf, monk
             assert time.time() < deadline, "setting up took too long"
             time.sleep(0.05)
         view = client.get("/api/lab", headers=headers).json()
-        assert view["observe_only"] and view["info"]["kind"] == "file" and "observe_only: true" in view["yaml"]
+        assert sorted(view["unreviewed"]) == ["lockin", "smu", "tc"] and view["info"]["kind"] == "file"
+        assert view["yaml"].count("added_by: kelvin") == 3
         folders = {f["name"]: f for f in view["folders"]}
         assert folders["lockin"]["manual"] and folders["lockin"]["manual_pages"] == 3
         assert folders["smu"]["parsed"]["model"] == "MODEL 2400"
         state = client.get("/api/state", headers=headers).json()
-        assert state["observe_only"] and state["setup"]["state"] == "done"
+        assert sorted(state["unreviewed"]) == ["lockin", "smu", "tc"] and state["setup"]["state"] == "done"
 
         assert client.post("/api/instruments/lockin/open", json={"what": "manual"}, headers=headers).json()["ok"]
         assert client.post("/api/instruments/tc/open", json={"what": "folder"}, headers=headers).json()["ok"]
@@ -304,13 +319,25 @@ def test_portal_sets_up_on_start_and_a_person_unlocks(tmp_path, bench, pdf, monk
         again = client.post("/api/instruments/smu/manual", json={"force": True}, headers=headers).json()
         assert again["ok"] and again["manual"]["url"].startswith("https://download.tek.com/")
 
-        r = client.post("/api/lab", json={"unlock": True}, headers=headers).json()
-        assert r["ok"] and not r["observe_only"] and not rt.lab.config.observe_only
-        assert "observe_only" not in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
+        connected = rt.lab
+        r = client.post("/api/lab", json={"reviewed": True}, headers=headers).json()
+        assert r["ok"] and r["unreviewed"] == [] and not rt.lab.config.unreviewed()
+        assert rt.lab is connected                              # only the marks went: nothing connected again
+        assert "added_by" not in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
         events = [json.loads(line) for line in (tmp_path / "data" / "events.jsonl").read_text().splitlines()]
-        assert any(e.get("by") == "human (portal, unlocked)" for e in events if e.get("type") == "lab_changed")
+        assert [sorted(e["instruments"]) for e in events if e.get("type") == "lab_reviewed"] == [["lockin", "smu", "tc"]]
         assert any(e.get("by") == "Kelvin auto-setup" for e in events if e.get("type") == "lab_changed")
-        assert client.post("/api/lab", json={"unlock": True}, headers=headers).json()["ok"]   # already unlocked: fine
+        assert client.post("/api/lab", json={"reviewed": True}, headers=headers).json()["ok"]   # reviewed already: fine
+
+        # the file says more than the marks (a person tightened a limit in another editor): Kelvin connects it anew
+        text = (tmp_path / "lab.yaml").read_text(encoding="utf-8")
+        edited = text.replace("V: [-210, 210]", "V: [-2, 2]").replace(
+            'address: "GPIB0::24::INSTR"', 'address: "GPIB0::24::INSTR"\n    added_by: kelvin')
+        assert edited.count("V: [-2, 2]") == 1 and "added_by" in edited
+        (tmp_path / "lab.yaml").write_text(edited, encoding="utf-8")
+        r = client.post("/api/lab", json={"reviewed": True}, headers=headers).json()
+        assert r["ok"] and rt.lab is not connected and rt.lab.instruments["smu"].limits("V") == (-2.0, 2.0)
+        assert not rt.lab.config.unreviewed() and "added_by" not in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
 
         shown = client.get("/api/settings", headers=headers).json()["settings"]
         assert shown["auto_setup"] and shown["manuals"]                                   # on unless switched off

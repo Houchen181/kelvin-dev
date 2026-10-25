@@ -219,7 +219,7 @@ class FakeDlcPro:
         pass
 
 
-def test_a_dlc_pro_reads_its_state_and_its_draft_card_keeps_drives_simulated(tmp_path):
+def test_a_dlc_pro_reads_its_state_and_its_draft_card_asks_before_drives(tmp_path):
     fake = MODULES["toptica"] = FakeDlcPro()
     lab = build_lab("""
 lab: Cooling lasers
@@ -230,9 +230,9 @@ instruments:
     assert inst.backend.query("*IDN?").startswith("TOPTICA,") and "DLC-001" in inst.backend.query("*IDN?")
     assert lab.read("dl", "emission") is False and lab.read("dl", "temperature") == pytest.approx(20.01)
     assert lab.read("dl", "health_text") == "ok"                            # DeCoP strings come quoted
-    gate = gate_for(lab, tmp_path, [True, True])
+    gate = gate_for(lab, tmp_path, [False])
     r = gate.set("dl", "current_enabled", True)
-    assert not r.ok and "draft" in r.message                                # unreviewed card: no real drive moves
+    assert r.action == "declined" and "draft" in str(gate.approver.requests[0])   # unreviewed card: a person decides
     assert fake.params["laser1:dl:cc:enabled"] == "#f"
     assert gate.raw("dl", "SET laser1:dl:cc:current-clip 400").action == "refused"
     inst.backend.write("SET laser1:dl:cc:current-set 85.5")                 # what the driver sends, once reviewed

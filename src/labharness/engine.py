@@ -249,7 +249,9 @@ class RunEngine:
         if problems:
             return self._refuse(plan.name, "; ".join(problems))
         sim = None
-        if dry_run or (items and self.gate.auto):
+        # auto mode needs a clean dry run, unless a drive is on an instrument Kelvin isn't sure about (a person asks)
+        could_auto = self.gate.auto and not any(self.gate.unsure(self.lab.resolve(k)[0]) for k in grants)
+        if dry_run or (items and could_auto):
             sim = self.simulate(plan)
             if sim.status == "refused":
                 return self._refuse(plan.name, "refused by %s" % sim.message, sim)

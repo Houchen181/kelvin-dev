@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from .cards import Card, CardRegistry, ParamSpec, num
 from .clock import SimClock
 from .instrument import OFF_TEXT, Instrument, OffBackend
-from .labconfig import LabConfig
+from .labconfig import InstrumentConfig, LabConfig
 
 BackendFactory = Callable[[str, Card, str], Any]
 SwitchedOff = Callable[[str], Iterable[str]]   # a lab's name -> the instruments a person switched off in it
@@ -79,6 +79,30 @@ class Lab:
             return
         backend = self._parked.pop(name, None)
         inst.backend = backend if backend is not None else self._factory(name, inst.card, inst.config.address)
+
+    def add(self, ic: InstrumentConfig, card: Card) -> Instrument:
+        """Connect one more instrument, as the lab config now lists it (Kelvin added it). The others stay connected
+        as they are: connecting them again would open a camera or a maker's program a second time. Raises KeyError
+        for a name in use, and AdapterError (or OSError) when it cannot connect."""
+        if ic.name in self.instruments:
+            raise KeyError("%s is already in %s" % (ic.name, self.config.name))
+        self.registry.put(card)
+        bound = card.bind(ic.vars)
+        self.config.instruments[ic.name] = ic   # the backend factory reads its connection settings from here
+        try:
+            backend = self._factory(ic.name, bound, ic.address)
+        except Exception:
+            del self.config.instruments[ic.name]
+            raise
+        inst = self.instruments[ic.name] = Instrument(ic.name, bound, backend, ic)
+        return inst
+
+    def remove(self, name: str) -> None:
+        """Take out an instrument just added (its entry could not be kept in the lab config): closed, then forgotten."""
+        inst = self.instruments.pop(name)
+        self.config.instruments.pop(name, None)
+        self._parked.pop(name, None)
+        inst.close()
 
     def resolve(self, key: str) -> Tuple[Instrument, ParamSpec]:
         instr, dot, param = key.partition(".")

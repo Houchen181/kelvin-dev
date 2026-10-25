@@ -32,10 +32,10 @@ Client setup. Use the full path to the venv's `kelvin-mcp` (or its Python with `
 A drive change blocks its tool call until a person answers. Set the client's tool timeout above the approval timeout: `MCP_TOOL_TIMEOUT` (ms) for Claude Code, `tool_timeout_sec` for Codex, `timeout` (ms) for Gemini CLI.
 
 Tools:
-- **The lab:** `lab_status`, `describe_instrument`, `instrument_info`, `search_manual`, `show_sequence`, `get_value`, `set_value`, `send_raw`, `undo_last`, `health_check`, `scan_instruments`, `watch`, `watches`, `unwatch`, `wait`.
+- **The lab:** `lab_status`, `describe_instrument`, `instrument_info`, `search_manual`, `show_sequence`, `get_value`, `set_value`, `send_raw`, `undo_last`, `health_check`, `scan_instruments`, `ask_to_switch_on`, `watch`, `watches`, `unwatch`, `wait`.
 - **Plans and the queue:** `validate_plan`, `simulate_plan`, `run_plan`, `queue_show`, `queue_add`, `queue_edit`, `queue_change`, `queue_start`, `queue_pause`, `queue_save`, `queue_load`.
 - **Data:** `find_runs` and `query_runs` (every run in the data folder: filters, or read-only SQL over the catalog), `describe_run` (a run's card), `get_run_data` (with `where`), `compute` (arithmetic on a run's columns), `get_trace`, `analyze_run`, `list_runs`, `recent_events`, `make_report` (`kind`: runs, scan, device or project).
-- **New instruments:** `card_guide`, `check_card`, `read_examples`, `try_card`, `save_card`.
+- **New instruments:** `card_guide`, `check_card`, `read_examples`, `try_card`, `save_card`; in the Kelvin app also `draft_card` (a card from the maker's manual online) and `add_instrument` (adds a connected instrument to the lab, marked as added by Kelvin: every output change on it asks a person until they review its limits).
 - **Literature:** `search_papers`, `read_paper`.
 
 **Security limit:** the access key keeps the model from approving its own requests through its tools. An agent that also has a shell on the same PC could still reach the page. For real hardware, run Kelvin on a machine where the agent has no shell.

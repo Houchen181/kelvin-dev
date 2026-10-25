@@ -2,8 +2,9 @@
 tried on the instrument, kept in ~/Kelvin/cards.
 
 A card Kelvin writes is always a draft. On real hardware a draft card's readings work, so it can be tried against
-the instrument, but its drives stay simulation-only until a person reviews the card and marks it lab-verified.
-Only a person can do that, and Kelvin never overwrites a card a person has reviewed."""
+the instrument, but every setting and output change on it asks a person, saying the card is a draft, until a person
+reviews the card and marks it lab-verified. Only a person can do that, and Kelvin never overwrites a card a person
+has reviewed."""
 from __future__ import annotations
 
 import json

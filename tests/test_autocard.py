@@ -7,6 +7,7 @@ import pytest
 from labharness import autocard, builtin_registry, profiles
 from labharness.adapters import set_resource_manager
 from labharness.carddraft import check
+from labharness.gate import ScriptedApprover
 from test_hardware import Bus, Device
 
 pytest.importorskip("pypdf")
@@ -135,6 +136,19 @@ def test_a_card_is_written_and_kept_as_a_draft(tmp_path, web):
     assert "could not find the ACME GIZMO 1 manual" in lost and "choose its PDF" in lost
 
 
+def test_a_card_for_an_instrument_the_person_named(tmp_path, web):
+    """It gave no identity reply (a serial instrument with its own protocol): the maker and model are the person's."""
+    prompts = []
+    r = autocard.make_card({"address": "ASRL5::INSTR", "maker": "ACME", "model": "WIDGET 9000"}, tmp_path / "cards",
+                           fake_model(prompts), web, builtin_ids=[c.id for c in builtin_registry()])
+    assert r["card_id"] == "acme/widget-9000" and "V (output, V)" in r["parameters"], r
+    assert any("kept the manual's identity check" in c for c in r["changed"])        # untested: try_card tests it
+    card, problems, _ = check((tmp_path / "cards" / "acme_widget-9000.yaml").read_text(encoding="utf-8"))
+    assert not problems and card.idn_pattern == "^NOT-THIS" and card.status == "draft"
+    assert "as the person named it" in prompts[1]
+    assert "needs the maker and the model" in autocard.make_card({"address": "ASRL5::INSTR"}, tmp_path, None, web)["error"]
+
+
 def test_first_start_writes_the_card_and_sets_the_instrument_up(tmp_path, web):
     from labharness.autosetup import AutoSetup
     widget = Device(idn=IDN)
@@ -149,14 +163,15 @@ def test_first_start_writes_the_card_and_sets_the_instrument_up(tmp_path, web):
         assert status["state"] == "done" and status["written"] == ["ACME Widget 9000 source"], status
         assert "wrote draft cards" in status["message"]
         lab = (tmp_path / "lab.yaml").read_text(encoding="utf-8")
-        assert "acme/widget-9000" in lab and "observe_only: true" in lab
+        assert "acme/widget-9000" in lab and "added_by: kelvin" in lab
         assert rt.lab.instruments["smu"].card.status == "draft"
         folder = tmp_path / "instruments" / "smu"
         assert (folder / "manual.pdf").exists() and (folder / "manual.txt").exists()   # kept, not fetched again
         assert web.asked.count("https://www.acme.example/docs/W9000-prog.pdf") == 1
         assert json.loads((folder / "instrument.json").read_text())["parsed"]["model"] == "WIDGET 9000"
         assert any(n["title"].startswith("Kelvin wrote a card") for n in rt.notifier.notices)
-        assert "refused" in rt.set("smu", "V", 1)                                       # outputs locked
+        rt.gate.approver = ScriptedApprover([False])                                 # every output change asks
+        assert rt.set("smu", "V", 1).startswith("declined") and "draft" in str(rt.gate.approver.requests[0])
 
         off = AutoSetup(runtime_for(tmp_path / "b"), FakeSettings(auto_cards="off"), tmp_path / "b",
                         make_card=lambda f: pytest.fail("switched off")).run()

@@ -1,13 +1,14 @@
 """Kelvin sets up the instruments it finds: the first time it starts, and again whenever a person asks.
 
     scan       ask everything VISA and LabOne can see who it is. Read-only: nothing is set.
-    lab.yaml   if the user has no lab yet, the instruments that matched a card are written as a lab config marked
-               observe_only, and Kelvin connects to it. Readings and settings work at once; every drive stays at its
-               safe value until a person reviews the limits in Lab setup and unlocks them.
+    lab.yaml   if the user has no lab yet, the instruments that matched a card are written as a lab config, each
+               marked added_by: kelvin, and Kelvin connects to it. Readings and settings work at once; Kelvin asks a
+               person before every output change on them until they review the limits in Lab setup.
     folders    each instrument's working folder (profiles.py): who it is, how Kelvin talks to it, every setting it
                has now, and its manual, which Kelvin reads before planning an involved scan.
 
-A lab.yaml the user already has is never changed by this: instruments it does not list are only reported."""
+A lab.yaml the user already has is not changed by this: instruments it does not list are only reported (Kelvin adds
+one when someone asks for it: runtime.add_instrument)."""
 from __future__ import annotations
 
 import logging
@@ -20,12 +21,12 @@ from typing import Any, Callable, Dict, List, Optional
 from . import profiles
 
 log = logging.getLogger("kelvin.setup")   # the desktop app writes this to ~/Kelvin/kelvin.log
-LOCK = "observe_only: true   # Kelvin wrote this lab from what it found; review the limits, then unlock in Lab setup"
-_LOCK_LINE = re.compile(r"^observe_only:.*(?:\r?\n|$)", re.M)
+_LOCK_LINE = re.compile(r"^observe_only:.*(?:\r?\n|$)", re.M)   # what older versions wrote for a whole lab
+_ADDED_LINE = re.compile(r"^[ \t]+added_by:[ \t]*kelvin\b.*(?:\r?\n|$)", re.M)
 
 
-def draft_observed(found: List[Dict[str, Any]], registry: Any, lab_name: str = "My lab") -> str:
-    """A lab config of the instruments a scan matched to cards, locked to observing until a person reviews it."""
+def draft_found(found: List[Dict[str, Any]], registry: Any, lab_name: str = "My lab") -> str:
+    """A lab config of the instruments a scan matched to cards, each marked as added by Kelvin."""
     from .discovery import draft_from
     items, taken = [], []
     for f in found:
@@ -35,17 +36,17 @@ def draft_observed(found: List[Dict[str, Any]], registry: Any, lab_name: str = "
         while name in taken:
             name += "_2"
         taken.append(name)
-        items.append({"name": name, "card": f["card_id"], "address": f["address"],
+        items.append({"name": name, "card": f["card_id"], "address": f["address"], "added_by": "kelvin",
                       "note": (f.get("idn") or f.get("how") or "")[:60]})
     if not items:
         return ""
-    text = draft_from(items, registry, lab_name)
-    return text.replace("lab: %s\n" % lab_name, "lab: %s\n%s\n" % (lab_name, LOCK), 1)
+    return draft_from(items, registry, lab_name)
 
 
-def unlock(text: str) -> str:
-    """The lab config with the observe_only line taken out (a person does this, after reviewing the limits)."""
-    return _LOCK_LINE.sub("", text)
+def reviewed(text: str) -> str:
+    """The lab config with Kelvin's marks taken out, every added_by: kelvin (and an older observe_only line): a
+    person does this after reviewing the limits."""
+    return _ADDED_LINE.sub("", _LOCK_LINE.sub("", text))
 
 
 class AutoSetup:
@@ -136,7 +137,7 @@ class AutoSetup:
                 return self._done(why or "Using the virtual lab")
             names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated and i.enabled)
             self._set("reading", message="Reading the settings of %s" % ", ".join(names),
-                      instruments=names, observe_only=rt.lab.config.observe_only)
+                      instruments=names, unreviewed=rt.lab.config.unreviewed())
             for name, ic in rt.lab.config.instruments.items():   # manuals found while writing cards: no second download
                 m = self._manuals.pop(ic.address, None)
                 if m and name in rt.lab.instruments:
@@ -149,7 +150,7 @@ class AutoSetup:
             fetched = [n for n, r in report.items() if "pages" in str(r.get("manual", ""))]
             missing = [n for n, r in report.items() if str(r.get("manual", "")).startswith("not fetched")]
             log.info("Instrument setup: %s; %s", ", ".join(names), report)
-            self._set("done", instruments=names, report=report, observe_only=rt.lab.config.observe_only,
+            self._set("done", instruments=names, report=report, unreviewed=rt.lab.config.unreviewed(),
                       written=list(self._written),
                       message="%d instrument%s set up%s%s%s%s" % (
                           len(names), "" if len(names) == 1 else "s",
@@ -193,8 +194,8 @@ class AutoSetup:
             if r.get("manual"):
                 self._manuals[f["address"]] = r["manual"]
             self.runtime.notifier("setup", "Kelvin wrote a card for the %s" % r["model"],
-                                  "From its manual (%s). It is a draft: its outputs stay simulation-only and setting "
-                                  "changes ask you until you review it in Lab setup." % r["manual"]["url"])
+                                  "From its manual (%s). It is a draft: Kelvin asks you before each setting or output "
+                                  "change on it until you review it in Lab setup." % r["manual"]["url"])
         return written, problems
 
     def _connect(self, matched: List[Dict[str, Any]]) -> bool:
@@ -202,7 +203,7 @@ class AutoSetup:
         from .virtual_lab import build_lab, lab_registry
         rt = self.runtime
         registry = lab_registry(self.home)
-        text = draft_observed(matched, registry)
+        text = draft_found(matched, registry)
         names = ", ".join("%s (%s)" % (f.get("suggested"), f.get("model")) for f in matched)
         self._set("connecting", message="Found %s; connecting" % names, found=len(matched))
         tmp = self.lab_file.with_suffix(".tmp")
@@ -228,6 +229,6 @@ class AutoSetup:
             self._set("done", found=len(matched), message="Found %s; %s" % (names, e))
             return False
         rt.notifier("setup", "Kelvin set up %d instrument%s" % (len(matched), "" if len(matched) == 1 else "s"),
-                    names + ". Readings and settings work now; drives stay at safe until you review the limits in "
-                    "Lab setup and unlock them.")
+                    names + ". Readings and settings work now; Kelvin asks you before each output change until you "
+                    "review their limits in Lab setup.")
         return True

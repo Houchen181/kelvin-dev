@@ -84,9 +84,9 @@ on_abort: { smu.V: { ramp_to: 0, rate_V_per_s: 1 } }
 
 **MCP tools:** `instr.get`, `instr.set`, `instr.raw`, `instr.undo`, `lab.status`, `lab.describe`, `lab.health_check`, `plan.validate`, `plan.simulate`, `plan.submit` (waits for human approval), `run.status`, `run.abort`, `data.query`, `data.plot`, `notebook.append`, `procedure.call`.
 
-**Onboarding a new lab (no code):** install the runtime → it scans VISA, serial and USB → matches instruments to cards in the registry → for an unmatched instrument, the agent drafts a card and adapter from its manual (status: draft; its drives are simulation-only until the owner reviews it) → the owner sets lab limits and safe states → health check → ready.
+**Onboarding a new lab (no code):** install the runtime → it scans VISA, serial and USB → matches instruments to cards in the registry → for an unmatched instrument, the agent finds the manual and drafts a card (status: draft) → instruments join the lab marked `added_by: kelvin`, also later whenever someone names one in a chat → every output change on them asks a person until the owner reviews the limits and safe states → health check → ready.
 
-**Trust (#3)** applies only to drive changes away from safe, and is set per instrument: *simulation only* (new or draft cards) → *ask each time* (default) → *run inside an envelope* signed by the PI or instrument owner (e.g. |V_gate| ≤ 5 V, P_RF ≤ −10 dBm). Logs compare predicted and real behavior, so trust grows from a track record.
+**Trust (#3)** applies only to drive changes away from safe, and is set per instrument: *ask each time, saying why Kelvin isn't sure* (draft cards, instruments Kelvin added; no auto mode or envelope) → *ask each time* (default) → *run inside an envelope* signed by the PI or instrument owner (e.g. |V_gate| ≤ 5 V, P_RF ≤ −10 dBm). Logs compare predicted and real behavior, so trust grows from a track record.
 
 **Deployment modes (#2):** *Local* (lab PC + local model; nothing leaves) · *Self-hosted* (institution server + approved API with zero data retention) · *Hosted* (for non-sensitive work). Each project has a policy that decides which models see what, and everything sent out is logged.
 
@@ -99,7 +99,7 @@ on_abort: { smu.V: { ramp_to: 0, rate_V_per_s: 1 } }
 | 1 | Fast instrument access | Direct commands over persistent connections; long loops run as plans in the run engine (not as LLM turns); status read from the monitor cache |
 | 2 | Confidential | Deployment modes, per-project model policy, raw data stays in the runtime, alias map for sample names, outbound log |
 | 3 | Caution + trust | Measure/drive tags per parameter; measurement runs freely; drive changes away from safe are limit-checked, previewed, confirmed and ramped while guard readings are watched; per-instrument trust; a stop button; open-source gate |
-| 4 | Custom instruments | Adapters + card format + procedures; the agent drafts cards from manuals; a draft's drives stay simulation-only until the owner reviews it |
+| 4 | Custom instruments | Adapters + card format + procedures; the agent drafts cards from manuals and adds the instruments people name; every output change on a draft or a Kelvin-added instrument asks until the owner reviews it |
 | 5 | Literature-based plans | Advisor + literature service + domain-pack templates output a plan with rationale and expected signal |
 | 6 | Know and test instruments | Cards (correct operating conditions); preflight health checks block runs on failure |
 | 7 | Track everything | Event log + per-run snapshot + sample/device/session registry |

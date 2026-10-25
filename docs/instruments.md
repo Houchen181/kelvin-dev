@@ -7,7 +7,9 @@ How Kelvin finds and talks to real instruments, what it keeps about each one, an
 Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-serial. It uses the VISA library you already have (NI-VISA or Keysight IO Libraries), or a pure-Python one if there is none. Install the extra with `pip install "kelvin-lab[hardware]"`; the desktop app includes it.
 
 **Kelvin sets up what it finds.** The first time the desktop app starts (and on every start until you have a lab of your own), Kelvin asks each connected instrument who it is. If any match a card, it connects them right away:
-- **Watching only.** Kelvin writes `~/Kelvin/lab.yaml` with the instruments it found, marked `observe_only: true`. Readings and measurement settings work at once. Every output (voltage, current, field, temperature, laser power) stays at its safe value until you check the limits in **Set up…** and press **Unlock outputs**. Until then, Kelvin refuses to drive anything away from safe and says why.
+- **Asking until you review the limits.** Kelvin writes `~/Kelvin/lab.yaml` with the instruments it found, each marked `added_by: kelvin`. Readings and measurement settings work at once. Their limits are the maker's maximums, so until you check them in **Set up…** and press **Limits reviewed**, Kelvin asks you before every output change on them (voltage, current, field, temperature, laser power), with a line saying why, and neither auto mode nor a project envelope covers them. **Limits reviewed** takes the marks out of the lab config; nothing is reconnected. Labs from older versions marked `observe_only: true` work the same way.
+- **Instruments you name.** Say "the Keithley 2450 on GPIB 18 is connected" or "use the lock-in I just plugged in" in a chat, and Kelvin sets it up itself: it scans, picks the matching card (or finds the maker's manual online and writes a draft card, then tries it), adds the instrument to your lab marked `added_by: kelvin`, connects just that one (the others stay connected as they are), and tells you. It asks you first only for an address the scan didn't find, or to move from the virtual lab you chose to your instruments. It stops and tells you what it needs when it can't go on by itself: a setting on the instrument (remote control, its address, a list of allowed computers), the maker's software or driver, or a manual that isn't public (choose its PDF).
+- **Switched-off instruments.** An instrument you switched off in the Lab panel stays off. When Kelvin needs it, it asks you to switch it on and says why; it is switched on only if you say yes.
 - **A folder for each instrument** in `~/Kelvin/instruments/<name>/`:
   - `instrument.json`: who it is (maker, model, serial number and firmware from its identity reply), its address, the connection settings it answered with (such as 57600 baud, 7 data bits, odd parity), and where its manual came from.
   - `settings.json`: every setting and reading it had (ranges, time constants, sensitivities...), refreshed on every start.
@@ -177,12 +179,14 @@ For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pu
 1. **It finds the manual.** Your default model suggests where the maker publishes it, and Kelvin also tries known addresses for some makers. A product or support page is followed one step to the PDFs it links, on the maker's own site only. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
 2. **It drafts the card.** The model writes the card from the manual's command pages, the card checker reviews it, and the model fixes what the checker found, once.
 3. **It makes the card safe to try, whatever the model wrote:**
-   - The card is a draft. On real hardware its outputs stay simulation-only, and every setting change asks you.
+   - The card is a draft. On real hardware every setting and output change asks you, saying the card is a draft.
    - No commands are sent on connect.
    - Reads that start something are left out (`MEASure?`, `READ?`, `INITiate`, `*TST?`, `*CAL?`), because on some instruments they switch an output on or run a self-test.
    - Calibration and firmware commands are blocked.
-   - The identity pattern is checked against the instrument's own reply.
-4. **It sets the instrument up.** At start-up, the instrument joins the watching-only lab with the others, and its folder gets the manual Kelvin downloaded. The card's first lines say where it came from and which model wrote it.
+   - The identity pattern is checked against the instrument's own reply. For an instrument that gave none (you named it), the manual's own identity check is kept, and trying the card tests it.
+4. **It sets the instrument up.** At start-up, the instrument joins the lab with the others, marked as added by Kelvin, and its folder gets the manual Kelvin downloaded. The card's first lines say where it came from and which model wrote it.
+
+In a chat, Kelvin does the same for an instrument you name (`draft_card`): with the maker and model from its identity reply, or from what you said for one that doesn't answer `*IDN?`. Then it tries the card (`try_card`) and adds the instrument (`add_instrument`).
 
 What leaves the computer: the maker and model name, and the manual's command pages, go to your model; the manual's address goes to the maker's site. The serial number never leaves. Switch this off with **Write cards for instruments Kelvin doesn't know** in Settings. If Kelvin can't find the manual (some makers want a sign-in) or there is no model, it says so; then draft the card from a PDF yourself:
 
@@ -190,8 +194,8 @@ For an instrument Kelvin doesn't know, open **Lab → Set up → Make a card for
 - **Drafting:** paste the manual's remote-programming chapter (copy it from your PDF viewer), or load the maker's example scripts: **Load files** takes several at once, such as the Python or MATLAB examples, a DLL's header file and the README. Pick a model and press **Draft the card**. The model writes the card from that text only, and Kelvin checks it against the card format, asking the model to fix any problems once.
 - **Trying:** type the instrument's address under the card and press **Try it**. Kelvin asks the instrument who it is and reads every reading, and shows each value or the error it gave. It sets nothing. To a text instrument it sends only queries, and it skips reads that could start a measurement or a self-test. Compare the values with the front panel, fix the card and try again until they agree. An instrument already connected in the lab is asked through that connection.
 - **Checking:** read the draft against the manual, edit it, press **Check**, then **Save card**. It is kept in `~/Kelvin/cards/` and appears in the card list for your lab config.
-- **In a chat:** "here is the command reference of my magnet supply, make a card", or "the attoDRY examples are in C:\attocube\examples, make a card for it". Kelvin reads them (`read_examples`), writes the card (`card_guide`, `check_card`), tries it on an instrument in the lab or one the scan found (`try_card`, readings only), fixes it with you, and saves it (`save_card`).
-- **Drafts are safe to try:** a new card is a **draft**. On real hardware its readings work, so you can try it, but its outputs stay simulation-only, and changing any of its settings asks you first (nobody has yet checked which of its parameters only configure).
+- **In a chat:** "here is the command reference of my magnet supply, make a card", or "the attoDRY examples are in C:\attocube\examples, make a card for it". Kelvin reads them (`read_examples`), writes the card (`card_guide`, `check_card`), tries it on an instrument in the lab or one the scan found (`try_card`, readings only; another address asks you first), fixes it with you, saves it (`save_card`) and adds the instrument (`add_instrument`).
+- **Drafts are safe to try:** a new card is a **draft**. On real hardware its readings work, so you can try it, but every change to its settings or outputs asks you first, saying the card is a draft (nobody has yet checked which of its parameters only configure, or its limits).
 - **Reviewing:** when you have checked the commands, limits and safe values, press **Mark reviewed**. Only a person can do that, and Kelvin never overwrites a card a person has reviewed.
 
 **Instruments driven through the maker's library.** Many instruments come with example scripts that call the maker's Python module or DLL instead of sending text commands: cryostats such as the attoDRY, piezo controllers, cameras, spectrometers. A card for one of them has a `library` section that names the module or the DLL (with each function's C arguments, taken from its header file), the calls that connect and disconnect, and switches the library can only toggle. Each parameter calls one function: `get: "GET getSampleTemperature"`, `set: "SET setUserTemperature {value}"`. Its address says where the library is:
@@ -214,7 +218,7 @@ card: 1
 id: acme/sm-2000
 model: ACME SM-2000 Source-Meter
 kind: source-meter
-status: draft                 # draft cards keep their drives simulation-only on real hardware
+status: draft                 # on real hardware, every change on a draft card asks a person
 manual: "ACME SM-2000 Reference Manual, SCPI commands"
 manual_url: "https://www.acme.example/manuals/sm-2000.pdf"   # the maker's own copy, fetched once per instrument
 identify: { idn: "^ACME,SM-2000" }

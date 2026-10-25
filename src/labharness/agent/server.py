@@ -9,7 +9,7 @@ import argparse
 import sys
 import webbrowser
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
@@ -31,8 +31,8 @@ You are connected to a physics lab through Kelvin.
   a clean dry run) go ahead without asking; lab_status says when it is on. Only a person can switch it.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. Do not try to work around a refusal; tell the user.
 - An instrument a person switched off in the Lab panel (lab_status says so) is not part of this experiment: Kelvin
-  sends it nothing, and commands and plans that use it are refused. Don't plan with it; if it is needed, ask the
-  person to switch it on. Only a person can.
+  sends it nothing, and commands and plans that use it are refused. Don't plan with it; if it is needed,
+  ask_to_switch_on asks the person, saying why. Only they switch it on.
 - For sweeps, write a plan and call run_plan directly. It checks the plan, health-checks the instruments it uses,
   asks once for its drive ranges, runs, logs and analyses the data. Report its assessment and key numbers (with
   uncertainties) rather than raw rows. A dry run (simulate_plan, or run_plan with dry_run: true) is not a routine
@@ -67,10 +67,20 @@ You are connected to a physics lab through Kelvin.
   between them (step: name, set: {...}, stabilize: {read, within, for, timeout}, wait: seconds), then queue_start.
   A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
   queued and roughly how long it takes; queue_show follows it.
-- For an instrument Kelvin has no card for: get its manual's command reference or the maker's example scripts
-  (pasted, or read_examples on a file or folder the person names), read card_guide, and write the card from that
-  text only. check_card until it is valid; try_card on the instrument (it only reads) and compare the readings with
-  what the person sees; fix and try again; then save_card. A person adds it to the lab and reviews it.
+- When the person names an instrument connected to this computer, or wants to use one the lab doesn't have yet,
+  set it up yourself: scan_instruments to find it; if a card matched, add_instrument; if none did, draft_card (Kelvin
+  finds the maker's manual online and writes a draft card), try_card it (it only reads) and check that its readings
+  make sense, then add_instrument. Then tell the person in a line or two what you added, with a reading or two they
+  can compare with the front panel. Add only what they asked for. Ask them only where you can't go on: a setting on
+  the instrument itself (remote control, its address, a list of allowed computers), the maker's software or driver
+  to install, a manual Kelvin can't get (ask for the PDF), or an address the scan didn't find.
+- When draft_card can't write it (no public manual, or an instrument driven through the maker's library), or outside
+  the Kelvin app, write the card yourself: the manual's command reference or the maker's example scripts (pasted, or
+  read_examples on a file or folder the person names), card_guide, the card from that text only, check_card until
+  it is valid, try_card, save_card.
+- An instrument Kelvin added, or one with a draft card, is not reviewed yet (lab_status says so): it reads and
+  configures at once, and every output change on it asks the person, auto mode included, until they review its
+  limits. Its limits and that mark are the person's to change, never yours.
 - Work like an experimentalist at the bench, not like a programmer testing code:
   - One plan answers one question. Don't stage checks around it: no validate_plan or simulate_plan before run_plan
     (use them only when the person asks what a plan would do or how long it takes), no test or verification scans,
@@ -90,6 +100,7 @@ You are connected to a physics lab through Kelvin.
 READ = ToolAnnotations(readOnlyHint=True)
 WEB = ToolAnnotations(readOnlyHint=True, openWorldHint=True)   # reads the public literature, never the lab
 ACT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+FETCH = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
 
 
 def build_server(rt: LabRuntime) -> MCPServer:
@@ -194,17 +205,44 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def try_card(card: str, instrument: str) -> str:
-        """Try a card (YAML text) before saving it: on an instrument in the lab (its name) or an address the last
-        scan found, ask who it is and read every reading. It sets nothing and skips reads that could start something.
-        Compare the values with what the person sees, fix the card, and try again."""
+        """Try a card on the instrument before using it: card is its YAML text, or the id of a card Kelvin has (one
+        draft_card wrote); instrument is its name in the lab or its address (one the last scan did not find asks the
+        person first). Asks who it is and reads every reading; it sets nothing and skips reads that could start
+        something. Compare the values with what the person sees, fix the card, and try again."""
         return rt.try_card(card, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
     def save_card(card: str) -> str:
         """Keep a new instrument card (status draft) with the user's cards. Only from the manual text the user gave;
-        never invent commands. A person adds it to the lab and reviews it; until then its drives stay
-        simulation-only on real hardware."""
+        never invent commands. Then try_card and add_instrument; until a person reviews it, every setting and output
+        change on it asks them."""
         return rt.save_card(card)
+
+    @server.tool(annotations=FETCH, structured_output=False)
+    def draft_card(address: str, maker: str = "", model: str = "") -> str:
+        """Write a card for a connected instrument Kelvin has none for: Kelvin finds the maker's manual online, writes
+        the card from its command reference, checks it and keeps it as a draft. Maker and model come from the
+        instrument's identity reply (scan_instruments first); for one that gave none, pass what the person said it is.
+        Only the maker and model leave the computer. Takes a minute or two; sends the instrument nothing."""
+        return rt.draft_card(address, maker, model)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def add_instrument(address: str, card: str = "", name: str = "", connection: Optional[Dict[str, Any]] = None,
+                       vars: Optional[Dict[str, str]] = None) -> str:
+        """Add an instrument connected to this computer to the lab, once the person has asked for it. address: from
+        scan_instruments; card: the one that matched (default), or the id draft_card or save_card gave; name: short,
+        e.g. smu or lockin2 (default: from its kind). connection: serial or line-ending settings from the manual or
+        the person (baud_rate, read_termination...); vars: the card's per-installation names (sensor, channel). Kelvin
+        connects it and checks who it is; the other instruments stay as they are. It reads and configures at once;
+        every output change on it asks the person until they review its limits. An address the scan did not find
+        asks the person first."""
+        return rt.add_instrument(address, card, name, connection, vars)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def ask_to_switch_on(instrument: str, why: str) -> str:
+        """Ask the person to switch on an instrument they switched off in the Lab panel, saying why you need it.
+        It is switched on only if they say yes."""
+        return rt.ask_to_switch_on(instrument, why)
 
     @server.tool(annotations=WEB, structured_output=False)
     def search_papers(query: str, limit: int = 8, since_year: Optional[int] = None) -> str:
@@ -235,7 +273,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=READ, structured_output=False)
     def scan_instruments() -> str:
         """Find instruments connected to this computer (GPIB, USB, LAN, serial) and match them to cards. It only
-        asks each instrument who it is. Adding one to the lab is the user's decision."""
+        asks each instrument who it is. add_instrument adds one the person asked for."""
         return rt.scan()
 
     @server.tool(annotations=READ, structured_output=False)

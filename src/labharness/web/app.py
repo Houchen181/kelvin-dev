@@ -32,13 +32,13 @@ from ..agent.approval import WebApprover
 from ..agent.runtime import LabRuntime
 from ..agent.server import build_server
 from ..adapters import AdapterError
-from ..autosetup import AutoSetup, log as setup_log, unlock as unlock_lab
+from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
 from ..cards import trace_x
 from .. import autocard
 from .. import profiles
 from ..clock import ScaledClock, SimClock
 from ..discovery import add_to_config
-from ..labconfig import ConfigError, load_lab_config
+from ..labconfig import ConfigError, load_lab_config, same_setup
 from .. import carddraft
 from .. import protection
 from .. import rundata
@@ -272,6 +272,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return r
 
     setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem() is None, make_card=write_card)
+    runtime.card_writer = write_card                      # draft_card: a card for an instrument someone named
+
+    def lab_changed(what: str) -> None:
+        """Kelvin changed the lab itself: keep it in Settings; an instrument it added gets its folder, settings and
+        manual."""
+        settings.set_switched_off(runtime.lab.config.name, runtime.lab.switched_off)
+        if what == "added":
+            settings.update({"lab": "mine"})
+            if auto_setup:
+                setup.start("lab changed")
+
+    runtime.lab_changed = lab_changed
+    runtime.switched_off_for = settings.switched_off
     tasks: List[asyncio.Task] = []
 
     def configure_literature() -> None:
@@ -1716,7 +1729,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                      for c in sorted(runtime.lab.registry, key=lambda c: (c.kind, c.id)) if not c.id.startswith("virtual/")]
             return JSONResponse({"name": runtime.lab.config.name, "info": runtime.lab_info, "cards": cards,
                                  "yaml": lab_file.read_text(encoding="utf-8") if lab_file.exists() else "",
-                                 "observe_only": runtime.lab.config.observe_only, "setup": setup.status,
+                                 "unreviewed": runtime.lab.config.unreviewed(), "setup": setup.status,
                                  "folders": instrument_folders()})
         body = await request.json()
         problem = busy_problem()
@@ -1724,10 +1737,23 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(409, problem)
         use = body.get("use")
         by = "human (portal)"
-        if body.get("unlock"):   # a person reviewed the limits Kelvin wrote and lifts the observe-only lock
+        if body.get("reviewed"):   # a person reviewed the limits of the instruments Kelvin added
             if not lab_file.exists():
-                return error(400, "There is no lab config to unlock.")
-            body, use, by = {"yaml": unlock_lab(lab_file.read_text(encoding="utf-8"))}, None, "human (portal, unlocked)"
+                return error(400, "There is no lab config to review.")
+            text = mark_reviewed(lab_file.read_text(encoding="utf-8"))
+            if runtime.lab_info.get("kind") == "file":
+                try:
+                    cfg = load_lab_config(text, lab_registry(lab_file.parent))
+                except ConfigError as e:
+                    return error(400, "The lab config has problems: " + "; ".join(e.errors[:6]))
+                if same_setup(cfg, runtime.lab.config):   # only Kelvin's marks go: nothing to connect again
+                    tmp = lab_file.with_suffix(".tmp")
+                    tmp.write_text(text, encoding="utf-8")
+                    tmp.replace(lab_file)
+                    await asyncio.to_thread(runtime.mark_reviewed, "human (portal)")
+                    return JSONResponse({"ok": True, "name": runtime.lab.config.name, "info": runtime.lab_info,
+                                         "health": [], "unreviewed": []})
+            body, use, by = {"yaml": text}, None, "human (portal, reviewed)"
         try:
             if use == "virtual":
                 lab, envelope, info = await asyncio.to_thread(open_home_lab, lab_file.parent, "virtual", 10,
@@ -1758,7 +1784,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if use != "virtual" and auto_setup:   # give new instruments their folders, settings and manuals
             setup.start("lab changed")
         return JSONResponse({"ok": True, "name": lab.config.name, "info": runtime.lab_info, "health": health,
-                             "observe_only": lab.config.observe_only})
+                             "unreviewed": lab.config.unreviewed()})
 
     def instrument_folders() -> List[Dict[str, Any]]:
         out = []

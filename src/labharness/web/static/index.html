@@ -246,9 +246,9 @@
         <ul id="lab-why-lines" class="why-lines" hidden></ul>
       </div>
       <div id="lab-observe" class="callout small calm" hidden>
-        <b>Watching only.</b> Kelvin set up these instruments itself. Readings and settings work; outputs stay at
-        safe until you check the limits and unlock them.
-        <button id="lab-observe-review" class="link" type="button">Review and unlock…</button>
+        <b>Limits not reviewed.</b> <span id="lab-observe-who">Kelvin added these instruments itself.</span> It asks
+        you before each output change on them until you check their limits and mark them reviewed.
+        <button id="lab-observe-review" class="link" type="button">Review limits…</button>
       </div>
       <div class="inst-head-row"><h3>Sample</h3><span id="mount-summary" class="inst-summary"></span>
         <button id="mount-new" class="link soft" type="button">New device…</button></div>
@@ -428,7 +428,7 @@
               <label class="check"><input id="scan-network" type="checkbox"> Look on the local network too</label>
               <label class="check"><input id="auto-cards" type="checkbox"> Write cards for instruments Kelvin doesn't know</label>
             </div>
-            <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows, with their outputs locked at safe until you review them. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website. Looking on the local network finds instruments that announce themselves (LXI); the first time, Windows may ask whether Kelvin may use the network: allow private networks. For an instrument it doesn't know, Kelvin finds the maker's manual and writes a draft card with your default model (it sends the maker, the model and the manual's command pages, never the serial number). A draft's outputs stay simulation-only and its setting changes ask you until you review it.</span>
+            <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows; until you review their limits, Kelvin asks you before each output change on them. When you name an instrument in a chat, Kelvin sets it up the same way. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website. Looking on the local network finds instruments that announce themselves (LXI); the first time, Windows may ask whether Kelvin may use the network: allow private networks. For an instrument it doesn't know, Kelvin finds the maker's manual and writes a draft card with your default model (it sends the maker, the model and the manual's command pages, never the serial number). Every setting and output change on a draft asks you until you review it.</span>
           </div>
         </section>
         <section class="set-page" data-page="data" hidden>
@@ -564,7 +564,7 @@
     <div id="lab-setup-box" class="setup-box" hidden>
       <span id="lab-setup-msg"></span>
       <div class="setup-actions">
-        <button id="lab-unlock" class="btn small primary" type="button" hidden>Unlock outputs…</button>
+        <button id="lab-unlock" class="btn small primary" type="button" hidden>Limits reviewed…</button>
         <button id="lab-setup-again" class="btn small" type="button">Set up again</button>
       </div>
     </div>
@@ -623,7 +623,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">A card tells Kelvin how to talk to an instrument model. For one Kelvin doesn't know, give the command reference from its manual, or the maker's example scripts, and a model drafts the card. Try it on the instrument, compare its readings with the front panel, and fix it until they agree. New cards are <b>drafts</b>: on real hardware their readings work, so you can try them, but their outputs stay simulation-only until you mark the card reviewed.</p>
+    <p class="muted small">A card tells Kelvin how to talk to an instrument model. For one Kelvin doesn't know, give the command reference from its manual, or the maker's example scripts, and a model drafts the card. Try it on the instrument, compare its readings with the front panel, and fix it until they agree. New cards are <b>drafts</b>: on real hardware their readings work, so you can try them, but Kelvin asks you before each setting or output change until you mark the card reviewed.</p>
     <ul id="card-list" class="memory-notes"></ul>
     <div class="field">
       <span class="field-label">New card from a manual or example scripts</span>

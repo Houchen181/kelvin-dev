@@ -10,6 +10,7 @@ data bits, parity, terminations) rather than a blind sweep. Instruments the lab 
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -212,20 +213,33 @@ def draft_lab_config(found: Sequence[Found], registry: CardRegistry, lab_name: s
     return draft_from(items, registry, lab_name)
 
 
+def _flow(values: Dict[str, Any]) -> str:
+    """A YAML flow mapping, each value written as JSON (which YAML reads as it is: "\\r\\n", 57600, true)."""
+    return "{ %s }" % ", ".join("%s: %s" % (k, json.dumps(v)) for k, v in values.items())
+
+
 def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
-    """One instrument entry of a lab config, with its drives' vendor limits to tighten."""
+    """One instrument entry of a lab config, with its drives' vendor limits to tighten. Optional: connection and
+    vars (what the person or the manual says), added_by: kelvin (Kelvin added it; no person has reviewed it)."""
     card = registry.get(item["card"])
     note = item.get("note") or card.model.split(" (")[0]
-    lines = ["  %s:" % item["name"], "    card: %s        # %s" % (card.id, note), "    address: \"%s\"" % item["address"]]
+    lines = ["  %s:" % item["name"], "    card: %s        # %s" % (card.id, note), "    address: %s" % json.dumps(item["address"])]
     lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives if p.numeric and p.limits]
     if lim:
         lines.append("    limits: { %s }   # vendor limits: tighten to what your sample can take" % ", ".join(lim))
     if card.kind in ("laser", "laser-driver"):
         lines.append("    auto: never        # a person approves every laser change")
-    if card.vars:   # names that differ between installations: say which to check
+    if item.get("connection"):
+        lines.append("    connection: %s" % _flow(item["connection"]))
+    if item.get("vars"):
+        lines.append("    vars: %s" % _flow(item["vars"]))
+    elif card.vars:   # names that differ between installations: say which to check
         lines.append("    vars: { %s }   # %s: check these on your instrument" % (
             ", ".join("%s: %s" % (k, v["default"]) for k, v in card.vars.items()),
             "; ".join(v["label"] for v in card.vars.values())))
+    if item.get("added_by") == "kelvin":
+        lines.append("    added_by: kelvin   # each output change asks you until you review the limits and delete "
+                     "this line")
     return lines
 
 

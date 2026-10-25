@@ -2985,7 +2985,9 @@
     const problem = s.lab_info && s.lab_info.error;
     $("lab-problem").hidden = !problem;
     if (problem) $("lab-problem").textContent = problem + " Kelvin is using the virtual lab meanwhile.";
-    $("lab-observe").hidden = !s.observe_only;
+    const unreviewed = s.unreviewed || [];
+    $("lab-observe").hidden = !unreviewed.length;
+    if (unreviewed.length) $("lab-observe-who").textContent = "Kelvin added " + andList(unreviewed) + " itself.";
     showWhy(s);
     const busySetup = s.setup && SETUP_BUSY.has(s.setup.state);
     $("lab-setting-up").hidden = !busySetup;
@@ -3391,15 +3393,19 @@
 
   // ------------------------------------------------------------------ setting up connected instruments
   const SETUP_BUSY = new Set(["scanning", "drafting", "connecting", "reading"]);
-  function showSetup(setup, observe) {
+  function andList(names) {
+    return names.length < 2 ? names.join("") : names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+  }
+  function showSetup(setup, unreviewed) {
     const busy = setup && SETUP_BUSY.has(setup.state);
-    const text = observe
-      ? "Kelvin set up this lab from what it found. Check each instrument's limits in the lab config below: outputs stay at safe until you unlock them."
+    const waiting = (unreviewed || []).length > 0;
+    const text = waiting
+      ? "Kelvin added " + andList(unreviewed) + " itself. Check their limits in the lab config below: until you mark them reviewed, Kelvin asks you before each output change on them."
       : (setup && setup.message ? setup.message + (busy ? "…" : "") : "");
     $("lab-setup-box").hidden = !text;
-    $("lab-setup-box").classList.toggle("locked", !!observe);
+    $("lab-setup-box").classList.toggle("locked", waiting);
     $("lab-setup-msg").textContent = text;
-    $("lab-unlock").hidden = !observe;
+    $("lab-unlock").hidden = !waiting;
     $("lab-setup-again").disabled = !!busy;
   }
   function renderFolders(folders) {
@@ -3459,18 +3465,19 @@
     } catch (e) { $("lab-msg").textContent = e.message; }
   }
   async function unlockLab() {
-    if (!confirm("Unlock the outputs?\n\nYou have checked the limits in the lab config: what each output may reach " +
-        "(voltage, current, field, temperature, power) is what your sample and setup can take. Kelvin still asks " +
-        "before driving harder, unless auto mode is on.")) return;
-    await connectLab({ unlock: true });
+    if (!confirm("Mark the limits reviewed?\n\nYou have checked the limits in the lab config of the instruments " +
+        "Kelvin added: what each output may reach (voltage, current, field, temperature, power) is what your sample " +
+        "and setup can take. Kelvin then treats them like your other instruments: it still asks before driving " +
+        "harder, unless auto mode or the project envelope covers the change.")) return;
+    await connectLab({ reviewed: true });
     refreshLabSetup();
   }
-  // what setting up changed (status, lock, folders, the lab config Kelvin wrote), without touching the rest
+  // what setting up changed (status, marks, folders, the lab config Kelvin wrote), without touching the rest
   async function refreshLabSetup() {
     let r;
     try { r = await api("/api/lab"); } catch (e) { return; }
     showLabState(r.info, r.name);
-    showSetup(r.setup, r.observe_only);
+    showSetup(r.setup, r.unreviewed);
     renderFolders(r.folders || []);
     if (document.activeElement !== $("lab-yaml")) $("lab-yaml").value = r.yaml || "";
   }
@@ -3480,7 +3487,7 @@
     try { r = await api("/api/lab"); } catch (e) { toast(e.message); return; }
     LAB.cards = r.cards;
     showLabState(r.info, r.name);
-    showSetup(r.setup, r.observe_only);
+    showSetup(r.setup, r.unreviewed);
     renderFolders(r.folders || []);
     $("lab-card").replaceWith(Object.assign(cardSelect("", "Card…"), { id: "lab-card" }));
     $("lab-yaml").value = r.yaml || "";
@@ -3544,8 +3551,8 @@
       Object.assign(f, { card_id: r.card_id, model: r.model, kind: r.kind, how: "card written by Kelvin" });
       if (!f.suggested) f.suggested = KIND_NAME[r.kind] || "instr";
       renderFound();
-      $("lab-msg").textContent = "Kelvin wrote " + r.card_id + " from " + r.manual_url + ". It is a draft: its outputs " +
-        "stay simulation-only and setting changes ask you until you review it under Your instrument cards.";
+      $("lab-msg").textContent = "Kelvin wrote " + r.card_id + " from " + r.manual_url + ". It is a draft: Kelvin " +
+        "asks you before each setting or output change on it until you review it under Your instrument cards.";
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "Find its manual and write its card";
@@ -3584,6 +3591,7 @@
         icon(/FAIL/.test(line) ? "warn" : "check"), h("span", {}, line))));
       $("lab-health").hidden = !r.health.length;
       $("lab-msg").textContent = bad.length ? bad.length + " instrument(s) need attention before use."
+        : body.reviewed && !r.health.length ? "Marked reviewed: Kelvin treats them like your other instruments now."
         : "Connected to " + r.name + ". Every instrument answered as expected.";
       pollState();
     } catch (e) {

@@ -6,6 +6,9 @@
   signed envelope or an approved plan covers it, or auto mode is on and the
   change is low-risk → ramps while watching guard readings, and returns to
   safe if one trips.
+- A real instrument Kelvin isn't sure about (its card is a draft, or Kelvin added it to the lab itself and nobody
+  has reviewed its limits): every change away from safe asks a person and says why; no envelope or auto mode
+  covers it.
 - Beyond limits, or blocked commands: refused.
 - A mounted device's protection (protection.py) narrows the limits and rates and adds its gates' leakage guards;
   a source's range changes only while its level is at safe; while a person has their hands on the sample
@@ -195,6 +198,9 @@ class SafetyGate:
         inst = self.lab.instrument(instr)
         card = inst.card
         lines = ["%s: %s (%s, card %s, %s, trust %s)" % (inst.name, card.model, card.kind, card.id, card.status, inst.trust)]
+        unsure = self.unsure(inst)
+        if unsure:
+            lines.append("  not sure yet: %s; every output change asks a person" % unsure)
         for spec in card.params.values():
             bits = [spec.name, spec.kind]
             if spec.unit:
@@ -232,6 +238,20 @@ class SafetyGate:
         except Exception as e:
             results = [Result(False, "error", instr, message="%s: instrument error: %s" % (instr, e))]
         return [self._done(r, "safe", by) for r in results]
+
+    def unsure(self, inst: Instrument) -> Optional[str]:
+        """Why Kelvin can't be sure what a person allows on this real instrument, if it can't: its card is a draft
+        nobody has checked, or Kelvin added it to the lab itself and nobody has reviewed its limits. Then every change
+        away from safe asks a person, saying this, and neither an envelope nor auto mode covers it."""
+        if inst.simulated:
+            return None
+        why = []
+        if inst.card.status == "draft":
+            why.append("its card is a draft that nobody has checked against the instrument")
+        if self.lab.config.observe_only or inst.config.added_by:
+            why.append("Kelvin added it to the lab itself, and its limits are the maker's: nobody has reviewed them "
+                       "for this setup")
+        return "; ".join(why) or None
 
     def request_abort(self) -> None:
         self._stop_gen += 1
@@ -279,6 +299,10 @@ class SafetyGate:
         fine, blockers = [], []
         for key, allowed in grants.items():
             inst, spec = self.lab.resolve(key)
+            unsure = self.unsure(inst)
+            if unsure:
+                blockers.append("%s: %s, so a person approves it" % (key, unsure))
+                continue
             values = sorted(allowed.values, key=str) if allowed.values is not None else [allowed.lo, allowed.hi]
             ok, why = self.auto_verdict(inst, spec, values)
             (fine if ok else blockers).append(why)
@@ -343,7 +367,9 @@ class SafetyGate:
             if problem:
                 problems.append(problem)
                 continue
-            if inst.trust == "envelope" and self.envelope and all(self.envelope.covers(key, v) for v in away):
+            unsure = self.unsure(inst)
+            if not unsure and inst.trust == "envelope" and self.envelope and all(self.envelope.covers(key, v)
+                                                                                  for v in away):
                 continue
             allowed = Allowed.of(spec, values)
             grants[key] = allowed
@@ -353,6 +379,8 @@ class SafetyGate:
             g = self._guard_text(inst, spec)
             if g:
                 bits.append(g)
+            if unsure:
+                bits.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
             items.append("; ".join(bits))
         return items, grants, problems
 
@@ -407,11 +435,19 @@ class SafetyGate:
                 problem = self._away_problem(inst, spec)
                 if problem:
                     return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
-                how = self._covered(inst, spec, target)
+                unsure = self.unsure(inst)
+                how = self._covered(inst, spec, target, envelope=not unsure)
                 if how is None:
                     request = ApprovalRequest("Approve drive change on %s?" % inst.name,
                                               [self._describe_move(inst, spec, current, target)])
-                    ok, why = self.auto_verdict(inst, spec, [target]) if self.auto else (False, "")
+                    if unsure:
+                        request.items.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
+                    if not self.auto:
+                        ok, why = False, ""
+                    elif unsure:
+                        ok, why = False, "nothing on %s is automatic until a person reviews it" % inst.name
+                    else:
+                        ok, why = self.auto_verdict(inst, spec, [target])
                     if ok:
                         self.auto_approve(request, [why])
                         how = "auto-approved"
@@ -482,11 +518,6 @@ class SafetyGate:
         hands = self._hands_problem(key)
         if hands:
             return hands
-        if inst.card.status == "draft" and not inst.simulated:
-            return "%s: draft card; its drives stay simulation-only until a person reviews it" % key
-        if self.lab.config.observe_only and not inst.simulated:
-            return ("%s: Kelvin set this lab up on its own, so drives stay at safe until a person reviews the limits "
-                    "in Lab setup and unlocks them" % key)
         off = set(self.lab.switched_off)
         for g in inst.guards(spec.name):   # nothing would watch it: a switched-off instrument is never read
             if g.instr in off:
@@ -503,7 +534,9 @@ class SafetyGate:
                 return "interlock: %s needs %s (now %s)" % (key, lock.require.text, cspec.show(actual))
         return None
 
-    def _covered(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
+    def _covered(self, inst: Instrument, spec: ParamSpec, target: Any, envelope: bool = True) -> Optional[str]:
+        """What already approves this change: a person's approval of the plan or queue, or (unless Kelvin isn't sure
+        about the instrument) the project envelope."""
         key = "%s.%s" % (inst.name, spec.name)
         grant = self._grants.get(key)
         if grant is not None and grant.covers(target):
@@ -511,7 +544,7 @@ class SafetyGate:
         standing = self._standing.get(key)
         if standing is not None and standing.covers(target):
             return "queue approval"
-        if inst.trust == "envelope" and self.envelope is not None and self.envelope.covers(key, target):
+        if envelope and inst.trust == "envelope" and self.envelope is not None and self.envelope.covers(key, target):
             return "envelope"
         return None
 

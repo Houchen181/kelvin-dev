@@ -148,7 +148,7 @@ def test_kelvin_drafts_a_card_over_mcp(parts, tmp_path):
     assert "schema version 1" in guide and "id: keithley/2400" in guide           # the format and a full example
     assert checked == "valid: acme/sm-2000 (ACME SM-2000 Source-Meter), 2 parameters; drives: V"
     assert bad.startswith("not valid:")
-    assert saved.startswith("saved draft card acme/sm-2000") and "simulation-only" in saved
+    assert saved.startswith("saved draft card acme/sm-2000") and "add_instrument" in saved and "asks them" in saved
     assert "acme/sm-2000" in runtime.lab.registry and "card acme/sm-2000 saved (draft)" in runtime.events(3)
     assert call(runtime, ("save_card", {"card": GOOD.replace("status: draft", "status: lab-verified")}))[0].startswith(
         "not saved: a card Kelvin writes must have status: draft")
