@@ -13,7 +13,8 @@ Requests (one JSON object per line):
      "convention": "cdecl", "returns": "error", "functions": {"getSampleTemperature": {"out": "float"}}}
     {"id": 3, "op": "call", "name": "getSampleTemperature", "args": []}
     {"id": 3, "op": "call", "name": "sample.getTemperature", "args": []}   (a function on a sub-object)
-    {"id": 4, "op": "quit"}
+    {"id": 4, "op": "describe", "path": "...", "module": "atto_device"}   (its classes and functions; nothing called)
+    {"id": 5, "op": "quit"}
 Replies: {"id": 1, "ok": true, "value": ...} or {"id": 1, "ok": false, "error": "..."}.
 A call follows sub-objects only when the maker's package made them (attocube's device.sample), never into Python's
 own modules or objects, and calls only the maker's own functions: its package's, or its DLL's.
@@ -112,8 +113,8 @@ class Library:
             return self._load_dll(req, path)
         return self._load_module(req, path)
 
-    def _load_module(self, req, path):
-        name = str(req.get("module") or "")
+    def _makers_module(self, name, path):
+        """The maker's module by name, imported: from the lab's folder or an installed package, never Python's own."""
         if not all(NAME.match(p) for p in name.split(".")) or name.split(".")[0] in DENY_MODULES:
             raise Refused("%r is not a maker's module" % name)
         spec = importlib.util.find_spec(name)
@@ -121,7 +122,67 @@ class Library:
             raise Refused("no module %s in %s or among the installed packages" % (name, path or "the Python path"))
         if not ((path and _inside(spec.origin, path)) or any(_inside(spec.origin, d) for d in _site_dirs())):
             raise Refused("%s is part of Python itself, not a maker's library" % name)
-        target = importlib.import_module(name)
+        return importlib.import_module(name), spec
+
+    def describe(self, req, limit=400):
+        """The maker's package as its programmer sees it: its modules, classes (with their methods and properties)
+        and functions, with their arguments and the first line of their documentation. Nothing is called, and no
+        object is made."""
+        import inspect
+        import pkgutil
+        path = req.get("path") or ""
+        if path and os.path.isdir(path) and path not in sys.path:
+            sys.path.insert(0, path)
+        name = str(req.get("module") or "")
+        root, _ = self._makers_module(name, path)
+        top, lines, problems = name.split(".")[0], [], []
+
+        def sig(fn):
+            try:
+                return str(inspect.signature(fn))
+            except (TypeError, ValueError):
+                return "(...)"
+
+        def doc(obj):
+            text = (inspect.getdoc(obj) or "").strip()
+            return "  # " + text.splitlines()[0][:150] if text else ""
+
+        modules = [root]
+        if hasattr(root, "__path__"):   # its submodules too: attocube's device.sample is defined in one
+            for info in pkgutil.walk_packages(root.__path__, root.__name__ + ".",
+                                              onerror=lambda n: problems.append("%s (not importable)" % n)):
+                if info.name.count(".") > name.count(".") + 2 or ".test" in info.name or len(modules) > 60:
+                    continue
+                try:
+                    modules.append(importlib.import_module(info.name))
+                except Exception as e:
+                    problems.append("%s (not importable: %s)" % (info.name, str(e).splitlines()[0][:100] if str(e)
+                                                                else type(e).__name__))
+        for mod in modules:
+            for attr, obj in sorted(vars(mod).items()):
+                if attr.startswith("_") or str(getattr(obj, "__module__", "") or "") != mod.__name__:
+                    continue   # its own, not what it imports
+                if isinstance(obj, type):
+                    lines.append("class %s.%s%s%s" % (mod.__name__, attr, sig(obj), doc(obj)))
+                    for member, value in sorted(vars(obj).items()):
+                        if member.startswith("_"):
+                            continue
+                        if isinstance(value, property):
+                            lines.append("    %s  (property)%s" % (member, doc(value)))
+                            continue
+                        fn = value.__func__ if isinstance(value, (staticmethod, classmethod)) else value
+                        if callable(fn):
+                            lines.append("    %s%s%s" % (member, sig(fn), doc(fn)))
+                elif callable(obj):
+                    lines.append("def %s.%s%s%s" % (mod.__name__, attr, sig(obj), doc(obj)))
+            if len(lines) > limit:
+                break
+        out = lines[:limit] + (["... (%d more lines)" % (len(lines) - limit)] if len(lines) > limit else [])
+        return "\n".join(out + (["Not imported: " + "; ".join(problems[:10])] if problems else []))
+
+    def _load_module(self, req, path):
+        name = str(req.get("module") or "")
+        target, spec = self._makers_module(name, path)
         self.packages = {name.split(".")[0]}
         if req.get("object"):
             if not NAME.match(str(req["object"])):
@@ -242,6 +303,8 @@ def serve(inp, out):
                 value = lib.load(req)
             elif op == "call":
                 value = lib.call(req.get("name"), list(req.get("args") or []))
+            elif op == "describe":
+                value = lib.describe(req)
             elif op == "quit":
                 out.write((json.dumps({"id": rid, "ok": True, "value": None}) + "\n").encode("utf-8"))
                 out.flush()

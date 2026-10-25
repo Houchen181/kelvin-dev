@@ -2172,6 +2172,20 @@ class LabRuntime:
                 return "%s (installed as a Python package)" % envs.site_packages(env, self.home)
             return str(envs.add_files(env, path, self.home))
 
+    def library_api(self, module: str, env: str = "") -> str:
+        """A maker's Python package as its programmer sees it, for writing its library card when the maker gives
+        no example scripts: its classes and functions with their arguments and documentation's first line. Read in
+        Kelvin's helper process, from one of Kelvin's environments; nothing in the package is called."""
+        from .. import library
+        from ..adapters import AdapterError
+        try:
+            said = library.describe(module.strip(), env.strip(), self.home)
+        except (AdapterError, ValueError) as e:
+            return "could not read %s: %s" % (module, e)
+        return (said or "%s has no public classes or functions of its own" % module) + (
+            "\nA library card names its module and object (card_guide), and calls these by name; the helper "
+            "calls nothing else.")
+
     def remove_environment(self, env: str) -> str:
         """Remove one of Kelvin's instrument environments, after a person approves; instruments using it stop
         connecting until it is installed again."""

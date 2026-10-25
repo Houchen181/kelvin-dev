@@ -84,7 +84,8 @@ You are connected to a physics lab through Kelvin.
   maker's Python package (at the version the instrument needs) or the maker's files once the person approves, into
   the drivers environment for Kelvin's built-in drivers (a card's requires, or a driver saying a package is missing),
   or into an environment of its own for a library card (lib://<address>?env=<it>; Python and bitness as the library
-  needs). Don't ask the person to pip install. Ask them only where you can't go on: a setting on the instrument
+  needs). With no example scripts, library_api shows the package's classes and functions. Don't ask the person to
+  pip install. Ask them only where you can't go on: a setting on the instrument
   itself (remote control, its address, a list of allowed computers), the maker's installer (a USB driver, a runtime
   that needs administrator rights: say which and where it is), a manual or specifications document nobody publishes
   (ask for its PDF, then draft_card with manual or specs), or an address nothing answers on.
@@ -355,6 +356,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         lib://<address>?env=<env>. Never ask the person to pip install. A maker's installer (a USB driver, a runtime)
         is theirs to run: say which and from where."""
         return rt.install_for_instrument(env, packages, python, bits, files, why)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def library_api(module: str, env: str = "") -> str:
+        """A maker's Python package as its programmer sees it: its classes (methods, properties) and functions with
+        their arguments and the first line of their documentation, from one of Kelvin's environments (env; default
+        drivers). For writing a library card when the maker gives no example scripts. Nothing in it is called."""
+        return rt.library_api(module, env)
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True,
                                              openWorldHint=False), structured_output=False)

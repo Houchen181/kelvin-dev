@@ -42,6 +42,14 @@ Each parameter:
 - label; kind: measure (reading or a setting that does not drive the sample) or drive (anything that drives the
   sample harder: voltage, current, power, field, temperature, outputs); unit (SI: V, A, W, T, K, Hz, s ...).
 - type: float (default), int, bool, enum (with values: {label: code}) or trace.
+- A trace (an oscilloscope's waveform, a spectrum analyzer's sweep): its x-axis as axis: {start: <param>, stop:
+  <param>} (a sweep's start and stop frequency), {origin: <param>, step: <param>} (a scope's first time and the time
+  between points: XORigin, XINCrement) or {values: <trace param>}. Comma-separated replies, with or without the
+  #<n><length> header, need nothing more; for a waveform sent as binary numbers (BYTE or WORD format), binary: int8,
+  uint8, int16, uint16, int32 or float32 (add "little" when the manual says the lowest byte comes first). When the
+  numbers are digitizer levels, y: their scaling from raw and the card's parameters that read it, as the manual
+  gives it, e.g. y: "(raw - yref) * yinc + yorig". Commands that choose the format or the points (WAVeform:FORMat,
+  DATa:ENCdg, :WAV:POINts) are settings of their own, never sent by a get.
 - set: command template with {value}; get: the query. SCPI short/long forms as in the manual, optional nodes in
   [brackets], e.g. "SOURce:VOLTage[:LEVel] {value}".
 - limits: [min, max] the instrument accepts (the vendor's, not the lab's).
@@ -52,6 +60,13 @@ Each parameter:
 - Replies: field: n (0-based) for comma-separated replies; parse: a regex with one group for odd formats;
   read_when: <bool drive> for readings that would switch something on if read while it is off.
 - description: one line; default: the power-on value if the manual gives it.
+
+Instruments that speak Modbus (the manual gives a register map: compressors, temperature controllers, chillers,
+flow and vacuum controllers): the address is modbus://<ip>?unit=<n> (TCP) or modbus://COM5?unit=<n>&baud=9600&parity=N
+(RTU). get: "READ 30008 float32" (input register 30008 in the usual numbering: 0xxxx coils, 1xxxx discrete
+inputs, 3xxxx input and 4xxxx holding registers; or "READ HR 6" counted from 0); types uint16, int16, uint32, int32,
+float32, float64, then swapped when the low word comes first and *0.1 for a register in tenths. set: "WRITE 40001
+int16 *0.1 {value}" or "WRITE COIL 3 {value}". Modbus has no identity reply: leave identify out.
 
 Instruments with a web API (HTTP and JSON; the lab config's address is http(s)://host:port): commands are the
 method, the path and, for writes, a JSON body with {value} in it: get: "GET /v1/Basic/ActualOutputPower" (the JSON

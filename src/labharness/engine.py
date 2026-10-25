@@ -120,8 +120,8 @@ class RunEngine:
             spec = self.lab.resolve(key)[1]
             m = {"key": key, "unit": spec.unit, "kind": "trace" if spec.type == "trace" else
                  "image" if spec.type == "image" else "scalar"}
-            if spec.axis or spec.x_values:
-                m["x_unit"] = unit("%s.%s" % (instr, spec.axis[0] if spec.axis else spec.x_values))
+            if spec.axis or spec.axis_step or spec.x_values:
+                m["x_unit"] = unit("%s.%s" % (instr, (spec.axis or spec.axis_step or (spec.x_values,))[0]))
             measures.append(m)
         return {"axes": axes, "measures": measures}
 
@@ -367,6 +367,9 @@ class RunEngine:
                         mspec = lab.instrument(instr).spec(param)
                         if mspec.axis:  # record the trace's x-axis as it was when measured
                             row[key + ".axis"] = [lab.read(instr, mspec.axis[0]), lab.read(instr, mspec.axis[1])]
+                        elif mspec.axis_step and row[key]:   # an oscilloscope's: origin and the step between points
+                            x0, dx = lab.read(instr, mspec.axis_step[0]), lab.read(instr, mspec.axis_step[1])
+                            row[key + ".axis"] = [x0, x0 + dx * (len(row[key]) - 1)]
                         elif mspec.x_values:   # its x values (a spectrometer's wavelengths), as they were then
                             row[key + ".x"] = lab.read(instr, mspec.x_values)
                         if mspec.type == "image" and row[key] and rec.path is not None:   # the frame's file

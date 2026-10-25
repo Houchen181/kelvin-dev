@@ -328,3 +328,71 @@ def test_the_scan_says_when_a_makers_program_is_here_but_its_package_isnt():
     if envs.have("nidaqmx") is None:
         assert said == ["NI-DAQmx is installed on this computer; for NI DAQ cards, " + envs.missing("nidaqmx")]
     assert not any("pylon" in s for s in said)                 # a Teledyne PyLoN is not Basler's pylon
+
+
+DEVICE = '''"""The cryostat over the network."""
+import os.path
+
+MARK = %r
+
+
+class Device:
+    """One cryostat on the network."""
+
+    def __init__(self, ip, port=9090):
+        open(MARK, "w").close()
+        self.sample = Sample(self)
+
+    def connect(self):
+        """Open the connection."""
+
+    def close(self):
+        pass
+
+    @property
+    def serial(self):
+        """Its serial number."""
+        return "X"
+
+
+class Sample:
+    def __init__(self, device):
+        self.device = device
+
+    def getTemperature(self):
+        """The sample's temperature in K."""
+        return 4.2
+
+    def setUserTemperature(self, kelvin: float) -> None:
+        """Where to regulate."""
+
+
+def find_devices(timeout=2.0):
+    """Devices that answer a broadcast."""
+    return []
+
+
+join = os.path.join
+'''
+
+
+def test_kelvin_reads_a_makers_package_without_calling_it(tmp_path):
+    from labharness import library
+    python, bits = envs.app_python()
+    site = tmp_path / "env" / "drivers" / ("Lib/site-packages" if envs.WIN else "lib/python%s/site-packages" % python)
+    (site / "acme_cryo").mkdir(parents=True)
+    envs._save({"name": "drivers", "python": python, "bits": bits, "packages": {}, "files": []}, tmp_path)
+    (site / "acme_cryo" / "__init__.py").write_text('"""ACME cryostats."""\nfrom .device import Device\n')
+    (site / "acme_cryo" / "device.py").write_text(DEVICE % str(tmp_path / "made"))
+    (site / "acme_cryo" / "fancy.py").write_text("import not_installed_anywhere\n")
+    said = library.describe("acme_cryo", "", tmp_path)
+    assert "class acme_cryo.device.Device(ip, port=9090)  # One cryostat on the network." in said
+    assert "    connect(self)  # Open the connection." in said and "    serial  (property)  # Its serial number." in said
+    assert "    getTemperature(self)  # The sample's temperature in K." in said
+    assert "    setUserTemperature(self, kelvin: float) -> None  # Where to regulate." in said
+    assert "def acme_cryo.device.find_devices(timeout=2.0)  # Devices that answer a broadcast." in said
+    assert "join" not in said                                    # what it imports isn't the maker's
+    assert "acme_cryo.fancy (not importable" in said
+    assert not (tmp_path / "made").exists()                      # no device was made, nothing called
+    with pytest.raises(AdapterError, match="there is no environment cryo"):
+        library.describe("acme_cryo", "cryo", tmp_path)

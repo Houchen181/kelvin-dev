@@ -182,7 +182,8 @@ def is_query(command: str, enq: bool = False) -> bool:
     first = command.strip().split(None, 1)
     if enq and first and "," not in command and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,5}", command.strip()):
         return True
-    return bool(first) and ("?" in first[0] or first[0].upper() == "GET")   # GET: a driver's or a web API's read
+    # GET: a driver's or a web API's read; READ: a Modbus register's (modbus.py)
+    return bool(first) and ("?" in first[0] or first[0].upper() in ("GET", "READ"))
 
 
 def split_compound(command: str) -> List[str]:

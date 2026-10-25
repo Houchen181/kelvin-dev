@@ -14,11 +14,15 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .envs import PACKAGE
+from .expr import CONSTANTS
 from .scpi import Template
 from .yamlio import load_yaml
 
 KINDS = ("measure", "drive")
 TYPES = ("float", "int", "bool", "enum", "str", "trace", "image")   # image: a camera frame, kept as a file
+# the numbers of a trace sent as an IEEE 488.2 block of binary numbers, and their struct codes
+BINARY = {"int8": "b", "uint8": "B", "int16": "h", "uint16": "H", "int32": "i", "uint32": "I", "float32": "f",
+          "float64": "d"}
 RAMPS = ("gate", "instrument", "none")
 STATUSES = ("community", "lab-verified", "draft")
 CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate": int, "data_bits": int,
@@ -92,6 +96,9 @@ class ParamSpec:
     bool_text: Tuple[str, str] = ("1", "0")
     axis: Optional[Tuple[str, str]] = None         # trace x-axis: (start param, stop param)
     x_values: Optional[str] = None                 # or a trace of x values (a spectrometer's wavelengths)
+    axis_step: Optional[Tuple[str, str]] = None    # or point i at origin + i * step (an oscilloscope's time axis)
+    binary: Optional[str] = None                   # a trace sent as a block of binary numbers: "int16" ("... little")
+    y: Optional[str] = None                        # a trace's values from its raw numbers: "(raw - yref) * yinc"
     applies_when: Optional[str] = None             # drive that must be on for this one to reach the sample
     label: str = ""                                # human name, e.g. "Compliance"
     words: Optional[Tuple[str, str]] = None        # how a bool reads, e.g. ("open", "closed")
@@ -192,7 +199,7 @@ class ParamSpec:
             if len(parts) > self.field:
                 text = parts[self.field]
         if self.type == "trace":
-            return [float(x) for x in text.split(",") if x.strip()]
+            return trace_numbers(text)
         if self.type in ("str", "image"):
             return text
         return self.coerce(text)
@@ -304,8 +311,35 @@ def trace_x(row: Dict[str, Any], key: str, n: int) -> List[float]:
     return [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(n)]
 
 
+def trace_numbers(text: str) -> List[float]:
+    """A trace's numbers from its reply: comma (or space) separated, after the IEEE 488.2 block header an instrument
+    may send first (#800012345 says 8 digits of length follow; #0 has none)."""
+    text = text.strip()
+    m = re.match(r"^#([1-9])", text)
+    if m:
+        text = text[2 + int(m.group(1)):]
+    elif text.startswith("#0"):
+        text = text[2:]
+    parts = text.split(",") if "," in text else text.split()
+    return [float(x) for x in parts if x.strip()]
+
+
 def _is_number(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _y_names(y: Optional[str], problem: Callable[[str], None]) -> List[str]:
+    """The names a trace's y expression uses (not its functions'), or none when it doesn't parse."""
+    import ast
+    if not y:
+        return []
+    try:
+        tree = ast.parse(y, mode="eval")
+    except SyntaxError as e:
+        problem("not an expression: %s" % e.msg)
+        return []
+    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    return sorted({n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in called})
 
 
 def _template(text: Any, err: Callable[[str, str], None], path: str, prefix: bool = False) -> Any:
@@ -421,10 +455,26 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
     if axis is not None:
         if typ == "trace" and isinstance(axis, dict) and axis.get("values") and len(axis) == 1:
             spec.x_values = str(axis["values"])
+        elif typ == "trace" and isinstance(axis, dict) and axis.get("origin") and axis.get("step") and len(axis) == 2:
+            spec.axis_step = (str(axis["origin"]), str(axis["step"]))
         elif typ != "trace" or not isinstance(axis, dict) or not axis.get("start") or not axis.get("stop"):
-            err(path + ".axis", "only traces have an axis: {start: param, stop: param} or {values: param}")
+            err(path + ".axis", "only traces have an axis: {start: param, stop: param}, {origin: param, step: param} "
+                                "or {values: param}")
         else:
             spec.axis = (str(axis["start"]), str(axis["stop"]))
+    binary = p.get("binary")
+    if binary is not None:
+        number, _, order = str(binary).strip().partition(" ")
+        if typ != "trace" or number not in BINARY or order.strip() not in ("", "big", "little"):
+            err(path + ".binary", "a trace's binary numbers: one of %s, with little after it when the lowest byte "
+                                  "comes first" % ", ".join(BINARY))
+        else:
+            spec.binary = str(binary).strip()
+    if p.get("y") is not None:
+        if typ != "trace":
+            err(path + ".y", "only traces have y: their values from raw and the card's parameters")
+        else:
+            spec.y = str(p["y"]).strip()
     if spec.ramp not in RAMPS:
         err(path + ".ramp", "must be gate, instrument or none")
     if spec.rate_per not in ("s", "min"):
@@ -553,9 +603,13 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
             err(path + ".applies_when", "%r is not a readable drive on this card" % spec.applies_when)
         if spec.read_when is not None and (spec.read_when not in params or params[spec.read_when].type != "bool"):
             err(path + ".read_when", "%r is not an on/off parameter on this card" % spec.read_when)
-        for ax in spec.axis or ():
+        for ax in (spec.axis or ()) + (spec.axis_step or ()):
             if ax not in params or params[ax].get_cmd is None or not params[ax].numeric:
                 err(path + ".axis", "%r is not a readable numeric parameter" % ax)
+        for name in _y_names(spec.y, lambda problem: err(path + ".y", problem)):
+            if name != "raw" and name not in CONSTANTS and (name not in params or params[name].get_cmd is None
+                                                            or not params[name].numeric):
+                err(path + ".y", "%r is not raw or a readable numeric parameter on this card" % name)
         if spec.x_values and (spec.x_values not in params or params[spec.x_values].type != "trace"
                               or params[spec.x_values].get_cmd is None):
             err(path + ".axis", "%r is not a readable trace on this card" % spec.x_values)

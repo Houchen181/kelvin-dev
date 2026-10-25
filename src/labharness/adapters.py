@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .cards import Card
 
@@ -184,6 +184,22 @@ class VisaBackend:
             if self.ack:
                 self._check_ack(command)
             return reply
+
+    def query_binary(self, command: str, binary: str) -> List[float]:
+        """A trace the instrument sends as an IEEE 488.2 block of binary numbers (an oscilloscope's waveform in BYTE
+        or WORD format): binary is the card's "int16", or "int16 little" when the lowest byte comes first."""
+        from .cards import BINARY
+        if self.write_only or self.enq or self.echo:
+            raise AdapterError("%s: binary traces need an instrument that answers queries plainly" % self.name)
+        number, _, order = binary.partition(" ")
+        with self.lock:
+            try:
+                values = self.res.query_binary_values(command, datatype=BINARY[number],
+                                                      is_big_endian=order.strip() != "little", container=list)
+            except (ValueError, TypeError) as e:
+                raise AdapterError("%s: %r did not answer with a block of %s numbers (%s)" % (self.name, command,
+                                                                                            number, e)) from e
+        return [float(v) for v in values]
 
     def close(self) -> None:
         with self.lock:

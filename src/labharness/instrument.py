@@ -76,7 +76,33 @@ class Instrument:
             if spec.default is not None:
                 return spec.default
             raise ValueError("%s.%s cannot be read" % (self.name, param))
+        if spec.type == "trace":
+            return self._trace(spec)
         return spec.from_wire(self.backend.query(spec.get_cmd.render()))
+
+    def _trace(self, spec: ParamSpec) -> List[float]:
+        """A trace: as text, or as a block of binary numbers (binary: on the card) where the connection can read one;
+        then in its units through the card's y expression of raw and the instrument's own scale readings."""
+        command = spec.get_cmd.render()
+        if spec.binary and hasattr(self.backend, "query_binary"):
+            values = self.backend.query_binary(command, spec.binary)
+        else:
+            values = spec.from_wire(self.backend.query(command))
+        if not spec.y or not values:
+            return values
+        import numpy as np
+        from . import expr
+        raw, known = np.asarray(values, dtype=float), {}
+
+        def column(name: str) -> Any:
+            if name == "raw":
+                return raw
+            if name not in self.card.params:
+                raise KeyError("%s has no parameter %r" % (self.card.id, name))
+            if name not in known:
+                known[name] = np.float64(float(self.read(name)))
+            return known[name]
+        return [float(v) for v in np.broadcast_to(expr.evaluate(spec.y, column, np), raw.shape)]
 
     def write(self, param: str, value: Any) -> None:
         spec = self.spec(param)

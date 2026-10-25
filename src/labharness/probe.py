@@ -29,7 +29,8 @@ PORTS: List[Tuple[int, str, str]] = [
     (80, "http", "web page"),
     (111, "open", "VXI-11 (SCPI over the network): TCPIP0::{host}::inst0::INSTR"),
     (443, "https", "web page"),
-    (502, "open", "Modbus TCP (controllers, pumps, gauges, chillers)"),
+    (502, "open", "Modbus TCP (compressors, temperature controllers, chillers, gauges): modbus://{host}?unit=1, "
+                  "with a card from its register map"),
     (1998, "banner", "Toptica DLC pro command line"),
     (4880, "open", "HiSLIP (SCPI over the network): TCPIP0::{host}::hislip0::INSTR"),
     (5000, "open", "Red Pitaya's SCPI server, or Quantum Design's MultiPyVu server (qd://{host}:5000)"),

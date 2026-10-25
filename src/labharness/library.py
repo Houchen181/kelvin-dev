@@ -262,6 +262,27 @@ def _text(value: Any) -> str:
     return json.dumps(value)
 
 
+def describe(module: str, env: str = "", home: Any = None, start: Any = None) -> str:
+    """A maker's Python package as its programmer sees it (its classes, functions and their arguments), read in the
+    helper process with the Python of one of Kelvin's environments (envs.py): the drivers environment's packages
+    with Kelvin's own Python, any other environment with its own. Nothing in the package is called."""
+    from . import envs
+    env = env or envs.DRIVERS
+    if envs.info(env, home) is None:
+        raise AdapterError("there is no environment %s: install_for_instrument makes it" % env)
+    if env == envs.DRIVERS:
+        python, path = None, str(envs.site_packages(env, home) or "")
+    else:
+        python, files = str(envs.python_of(env, home)), envs.env_dir(env, home) / "files"
+        path = str(files) if files.is_dir() else ""
+    bridge = (start or Bridge)("library " + module, bridge_command(python))
+    try:
+        bridge.request("ping", 30)
+        return str(bridge.request("describe", 120, module=module, path=path))
+    finally:
+        bridge.stop()
+
+
 def self_test() -> bool:
     """For the release build's self-test: the helper starts with Kelvin's own Python and answers."""
     try:
