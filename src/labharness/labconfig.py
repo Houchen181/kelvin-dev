@@ -174,8 +174,9 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
             elif not _pair(lim):
                 err(path + ".limits." + str(p), "must be [low, high]")
             elif spec.limits and (lim[0] < spec.limits[0] or lim[1] > spec.limits[1]):
-                err(path + ".limits." + str(p), "[%s, %s] exceeds vendor limits [%s, %s]"
-                    % (num(lim[0]), num(lim[1]), num(spec.limits[0]), num(spec.limits[1])))
+                err(path + ".limits." + str(p), "[%s, %s] exceeds vendor limits [%s, %s]; for a wider range, make "
+                    "this lab's version of the card %s with the instrument's own limits (Lab, Cards…, Make your "
+                    "version)" % (num(lim[0]), num(lim[1]), num(spec.limits[0]), num(spec.limits[1]), card.id))
             else:
                 limits[p] = (float(lim[0]), float(lim[1]))
         rates: Dict[str, float] = {}

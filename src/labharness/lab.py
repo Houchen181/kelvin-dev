@@ -198,8 +198,12 @@ class Lab:
                 if card.idn_pattern:
                     idn = inst.query_raw(card.idn_query).strip()
                     if not re.search(card.idn_pattern, idn, re.I):
-                        problems.append("identity %r does not match card %s (wrong address or instrument?)"
-                                        % (idn[:80], card.id))
+                        from .virtual_lab import builtin_ids
+                        problems.append("identity %r does not match card %s (wrong address or instrument? If it is "
+                                        "a variant the card doesn't know, %s)" % (idn[:80], card.id, (
+                                            "make this lab's version of the card with its identity: Lab, Cards…, "
+                                            "Make your version") if card.id in builtin_ids() else
+                                        "add its identity to the card: Lab, Cards…, Edit"))
                         out.append(HealthResult(name, False, problems))
                         continue  # nothing else is meaningful on the wrong instrument
                 err = inst.instrument_error()

@@ -30,8 +30,9 @@ def builtin_ids() -> frozenset:
 
 
 def lab_registry(home: Any = None) -> CardRegistry:
-    """Kelvin's cards plus the user's own from `home`/cards. A broken user card, or one that reuses a built-in
-    id, is left out here; the Cards dialog lists it with its problems."""
+    """Kelvin's cards plus the user's own from `home`/cards. A user card under the id of one of Kelvin's is this
+    lab's version of it and replaces Kelvin's here. A broken user card is left out (Kelvin's, if any, stays); the
+    Cards dialog lists it with its problems."""
     registry = builtin_registry()
     folder = Path(home) / "cards" if home else None
     if folder is not None and folder.is_dir():
@@ -40,8 +41,7 @@ def lab_registry(home: Any = None) -> CardRegistry:
                 card = load_card(path)
             except Exception:
                 continue
-            if card.id not in registry:
-                registry.add(card)
+            registry.put(card)
     from .carddraft import apply_reviews
     apply_reviews(registry, folder)   # Kelvin's own draft cards a person reviewed for this lab
     return registry

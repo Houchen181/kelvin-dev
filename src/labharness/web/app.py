@@ -1444,37 +1444,41 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         body = await request.json()
         try:
             card, path, warnings = carddraft.save(runtime.cards_dir, str(body.get("yaml") or ""), builtin_ids(), "human",
-                                                  str(body.get("replace") or "") or None)
+                                                  str(body.get("replace") or "") or None, bool(body.get("version")))
         except ValueError as e:
             return error(400, str(e))
         if body.get("replace") and body["replace"] != card.id and body["replace"] not in builtin_ids():
             runtime.lab.registry.remove(body["replace"])
         runtime.lab.registry.put(card)
         runtime.gate.log.write("card", by="human", card=card.id, status=card.status, file=path.name)
-        return JSONResponse({"id": card.id, "file": path.name, "status": card.status, "warnings": warnings})
+        return JSONResponse({"id": card.id, "file": path.name, "status": card.status, "warnings": warnings,
+                             "kelvins": card.id in builtin_ids(), "reconnect": sorted(
+                                 n for n, i in runtime.lab.instruments.items() if i.card.id == card.id)})
 
     async def card_check(request: Request) -> Response:
         card, problems, warnings = carddraft.check(str((await request.json()).get("yaml") or ""))
         return JSONResponse({"id": card.id if card else None, "problems": problems, "warnings": warnings})
 
     def kelvins_cards() -> List[Dict[str, Any]]:
-        """Kelvin's own cards the lab uses that came as drafts: a person reviews them for their lab here too."""
+        """Kelvin's own cards the lab uses (not those it has its own version of): a person reviews a draft one for
+        their lab here, or makes the lab's version of any of them."""
         reviewed = carddraft.builtin_reviews(runtime.cards_dir)
+        mine = {c["id"] for c in carddraft.user_cards(runtime.cards_dir)}
         users: Dict[str, List[str]] = {}
         for name, inst in runtime.lab.instruments.items():
             users.setdefault(inst.card.id, []).append(name)
         out = []
         for card_id, names in sorted(users.items()):
-            if card_id not in builtin_ids():
+            if card_id not in builtin_ids() or card_id in mine:
                 continue
             card = runtime.lab.registry.get(card_id)
-            if card.status == "draft" or card_id in reviewed:
-                try:
-                    text = Path(card.source).read_text(encoding="utf-8")
-                except OSError:
-                    text = ""
-                out.append({"id": card_id, "model": card.model, "status": card.status, "instruments": names,
-                            "yaml": text, "problems": [], "warnings": []})
+            try:
+                text = Path(card.source).read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            out.append({"id": card_id, "model": card.model, "status": card.status, "instruments": names,
+                        "yaml": text, "problems": [], "warnings": [], "reviewable": card.status == "draft" or
+                        card_id in reviewed})
         return out
 
     async def card_status(request: Request) -> Response:
@@ -1506,7 +1510,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(404, e.args[0])
         if card_id not in builtin_ids():
             runtime.lab.registry.remove(card_id)
-        return JSONResponse({"ok": True})
+        else:   # the lab's version of Kelvin's card is gone: Kelvin's own again (with a person's review of it, if any)
+            kelvins = builtin_registry()
+            carddraft.apply_reviews(kelvins, runtime.cards_dir)
+            runtime.lab.registry.put(kelvins.get(card_id))
+        return JSONResponse({"ok": True, "reconnect": sorted(n for n, i in runtime.lab.instruments.items()
+                                                             if i.card.id == card_id)})
 
     async def card_try(request: Request) -> Response:
         """Try a card on an address a person typed: who it is, and every reading; nothing is set."""

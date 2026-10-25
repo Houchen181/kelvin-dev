@@ -4,10 +4,11 @@ model: RFSoC board running QICK (ZCU111, ZCU216, RFSoC 4x2, QICK box)
 vendor: QICK (open source, Fermilab)
 kind: awg
 status: community
-manual: "QICK documentation and tutorials, github.com/openquantumhardware/qick (qick 0.2.436, tProc v2 firmware)"
+manual: "QICK documentation and tutorials, github.com/openquantumhardware/qick (qick 0.2.436; tProc v1 and v2 firmware)"
 notes:
   - "Address qick://<name server host>:8888/<proxy name>, e.g. qick://192.168.3.1:8888/myqick for an RFSoC 4x2 on its USB network. On the board, start the Pyro4 name server, then the QICK server, in that order: on a PYNQ board, in its Jupyter (http://<board>:9090), run qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb (its proxy name, myqick by default, goes in the address); or python -m qick.pyro_cli <proxy name> -n <host> -p 8888. Restart the server whenever the name server restarts; qick/pyro4/qick_pyro.service starts both at boot."
   - "On this computer: qick and Pyro4, which Kelvin installs on this computer once a person approves (the app does not carry them). The board's qick and this computer's should be the same version: the instrument's identity shows both, and Kelvin installs the board's (qick==<its version>). The Pyro server has no password: keep the board on a private lab network."
+  - "Firmware with a tProc v1 or v2: Kelvin reads which from the board and runs programs written for it. For firmware it doesn't recognise, set vars: {tproc: \"1\"} (or \"2\") for the instrument in the lab config."
   - "Gain is a fraction of the generator's full scale, not dBm: the power depends on the board, the balun or daughtercard, the Nyquist zone and the frequency. Put an attenuator after it and set the lab's gain limit from a measurement."
   - "A tone keeps playing after a program ends: Kelvin stops it (reset_gens: every generator to zero) whenever the output goes off, on make-safe, and when it disconnects."
   - "Each read of i, q, magnitude and phase shares one averaged acquisition (reps). In pulsed mode, or with the output off (zero gain: the background), each read plays the pulse once per rep."
@@ -18,7 +19,8 @@ identify:
 vars:
   gen: { default: "0", label: "Generator (DAC) channel, as print(soccfg) lists them" }
   ro: { default: "0", label: "Readout (ADC) channel" }
-on_connect: ["SET channels gen={gen},ro={ro}"]
+  tproc: { default: "auto", label: "tProc firmware: auto (as the board says), 1 or 2" }
+on_connect: ["SET channels gen={gen},ro={ro}", "SET tproc {tproc}"]
 
 parameters:
   output:

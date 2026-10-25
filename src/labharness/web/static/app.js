@@ -3309,7 +3309,7 @@
     $("lab-now").textContent = "Kelvin now controls " + (name || "the lab") + (mine ? "" : " (simulated)") + ".";
   }
   // ------------------------------------------------------------------ the user's own instrument cards
-  const CARDS = { editing: null };
+  const CARDS = { editing: null, version: false };   // version: the lab's version of one of Kelvin's cards
   async function openCards() {
     fillModels($("card-model"), S.groups, (S.settings && S.settings.default_model) || $("model").value);
     showCardEditor(null);
@@ -3326,16 +3326,24 @@
       flip.addEventListener("click", () => setCardStatus(c, reviewed ? "draft" : "lab-verified"));
       const edit = h("button", { class: "link soft", type: "button" }, "Edit");
       edit.addEventListener("click", () => showCardEditor(c.yaml, c.id, c.problems, c.warnings));
+      const remove = async () => {
+        if (!confirm(c.kelvins ? "Go back to Kelvin's own card " + c.id + "? Your lab's version is deleted."
+          : "Delete the card " + (c.id || c.file) + "?")) return;
+        let r = {};
+        try { r = await api("/api/cards/delete", { body: { id: c.id || c.file.replace(/\.yaml$/, "") } }); } catch (e) { $("cards-msg").textContent = e.message; }
+        if (r.reconnect && r.reconnect.length) $("cards-msg").textContent = andList(r.reconnect) + (r.reconnect.length === 1 ? " uses" : " use") + " Kelvin's card again once the lab reconnects (Set up…, Save and connect).";
+        loadCards();
+      };
+      const back = c.kelvins ? h("button", { class: "link soft", type: "button" }, "Back to Kelvin's card") : null;
+      if (back) back.addEventListener("click", remove);
       return h("li", { class: "memory-note" + (c.problems.length ? " broken" : "") },
-        h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, c.problems.length ? "broken" : reviewed ? "reviewed" : "draft"),
+        h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, c.problems.length ? "broken" : reviewed ? "reviewed"
+          : c.status === "draft" ? "draft" : c.status),
         h("div", { class: "memory-body" }, h("span", {}, c.model),
-          h("span", { class: "memory-meta" }, (c.id || c.file) + (c.problems.length ? " · " + c.problems[0] : ""))),
-        h("span", { class: "card-actions" }, edit, c.problems.length ? null : flip),
-        rowButton("trash", "Delete this card", async () => {
-          if (!confirm("Delete the card " + (c.id || c.file) + "?")) return;
-          try { await api("/api/cards/delete", { body: { id: c.id || c.file.replace(/\.yaml$/, "") } }); } catch (e) { $("cards-msg").textContent = e.message; }
-          loadCards();
-        }));
+          h("span", { class: "memory-meta" }, (c.id || c.file) + (c.kelvins ? " · your lab's version of Kelvin's card" : "") +
+            (c.problems.length ? " · " + c.problems[0] : ""))),
+        h("span", { class: "card-actions" }, edit, c.problems.length ? null : flip, back),
+        c.kelvins ? null : rowButton("trash", "Delete this card", remove));
     }) : [h("li", { class: "memory-empty" }, "No cards of your own yet.")]), ...(r.kelvins || []).map(kelvinsCard));
   }
   function kelvinsCard(c) {   // one of Kelvin's own cards that came as a draft and that this lab uses
@@ -3349,15 +3357,22 @@
       item.querySelector(".memory-body").append(h("pre", { class: "know-body" }, c.yaml));
       view.textContent = "Hide";
     });
+    const yours = h("button", { class: "link soft", type: "button", title: "Change it for your lab's instrument (another firmware, a wider range, a different command); Kelvin's card stays for other labs" }, "Make your version");
+    yours.addEventListener("click", () => {
+      showCardEditor(c.yaml, c.id, [], [], "Your lab's version of Kelvin's card " + c.id + ": keep its id, change what differs on your instrument, then Save card. It replaces Kelvin's card in this lab.");
+      CARDS.version = true;
+    });
+    const draft = c.status === "draft", kept = c.status === "lab-verified" && c.reviewable;
     const item = h("li", { class: "memory-note" },
-      h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, reviewed ? "reviewed" : "draft"),
+      h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, draft ? "draft" : reviewed ? "reviewed" : "Kelvin's"),
       h("div", { class: "memory-body" }, h("span", {}, c.model),
         h("span", { class: "memory-meta" }, c.id + " · comes with Kelvin · used by " + c.instruments.join(", "))),
-      h("span", { class: "card-actions" }, view, flip));
+      h("span", { class: "card-actions" }, view, yours, draft || kept ? flip : null));
     return item;
   }
   function showCardEditor(text, editing, problems, warnings, notes) {
     CARDS.editing = editing || null;
+    CARDS.version = false;   // set after this when the card is the lab's version of one of Kelvin's
     $("card-edit").hidden = text == null;
     $("card-check").hidden = $("card-save").hidden = text == null;
     if (text == null) return;
@@ -3424,8 +3439,10 @@
   }
   async function saveCard() {
     try {
-      const r = await api("/api/cards", { body: { yaml: $("card-yaml").value, replace: CARDS.editing } });
-      $("cards-msg").textContent = "Saved " + r.id + " (" + r.status + "). Add it to the lab under Instruments.";
+      const r = await api("/api/cards", { body: { yaml: $("card-yaml").value, replace: CARDS.editing, version: CARDS.version } });
+      $("cards-msg").textContent = (r.kelvins ? "Saved your lab's version of " + r.id : "Saved " + r.id) + " (" + r.status + "). " +
+        (r.reconnect && r.reconnect.length ? andList(r.reconnect) + " use" + (r.reconnect.length === 1 ? "s" : "") +
+          " it once the lab reconnects (Set up…, Save and connect)." : "Add it to the lab under Instruments.");
       showCardEditor(null);
       await loadCards();
       if ($("lab-dialog").open) openLabSetup();

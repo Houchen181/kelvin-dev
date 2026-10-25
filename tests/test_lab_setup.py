@@ -86,6 +86,7 @@ def test_health_check_catches_the_wrong_instrument_at_an_address(bench):
     lab = build_lab("lab: x\ninstruments:\n  smu: {card: keithley/2400, address: 'GPIB0::8::INSTR'}\n")
     (result,) = lab.health_check()
     assert not result.ok and "does not match card keithley/2400" in str(result)
+    assert "Make your version" in str(result)                                   # or a variant: the lab's own card
     assert all("?" in c for c in bus.devices["GPIB0::8::INSTR"].sent)          # it only asked
 
 

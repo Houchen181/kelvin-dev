@@ -84,9 +84,11 @@ def test_a_person_reviews_one_of_kelvins_own_draft_cards(tmp_path):
     assert rt.gate.unsure(tc).startswith("its card is a draft")
     client, headers = client_for((rt, Settings(tmp_path / "settings.json"), ChatStore(tmp_path / "chats")), {})
     with client:
-        [kelvins] = client.get("/api/cards", headers=headers).json()["kelvins"]
-        assert kelvins["id"] == "virtual/temperature-controller" and kelvins["instruments"] == ["tc"]
+        listed = client.get("/api/cards", headers=headers).json()["kelvins"]
+        kelvins = next(c for c in listed if c["id"] == "virtual/temperature-controller")
+        assert kelvins["instruments"] == ["tc"] and kelvins["reviewable"]
         assert kelvins["status"] == "draft" and "virtual/temperature-controller" in kelvins["yaml"]
+        assert {c["id"] for c in listed} >= {"virtual/source-meter", "virtual/lock-in"}   # any can get a lab version
         r = client.post("/api/cards/status", json={"id": kelvins["id"], "status": "lab-verified"}, headers=headers)
         assert r.json() == {"id": "virtual/temperature-controller", "status": "lab-verified"}
     assert rt.gate.unsure(tc) is None                                  # at once, without reconnecting

@@ -121,8 +121,8 @@ def test_checking_and_keeping_cards(tmp_path):
     builtin = {"keithley/2400"}
     with pytest.raises(ValueError, match="must have status: draft"):
         carddraft.save(folder, GOOD.replace("status: draft", "status: lab-verified"), builtin, by="agent")
-    with pytest.raises(ValueError, match="already has a card keithley/2400"):
-        carddraft.save(folder, GOOD.replace("acme/sm-2000", "keithley/2400"), builtin)
+    with pytest.raises(ValueError, match="already has a card keithley/2400.*Make your version"):
+        carddraft.save(folder, GOOD.replace("acme/sm-2000", "keithley/2400"), builtin)   # only on purpose
     card, path, _ = carddraft.save(folder, GOOD, builtin, by="agent")
     assert path.name == "acme_sm-2000.yaml" and card.status == "draft"
     assert carddraft.set_status(folder, "acme/sm-2000", "lab-verified").status == "lab-verified"
@@ -131,9 +131,13 @@ def test_checking_and_keeping_cards(tmp_path):
     (folder / "broken.yaml").write_text("card: 1\nid: [", encoding="utf-8")
     listed = {c["file"]: c for c in carddraft.user_cards(folder)}
     assert listed["acme_sm-2000.yaml"]["status"] == "lab-verified" and listed["broken.yaml"]["status"] == "broken"
-    (folder / "clash.yaml").write_text(GOOD.replace("acme/sm-2000", "keithley/2400"), encoding="utf-8")
-    registry = lab_registry(tmp_path)
-    assert "acme/sm-2000" in registry and registry.get("keithley/2400").vendor != "ACME"   # built-ins win
+    version, _, _ = carddraft.save(folder, GOOD.replace("acme/sm-2000", "keithley/2400"), builtin, version=True)
+    registry = lab_registry(tmp_path)                                       # this lab's version replaces Kelvin's
+    assert "acme/sm-2000" in registry and registry.get("keithley/2400").vendor == "ACME"
+    assert {c["id"]: c["kelvins"] for c in carddraft.user_cards(folder) if c["id"]} == {
+        "acme/sm-2000": False, "keithley/2400": True}
+    carddraft.delete(folder, "keithley/2400")
+    assert lab_registry(tmp_path).get("keithley/2400").vendor != "ACME"     # Kelvin's own again
     carddraft.delete(folder, "acme/sm-2000")
     with pytest.raises(KeyError):
         carddraft.delete(folder, "acme/sm-2000")
@@ -171,7 +175,8 @@ def test_cards_in_the_portal(parts):
         assert client.post("/api/cards/check", json={"yaml": "card: 1"}, headers=headers).json()["problems"]
 
         saved = client.post("/api/cards", json={"yaml": r["yaml"]}, headers=headers).json()
-        assert saved == {"id": "acme/sm-2000", "file": "acme_sm-2000.yaml", "status": "draft", "warnings": []}
+        assert saved == {"id": "acme/sm-2000", "file": "acme_sm-2000.yaml", "status": "draft", "warnings": [],
+                         "kelvins": False, "reconnect": []}
         assert any(c["id"] == "acme/sm-2000" for c in client.get("/api/lab", headers=headers).json()["cards"])
         assert client.post("/api/cards/status", json={"id": "acme/sm-2000", "status": "lab-verified"},
                            headers=headers).json() == {"id": "acme/sm-2000", "status": "lab-verified"}
@@ -179,5 +184,6 @@ def test_cards_in_the_portal(parts):
         client.post("/api/cards", json={"yaml": renamed, "replace": "acme/sm-2000"}, headers=headers)
         ids = [c["id"] for c in client.get("/api/cards", headers=headers).json()["cards"]]
         assert ids == ["acme/sm-2000b"] and "acme/sm-2000" not in runtime.lab.registry
-        assert client.post("/api/cards/delete", json={"id": "acme/sm-2000b"}, headers=headers).json() == {"ok": True}
+        assert client.post("/api/cards/delete", json={"id": "acme/sm-2000b"}, headers=headers).json() == {
+            "ok": True, "reconnect": []}
         assert "acme/sm-2000b" not in runtime.lab.registry

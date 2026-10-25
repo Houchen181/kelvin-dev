@@ -188,7 +188,9 @@ def file_for(card_id: str) -> str:
 
 
 def user_cards(cards_dir: Optional[Path]) -> List[Dict[str, Any]]:
-    """The user's own cards, with any problems (a broken file is listed, not skipped silently)."""
+    """The user's own cards, with any problems (a broken file is listed, not skipped silently). "kelvins": the lab's
+    version of one of Kelvin's cards (under its id), which replaces Kelvin's in this lab."""
+    from .virtual_lab import builtin_ids
     out = []
     if not cards_dir or not Path(cards_dir).is_dir():
         return out
@@ -198,19 +200,22 @@ def user_cards(cards_dir: Optional[Path]) -> List[Dict[str, Any]]:
         out.append({"file": path.name, "id": card.id if card else None, "model": card.model if card else path.stem,
                     "kind": card.kind if card else "", "vendor": card.vendor if card else "",
                     "status": card.status if card else "broken", "problems": problems, "warnings": warnings,
-                    "yaml": text})
+                    "yaml": text, "kelvins": bool(card and card.id in builtin_ids())})
     return out
 
 
 def save(cards_dir: Path, text: str, builtin_ids: Iterable[str], by: str = "human",
-         replace: Optional[str] = None) -> Tuple[Card, Path, List[str]]:
-    """Check and keep a card. Kelvin's cards must be drafts and may not replace a card a person reviewed."""
+         replace: Optional[str] = None, version: bool = False) -> Tuple[Card, Path, List[str]]:
+    """Check and keep a card. Kelvin's cards must be drafts and may not replace a card a person reviewed. version:
+    the card may take the id of one of Kelvin's own, as this lab's version of it (another firmware, a wider range, a
+    different command): it replaces Kelvin's card in this lab, and Kelvin's stays for every other lab."""
     card, problems, warnings = check(text)
     if card is None:
         raise ValueError("the card has problems: " + "; ".join(problems[:8]))
-    if card.id in set(builtin_ids):
-        raise ValueError("Kelvin already has a card %s; give yours another id, e.g. %s" % (
-            card.id, "mylab/" + card.id.split("/")[-1]))
+    if card.id in set(builtin_ids) and not version:
+        raise ValueError("Kelvin already has a card %s; give yours another id (e.g. %s), or make it this lab's "
+                         "version of Kelvin's card (in the portal: Lab, Cards…, Make your version)" % (
+                             card.id, "mylab/" + card.id.split("/")[-1]))
     if by != "human" and card.status != "draft":
         raise ValueError("a card Kelvin writes must have status: draft; a person reviews it and marks it lab-verified")
     cards_dir = Path(cards_dir)

@@ -2016,14 +2016,17 @@ class LabRuntime:
             return "not saved: this Kelvin has no folder for your cards"
         from ..virtual_lab import builtin_ids
         try:
-            card, path, warnings = carddraft.save(self.cards_dir, text, builtin_ids(), by)
+            card, path, warnings = carddraft.save(self.cards_dir, text, builtin_ids(), by, version=True)
         except ValueError as e:
             return "not saved: %s" % e
         self.lab.registry.put(card)
         self.gate.log.write("card", by=by, card=card.id, status=card.status, file=path.name)
-        return "\n".join(["saved %s card %s as %s. try_card it on the instrument, then add_instrument. Until a person "
-                          "marks it reviewed (Lab, Cards), every setting and output change on it asks them."
-                          % (card.status, card.id, path)] + ["warning: " + w for w in warnings])
+        users = sorted(n for n, i in self.lab.instruments.items() if i.card.id == card.id)
+        return "\n".join(["saved %s card %s as %s%s. try_card it on the instrument, then add_instrument%s. Until a "
+                          "person marks it reviewed (Lab, Cards…), every setting and output change on it asks them."
+                          % (card.status, card.id, path, ", this lab's version of Kelvin's card" if card.id in
+                             builtin_ids() else "", " (or reconnect_instrument %s)" % ", ".join(users) if users else "")]
+                         + ["warning: " + w for w in warnings])
 
     def draft_card(self, address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
         """A card for an instrument Kelvin has none for: Kelvin finds the maker's manual online (or reads the one the

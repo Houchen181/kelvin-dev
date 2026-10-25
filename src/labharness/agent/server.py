@@ -265,7 +265,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def save_card(card: str) -> str:
         """Keep a new instrument card (status draft) with the user's cards. Only from the manual text the user gave;
         never invent commands. Then try_card and add_instrument; until a person reviews it, every setting and output
-        change on it asks them."""
+        change on it asks them. When one of Kelvin's cards doesn't fit this lab's instrument (another firmware, a
+        wider range, a different command), save the corrected card under the same id: it becomes this lab's version
+        of Kelvin's card and replaces it here only."""
         return rt.save_card(card)
 
     @server.tool(annotations=FETCH, structured_output=False)

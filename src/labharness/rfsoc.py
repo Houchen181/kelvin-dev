@@ -3,7 +3,8 @@
 Address: qick://<name server host>[:8888]/<proxy name>, as started on the board:
     pyro4-ns -n 0.0.0.0 -p 8888          then   python -m qick.pyro_cli myqick -n <host> -p 8888
 Needs qick and Pyro4 on the computer that runs Kelvin (Kelvin installs them into its drivers environment once a
-person approves: envs.py), and tProc v2 firmware on the board.
+person approves: envs.py). The board's firmware may have a tProc v1 or v2: Kelvin reads which from the board and runs
+programs written for it (the instrument's tproc var, 1 or 2, overrides that for a firmware it doesn't recognise).
 
 Kelvin plays one generator channel and reads one readout channel (set in the card's vars):
     output     drive: off sends soc.reset_gens(), which drives every generator with zeros
@@ -35,12 +36,69 @@ def load_qick() -> Any:
     try:
         import qick   # type: ignore
         from qick.pyro import make_proxy   # type: ignore
-        from qick.asm_v2 import AveragerProgramV2   # type: ignore
     except ImportError as e:
         raise AdapterError("QICK boards need qick, at the board's version where it is known, and Pyro4: %s"
                            % envs.missing("qick", "Pyro4")) from e
-    return SimpleNamespace(make_proxy=make_proxy, AveragerProgramV2=AveragerProgramV2,
+    try:
+        from qick.asm_v2 import AveragerProgramV2   # type: ignore
+    except ImportError:   # a qick from before tProc v2, as a board with v1 firmware may run
+        AveragerProgramV2 = None
+    try:
+        from qick import AveragerProgram   # type: ignore   # tProc v1
+    except ImportError:
+        AveragerProgram = None
+    return SimpleNamespace(make_proxy=make_proxy, AveragerProgramV2=AveragerProgramV2, AveragerProgram=AveragerProgram,
                            version=str(getattr(qick, "__version__", "") or ""))
+
+
+def generation(tprocs: Any) -> Optional[int]:
+    """Which tProc the board's firmware has (1 or 2), from the board's own description; None if Kelvin can't tell."""
+    kind = str(((tprocs or [{}])[0] or {}).get("type") or "")
+    if not kind or kind == "qick_processor":
+        return 2
+    if kind.startswith("axis_tproc64x32"):
+        return 1
+    return None
+
+
+def programs_v1(base: Any) -> Dict[str, Any]:
+    """The same two programs for tProc v1 firmware, on the library's AveragerProgram: the gain in DAC units, the
+    pulse length in the generator's clock cycles, the readout window in samples, the readout delay in the tProc's."""
+
+    def declare(prog: Any, periodic: bool) -> None:
+        cfg = prog.cfg
+        gen, ro = cfg["gen"], cfg["ro"]
+        kw = {"mixer_freq": cfg["mixer"]} if cfg["has_mixer"] else {}
+        prog.declare_gen(ch=gen, nqz=cfg["nqz"], **kw)
+        prog.declare_readout(ch=ro, length=prog.us2cycles(cfg["readout_length"], ro_ch=ro), freq=cfg["frequency"],
+                             gen_ch=gen)
+        prog.set_pulse_registers(ch=gen, style="const", freq=prog.freq2reg(cfg["frequency"], gen_ch=gen, ro_ch=ro),
+                                 phase=prog.deg2reg(cfg["phase0"], gen_ch=gen), gain=cfg["gain_dac"],
+                                 length=prog.us2cycles(cfg["length"], gen_ch=gen),
+                                 mode="periodic" if periodic else "oneshot")
+        prog.synci(200)   # time for the processor to set up before the first pulse
+
+    class Tone(base):   # the tone starts once and repeats; each rep only reads
+        def initialize(self):
+            declare(self, True)
+            self.pulse(ch=self.cfg["gen"], t=0)
+
+        def body(self):
+            self.trigger(adcs=[self.cfg["ro"]], pins=[0], adc_trig_offset=self.us2cycles(self.cfg["trigger_delay"]))
+            self.wait_all()
+            self.sync_all(self.us2cycles(1.0))
+
+    class Probe(base):   # one pulse and one read per rep
+        def initialize(self):
+            declare(self, False)
+
+        def body(self):
+            cfg = self.cfg
+            self.measure(pulse_ch=cfg["gen"], adcs=[cfg["ro"]], pins=[0],
+                         adc_trig_offset=self.us2cycles(cfg["trigger_delay"]), wait=True,
+                         syncdelay=self.us2cycles(1.0))
+
+    return {"tone": Tone, "pulsed": Probe}
 
 
 def programs(base: Any) -> Dict[str, Any]:
@@ -109,15 +167,27 @@ class Qick(DriverBackend):
                                % (name, proxy, url.hostname, url.port or 8888, e, url.hostname)) from e
         # the board's QICK and this computer's should be the same version: Pyro hands objects over as they are
         self.versions = (str(self._cfg("sw_version") or ""), str(getattr(self.qick, "version", "") or ""))
-        tprocs = self._cfg("tprocs") or [{}]
-        if tprocs[0].get("type") not in (None, "qick_processor"):
-            raise AdapterError("%s: Kelvin runs tProc v2 programs; this board's firmware has %s"
-                               % (name, tprocs[0].get("type")))
-        self.programs = programs(self.qick.AveragerProgramV2)
+        self.firmware = str(((self._cfg("tprocs") or [{}])[0] or {}).get("type") or "")
+        self.found = generation(self._cfg("tprocs"))   # from the board; the tproc var overrides it (SET tproc)
+        self.tproc: Optional[int] = None
+        self.programs: Dict[str, Any] = {}
+        self._use(self.found)
         self.state: Dict[str, Any] = dict(DEFAULTS, gen=0, ro=0)
         self.data: Dict[str, float] = {}
         self.taken: set = set()
         self.playing = False
+
+    def _use(self, tproc: Optional[int]) -> None:
+        """Programs for this tProc generation (None: not known yet; the first program says how to set it)."""
+        self.tproc, self.programs = tproc, {}
+        if tproc is None:
+            return
+        base = getattr(self.qick, "AveragerProgram" if tproc == 1 else "AveragerProgramV2", None)
+        if base is None:
+            raise AdapterError("%s: the board's firmware has a tProc v%d, and this computer's qick (%s) has no "
+                               "programs for it: install the board's qick version (install_for_instrument)"
+                               % (self.name, tproc, getattr(self.qick, "version", "") or "?"))
+        self.programs = programs_v1(base) if tproc == 1 else programs(base)
 
     def _cfg(self, key: str) -> Any:
         try:
@@ -134,10 +204,19 @@ class Qick(DriverBackend):
         has_mixer = bool(gens[s["gen"]].get("has_mixer"))
         if has_mixer and not s["mixer"]:
             raise AdapterError("%s: generator %d has a digital mixer: set mixer (MHz) first" % (self.name, s["gen"]))
-        return dict(s, gain=s["gain"] if gain is None else gain, has_mixer=has_mixer,
+        g = s["gain"] if gain is None else gain
+        maxv = gens[s["gen"]].get("maxv") or 32766   # tProc v1 takes the gain in DAC units
+        return dict(s, gain=g, gain_dac=int(round(g * maxv)), has_mixer=has_mixer,
                     tproc_readout="tproc_ctrl" in ros[s["ro"]])
 
     def _run(self, kind: str, cfg: Dict[str, Any]) -> Any:
+        if not self.programs:
+            raise AdapterError("%s: Kelvin doesn't know this board's firmware (its tProc is %r): set the instrument's "
+                               "tproc to 1 or 2 in the lab config (vars: {tproc: \"1\"})" % (self.name, self.firmware))
+        if self.tproc == 1:   # AveragerProgram: the config in one dict; I and Q as lists, per readout channel
+            prog = self.programs[kind](self.soccfg, dict(cfg, reps=int(cfg["reps"])))
+            di, dq = prog.acquire(self.soc, load_pulses=True, progress=False)
+            return [[(di[0][0], dq[0][0])]]   # as tProc v2's: the first readout's first point, (I, Q)
         prog = self.programs[kind](self.soccfg, reps=int(cfg["reps"]), final_delay=1.0, cfg=cfg)
         return prog.acquire(self.soc, progress=False)
 
@@ -156,6 +235,14 @@ class Qick(DriverBackend):
             if self.playing:
                 self._stop()
             s["gen"], s["ro"] = ch.get("gen", s["gen"]), ch.get("ro", s["ro"])
+            return
+        if path == "tproc":   # the card's tproc var: auto (what the board says), 1 or 2
+            choice = str(value).strip().lower().lstrip("v")
+            if choice not in ("auto", "1", "2"):
+                raise AdapterError("%s: tproc is auto, 1 or 2" % self.name)
+            if self.playing:
+                self._stop()
+            self._use(self.found if choice == "auto" else int(choice))
             return
         if path not in DEFAULTS or path == "phase0":
             raise AdapterError("%s: no setting %r (it has: %s)" % (self.name, path, ", ".join(DEFAULTS)))
@@ -210,6 +297,8 @@ class Qick(DriverBackend):
     def identity(self) -> str:
         board = self._cfg("board") or "RFSoC"
         text = "QICK,%s,%s" % (board, self.address.split("://", 1)[1])
+        if self.tproc:
+            text += ",tProc v%d" % self.tproc
         theirs, ours = getattr(self, "versions", ("", ""))
         if theirs or ours:
             text += ",board's qick %s, Kelvin's qick %s%s" % (theirs or "?", ours or "?", "" if theirs == ours else
