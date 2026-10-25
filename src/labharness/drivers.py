@@ -683,25 +683,32 @@ def library_notes() -> List[str]:
     picam = LAST.get("picam") or ""
     if picam.endswith("not installed here") and not lightfield:
         picam = ""
-    return [n for n in (picam, lightfield) if n]
+    return [n for n in (picam, lightfield) if n] + package_notes()
 
 
-LIBRARIES = (("nidaqmx", "nidaqmx.system"), ("seabreeze", "seabreeze.spectrometers"), ("pypylon", "pypylon.pylon"),
-             ("pylablib", "pylablib.devices.Attocube"), ("qick", "qick.pyro"))
+# a maker's program or driver (words in its name and maker), the package Kelvin reaches its instruments through, and
+# what they are: with the program here and the package not, the scan says how Kelvin installs it
+PACKAGE_HINTS = ((("ni-daqmx",), "nidaqmx", "NI DAQ cards", "NI-DAQmx"),
+                 (("labone",), "zhinst-core", "Zurich Instruments' instruments", "LabOne"),
+                 (("oceanview",), "seabreeze", "Ocean spectrometers", "OceanView"),
+                 (("basler", "pylon"), "pypylon", "Basler cameras", "Basler's pylon"),
+                 (("time tagger",), "Swabian-TimeTagger", "Swabian Time Taggers", "Swabian's Time Tagger software"),
+                 (("multivu",), "MultiPyVu", "Quantum Design systems", "MultiVu"),
+                 (("spinapi",), "spinapi", "SpinCore PulseBlasters", "SpinAPI"))
 
 
-def instrument_libraries(problems: Optional[Dict[str, str]] = None) -> List[str]:
-    """The makers' Python libraries this Kelvin can load (the private app build brings them); why the others don't
-    go to `problems`."""
-    import importlib
+def package_notes(programs: Optional[List[Dict[str, str]]] = None) -> List[str]:
+    """Makers' programs installed here whose instruments Kelvin reaches through a package it doesn't have yet."""
+    from . import probe
+    try:
+        found = probe.programs() if programs is None else programs
+    except Exception:
+        return []
+    text = [("%s %s" % (p.get("name", ""), p.get("publisher", ""))).lower() for p in found]
     out = []
-    for name, module in LIBRARIES:
-        try:
-            importlib.import_module(module)
-            out.append(name)
-        except Exception as e:
-            if problems is not None:
-                problems[name] = "%s: %s" % (type(e).__name__, str(e).splitlines()[0][:160] if str(e) else "")
+    for words, package, what, program in PACKAGE_HINTS:
+        if any(all(w in t for w in words) for t in text) and envs.have(package) is None:
+            out.append("%s is installed on this computer; for %s, %s" % (program, what, envs.missing(package)))
     return out
 
 

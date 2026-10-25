@@ -20,10 +20,6 @@ jobs:
           python-version: "3.13"
       - name: Install
         run: python -m pip install -e ".[web,desktop]" "pyinstaller>=6"
-      - name: The makers' instrument libraries (private build)
-        if: startsWith(github.ref, 'refs/tags/private-v')
-        # NI DAQ cards; PICam, Andor's spectrograph DLL and the ANC300 need no Python package
-        run: python -m pip install nidaqmx
       - name: The tag matches the version
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
@@ -54,6 +50,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
       - name: Install it and self-test the installed app
         shell: pwsh
+        env:
+          KELVIN_SELFTEST_ENVS: "1"   # also: uv, an instrument environment, and packages imported from it
         run: |
           $setup = Get-ChildItem dist\Kelvin-Setup-*.exe | Select-Object -First 1
           Start-Process $setup.FullName -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait
@@ -64,10 +62,8 @@ jobs:
           # the Claude Code bridge is in the private build only, never in a published one
           $private = "$env:GITHUB_REF" -like "refs/tags/private-v*"
           if ($private -ne ($log -match "Claude Code bridge on")) { throw "the Claude Code bridge is in the wrong build" }
-          # the private build brings the makers' instrument libraries, and they load
-          if ($private -and -not ($log -match "instrument libraries: nidaqmx")) {
-            throw "the instrument libraries are missing from the private build"
-          }
+          # no build brings makers' instrument libraries: the app installs them into an environment and imports them
+          if (-not ($log -match "instrument environments: ok")) { throw "instrument environments don't work in the app" }
       - name: Uninstall it; Kelvin's own data go, measurements stay
         shell: pwsh
         run: |
@@ -104,9 +100,12 @@ jobs:
       - name: Build the app
         run: pyinstaller packaging/kelvin.spec --noconfirm --distpath dist --workpath build
       - name: Self-test the app
+        env:
+          KELVIN_SELFTEST_ENVS: "1"   # also: uv, an instrument environment, and packages imported from it
         run: |
           ./dist/Kelvin.app/Contents/MacOS/Kelvin --self-test --home "$RUNNER_TEMP/kelvin-a"
           cat "$RUNNER_TEMP/kelvin-a/kelvin.log"
+          grep -q "instrument environments: ok" "$RUNNER_TEMP/kelvin-a/kelvin.log"
       - name: Zip
         run: |
           version=$(python -c "import sys; sys.path.insert(0, 'src'); from labharness._version import __version__; print(__version__)")

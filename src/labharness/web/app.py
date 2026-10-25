@@ -1797,7 +1797,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except ConfigError as e:
             return error(400, "The lab config has problems: " + "; ".join(e.errors[:6]))
         except (AdapterError, OSError, ValueError) as e:
-            return error(400, str(e).splitlines()[0] if str(e) else type(e).__name__)
+            from .. import envs
+            return JSONResponse({"error": envs.for_people(str(e).splitlines()[0]) if str(e) else type(e).__name__,
+                                 "install": envs.needed(str(e))}, status_code=400)
         try:
             health = await asyncio.to_thread(runtime.switch_lab, lab, envelope, info, by)
         except RuntimeError as e:
@@ -1808,6 +1810,21 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             setup.start("lab changed")
         return JSONResponse({"ok": True, "name": lab.config.name, "info": runtime.lab_info, "health": health,
                              "unreviewed": lab.config.unreviewed()})
+
+    async def lab_install(request: Request) -> Response:
+        """POST {env, packages}: install the makers' packages the lab's instruments need, from the Install button
+        shown where the lab can't connect because one is missing. The person approves what is downloaded, with
+        its versions and sources, as for Kelvin's own installs (envs.py); then the Lab panel connects again."""
+        body = await request.json()
+        packages = body.get("packages")
+        if not isinstance(packages, list) or not packages or not all(isinstance(p, str) for p in packages):
+            return error(400, "Say which packages to install.")
+        problem = busy_problem()
+        if problem:
+            return error(409, problem)
+        said = await asyncio.to_thread(runtime.install_for_instrument, str(body.get("env") or ""), packages,
+                                       why="your lab's instruments", by="human (portal)")
+        return JSONResponse({"ok": said.startswith("installed"), "message": said})
 
     def instrument_folders() -> List[Dict[str, Any]]:
         out = []
@@ -2276,6 +2293,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/state", state),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/lab", lab_view, methods=["GET", "POST"]),
+        Route("/api/lab/install", lab_install, methods=["POST"]),
         Route("/api/reports", reports_view, methods=["GET", "POST"]),
         Route("/api/reports/tree", reports_tree),
         Route("/api/reports/refresh", reports_refresh, methods=["POST"]),

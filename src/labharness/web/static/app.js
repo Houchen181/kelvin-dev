@@ -85,7 +85,9 @@
       let msg = "HTTP " + res.status, data = null;
       try { data = await res.json(); msg = data.error || msg; } catch (e) { /* not JSON */ }
       if (res.status === 401 && data && data.signin) setTimeout(() => location.reload(), 300);   // signed out elsewhere
-      throw new Error(msg);
+      const err = new Error(msg);
+      err.data = data;
+      throw err;
     }
     return res.json();
   }
@@ -2988,7 +2990,13 @@
     $("sim-tag").hidden = !s.simulated;
     const problem = s.lab_info && s.lab_info.error;
     $("lab-problem").hidden = !problem;
-    if (problem) $("lab-problem").textContent = problem + " Kelvin is using the virtual lab meanwhile.";
+    if (problem) {
+      const text = problem + " Kelvin is using the virtual lab meanwhile.";
+      if ($("lab-problem").dataset.text !== text) {   // the install button keeps its state between polls
+        $("lab-problem").dataset.text = text;
+        $("lab-problem").replaceChildren(h("span", {}, text), ...installOffer(s.lab_info.install));
+      }
+    } else delete $("lab-problem").dataset.text;
     const unreviewed = s.unreviewed || [];
     $("lab-observe").hidden = !unreviewed.length;
     if (unreviewed.length) $("lab-observe-who").textContent = "Kelvin added " + andList(unreviewed) + " itself.";
@@ -3599,8 +3607,31 @@
         : "Connected to " + r.name + ". Every instrument answered as expected.";
       pollState();
     } catch (e) {
-      $("lab-msg").textContent = e.message;
+      $("lab-msg").replaceChildren(h("span", {}, e.message), ...installOffer(e.data && e.data.install));
     } finally { save.disabled = false; }
+  }
+
+  // A maker's package the lab's instruments need is missing (envs.py): install it, once the person approves what is
+  // downloaded (the request appears with the other approvals), then connect the lab again.
+  function installOffer(install) {
+    if (!install || !install.packages || !install.packages.length) return [];
+    const names = andList(install.packages);
+    const button = h("button", { class: "link", type: "button" }, "Install " + names);
+    const said = h("span", { class: "install-said" });
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      said.textContent = " Approve the download above to go on…";
+      try {
+        const r = await api("/api/lab/install", { body: install });
+        said.textContent = " " + r.message;
+        if (r.ok) await connectLab({ use: "mine" });
+        else button.disabled = false;
+      } catch (e) {
+        said.textContent = " " + e.message;
+        button.disabled = false;
+      }
+    });
+    return [" ", button, said];
   }
 
   // ------------------------------------------------------------------ approval mode (a person's choice)

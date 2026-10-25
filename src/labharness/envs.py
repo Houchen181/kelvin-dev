@@ -344,20 +344,27 @@ def attach(name: str = DRIVERS, home: Any = None) -> Optional[str]:
     rec, site = info(name, home), site_packages(name, home)
     if rec is None or site is None or (rec.get("python"), rec.get("bits", 64)) != app_python():
         return None
-    folders = [str(site)]
+    import importlib
+    if str(site) not in sys.path:
+        sys.path.append(str(site))
+        importlib.invalidate_caches()
+    # its .pth files, as Python's site module reads them: folders (relative to site-packages) in order, and a
+    # package's own start-up line (pywin32 adds its DLL folder), but not the venv's and setuptools' own hooks
     for pth in sorted(site.glob("*.pth")):
         for line in pth.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
-            if line and not line.startswith(("#", "import ")) and Path(line).is_dir():
-                folders.append(line)
-    added = False
-    for f in folders:
-        if f not in sys.path:
-            sys.path.append(f)
-            added = True
-    if added:
-        import importlib
-        importlib.invalidate_caches()
+            if not line or line.startswith("#") or "_virtualenv" in line or "_distutils_hack" in line:
+                continue
+            if line.startswith(("import ", "import\t")):
+                try:
+                    exec(line)
+                except Exception:
+                    pass
+                continue
+            folder = Path(line) if Path(line).is_absolute() else site / line
+            if folder.is_dir() and str(folder) not in sys.path:
+                sys.path.append(str(folder))
+                importlib.invalidate_caches()
     return str(site)
 
 
@@ -368,6 +375,55 @@ def missing(*packages: str) -> str:
             "(install_for_instrument with env %s and packages %s); from source, pip install %s"
             % (" and ".join(packages), "is" if one else "are", "it" if one else "them", DRIVERS,
                json.dumps(list(packages)), " ".join(packages)))
+
+
+_NEEDED = re.compile(r"install_for_instrument with env ([a-z][a-z0-9_-]*) and packages (\[[^\]]*\])")
+
+
+def needed(text: str) -> Optional[Dict[str, Any]]:
+    """The install a missing-package message asks for (missing() and library.py write it): {env, packages}, so the
+    Lab panel can offer it. None when the text asks for none."""
+    m = _NEEDED.search(text or "")
+    try:
+        packages = json.loads(m.group(2)) if m else None
+    except ValueError:
+        return None
+    if not packages or not all(isinstance(p, str) and PACKAGE.match(p) for p in packages):
+        return None
+    return {"env": m.group(1), "packages": packages}
+
+
+def for_people(text: str) -> str:
+    """A missing-package message as a person reads it beside the Install button: what needs the packages, and that
+    they aren't here yet, without the part for the AI (how Kelvin installs them)."""
+    need = needed(text)
+    if need is None:
+        return text
+    names, one = " and ".join(need["packages"]), len(need["packages"]) == 1
+    cuts = [i for i in (text.find(names + " is not on this computer"), text.find(names + " are not on this computer"),
+                        text.find(" Kelvin installs")) if i > 0]
+    lead = text[:min(cuts)].rstrip(" :;,") if cuts else ""
+    where = "on this computer" if need["env"] == DRIVERS else "in Kelvin's environment %s" % need["env"]
+    return "%s%s %s %s yet." % (lead + ": " if lead else "", names, "isn't" if one else "aren't", where)
+
+
+def self_test(packages: Tuple[str, ...] = ("Pyro4", "ujson")) -> str:
+    """For the release build's self-test, which has the network: uv fetched and checked, the drivers environment
+    made with the app's own Python, a pure and a compiled package installed into it, and the app importing both
+    from there. Raises on any failure."""
+    import importlib
+    uv_path() or fetch_uv()
+    if info(DRIVERS) is None:
+        create(DRIVERS, why="the self-test")
+    rec = install(DRIVERS, list(packages))
+    if attach(DRIVERS) is None:
+        raise RuntimeError("the drivers environment could not be attached")
+    where = env_dir(DRIVERS).resolve()
+    for p in packages:
+        module = importlib.import_module(p)
+        if where not in Path(module.__file__).resolve().parents:
+            raise RuntimeError("%s came from %s, not from the drivers environment" % (p, module.__file__))
+    return "Python %s, %s" % (rec["python"], ", ".join("%s %s" % (p, rec["packages"].get(p, "?")) for p in packages))
 
 
 def pypi(spec: str, get: Optional[Callable[[str], bytes]] = None) -> Dict[str, str]:

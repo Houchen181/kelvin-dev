@@ -2063,7 +2063,7 @@ class LabRuntime:
         return "\n".join(lines)
 
     def install_for_instrument(self, env: str, packages: Optional[List[str]] = None, python: str = "", bits: int = 64,
-                               files: str = "", why: str = "") -> str:
+                               files: str = "", why: str = "", by: str = "agent") -> str:
         """Install what an instrument needs on this computer, in one of Kelvin's environments (envs.py): its maker's
         Python packages from PyPI, at the version the instrument needs, and its own files (a folder or a download).
         A person approves first, seeing what, which version and from where."""
@@ -2132,12 +2132,12 @@ class LabRuntime:
                 kept = self._fetch_files(env, files)
                 rec = envs.info(env, self.home) or rec
         except Exception as e:
-            self.gate.log.write("install_failed", by="agent", env=env, packages=packages, files=files or None,
+            self.gate.log.write("install_failed", by=by, env=env, packages=packages, files=files or None,
                                 error=profiles._first_line(e))
             return "could not install: %s" % profiles._first_line(e)
         if env == envs.DRIVERS:
             envs.attach(env, self.home)
-        self.gate.log.write("installed", by="agent", env=env, packages=packages, files=files or None, why=why or None)
+        self.gate.log.write("installed", by=by, env=env, packages=packages, files=files or None, why=why or None)
         got = ", ".join("%s %s" % (base, rec["packages"].get(envs.base_name(base), "?"))
                         for base in [envs.base_name(p) for p in packages])
         return ("installed in environment %s (Python %s, %d-bit)%s%s. %s"

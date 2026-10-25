@@ -109,7 +109,10 @@ def open_home_lab(home: Any, choice: str = "auto", speed: float = 10,
         try:
             return build_lab(path, registry=registry, switched_off=switched_off), None, dict(info, kind="file")
         except Exception as e:
-            info["error"] = "Your lab (%s) could not be connected: %s" % (path.name, str(e).splitlines()[0])
+            from . import envs
+            info["install"] = envs.needed(str(e))   # a maker's package missing: the Lab panel offers to install it
+            info["error"] = "Your lab (%s) could not be connected: %s" % (path.name,
+                                                                         envs.for_people(str(e).splitlines()[0]))
     lab = build_virtual_lab(clock=ScaledClock(speed) if speed else SimClock(), registry=registry,
                             switched_off=switched_off)
     return lab, demo_envelope(lab), info

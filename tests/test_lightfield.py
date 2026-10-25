@@ -213,6 +213,7 @@ def test_the_scan_says_what_teledyne_software_saw(monkeypatch, tmp_path):
     from labharness.survey import Survey
     monkeypatch.setitem(princeton.LAST, "picam", "PICam (Princeton Instruments cameras): not installed here")
     monkeypatch.setattr(lightfield, "root", lambda: None)
+    monkeypatch.setattr(drivers, "package_notes", lambda programs=None: [])   # whatever else this computer has
     assert drivers.library_notes() == []                     # no Teledyne software at all: nothing to say
     monkeypatch.setattr(lightfield, "root", lambda: str(tmp_path))
     monkeypatch.setattr(lightfield.sys, "platform", "win32")

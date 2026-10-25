@@ -87,9 +87,9 @@ More instruments with a library of their own:
 
 | Instrument | Address | What the computer needs | Card |
 |---|---|---|---|
-| National Instruments DAQ (USB-600x, USB-62xx, PCIe/PXIe-63xx, cDAQ) | `nidaq://Dev1?terminal=rse` | NI-DAQmx (the app brings nidaqmx) | `ni/daqmx` |
+| National Instruments DAQ (USB-600x, USB-62xx, PCIe/PXIe-63xx, cDAQ) | `nidaq://Dev1?terminal=rse` | NI-DAQmx (NI's installer), and `nidaqmx`, which Kelvin installs | `ni/daqmx` |
 | Teledyne Princeton Instruments camera (PyLoN, PIXIS, ProEM, BLAZE, KURO, SOPHIA) | `picam://<serial>` | PICam, or LightField which installs it | `princeton/picam` |
-| The same cameras with their spectrograph (IsoPlane, SpectraPro, HRS), through LightField | `lightfield://<experiment>` | LightField, with its license (the app brings pythonnet) | `princeton/lightfield` |
+| The same cameras with their spectrograph (IsoPlane, SpectraPro, HRS), through LightField | `lightfield://<experiment>` | LightField, with its license | `princeton/lightfield` |
 | Princeton Instruments (Acton) SpectraPro monochromator | `serial://COM4` | nothing (text commands) | `princeton/spectrapro` |
 | Andor Shamrock / Kymera spectrograph | `shamrock://0` | Andor Solis or the Andor SDK | `andor/shamrock` |
 | Andor sCMOS camera (Zyla, Neo, Sona, Marana) | `andor://0?sdk=3` | Andor SDK3 and its pyAndorSDK3 | `andor/scmos` (draft) |
@@ -101,7 +101,7 @@ More instruments with a library of their own:
 | Ocean Insight spectrometer | `seabreeze://<serial>` | `seabreeze`, which Kelvin installs, and its USB driver once | `ocean/spectrometer` |
 | Basler camera | `pylon://<serial>` | `pypylon`, which Kelvin installs | `basler/camera` |
 
-- **The app brings only what it needs:** nidaqmx, numpy, and pythonnet for LightField's automation. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a maker's Python package the app doesn't carry: Kelvin installs it on this computer the first time, once you approve.
+- **The app brings no maker's library:** Kelvin installs the Python package an instrument needs (nidaqmx, seabreeze, pypylon, pylablib) on this computer the first time, once you approve. LightField's automation uses pythonnet, which the app has for its own window. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text.
 
 - **Scans find them:** the NI devices, Princeton Instruments cameras, Andor spectrographs and sCMOS cameras (and, once their packages are installed, Ocean spectrometers, Basler cameras and ANC350s), through their libraries, which only list what they see. Add the others by address. Andor SDK2 cameras aren't listed, because finding one means initializing it, which resets it.
 - **The scan says what PICam saw:** each camera that is free, each one open in another program (LightField, say), PICam missing, and whether LightField is installed. Kelvin never starts LightField by itself: add it in the Lab panel.
@@ -120,7 +120,7 @@ More instruments with a library of their own:
   - the LightField calls are from Teledyne's automation interface as labs' own scripts use it.
 - **For a model that isn't here** (a Newport Cornerstone, a Horiba monochromator, a Hamamatsu or Thorlabs camera, a SmarAct or Mad City Labs stage): Kelvin writes a card from its manual or the maker's example scripts (see [Cards for new instruments](#cards-for-new-instruments)).
 
-Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app: Kelvin installs the one an instrument needs, once you approve (from source, the extras `zhinst`, `qd`, `nidaq`, `ocean`, `basler` and `pylablib` install them). Andor's pyAndorSDK2/3 come with Andor's SDK, and Kelvin installs them from its Python folder. The private app brings nidaqmx. These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.
+Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app: Kelvin installs the one an instrument needs, once you approve (from source, the extras `zhinst`, `qd`, `nidaq`, `ocean`, `basler` and `pylablib` install them). Andor's pyAndorSDK2/3 come with Andor's SDK, and Kelvin installs them from its Python folder. These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.
 
 **Instruments on the network with their own protocol.** No vendor software is needed; the address says how to talk:
 - `http://<ip>:<port>/<base>` (or `https://`) for an instrument with a web API, such as a Light Conversion PHAROS (`http://<ip>:20022/v1`). Card commands are the method, the path and a JSON body: `GET /Basic/ActualOutputPower`, `PUT /Basic/TargetAttenuatorPercentage {value}`. Add `?auth_env=NAME` for a bearer token kept in that environment variable, or `?insecure=1` for a self-signed certificate.
@@ -240,6 +240,8 @@ The app carries no instrument maker's software: every lab has different instrume
 - **Versions that must match:** some instruments need the same version on both sides, such as a QICK board and this computer's `qick`. Kelvin installs the version the instrument has.
 - **The makers' installers stay yours:** a USB driver or a runtime that needs administrator rights (NI-DAQmx, the Opal Kelly driver, LightField) comes from the maker's installer, which you run. Kelvin says which one, and where it is.
 - **Cards say what they need:** a card's `requires` lists the maker's Python packages its driver imports, such as `requires: [qick, Pyro4]`.
+- **When your lab can't connect** because an instrument's package is missing, the Lab panel says so with an **Install** button: you approve the download, and Kelvin connects the lab again.
+- **Scans say what is missing:** when a maker's program is on this computer (NI-DAQmx, LabOne, MultiVu, Basler's pylon, Swabian's Time Tagger software, SpinAPI) but not the package Kelvin reaches its instruments through, the scan says so, and how Kelvin installs it.
 - **Seeing and removing them:** ask Kelvin what it has installed (`environments`), or to remove an environment (`remove_environment`, which you approve).
 - **Searching outside the lab** (Settings) also covers these downloads: with it off, or in a project that keeps its work off the internet, Kelvin downloads nothing.
 

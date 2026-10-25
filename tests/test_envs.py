@@ -45,6 +45,10 @@ class FakeUv:
                     continue
                 name = envs.base_name(Path(spec).name if ("/" in spec or "\\" in spec) else spec)
                 self.installed[name.lower()] = spec.split("==")[1] if "==" in spec else "1.0"
+                if name.startswith("kelvin_"):   # a module the app can import, for the self-test
+                    folder = Path(cmd[cmd.index("--python") + 1]).parent.parent
+                    site = folder / ("Lib/site-packages" if envs.WIN else "lib/python3.13/site-packages")
+                    (site / (name + ".py")).write_text("NAME = %r\n" % name)
             return 0, "Installed %d packages" % len(self.installed)
         if cmd[1:3] == ["pip", "list"]:
             return 0, json.dumps([{"name": k, "version": v} for k, v in self.installed.items()])
@@ -230,5 +234,97 @@ def test_a_missing_package_says_how_kelvin_installs_it():
     said = envs.missing("qick", "Pyro4")
     assert said.startswith("qick and Pyro4 are not on this computer")
     assert 'install_for_instrument with env drivers and packages ["qick", "Pyro4"]' in said
+    assert envs.needed("rfsoc: QICK boards need qick: " + said) == {"env": "drivers", "packages": ["qick", "Pyro4"]}
+    assert envs.needed('install_for_instrument with env cryo and packages ["atto-device"]')["env"] == "cryo"
+    assert envs.needed("packages <its pip name>") is None and envs.needed("smu: no answer") is None
+    assert envs.needed('install_for_instrument with env drivers and packages ["x; rm"]') is None
     assert envs.lacking(["pytest", "surely-not-installed-anywhere"]) == ["surely-not-installed-anywhere"]
     assert envs.have("PyTest") == envs.have("pytest") is not None
+
+
+QICK_LAB = """lab: RF bench
+instruments:
+  rfsoc: { card: qick/rfsoc, address: "qick://192.168.3.1:8888/myqick" }
+"""
+
+
+def test_a_lab_that_cant_connect_for_a_missing_package_offers_the_install(tmp_path):
+    import importlib.util
+    if importlib.util.find_spec("qick") is not None:
+        pytest.skip("qick is installed here, so the board would be reached")
+    from labharness.virtual_lab import open_home_lab
+    (tmp_path / "lab.yaml").write_text(QICK_LAB, encoding="utf-8")
+    lab, _, info = open_home_lab(tmp_path, "auto", 0)
+    try:
+        assert info["kind"] == "virtual" and "could not be connected" in info["error"]
+        assert info["install"] == {"env": "drivers", "packages": ["qick", "Pyro4"]}
+    finally:
+        lab.close()
+
+
+def test_the_lab_panels_install_button_asks_then_installs(kelvin, tmp_path, monkeypatch):
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+    from labharness.web import app as webapp
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    from test_web import Scripted
+    monkeypatch.setitem(envs.HOME, "path", tmp_path)
+    settings = Settings(tmp_path / "settings.json")
+    app = webapp.create_app(kelvin, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"],
+                            providers={"scripted": Scripted([])})
+    headers = {"X-Kelvin-Token": settings.access_key}
+    kelvin.approver.answers = [False, True]
+    with TestClient(app) as client:
+        declined = client.post("/api/lab/install", json={"env": "drivers", "packages": ["qick"]}, headers=headers)
+        assert declined.json() == {"ok": False, "message": "declined: nothing installed"}
+        r = client.post("/api/lab/install", json={"env": "drivers", "packages": ["qick", "Pyro4"]}, headers=headers)
+        assert r.json()["ok"] and "installed in environment drivers" in r.json()["message"]
+        assert client.post("/api/lab/install", json={"packages": "qick"}, headers=headers).status_code == 400
+    assert "your lab's instruments" in kelvin.approver.requests[1].title
+    logged = [json.loads(x) for x in (tmp_path / "data" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [e["by"] for e in logged if e.get("type") == "installed"] == ["human (portal)"]
+
+
+def test_attaching_reads_an_environments_pth_files_as_python_does(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.delenv("KELVIN_PTH_HOOK", raising=False)
+    python, bits = envs.app_python()
+    (tmp_path / "env" / "drivers").mkdir(parents=True)
+    envs._save({"name": "drivers", "python": python, "bits": bits, "packages": {}, "files": []}, tmp_path)
+    site = tmp_path / "env" / "drivers" / ("Lib/site-packages" if envs.WIN else "lib/python%s/site-packages" % python)
+    (site / "extra").mkdir(parents=True)
+    (site / "extra" / "kelvin_pth_extra.py").write_text("WHERE = 'extra'\n")
+    (site / "kelvin_pth_hook.py").write_text("import os\nos.environ['KELVIN_PTH_HOOK'] = '1'\n")
+    (site / "_virtualenv.py").write_text("raise RuntimeError('the venv hook is not for the app')\n")
+    (site / "kelvin.pth").write_text("# a package's own\nextra\nimport kelvin_pth_hook\nimport _virtualenv\n")
+    assert envs.attach("drivers", tmp_path) == str(site)
+    assert sys.path[-2:] == [str(site), str(site / "extra")]
+    assert __import__("kelvin_pth_extra").WHERE == "extra"
+    assert __import__("os").environ.get("KELVIN_PTH_HOOK") == "1"
+    (tmp_path / "env" / "other" / "Lib" / "site-packages").mkdir(parents=True)
+    envs._save({"name": "other", "python": "3.8", "bits": 32, "packages": {}, "files": []}, tmp_path)
+    assert envs.attach("other", tmp_path) is None              # not the app's Python: run in the helper instead
+
+
+def test_the_release_self_test_installs_and_imports_through_an_environment(tmp_path, monkeypatch):
+    monkeypatch.setattr(envs, "_run", FakeUv())
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    monkeypatch.setitem(envs.HOME, "path", tmp_path)
+    (tmp_path / "tools" / "uv").mkdir(parents=True)
+    (tmp_path / "tools" / "uv" / ("uv.exe" if envs.WIN else "uv")).write_text("")
+    said = envs.self_test(("kelvin_selftest_pure", "kelvin_selftest_compiled"))
+    assert said == "Python %s, kelvin_selftest_pure 1.0, kelvin_selftest_compiled 1.0" % envs.app_python()[0]
+    assert __import__("kelvin_selftest_pure").NAME == "kelvin_selftest_pure"
+    with pytest.raises(RuntimeError, match="not from the drivers environment"):
+        envs.self_test(("json",))                              # the app's own module is not the environment's
+
+
+def test_the_scan_says_when_a_makers_program_is_here_but_its_package_isnt():
+    from labharness.drivers import package_notes
+    said = package_notes([{"name": "NI-DAQmx Runtime 2024 Q1", "publisher": "National Instruments"},
+                          {"name": "PyLoN tools", "publisher": "Teledyne Princeton Instruments"},
+                          {"name": "pytest", "publisher": "pytest-dev"}])
+    if envs.have("nidaqmx") is None:
+        assert said == ["NI-DAQmx is installed on this computer; for NI DAQ cards, " + envs.missing("nidaqmx")]
+    assert not any("pylon" in s for s in said)                 # a Teledyne PyLoN is not Basler's pylon

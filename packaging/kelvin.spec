@@ -34,12 +34,9 @@ PACKAGES = [
     ("zeroconf", "zeroconf", ()),                  # network instruments: mDNS (LXI) adverts
     ("ifaddr", "ifaddr", ()),
     ("pypdf", "pypdf", ()),                        # reading instrument manuals
-    # the makers' instrument libraries: only the private build installs them (release.yml); skipped otherwise.
-    # The rest need no Python package (PICam, Andor's spectrograph DLL, the ANC300's command line) or are for
-    # installs from source (seabreeze, pypylon, pylablib)
-    ("nidaqmx", "nidaqmx", ()),                    # NI DAQ cards (NI-DAQmx itself is NI's installer)
+    # no maker's instrument library: Kelvin installs the one an instrument needs, once a person approves (envs.py)
 ]
-if sys.platform == "win32":
+if sys.platform == "win32":   # the window's own (pywebview's WebView2 through .NET), which LightField's automation uses
     PACKAGES += [("clr_loader", "clr_loader", ()), ("pythonnet", "pythonnet", ())]
 
 datas, binaries, hiddenimports = [], [], []
@@ -53,8 +50,7 @@ for package, dist, skip in PACKAGES:
         print("skipping", package, e)
         continue
     try:
-        # the makers' libraries look up their dependencies by metadata (nidaqmx: nitypes...), so bring theirs too
-        datas += copy_metadata(dist, recursive=dist == "nidaqmx")
+        datas += copy_metadata(dist)   # so envs.have() sees what the app brings
     except Exception:
         pass
 
@@ -68,9 +64,9 @@ a = Analysis(
     binaries=binaries,
     hiddenimports=hiddenimports,
     excludes=["tkinter", "pytest", "PyInstaller",
-              # libraries for instruments the app doesn't carry (Kelvin from source has them), whatever this
-              # computer has installed
-              "seabreeze", "pypylon", "pylablib", "scipy", "pandas"],
+              # makers' instrument libraries, whatever this computer has installed: Kelvin installs them on demand
+              "seabreeze", "pypylon", "pylablib", "nidaqmx", "zhinst", "MultiPyVu", "qick", "Pyro4",
+              "pulsestreamer", "spinapi", "TimeTagger", "Swabian", "scipy", "pandas"],
     noarchive=False,
 )
 # pypylon brings Basler's image-processing plugins (vTools, ~230 MB); Kelvin only grabs frames, so they stay out

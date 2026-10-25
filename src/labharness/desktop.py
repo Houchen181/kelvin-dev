@@ -110,15 +110,17 @@ def _self_test(port: int, key: str) -> int:
     bridge_ok = library.self_test()   # the helper for makers' libraries starts (Kelvin.exe --bridge) and answers
     page_ok = page_ok and bridge_ok
     ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
-    message = "Kelvin self-test: %s (lab %r)" % ("ok" if ok else "FAILED", boot.get("lab"))
+    extra = ""
+    if os.environ.get("KELVIN_SELFTEST_ENVS") == "1":   # the release builds, which have the network (envs.py)
+        from . import envs
+        try:
+            extra = " (instrument environments: ok, %s)" % envs.self_test()
+        except Exception as e:
+            ok, extra = False, " (instrument environments FAILED: %s)" % (str(e).splitlines()[0][:300] if str(e)
+                                                                           else type(e).__name__)
+    message = "Kelvin self-test: %s (lab %r)%s" % ("ok" if ok else "FAILED", boot.get("lab"), extra)
     if boot.get("claude_code"):   # Claude Code bridge: only in a private build, never in a published one
         message += " (Claude Code bridge on)"
-    problems: dict = {}
-    loaded = drivers.instrument_libraries(problems)   # the makers' libraries bundled in the private build
-    if loaded:
-        message += " (instrument libraries: %s)" % ", ".join(loaded)
-        for name, why in problems.items():
-            log.info("instrument library %s did not load: %s", name, why)
     log.info(message)
     print(message, flush=True)
     return 0 if ok else 1
