@@ -100,6 +100,35 @@ def test_the_manual_is_found_through_the_makers_page(web):
     assert "SR999" in autocard.KNOWN[0][1].format(MODEL="SR999")
 
 
+def test_the_manual_is_found_two_pages_away_and_the_sites_own_pages_are_skipped():
+    """As on tek.com (the Keithley 6221): the product page links a page about the series' manuals, and that page the
+    PDF on the maker's download host, whose name has spaces. The site's "Datasheets and Manuals" page, another product
+    ("Programmable ...") and the manual page in French are not fetched."""
+    product = "https://www.maker.example/en/products/series-6200"
+    manuals = "https://www.maker.example/en/product-series/series-6200-manual/model-6220-model-6221"
+    pdf_url = "https://download.maker.example/manual/622x-900-01%20(C%20-%20Oct%202008)(User).pdf"
+    pages = {
+        product: b'<html><body><a href="/en/support/datasheets-manuals-software-downloads">Datasheets and Manuals</a>'
+                 b'<a href="/en/products/2220-series">Programmable DC power supplies</a>'
+                 b'<a href="/en/product-series/series-6200-manual/model-6220-model-6221">Manual</a></body></html>',
+        manuals: b'<html><body><h1>Series 6200 manual</h1><p>' + b"Model 6220 and Model 6221 user's manual. " * 30 +
+                 b'</p><a href="/fr/product-series/series-6200-manual/model-6220-model-6221">Francais</a>'
+                 b'<a href="https://download.maker.example/manual/622x-900-01 (C - Oct 2008)(User).pdf">Download</a>'
+                 b'</body></html>',
+        pdf_url: tiny_pdf([["Model 6220/6221 User's Manual"] + COMMANDS * 8]),
+    }
+    asked = []
+
+    def fetch(url):
+        asked.append(url)
+        if url not in pages:
+            raise OSError("HTTP Error 404: Not Found")
+        return pages[url]
+    m = autocard.find_manual("KEITHLEY INSTRUMENTS INC.", "MODEL 6221", lambda system, prompt: (product, "m"), fetch)
+    assert m is not None and m["url"] == pdf_url and m["kind"] == "pdf", asked
+    assert asked == [product, manuals, pdf_url]
+
+
 def test_the_command_pages_go_to_the_model():
     pages = ["intro " * 50, "VOLT? MEAS:CURR? *IDN? " * 10, "warranty", "SYST:ERR? OUTP? " * 5]
     excerpt = autocard.command_excerpt(pages)

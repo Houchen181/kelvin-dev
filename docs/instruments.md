@@ -176,7 +176,7 @@ For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pu
 ## Cards for new instruments
 
 **Kelvin writes the card itself.** When a scan finds an instrument that says who it is but matches no card, Kelvin writes one. It does this at start-up, and when you press **Find its manual and write its card** on that instrument in **Set up…**.
-1. **It finds the manual.** Your default model suggests where the maker publishes it, and Kelvin also tries known addresses for some makers. A product or support page is followed one step to the PDFs it links, on the maker's own site only. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
+1. **It finds the manual.** Your default model suggests where the maker publishes it, and Kelvin also tries known addresses for some makers. On a product page, Kelvin follows the links on the maker's own site that look most like this model's manual (naming the model or its series, PDFs, "manual" or "programming"), skipping the site's general pages, and from a page about the model's manuals on to its PDFs. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
 2. **It drafts the card.** The model writes the card from the manual's command pages, the card checker reviews it, and the model fixes what the checker found, once.
 3. **It makes the card safe to try, whatever the model wrote:**
    - The card is a draft. On real hardware every setting and output change asks you, saying the card is a draft.

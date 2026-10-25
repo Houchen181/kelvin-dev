@@ -2,8 +2,10 @@
 manual's command reference with your model, and makes it safe to try whatever the model wrote.
 
     1. The manual. Addresses your model suggests on the maker's own site, and known patterns for some makers. A web
-       page is followed one step to the PDFs it links. A document counts only once Kelvin has downloaded it and its
-       text names the model; of those, the one with the most command syntax wins.
+       page is followed to the links on the same site that look most like this model's manual (naming the model or
+       its series, PDFs, "manual" or "programming"), and a page about the model's manuals on to its PDFs. A document
+       counts only once Kelvin has downloaded it and its text names the model; of those, the one with the most
+       command syntax wins.
     2. The card. The model writes it from the command reference (the pages densest in commands), the card checker
        reviews it, and the model fixes what the checker found, once.
     3. Safe to try. Status draft: on real hardware every setting and output change asks a person, saying the card
@@ -19,7 +21,7 @@ from __future__ import annotations
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 from . import carddraft, profiles
 from .scpi import is_query
@@ -27,8 +29,9 @@ from .scpi import is_query
 Ask = Callable[[str, str], Tuple[str, str]]       # (system, prompt) -> (answer, model key)
 Fetch = Callable[[str], bytes]
 
-MAX_FETCHES = 10
+MAX_FETCHES = 14
 GOOD = 40          # command-syntax hits that make a document a command reference
+MANUAL_WORDS = re.compile(r"manual|programm(?:ing|er)|command reference|reference (?:manual|guide)|user'?s? guide", re.I)
 # reads that do something: measure (and on some source-meters switch the output on), trigger, self-test, calibrate
 ACTION_READ = re.compile(r"^[\s:]*(MEAS(?:ure)?|READ|INIT(?:iate)?|\*CAL|\*TST|\*TRG|TRIG(?:ger)?)\b", re.I)
 _CMD = re.compile(r"(?<![A-Za-z0-9])(\*[A-Z]{3}\??|:?[A-Z]{3,}[a-z]*(?::[A-Z]{2,}[a-z]*)+\??|[A-Z]{3,5}\?)")
@@ -79,18 +82,47 @@ def _site(url: str) -> str:
     return ".".join(host.split(".")[-2:])
 
 
-def pdf_links(html: str, base: str) -> List[str]:
-    """Links on a maker's page that lead to manuals: PDFs, or links that say manual, on the same site."""
-    out = []
-    for href, label in re.findall(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", html, re.I | re.S):
-        url = urljoin(base, href.strip())
-        text = re.sub(r"<[^>]+>", " ", label).lower()
-        if not url.startswith(("https://", "http://")) or _site(url) != _site(base):
+def _model_words(model: str) -> List[str]:
+    """The words of a model name that carry digits (6221, afg31252, dp832): what a link to its manual names."""
+    return [w for w in re.findall(r"[a-z0-9]+", model.lower()) if len(w) >= 3 and any(c.isdigit() for c in w)]
+
+
+def _family(word: str) -> str:
+    """The start a model shares with its series' pages: 622 for the 6221 (Series 6200, the 6220/6221 manual)."""
+    return word[:max(3, len(word) - 2)]
+
+
+def _same_page(a: str, b: str) -> bool:
+    """The same page, or the same page in another language (/en/..., /fr/..., /zh-cn/...)."""
+    def path(u: str) -> str:
+        p = urlparse(u)
+        return (p.hostname or "") + re.sub(r"^/[a-z]{2}(?:[-_][a-z]{2})?(?=/)", "", p.path.rstrip("/"), flags=re.I)
+    return path(a) == path(b)
+
+
+def _clean(url: str) -> str:
+    """An address as a browser would send it: spaces and other unsafe characters percent-encoded."""
+    return quote(url, safe=":/?#[]@!$&'()*+,;=%~")
+
+
+def pdf_links(html: str, base: str, model: str = "") -> List[str]:
+    """Links on a maker's page that may lead to the model's manual, on the same site, best first: those naming the
+    model (or its series), PDFs, and links that say manual or programming. A site's general pages are left out."""
+    words = _model_words(model)
+    scored: List[Tuple[int, int, str]] = []
+    for n, (href, label) in enumerate(re.findall(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", html, re.I | re.S)):
+        url = _clean(urljoin(base, href.strip()))
+        about = (url + " " + re.sub(r"<[^>]+>", " ", label)).lower()
+        if not url.startswith(("https://", "http://")) or _site(url) != _site(base) or _same_page(url, base):
             continue
-        if url.lower().split("?")[0].endswith(".pdf") or re.search(r"manual|programm|reference|command", text + url.lower()):
-            if url not in out:
-                out.append(url)
-    return out[:8]
+        is_pdf = url.lower().split("?")[0].split("#")[0].endswith(".pdf")
+        says = MANUAL_WORDS.search(about) is not None
+        names = 4 if any(w in about for w in words) else 2 if any(_family(w) in about for w in words) else 0
+        if not (is_pdf or says) or (words and not is_pdf and not names):
+            continue   # e.g. the site's "Datasheets and Manuals" page, or another product
+        if url not in [u for _, _, u in scored]:
+            scored.append((-(names + 2 * is_pdf + says), n, url))
+    return [u for _, _, u in sorted(scored)][:6]
 
 
 def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
@@ -132,11 +164,14 @@ def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
             kind = "pdf"
         elif b"<html" in data[:4096].lower():
             html = data.decode("utf-8", errors="replace")
-            if depth == 0:
-                queue = [(u, 1) for u in pdf_links(html, url)] + queue   # a product page: look at what it links
             from .literature import html_to_text
             pages = [html_to_text(html)]
             kind = "html"
+            if depth == 0:   # a product or downloads page: look at what it links
+                queue = [(u, 1) for u in pdf_links(html, url, model)] + queue
+            elif depth == 1 and names_model(pages[0], model):   # a page about this model's manuals: its PDFs
+                pdfs = [u for u in pdf_links(html, url, model) if u.lower().split("?")[0].endswith(".pdf")]
+                queue = [(u, 2) for u in pdfs[:4]] + queue
         else:
             continue
         head = "\n".join(pages[:20])
