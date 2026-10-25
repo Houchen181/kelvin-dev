@@ -82,8 +82,10 @@ DLL instead of sending text): the card gets a library section, and each command 
   Kelvin reads the state before it toggles.
 - Leave out what the maker's own program or touch screen should do (sample exchange, pumping, valves, calibration
   curves, firmware): Kelvin can call only the functions the card names.
-- Say in notes how to address it: lib://<port or IP>?python=<a Python that can load the library, 32-bit for a 32-bit
-  DLL>&path=<the folder with the maker's files>.
+- requires: [<the maker's Python packages the library imports, as pip names them>], when they come from PyPI.
+- Say in notes how to address it: lib://<port or IP>?env=<the environment install_for_instrument made for the
+  library: its Python, 32-bit for a 32-bit DLL, with the maker's package or files in it>; or, where a person set the
+  library up themselves, lib://<port or IP>?python=<that Python>&path=<the folder with the maker's files>.
 Example scripts that send text (inst.write("SOUR:VOLT 1"), inst.query("MEAS:VOLT?")) give ordinary command templates.
 
 Instruments whose commands start with the value ("ON,1" / "OFF,1"): set: "{value},{ch}" with bool_text: ["ON", "OFF"]

@@ -1,6 +1,6 @@
 """Cameras: a frame is an image reading, kept as a .npy file (frames.py); its mean, max, min and sum are readings.
 
-    pylon://<serial>         Basler cameras (ace, dart, boost, pulse...) through pypylon (pip install pypylon).
+    pylon://<serial>         Basler cameras (ace, dart, boost, pulse...) through pypylon.
                              pylon:// is the first one found.
     andor://<index>?sdk=3    Andor sCMOS cameras (Zyla, Neo, Sona, Marana) through Andor's pyAndorSDK3
     andor://<index>?sdk=2    Andor CCD and EMCCD cameras (iXon, Newton, iDus, Luca, Clara) through pyAndorSDK2
@@ -16,6 +16,7 @@ import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import envs
 from . import frames
 from .adapters import AdapterError
 from .cards import Card
@@ -74,7 +75,7 @@ class BaslerCamera(Camera):
             try:
                 from pypylon import pylon as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs pypylon: pip install pypylon" % name) from e
+                raise AdapterError("%s needs pypylon: %s" % (name, envs.missing("pypylon"))) from e
         self.pylon = module
         serial, _ = _target(address)
         tl = module.TlFactory.GetInstance()
@@ -182,8 +183,10 @@ class AndorCamera(Camera):
                 else:
                     import pyAndorSDK2 as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs Andor's pyAndorSDK%s, from Andor's SDK (its Python folder: pip install "
-                                   "it from there)" % (name, self.sdk_version)) from e
+                raise AdapterError("%s needs Andor's pyAndorSDK%s, from Andor's SDK: Kelvin installs it from the SDK's "
+                                   "Python folder into its drivers environment once a person approves "
+                                   "(install_for_instrument, env %s, files <that folder>)"
+                                   % (name, self.sdk_version, envs.DRIVERS)) from e
         self.mod = module
         try:
             if self.sdk_version == "3":

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .envs import PACKAGE
 from .scpi import Template
 from .yamlio import load_yaml
 
@@ -257,6 +258,7 @@ class Card:
     bound: Dict[str, str] = field(default_factory=dict)             # the values this copy was made with
     data: Dict[str, Any] = field(default_factory=dict, repr=False)  # as written, to bind other values
     library: Dict[str, Any] = field(default_factory=dict)            # the maker's module or DLL (library.py)
+    requires: List[str] = field(default_factory=list)   # the maker's Python packages its driver imports (envs.py)
 
     def bind(self, values: Optional[Dict[str, Any]]) -> "Card":
         """This card with its variables set for one instrument (which sensor, channel or output it uses)."""
@@ -603,6 +605,10 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         except re.error as e:
             err("identify.idn", "not a valid regex: %s" % e)
     usb_ids = [str(u).lower() for u in identify.get("usb") or []]
+    requires = data.get("requires") or []
+    if not isinstance(requires, list) or not all(isinstance(r, str) and PACKAGE.match(r.strip()) for r in requires):
+        err("requires", "a list of the maker's Python packages, as pip names them (qick, Pyro4, zhinst-core)")
+        requires = []
     for u in usb_ids:
         if not re.match(r"^[0-9a-f]{4}:[0-9a-f]{4}$", u):
             err("identify.usb", "%r is not VID:PID in hex" % u)
@@ -644,6 +650,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
         source=source, connection=connection, idn_query=str(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
         on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library,
+        requires=[r.strip() for r in requires],
     )
 
 

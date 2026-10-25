@@ -7,8 +7,9 @@ status: community
 manual: "Time Tagger documentation, event counting (GatedCounter, Countrate)"
 manual_url: "https://www.swabianinstruments.com/static/documentation/TimeTagger/api/measurements/event_counting.html"
 notes:
-  - "Address timetagger://<serial, or empty for the first>?click=1&gate=2 (inputs, 1-based: the detector, and the pulse generator's gate; &level=0.5 sets both trigger levels in volts). Needs pip install Swabian-TimeTagger and the Opal Kelly USB driver."
+  - "Address timetagger://<serial, or empty for the first>?click=1&gate=2 (inputs, 1-based: the detector, and the pulse generator's gate; &level=0.5 sets both trigger levels in volts). Needs Swabian-TimeTagger, which Kelvin installs on this computer once a person approves, and the Opal Kelly USB driver (Swabian's installer, run by a person)."
   - "Counts the detector in the gate windows: a signal window, then a reference window, each period. Kelvin finds which comes first from the generator's own timing, and reads both from one acquisition."
+requires: [Swabian-TimeTagger]
 identify:
   idn: "^Swabian Instruments,Time Tagger"
   example: "Swabian Instruments,Time Tagger Ultra,1234000ABC"

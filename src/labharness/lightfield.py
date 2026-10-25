@@ -25,6 +25,7 @@ import urllib.parse
 from types import SimpleNamespace
 from typing import Any, List, Optional, Tuple
 
+from . import envs
 from .adapters import AdapterError
 from .cameras import Camera
 from .cards import Card
@@ -70,7 +71,8 @@ def load_lightfield() -> Any:
     try:
         import clr   # pythonnet
     except Exception as e:
-        raise AdapterError("Kelvin can't reach .NET here, which LightField's automation needs (%s)" % _first(e))
+        raise AdapterError("Kelvin can't reach .NET here, which LightField's automation needs (%s): %s"
+                           % (_first(e), envs.missing("pythonnet")))
     for path in (folder, os.path.join(folder, "AddInViews")):
         if os.path.isdir(path) and path not in sys.path:
             sys.path.append(path)

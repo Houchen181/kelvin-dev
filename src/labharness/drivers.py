@@ -22,8 +22,8 @@ like a SCPI instrument. The address names the driver:
     andor://0?sdk=3                       Andor cameras through Andor's pyAndorSDK3 / pyAndorSDK2 (cameras.py)
     anc300://COM5, anc350://0             attocube positioners: the ANC300's command line, the ANC350 through pylablib
 
-The vendor libraries are optional: `pip install zhinst-core` or `pip install MultiPyVu` on the computer that runs
-Kelvin. Without them Kelvin says what to install."""
+The makers' libraries are not in the app: Kelvin installs the one an instrument needs into its drivers environment
+(envs.py) once a person approves, and says so when one is missing. From source, pip install them."""
 from __future__ import annotations
 
 import math
@@ -32,6 +32,7 @@ import threading
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import envs
 from .adapters import AdapterError
 from .cards import Card
 
@@ -138,7 +139,7 @@ class Zhinst(DriverBackend):
             try:
                 import zhinst.core as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs the LabOne Python API: pip install zhinst-core" % name) from e
+                raise AdapterError("%s needs the LabOne Python API: %s" % (name, envs.missing("zhinst-core"))) from e
         try:
             self.daq = module.ziDAQServer(q.get("host", "localhost"), int(q.get("port", 8004)), 6)
             if q.get("interface", "1GbE"):
@@ -213,8 +214,8 @@ class MultiVu(DriverBackend):
             try:
                 import MultiPyVu as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs Quantum Design's MultiPyVu: pip install MultiPyVu (and its server "
-                                   "running next to MultiVu)" % name) from e
+                raise AdapterError("%s needs Quantum Design's MultiPyVu (and its server running next to MultiVu): %s"
+                                   % (name, envs.missing("MultiPyVu"))) from e
         try:
             self.client = module.Client(host=self.host, port=self.port)
             self.client.open()
@@ -422,7 +423,7 @@ class PulseStreamer(PulseGeneratorDriver):
             try:
                 import pulsestreamer as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs Swabian's client: pip install pulsestreamer" % name) from e
+                raise AdapterError("%s: %s" % (name, envs.missing("pulsestreamer"))) from e
         self.mod = module
         try:
             self.ps = module.PulseStreamer(host)
@@ -477,7 +478,8 @@ class PulseBlaster(PulseGeneratorDriver):
             try:
                 import spinapi as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs SpinCore's SpinAPI and the Python wrapper: pip install spinapi" % name) from e
+                raise AdapterError("%s: %s; it also needs SpinCore's SpinAPI (SpinCore's installer)"
+                                   % (name, envs.missing("spinapi"))) from e
         self.sp = module
         try:
             if self.sp.pb_count_boards() <= self.board:
@@ -561,7 +563,7 @@ class TimeTagger(CounterDriver):
                 try:
                     import TimeTagger as module   # type: ignore  (the Windows installer's module)
                 except ImportError as e:
-                    raise AdapterError("%s needs Swabian's library: pip install Swabian-TimeTagger" % name) from e
+                    raise AdapterError("%s: %s" % (name, envs.missing("Swabian-TimeTagger"))) from e
         self.tt = module
         try:
             self.tagger = module.createTimeTagger(self.serial)

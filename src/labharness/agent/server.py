@@ -75,13 +75,23 @@ You are connected to a physics lab through Kelvin.
   When draft_card can't find the manual, or you need the maker's documentation, software or a driver, look it up
   yourself: web_search, read_web_page (a page's text and its links, PDFs first), save_manual (keeps the PDF, with the
   instrument's address), then draft_card with manual. Never use the screen to search or to download.
-  Ask them only where you can't go on: a setting on the instrument itself (remote control, its address, a list of
-  allowed computers), the maker's software or driver to install, a manual or specifications document nobody
-  publishes (ask for its PDF, then draft_card with manual or specs), or an address the scan didn't find.
+- An instrument the scan doesn't find or doesn't identify: find out what it is yourself. inspect_address for one on
+  the network (what its ports answer), connected_devices for one plugged in (USB devices, also without a driver;
+  serial ports; this computer's networks), installed_software and find_maker_files for the maker's software, SDK,
+  examples and manual on this computer. Then how its maker talks to it (the manual, the maker's examples, the web)
+  decides the card: text commands give an ordinary card; a maker's Python package or DLL gives a library card.
+- What an instrument needs on this computer, Kelvin installs, never the app: install_for_instrument installs the
+  maker's Python package (at the version the instrument needs) or the maker's files once the person approves, into
+  the drivers environment for Kelvin's built-in drivers (a card's requires, or a driver saying a package is missing),
+  or into an environment of its own for a library card (lib://<address>?env=<it>; Python and bitness as the library
+  needs). Don't ask the person to pip install. Ask them only where you can't go on: a setting on the instrument
+  itself (remote control, its address, a list of allowed computers), the maker's installer (a USB driver, a runtime
+  that needs administrator rights: say which and where it is), a manual or specifications document nobody publishes
+  (ask for its PDF, then draft_card with manual or specs), or an address nothing answers on.
 - When draft_card can't write it (no public manual, or an instrument driven through the maker's library), or outside
   the Kelvin app, write the card yourself: the manual's command reference or the maker's example scripts (pasted, or
-  read_examples on a file or folder the person names), card_guide, the card from that text only, check_card until
-  it is valid, try_card, save_card.
+  read_examples on a file or folder, found with find_maker_files or named by the person), card_guide, the card from
+  that text only, check_card until it is valid, try_card, save_card.
 - An instrument Kelvin added, or one with a draft card, is not reviewed yet (lab_status says so): it reads and
   configures at once, and every output change on it asks the person, auto mode included, until they review its
   limits. Its limits and that mark are the person's to change, never yours.
@@ -299,6 +309,61 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.scan()
 
     @server.tool(annotations=READ, structured_output=False)
+    def inspect_address(address: str) -> str:
+        """What an address on the lab's network answers, for an instrument the scan didn't find or didn't
+        identify: the ports instruments use, what each says (its *IDN? reply where it speaks SCPI, a web page's
+        title, a greeting, a Jupyter or Pyro server on a board), its LXI identification, the matching card and the
+        address to use. address: an IP address or host name, optionally :port. Local networks only; only looks."""
+        return rt.inspect_address(address)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def connected_devices() -> str:
+        """Everything plugged into this computer, also what no driver claims: USB devices with the name each
+        reports, its maker and driver (or that it has none), serial ports, and the networks this computer is on (a
+        board on USB networking makes one). For an instrument scan_instruments doesn't find."""
+        return rt.connected_devices()
+
+    @server.tool(annotations=READ, structured_output=False)
+    def installed_software(query: str = "") -> str:
+        """Programs and drivers installed on this computer, with version and folder: those matching query (a maker
+        or program, e.g. attocube, LightField, NI-DAQmx), or with none the instrument makers' software, drivers and
+        Pythons. Tells whether the maker's software or driver an instrument needs is here."""
+        return rt.installed_software(query)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def find_maker_files(query: str) -> str:
+        """Find a maker's files on this computer by name, in the folders makers install to (Program Files,
+        ProgramData, Public Documents; /Applications, /Library, /opt): its example scripts, its SDK's Python
+        package, its DLL and header, its manual. Then read_examples, or install_for_instrument with files."""
+        return rt.find_maker_files(query)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def environments() -> str:
+        """The instrument environments Kelvin installed on this computer: each one's Python, the makers' packages
+        and files in it, and which instruments it is for."""
+        return rt.environments()
+
+    @server.tool(annotations=FETCH, structured_output=False)
+    def install_for_instrument(env: str, packages: Optional[List[str]] = None, python: str = "", bits: int = 64,
+                               files: str = "", why: str = "") -> str:
+        """Install what an instrument needs on this computer, once the person approves (they see what, which
+        version and from where): its maker's Python packages from PyPI (pip names, with ==version where it must
+        match the instrument's own, e.g. qick==0.2.436), and/or the maker's files (files: a folder or file here, or
+        a web address: an SDK's Python package is installed, a DLL is kept). env: drivers for Kelvin's built-in
+        drivers (a card's requires, or what a driver says is missing); for a library card, an environment of its own
+        (e.g. attodry), with python (3.8...) and bits (32 for a 32-bit DLL) as its library needs, then
+        lib://<address>?env=<env>. Never ask the person to pip install. A maker's installer (a USB driver, a runtime)
+        is theirs to run: say which and from where."""
+        return rt.install_for_instrument(env, packages, python, bits, files, why)
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True,
+                                             openWorldHint=False), structured_output=False)
+    def remove_environment(env: str) -> str:
+        """Remove one of Kelvin's instrument environments (after the person approves), e.g. one an instrument no
+        longer needs; instruments using it stop connecting until it is installed again."""
+        return rt.remove_environment(env)
+
+    @server.tool(annotations=READ, structured_output=False)
     def health_check(instruments: Optional[List[str]] = None) -> str:
         """Identity, error queue, sanity readings and drives inside limits, for all or some instruments. run_plan
         already checks the instruments a plan uses; call this when one misbehaves, after an alarm, or when asked."""
@@ -469,6 +534,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     data_dir = args.data_dir or home / ("agents" if (home / "accounts.json").exists() else "virtual-lab")
     runtime = LabRuntime(lab, approver, data_dir, envelope)
     runtime.cards_dir = Path.home() / "Kelvin" / "cards"
+    from .. import envs
+    envs.cleanup()
+    envs.attach(envs.DRIVERS)   # makers' packages Kelvin installed for its built-in drivers (envs.py)
     runtime.monitor.start()
     runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
     ui = ApprovalServer(runtime, port=args.ui_port).start()

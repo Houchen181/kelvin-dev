@@ -18,6 +18,7 @@ import time
 import urllib.parse
 from typing import Any, List, Optional, Tuple
 
+from . import envs
 from .adapters import AdapterError
 from .cards import Card
 from .drivers import DriverBackend
@@ -35,7 +36,8 @@ def _module(module: Any, name: str) -> Any:
         import nidaqmx.system   # type: ignore  # noqa: F401
         return nidaqmx
     except ImportError as e:
-        raise AdapterError("%s needs NI-DAQmx: install NI's DAQmx driver, then pip install nidaqmx" % name) from e
+        raise AdapterError("%s needs NI's DAQmx driver (NI's installer), then nidaqmx: %s"
+                           % (name, envs.missing("nidaqmx"))) from e
 
 
 class NIDAQ(DriverBackend):

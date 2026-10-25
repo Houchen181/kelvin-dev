@@ -73,14 +73,14 @@ Real hardware gets the same gate as the virtual lab, and a few protections of it
 - **Connecting changes nothing.** Kelvin leaves every instrument as it finds it: no reset, no default values. A card's `on_connect` commands may only set up the connection itself (listen mode, headers, a driver's wiring); a card whose `on_connect` would set any parameter is refused. A drive with no read-back (an RF switch, a DDS amplitude) is unknown until Kelvin sets it: switching it to its safe value always goes ahead, anything else needs approval, and a ramped one first goes to safe.
 
 **Instruments behind vendor software.** Some instruments are not driven with text commands but through their maker's library. Kelvin has drivers for two of them; the address says which:
-- `zhinst://dev1234` for a Zurich Instruments lock-in, through LabOne's Python API (`pip install zhinst-core`). Add `?host=...&port=8004&interface=1GbE` if the data server runs elsewhere. A scan finds these devices through LabOne.
-- `qd://<computer>:5000` for a Quantum Design system, through MultiPyVu (`pip install MultiPyVu`, with its server running next to MultiVu). MultiVu ramps temperature and field itself; Kelvin sets the rate and setpoint, then waits for the reading.
+- `zhinst://dev1234` for a Zurich Instruments lock-in, through LabOne's Python API (`zhinst-core`, which Kelvin installs the first time, once you approve). Add `?host=...&port=8004&interface=1GbE` if the data server runs elsewhere. A scan finds these devices through LabOne.
+- `qd://<computer>:5000` for a Quantum Design system, through MultiPyVu (Kelvin installs it once you approve; its server runs next to MultiVu). MultiVu ramps temperature and field itself; Kelvin sets the rate and setpoint, then waits for the reading.
 
 More instruments with a library of their own:
-- `pulsestreamer://<ip>` for a Swabian Pulse Streamer (`pip install pulsestreamer`), `pulseblaster://0?clock=500` for a SpinCore PulseBlaster (SpinCore's `spinapi`), and `timetagger://<serial>?click=1&gate=2` for a Swabian Time Tagger (Swabian's installer). A scan finds the Swabian devices.
+- `pulsestreamer://<ip>` for a Swabian Pulse Streamer (`pulsestreamer`), `pulseblaster://0?clock=500` for a SpinCore PulseBlaster (SpinCore's SpinAPI, and the `spinapi` wrapper), and `timetagger://<serial>?click=1&gate=2` for a Swabian Time Tagger (`Swabian-TimeTagger`, and Swabian's installer for its USB driver). A scan finds the Swabian devices. Kelvin installs the Python packages they need, once you approve; the makers' installers are yours to run (see [What an instrument needs on this computer](#what-an-instrument-needs-on-this-computer)).
 - `qick://<name server>:8888/<proxy name>` for an RFSoC board running QICK, through its Pyro4 server (tProc v2 firmware), e.g. `qick://192.168.3.1:8888/myqick` for an RFSoC 4x2 on its USB network.
   - **Starting the server:** on a PYNQ board, in its Jupyter (`http://<board>:9090`), run `qick/pyro4/00_nameserver.ipynb`, then `01_server.ipynb`, whose proxy name goes in the address.
-  - **The client:** `pip install qick Pyro4` on the computer that runs Kelvin (from source; the app does not carry them). The board's QICK and this computer's should be the same version, and the instrument's identity shows both.
+  - **The client:** `qick` and `Pyro4` on the computer that runs Kelvin, which Kelvin installs once you approve (the app does not carry them). The board's QICK and this computer's should be the same version: the instrument's identity shows both, and Kelvin installs the board's.
   - **What Kelvin does:** it plays one generator as a continuous tone or as pulses, and reads I/Q from one readout. A tone keeps playing after a program ends, so Kelvin stops every generator (`reset_gens`) when the output goes off and when it disconnects.
 
 **DAQ cards, spectrometers, monochromators, cameras and nanopositioners.**
@@ -97,13 +97,13 @@ More instruments with a library of their own:
 | attocube ANC300 (open loop, scanner offset) | `anc300://COM5` or `anc300://<ip>` | nothing (its command line) | `attocube/anc300` |
 | PI piezo scanner controllers (GCS: E-727, E-709, E-712...) | `TCPIP0::<ip>::50000::SOCKET` | nothing (GCS text commands) | `pi/gcs-piezo` |
 | Thorlabs MDT693A / MDT694A piezo controller | `serial://COM6` | nothing (text commands) | `thorlabs/mdt69xa` |
-| attocube ANC350 (closed loop) | `anc350://0` | attocube's USB driver; Kelvin from source with `pylablib` | `attocube/anc350` |
-| Ocean Insight spectrometer | `seabreeze://<serial>` | Kelvin from source with `seabreeze` | `ocean/spectrometer` |
-| Basler camera | `pylon://<serial>` | Kelvin from source with `pypylon` | `basler/camera` |
+| attocube ANC350 (closed loop) | `anc350://0` | attocube's USB driver, and `pylablib`, which Kelvin installs | `attocube/anc350` |
+| Ocean Insight spectrometer | `seabreeze://<serial>` | `seabreeze`, which Kelvin installs, and its USB driver once | `ocean/spectrometer` |
+| Basler camera | `pylon://<serial>` | `pypylon`, which Kelvin installs | `basler/camera` |
 
-- **The app brings only what it needs:** nidaqmx, numpy, and pythonnet for LightField's automation. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a Python library the app doesn't carry, so run Kelvin from source for them.
+- **The app brings only what it needs:** nidaqmx, numpy, and pythonnet for LightField's automation. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a maker's Python package the app doesn't carry: Kelvin installs it on this computer the first time, once you approve.
 
-- **Scans find them:** the NI devices, Princeton Instruments cameras, Andor spectrographs and sCMOS cameras (and, from source, Ocean spectrometers, Basler cameras and ANC350s), through their libraries, which only list what they see. Add the others by address. Andor SDK2 cameras aren't listed, because finding one means initializing it, which resets it.
+- **Scans find them:** the NI devices, Princeton Instruments cameras, Andor spectrographs and sCMOS cameras (and, once their packages are installed, Ocean spectrometers, Basler cameras and ANC350s), through their libraries, which only list what they see. Add the others by address. Andor SDK2 cameras aren't listed, because finding one means initializing it, which resets it.
 - **The scan says what PICam saw:** each camera that is free, each one open in another program (LightField, say), PICam missing, and whether LightField is installed. Kelvin never starts LightField by itself: add it in the Lab panel.
 - **Through LightField:** Kelvin starts LightField, a window you can watch and use, and loads the experiment saved there. It sets exposure, frames (averaged per reading), the grating (as LightField names it, or by grooves per mm), the center wavelength and the sensor setpoint, and waits while the spectrograph moves. Each reading captures without saving a file. A spectrum comes with LightField's wavelength calibration, for the frame's own columns and binning. One program per camera: close a LightField you opened yourself first, and don't add the same camera through PICam as well.
 - **PICam's errors in words:** a failure names what Kelvin was doing and PICam's own name for the error, such as "PICam couldn't open the camera: Device Open Elsewhere", with what helps.
@@ -120,7 +120,7 @@ More instruments with a library of their own:
   - the LightField calls are from Teledyne's automation interface as labs' own scripts use it.
 - **For a model that isn't here** (a Newport Cornerstone, a Horiba monochromator, a Hamamatsu or Thorlabs camera, a SmarAct or Mad City Labs stage): Kelvin writes a card from its manual or the maker's example scripts (see [Cards for new instruments](#cards-for-new-instruments)).
 
-Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app; install Kelvin from source to use them (`pip install "kelvin-lab[desktop,zhinst]"`, or the extras `qd`, `nidaq`, `ocean`, `basler`, `pylablib`; Andor's pyAndorSDK2/3 come with Andor's SDK). The private app brings nidaqmx. These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.
+Their cards use the same command templates (`SET <path> {value}`, `GET <path>`), so limits, ramps, approvals and the simulated twins work as for any instrument. The vendor libraries are not part of the desktop app: Kelvin installs the one an instrument needs, once you approve (from source, the extras `zhinst`, `qd`, `nidaq`, `ocean`, `basler` and `pylablib` install them). Andor's pyAndorSDK2/3 come with Andor's SDK, and Kelvin installs them from its Python folder. The private app brings nidaqmx. These cards and drivers follow the vendors' documentation and haven't been verified on hardware yet, so tighten the limits and watch the first runs.
 
 **Instruments on the network with their own protocol.** No vendor software is needed; the address says how to talk:
 - `http://<ip>:<port>/<base>` (or `https://`) for an instrument with a web API, such as a Light Conversion PHAROS (`http://<ip>:20022/v1`). Card commands are the method, the path and a JSON body: `GET /Basic/ActualOutputPower`, `PUT /Basic/TargetAttenuatorPercentage {value}`. Add `?auth_env=NAME` for a bearer token kept in that environment variable, or `?insecure=1` for a self-signed certificate.
@@ -218,6 +218,7 @@ cryo: { card: attocube/attodry, address: "lib://COM4?python=C:/Python38-32/pytho
 - `COM4` is what the library connects to (`{address}` in the card's connect calls).
 - `python` is a Python that can load the library: a 32-bit Python for a 32-bit DLL, or the Python that has the maker's package. Without it, Kelvin uses its own (64-bit).
 - `path` is the folder with the maker's module or DLL.
+- `env`, instead of both, is an environment Kelvin installed for the library, with its Python and the maker's package or files in it: `lib://COM4?env=attodry` (see [What an instrument needs on this computer](#what-an-instrument-needs-on-this-computer)). Kelvin writes and tries addresses like these itself; one with `python` or `path` names a program on this computer, so only you add it.
 
 **Libraries with sub-objects.** Some libraries put each part of the instrument on a sub-object of the object you create. attocube's network instruments do this, for example the attoDRY2100 through its `atto_device` package:
 
@@ -227,9 +228,27 @@ device.connect()
 device.sample.getTemperature()
 ```
 
-Their card creates the object with the address (`object: Device`, `create: true`, `create_args: ["{address}"]`, `open: [connect]`, `close: [close]`) and calls each function by its path: `get: "GET sample.getTemperature"`. The address is then the instrument's IP: `lib://192.168.1.20?path=<the folder that holds atto_device>`.
+Their card creates the object with the address (`object: Device`, `create: true`, `create_args: ["{address}"]`, `open: [connect]`, `close: [close]`) and calls each function by its path: `get: "GET sample.getTemperature"`. The address is then the instrument's IP: `lib://192.168.1.20?env=attodry`, with attocube's `atto_device` package installed in that environment (or `?path=<the folder that holds atto_device>`).
 
 Kelvin runs the library in a helper process, so a crash or a 32-bit DLL never takes Kelvin down. The helper loads only the module or DLL the card names, from that folder (or an installed package of the maker's), never part of Python itself or a system DLL. It calls only the functions on the card, and only the maker's own: a path goes only through objects the maker's package made, never into Python's modules or objects, such as a socket the library holds. Readings must call functions that only read (`get…`, `is…`, `query…`), and a switch that only toggles is read before it is toggled. The included attoDRY card is a draft written from attocube's header (attoDRYLib, for the attoDRY's USB connection): try it, compare it with the touch screen, and mark it reviewed when it agrees.
+
+## What an instrument needs on this computer
+
+The app carries no instrument maker's software: every lab has different instruments. When one needs its maker's Python package (QICK, LabOne, MultiPyVu, a camera's SDK) or the maker's files (a DLL, an SDK's Python folder), Kelvin installs them on this computer, once you approve, in an environment of its own:
+- **What you approve:** each package with its version and where it comes from (PyPI, with the project's summary and home page), the maker's files and their source, and the first time uv, the installer Kelvin uses, from its GitHub release (checked against its published checksum). Nothing is installed system-wide, and no administrator rights are needed.
+- **Where it goes:** `~/Kelvin/env/<name>`, each with its own Python. Kelvin's built-in drivers use the `drivers` environment, which has the app's own Python version, so the app loads from it. A library card uses the environment its address names, `lib://<address>?env=<name>`, with the Python its library needs: a 32-bit one for a 32-bit DLL, an older one where the maker's package wants it.
+- **Versions that must match:** some instruments need the same version on both sides, such as a QICK board and this computer's `qick`. Kelvin installs the version the instrument has.
+- **The makers' installers stay yours:** a USB driver or a runtime that needs administrator rights (NI-DAQmx, the Opal Kelly driver, LightField) comes from the maker's installer, which you run. Kelvin says which one, and where it is.
+- **Cards say what they need:** a card's `requires` lists the maker's Python packages its driver imports, such as `requires: [qick, Pyro4]`.
+- **Seeing and removing them:** ask Kelvin what it has installed (`environments`), or to remove an environment (`remove_environment`, which you approve).
+- **Searching outside the lab** (Settings) also covers these downloads: with it off, or in a project that keeps its work off the internet, Kelvin downloads nothing.
+
+**Finding out what an instrument is.** When a scan doesn't find an instrument, or finds it but no card matches, Kelvin looks further by itself:
+- `inspect_address`, for an address on the lab's network: which of the ports instruments use answer, and what they say (an `*IDN?` reply where it speaks SCPI, a web page's title, its LXI identification, a Jupyter or Pyro server on a board). It looks only at local networks, and leaves an instrument already in the lab connected as it is.
+- `connected_devices`, for what is plugged in: every USB device with the name it reports, its maker and its driver (or that it has none), the serial ports, and the networks this computer is on (a board on USB networking makes one).
+- `installed_software` and `find_maker_files`, for the makers' programs, drivers, examples, SDK folders and manuals on this computer.
+
+Then it reads the manual and the maker's examples (on this computer or the web), installs what the instrument needs, writes and tries its card, and adds it.
 
 ## Writing a card
 

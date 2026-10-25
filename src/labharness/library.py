@@ -4,7 +4,9 @@ Address: lib://<what the library connects to>?python=<python.exe>&path=<folder w
     lib://COM4?python=C:/Python38-32/python.exe&path=C:/attocube/attoDRYLib
 The part after lib:// is {address} in the card's open calls (a COM port, an IP address, a serial number). python is
 the interpreter that can load the library (a 32-bit one for a 32-bit DLL; by default Kelvin's own), and path is the
-folder holding the maker's module or DLL.
+folder holding the maker's module or DLL. Or env=<name>: one of the environments Kelvin installs a maker's package
+or files into, once a person approves (envs.py), with the Python the library needs:
+    lib://192.168.1.20?env=attodry
 
 The card says what to load and how to call it, under library:
     library:
@@ -159,8 +161,20 @@ class LibraryInstrument(DriverBackend):
         self.timeout = float(card.connection.get("timeout_ms", 10000)) / 1000.0
         self.sets, self.gets = card_calls(card)
         self.toggles: Dict[str, Dict[str, str]] = dict(lib.get("toggles") or {})
+        python = q.get("python")
+        if q.get("env"):   # one of Kelvin's instrument environments (envs.py): its Python, and the maker's files
+            from . import envs
+            try:
+                python = str(envs.python_of(q["env"]))
+            except ValueError as e:
+                raise AdapterError("%s: %s" % (name, e)) from e
+            if not Path(python).is_file():
+                raise AdapterError("%s: there is no instrument environment %r on this computer yet: Kelvin makes it "
+                                   "with install_for_instrument" % (name, q["env"]))
+            if not q.get("path") and (envs.env_dir(q["env"]) / "files").is_dir():
+                q["path"] = str(envs.env_dir(q["env"]) / "files")
         start = module or Bridge   # tests may pass their own
-        self.bridge = start(name, bridge_command(q.get("python")))
+        self.bridge = start(name, bridge_command(python))
         self.python: Any = None
         try:
             self.python = self.bridge.request("ping", 30)
@@ -175,8 +189,12 @@ class LibraryInstrument(DriverBackend):
         except AdapterError as e:
             self.bridge.stop()
             bits = self.python.get("bits") if isinstance(self.python, dict) else None
-            hint = (" A 32-bit DLL needs a 32-bit Python: set python= in the address." if bits == 64 and lib.get("dll")
-                    and "WinError 193" in str(e) else "")
+            hint = (" A 32-bit DLL needs a 32-bit Python: set python= in the address, or use an environment made with "
+                    "bits 32." if bits == 64 and lib.get("dll") and "WinError 193" in str(e) else "")
+            if "No module named" in str(e) and q.get("env"):
+                hint = (" Kelvin installs the maker's package into environment %s once a person approves "
+                        "(install_for_instrument with env %s and packages %s, or files for the maker's own folder)"
+                        % (q["env"], q["env"], json.dumps(card.requires) if card.requires else "<its pip name>"))
             raise AdapterError(str(e) + hint) from e
 
     def _step(self, text: str) -> Any:

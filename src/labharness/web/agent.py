@@ -49,7 +49,8 @@ what you would do; the user picks one answer to continue with."""
 CONFIDENTIAL = """# Confidential project
 This project's rules: {rules}. Keep its details inside this conversation: never suggest pasting them into outside
 services."""
-WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual"}   # reach the internet
+WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual",   # reach the internet
+             "install_for_instrument"}
 COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”

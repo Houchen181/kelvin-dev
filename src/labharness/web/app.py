@@ -228,6 +228,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
+    from .. import envs
+    envs.set_home(home)          # the instrument environments Kelvin installs makers' packages into (envs.py)
+    envs.cleanup()               # environments removed while their files were in use
+    envs.attach(envs.DRIVERS)    # the built-in drivers import their makers' packages from there
     runtime.keep_hands(settings.hands_on())               # a hands-on lock stays on across restarts
     default_data = home / "virtual-lab"                   # runs, record and reports unless the user chose a folder
     loop_ref: Dict[str, Any] = {}

@@ -6,9 +6,10 @@ kind: daq
 status: community
 manual: "NI-DAQmx Python API (nidaqmx): Task, ai_channels, ao_channels, di/do_channels, ci_channels"
 notes:
-  - "Address nidaq://Dev1 (the device name NI MAX shows); add ?terminal=rse (or nrse, diff, pseudodiff) and &range=10 for the analog inputs. Needs NI's DAQmx driver and pip install nidaqmx."
+  - "Address nidaq://Dev1 (the device name NI MAX shows); add ?terminal=rse (or nrse, diff, pseudodiff) and &range=10 for the analog inputs. Needs NI's DAQmx driver (NI's installer, run by a person), and nidaqmx, which Kelvin installs on this computer once a person approves."
   - "Analog and digital outputs can't be read back through NI-DAQmx: Kelvin knows an output once it has set it. Until then setting it to 0 (off) always goes ahead, any other value asks you, and a sweep starts from 0."
   - "This card has the channels nearly every NI multifunction device has: ai0-ai3, ao0-ao1, port0 lines 0-1 as outputs, lines 2-3 as inputs, and counter 0. Add more by copying a parameter (ai4: GET ai4)."
+requires: [nidaqmx]
 identify:
   idn: "^National Instruments,"
   example: "National Instruments,USB-6001,1F2A3B4"

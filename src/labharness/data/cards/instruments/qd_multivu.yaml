@@ -7,8 +7,9 @@ status: community
 manual: "Quantum Design MultiPyVu documentation (the MultiVu server and its Python client)"
 manual_url: "https://qdusa.com/siteDocs/appNotes/1070-220.pdf"
 notes:
-  - "Controlled through MultiPyVu (pip install MultiPyVu), with its server running on the MultiVu computer; address qd://<that computer>:5000"
+  - "Controlled through MultiPyVu (which Kelvin installs on this computer once a person approves), with its server running on the MultiVu computer; address qd://<that computer>:5000"
   - "MultiVu ramps temperature and field itself; Kelvin sets the rate, then the setpoint, and waits for the reading"
+requires: [MultiPyVu]
 identify:
   idn: "^Quantum Design,MultiVu"
   example: "Quantum Design,MultiVu,192.168.1.20:5000"

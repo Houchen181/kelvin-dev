@@ -7,9 +7,10 @@ status: community
 manual: "Pulse Streamer 8/2 documentation (v2.1), Python API"
 manual_url: "https://www.swabianinstruments.com/static/documentation/pulse-streamer/v2.1/sections/api-doc.html"
 notes:
-  - "Address pulsestreamer://<ip or hostname> (the factory fallback address is 169.254.8.2). Needs Swabian's client: pip install pulsestreamer."
+  - "Address pulsestreamer://<ip or hostname> (the factory fallback address is 169.254.8.2). Needs Swabian's client, pulsestreamer, which Kelvin installs on this computer once a person approves."
   - "Plays Kelvin's protocols (cw, pulsed_odmr, rabi, ramsey, hahn_echo, t1) on three of its eight outputs: set which in vars, and the AOM's delay."
   - "Stopping sets every output low (the vendor's constant(ZERO)). Steps are 1 ns, the shortest pulse 2 ns."
+requires: [pulsestreamer]
 identify:
   idn: "^Swabian Instruments,Pulse Streamer"
   example: "Swabian Instruments,Pulse Streamer 8/2,00:26:32:f0:3a:12,1.7.2"

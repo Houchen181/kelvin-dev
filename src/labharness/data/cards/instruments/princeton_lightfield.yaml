@@ -6,12 +6,13 @@ kind: spectrometer
 status: community
 manual: "LightField Add-ins and Automation: Automation, IExperiment (Load, Capture, GetValue, SetValue, Exists, IsReadyToRun, IsRunning, SystemColumnCalibration), CameraSettings.ShutterTimingExposureTime (ms), SensorTemperatureReading / SensorTemperatureSetPoint / SensorTemperatureStatus, ExperimentSettings.FrameSettingsFramesToStore, SpectrometerSettings.Grating / GratingCenterWavelength (nm)"
 notes:
-  - "Address lightfield://<experiment>: the experiment saved in LightField to load (lightfield:// keeps the one LightField opens). Add ?visible=0 to start LightField without its window. Needs LightField, with its license, on this computer."
+  - "Address lightfield://<experiment>: the experiment saved in LightField to load (lightfield:// keeps the one LightField opens). Add ?visible=0 to start LightField without its window. Needs LightField, with its license, on this computer, and pythonnet, which Kelvin installs on this computer once a person approves."
   - "Kelvin starts LightField itself, a normal window you can watch and use, and that LightField then has the camera: close a LightField you opened by hand first. Don't also add the same camera through PICam (picam://): one program per camera."
   - "Kelvin changes only what a person or a plan sets; the experiment as saved in LightField stays as it was."
   - "Each reading captures the experiment's frames (no file is saved) and averages them. Spectrum sums each column's rows; its wavelengths come from LightField's calibration of the spectrograph (column numbers when the experiment has none)."
   - "A grating is given as LightField names it ([550nm,900][1][0]) or by its grooves per mm (900). Kelvin waits while the spectrograph moves to a new grating or center wavelength."
   - "Not yet tried with LightField itself: watch the first runs."
+requires: [pythonnet]
 identify:
   idn: "^Teledyne Princeton Instruments,LightField,"
   example: "Teledyne Princeton Instruments,LightField,PL spectra"

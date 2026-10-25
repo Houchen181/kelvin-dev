@@ -2,7 +2,8 @@
 
 Address: qick://<name server host>[:8888]/<proxy name>, as started on the board:
     pyro4-ns -n 0.0.0.0 -p 8888          then   python -m qick.pyro_cli myqick -n <host> -p 8888
-Needs `pip install qick Pyro4` on the computer that runs Kelvin, and tProc v2 firmware on the board.
+Needs qick and Pyro4 on the computer that runs Kelvin (Kelvin installs them into its drivers environment once a
+person approves: envs.py), and tProc v2 firmware on the board.
 
 Kelvin plays one generator channel and reads one readout channel (set in the card's vars):
     output     drive: off sends soc.reset_gens(), which drives every generator with zeros
@@ -20,6 +21,7 @@ import urllib.parse
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
+from . import envs
 from .adapters import AdapterError
 from .cards import Card
 from .drivers import DriverBackend
@@ -35,8 +37,8 @@ def load_qick() -> Any:
         from qick.pyro import make_proxy   # type: ignore
         from qick.asm_v2 import AveragerProgramV2   # type: ignore
     except ImportError as e:
-        raise AdapterError("QICK boards need the qick and Pyro4 packages on this computer, which the Kelvin app does "
-                           "not carry: run Kelvin from source with pip install qick Pyro4 (%s)" % e) from e
+        raise AdapterError("QICK boards need qick, at the board's version where it is known, and Pyro4: %s"
+                           % envs.missing("qick", "Pyro4")) from e
     return SimpleNamespace(make_proxy=make_proxy, AveragerProgramV2=AveragerProgramV2,
                            version=str(getattr(qick, "__version__", "") or ""))
 

@@ -1,8 +1,8 @@
 """Spectrometers and spectrographs.
 
     seabreeze://<serial>     Ocean Insight / Ocean Optics USB spectrometers (USB2000+, USB4000, Flame, HR4000, QE Pro,
-                             Maya...) through python-seabreeze (pip install seabreeze; seabreeze_os_setup once for its
-                             USB driver). seabreeze:// is the first one found.
+                             Maya...) through python-seabreeze (Kelvin installs it once a person approves;
+                             seabreeze_os_setup once for its USB driver). seabreeze:// is the first one found.
     shamrock://<index>       Andor Shamrock and Kymera spectrographs (also monochromators) through Andor's
                              spectrograph library (atspectrograph or ShamrockCIF DLL, installed with Solis or the
                              Andor SDK), called directly. shamrock:// is the first.
@@ -18,6 +18,7 @@ import time
 import urllib.parse
 from typing import Any, List, Optional, Tuple
 
+from . import envs
 from .adapters import AdapterError
 from .cards import Card
 from .drivers import DriverBackend
@@ -43,8 +44,8 @@ class OceanSpectrometer(DriverBackend):
             try:
                 import seabreeze.spectrometers as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs python-seabreeze: pip install seabreeze, then run seabreeze_os_setup "
-                                   "once for its USB driver" % name) from e
+                raise AdapterError("%s needs python-seabreeze (and seabreeze_os_setup once, for its USB driver): %s"
+                                   % (name, envs.missing("seabreeze"))) from e
         self.sb = module
         serial = _target(address)
         try:

@@ -139,9 +139,14 @@ def trace_summary(spec: ParamSpec, values: List[float]) -> str:
 
 
 def _runs_a_program(address: str) -> bool:
-    """A lib:// address names a Python (python=) and a folder of the maker's files (path=) that Kelvin runs: only a
-    person writes one (Lab setup); Kelvin uses it once it is in the lab."""
-    return address.strip().lower().startswith("lib://")
+    """A lib:// address that names a Python (python=) or a folder of files (path=), or none at all, runs a program
+    a person chose: only a person writes one (Lab setup); Kelvin uses it once it is in the lab. One that names an
+    environment Kelvin installed with a person's approval (env=, envs.py) Kelvin may try and add itself."""
+    import urllib.parse
+    if not address.strip().lower().startswith("lib://"):
+        return False
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(address.strip()).query))
+    return bool(q.get("python") or q.get("path") or not q.get("env"))
 
 
 class LabRuntime:
@@ -1742,7 +1747,9 @@ class LabRuntime:
         address = targets.get(instrument)
         if address is None and _runs_a_program(instrument):
             return ("Kelvin tries a card only on an instrument in the lab or an address the scan found: a lib:// "
-                    "address names a program for Kelvin to run, so a person tries it in Lab, Cards")
+                    "address with python= or path= names a program for Kelvin to run, so a person tries it in Lab, "
+                    "Cards; or install the maker's library with install_for_instrument and use "
+                    "lib://<address>?env=<environment>")
         if address is None and ("::" in instrument or "://" in instrument):
             request = ApprovalRequest("Try a card on %s?" % instrument, [
                 "Kelvin's last scan did not find an instrument at %s. Trying the %s card asks it who it is and reads "
@@ -1920,6 +1927,275 @@ class LabRuntime:
                             address=address or None)
         return "\n".join(lines)
 
+    # ------------------------------------------------------------------ what an instrument is (probe.py)
+
+    def inspect_address(self, address: str) -> str:
+        """What a network address answers: the ports instruments use, what each says (its *IDN? reply where it
+        speaks SCPI, a web page's title, a greeting), the matching card and the address to use. Local networks only;
+        an instrument already in the lab keeps its connection (only its web page is looked at)."""
+        from .. import probe
+        from ..discovery import identify, match_card
+        try:
+            host, _ = probe.host_of(address)
+            ip = probe.local_ip(host)
+        except ValueError as e:
+            return str(e)
+        in_lab = {name: ic.address for name, ic in self.lab.config.instruments.items()
+                  if probe.host_of(ic.address)[0] in (host, ip)}
+        ports = [p for p in probe.PORTS if p[1] in ("http", "https")] if in_lab else None
+        res = probe.inspect(address, ports)
+        lines = ["%s%s: %s" % (host, " (%s)" % ip if ip != host else "",
+                               "%d of the ports instruments use answer" % len(res["found"]) if res["found"] else
+                               "nothing answers on the ports instruments use")]
+        if in_lab:
+            lines.append("In this lab already: %s; Kelvin left its connection alone and looked only at its web page."
+                         % ", ".join("%s (%s)" % kv for kv in in_lab.items()))
+        found_here = []
+        for f in res["found"]:
+            line = "- " + probe.what_answers(f)
+            resource = None
+            if f.get("idn"):
+                resource = "TCPIP0::%s::%d::SOCKET" % (ip, f["port"])
+                card = match_card(f["idn"], self.lab.registry)
+                line += (" → card %s (%s): add_instrument %s" % (card.id, card.model, resource) if card else
+                         " → no card matches it yet: draft_card %s" % resource)
+            elif f["port"] in (111, 4880) and not in_lab:   # VXI-11 and HiSLIP speak through VISA
+                candidate = "TCPIP0::%s::%s::INSTR" % (ip, "inst0" if f["port"] == 111 else "hislip0")
+                try:
+                    got = identify(candidate, self.lab.registry, timeout_ms=1500)
+                except Exception:
+                    got = None
+                if got is not None and got.idn:
+                    resource = candidate
+                    line += "; answers %r there%s" % (got.idn[:100], " → card %s: add_instrument %s" % (
+                        got.card_id, candidate) if got.card_id else " → no card matches it yet: draft_card %s"
+                        % candidate)
+            if resource:
+                found_here.append(resource)
+            lines.append(line)
+        if res["lxi"]:
+            lines.append("Its LXI identification: " + ", ".join("%s %s" % kv for kv in res["lxi"].items()))
+        quiet = [str(p) for p in res["looked"] if p not in {f["port"] for f in res["found"]}]
+        if quiet:
+            lines.append("Closed or silent: " + ", ".join(quiet))
+        if not res["found"]:
+            lines.append("Check the address (the instrument's front panel or its maker's program shows it), that it "
+                         "is switched on, and that this computer is on its network (connected_devices lists this "
+                         "computer's networks). An instrument on a port of its own: inspect_address <address>:<port>.")
+        for resource in found_here:
+            if resource not in self.last_found:
+                self.last_found.append(resource)   # found here: try_card and add_instrument may use it
+        return "\n".join(lines)
+
+    def connected_devices(self) -> str:
+        """Everything plugged into this computer: USB devices (with what each calls itself and its driver, also
+        those no driver claims), serial ports, and the networks this computer is on."""
+        from .. import probe
+        ports, devices = probe.serial_ports(), probe.usb_devices()
+        lines = ["USB devices:" if devices else "No USB devices (or this computer doesn't say)."]
+        plain = [d for d in devices if probe.ordinary(d)]
+        lines += ["- " + probe.usb_line(d, ports) for d in devices if d not in plain]
+        if plain:
+            lines.append("- also: " + ", ".join((d["names"] or ["?"])[0] for d in plain))
+        usb_ports = {p["port"] for p in ports if p.get("vid") is not None}
+        other = [p for p in ports if p["port"] not in usb_ports]
+        if other:
+            lines.append("Serial ports (not USB): " + ", ".join("%s (%s)" % (p["port"], p["description"])
+                                                                if p["description"] else p["port"] for p in other))
+        nets = probe.network_adapters()
+        if nets:
+            lines.append("Networks this computer is on: " + "; ".join(
+                "%s %s (this computer %s)%s" % (n["name"], n["network"], n["address"],
+                                                ", link-local: instruments that fall back to 169.254.x.x" if
+                                                n["link_local"] else "") for n in nets))
+        lines.append("An instrument here that scan_instruments doesn't find: its maker (installed_software, or "
+                     "web_search for its USB ID), then what it needs (install_for_instrument) and its card "
+                     "(draft_card). On a network: inspect_address.")
+        return "\n".join(lines)
+
+    def installed_software(self, query: str = "") -> str:
+        """Programs and drivers installed on this computer: those whose name or maker holds the query, or with no
+        query the ones that look like instrument makers' software, drivers and Pythons."""
+        from .. import probe
+        found = probe.programs(query)
+        if not found:
+            return ("nothing installed matches %r" % query if query else
+                    "no instrument makers' software found among the installed programs")
+        lines = ["%s%s%s%s" % (p["name"], " " + p["version"] if p["version"] and p["version"] not in p["name"] else "",
+                               " (%s)" % p["publisher"] if p["publisher"] else "",
+                               " in " + p["location"] if p["location"] else "") for p in found[:60]]
+        if len(found) > 60:
+            lines.append("... and %d more: name a maker or program" % (len(found) - 60))
+        lines.append("find_maker_files finds a program's examples, SDK folders and libraries.")
+        return "\n".join(lines)
+
+    def find_maker_files(self, query: str) -> str:
+        """Files and folders named like the query in the makers' install folders (Program Files, ProgramData, Public
+        Documents; /Applications, /Library, /opt): a maker's examples, its SDK's Python package, its DLL."""
+        from .. import probe
+        hits = probe.find_files(query)
+        if not hits:
+            return "nothing named like %r in %s" % (query, ", ".join(str(r) for r in probe.search_roots()))
+        lines = ["%s (%s)" % h for h in hits]
+        lines.append("read_examples reads a folder of examples; install_for_instrument with files installs an SDK's "
+                     "Python package or keeps a DLL in an environment.")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ what an instrument needs on this computer
+
+    def environments(self) -> str:
+        """Kelvin's instrument environments on this computer (envs.py): their Python, packages and files."""
+        from .. import envs
+        found = envs.listing(self.home)
+        if not found:
+            return ("no instrument environments yet: install_for_instrument makes one when an instrument needs its "
+                    "maker's Python package or files")
+        lines = []
+        for rec in found:
+            pkgs = ", ".join("%s %s" % kv for kv in sorted(rec.get("packages", {}).items())) or "no packages"
+            lines.append("%s: Python %s (%d-bit); %s%s%s" % (
+                rec["name"], rec.get("python"), rec.get("bits", 64), pkgs,
+                "; files: " + ", ".join(rec["files"]) if rec.get("files") else "",
+                "; for " + ", ".join(rec["for"]) if rec.get("for") else ""))
+        uv = envs.uv_path(self.home)
+        lines.append("(uv: %s) A library card uses one with lib://<address>?env=<name>; Kelvin's built-in drivers use "
+                     "%r." % (uv or "not here yet", envs.DRIVERS))
+        return "\n".join(lines)
+
+    def install_for_instrument(self, env: str, packages: Optional[List[str]] = None, python: str = "", bits: int = 64,
+                               files: str = "", why: str = "") -> str:
+        """Install what an instrument needs on this computer, in one of Kelvin's environments (envs.py): its maker's
+        Python packages from PyPI, at the version the instrument needs, and its own files (a folder or a download).
+        A person approves first, seeing what, which version and from where."""
+        from .. import envs, profiles
+        from ..gate import ApprovalRequest
+        packages = [p.strip() for p in (packages or []) if str(p).strip()]
+        try:
+            envs.env_dir(env, self.home)
+        except ValueError as e:
+            return str(e)
+        if not packages and not files:
+            return "say which packages (pip names, with a version if it must match) or which files to install"
+        if bits not in (32, 64):
+            return "bits is 32 or 64"
+        bad = [p for p in packages if not envs.PACKAGE.match(p)]
+        if bad or len(packages) > 12:
+            return "not package names: %s" % ", ".join(bad) if bad else "at most 12 packages at a time"
+        if not self.literature.enabled and (packages or re.match(r"^https?://", files or "")):
+            return "searching outside the lab (literature and web) is switched off in Settings, so Kelvin downloads nothing"
+        rec = envs.info(env, self.home)
+        app_version, app_bits = envs.app_python()
+        if rec is not None and ((python and python != rec.get("python")) or bits != rec.get("bits", 64)):
+            return ("environment %s has Python %s (%d-bit): name another environment for Python %s (%d-bit)"
+                    % (env, rec.get("python"), rec.get("bits", 64), python or app_version, bits))
+        if env == envs.DRIVERS and (python and python != app_version or bits != app_bits):
+            return ("%s is for Kelvin's built-in drivers and has Kelvin's own Python (%s, %d-bit); a library that needs "
+                    "another goes in an environment of its own" % (envs.DRIVERS, app_version, app_bits))
+        items = []
+        if envs.uv_path(self.home) is None:
+            items.append("uv, Astral's Python installer (about 20 MB), from its GitHub release (github.com/astral-sh/uv), "
+                         "checked against its published SHA-256; once, kept in %s" % (Path(self.home) / "tools"))
+        if rec is None:
+            items.append("a new environment %s in %s, with its own Python %s (%d-bit), which uv downloads if this "
+                         "computer has none (30 to 40 MB)" % (env, envs.env_dir(env, self.home), python or app_version, bits))
+        for spec in packages:
+            try:
+                meta = envs.pypi(spec, self._get)
+            except LookupError as e:
+                return "%s: check the package's name in the maker's instructions" % e
+            except Exception as e:
+                return "could not look up %s on PyPI: %s" % (spec, profiles._first_line(e))
+            items.append("%s from PyPI (%s; latest %s)%s%s" % (spec, meta["name"], meta["version"],
+                                                               ": " + meta["summary"] if meta["summary"] else "",
+                                                               " — " + meta["home"] if meta["home"] else ""))
+        if files and not re.match(r"^https?://", files) and not Path(files).expanduser().exists():
+            return "there is no file or folder %s on this computer" % files
+        if files:
+            items.append("the maker's files from %s, kept in the environment (a Python package among them is "
+                         "installed)" % files)
+        request = ApprovalRequest("Install on this computer%s?" % (" for " + why if why else ""), items)
+        if not self.gate.ask(request):
+            note = " (%s)" % request.note if request.note else ""
+            return "declined: nothing installed%s" % note
+        try:
+            if envs.uv_path(self.home) is None:
+                envs.fetch_uv(self.home, self._get)
+            if rec is None:
+                rec = envs.create(env, python, bits, self.home, why=why)
+            elif why and why not in rec.get("for", []):
+                rec.setdefault("for", []).append(why)
+                envs._save(rec, self.home)
+            if packages:
+                rec = envs.install(env, packages, self.home)
+            if files:
+                rec = envs.info(env, self.home) or rec
+                kept = self._fetch_files(env, files)
+                rec = envs.info(env, self.home) or rec
+        except Exception as e:
+            self.gate.log.write("install_failed", by="agent", env=env, packages=packages, files=files or None,
+                                error=profiles._first_line(e))
+            return "could not install: %s" % profiles._first_line(e)
+        if env == envs.DRIVERS:
+            envs.attach(env, self.home)
+        self.gate.log.write("installed", by="agent", env=env, packages=packages, files=files or None, why=why or None)
+        got = ", ".join("%s %s" % (base, rec["packages"].get(envs.base_name(base), "?"))
+                        for base in [envs.base_name(p) for p in packages])
+        return ("installed in environment %s (Python %s, %d-bit)%s%s. %s"
+                % (env, rec.get("python"), rec.get("bits", 64), ": " + got if got else "",
+                   "; files in %s" % kept if files else "",
+                   "Kelvin's built-in drivers use it now." if env == envs.DRIVERS else
+                   "A library card uses it with lib://<address>?env=%s." % env))
+
+    def _fetch_files(self, env: str, source: str) -> str:
+        """A maker's files into an environment: a folder or file on this computer, or a web address. A Python package
+        (a wheel, a source archive, a folder with its setup, as SDKs bring them) is installed; anything else (a
+        DLL, a .py, a folder of them, a .zip's contents) is kept in the environment's files folder."""
+        import tempfile
+        import zipfile
+        from .. import envs
+        with tempfile.TemporaryDirectory() as tmp:
+            if re.match(r"^https?://", source):
+                path = Path(tmp) / (re.sub(r"[^A-Za-z0-9._-]+", "_", Path(source.split("?")[0]).name) or "download")
+                path.write_bytes(self._get(source))
+            else:
+                path = Path(source).expanduser()
+                if not path.exists():
+                    raise FileNotFoundError("no file or folder %s" % source)
+            if path.is_file() and path.name.lower().endswith(".zip"):
+                folder = Path(tmp) / "unzipped" / path.stem   # kept under the archive's name
+                with zipfile.ZipFile(path) as z:
+                    z.extractall(folder)   # names with .. or a drive are made safe by zipfile
+                inner = list(folder.iterdir())
+                path = inner[0] if len(inner) == 1 and inner[0].is_dir() else folder
+            if envs.installable(path):
+                envs.install_path(env, path, self.home)
+                return "%s (installed as a Python package)" % envs.site_packages(env, self.home)
+            return str(envs.add_files(env, path, self.home))
+
+    def remove_environment(self, env: str) -> str:
+        """Remove one of Kelvin's instrument environments, after a person approves; instruments using it stop
+        connecting until it is installed again."""
+        from .. import envs
+        from ..gate import ApprovalRequest
+        try:
+            rec = envs.info(env, self.home)
+        except ValueError as e:
+            return str(e)
+        if rec is None:
+            return "no environment %s" % env
+        using = [n for n, i in self.lab.instruments.items() if "env=%s" % env in (i.config.address or "")
+                 or (env == envs.DRIVERS and i.card.requires)]
+        request = ApprovalRequest("Remove an instrument environment?", [
+            "%s (Python %s, %d-bit: %s)%s" % (env, rec.get("python"), rec.get("bits", 64),
+                                             ", ".join(rec.get("packages", {})) or "no packages",
+                                             "; used by " + ", ".join(using) if using else "")])
+        if not self.gate.ask(request):
+            return "declined: %s stays" % env
+        whole = envs.remove(env, self.home)
+        self.gate.log.write("environment_removed", by="agent", env=env)
+        return "removed environment %s%s" % (env, "" if whole else ": some of its files are in use, and go when Kelvin "
+                                             "next starts")
+
     # ------------------------------------------------------------------ adding instruments to the lab
 
     def add_instrument(self, address: str, card: str = "", name: str = "", connection: Optional[Dict[str, Any]] = None,
@@ -2000,8 +2276,9 @@ class LabRuntime:
             asks = []
             if resource_name(address) not in {resource_name(a) for a in self.last_found}:
                 if _runs_a_program(address):
-                    return ("not added: a lib:// address names a program for Kelvin to run (python=, path=), so a "
-                            "person adds it in Lab setup; the card is ready for them")
+                    return ("not added: a lib:// address with python= or path= names a program for Kelvin to run, "
+                            "so a person adds it in Lab setup (the card is ready for them); or install the maker's "
+                            "library with install_for_instrument and use lib://<address>?env=<environment>")
                 asks.append("Kelvin's last scan did not find an instrument at %s. Kelvin would connect to it as %s "
                             "(%s) and read it." % (address, new, the_card.model))
             if not on_file and lab_file.exists() and not self.lab_info.get("error"):
