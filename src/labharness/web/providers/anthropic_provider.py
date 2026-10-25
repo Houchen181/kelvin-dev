@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 
 import anthropic
 
-from .base import Emit, ModelInfo, Provider, TurnResult, safe_id, user_text
+from .base import DOCUMENTS_NOTE, Emit, ModelInfo, Provider, TurnResult, safe_id, user_text
 
 MODELS = [
     ("claude-opus-5-5", "Claude Opus 5.5"),
@@ -32,13 +32,17 @@ def _image(image: Dict[str, str]) -> Dict[str, Any]:
     return {"type": "image", "source": {"type": "base64", "media_type": image["mime"], "data": image["data"]}}
 
 
+def _document(doc: Dict[str, str]) -> Dict[str, Any]:
+    return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": doc["data"]}}
+
+
 def to_messages(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     n = 0
     for m in history:
-        if m["role"] == "user":   # pictures first, then the words about them
-            out.append({"role": "user", "content": [_image(i) for i in m.get("images") or []] +
-                        [{"type": "text", "text": user_text(m)}]})
+        if m["role"] == "user":   # PDFs and pictures first, then the words about them
+            out.append({"role": "user", "content": [_document(d) for d in m.get("documents") or []] +
+                        [_image(i) for i in m.get("images") or []] + [{"type": "text", "text": user_text(m)}]})
         elif m["role"] == "assistant":
             if m.get("provider") == "anthropic" and m.get("raw"):
                 content = m["raw"]
@@ -54,11 +58,15 @@ def to_messages(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if content:
                 out.append({"role": "assistant", "content": content})
         elif m["role"] == "tool":
-            out.append({"role": "user", "content": [
+            content = [
                 {"type": "tool_result", "tool_use_id": safe_id(r["id"], 0),
                  "content": ([{"type": "text", "text": r["content"] or "(empty)"}] + [_image(i) for i in r["images"]])
                  if r.get("images") else r["content"] or "(empty)",
-                 "is_error": bool(r["is_error"])} for r in m["results"]]})
+                 "is_error": bool(r["is_error"])} for r in m["results"]]
+            docs = [d for r in m["results"] for d in r.get("documents") or []]
+            if docs:   # after every result, as a user message may go on
+                content += [{"type": "text", "text": DOCUMENTS_NOTE}] + [_document(d) for d in docs]
+            out.append({"role": "user", "content": content})
     return out
 
 
@@ -66,6 +74,7 @@ class AnthropicProvider(Provider):
     name = "anthropic"
     label = "Claude"
     sees_images = True
+    sees_pdfs = True
     can_search = True
 
     def __init__(self, api_key: Optional[str]):

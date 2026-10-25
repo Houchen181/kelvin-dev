@@ -21,10 +21,10 @@ def test_auto_mode_asks_after_the_model_read_outside_text(make_gate, monkeypatch
     assert "(auto-approved)" in gate.set("smu", "V", 3).message
     gate.outside_chat = "a paper"                                          # but not in a chat that read some
     assert "(approved)" in gate.set("smu", "V", 4).message
-    assert "this chat has read text from the web (a paper) since the person last wrote" in " ".join(
+    assert "this chat has read text from outside the lab (a paper) since the person last wrote" in " ".join(
         approver.requests[1].items)
     allowed, why = gate.auto_plan({}, None)
-    assert not allowed and "read text from the web" in why[0]
+    assert not allowed and "read text from outside the lab" in why[0]
 
 
 def test_tools_mark_outside_text(tmp_path):
@@ -120,7 +120,7 @@ def test_auto_mode_goes_on_once_the_person_writes_again(tmp_path):
             await agent.close()
     asyncio.run(go())
     results = [r for m in store.load(chat["id"])["messages"] if m["role"] == "tool" for r in m["results"]]
-    assert results[1]["content"].startswith("declined") and "read text from the web (a web page)" in " ".join(
+    assert results[1]["content"].startswith("declined") and "read text from outside the lab (a web page)" in " ".join(
         approver.requests[0].items)                                          # the turn that read the web asked
     assert results[3]["content"].endswith("(auto-approved)")                 # the person wrote again: auto again
     assert len(approver.requests) == 1 and "outside" not in store.load(chat["id"])

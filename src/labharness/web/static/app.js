@@ -1449,6 +1449,9 @@
       case "save_paper": return v("Adding", "Added") + " " + code(a.paper || "") + " to the reading list";
       case "web_search": return v("Searching", "Searched") + " the web for " + code(a.query || "");
       case "read_web_page": return v("Reading", "Read") + " " + code(a.url || "") + (a.start ? " from character " + esc(String(a.start)) : "");
+      case "list_folder": return v("Looking", "Looked") + " in " + (a.path ? code(a.path) : "the chat's folder");
+      case "read_file": return v("Reading", "Read") + " " + code(a.path || "") + (a.pages ? ", pages " + esc(String(a.pages)) : "") +
+        (a.start ? " from character " + esc(String(a.start)) : "") + (a.figures ? " (the pages as drawn)" : "");
       case "save_manual": return v("Keeping", "Kept") + " the manual " + code(a.source || "") +
         (a.model ? " for the " + esc(String((a.maker ? a.maker + " " : "") + a.model)) : "");
       case "make_report": return v("Writing", "Wrote") + " a report" + (a.title ? ": " + esc(String(a.title)) : "");
@@ -1458,8 +1461,8 @@
       default: return code(name);
     }
   }
-  function summaryOf(content) {
-    const lines = String(content || "").split("\n").filter((l) => l.trim());
+  function summaryOf(content) {   // the marks around text from outside the lab are for the model
+    const lines = String(content || "").split("\n").filter((l) => l.trim() && !/^<\/?outside_text\b/.test(l));
     return lines.find((l) => !/^dry run:/.test(l)) || lines[0] || "";
   }
   function outcome(content, isError) {

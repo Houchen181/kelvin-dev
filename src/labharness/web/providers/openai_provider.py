@@ -12,10 +12,15 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import openai
 
-from .base import PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, safe_id, text_of, user_text
+from .base import (DOCUMENTS_NOTE, PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, safe_id, text_of,
+                   user_text)
 
 _SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
          "dall-e", "whisper", "davinci", "babbage")
+
+
+def _file(doc: Dict[str, str]) -> Dict[str, Any]:
+    return {"type": "file", "file": {"filename": doc.get("name") or "document.pdf", "file_data": data_url(doc)}}
 
 
 def to_messages(system: str, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -23,10 +28,10 @@ def to_messages(system: str, history: List[Dict[str, Any]]) -> List[Dict[str, An
     n = 0
     for m in history:
         if m["role"] == "user":
-            images = m.get("images") or []
+            images, docs = m.get("images") or [], m.get("documents") or []
             out.append({"role": "user", "content": [{"type": "text", "text": user_text(m)}] + [
-                {"type": "image_url", "image_url": {"url": data_url(i)}} for i in images]
-                if images else user_text(m)})
+                {"type": "image_url", "image_url": {"url": data_url(i)}} for i in images] + [_file(d) for d in docs]
+                if images or docs else user_text(m)})
         elif m["role"] == "assistant":
             calls = []
             for b in m["blocks"]:
@@ -45,9 +50,15 @@ def to_messages(system: str, history: List[Dict[str, Any]]) -> List[Dict[str, An
             for r in m["results"]:
                 out.append({"role": "tool", "tool_call_id": safe_id(r["id"], 0), "content": r["content"] or "(empty)"})
             images = [i for r in m["results"] for i in r.get("images") or []]
-            if images:   # a tool message holds text only: its pictures follow as the user's
-                out.append({"role": "user", "content": [{"type": "text", "text": PICTURES_NOTE}] + [
-                    {"type": "image_url", "image_url": {"url": data_url(i)}} for i in images]})
+            docs = [d for r in m["results"] for d in r.get("documents") or []]
+            parts: List[Dict[str, Any]] = []
+            if images:   # a tool message holds text only: its pictures and PDFs follow as the user's
+                parts += [{"type": "text", "text": PICTURES_NOTE}] + [
+                    {"type": "image_url", "image_url": {"url": data_url(i)}} for i in images]
+            if docs:
+                parts += [{"type": "text", "text": DOCUMENTS_NOTE}] + [_file(d) for d in docs]
+            if parts:
+                out.append({"role": "user", "content": parts})
     return out
 
 
@@ -83,6 +94,7 @@ class OpenAIProvider(Provider):
         self._cache: Optional[List[ModelInfo]] = None
         self.can_search = name == "openai" and not base_url   # OpenAI's own web search (local services have none)
         self.sees_images = name == "openai" and not base_url  # other services may serve models that don't
+        self.sees_pdfs = self.sees_images                    # OpenAI's models read PDFs as files
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """OpenAI's web search (the Responses API's web_search tool): the pages it cited, with its notes."""

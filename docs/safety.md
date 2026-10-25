@@ -27,9 +27,9 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 
 ### Text from outside the lab
 
-Web pages, papers, manuals, makers' example scripts, an instrument's or a board's replies and PDFs a person attaches can contain text written to steer a model. Kelvin's tools mark such text as outside text (`<outside_text from="...">`), and the models are told it is information, never instructions.
+Web pages, papers, manuals, makers' example scripts, an instrument's or a board's replies, PDFs a person attaches and files Kelvin reads in a chat's folder can contain text written to steer a model. Kelvin's tools mark such text as outside text (`<outside_text from="...">`), and the models are told it is information, never instructions.
 
-Text from the open web (web pages, web search results, papers) is where such text would come from, so it also pauses auto mode: in a chat that has read some, drive changes and runs ask a person until the person writes again in that chat; for an agent through MCP, for 30 minutes. The request says why. An instrument's manual, a maker's files, an instrument's reply and a file a person attached are marked for the model but don't pause auto mode: reading the manual is part of using an instrument well.
+Text from the open web (web pages, web search results, papers) is where such text would come from, so it also pauses auto mode, and so does a file Kelvin reads in the chat's folder (the folder may hold files from anywhere, such as downloaded papers, and Kelvin chose the file, not you): in a chat that has read some, drive changes and runs ask a person until the person writes again in that chat; for an agent through MCP, for 30 minutes. The request says why. An instrument's manual, a maker's files, an instrument's reply and a file a person attached are marked for the model but don't pause auto mode: reading the manual is part of using an instrument well.
 
 ### Checked like an experiment, not tested like code
 
@@ -52,9 +52,9 @@ In auto mode, a drive change, a run or a queue goes ahead without asking when al
 - For a run, its dry run finishes cleanly. In auto mode a run is dry-run first, since no person looks at it; a queue is rehearsed on the simulated lab as a whole, in order.
 - The lab config doesn't exclude the instrument.
 - Kelvin is sure about the instrument: its card has been reviewed, and if Kelvin added it to the lab, its limits have been reviewed too (see "When Kelvin isn't sure, it asks" above).
-- The chat hasn't read text from the web since you last wrote in it ([below](#text-from-outside-the-lab)).
+- The chat hasn't read text from the web, or a file in its folder, since you last wrote in it ([below](#text-from-outside-the-lab)).
 
-Auto mode also says yes, unless the chat has read text from the web since you last wrote, to:
+Auto mode also says yes, unless the chat has read text from the web or a file in its folder since you last wrote, to:
 - trying a card on an address the last scan didn't find: it only asks the instrument who it is and reads it;
 - adding an instrument at such an address to your lab: it connects it and reads it, and every output change on it still asks until you review its limits;
 - keeping a skill or a recipe: it changes nothing in the lab, and you can read and delete it in Settings → **Memory**.

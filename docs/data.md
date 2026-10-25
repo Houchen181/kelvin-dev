@@ -136,6 +136,7 @@ Each chat saves its runs in a folder you choose, so you always know where its da
 - **A new chat** starts in the folder you last chose (in a project, the one its chats last chose). Settings → **Data & reports** → **Ask for a folder when I start a new chat** turns the picker off for new chats.
 - **Without a folder of its own** (and from other AI apps through MCP), a chat's runs go to the data folder's `runs/`.
 - **Queued runs** go to the folder of the chat that queued them.
+- **Kelvin reads the files in it:** PDFs, text and CSV files, and pictures in the chat's folder and its subfolders, never outside it (see [Files in the chat's folder](portal.md#in-the-portal)).
 - **Kelvin finds every run wherever it is:** the catalog, reports and Kelvin's tools look in the data folder and in every chat's folder (`folders.json` in the data folder lists them). When a run ends, Kelvin says its whole path. Your other files in a chat's folder are left alone.
 - **A folder that can't be written when a run starts** (a drive that is away, say): the run is saved in the data folder instead, and Kelvin says so.
 - **Only a person** changes a chat's folder.

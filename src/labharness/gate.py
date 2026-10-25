@@ -343,11 +343,12 @@ class SafetyGate:
         self.outside = (time.monotonic(), source)
 
     def outside_reason(self) -> Optional[str]:
-        """Why auto mode asks a person now, because the model read text from the web; None when it hasn't. In a
-        portal chat, until the person writes again in it; for other clients, for OUTSIDE_S."""
+        """Why auto mode asks a person now, because the model read text from outside the lab (the web; in a portal
+        chat, also a file in the chat's folder); None when it hasn't. In a portal chat, until the person writes again
+        in it; for other clients, for OUTSIDE_S."""
         if self.outside_chat:
-            return ("this chat has read text from the web (%s) since the person last wrote, which could try to "
-                    "steer a model, so a person approves" % self.outside_chat)
+            return ("this chat has read text from outside the lab (%s) since the person last wrote, which could try "
+                    "to steer a model, so a person approves" % self.outside_chat)
         if not self.in_chat and self.outside is not None and time.monotonic() - self.outside[0] < OUTSIDE_S:
             return ("Kelvin read text from the web (%s) in the last %d minutes, which could try to steer a model, "
                     "so a person approves" % (self.outside[1], OUTSIDE_S // 60))
