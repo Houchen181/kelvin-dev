@@ -26,7 +26,9 @@ def _word(word: str) -> str:
     return "(?:%s|%s)" % (re.escape(long), re.escape(short))
 
 
-def _header(header: str) -> str:
+def _header(header: str, any_channel: bool = False) -> str:
+    """The header as a regex; any_channel: an SCPI node written without a number also matches it with one (SOURce
+    matches SOURce2), as a family of commands covers every channel. Not a short mnemonic: Novatech's Vs is not V0."""
     parts, pos, leading = [], 0, True
     for m in _NODE.finditer(header):
         if m.start() != pos:
@@ -35,7 +37,8 @@ def _header(header: str) -> str:
         if bool(opt) != bool(close):
             raise ValueError("unbalanced [ ] in %r" % header)
         sep = (":?" if leading else ":") if colon else ""
-        node = sep + _word(word) + re.escape(digits)
+        channel = any_channel and not digits and len(re.match(r"\*?([A-Z]*)", word).group(1)) >= 3
+        node = sep + _word(word) + (r"\d*" if channel else re.escape(digits))
         parts.append("(?:%s)?" % node if opt else node)
         leading = leading and bool(opt)
         pos = m.end()
@@ -65,7 +68,7 @@ def _parses(header: str) -> bool:
 
 class Template:
     """One command pattern from a card. `prefix=True` matches a header and
-    everything below it (used for blocked and reset command families)."""
+    everything below it, on any channel (used for blocked and reset command families)."""
 
     def __init__(self, text: str, prefix: bool = False):
         lead = re.match(r"^\s*\{value\}(.*)$", text or "", re.S)
@@ -92,7 +95,7 @@ class Template:
         self.is_query = rest.lstrip().startswith("?")
         self.prefix = prefix
         # a header never runs into a letter: VOLT must not match the start of VOLTage:ILIMit (but SLVL5 is SLVL 5)
-        pattern = r"^\s*:?" + _header(head) + r"(?![A-Za-z])"
+        pattern = r"^\s*:?" + _header(head, any_channel=prefix) + r"(?![A-Za-z])"
         pattern += r"(?=$|[\s:?;,])" if prefix else _rest(rest) + r"\s*$"   # ',': COMMAND,ch,value instruments
         self._re = re.compile(pattern, re.IGNORECASE | re.S)
 
@@ -174,8 +177,11 @@ class _PathPrefix:
         return "" if same else None
 
 
-def is_query(command: str) -> bool:
+def is_query(command: str, enq: bool = False) -> bool:
+    """enq: the instrument answers on ENQ (Pfeiffer), where a mnemonic without parameters (PR1) is a read."""
     first = command.strip().split(None, 1)
+    if enq and first and "," not in command and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,5}", command.strip()):
+        return True
     return bool(first) and ("?" in first[0] or first[0].upper() == "GET")   # GET: a driver's or a web API's read
 
 

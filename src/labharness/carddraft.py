@@ -31,7 +31,9 @@ Top level:
   answer *IDN?.
 - error_query: the command that reads the error queue, if any (e.g. "SYSTem:ERRor?").
 - connection (only if the manual requires it): read_termination, write_termination, baud_rate, data_bits, parity,
-  stop_bits, timeout_ms, write_only (a listen-only instrument), ack (a reply every set returns).
+  stop_bits, timeout_ms, write_only (a listen-only instrument), ack (a reply every set returns), enq: true (each
+  command is answered ACK or NAK and the reply comes only on ENQ, as on Pfeiffer's gauge controllers; a get is then
+  the bare mnemonic, e.g. "PR1", and a set the mnemonic with its parameters, e.g. "SEN,{value},0").
 - parameters: one entry per quantity, keyed by a short name.
 - display: {headline: <parameter>} for the reading shown large; raw: {blocked: [...], reset: [...]}: command headers
   that must never be sent (calibration, firmware, sensor curves, protection limits) and reset commands.
@@ -105,6 +107,16 @@ def extract_yaml(text: str) -> str:
         return m.group(1).strip() + "\n"
     i = (text or "").find("card: 1")
     return (text[i:] if i >= 0 else text or "").strip() + "\n"
+
+
+def notes_in(text: str) -> List[str]:
+    """What the model wrote beside its card: what it left out or is unsure of (at most five lines)."""
+    m = re.search(r"```(?:ya?ml)?\s*\n.*?```", text or "", re.S)
+    if not m:
+        return []
+    rest = text[:m.start()] + "\n" + text[m.end():]
+    lines = [re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", line).strip() for line in rest.splitlines()]
+    return [line[:300] for line in lines if line][:5]
 
 
 def check(text: str, source: str = "draft") -> Tuple[Optional[Card], List[str], List[str]]:
@@ -206,15 +218,21 @@ def delete(cards_dir: Path, card_id: str) -> None:
 DRAFT_SYSTEM = GUIDE + """
 
 You write one card for the instrument the user names, from the manual text or example scripts they give you. Answer with the card in
-one ```yaml block, then at most five short lines on what you left out or are unsure of. Status: draft."""
+one ```yaml block, then at most five short lines on what you left out or are unsure of. If the manual leaves an output's
+ranges to another document (its specifications or a datasheet), keep that output as a reading only and add the line
+"Ranges in: <that document's title>; for: <those outputs, e.g. amplitude, offset>". Status: draft."""
 
 
-def draft_prompt(manual: str, name: str) -> str:
+def draft_prompt(manual: str, name: str, specs: str = "") -> str:
+    """specs: pages of the document the manual leaves some ranges to (its specifications), if Kelvin has it."""
     manual = manual.strip()
     clipped = manual[:MAX_MANUAL]
     note = "" if len(manual) <= MAX_MANUAL else "\n(The manual text was cut at %d characters.)" % MAX_MANUAL
-    return ("Instrument: %s\n\nAn example of a finished card, for the format:\n%s\n\nThe manual, its command "
-            "reference, or the maker's example scripts:\n%s%s" % (name or "(see the manual)", example(), clipped, note))
+    ranges = ("\n\nIts specifications (the document the manual leaves ranges to), for the limits:\n%s"
+              % specs.strip()[:MAX_MANUAL // 2]) if specs.strip() else ""
+    return ("Instrument: %s\n\nAn example of a finished card, for the format:\n%s%s\n\nThe manual, its command "
+            "reference, or the maker's example scripts:\n%s%s" % (name or "(see the manual)", example(), ranges,
+                                                                    clipped, note))
 
 
 SOURCE_TYPES = {".py", ".m", ".h", ".hpp", ".c", ".cpp", ".cs", ".vb", ".bas", ".jl", ".tcl", ".ipynb", ".txt", ".md",

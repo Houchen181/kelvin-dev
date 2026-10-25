@@ -1778,11 +1778,13 @@ class LabRuntime:
                           "marks it reviewed (Lab, Cards), every setting and output change on it asks them."
                           % (card.status, card.id, path)] + ["warning: " + w for w in warnings])
 
-    def draft_card(self, address: str, maker: str = "", model: str = "") -> str:
-        """A card for an instrument Kelvin has none for: Kelvin finds the maker's manual online, writes the card from
-        its command reference with the app's model, checks it and keeps it as a draft (autocard.py). The maker and
-        model come from the instrument's identity reply (the last scan), else from what the person said. Only they
-        leave the computer, never a serial number. Sends the instrument nothing."""
+    def draft_card(self, address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
+        """A card for an instrument Kelvin has none for: Kelvin finds the maker's manual online (or reads the one the
+        person gave: `manual`, a file on this computer or its web address), writes the card from its command reference
+        with the app's model, checks it and keeps it as a draft (autocard.py). Where the manual leaves some ranges to
+        another document, Kelvin looks for it too (or reads `specs`, which the person gave). The maker and model come
+        from the instrument's identity reply (the last scan), else from what the person said. Only they leave the
+        computer, never a serial number. Sends the instrument nothing."""
         from ..adapters import resource_name
         if self.card_writer is None:
             return ("Kelvin writes cards from manuals in the Kelvin app. Here, write it yourself: the person gives the "
@@ -1796,19 +1798,29 @@ class LabRuntime:
             return ("%s did not answer who it is%s: give the maker and the model the person named"
                     % (address or "the instrument", "" if found else " (or the last scan did not find it)"))
         try:
-            r = self.card_writer({"address": address, "idn": idn, "maker": maker.strip(), "model": model.strip()})
+            r = self.card_writer({"address": address, "idn": idn, "maker": maker.strip(), "model": model.strip(),
+                                  "manual": (manual or "").strip(), "specs": (specs or "").strip(),
+                                  "serial": found.get("serial") or {}})
         except Exception as e:   # the model or the maker's site failed in a way autocard did not catch
             r = {"error": str(e).splitlines()[0] if str(e) else type(e).__name__}
         if r.get("error"):
-            return "no card yet: %s" % r["error"]
+            hint = "" if manual or "manual" not in r["error"] else (
+                " (ask the person for the manual's PDF or web address, then draft_card with manual)")
+            return "no card yet: %s%s" % (r["error"], hint)
         if r.get("manual") and address:
             self.manuals_found[resource_name(address)] = r["manual"]
         self.gate.log.write("card", by="agent", card=r["card_id"], status="draft", manual=(r.get("manual") or {}).get("url"))
-        lines = ["drafted card %s (%s, %s) from %s%s." % (r["card_id"], r["model"], r["kind"],
-                                                            (r.get("manual") or {}).get("url") or "its manual",
-                                                            "; " + "; ".join(r["changed"]) if r.get("changed") else "")]
+        lines = ["drafted card %s (%s, %s) from %s%s%s." % (
+            r["card_id"], r["model"], r["kind"], (r.get("manual") or {}).get("url") or "its manual",
+            " with ranges from %s" % r["specs"] if r.get("specs") else "",
+            "; " + "; ".join(r["changed"]) if r.get("changed") else "")]
         if r.get("parameters"):
             lines.append("parameters: " + r["parameters"])
+        if r.get("notes"):   # what the model left out or is unsure of: the person should hear it
+            lines.append("the model's notes: " + " | ".join(r["notes"]))
+        if r.get("ranges_in"):
+            lines.append("Some outputs stay readings: their ranges are in %r, which Kelvin could not get. Ask the person "
+                         "for its PDF or web address, then draft_card again with specs." % r["ranges_in"])
         lines.append("Next: try_card %s on %s and compare the readings with what the person sees; then "
                      "add_instrument." % (r["card_id"], address or "the instrument"))
         return "\n".join(lines)
@@ -1822,6 +1834,7 @@ class LabRuntime:
         its limits, every output change on it asks them. An address the last scan did not find asks first; moving
         Kelvin off a virtual lab the person chose asks too."""
         from ..adapters import AdapterError, resource_name
+        from ..cards import CONNECTION_KEYS
         from ..discovery import Found, add_to_config
         from ..labconfig import ConfigError, load_lab_config
         from ..virtual_lab import build_lab, lab_registry
@@ -1872,9 +1885,12 @@ class LabRuntime:
                 return "not added: %r can't be a name (letters, digits and _)" % new
             if new in names:
                 return "not added: the lab has a %s already (%s); choose another name" % (new, ", ".join(names))
+            conn = dict(connection or {})
+            if not conn and found.get("serial") and "baud_rate" not in the_card.connection:   # how the scan reached it
+                conn = {k: v for k, v in found["serial"].items() if k in CONNECTION_KEYS}
             item = {"name": new, "card": the_card.id, "address": address, "added_by": "kelvin",
                     "note": str(found.get("idn") or the_card.model)[:60],
-                    "connection": dict(connection or {}), "vars": {str(k): str(v) for k, v in (card_vars or {}).items()}}
+                    "connection": conn, "vars": {str(k): str(v) for k, v in (card_vars or {}).items()}}
             try:
                 new_text = add_to_config(text, [item], registry)
                 cfg = load_lab_config(new_text, registry)

@@ -94,7 +94,7 @@ class Instrument:
         if self.card.error_query is None:
             return None
         resp = self.backend.query(self.card.error_query.render()).strip()
-        return None if re.match(r"^\+?0\s*(,|$)", resp) else resp   # "0,No error", or a bare 0 (SRS LERR?)
+        return None if re.match(r"^\+?0+\s*(,|$)", resp) else resp   # "0,No error", 0 (SRS LERR?), 0000 (Pfeiffer ERR)
 
     def limits(self, param: str) -> Optional[Tuple[float, float]]:
         """The lab's limits (or the card's), narrowed to the mounted device's: the tighter side always holds."""

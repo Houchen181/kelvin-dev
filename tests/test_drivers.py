@@ -255,7 +255,8 @@ def test_mercury_answers_every_set(tmp_path):
         lab.read("itc", "T")
         assert itc.sent[-1] == "READ:DEV:DB6.T1:TEMP:SIG:TEMP"
         gate = gate_for(lab, tmp_path, [True])
-        assert gate.set("itc", "ramp_rate", 2).ok and itc.sent[-1] == "SET:DEV:DB6.T1:TEMP:LOOP:RSET:2"
+        assert gate.set("itc", "ramp_rate", 2).ok and itc.sent[-2:] == [   # set, then read back
+            "SET:DEV:DB6.T1:TEMP:LOOP:RSET:2", "READ:DEV:DB6.T1:TEMP:LOOP:RSET"]
         itc.replies = lambda cmd: "STAT:" + cmd + ":INVALID"
         with pytest.raises(AdapterError, match="refused"):
             lab.instruments["itc"].backend.write("SET:DEV:DB6.T1:TEMP:LOOP:RSET:3")

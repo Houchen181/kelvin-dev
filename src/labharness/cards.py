@@ -24,7 +24,8 @@ CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate
                    "stop_bits": float, "parity": str, "timeout_ms": int, "query_delay": float, "write_only": bool,
                    "echo": bool,  # the instrument echoes each command as a line: read and dropped before the reply
                    "ack": str,   # ack: the line an instrument sends after every command (e.g. "OK"), read and checked
-                   "set_reply": str}   # a regex every set command's reply must match (e.g. ":VALID$"); read after each set
+                   "set_reply": str,   # a regex every set command's reply must match (e.g. ":VALID$"); read after each set
+                   "enq": bool}   # Pfeiffer's protocol: each command is acknowledged (ACK or NAK) and a reply is sent on ENQ
 VAR_NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 VAR_VALUE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")   # never spaces, separators or line ends: no command can hide in it
 _TRUE = {"1", "on", "true", "yes", "open"}
@@ -150,6 +151,10 @@ class ParamSpec:
             s = str(value).strip().lower()
             for name, code in (self.values or {}).items():
                 if s == name.lower() or s == str(code).lower():
+                    return name
+            for name, code in (self.values or {}).items():   # an SCPI reply in short form: SIN for SINusoid
+                short = re.match(r"[A-Z]*", str(code)).group(0)
+                if short and short != str(code) and s == short.lower():
                     return name
             raise ValueError("%s must be one of %s, got %r" % (self.name, ", ".join(self.values or {}), value))
         if t == "str":

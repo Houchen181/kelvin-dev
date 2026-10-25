@@ -71,9 +71,10 @@ You are connected to a physics lab through Kelvin.
   set it up yourself: scan_instruments to find it; if a card matched, add_instrument; if none did, draft_card (Kelvin
   finds the maker's manual online and writes a draft card), try_card it (it only reads) and check that its readings
   make sense, then add_instrument. Then tell the person in a line or two what you added, with a reading or two they
-  can compare with the front panel. Add only what they asked for. Ask them only where you can't go on: a setting on
-  the instrument itself (remote control, its address, a list of allowed computers), the maker's software or driver
-  to install, a manual Kelvin can't get (ask for the PDF), or an address the scan didn't find.
+  can compare with the front panel, and what the card left out (draft_card's notes). Add only what they asked for.
+  Ask them only where you can't go on: a setting on the instrument itself (remote control, its address, a list of
+  allowed computers), the maker's software or driver to install, a manual or specifications document Kelvin can't
+  get (ask for its PDF or web address, then draft_card with manual or specs), or an address the scan didn't find.
 - When draft_card can't write it (no public manual, or an instrument driven through the maker's library), or outside
   the Kelvin app, write the card yourself: the manual's command reference or the maker's example scripts (pasted, or
   read_examples on a file or folder the person names), card_guide, the card from that text only, check_card until
@@ -219,12 +220,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.save_card(card)
 
     @server.tool(annotations=FETCH, structured_output=False)
-    def draft_card(address: str, maker: str = "", model: str = "") -> str:
+    def draft_card(address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
         """Write a card for a connected instrument Kelvin has none for: Kelvin finds the maker's manual online, writes
         the card from its command reference, checks it and keeps it as a draft. Maker and model come from the
         instrument's identity reply (scan_instruments first); for one that gave none, pass what the person said it is.
-        Only the maker and model leave the computer. Takes a minute or two; sends the instrument nothing."""
-        return rt.draft_card(address, maker, model)
+        manual: when Kelvin can't find it online, the manual the person gives (a file on this computer or its web
+        address). specs: likewise, the specifications document an output's ranges are in, when the manual leaves them
+        there and Kelvin can't find it. Only the maker and model leave the computer. Takes a minute or two; sends the
+        instrument nothing."""
+        return rt.draft_card(address, maker, model, manual, specs)
 
     @server.tool(annotations=ACT, structured_output=False)
     def add_instrument(address: str, card: str = "", name: str = "", connection: Optional[Dict[str, Any]] = None,

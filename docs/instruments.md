@@ -177,7 +177,14 @@ For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pu
 
 **Kelvin writes the card itself.** When a scan finds an instrument that says who it is but matches no card, Kelvin writes one. It does this at start-up, and when you press **Find its manual and write its card** on that instrument in **Set up…**.
 1. **It finds the manual.** Your default model suggests where the maker publishes it, and Kelvin also tries known addresses for some makers. On a product page, Kelvin follows the links on the maker's own site that look most like this model's manual (naming the model or its series, PDFs, "manual" or "programming"), skipping the site's general pages, and from a page about the model's manuals on to its PDFs. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
-2. **It drafts the card.** The model writes the card from the manual's command pages, the card checker reviews it, and the model fixes what the checker found, once.
+2. **It drafts the card.** The model writes the card from the manual's most useful pages, up to about 60,000 characters:
+   - pages with this model's ranges;
+   - pages on how to talk to it (serial settings, line ends, a handshake such as Pfeiffer's ACK and ENQ);
+   - then the pages that define commands. Outputs, levels and readings come first (`OUTPut[:STATe]`, `VOLTage`, `SETP`), deep commands and housekeeping last, and the contents and the index not at all.
+
+   The card checker reviews the card, and the model fixes what the checker found, once. What the model left out or is unsure of goes to you and into the card's first lines.
+   - **Ranges in another document.** Some manuals leave an output's ranges to another document; Tektronix's programmer manuals send them to a specifications document. The model then keeps that output as a reading and says which document has its ranges. Kelvin looks for that document the same way and has the card written again with its pages on those outputs, so the output gets its limits. If Kelvin can't get it, it asks you for its PDF or web address, as for a manual.
+   - **Instruments with their own handshake.** Pfeiffer's gauge controllers answer each command with ACK and send the data on ENQ. Their card says `enq: true`, and Kelvin speaks that protocol, passing over the readings they send by themselves from power-up.
 3. **It makes the card safe to try, whatever the model wrote:**
    - The card is a draft. On real hardware every setting and output change asks you, saying the card is a draft.
    - No commands are sent on connect.
@@ -186,7 +193,7 @@ For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pu
    - The identity pattern is checked against the instrument's own reply. For an instrument that gave none (you named it), the manual's own identity check is kept, and trying the card tests it.
 4. **It sets the instrument up.** At start-up, the instrument joins the lab with the others, marked as added by Kelvin, and its folder gets the manual Kelvin downloaded. The card's first lines say where it came from and which model wrote it.
 
-In a chat, Kelvin does the same for an instrument you name (`draft_card`): with the maker and model from its identity reply, or from what you said for one that doesn't answer `*IDN?`. Then it tries the card (`try_card`) and adds the instrument (`add_instrument`).
+In a chat, Kelvin does the same for an instrument you name (`draft_card`): with the maker and model from its identity reply, or from what you said for one that doesn't answer `*IDN?`. Then it tries the card (`try_card`) and adds the instrument (`add_instrument`), and tells you what the card left out. A manual or specifications document Kelvin can't get, you can give it (`draft_card` with `manual` or `specs`: a PDF on this computer or its web address).
 
 What leaves the computer: the maker and model name, and the manual's command pages, go to your model; the manual's address goes to the maker's site. The serial number never leaves. Switch this off with **Write cards for instruments Kelvin doesn't know** in Settings. If Kelvin can't find the manual (some makers want a sign-in) or there is no model, it says so; then draft the card from a PDF yourself:
 

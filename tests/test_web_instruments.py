@@ -170,7 +170,8 @@ instruments:
     gate = gate_for(lab, tmp_path, [True, True])
     assert gate.set("fs", "output", True).ok and fake.requests[-1][:2] == ("POST", "/Basic/EnableOutput")
     assert gate.set("fs", "attenuator", 50).action == "refused"            # the lab's 25 %
-    assert gate.set("fs", "attenuator", 20).ok and fake.requests[-1][2] == b"20"
+    assert gate.set("fs", "attenuator", 20).ok and fake.requests[-2][2] == b"20"   # then read back
+    assert fake.requests[-1][0] == "GET"
     assert lab.read("fs", "power") == pytest.approx(4.0)
     r = gate.raw("fs", "POST /Basic/TurnOn")                               # starting the laser stays with people
     assert r.action == "refused" and fake.requests[-1][1] != "/Basic/TurnOn"

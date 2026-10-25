@@ -616,7 +616,7 @@ class SafetyGate:
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, target, trip)
-        err = inst.instrument_error()
+        err = inst.instrument_error() or self._shown(inst, spec, target)
         if err:
             return Result(False, "error", key, value=target, before=current,
                           message="%s: instrument reported %s" % (key, err))
@@ -629,6 +629,28 @@ class SafetyGate:
         if notes:
             msg += "; " + "; ".join(notes)
         return Result(True, "set", key, value=target, before=current, message=msg)
+
+    def _shown(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
+        """What a real instrument shows instead of the number Kelvin just set, when it reads back clearly different
+        for a while: it refused or clipped the value (a range can depend on its other settings, as a generator's
+        amplitude on its load setting), and its card has no error queue that would say so. None when it agrees or
+        can't be read back. Not for switches and modes, whose state may take seconds to follow (a laser enabling),
+        nor for an instrument that ramps itself (_wait follows it)."""
+        if inst.simulated or spec.get_cmd is None or spec.ramp == "instrument" or not spec.numeric:
+            return None
+        lim = inst.limits(spec.name)
+        close = max(0.01 * abs(target), 1e-3 * (lim[1] - lim[0]) if lim else 0.0, 1e-12)   # rounded, or measured
+        now = None
+        for attempt in range(3):
+            if attempt:
+                self.lab.clock.sleep(0.3)
+            try:
+                now = inst.read(spec.name)
+            except Exception:
+                return None
+            if now is None or abs(now - target) <= close:
+                return None
+        return "that it is at %s, not %s: it may have refused or clipped the value" % (spec.show(now), spec.show(target))
 
     def _ramp(self, inst: Instrument, spec: ParamSpec, current: float, target: float,
               watch: bool, gen: int) -> Optional[Result]:
@@ -739,7 +761,7 @@ class SafetyGate:
                 if b.match(cmd) is not None:
                     return done(Result(False, "refused", target,
                                        message="refused: %r is blocked on %s (firmware/calibration class)" % (cmd, inst.name)))
-            if is_query(cmd):
+            if is_query(cmd, bool(card.connection.get("enq"))):
                 resp = inst.query_raw(cmd).strip()
                 shown = resp if len(resp) <= 80 else resp[:77] + "..."
                 return done(Result(True, "read", target, value=resp, message="%s %s → %s" % (inst.name, cmd, shown)))

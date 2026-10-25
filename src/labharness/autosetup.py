@@ -195,7 +195,9 @@ class AutoSetup:
                 self._manuals[f["address"]] = r["manual"]
             self.runtime.notifier("setup", "Kelvin wrote a card for the %s" % r["model"],
                                   "From its manual (%s). It is a draft: Kelvin asks you before each setting or output "
-                                  "change on it until you review it in Lab setup." % r["manual"]["url"])
+                                  "change on it until you review it in Lab setup.%s" % (
+                                      r["manual"]["url"], " Left out or unsure: " + " ".join(r["notes"])
+                                      if r.get("notes") else ""))
         return written, problems
 
     def _connect(self, matched: List[Dict[str, Any]]) -> bool:

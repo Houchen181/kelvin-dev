@@ -13,7 +13,7 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .adapters import AdapterError, apply_serial_settings, is_serial, resource_manager
@@ -24,7 +24,7 @@ SHORT_NAMES = {"source-meter": "smu", "lock-in": "lockin", "temperature-controll
                "nanovoltmeter": "nvm", "function-generator": "fg", "vna": "vna", "motion-stage": "stage",
                "current-source": "isrc", "voltage-source": "vsrc", "pulse-generator": "pg",
                "microwave-source": "mw", "rf-source": "rf", "photon-counter": "counter", "awg": "awg",
-               "delay-generator": "dg", "aom-driver": "aom", "eom-driver": "eom"}
+               "delay-generator": "dg", "aom-driver": "aom", "eom-driver": "eom", "power-supply": "psu"}
 DEFAULT_SERIAL = [(9600, "\n"), (115200, "\n"), (19200, "\r\n"), (57600, "\r\n")]
 
 
@@ -38,6 +38,7 @@ class Found:
     how: str = ""          # "identity reply", "USB ID", or why nothing matched
     settings: str = ""     # serial settings that answered, e.g. "57600 7O1"
     in_lab: Optional[str] = None
+    serial: Dict[str, Any] = field(default_factory=dict)   # those settings, as a card's or lab's connection
 
     def suggest_name(self, taken: Iterable[str] = ()) -> str:
         base = SHORT_NAMES.get(self.kind, re.sub(r"[^a-z0-9]+", "", self.kind.lower()) or "instr")
@@ -75,6 +76,8 @@ def _serial_settings(registry: CardRegistry) -> List[Dict[str, Any]]:
         s = {"baud_rate": conn["baud_rate"], "data_bits": conn.get("data_bits", 8), "parity": conn.get("parity", "none"),
              "stop_bits": conn.get("stop_bits", 1.0), "read_termination": conn.get("read_termination", "\n"),
              "write_termination": conn.get("write_termination", "\n"), "query": card.idn_query}
+        if conn.get("enq"):
+            s["enq"] = True
         key = tuple(sorted(s.items()))
         if key not in seen:
             seen.add(key)
@@ -94,6 +97,8 @@ def _framing(s: Dict[str, Any]) -> str:
 
 
 def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dict[str, Any]] = None) -> str:
+    """Its reply to the identity query, or '' for none: no reply, control characters (a NAK), or numbers only (a
+    gauge controller sending its readings by itself, as Pfeiffer's do from power-up)."""
     res = rm.open_resource(name)
     try:
         res.timeout = timeout_ms
@@ -101,8 +106,21 @@ def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dic
         res.write_termination = (settings or {}).get("write_termination", "\n")
         if settings:
             apply_serial_settings(res, settings)
-        reply = str(res.query(query)).strip()
-        return reply if reply and all(ch.isprintable() for ch in reply) else ""
+        if (settings or {}).get("enq"):   # acknowledged (passing over readings it was sending), then asked with ENQ
+            res.write(query)
+            for _ in range(20):
+                ack = str(res.read()).strip()
+                if ack in ("\x06", "\x15"):
+                    break
+            if ack != "\x06":
+                return ""
+            res.write_raw(b"\x05")
+            reply = str(res.read()).strip()
+        else:
+            reply = str(res.query(query)).strip()
+        if re.fullmatch(r"[\d\s.,;:+\-Ee]*", reply):
+            return ""
+        return reply if all(ch.isprintable() for ch in reply) else ""
     finally:
         try:
             res.close()
@@ -146,6 +164,7 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
             continue
         found.idn = reply
         found.settings = _framing(settings) if settings else ""
+        found.serial = {k: v for k, v in (settings or {}).items() if k != "query"}
         card = match_card(reply, registry)
         if card:
             found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "identity reply"

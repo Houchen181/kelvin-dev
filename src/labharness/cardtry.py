@@ -15,6 +15,7 @@ from .autocard import ACTION_READ
 from .cards import Card
 from .instrument import Instrument
 from .labconfig import InstrumentConfig
+from .scpi import is_query
 
 
 def _clone_without_connect(card: Card) -> Card:
@@ -47,8 +48,7 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
             return None
         if ACTION_READ.match(command):
             return "this read may start a measurement or a test; try it with the instrument in the lab"
-        first = command.split(None, 1)[0] if command.strip() else ""
-        if "?" not in first:
+        if not is_query(command, bool(card.connection.get("enq"))):   # on an ENQ instrument, PR1 is a read
             return "not a query (no ?), so it might change something; check it in the manual"
         return None
 

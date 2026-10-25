@@ -107,6 +107,7 @@ class VisaBackend:
         self.resource = resource_name(address)
         conn = dict(card.connection, **(overrides or {}))
         self.ack = conn.get("ack")
+        self.enq = bool(conn.get("enq"))
         self.echo = bool(conn.get("echo"))
         self.set_reply = re.compile(conn["set_reply"]) if conn.get("set_reply") else None
         self.write_only = bool(conn.get("write_only"))
@@ -135,8 +136,22 @@ class VisaBackend:
         if reply != self.ack:
             raise AdapterError("%s: %r answered %r instead of %r" % (self.name, command, reply, self.ack))
 
+    def _enq_ack(self, command: str) -> None:
+        """Pfeiffer's protocol: the command, then <ACK> (or <NAK>) on a line of its own. Measured values the
+        instrument was sending by itself until then (it does from power-up) are passed over."""
+        self.res.write(command)
+        for _ in range(20):
+            reply = str(self.res.read()).strip()
+            if reply == "\x06":
+                return
+            if reply == "\x15":
+                raise AdapterError("%s refused %r (it answered NAK)" % (self.name, command))
+        raise AdapterError("%s did not acknowledge %r" % (self.name, command))
+
     def write(self, command: str) -> None:
         with self.lock:
+            if self.enq:
+                return self._enq_ack(command)
             self.res.write(command)
             if self.echo:
                 self.res.read()   # the command, echoed
@@ -151,6 +166,10 @@ class VisaBackend:
         if self.write_only:
             raise AdapterError("%s does not answer queries (write-only); Kelvin uses the last value it set" % self.name)
         with self.lock:
+            if self.enq:   # acknowledged, then the reply on <ENQ>
+                self._enq_ack(command)
+                self.res.write_raw(b"\x05")
+                return str(self.res.read())
             if self.echo:
                 self.res.write(command)
                 self.res.read()   # the command, echoed

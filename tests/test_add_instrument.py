@@ -161,7 +161,8 @@ def test_a_card_for_a_named_instrument_then_adding_it_keeps_its_manual(tmp_path,
     silent = rt.draft_card("ASRL5::INSTR")
     assert "did not answer who it is" in silent and "maker and the model" in silent and len(asked) == 1
     rt.draft_card("ASRL5::INSTR", "ACME", "Widget 9000")                    # as the person named it
-    assert asked[-1] == {"address": "ASRL5::INSTR", "idn": "", "maker": "ACME", "model": "Widget 9000"}
+    assert asked[-1] == {"address": "ASRL5::INSTR", "idn": "", "maker": "ACME", "model": "Widget 9000", "manual": "",
+                         "specs": "", "serial": {}}
     assert "already matches card srs/sr830" in rt.draft_card("GPIB0::8::INSTR")
 
     tried = rt.try_card("acme/widget-9000", "GPIB0::5::INSTR")              # the saved draft, by its id
@@ -176,6 +177,14 @@ def test_a_card_for_a_named_instrument_then_adding_it_keeps_its_manual(tmp_path,
 
     rt.card_writer = lambda f: {"error": "Kelvin could not find the ACME GIZMO 1 manual online: choose its PDF"}
     assert rt.draft_card("ASRL5::INSTR", "ACME", "GIZMO 1").startswith("no card yet: Kelvin could not find")
+
+    # what the model left out reaches the person; ranges Kelvin could not get are the person's to give
+    rt.card_writer = lambda f: dict(writer(f), notes=["Left out: setting the amplitude (no ranges given)",
+                                                      "Ranges in: Widget 9000 specifications; for: amplitude"],
+                                    ranges_in="Widget 9000 specifications")
+    out = rt.draft_card("ASRL5::INSTR", "ACME", "Widget 9000", specs="C:/manuals/w9000-specs.pdf")
+    assert "the model's notes: Left out: setting the amplitude" in out and asked[-1]["specs"] == "C:/manuals/w9000-specs.pdf"
+    assert "ranges are in 'Widget 9000 specifications', which Kelvin could not get" in out and "with specs" in out
 
 
 def test_try_card_asks_before_an_address_the_scan_did_not_find(tmp_path, bench):
