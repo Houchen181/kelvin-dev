@@ -2870,11 +2870,12 @@
     const head = inst.readings.find((r) => r.name === inst.headline);
     const [hv, hu] = head ? splitValue(head.value) : ["", ""];
     const off = inst.enabled === false;
-    const stateText = off ? "switched off" : inst.state === "error" ? "not responding"
+    const missing = inst.state === "unavailable";   // could not be connected (its package, the instrument itself)
+    const stateText = missing ? "not connected" : off ? "switched off" : inst.state === "error" ? "not responding"
       : inst.state === "active" ? inst.active + " active" : "safe";
     const chev = icon("chev"); chev.classList.add("chev");
     const count = inst.state === "active" ? h("span", { class: "inst-count" }, String(inst.active))
-      : inst.state === "error" ? h("span", { class: "inst-count err" }, "!") : h("span", { class: "inst-count none" });
+      : inst.state === "error" || missing ? h("span", { class: "inst-count err" }, "!") : h("span", { class: "inst-count none" });
     const row = h("button", { class: "inst-row", type: "button", "aria-expanded": String(open),
       title: inst.model + " · " + stateText + (head ? " · " + head.label + " " + head.value : "") },
       h("span", { class: "inst-icon" }, icon(ICONS[inst.kind] ? inst.kind : "instrument")),
@@ -2888,7 +2889,8 @@
     });
     // on/off for this experiment: off, Kelvin sends it nothing at all until a person switches it on (lab.py)
     const sw = h("button", { class: "inst-switch", type: "button", role: "switch", "aria-checked": String(!off),
-      "aria-label": "Use " + inst.name, title: off ? "Switched off: Kelvin sends " + inst.name + " nothing. Switch it on to use it."
+      "aria-label": "Use " + inst.name, title: missing ? "Not connected: " + inst.why + " Switch it on to try again."
+        : off ? "Switched off: Kelvin sends " + inst.name + " nothing. Switch it on to use it."
         : "On: Kelvin may use " + inst.name + ". Switch it off to keep Kelvin from sending it anything." });
     sw.addEventListener("click", async () => {
       sw.disabled = true;
@@ -2900,13 +2902,16 @@
     });
     const item = h("div", { class: "inst " + inst.state + (open ? " open" : "") }, h("div", { class: "inst-head" }, row, sw));
     const on = inst.drives.filter((d) => d.away);
-    if (off) item.append(h("div", { class: "inst-sub" }, "Off: Kelvin sends it nothing"));
+    if (missing) item.append(h("div", { class: "inst-sub" }, "Not connected: " + inst.why, ...installOffer(inst.install, pollState)));
+    else if (off) item.append(h("div", { class: "inst-sub" }, "Off: Kelvin sends it nothing"));
     else if (inst.state === "error") item.append(h("div", { class: "inst-sub" }, "Not responding"));
     else if (on.length && !open) item.append(h("div", { class: "inst-sub" }, on.map((d) => d.label + " " + d.value).join(" · ")));
     if (!open) return item;
     const card = item;
     const body = h("div", { class: "inst-body" });
-    if (off) body.append(h("div", { class: "hint" }, "Kelvin sends it no command and reads nothing from it: no checks, "
+    if (missing) body.append(h("div", { class: "hint" }, "Kelvin could not connect to it, so it sends it nothing, and plans "
+      + "that use it are refused. Once that is fixed, switch it on to connect it; the rest of the lab works as usual."));
+    else if (off) body.append(h("div", { class: "hint" }, "Kelvin sends it no command and reads nothing from it: no checks, "
       + "no alarms, and plans that use it are refused. Switch it on to use it again."));
     const others = inst.readings.filter((r) => r.name !== inst.headline);
     if (others.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Readings"), ...others.map((r) => kv(r))));
@@ -2935,8 +2940,9 @@
     const active = all.filter((i) => i.state === "active").length;
     const errors = all.filter((i) => i.state === "error").length;
     const off = all.filter((i) => i.state === "off").length;
+    const unconnected = all.filter((i) => i.state === "unavailable").length;
     $("inst-summary").textContent = all.length + " · " + active + " active" + (errors ? " · " + errors + " not responding" : "")
-      + (off ? " · " + off + " off" : "");
+      + (unconnected ? " · " + unconnected + " not connected" : "") + (off ? " · " + off + " off" : "");
     $("seg-active").textContent = "Active" + (active + errors ? " (" + (active + errors) + ")" : "");
     for (const b of document.querySelectorAll("#inst-seg button")) {
       const on = (b.dataset.v === "active") === PANEL.activeOnly;
@@ -2989,12 +2995,16 @@
     $("lab-name").textContent = s.lab;
     $("sim-tag").hidden = !s.simulated;
     const problem = s.lab_info && s.lab_info.error;
-    $("lab-problem").hidden = !problem;
-    if (problem) {
-      const text = problem + " Kelvin is using the virtual lab meanwhile.";
+    const missing = problem ? [] : (s.unavailable || []);
+    $("lab-problem").hidden = !problem && !missing.length;
+    if (problem || missing.length) {
+      const text = problem ? problem + " Kelvin is using the virtual lab meanwhile."
+        : "Not connected: " + missing.map((m) => m.name + " (" + m.why + ")").join("; ") + " The rest of your lab is connected.";
       if ($("lab-problem").dataset.text !== text) {   // the install button keeps its state between polls
         $("lab-problem").dataset.text = text;
-        $("lab-problem").replaceChildren(h("span", {}, text), ...installOffer(s.lab_info.install));
+        const offers = problem ? installOffer(s.lab_info.install)
+          : missing.filter((m) => m.install).flatMap((m) => installOffer(m.install, pollState));
+        $("lab-problem").replaceChildren(h("span", {}, text), ...offers);
       }
     } else delete $("lab-problem").dataset.text;
     const unreviewed = s.unreviewed || [];
@@ -3613,7 +3623,7 @@
 
   // A maker's package the lab's instruments need is missing (envs.py): install it, once the person approves what is
   // downloaded (the request appears with the other approvals), then connect the lab again.
-  function installOffer(install) {
+  function installOffer(install, after) {
     if (!install || !install.packages || !install.packages.length) return [];
     const names = andList(install.packages);
     const button = h("button", { class: "link", type: "button" }, "Install " + names);
@@ -3624,7 +3634,7 @@
       try {
         const r = await api("/api/lab/install", { body: install });
         said.textContent = " " + r.message;
-        if (r.ok) await connectLab({ use: "mine" });
+        if (r.ok) await (after ? after() : connectLab({ use: "mine" }));   // Kelvin connects what it was for
         else button.disabled = false;
       } catch (e) {
         said.textContent = " " + e.message;

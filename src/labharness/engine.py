@@ -134,6 +134,9 @@ class RunEngine:
         for name in plan.requires:
             if name not in lab.instruments:
                 errors.append("unknown instrument %r" % name)
+            elif lab.instruments[name].unavailable:
+                errors.append("%s is not connected (%s); reconnect_instrument once that is fixed"
+                              % (name, lab.instruments[name].unavailable))
             elif not lab.instruments[name].enabled:
                 errors.append("%s is switched off in the Lab panel; a person switches it on there to use it" % name)
 

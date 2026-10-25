@@ -59,7 +59,7 @@ def is_simulated(config: LabConfig) -> bool:
 
 
 def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[CardRegistry] = None,
-              switched_off: Optional[SwitchedOff] = None) -> Lab:
+              switched_off: Optional[SwitchedOff] = None, partial: bool = False) -> Lab:
     """A lab from a lab config whose instruments may be real (VISA/serial addresses) or simulated (sim://).
     switched_off: the instruments a person switched off in the Lab panel, never connected.
 
@@ -86,7 +86,7 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
         return backend
 
     try:
-        return Lab(cfg, registry, factory, clock, world, switched_off)
+        return Lab(cfg, registry, factory, clock, world, switched_off, partial)
     except Exception:
         for backend in opened:  # one instrument failed: let go of the ones already opened
             backend.close()
@@ -106,8 +106,15 @@ def open_home_lab(home: Any, choice: str = "auto", speed: float = 10,
     info: Dict[str, Any] = {"kind": "virtual", "path": str(path), "error": None, "has_file": path.exists()}
     registry = lab_registry(home)
     if choice != "virtual" and path.exists():
-        try:
-            return build_lab(path, registry=registry, switched_off=switched_off), None, dict(info, kind="file")
+        try:   # an instrument that can't be connected is set aside, with why, and the rest of the lab used
+            lab = build_lab(path, registry=registry, switched_off=switched_off, partial=True)
+            tried = [n for n in lab.instruments if n not in lab.switched_off]
+            if tried and len(lab.unavailable) == len(tried):   # none of them: say why, on the virtual lab
+                why = lab.unavailable[tried[0]]
+                lab.close()
+                raise RuntimeError("%s: %s" % (tried[0], why) if len(tried) == 1 else
+                                   "none of its instruments could be connected (%s: %s)" % (tried[0], why))
+            return lab, None, dict(info, kind="file")
         except Exception as e:
             from . import envs
             info["install"] = envs.needed(str(e))   # a maker's package missing: the Lab panel offers to install it

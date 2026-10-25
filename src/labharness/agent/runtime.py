@@ -341,6 +341,9 @@ class LabRuntime:
         for name in self.lab.switched_off:
             lines.append("%s: switched off in the Lab panel; Kelvin sends it nothing (ask_to_switch_on asks the person)"
                          % name)
+        for name, why in self.lab.unavailable.items():
+            lines.append("%s: not connected (%s); Kelvin sends it nothing until it connects: fix that "
+                         "(install_for_instrument for a missing package), then reconnect_instrument" % (name, why))
         for name, values in self._status.items():
             if name not in self.lab.instruments or not self.lab.instruments[name].enabled:
                 continue
@@ -542,7 +545,8 @@ class LabRuntime:
     def health(self, instruments: Optional[List[str]] = None) -> str:
         return self._do("health check", lambda: "\n".join(
             [str(r) for r in self.engine.preflight(instruments, fresh=True)]   # asked for: always checks again
-            + ([] if instruments else ["%s switched off (not checked)" % n for n in self.lab.switched_off])))
+            + ([] if instruments else ["%s switched off (not checked)" % n for n in self.lab.switched_off]
+               + ["%s not connected: %s" % kv for kv in self.lab.unavailable.items()])))
 
     def wait(self, seconds: float) -> str:
         seconds = max(0.0, min(float(seconds), MAX_WAIT_S))
@@ -1492,12 +1496,25 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ for the approval page
 
+    def _unavailable_view(self) -> List[Dict[str, Any]]:
+        """The lab's instruments that could not be connected: why, in words, and the install that would fix it."""
+        from .. import envs
+        return [{"name": n, "why": envs.for_people(why), "install": envs.needed(why)}
+                for n, why in self.lab.unavailable.items()]
+
     def instruments(self) -> List[Dict[str, Any]]:
         """Each instrument for the lab panel: its readings, outputs (drives) and settings, and a state."""
         out = []
         status = dict(self._status)
         for name, inst in self.lab.instruments.items():
             card = inst.card
+            if inst.unavailable:   # it could not be connected: why, and the install that would fix it
+                from .. import envs
+                out.append({"name": name, "model": card.model, "kind": card.kind, "state": "unavailable",
+                            "enabled": False, "why": envs.for_people(inst.unavailable),
+                            "install": envs.needed(inst.unavailable), "active": 0, "headline": None, "readings": [],
+                            "drives": [], "settings": []})
+                continue
             if not inst.enabled:
                 out.append({"name": name, "model": card.model, "kind": card.kind, "state": "off", "enabled": False,
                             "active": 0, "headline": None, "readings": [], "drives": [], "settings": []})
@@ -1545,7 +1562,8 @@ class LabRuntime:
             if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
                 raise RuntimeError("A plan or the queue is running; stop it first, then switch %s %s."
                                    % (name, "on" if on else "off"))
-            if self.lab.instruments[name].enabled == on:
+            inst = self.lab.instruments[name]
+            if inst.enabled == on and not inst.unavailable:
                 return
             self.lab.switch(name, on)
             self.gate.log.write("instrument_switched", by=by, instrument=name, on=on)
@@ -1564,6 +1582,9 @@ class LabRuntime:
                 return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
             if inst.enabled:
                 return "%s is on" % name
+            if inst.unavailable:
+                return ("not asked: nobody switched %s off; it is not connected (%s). Fix that, then "
+                        "reconnect_instrument" % (name, inst.unavailable))
             live = self.live or {}
             if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
                 return "not asked: a plan or the queue is running; ask when it has finished"
@@ -2140,11 +2161,40 @@ class LabRuntime:
         self.gate.log.write("installed", by=by, env=env, packages=packages, files=files or None, why=why or None)
         got = ", ".join("%s %s" % (base, rec["packages"].get(envs.base_name(base), "?"))
                         for base in [envs.base_name(p) for p in packages])
-        return ("installed in environment %s (Python %s, %d-bit)%s%s. %s"
+        names = {envs.base_name(p).lower() for p in packages}
+        waiting = [n for n, why in self.lab.unavailable.items()   # the instruments it was missing for
+                   if (envs.needed(why) or {}).get("env") == env and names >= {envs.base_name(p).lower() for p in
+                                                                             envs.needed(why)["packages"]}]
+        connected = [self.reconnect_instrument(n, by) for n in waiting]
+        return ("installed in environment %s (Python %s, %d-bit)%s%s. %s%s"
                 % (env, rec.get("python"), rec.get("bits", 64), ": " + got if got else "",
                    "; files in %s" % kept if files else "",
                    "Kelvin's built-in drivers use it now." if env == envs.DRIVERS else
-                   "A library card uses it with lib://<address>?env=%s." % env))
+                   "A library card uses it with lib://<address>?env=%s." % env,
+                   "".join(" " + c for c in connected)))
+
+    def reconnect_instrument(self, name: str, by: str = "agent") -> str:
+        """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package
+        installed, the instrument switched on or plugged in). Connecting changes nothing on it."""
+        inst = self.lab.instruments.get(name)
+        if inst is None:
+            return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
+        if inst.enabled:
+            return "%s is connected" % name
+        if not inst.unavailable:
+            return "%s is switched off in the Lab panel: ask_to_switch_on asks the person" % name
+        with self.lock:
+            try:
+                self.lab.reconnect(name)
+            except Exception as e:
+                self.gate.log.write("reconnect_failed", by=by, instrument=name, error=inst.unavailable)
+                return "%s is still not connected: %s" % (name, inst.unavailable or e)
+            self.gate.log.write("instrument_connected", by=by, instrument=name)
+            self._caps_if_waiting()
+            self._refresh()
+        health = self.lab.health_check([name])[0]
+        return "%s is connected now%s" % (name, ": " + "; ".join(health.problems) if health.problems else
+                                          " and answers as its card expects")
 
     def _fetch_files(self, env: str, source: str) -> str:
         """A maker's files into an environment: a folder or file on this computer, or a web address. A Python package
@@ -2931,6 +2981,7 @@ class LabRuntime:
                 "hands_on": self.hands,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
+                "unavailable": self._unavailable_view(),
                 "unreviewed": self.lab.config.unreviewed(), "setup": self.setup_status, "survey": self.last_survey,
                 "watches": self.monitor.list(),
                 "alarms": [a.view() for a in self.monitor.alarms[:10]],

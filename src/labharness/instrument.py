@@ -13,6 +13,7 @@ from .labconfig import Guard, InstrumentConfig
 
 
 OFF_TEXT = "%s is switched off in the Lab panel: Kelvin sends it nothing until a person switches it on"
+NOT_CONNECTED = "%s is not connected (%s): Kelvin sends it nothing until it connects (reconnect_instrument)"
 
 
 class InstrumentOff(RuntimeError):
@@ -36,6 +37,21 @@ class OffBackend:
         pass
 
 
+class Unavailable(OffBackend):
+    """Stands in for an instrument that could not be connected when its lab was (its maker's package missing, the
+    instrument off or unplugged): nothing is sent to it, and Kelvin says why, until it connects (Lab.reconnect)."""
+
+    def __init__(self, name: str, reason: str):
+        super().__init__(name)
+        self.reason = reason
+
+    def write(self, command: str) -> None:
+        raise InstrumentOff(NOT_CONNECTED % (self.name, self.reason))
+
+    def query(self, command: str) -> str:
+        raise InstrumentOff(NOT_CONNECTED % (self.name, self.reason))
+
+
 class Instrument:
     def __init__(self, name: str, card: Card, backend: Any, config: InstrumentConfig):
         self.name = name
@@ -55,8 +71,14 @@ class Instrument:
 
     @property
     def enabled(self) -> bool:
-        """False when a person switched it off in the Lab panel: then nothing is sent to it."""
+        """False when a person switched it off in the Lab panel, or it could not be connected: then nothing is sent
+        to it."""
         return not isinstance(self.backend, OffBackend)
+
+    @property
+    def unavailable(self) -> Optional[str]:
+        """Why it could not be connected, while it isn't; None otherwise."""
+        return self.backend.reason if isinstance(self.backend, Unavailable) else None
 
     @property
     def trust(self) -> str:

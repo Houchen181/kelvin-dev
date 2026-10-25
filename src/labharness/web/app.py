@@ -1788,7 +1788,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     return error(400, "There is no lab config yet; scan for instruments or write one first.")
                 registry = lab_registry(lab_file.parent)   # Kelvin's cards and the user's own
                 load_lab_config(text, registry)   # check it before touching any instrument
-                lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off)
+                lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off, True)
                 envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
                 if use != "mine":
                     tmp = lab_file.with_suffix(".tmp")
@@ -1925,7 +1925,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(404, e.args[0])
         except RuntimeError as e:
             if isinstance(e, AdapterError):
-                return error(400, "%s could not be connected: %s" % (name, str(e).splitlines()[0]))
+                from .. import envs
+                return error(400, "%s could not be connected: %s" % (name, envs.for_people(str(e).splitlines()[0])))
             return error(409, str(e))
         except (OSError, ValueError) as e:
             return error(400, "%s could not be connected: %s" % (name, str(e).splitlines()[0] if str(e) else e))

@@ -2,7 +2,8 @@
 
 Removed, Kelvin's own:  settings and API keys, the ChatGPT sign-in (revoked with OpenAI first), chats, projects and
                         memory, the accounts, the lab config, your instrument cards, the instrument folders with their
-                        manuals, the app's log, lock file and window cache. With accounts, each person's too.
+                        manuals, the manuals Kelvin kept, what it installed for instruments (its environments, uv and
+                        their Pythons), the app's log, lock file and window cache. With accounts, each person's too.
 Kept, your measurements: every run folder, the record of commands and approvals (events.jsonl) and reports, in
                         ~/Kelvin/virtual-lab, in each person's ~/Kelvin/users/<name>/data and in any data folder
                         chosen in Settings; the lab's instrument log (instrument-log.jsonl, and lab/events.jsonl).
@@ -18,7 +19,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 HARNESS = ("settings.json", "chatgpt.json", "app.json", "kelvin.log", "lab.yaml", "lab.tmp", "settings.tmp",
-           "webview", "instruments", "cards", "accounts.json", "accounts.tmp")
+           "webview", "instruments", "cards", "accounts.json", "accounts.tmp",
+           "manuals", "env", "tools")   # manuals Kelvin kept; instrument environments, uv and their Pythons (envs.py)
 DATA_HARNESS = ("chats",)                       # in the default data folder: the conversations, projects and memory
 PERSON = ("settings.json", "settings.tmp", "chatgpt.json", "chatgpt.tmp", "chats")   # in each ~/Kelvin/users/<name>
 MEASUREMENTS = ("runs", "reports", "events.jsonl")

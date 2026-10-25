@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .cards import Card, CardRegistry, ParamSpec, num
 from .clock import SimClock
-from .instrument import OFF_TEXT, Instrument, OffBackend
+from .instrument import NOT_CONNECTED, OFF_TEXT, Instrument, OffBackend, Unavailable
 from .labconfig import InstrumentConfig, LabConfig
 
 BackendFactory = Callable[[str, Card, str], Any]
@@ -30,11 +30,17 @@ def real_backend_factory(name: str, card: Card, address: str) -> Any:
     return open_backend(name, card, address)
 
 
+
+def first_line(e: BaseException) -> str:
+    return str(e).splitlines()[0][:300] if str(e).strip() else type(e).__name__
+
+
 class Lab:
     def __init__(self, config: LabConfig, registry: CardRegistry, backend_factory: BackendFactory,
-                 clock: Any, world: Any = None, switched_off: Optional[SwitchedOff] = None):
+                 clock: Any, world: Any = None, switched_off: Optional[SwitchedOff] = None, partial: bool = False):
         """switched_off: the instruments a person switched off (Lab panel). They are never connected, so nothing,
-        not even the connecting, is sent to them."""
+        not even the connecting, is sent to them. partial: an instrument that can't be connected is set aside, with
+        the reason, and the others are used (otherwise its error is raised)."""
         self.config = config
         self.registry = registry
         self.clock = clock
@@ -45,7 +51,15 @@ class Lab:
         self.instruments: Dict[str, Instrument] = {}
         for name, ic in config.instruments.items():
             card = registry.get(ic.card).bind(ic.vars)   # with this installation's sensor or channel names
-            backend = OffBackend(name) if name in off else backend_factory(name, card, ic.address)
+            if name in off:
+                backend = OffBackend(name)
+            else:
+                try:
+                    backend = backend_factory(name, card, ic.address)
+                except Exception as e:
+                    if not partial:
+                        raise
+                    backend = Unavailable(name, first_line(e))
             self.instruments[name] = Instrument(name, card, backend, ic)
 
     def instrument(self, name: str) -> Instrument:
@@ -55,12 +69,37 @@ class Lab:
         except KeyError:
             raise KeyError("no instrument %r (have: %s)" % (name, ", ".join(self.instruments)))
         if not inst.enabled:
-            raise KeyError(OFF_TEXT % name)
+            raise KeyError(NOT_CONNECTED % (name, inst.unavailable) if inst.unavailable else OFF_TEXT % name)
         return inst
 
     @property
     def switched_off(self) -> List[str]:
-        return [name for name, inst in self.instruments.items() if not inst.enabled]
+        """The instruments a person switched off (not those that could not be connected)."""
+        return [name for name, inst in self.instruments.items() if not inst.enabled and inst.unavailable is None]
+
+    @property
+    def unavailable(self) -> Dict[str, str]:
+        """The instruments that could not be connected, with why."""
+        return {name: inst.unavailable for name, inst in self.instruments.items() if inst.unavailable is not None}
+
+    def away(self, name: str) -> Optional[str]:
+        """Why an instrument of this lab is not in use (switched off, or not connected), or None."""
+        inst = self.instruments.get(name)
+        if inst is None or inst.enabled:
+            return None
+        return "not connected (%s)" % inst.unavailable if inst.unavailable else "switched off in the Lab panel"
+
+    def reconnect(self, name: str) -> None:
+        """Connect an instrument that could not be connected; it stays set aside, with the new reason, if it still
+        can't (the error is raised)."""
+        inst = self.instruments[name]
+        if inst.unavailable is None:
+            return
+        try:
+            inst.backend = self._factory(name, inst.card, inst.config.address)
+        except Exception as e:
+            inst.backend = Unavailable(name, first_line(e))
+            raise
 
     def switch(self, name: str, on: bool) -> None:
         """Switch an instrument on or off for this lab. Off sends nothing: a plain VISA session is closed (that
@@ -68,6 +107,12 @@ class Lab:
         send something (a pulse generator stops its outputs), is set aside as it is. On connects it again, or
         takes back the connection set aside."""
         inst = self.instruments[name]   # KeyError: not in this lab
+        if inst.unavailable is not None:   # not connected: on tries again, off keeps it off
+            if on:
+                self.reconnect(name)
+            else:
+                inst.backend = OffBackend(name)
+            return
         if on == inst.enabled:
             return
         if not on:
@@ -145,7 +190,7 @@ class Lab:
                 out.append(HealthResult(name, False, ["not in this lab"]))
                 continue
             if not inst.enabled:
-                out.append(HealthResult(name, False, ["switched off in the Lab panel"]))
+                out.append(HealthResult(name, False, [self.away(name) or "switched off in the Lab panel"]))
                 continue
             problems: List[str] = []
             try:
@@ -203,7 +248,7 @@ class Lab:
         from .sim.twin import World, sim_backend_factory
         clock = SimClock()
         world = World(clock, seed)
-        off = set(self.switched_off)
+        off = set(self.switched_off) | set(self.unavailable)
         twin = Lab(self.config, self.registry, sim_backend_factory(world), clock, world, lambda _: off)
         for name, inst in self.instruments.items():
             if name in off:

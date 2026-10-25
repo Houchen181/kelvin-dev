@@ -85,7 +85,7 @@ Kelvin keeps it up to date by itself. It lets the AI answer questions across all
 Next to the run folders sit `events.jsonl`, your record of every command, reading, approval, refusal and alarm with who did it, and `reports/`. Each person has their own (see [Signing in](portal.md#signing-in)); the lab's instrument log, `~/Kelvin/instrument-log.jsonl`, has everyone's, each with their name.
 
 **When you uninstall Kelvin:** the Windows uninstaller deletes Kelvin's own data and keeps your measurements.
-- **Deleted:** settings and API keys, the ChatGPT sign-ins (revoked with OpenAI first), the accounts, chats, projects and memory, the lab config, your instrument cards, the instrument folders with their manuals, the log and the window's cache. Everyone's.
+- **Deleted:** settings and API keys, the ChatGPT sign-ins (revoked with OpenAI first), the accounts, chats, projects and memory, the lab config, your instrument cards, the instrument folders with their manuals, the manuals Kelvin kept, what it installed for instruments (its environments in `~/Kelvin/env`, and uv and their Pythons in `~/Kelvin/tools`), the log and the window's cache. Everyone's.
 - **Kept:** every run folder, `events.jsonl` and `reports/`, in `~/Kelvin/virtual-lab`, in each person's `~/Kelvin/users/<name>/data` and in any data folder someone chose; and the lab's instrument log. A note in `~/Kelvin`, "About this folder.txt", says what is there. Installing Kelvin again shows those runs again.
 - **Only Kelvin's own items are deleted, by name.** Any other file you put in `~/Kelvin` stays.
 - **Kelvin must be closed:** the uninstaller waits until it is.

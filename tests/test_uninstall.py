@@ -110,3 +110,15 @@ def test_the_windows_uninstaller_runs_it():
     assert "[UninstallRun]" in iss and 'Parameters: "--remove-data"' in iss
     assert "AppMutex=%s" % desktop.APP_MUTEX in iss                           # waits while Kelvin runs
     assert "measurement data are kept" in iss
+
+
+def test_what_kelvin_installed_for_instruments_goes_too(tmp_path):
+    home = make_home(tmp_path, tmp_path / "data")
+    for made in ("env/drivers/Lib/site-packages", "tools/uv", "tools/python/cpython-3.13", "manuals"):
+        (home / made).mkdir(parents=True)
+    (home / "manuals" / "Keithley-6221.pdf").write_bytes(b"%PDF")
+    remove_data(home, revoke=False)
+    for gone in ("env", "tools", "manuals"):
+        assert not (home / gone).exists(), gone
+    assert (home / "my notes.txt").exists()
+

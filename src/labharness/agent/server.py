@@ -32,7 +32,9 @@ You are connected to a physics lab through Kelvin.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. Do not try to work around a refusal; tell the user.
 - An instrument a person switched off in the Lab panel (lab_status says so) is not part of this experiment: Kelvin
   sends it nothing, and commands and plans that use it are refused. Don't plan with it; if it is needed,
-  ask_to_switch_on asks the person, saying why. Only they switch it on.
+  ask_to_switch_on asks the person, saying why. Only they switch it on. One that could not be connected (lab_status
+  says why; the rest of the lab works) is yours to fix: a missing package with install_for_instrument, which
+  connects it after, anything else with the person, then reconnect_instrument.
 - For sweeps, write a plan and call run_plan directly. It checks the plan, health-checks the instruments it uses,
   asks once for its drive ranges, runs, logs and analyses the data. Report its assessment and key numbers (with
   uncertainties) rather than raw rows. A dry run (simulate_plan, or run_plan with dry_run: true) is not a routine
@@ -271,6 +273,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         every output change on it asks the person until they review its limits. An address the scan did not find
         asks the person first."""
         return rt.add_instrument(address, card, name, connection, vars)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def reconnect_instrument(instrument: str) -> str:
+        """Connect an instrument of the lab that could not be connected (lab_status says why), once that is fixed:
+        its package installed (install_for_instrument does this by itself), the instrument switched on or plugged in.
+        Connecting changes nothing on it."""
+        return rt.reconnect_instrument(instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
     def ask_to_switch_on(instrument: str, why: str) -> str:

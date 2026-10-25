@@ -518,16 +518,17 @@ class SafetyGate:
         hands = self._hands_problem(key)
         if hands:
             return hands
-        off = set(self.lab.switched_off)
         for g in inst.guards(spec.name):   # nothing would watch it: a switched-off instrument is never read
-            if g.instr in off:
-                return "%s: its guard %s is on %s, which is switched off in the Lab panel" % (key, g.key, g.instr)
+            away = self.lab.away(g.instr)
+            if away:
+                return "%s: its guard %s is on %s, which is %s" % (key, g.key, g.instr, away)
         for lock in self.lab.config.interlocks:
             if lock.drive != key:
                 continue
-            if lock.require.key.split(".")[0] in off:
-                return "interlock: %s needs %s, but %s is switched off in the Lab panel" % (
-                    key, lock.require.text, lock.require.key.split(".")[0])
+            away = self.lab.away(lock.require.key.split(".")[0])
+            if away:
+                return "interlock: %s needs %s, but %s is %s" % (key, lock.require.text,
+                                                                  lock.require.key.split(".")[0], away)
             ok, actual = lock.require.check(self.lab.read)
             if not ok:
                 _, cspec = self.lab.resolve(lock.require.key)
