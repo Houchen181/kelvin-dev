@@ -326,11 +326,22 @@ def draft_prompt(manual: str, name: str, specs: str = "") -> str:
 
 
 SOURCE_TYPES = {".py", ".m", ".h", ".hpp", ".c", ".cpp", ".cs", ".vb", ".bas", ".jl", ".tcl", ".ipynb", ".txt", ".md",
-                ".rst", ".ini", ".json", ".yaml", ".yml", ".htm", ".html"}
+                ".rst", ".ini", ".json", ".yaml", ".yml", ".htm", ".html", ".pdf"}
+MAX_PDF_BYTES = 40_000_000   # a manual: read up to MAX_MANUAL characters of its text
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "venv", ".venv", "build", "dist"}
 
 
 def _source_text(path: Path) -> str:
+    if path.suffix.lower() == ".pdf":   # a manual: its pages' text
+        from .profiles import pdf_pages
+        try:
+            pages = pdf_pages(path)
+        except RuntimeError as e:   # no pypdf here
+            return "(%s: %s)" % (path.name, e)
+        except Exception as e:
+            return "(%s: Kelvin could not read this PDF: %s)" % (path.name, str(e).splitlines()[0] if str(e) else e)
+        text = "\n\n".join("[page %d]\n%s" % (i + 1, p.strip()) for i, p in enumerate(pages) if p.strip())
+        return text or "(%s: no text in this PDF, a scan? attach pictures of its pages)" % path.name
     text = path.read_text(encoding="utf-8", errors="replace")
     if path.suffix.lower() == ".ipynb":   # a notebook: its code and notes, not its outputs
         try:
@@ -358,10 +369,11 @@ def read_sources(path: str, limit: int = MAX_MANUAL) -> str:
                 break
             if any(part in SKIP_DIRS for part in p.relative_to(root).parts[:-1]):
                 continue
-            if p.is_file() and p.suffix.lower() in SOURCE_TYPES and p.stat().st_size < 2_000_000:
+            if p.is_file() and p.suffix.lower() in SOURCE_TYPES and p.stat().st_size < (
+                    MAX_PDF_BYTES if p.suffix.lower() == ".pdf" else 2_000_000):
                 files.append(p)
     if not files:
-        raise ValueError("no scripts, headers or text files in %s" % path)
+        raise ValueError("no scripts, headers, text files or PDFs in %s" % path)
 
     def rank(p: Path) -> Tuple[int, int]:
         name = p.name.lower()

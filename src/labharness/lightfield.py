@@ -56,8 +56,9 @@ def note() -> str:
     folder = root() if sys.platform == "win32" else None
     if folder is None:
         return ""
-    return ("LightField: installed (%s). Kelvin can drive the camera and spectrograph through it: add Teledyne "
-            "LightField with the address lightfield://<experiment saved in LightField>" % folder)
+    return ("LightField: installed (%s). Kelvin drives the camera and spectrograph through it, not through its "
+            "window: add_instrument with address lightfield://<experiment saved in LightField> and card "
+            "princeton/lightfield" % folder)
 
 
 def load_lightfield() -> Any:
@@ -91,12 +92,13 @@ def load_lightfield() -> Any:
         from PrincetonInstruments.LightField.Automation import Automation   # type: ignore
         from PrincetonInstruments.LightField.AddIns import (CameraSettings, ExperimentSettings,   # type: ignore
                                                             SpectrometerSettings)
-        from System import String   # type: ignore
+        from System import Int32, String   # type: ignore
         from System.Collections.Generic import List as NetList   # type: ignore
     except Exception as e:
         raise AdapterError("LightField's automation didn't load (%s)" % _first(e))
     return SimpleNamespace(Automation=Automation, CameraSettings=CameraSettings, ExperimentSettings=ExperimentSettings,
-                           SpectrometerSettings=SpectrometerSettings, no_arguments=lambda: NetList[String]())
+                           SpectrometerSettings=SpectrometerSettings, no_arguments=lambda: NetList[String](),
+                           Int32=Int32)
 
 
 def _to_numpy(data: Any, np: Any) -> Any:
@@ -150,6 +152,16 @@ class LightFieldCamera(Camera):
             return bool(self.experiment.Exists(setting))
         except Exception:
             return False
+
+    def _frames_setting(self) -> Any:
+        """The frames to store: AcquisitionFramesToStore in LightField 6 (as its Python samples set it),
+        FrameSettingsFramesToStore in older LightFields."""
+        es = self.api.ExperimentSettings
+        for name in ("AcquisitionFramesToStore", "FrameSettingsFramesToStore"):
+            setting = getattr(es, name, None)
+            if setting is not None:
+                return setting
+        raise AdapterError("%s: this LightField has no setting for the frames to store" % self.name)
 
     def _get(self, setting: Any, what: str) -> Any:
         if not self._exists(setting):
@@ -219,7 +231,7 @@ class LightFieldCamera(Camera):
 
     def _frames(self) -> int:
         try:
-            return max(1, min(10000, int(self._get(self.api.ExperimentSettings.FrameSettingsFramesToStore, "frames"))))
+            return max(1, min(10000, int(self._get(self._frames_setting(), "frames"))))
         except AdapterError:
             return 1
 
@@ -255,7 +267,7 @@ class LightFieldCamera(Camera):
         if path == "exposure":
             self._set(cs.ShutterTimingExposureTime, float(value) * 1000.0, "exposure time")
         elif path == "frames":
-            self._set(es.FrameSettingsFramesToStore, int(value), "frames")
+            self._set(self._frames_setting(), getattr(self.api, "Int32", int)(int(value)), "frames")   # .NET's Int32
         elif path == "center_wavelength":
             self._set(ss.GratingCenterWavelength, float(value), "center wavelength")
             self._settle()

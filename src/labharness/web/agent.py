@@ -301,7 +301,9 @@ OPERATE_COMPUTER = {
                    "read_web_page and save_manual do those directly. Say what to do, what done looks like, and what "
                    "must not be touched. It returns what was done. Settings changed this way bypass Kelvin's safety "
                    "gate: use Kelvin's own instrument tools whenever they can do it, and name in the task exactly "
-                   "which instrument settings may change.",
+                   "which instrument settings may change. Never for a program Kelvin drives as an instrument: "
+                   "LightField (Teledyne Princeton cameras and spectrographs) is one: add_instrument with "
+                   "lightfield://.",
     "schema": {"type": "object", "required": ["task"], "properties": {
         "task": {"type": "string", "description": "The task, in plain words, with what done looks like"},
         "minutes": {"type": "number", "description": "Time limit in minutes (default 10, at most 30)"}}},
@@ -391,6 +393,29 @@ class ChatAgent:
         return {"groups": groups}
 
     # ------------------------------------------------------------------ memory
+
+    def _files(self) -> str:
+        """Where Kelvin keeps things on this computer, so Kelvin can say where they are (and find them)."""
+        rt = self.runtime
+        lines = ["# Kelvin's files on this computer",
+                 "- The data folder, %s: runs/<run id>/ (run.h5 with every point, setting and fit; report.pdf and "
+                 "report.pptx), catalog.sqlite (the catalog of every run, which find_runs and query_runs read), "
+                 "folders.json (the chats' folders that hold runs), reports/ (project and device reports, and the "
+                 "ones asked for), events.jsonl (the record of every command and approval)." % rt.data_dir]
+        home = getattr(rt, "home", None)
+        if home:
+            lines.append("- Kelvin's own folder, %s: instruments/<name>/ (each instrument's identity, settings and "
+                         "manual), manuals/ (manuals kept for instruments not added yet), env/ (the makers' packages "
+                         "Kelvin installed), the settings, chats and memory." % home)
+        cards = getattr(rt, "cards_dir", None)
+        if cards:
+            lines.append("- The lab's own instrument cards: %s." % cards)
+        lab = (getattr(rt, "lab_info", None) or {}).get("path")
+        if lab:
+            lines.append("- The lab config (instruments, addresses, limits): %s." % lab)
+        lines.append("Data Kelvin didn't measure (another program's files) become runs with import_data. Give "
+                     "whole paths when you say where something is.")
+        return "\n".join(lines)
 
     def _folder(self, chat: Dict[str, Any]) -> str:
         """Where this chat's runs go, so Kelvin can say where its data are; and its files, which Kelvin may read."""
@@ -483,8 +508,8 @@ class ChatAgent:
         if chat.get("incognito"):   # not kept, so never continued later either; Kelvin's own skills only
             own = self.know.index(incognito=True)
             return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO] +
-                                           ([READ_GUIDE + "\n" + own] if own else []) + [self._folder(chat),
-                                                                                           self._more_tools(chat)]),
+                                           ([READ_GUIDE + "\n" + own] if own else []) + [
+                                               self._more_tools(chat), self._files(), self._folder(chat)]),
                     "tools": self._lab_tools(chat) + [CHAT_HISTORY, FIND_TOOLS] + ([USE_SKILL, READ_SKILL_FILE]
                                                                                     if own else []) +
                     self._folder_tools(chat), "project": None, "learn": False}
@@ -510,6 +535,7 @@ class ChatAgent:
         if rulebook.restrictive(rules):
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
         parts.append(self._more_tools(chat))
+        parts.append(self._files())
         parts.append(self._folder(chat))   # last: it changes only when the person picks another folder
         private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []

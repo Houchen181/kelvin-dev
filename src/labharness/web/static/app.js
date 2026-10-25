@@ -1453,6 +1453,8 @@
       case "list_folder": return v("Looking", "Looked") + " in " + (a.path ? code(a.path) : "the chat's folder");
       case "read_file": return v("Reading", "Read") + " " + code(a.path || "") + (a.pages ? ", pages " + esc(String(a.pages)) : "") +
         (a.start ? " from character " + esc(String(a.start)) : "") + (a.figures ? " (the pages as drawn)" : "");
+      case "import_data": return v("Importing", "Imported") + " " + code(String(a.paths || "").split(";").map((p) => p.trim().split(/[\\/]/).pop()).join(", ")) +
+        (a.name ? " as " + code(a.name) : "");
       case "save_manual": return v("Keeping", "Kept") + " the manual " + code(a.source || "") +
         (a.model ? " for the " + esc(String((a.maker ? a.maker + " " : "") + a.model)) : "");
       case "make_report": return v("Writing", "Wrote") + " a report" + (a.title ? ": " + esc(String(a.title)) : "");

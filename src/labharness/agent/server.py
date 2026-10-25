@@ -248,9 +248,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def read_examples(path: str) -> str:
-        """Read an instrument maker's example scripts, SDK header files and READMEs (Python, MATLAB, C/C#, notebooks,
-        text) from a file or folder on this computer that the person named, to write a card from how the maker's
-        own scripts talk to the instrument."""
+        """Read an instrument maker's example scripts, SDK header files, READMEs and manuals (Python, MATLAB, C/C#,
+        notebooks, text, PDF) from a file or folder on this computer that the person named, to write a card from
+        how the maker's own scripts and manuals say to talk to the instrument. To keep a manual PDF for the
+        instrument (search_manual, draft_card), use save_manual with its file or its folder."""
         return outside(rt, "a maker's example files", rt.read_examples(path))
 
     @server.tool(annotations=READ, structured_output=False)
@@ -560,6 +561,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
         "the data folder; up to %d rows come back as CSV. Tables:\n%s" % (QUERY_ROWS, SCHEMA_TEXT)))
     def query_runs(sql: str) -> str:
         return rt.query_runs(sql)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def import_data(paths: str, name: str = "") -> str:
+        """Make data Kelvin didn't measure into a run, so the run tools work on it (describe_run, get_run_data,
+        compute, look_at, reports, the automatic fits): another program's tables (CSV, TSV, text with a header) and
+        LightField's .spe spectra (rows summed, frames averaged, wavelengths from its calibration). paths: the files'
+        full paths, ';' between several; files with the same x values go side by side into one run, to compare,
+        normalise or subtract them with compute. name: the run's name. Only numbers are read."""
+        return rt.import_data(paths, name)
 
     @server.tool(annotations=READ, structured_output=False)
     def describe_run(run_id: str) -> str:

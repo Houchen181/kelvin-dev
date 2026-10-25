@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import re
+import sys
 import threading
 import time
 from datetime import datetime
@@ -362,9 +363,26 @@ class LabRuntime:
                              "change on %s asks the person, auto mode included" % (", ".join(unsure),
                                                                                   "it" if len(unsure) == 1 else "them"))
             lines += self._status_lines()
+            lines += self._programs_here()
+            lines.append("data folder: %s (runs/<run id>/run.h5, catalog.sqlite, reports/, events.jsonl)"
+                         % self.data_dir)
             lines.append("* = drive away from its safe value")
             return "\n".join(lines)
         return self._do("reading status", run)
+
+    def _programs_here(self) -> List[str]:
+        """Makers' programs on this computer that Kelvin drives as instruments, not yet in the lab."""
+        from .. import lightfield
+        try:
+            folder = lightfield.root() if sys.platform == "win32" else None
+        except Exception:
+            folder = None
+        if folder is None or any(ic.address.startswith("lightfield://")
+                                 for ic in self.lab.config.instruments.values()):
+            return []
+        return ["LightField is installed here (%s): Kelvin drives its camera and spectrograph as an instrument, not "
+                "through its window: add_instrument with address lightfield:// (or lightfield://<experiment>) and "
+                "card princeton/lightfield" % folder]
 
     def _protection_lines(self) -> List[str]:
         m = self.mounted or {}
@@ -990,9 +1008,70 @@ class LabRuntime:
         lines = [yaml.safe_dump(card, sort_keys=False, allow_unicode=True, width=110).rstrip()]
         if plan_text.strip():
             lines += ["plan as run:", "  " + plan_text.strip().replace("\n", "\n  ")]
-        lines.append("files: %s" % (", ".join(f["name"] for f in self.run_files(run_id)) or "none yet"))
+        lines.append("files: %s, in %s" % (", ".join(f["name"] for f in self.run_files(run_id)) or "none yet", d))
         lines.append("numbers: get_run_data (columns, where), compute (expressions), get_trace (one trace)")
         return "\n".join(lines)
+
+    def import_data(self, paths: Any, name: str = "") -> str:
+        """Files Kelvin didn't measure, as a run (imports.py): another program's tables (CSV, TSV, text) and
+        LightField's .spe spectra; several with the same x values side by side in one run, to compare or subtract.
+        The run goes with this chat's runs, gets the automatic fits, and Kelvin's run tools read it."""
+        from types import SimpleNamespace
+        from .. import imports
+        from ..analysis import analyze_run
+        given = paths if isinstance(paths, (list, tuple)) else str(paths or "").split(";")
+        files = [str(p).strip().strip('"') for p in given if str(p).strip()]
+        if not files:
+            return "name the files to import: their full paths (';' between several)"
+        if len(files) > 20:
+            return "at most 20 files at once"
+        try:
+            table = imports.merge([imports.read(p) for p in files])
+        except imports.DataError as e:
+            return "not imported: %s" % e
+        except OSError as e:
+            return "not imported: %s" % (e.strerror or e)
+        plan_name = re.sub(r"[^\w.-]+", "_", (name or "").strip() or "imported_" + table.name)[:48]
+
+        def run() -> str:
+            rec = self.engine.store.create(plan_name, {"plan": plan_name, "imported": files}, "import",
+                                           self.attribution.get("folder"))
+            rec.meta.update(self._attribute(SimpleNamespace(device=None)))
+            rec.meta.update(lab="imported", simulated=False, imported=files)
+            axes = [{"key": table.x_key, "unit": table.x_unit, "kind": "imported"}]
+            measures = [{"key": k, "unit": u, "kind": "scalar"} for k, (u, _) in table.columns.items()]
+            rec.set_columns({"axes": axes, "measures": measures})
+            rows = []
+            for i, x in enumerate(table.x):
+                row = {"i": i, "t": 0.0, table.x_key: x}
+                row.update({k: values[i] for k, (_, values) in table.columns.items()})
+                rec.add(row)
+                rows.append(row)
+            meta = dict(status="done", reason=None, points=len(rows), planned_points=len(rows), duration_s=0.0,
+                        warnings=list(table.notes))
+            analysis = None
+            try:
+                analysis = analyze_run(rows, axes, measures, meta)
+                rec.set_analysis(analysis)
+            except Exception:
+                analysis = None   # the fits are a convenience; the numbers are kept
+            rec.finish(**meta)
+            self.gate.log.write("run_imported", by=self.gate.operator, run=rec.run_id, files=len(files))
+            try:
+                self.catalog.add(rec.path)
+            except Exception:
+                pass   # the catalog finds it at its next look
+            first = next(iter(table.columns))
+            lines = ["imported %s as run %s: %d points of %s (%s), columns %s" % (
+                         ", ".join(Path(f).name for f in files), rec.run_id, len(rows), table.x_key,
+                         table.x_unit or "no unit", ", ".join(table.columns)),
+                     "saved in %s" % rec.path] + ["note: " + n for n in table.notes]
+            if analysis:
+                lines += self._analysis_lines(analysis)
+            lines.append("numbers: get_run_data, compute (e.g. %s / max(%s)), look_at; describe_run for its card"
+                         % (first, first))
+            return "\n".join(lines)
+        return self._do("importing data", run)
 
     def stop_run(self) -> bool:
         """Stop the plan that is running (its on_abort steps then run). False if none is running."""
@@ -2152,9 +2231,18 @@ class LabRuntime:
         writes the card from it (manual=<the kept file>)."""
         from .. import autocard, profiles
         from ..adapters import resource_name
-        source = (source or "").strip()
+        source = (source or "").strip().strip('"')
         if not source:
             return "give the manual's web address, or a file on this computer"
+        if not re.match(r"^https?://", source) and Path(source).expanduser().is_dir():   # a folder: its manual
+            folder = Path(source).expanduser()
+            pdfs = sorted(folder.glob("*.pdf")) or sorted(folder.rglob("*.pdf"))[:40]
+            if not pdfs:
+                return "there is no PDF in %s: give the manual's file, or its web address" % folder
+            if len(pdfs) > 1:
+                return "%d PDFs in %s; name the manual's file: %s" % (len(pdfs), folder,
+                                                                         ", ".join(p.name for p in pdfs[:20]))
+            source = str(pdfs[0])
         if re.match(r"^https?://", source) and not self.literature.enabled:
             return "searching outside the lab (literature and web) is switched off in Settings"
         if instrument and instrument not in self.lab.instruments:

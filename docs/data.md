@@ -128,6 +128,13 @@ Next to the run folders sit `events.jsonl`, your record of every command, readin
 - **What stays in `~/Kelvin`:** chats, settings, API keys and instrument folders.
 - **From a terminal:** `kelvin --data-dir <folder>` overrides the setting, for one person without sign-in.
 
+### Data from other programs
+
+Spectra and tables that Kelvin didn't measure can become runs, so Kelvin's tools work on them: its card, its numbers, `compute`, its plots, reports and the automatic fits. In a chat: "compare the two PL spectra in C:\Data\PL" or "import these files".
+- **What it reads:** tables (CSV, TSV, text, with or without a header row; `Wavelength (nm)` gives the column its unit) and LightField's .spe files (each frame's rows summed per column, frames averaged, the wavelengths from the file's calibration). LightField's long CSV export is summed the same way.
+- **Several files at once** go side by side into one run when they share their x values, so `compute` can normalise or subtract them: `f_004_sample.counts - f_003_silicon.counts`.
+- **Only numbers are read;** names become column names (starting with a letter). The run is kept like any other (in the chat's folder, if it has one), marked as imported, with the files it came from.
+
 ### Each chat's folder
 
 Each chat saves its runs in a folder you choose, so you always know where its data are.
