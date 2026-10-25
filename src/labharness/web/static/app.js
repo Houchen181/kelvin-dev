@@ -31,6 +31,7 @@
     plus: '<path d="M12 5v14M5 12h14"/>',
     dots: '<circle cx="5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="19" cy="12" r="1.1"/>',
     folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
+    "folder-open": '<path d="M3 7.5V5.5A1.5 1.5 0 0 1 4.5 4H9l2 2h6.5A1.5 1.5 0 0 1 19 7.5V9"/><path d="M2.6 10.2A1 1 0 0 1 3.6 9h16.8a1 1 0 0 1 1 1.2l-1.5 7.5a2 2 0 0 1-2 1.6H6a2 2 0 0 1-2-1.6z"/>',
     pencil: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
     sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
@@ -1936,7 +1937,7 @@
       head = h("div", { class: "proj-row" + (holdsActive && !S.chatId ? " active" : ""), role: "button", tabindex: "0", "aria-expanded": String(open), title: p.name },
         h("span", { class: "chev-s" + (open ? " open" : "") }, icon("chev")), icon("folder"),
         h("span", { class: "t" }, p.name), h("span", { class: "count" }, chats.length ? String(chats.length) : ""),
-        rowButton("plus", "New chat in " + p.name, () => newChat(p.id)),
+        rowButton("plus", "New chat in " + p.name, () => newChat(p.id, true)),
         rowButton("dots", "Options for " + p.name, (e) => projectMenu(e.currentTarget, p, chats)));
       const toggle = () => {
         if (SIDE.collapsed.has(p.id) || !open) SIDE.collapsed.delete(p.id); else SIDE.collapsed.add(p.id);
@@ -2006,7 +2007,9 @@
     });
     document.body.append(menu);
     const r = anchor.getBoundingClientRect();
-    const top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8);
+    const below = r.bottom + 4, above = r.top - menu.offsetHeight - 4;   // above when it doesn't fit below (the composer)
+    const top = below + menu.offsetHeight + 8 <= window.innerHeight ? below
+      : above >= 8 ? above : window.innerHeight - menu.offsetHeight - 8;
     menu.style.top = Math.max(8, top) + "px";
     menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + "px";
     openMenu = menu;
@@ -2029,7 +2032,7 @@
   }
   function projectMenu(anchor, p, chats) {
     popMenu(anchor, [
-      { label: "New chat in this project", icon: "plus", onClick: () => newChat(p.id) },
+      { label: "New chat in this project", icon: "plus", onClick: () => newChat(p.id, true) },
       { label: "Rename", icon: "pencil", onClick: () => { SIDE.renaming = p.id; renderChats(); } },
       { label: "Project settings", icon: "sliders", onClick: () => openProjectSettings(p) },
       { sep: true },
@@ -2349,12 +2352,13 @@
     S.chatRules = chat.rules || null;
     renderChat(chat);
     setTitle(chat.title, chat.project);
+    showFolder(chat.folder, chat.own_folder);
     if (chat.model && S.labels[chat.model]) $("model").value = chat.model;
     applyRules();
     renderChats();
     closeSidebar();
   }
-  function newChat(projectId) {
+  function newChat(projectId, ask) {   // ask: the person started it, so the folder picker opens (in the app)
     if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
     leaveIncognito();
     S.chatId = null;
@@ -2367,7 +2371,72 @@
     renderChats();
     closeSidebar();
     applyIncognito();
+    if (ask) askFolder(); else loadNewFolder();
     $("input").focus();
+  }
+
+  // ------------------------------------------------------------------ the chat's folder: where its runs go
+  const FOLDER = { path: "", own: false };
+  function folderName(path) { const parts = path.split(/[\\/]+/).filter(Boolean); return parts[parts.length - 1] || path; }
+  function showFolder(path, own) {
+    FOLDER.path = path || "";
+    FOLDER.own = !!own;
+    $("folder-label").textContent = FOLDER.own ? folderName(FOLDER.path) : "Data folder";
+    $("folder-btn").title = "This chat saves its runs in " + (FOLDER.own ? "" : "the data folder, ") + FOLDER.path;
+    $("folder-btn").classList.toggle("own", FOLDER.own);
+    $("folder-btn").hidden = !FOLDER.path;
+  }
+  async function loadNewFolder() {   // where a new chat (in this project) saves its runs
+    let r;
+    try { r = await api("/api/folder" + (SIDE.newProject ? "?project=" + encodeURIComponent(SIDE.newProject) : "")); } catch (e) { return; }
+    if (!S.chatId) showFolder(r.folder, r.folder !== r.data);
+  }
+  function hasPicker() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_folder); }
+  async function pickFolder(start) {   // the computer's own folder picker in the Kelvin app; in a browser, the path typed
+    if (hasPicker()) {
+      try { return (await window.pywebview.api.pick_folder(start || "")) || ""; } catch (e) { return ""; }
+    }
+    const typed = window.prompt("The folder's full path, where this chat saves its runs:", start || "");
+    return typed ? typed.trim() : "";
+  }
+  async function useFolder(path) {   // path null: the data folder
+    if (S.chatId) {
+      const chat = await api("/api/chats/" + S.chatId, { method: "PATCH", body: { folder: path } });
+      showFolder(chat.folder, chat.own_folder);
+    } else {   // kept until the chat's first message makes it
+      const r = await api("/api/folder", { body: { path, project: SIDE.newProject } });
+      showFolder(r.folder, !!path);
+    }
+  }
+  async function changeFolder() {
+    const path = await pickFolder(FOLDER.path);
+    if (!path) return;
+    try { await useFolder(path); toast("This chat saves its runs in " + FOLDER.path); } catch (e) { toast(e.message); }
+  }
+  async function askFolder() {   // a chat the person starts: they say where its runs go (Settings can turn it off)
+    await loadNewFolder();
+    if (!hasPicker() || (S.settings && S.settings.ask_folder === false)) return;
+    const path = await pickFolder(FOLDER.path);
+    if (path && !S.chatId) { try { await useFolder(path); } catch (e) { toast(e.message); } }
+  }
+  async function folderMenu() {   // like a code editor's folder menu: the whole path, recent folders, another one
+    let recent = [];
+    try { recent = (await api("/api/folder" + (SIDE.newProject ? "?project=" + encodeURIComponent(SIDE.newProject) : ""))).recent || []; } catch (e) { /* the rest still works */ }
+    const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+    const items = [{ heading: FOLDER.path }];
+    if (recent.length) {
+      items.push({ heading: "Recent folders" });
+      for (const p of recent) {
+        const twin = recent.some((q) => q !== p && same(folderName(q), folderName(p)));   // two "data" folders: say which
+        items.push({ label: twin ? p : folderName(p), icon: "folder", checked: FOLDER.own && same(p, FOLDER.path),
+          onClick: () => { if (!(FOLDER.own && same(p, FOLDER.path))) useFolder(p).catch((e) => toast(e.message)); } });
+      }
+      items.push({ sep: true });
+    }
+    items.push({ label: "Choose folder…", icon: "folder-open", onClick: changeFolder },
+      { label: "Open folder", icon: "doc", onClick: () => api("/api/folder", { body: { open: true, chat: S.chatId, project: SIDE.newProject } }).catch((e) => toast(e.message)) });
+    if (FOLDER.own) items.push({ label: "Use the data folder", icon: "x", onClick: () => useFolder(null).catch((e) => toast(e.message)) });
+    popMenu($("folder-btn"), items);
   }
 
   // ------------------------------------------------------------------ sending
@@ -2450,7 +2519,11 @@
     store("lh.model", model);
     if (!S.chatId) {
       const rules = currentRules();
-      try { S.chatId = (await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
+      try {
+        const made = await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } });
+        S.chatId = made.id;
+        showFolder(made.folder, made.own_folder);
+      } catch (e) { toast(e.message); return; }
       S.chatRules = rules;
       applyIncognito();
     }
@@ -2553,7 +2626,11 @@
   async function sendCompare(text, models) {
     if (!S.chatId) {
       const rules = currentRules();
-      try { S.chatId = (await api("/api/chats", { body: { model: models[0], project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
+      try {
+        const made = await api("/api/chats", { body: { model: models[0], project: SIDE.newProject, incognito: S.incognito } });
+        S.chatId = made.id;
+        showFolder(made.folder, made.own_folder);
+      } catch (e) { toast(e.message); return; }
       S.chatRules = rules;
       applyIncognito();
     }
@@ -4298,7 +4375,8 @@
     DATA.now = r;
     $("data-path").value = r.path;
     showDataFolder(r.problem || (r.runs + " run" + (r.runs === 1 ? "" : "s") + " and " + r.reports + " report" +
-      (r.reports === 1 ? "" : "s") + " in this folder."), !!r.problem);
+      (r.reports === 1 ? "" : "s") + " in this folder" + (r.elsewhere ? "; " + r.elsewhere + " run" + (r.elsewhere === 1 ? "" : "s") +
+      " in chats' own folders (they stay there)." : ".")), !!r.problem);
     dataPathChanged();
   }
   function showDataFolder(text, bad) {
@@ -4414,6 +4492,8 @@
     $("auto-cards").checked = !S.settings || S.settings.auto_cards !== false;
     $("manuals").checked = !S.settings || S.settings.manuals !== false;
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
+    $("ask-folder").checked = !S.settings || S.settings.ask_folder !== false;
+    $("data-choose").hidden = !hasPicker();
     const reportKinds = (S.settings && S.settings.report_kinds) || ["scan", "device", "project"];
     for (const c of document.querySelectorAll("#report-kinds input")) c.checked = reportKinds.includes(c.value);
     $("pair-box").hidden = true;
@@ -4569,6 +4649,7 @@
     body.auto_cards = $("auto-cards").checked ? "on" : "off";
     body.manuals = $("manuals").checked ? "on" : "off";
     body.auto_report = $("auto-report").value;
+    body.ask_folder = $("ask-folder").checked ? "on" : "off";
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     if (S.claudeCode) { body.claude_code = $("cc-on").checked ? "on" : "off"; body.claude_code_path = $("cc-path").value.trim(); }
@@ -4658,6 +4739,7 @@
     initTerminal();
     renderChats();
     showEmpty(true);
+    loadNewFolder();
 
     $("composer").addEventListener("submit", (e) => {
       e.preventDefault();
@@ -4685,6 +4767,10 @@
     $("data-path").addEventListener("input", dataPathChanged);
     $("data-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("data-use").disabled) useDataFolder(); } });
     $("data-use").addEventListener("click", useDataFolder);
+    $("data-choose").addEventListener("click", async () => {
+      const path = await pickFolder($("data-path").value.trim());
+      if (path) { $("data-path").value = path; dataPathChanged(); }
+    });
     $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));
     $("pair-start").addEventListener("click", startPairing);
     $("firewall-allow").addEventListener("click", allowFirewall);
@@ -4793,7 +4879,8 @@
         connectLab({ use: b.dataset.use });
       });
     }
-    $("new-chat").addEventListener("click", () => newChat());
+    $("new-chat").addEventListener("click", () => newChat(null, true));
+    $("folder-btn").addEventListener("click", (e) => { e.stopPropagation(); folderMenu(); });
     $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });
     $("scrim").addEventListener("click", () => { closeSidebar(); if (S.labOpen) toggleLab(false); if (RUNS.open) toggleRuns(false); });
     $("toggle-lab").addEventListener("click", () => toggleLab());

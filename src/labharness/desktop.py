@@ -144,6 +144,18 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
         return True
 
     window.events.closing += on_closing
+
+    def pick_folder(start: str = "") -> str:
+        """The computer's own folder picker, for the portal (a chat's folder, the data folder): the folder the person
+        chose, or "" if they closed it."""
+        kind = getattr(getattr(webview, "FileDialog", None), "FOLDER", None) or webview.FOLDER_DIALOG
+        try:
+            chosen = window.create_file_dialog(kind, directory=start if start and os.path.isdir(start) else "")
+        except Exception:
+            return ""
+        return str(chosen[0]) if chosen else ""
+
+    window.expose(pick_folder)
     try:
         webview.settings["ALLOW_DOWNLOADS"] = True   # reports can be saved from the window too
     except (AttributeError, TypeError):

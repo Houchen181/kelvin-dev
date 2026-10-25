@@ -21,7 +21,7 @@ import yaml
 from .. import frames
 from ..cards import ParamSpec, num, trace_x
 from ..engine import RunEngine, RunReport
-from ..eventlog import EventLog, RunStore
+from ..eventlog import EventLog, RunFolders, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, Envelope
@@ -154,6 +154,25 @@ def _runs_a_program(address: str) -> bool:
     return not q.get("env")
 
 
+def writable_folder(path: Any) -> Path:
+    """A folder a person chose for Kelvin's files (the data folder, a chat's folder): its full path, made if it is
+    missing, checked that Kelvin can write there."""
+    import os
+    text = str(path or "").strip()
+    new = Path(text).expanduser()
+    if not text or not new.is_absolute():
+        raise ValueError("give the folder's full path, such as D:\\Data\\Kelvin or /Users/me/Data/Kelvin")
+    new = Path(os.path.abspath(new))
+    try:
+        new.mkdir(parents=True, exist_ok=True)
+        probe = new / ".kelvin-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        raise ValueError("Kelvin cannot write to %s: %s" % (new, e.strerror or e))
+    return new
+
+
 def _installed_by_a_maker(folder: str) -> bool:
     """A folder a maker's installer wrote: in Program Files (only an administrator writes there), /Applications or
     /opt."""
@@ -184,7 +203,7 @@ class LabRuntime:
         self.shared_log: Optional[Path] = None      # the lab's instrument log, everyone's events; set by the app
         self.operating: Optional[str] = None        # Claude Code bridge: the task Claude is doing on the screen now
         self.gate = SafetyGate(lab, approver, self._new_log(lab.clock), envelope, operator="agent")
-        self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
+        self.engine = RunEngine(self.gate, self._store())
         self.engine.progress = self._on_progress
         self.lock = threading.RLock()
         self.busy: Optional[str] = None
@@ -406,32 +425,34 @@ class LabRuntime:
 
     DATA = ("runs", "reports", "events.jsonl")   # what a data folder holds; chats and settings stay with Kelvin
 
+    @property
+    def runs(self) -> RunFolders:
+        """Every folder this person's runs are in: the data folder's runs/ and the chats' own folders."""
+        return RunFolders(self.data_dir)
+
+    def _store(self) -> RunStore:
+        return RunStore(self.data_dir / "runs", RunFolders(self.data_dir))
+
     def data_summary(self) -> Dict[str, Any]:
         runs = self.data_dir / "runs"
         return {"path": str(self.data_dir), "runs": sum(1 for d in runs.iterdir() if d.is_dir()) if runs.exists() else 0,
                 "reports": sum(1 for f in (self.data_dir / "reports").glob("*") if f.is_file())
-                if (self.data_dir / "reports").exists() else 0}
+                if (self.data_dir / "reports").exists() else 0,
+                "elsewhere": sum(1 for d in self.runs.iterdir() if d.parent != runs)}   # in chats' own folders
 
     def set_data_dir(self, path: Any, move: bool = False, by: str = "human") -> Dict[str, Any]:
         """Keep runs, the lab record (events.jsonl) and reports in another folder: a person's choice, from Settings.
         Refused while Kelvin is busy. With move, what is saved now goes along, but nothing there is overwritten:
         a run or report whose name is taken, or a record the new folder already has, stays where it was."""
         import shutil
-        new = Path(str(path)).expanduser()
-        if not new.is_absolute():
+        if not Path(str(path or "").strip()).expanduser().is_absolute():
             raise ValueError("give the folder's full path, such as D:\\Data\\Kelvin or /Users/me/Data/Kelvin")
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("Kelvin is busy (%s); try again when it is idle" % (self.busy or "working"))
         try:
             if self.live and self.live.get("status") == "running":
                 raise RuntimeError("a plan is running; change the data folder after it finishes")
-            try:
-                new.mkdir(parents=True, exist_ok=True)
-                probe = new / ".kelvin-write-test"
-                probe.write_text("ok", encoding="utf-8")
-                probe.unlink()
-            except OSError as e:
-                raise ValueError("Kelvin cannot write to %s: %s" % (new, e.strerror or e))
+            new = writable_folder(path)
             old = self.data_dir
             if new.resolve() == old.resolve():
                 return dict(self.data_summary(), moved=0, kept=[])
@@ -455,6 +476,9 @@ class LabRuntime:
                     else:
                         shutil.move(str(old / "events.jsonl"), str(new / "events.jsonl"))
                         moved += 1
+                for f in RunFolders(old).chat_folders():   # the chats' folders keep their runs; Kelvin still finds them
+                    RunFolders(new).remember(f)
+                (old / RunFolders.INDEX).unlink(missing_ok=True)
             if not move or kept:
                 self.gate.log.write("data_folder", by=by, moved_to=str(new),
                                     note="what stays here was not moved" if move else "earlier data stay here")
@@ -463,7 +487,7 @@ class LabRuntime:
             self.queue.move_to(new / "queue.json")
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
-            self.engine.store = RunStore(new / "runs")
+            self.engine.store = self._store()
             self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept))
             self.tidy_later()
             return dict(self.data_summary(), moved=moved, kept=kept, previous=str(old))
@@ -501,7 +525,7 @@ class LabRuntime:
             frames.FOLDER = new / "frames"
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
-            self.engine.store = RunStore(new / "runs")
+            self.engine.store = self._store()
             self.queue = ScanQueue(new / "queue.json")
             self.mounted = self._load_mounted()
             self._apply_protection(recheck=True)
@@ -618,7 +642,7 @@ class LabRuntime:
             return "invalid plan: %s" % e, None
         meta = self._attribute(plan)
         with self._device_protection(meta) as held:
-            report = self.engine.run(plan, dry_run=dry_run, meta=meta)
+            report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"))
         made = self._auto_report(report.run_id)
         if report.run_id:
             summary = (report.analysis or {}).get("assessment") or report.message
@@ -633,9 +657,10 @@ class LabRuntime:
         else:
             lines += self._preview(plan, report.rows)
         lines += ["warning: " + w for w in report.warnings]
-        if made:
-            lines.append("saved in the run folder: run.h5 (every point, trace, setting and fit) and %s (made "
-                         "automatically; use make_report only for another selection or wording)" % " and ".join(made))
+        if report.path:
+            lines.append("saved in %s: run.h5 (every point, trace, setting and fit)%s" % (report.path, (
+                " and %s (made automatically; use make_report only for another selection or wording)"
+                % " and ".join(made)) if made else ""))
         if report.run_id and report.rows:
             lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
         return "\n".join(lines), report
@@ -777,10 +802,10 @@ class LabRuntime:
     # ------------------------------------------------------------------ data
 
     def _run_dir(self, run_id: str) -> Path:
-        d = (self.data_dir / "runs" / run_id).resolve()
-        if d.parent != (self.data_dir / "runs").resolve() or not d.is_dir():
+        d = self.runs.find(run_id)
+        if d is None:
             raise KeyError("no run %r (see list_runs)" % run_id)
-        return d
+        return d.resolve()
 
     def _rows(self, run_id: str) -> List[Dict[str, Any]]:
         try:
@@ -798,8 +823,7 @@ class LabRuntime:
 
     def runs_index(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Most recent runs first: run_id, plan, status, points, planned_points, reason."""
-        root = self.data_dir / "runs"
-        dirs = sorted((d for d in root.iterdir() if d.is_dir()), reverse=True)[:limit] if root.exists() else []
+        dirs = sorted(self.runs.iterdir(), key=lambda d: d.name, reverse=True)[:limit]
         out = []
         for d in dirs:
             entry: Dict[str, Any] = {"run_id": d.name, "plan": d.name.split("-", 2)[-1], "status": "unfinished"}
@@ -847,9 +871,9 @@ class LabRuntime:
         in the run folder). Kelvin does this when it starts and when the data folder or the person changes, in the
         background. A run being recorded, by this Kelvin or another, is left alone."""
         with self._tidy_lock:
-            root = self.data_dir / "runs"
+            root = self.runs
             done = {"interrupted": 0, "upgraded": 0, "failed": 0}
-            for d in sorted(d for d in root.iterdir() if d.is_dir()) if root.exists() else []:
+            for d in root.iterdir():
                 try:
                     if (d / rundata.RECORD).exists():
                         if rundata.being_recorded(d) or (rundata.closed(d) and not rundata.have_h5()):
@@ -892,7 +916,7 @@ class LabRuntime:
         cat.ready()
         if time.monotonic() - cat.synced > 30 or not cat.synced:
             running = self._running_id()
-            cat.sync(self.data_dir / "runs", skip=[running] if running else ())
+            cat.sync(self.runs, skip=[running] if running else ())
         return cat
 
     def find_runs(self, text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
@@ -1224,7 +1248,7 @@ class LabRuntime:
             return "not added: " + "; ".join(problems[:5])
         item = self.queue.add(text, position, note, by, project=self.attribution.get("project"),
                               incognito=bool(self.attribution.get("incognito")),
-                              unshared=bool(self.attribution.get("unshared")))
+                              unshared=bool(self.attribution.get("unshared")), folder=self.attribution.get("folder"))
         pos = self.queue.items.index(item) + 1
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name, position=pos)
         return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self.queue.text())
@@ -1448,7 +1472,7 @@ class LabRuntime:
                         meta = self._attribute(plan, item.project, item.incognito, item.unshared, item.legacy)
                         with self._device_protection(meta):
                             report = self.engine.run(plan, meta=dict(meta, queue={
-                                "item": item.id, "position": position, "note": item.note}))
+                                "item": item.id, "position": position, "note": item.note}), folder=item.folder)
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
@@ -2802,7 +2826,7 @@ class LabRuntime:
         return self.data_dir / "reports"
 
     def pick_runs(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0) -> List[str]:
-        return pick_runs(self.data_dir / "runs", runs, day, last)
+        return pick_runs(self.runs, runs, day, last)
 
     def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
                notes: Any = (), by: str = "human", references: Any = (), folder: Optional[Path] = None,
@@ -2826,7 +2850,7 @@ class LabRuntime:
         lab_name = ", ".join(labs) if labs else self.lab.config.name
         simulated = all(m.get("simulated", True) for m in metas) if labs else \
             all(i.simulated for i in self.lab.instruments.values())
-        report = Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line).report(
+        report = Collector(self.runs, self.lab, columns, self.gate.log.events, event_line).report(
             run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated, references)
         target = folder or self.reports_dir / "custom"
         target.mkdir(parents=True, exist_ok=True)
@@ -2876,7 +2900,7 @@ class LabRuntime:
                 return self._columns(rundata.load(self._run_dir(run_id), with_rows=False))
             except Exception:   # the run's instruments are not in this lab any more
                 return None
-        return Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line)
+        return Collector(self.runs, self.lab, columns, self.gate.log.events, event_line)
 
     def _write_doc(self, doc: Any, base: Path, fmt: Optional[str] = None) -> List[str]:
         base.parent.mkdir(parents=True, exist_ok=True)
@@ -2927,14 +2951,12 @@ class LabRuntime:
             return {}
 
     def _digests(self) -> List[report_kinds.Digest]:
-        root = self.data_dir / "runs"
         out = []
-        for d in sorted(root.iterdir()) if root.exists() else []:
-            if d.is_dir():
-                dg = report_kinds.digest(d)
-                if dg is not None:
-                    out.append(dg)
-        return out
+        for d in self.runs.iterdir():
+            dg = report_kinds.digest(d)
+            if dg is not None:
+                out.append(dg)
+        return sorted(out, key=lambda dg: dg.run_id)
 
     def _run_owners(self, digests: Optional[List[report_kinds.Digest]] = None) -> Dict[str, Optional[str]]:
         """run id -> project id (None: General). A run records its project; older runs belong to the project of
@@ -3197,7 +3219,7 @@ class LabRuntime:
             old = self.lab
             self.lab = lab
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
-            self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
+            self.engine = RunEngine(self.gate, self._store())
             self.engine.progress = self._on_progress
             self._apply_protection(recheck=True)
             self.lab_info = dict(info)

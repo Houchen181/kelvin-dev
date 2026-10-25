@@ -160,6 +160,7 @@
         <div id="attach-list" class="attach-list" hidden></div>
         <textarea id="input" rows="1" placeholder="Ask Kelvin…" aria-label="Message"></textarea>
         <div class="composer-row">
+          <button id="folder-btn" class="compare-btn folder-btn" type="button" aria-haspopup="menu" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7.5V5.5A1.5 1.5 0 0 1 4.5 4H9l2 2h6.5A1.5 1.5 0 0 1 19 7.5V9"/><path d="M2.6 10.2A1 1 0 0 1 3.6 9h16.8a1 1 0 0 1 1 1.2l-1.5 7.5a2 2 0 0 1-2 1.6H6a2 2 0 0 1-2-1.6z"/></svg><span id="folder-label" class="folder-label"></span></button>
           <label id="mode-box" class="mode-picker" title="Who approves changes that drive the sample harder">
             <span class="sr-only">Approvals</span>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V6z"/></svg>
@@ -456,10 +457,15 @@
           <h3 class="set-title">Data &amp; reports</h3>
           <div class="field">
             <div class="field-row"><span class="field-label">Data folder</span><button id="data-open" class="link" type="button">Open</button></div>
-            <div class="key-row"><input id="data-path" spellcheck="false" autocomplete="off" aria-label="Data folder"><button id="data-use" class="btn small" type="button" disabled>Use this folder</button></div>
+            <div class="key-row"><input id="data-path" spellcheck="false" autocomplete="off" aria-label="Data folder"><button id="data-choose" class="btn small" type="button" hidden>Choose…</button><button id="data-use" class="btn small" type="button" disabled>Use this folder</button></div>
             <div id="data-move-row" class="checks" hidden><label class="check wrap"><input id="data-move" type="checkbox" checked> <span id="data-move-text">Move what is saved now</span></label></div>
             <span id="data-msg" class="hint"></span>
-            <span class="hint">Where Kelvin saves runs (each in its own dated folder with its data, the instrument settings and the analysis), the lab record of every command and approval, and reports. A lab server or a synced drive works. Chats, settings and API keys stay in ~/Kelvin.</span>
+            <span class="hint">Where Kelvin saves the lab record of every command and approval, reports, and the runs of chats without a folder of their own (each run in its own dated folder with its data, the instrument settings and the analysis). A lab server or a synced drive works. Chats, settings and API keys stay in ~/Kelvin.</span>
+          </div>
+          <div class="field">
+            <span class="field-label">Chats' folders</span>
+            <div class="checks"><label class="check wrap"><input id="ask-folder" type="checkbox" checked> Ask for a folder when I start a new chat (in the Kelvin app)</label></div>
+            <span class="hint">Each chat saves its runs in its own folder, shown under the message box: click it to change it (Choose folder…, or a recent folder) or to see it (Open folder). A new chat starts in the folder you last chose (in a project: the project's). Kelvin finds every run wherever it is saved.</span>
           </div>
           <div class="field">
             <label class="field-label" for="auto-report">Reports</label>

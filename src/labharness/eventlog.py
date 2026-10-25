@@ -7,7 +7,7 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import yaml
 
@@ -155,14 +155,102 @@ class RunRecord:
             self._record.release()
 
 
-class RunStore:
-    def __init__(self, root: Any = None):
-        self.root = Path(root) if root else None
+RUN_NAME = re.compile(r"^\d{8}-\d{6}-[\w.-]*$")   # a run's folder is its id, as RunStore names it
 
-    def create(self, plan_name: str, plan: Dict[str, Any], operator: str) -> RunRecord:
+
+class RunFolders:
+    """Where a person's runs are: the data folder's runs/, and each folder a chat saved runs in (the data folder's
+    folders.json lists them). It reads like runs/ alone did: folders / run_id is that run's folder wherever it is,
+    and iterdir() gives every run's folder (in a chat's folder only Kelvin's runs: the person keeps other files
+    there too). A folder that can't be read now (a drive that is away) is skipped until it is back."""
+
+    INDEX = "folders.json"
+
+    def __init__(self, data_dir: Any):
+        self.home = Path(data_dir) / "runs"
+        self.index = Path(data_dir) / self.INDEX
+
+    def chat_folders(self) -> List[Path]:
+        try:
+            listed = json.loads(self.index.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return [Path(p) for p in listed if isinstance(p, str)] if isinstance(listed, list) else []
+
+    def roots(self) -> List[Path]:
+        out = [self.home]
+        for p in self.chat_folders():
+            if p not in out:
+                out.append(p)
+        return out
+
+    def remember(self, folder: Any) -> None:
+        """Note a chat's folder once it holds a run, so Kelvin finds its runs from then on."""
+        folder, listed = Path(folder), self.chat_folders()
+        if folder == self.home or folder in listed:
+            return
+        self.index.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.index.with_suffix(".tmp")
+        tmp.write_text(json.dumps([str(p) for p in listed + [folder]], indent=1), encoding="utf-8")
+        tmp.replace(self.index)
+
+    def find(self, run_id: str) -> Optional[Path]:
+        """The run's folder, or None (an id is a name, never a path)."""
+        if not run_id or run_id in (".", "..") or "/" in run_id or "\\" in run_id or ":" in run_id:
+            return None
+        for root in self.roots():
+            d = root / run_id
+            try:
+                if d.is_dir() and (root == self.home or rundata.is_run(d)):
+                    return d
+            except OSError:
+                continue
+        return None
+
+    def __truediv__(self, run_id: str) -> Path:
+        return self.find(run_id) or self.home / run_id
+
+    def iterdir(self) -> Iterator[Path]:
+        seen = set()
+        for root in self.roots():
+            try:
+                found = sorted((d for d in root.iterdir() if d.is_dir()), key=lambda d: d.name)
+            except OSError:
+                continue
+            for d in found:
+                if d.name in seen or (root != self.home and not (RUN_NAME.match(d.name) and rundata.is_run(d))):
+                    continue
+                seen.add(d.name)
+                yield d
+
+    def exists(self) -> bool:
+        return any(root.is_dir() for root in self.roots())
+
+
+class RunStore:
+    """Makes each run's folder, named by its id: in root (the data folder's runs/), or in the folder the run is
+    given (its chat's). folders: where runs are kept, so an id is never used twice."""
+
+    def __init__(self, root: Any = None, folders: Optional[RunFolders] = None):
+        self.root = Path(root) if root else None
+        self.folders = folders
+
+    def create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None) -> RunRecord:
+        root = Path(folder) if folder and self.root else self.root
         base = "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"), re.sub(r"[^\w.-]+", "_", plan_name))
         run_id, n = base, 1
-        while self.root and (self.root / run_id).exists():
+        while root and ((root / run_id).exists() or (self.folders is not None and self.folders.find(run_id))):
             n += 1
             run_id = "%s-%d" % (base, n)
-        return RunRecord(run_id, self.root / run_id if self.root else None, plan, operator)
+        if root is None or root == self.root:
+            return RunRecord(run_id, root / run_id if root else None, plan, operator)
+        try:
+            rec = RunRecord(run_id, root / run_id, plan, operator)
+        except OSError as e:   # the chat's folder is away (a drive, a server): the run still keeps its data
+            rec = RunRecord(run_id, self.root / run_id, plan, operator)
+            rec.moved = "the chat's folder %s could not be written (%s), so this run is in %s" % (
+                root, e.strerror or e, rec.path)
+            return rec
+        if self.folders is not None:
+            self.folders.remember(root)
+        return rec

@@ -34,6 +34,8 @@ People sign in with a **Kelvin account**: email and password, the same on every 
 
 ## In the portal
 
+- **Each chat's folder:** the folder button under the message box shows where the chat saves its runs; click it to see the whole path, pick a recent folder or choose another. In the Kelvin app, **New chat** asks for a folder with the computer's folder picker. See [Each chat's folder](data.md#each-chats-folder).
+
 - **Models:** Add keys under Settings for Claude, GPT or Gemini, or point it at a local OpenAI-compatible server (Ollama, vLLM, LM Studio) for confidential work. Keys stay in your own settings file (`~/Kelvin/users/<you>/settings.json`, encrypted if you have a password) and go only to their own provider.
 - **ChatGPT plan:** Instead of an OpenAI API key, you can use your ChatGPT plan. In Settings press **Continue with ChatGPT** and sign in on OpenAI's page in your browser.
   - **What Kelvin gets:** it never sees your password and gets no access to your ChatGPT conversations.

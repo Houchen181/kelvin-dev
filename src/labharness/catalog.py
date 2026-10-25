@@ -111,8 +111,9 @@ class Catalog:
 
     def sync(self, runs_dir: Path, skip: Sequence[str] = ()) -> int:
         """Bring the catalog up to date with the run folders: add new and changed runs, drop the ones gone.
+        runs_dir: a folder of runs, or every folder a person's runs are in (eventlog.RunFolders).
         skip: runs being measured. Returns how many runs were read."""
-        runs_dir = Path(runs_dir)
+        runs_dir = runs_dir if hasattr(runs_dir, "roots") else Path(runs_dir)
         folders = {d.name: d for d in runs_dir.iterdir() if d.is_dir()} if runs_dir.exists() else {}
         with _lock:
             con = self._connect()

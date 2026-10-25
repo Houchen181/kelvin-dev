@@ -230,10 +230,12 @@ class RunEngine:
         report.message = "dry run: " + report.message
         return report
 
-    def run(self, plan: Any, dry_run: bool = False, meta: Optional[Dict[str, Any]] = None) -> RunReport:
+    def run(self, plan: Any, dry_run: bool = False, meta: Optional[Dict[str, Any]] = None,
+            folder: Any = None) -> RunReport:
         """Validate, check the instruments, ask once for the drive ranges, run, log, analyse. No dry run unless asked
         (dry_run), or in auto mode for a run nobody approves: there the dry run stands in for the person's look.
-        Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal."""
+        Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal.
+        folder: where the run's folder goes (its chat's folder; else the data folder's runs/)."""
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan)
         except PlanError as e:
@@ -283,7 +285,7 @@ class RunEngine:
                 report = RunReport("declined", plan.name, "declined: plan %s not run%s" % (plan.name, why), dry_run=sim)
                 self.gate.log.write("run_declined", by=self.gate.operator, plan=plan.name)
                 return report
-        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta)
+        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta, folder)
         report.dry_run = sim
         if report.status != "done":   # something went wrong on them: check them again before the next run
             for name in plan.requires:
@@ -317,11 +319,11 @@ class RunEngine:
             clock.sleep(max(0.05, min(2.0, st.duration / 10)))
 
     def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
-                 meta: Optional[Dict[str, Any]] = None) -> RunReport:
+                 meta: Optional[Dict[str, Any]] = None, folder: Any = None) -> RunReport:
         """expected_s: the dry run's duration (lab time), for an honest time-left estimate that counts ramps."""
         gate, lab, clock = self.gate, self.lab, self.lab.clock
         gen = gate.stop_generation
-        rec = self.store.create(plan.name, plan.source, gate.operator)
+        rec = self.store.create(plan.name, plan.source, gate.operator, folder)
         rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
         rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
         rec.meta.update(meta or {})   # e.g. which queue item this run was
@@ -334,7 +336,7 @@ class RunEngine:
         self._emit(event="start", run_id=rec.run_id, plan=plan.name, total=plan.points, **cols)
         t0, wall0 = clock.now(), time.time()
         status, reason, n = "done", None, 0
-        warnings: List[str] = []
+        warnings: List[str] = [rec.moved] if getattr(rec, "moved", None) else []
 
         def apply(instr: str, param: str, value: Any) -> None:
             r = gate._set(instr, param, value, True, "plan:" + plan.name)

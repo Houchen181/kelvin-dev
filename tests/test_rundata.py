@@ -204,3 +204,24 @@ def test_kelvin_keeps_crashed_and_older_runs_when_it_starts(tmp_path):
     assert found.startswith("2 runs") and "20261024-101500-gate_sweep" in found and old.name in found
     assert rundata.card(old)["swept"][0]["unit"] == "V"                     # units from this lab's cards
     assert any(e["type"] == "runs_kept" for e in rt.gate.log.events())
+
+
+def test_runs_in_a_chats_own_folder_are_found_with_the_rest(tmp_path):
+    from labharness.eventlog import RunFolders, RunStore
+    folders = RunFolders(tmp_path / "data")
+    store = RunStore(tmp_path / "data" / "runs", folders)
+    mine = tmp_path / "Sample 7"
+    made = []
+    for folder in (mine, None):
+        rec = store.create("gate sweep", {"plan": "gate sweep"}, "test", folder)
+        rec.add({"i": 0, "t": 0.0, "smu.V": 0.1})
+        rec.finish(status="done")
+        made.append(rec)
+    ours, home = made
+    assert ours.path.parent == mine and home.path.parent == tmp_path / "data" / "runs"
+    assert ours.run_id != home.run_id                                  # one id per run, in every folder
+    (mine / "notes").mkdir()                                           # the person's own files there
+    (mine / "notes" / "meta.json").write_text("{}", encoding="utf-8")
+    assert sorted(d.name for d in folders.iterdir()) == sorted([ours.run_id, home.run_id])
+    assert folders / ours.run_id == ours.path and folders.find("../notes") is None
+    assert folders.chat_folders() == [mine]

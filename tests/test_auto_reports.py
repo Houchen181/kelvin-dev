@@ -42,7 +42,8 @@ def test_every_run_gets_its_report_in_its_own_folder(tmp_path):
     run_id = rt.runs_index(1)[0]["run_id"]
     names = [f["name"] for f in rt.run_files(run_id)]
     assert names == ["report.pdf", "report.pptx", "run.h5"]
-    assert "saved in the run folder: run.h5 (every point, trace, setting and fit) and report.pdf and report.pptx" in out
+    assert ("saved in %s: run.h5 (every point, trace, setting and fit) and report.pdf and report.pptx"
+            % rt._run_dir(run_id)) in out                                    # the whole path: the person finds it
     assert (rt._run_dir(run_id) / "report.pdf").read_bytes().startswith(b"%PDF")
     rt.auto_report = "off"                                                   # only when asked
     rt.run(SWEEP)

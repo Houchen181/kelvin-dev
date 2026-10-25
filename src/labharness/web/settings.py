@@ -29,7 +29,7 @@ SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webho
 SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
-                     "answer_words", "phone_relay",
+                     "answer_words", "phone_relay", "ask_folder",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
@@ -37,6 +37,7 @@ LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards
        "account_hub", "hub_installation", "instruments_off", "hands_on"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
+MAX_RECENT_FOLDERS = 8   # chats' folders the folder menu offers again
 
 
 def _answer_words(value: str) -> str:
@@ -206,6 +207,8 @@ class Settings:
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "answer_words":  # how long answers may be before Kelvin condenses them (brevity.py)
                 value = _answer_words(value)
+            if name == "ask_folder":  # the folder picker opens for each new chat (desktop app): on unless off
+                value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "auto_report":  # a report after each run and queue: both (the default), pdf, pptx or off
@@ -233,6 +236,22 @@ class Settings:
         else:
             self._user.pop("data_dir", None)
         self._save()
+
+    def remember_folder(self, path: Optional[str]) -> None:
+        """A folder this person chose for a chat (checked by the portal first): a new chat starts there, and it heads
+        their recent folders. None: new chats start in the data folder again."""
+        if path:
+            self._user["last_folder"] = str(path)
+            recent = [p for p in self.recent_folders if p.lower() != str(path).lower()]
+            self._user["recent_folders"] = [str(path)] + recent[:MAX_RECENT_FOLDERS - 1]
+        else:
+            self._user.pop("last_folder", None)
+        self._save()
+
+    @property
+    def recent_folders(self) -> List[str]:
+        kept = self._user.get("recent_folders")
+        return [str(p) for p in kept if p] if isinstance(kept, list) else []
 
     # ------------------------------------------------------------------ the Kelvin hub (hubsync.py)
 
@@ -279,6 +298,7 @@ class Settings:
             "auto_cards": self._lab.get("auto_cards") != "off",
             "auto_report": self._user.get("auto_report") or "both",
             "report_kinds": self.report_kinds,
+            "ask_folder": self._user.get("ask_folder") != "off",
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "claude_code_path": self._user.get("claude_code_path", ""),

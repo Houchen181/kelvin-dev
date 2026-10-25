@@ -94,6 +94,7 @@ class Item:
     incognito: bool = False         # queued from an incognito chat: its runs are never shared on the Kelvin hub
     unshared: bool = False          # queued from a chat that left unshared work: nor are these
     legacy: bool = False            # queued before Kelvin noted either: its runs are held like older runs
+    folder: Optional[str] = None    # the folder of the chat that queued it, where its runs go
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
@@ -181,10 +182,11 @@ class ScanQueue:
                 raise KeyError("no queue item %r (the queue has %d)" % (ref, len(self.items)))
 
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "",
-            project: Optional[str] = None, incognito: bool = False, unshared: bool = False) -> Item:
+            project: Optional[str] = None, incognito: bool = False, unshared: bool = False,
+            folder: Optional[str] = None) -> Item:
         kind, name = parse_item(text)
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time(),
-                    project=project, incognito=incognito, unshared=unshared)
+                    project=project, incognito=incognito, unshared=unshared, folder=folder)
         with self.lock:
             if position is None or position > len(self.items):
                 self.items.append(item)

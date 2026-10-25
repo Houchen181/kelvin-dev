@@ -76,6 +76,12 @@ LEARN_RULES = """Use the remember tool when something durable is settled. For th
 preference or convention, such as units or how cautious to be. For this project (scope project): a decision, a working
 procedure, an instrument quirk, or a key result with units and run ID. Never save questions, one-off requests,
 chit-chat, guesses, or anything already in the notes. To correct an outdated note, pass its id as replaces."""
+
+FOLDER = """# This chat's folder
+Runs started in this chat are saved {where}, each in its own folder named by its run id (date, time, plan). Only \
+the person changes it: the folder button under the message box. When you say where something was saved, give the \
+whole path."""
+
 INCOGNITO = """# Incognito chat
 No saved notes or instructions are used here, nothing from this chat is remembered, and it is gone when the user
 leaves it. Answer from this conversation alone."""
@@ -325,6 +331,13 @@ class ChatAgent:
 
     # ------------------------------------------------------------------ memory
 
+    def _folder(self, chat: Dict[str, Any]) -> str:
+        """Where this chat's runs go, so Kelvin can say where its data are."""
+        if chat.get("folder"):
+            return FOLDER.format(where="in %s, the folder the person chose for this chat" % chat["folder"])
+        return FOLDER.format(where="in the data folder, %s (this chat has no folder of its own)"
+                                   % (self.runtime.data_dir / "runs"))
+
     def context(self, chat: Dict[str, Any]) -> Dict[str, Any]:
         """The system prompt and tools for one turn in this chat. Only stable text goes here (Kelvin's rules, the
         user's instructions, the project's instructions), so the cached prompt prefix survives; notes are recalled
@@ -333,7 +346,7 @@ class ChatAgent:
         if chat.get("incognito"):   # not kept, so never continued later either; Kelvin's own skills only
             own = self.know.index(incognito=True)
             return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO] +
-                                           ([READ_GUIDE + "\n" + own] if own else [])),
+                                           ([READ_GUIDE + "\n" + own] if own else []) + [self._folder(chat)]),
                     "tools": self.tools + [CHAT_HISTORY] + ([USE_SKILL] if own else []), "project": None,
                     "learn": False}
         parts = [SYSTEM] + self._brevity()
@@ -357,6 +370,7 @@ class ChatAgent:
         rules = self.chat_rules(chat)
         if rulebook.restrictive(rules):
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
+        parts.append(self._folder(chat))   # last: it changes only when the person picks another folder
         private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
         tools = self.tools + remember + ([SAVE_PAPER] if project else []) + [DEVICES, ADD_DEVICE, MOUNT_DEVICE,
@@ -570,7 +584,7 @@ class ChatAgent:
         day = str(args.get("day") or "")
         chats, project = self.chats_for_report(chat)
         if not (runs or day or last):
-            runs = [r for r in runs_in(chats) if (self.runtime.data_dir / "runs" / r).is_dir()] or None
+            runs = [r for r in runs_in(chats) if self.runtime.runs.find(r)] or None
         title = str(args.get("title") or "") or ("%s report" % project["name"] if project else "")
         kind = str(args.get("kind") or "runs")
         if kind == "project" and args.get("summary"):   # Kelvin's words open the master report until rewritten
@@ -627,7 +641,8 @@ class ChatAgent:
             chat = self.store.load(chat_id)
             # the project scans started in this turn belong to, when no device is mounted
             self.runtime.attribution = {"project": None if chat.get("incognito") else self.store.project_of(chat_id),
-                                        "chat": chat_id, "incognito": bool(chat.get("incognito"))}
+                                        "chat": chat_id, "incognito": bool(chat.get("incognito")),
+                                        "folder": chat.get("folder")}   # where its runs go
             message: Dict[str, Any] = {"role": "user", "text": text}
             if wake:
                 message["wake"] = wake

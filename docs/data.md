@@ -72,7 +72,7 @@ wait: 300                                                          # then wait 5
 
 ## Your data
 
-Every run is saved as it is measured, with nothing to click. It gets its own folder, named by date, time and plan, such as `runs/20261018-015328-gate_sweep/`, which holds:
+Every run is saved as it is measured, with nothing to click, in the folder of the chat that started it (see [Each chat's folder](#each-chats-folder)). It gets its own folder there, named by date, time and plan, such as `20261018-015328-gate_sweep/`, which holds:
 - `run.h5`: the run's data, in one HDF5 file. It holds every point, trace and camera frame, every instrument setting at the start and at the end, the plan as it ran, the automatic fits, and a short card saying what the run is.
 - `report.pdf` and `report.pptx`: the scan report, written as soon as the run ends (see [Reports](#reports)).
 
@@ -122,11 +122,23 @@ Next to the run folders sit `events.jsonl`, your record of every command, readin
 - **On a Mac or from source:** run `/Applications/Kelvin.app/Contents/MacOS/Kelvin --remove-data` (from source: `python -m labharness.desktop --remove-data`) for the same clean-up, then delete the app.
 
 **Choosing the data folder:** these live in your own folder, `~/Kelvin/users/<you>/data` (for the first account, `~/Kelvin/virtual-lab`, where they were before accounts), until you choose another folder under **Settings → Data folder**. A lab server or a synced drive works:
-- **Use this folder** switches at once. Kelvin checks first that it can write there.
-- **Move what is saved now** takes the existing runs, reports and record along. Nothing there is overwritten: a run whose name is taken stays where it was, and Kelvin says so.
+- **Use this folder** switches at once. Kelvin checks first that it can write there. In the Kelvin app, **Choose…** opens the computer's folder picker.
+- **Move what is saved now** takes the existing runs, reports and record along (runs in chats' own folders stay there, and Kelvin keeps finding them). Nothing there is overwritten: a run whose name is taken stays where it was, and Kelvin says so.
 - **If the folder can't be written to when you sign in** (a network drive that is offline, say), Kelvin saves to your own folder meanwhile and tells you in Settings.
 - **What stays in `~/Kelvin`:** chats, settings, API keys and instrument folders.
 - **From a terminal:** `kelvin --data-dir <folder>` overrides the setting, for one person without sign-in.
+
+### Each chat's folder
+
+Each chat saves its runs in a folder you choose, so you always know where its data are.
+- **Where it shows:** the folder button under the message box, at the left, as in code editors: it reads **Data folder**, or the name of the folder you chose. Click it for the whole path, **Recent folders**, **Choose folder…**, **Open folder** and **Use the data folder**.
+- **Choosing:** in the Kelvin app, **New chat** opens the computer's folder picker; **Choose folder…** opens it for a chat you are in, and a recent folder is one click. In a browser, you type the folder's full path. Kelvin checks that it can write there, and makes the folder if it is new. A folder change applies from the next message.
+- **A new chat** starts in the folder you last chose (in a project, the one its chats last chose). Settings → **Data & reports** → **Ask for a folder when I start a new chat** turns the picker off for new chats.
+- **Without a folder of its own** (and from other AI apps through MCP), a chat's runs go to the data folder's `runs/`.
+- **Queued runs** go to the folder of the chat that queued them.
+- **Kelvin finds every run wherever it is:** the catalog, reports and Kelvin's tools look in the data folder and in every chat's folder (`folders.json` in the data folder lists them). When a run ends, Kelvin says its whole path. Your other files in a chat's folder are left alone.
+- **A folder that can't be written when a run starts** (a drive that is away, say): the run is saved in the data folder instead, and Kelvin says so.
+- **Only a person** changes a chat's folder.
 
 ## Reports
 

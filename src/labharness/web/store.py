@@ -289,6 +289,18 @@ class ChatStore:
             self._write_index(index)
         return project
 
+    def set_folder(self, project_id: str, path: Optional[str]) -> Dict[str, Any]:
+        """The folder this project's chats last chose: its next new chat starts there."""
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            if path:
+                project["folder"] = str(path)
+            else:
+                project.pop("folder", None)
+            self._write_index(index)
+        return project
+
     def set_instructions(self, project_id: str, text: Any) -> Dict[str, Any]:
         with self._lock:
             index = self._read_index()

@@ -29,7 +29,7 @@ from .._version import __version__
 from ..accounts import Accounts, cipher_for, has_legacy
 from .. import central
 from ..agent.approval import WebApprover
-from ..agent.runtime import LabRuntime
+from ..agent.runtime import LabRuntime, writable_folder
 from ..agent.server import build_server
 from ..adapters import AdapterError
 from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
@@ -67,9 +67,9 @@ SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/ac
 HUB_SHARING = False
 # Claude Code bridge: locked while Claude works the screen, so its clicks never answer for a person
 LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
-                          "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/phone",
-                          "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount", "/api/quit",
-                          "/api/update", "/api/hub")
+                          "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/folder",
+                          "/api/phone", "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount",
+                          "/api/quit", "/api/update", "/api/hub")
 
 
 def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -470,7 +470,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if live.get("run_id") == run_id and live.get("status") == "running":
             return unshared_meta(runtime.running_meta)
         try:
-            meta = rundata.meta(runtime.data_dir / "runs" / run_id)
+            meta = rundata.meta(runtime.runs / run_id)
         except (KeyError, OSError, ValueError):
             return False
         return unshared_meta(meta)
@@ -1005,16 +1005,54 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         on_quit()
         return JSONResponse({"ok": True})
 
+    def suggested_folder(project: Optional[str]) -> str:
+        """Where a new chat saves its runs unless the person picks another folder: the folder its project's chats
+        last chose, else the one this person last chose, else the data folder's runs."""
+        if project:
+            try:
+                chosen = store.project(project).get("folder")
+            except KeyError:
+                chosen = None
+            if chosen:
+                return str(chosen)
+        return settings.get("last_folder") or str(runtime.data_dir / "runs")
+
+    def keep_folder(path: Optional[str], project: Optional[str]) -> None:
+        """A folder the person chose: their next new chat (in this project) starts there. None: the data folder."""
+        settings.remember_folder(path)
+        if project:
+            store.set_folder(project, path)
+
+    async def new_chat_folder(body: Dict[str, Any], project: Optional[str]) -> Optional[str]:
+        """The folder a new chat saves its runs in: the one the person picked (checked: a problem is theirs to
+        see), else the suggested one if Kelvin can write there now (a drive that is away: the data folder)."""
+        picked = str(body.get("folder") or "").strip()
+        if picked:
+            return str(await asyncio.to_thread(writable_folder, picked))
+        suggested = suggested_folder(project)
+        if Path(suggested) == runtime.data_dir / "runs":
+            return None
+        try:
+            return str(await asyncio.to_thread(writable_folder, suggested))
+        except ValueError:
+            return None
+
     async def chats(request: Request) -> Response:
         if request.method == "POST":
             body = await request.json()
+            project = body.get("project") or None
             try:
-                return JSONResponse(store.create(str(body.get("model") or ""), body.get("project") or None,
-                                                 incognito=bool(body.get("incognito"))))
+                folder = await new_chat_folder(body, project)
+                chat = store.create(str(body.get("model") or ""), project, incognito=bool(body.get("incognito")))
             except KeyError as e:
                 return error(404, e.args[0])
             except ValueError as e:
                 return error(400, str(e))
+            if folder:
+                chat["folder"] = folder
+                store.save(chat)
+                keep_folder(folder, chat.get("project"))
+            return JSONResponse(dict(chat, folder=folder or str(runtime.data_dir / "runs"), own_folder=bool(folder)))
         return JSONResponse(store.list())
 
     async def chat(request: Request) -> Response:
@@ -1037,7 +1075,22 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     store.save(data)
                 if "project" in body:  # file it under a project, or null to take it out
                     store.assign(chat_id, body["project"] or None)
+                if "folder" in body:   # where its runs go: a folder the person chose, or null for the data folder
+                    if agent.active and agent.active["chat_id"] == chat_id:
+                        return error(409, "Change the folder when the current answer is done.")
+                    if runtime.operating:   # a person's choice, like the data folder
+                        return error(423, "Claude is operating this computer, so the chat's folder is locked until "
+                                          "it finishes. Press Stop to end it.")
+                    raw = str(body.get("folder") or "").strip()
+                    if raw:
+                        data["folder"] = str(await asyncio.to_thread(writable_folder, raw))
+                        keep_folder(data["folder"], store.project_of(chat_id))
+                    else:
+                        data.pop("folder", None)
+                    store.save(data)
             out = dict(data, messages=[shown(m) for m in data["messages"]])
+            out["folder"] = data.get("folder") or str(runtime.data_dir / "runs")   # where its runs go
+            out["own_folder"] = bool(data.get("folder"))
             out["project"] = store.project_of(chat_id)  # the browser never needs provider-internal state
             out["rules"] = agent.chat_rules(data)
             return JSONResponse(out)
@@ -1701,7 +1754,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             if scope in ("chat", "project"):
                 chat = store.load(str(body.get("chat_id") or ""))
                 chats, project = agent.chats_for_report(chat) if scope == "project" else ([chat], None)
-                runs = [r for r in runs_in(chats) if (runtime.data_dir / "runs" / r).is_dir()]
+                runs = [r for r in runs_in(chats) if runtime.runs.find(r)]
                 notes = agent.report_notes(project)
                 references = agent.report_references(project)
                 title = title or ("%s report" % project["name"] if project else chat.get("title") or "")
@@ -1990,6 +2043,38 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except (LookupError, ValueError, OSError, RuntimeError) as e:
             return error(400, str(e).splitlines()[0] if str(e) else type(e).__name__)
         return JSONResponse({"ok": True, "manual": manual, "folders": instrument_folders()})
+
+    async def folder_view(request: Request) -> Response:
+        """A chat's folder, where its runs go. GET ?project=: where a new chat (in that project) starts, the data
+        folder's runs, and the folders this person chose lately. POST {path, project}: a folder the person picked
+        for a new chat, checked and kept (the chat is made at its first message); path null: the data folder.
+        POST {open: true, chat or project}: show it on this computer."""
+        if request.method == "GET":
+            return JSONResponse({"folder": suggested_folder(request.query_params.get("project") or None),
+                                 "data": str(runtime.data_dir / "runs"), "recent": settings.recent_folders})
+        body = await request.json()
+        project = body.get("project") or None
+        try:
+            if body.get("open"):
+                chat_id = str(body.get("chat") or "")
+                where = Path((store.load(chat_id).get("folder") if chat_id else suggested_folder(project))
+                             or runtime.data_dir / "runs")
+                if where == runtime.data_dir / "runs":
+                    where.mkdir(parents=True, exist_ok=True)   # before the first run
+                open_path(where)
+                return JSONResponse({"ok": True})
+            if not str(body.get("path") or "").strip():   # new chats start in the data folder again
+                keep_folder(None, project)
+                return JSONResponse({"folder": str(runtime.data_dir / "runs")})
+            path = str(await asyncio.to_thread(writable_folder, body.get("path")))
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ValueError as e:
+            return error(400, str(e))
+        except OSError as e:
+            return error(500, "Could not open it: %s" % (e.strerror or e))
+        keep_folder(path, project)
+        return JSONResponse({"folder": path})
 
     async def data_folder(request: Request) -> Response:
         """GET: where runs, the lab record and reports are kept. POST {path, move}: keep them somewhere else.
@@ -2476,6 +2561,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
         Route("/api/terminal", terminal, methods=["POST"]),
         Route("/api/data-folder", data_folder, methods=["GET", "POST"]),
+        Route("/api/folder", folder_view, methods=["GET", "POST"]),
         Route("/api/instruments/{name}/manual", instrument_manual, methods=["POST", "PUT"]),
         Route("/api/instruments/{name}/open", instrument_open, methods=["POST"]),
         Route("/api/instruments/{name}/switch", instrument_switch, methods=["POST"]),
