@@ -92,6 +92,6 @@ What changed:
 - **draft_card's manual finder** tries what the web search finds before the addresses the model remembers.
 - **Privacy:** the web tools follow literature search's switch, now "Literature and web search", in Settings and per project.
 - **Screenshots** use Windows' own GDI (scaled by Windows) or macOS's screencapture and sips, with Kelvin's own PNG writer: no image library. A screen Windows can't copy is reported as that, the screen task rules say to report a tool's error word for word, and operate_computer is no longer for searching or downloading.
-- **The private app brings QICK's client** (qick and Pyro4, without the boards' 100 MB of firmware), and the release check requires it. A QICK board's identity shows the board's QICK version and Kelvin's. A board whose server isn't running gets the notebooks to run (qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb).
+- **QICK:** a board's identity shows the board's QICK version and this computer's. A board whose server isn't running gets the notebooks to run (qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb). Bringing QICK's client in the app was built and then taken out the same day: the user's rule is that the app carries no instrument's libraries, and Kelvin installs what an identified instrument needs locally, on demand (to build).
 
 Tested with model services and a board stood in for (their documented answers), and screenshots on this laptop. Not yet tried with a real API key's web search, the lab PC, or the RFSoC 4x2.

@@ -80,7 +80,7 @@ More instruments with a library of their own:
 - `pulsestreamer://<ip>` for a Swabian Pulse Streamer (`pip install pulsestreamer`), `pulseblaster://0?clock=500` for a SpinCore PulseBlaster (SpinCore's `spinapi`), and `timetagger://<serial>?click=1&gate=2` for a Swabian Time Tagger (Swabian's installer). A scan finds the Swabian devices.
 - `qick://<name server>:8888/<proxy name>` for an RFSoC board running QICK, through its Pyro4 server (tProc v2 firmware), e.g. `qick://192.168.3.1:8888/myqick` for an RFSoC 4x2 on its USB network.
   - **Starting the server:** on a PYNQ board, in its Jupyter (`http://<board>:9090`), run `qick/pyro4/00_nameserver.ipynb`, then `01_server.ipynb`, whose proxy name goes in the address.
-  - **The client:** the private Kelvin app brings qick and Pyro4; from source, `pip install qick Pyro4`. The board's QICK and Kelvin's should be the same version, and the instrument's identity shows both.
+  - **The client:** `pip install qick Pyro4` on the computer that runs Kelvin (from source; the app does not carry them). The board's QICK and this computer's should be the same version, and the instrument's identity shows both.
   - **What Kelvin does:** it plays one generator as a continuous tone or as pulses, and reads I/Q from one readout. A tone keeps playing after a program ends, so Kelvin stops every generator (`reset_gens`) when the output goes off and when it disconnects.
 
 **DAQ cards, spectrometers, monochromators, cameras and nanopositioners.**
@@ -101,7 +101,7 @@ More instruments with a library of their own:
 | Ocean Insight spectrometer | `seabreeze://<serial>` | Kelvin from source with `seabreeze` | `ocean/spectrometer` |
 | Basler camera | `pylon://<serial>` | Kelvin from source with `pypylon` | `basler/camera` |
 
-- **The app brings only what it needs:** nidaqmx, numpy, pythonnet for LightField's automation, and QICK's client (qick and Pyro4, without the boards' firmware). PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a Python library the app doesn't carry, so run Kelvin from source for them.
+- **The app brings only what it needs:** nidaqmx, numpy, and pythonnet for LightField's automation. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a Python library the app doesn't carry, so run Kelvin from source for them.
 
 - **Scans find them:** the NI devices, Princeton Instruments cameras, Andor spectrographs and sCMOS cameras (and, from source, Ocean spectrometers, Basler cameras and ANC350s), through their libraries, which only list what they see. Add the others by address. Andor SDK2 cameras aren't listed, because finding one means initializing it, which resets it.
 - **The scan says what PICam saw:** each camera that is free, each one open in another program (LightField, say), PICam missing, and whether LightField is installed. Kelvin never starts LightField by itself: add it in the Lab panel.

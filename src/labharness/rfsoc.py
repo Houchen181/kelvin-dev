@@ -35,8 +35,8 @@ def load_qick() -> Any:
         from qick.pyro import make_proxy   # type: ignore
         from qick.asm_v2 import AveragerProgramV2   # type: ignore
     except ImportError as e:
-        raise AdapterError("QICK boards need the qick and Pyro4 packages: the private Kelvin app brings them; from "
-                           "source, pip install qick Pyro4 (%s)" % e) from e
+        raise AdapterError("QICK boards need the qick and Pyro4 packages on this computer, which the Kelvin app does "
+                           "not carry: run Kelvin from source with pip install qick Pyro4 (%s)" % e) from e
     return SimpleNamespace(make_proxy=make_proxy, AveragerProgramV2=AveragerProgramV2,
                            version=str(getattr(qick, "__version__", "") or ""))
 
