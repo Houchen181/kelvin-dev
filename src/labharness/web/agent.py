@@ -60,12 +60,10 @@ This project's rules: {rules}. Keep its details inside this conversation: never 
 services."""
 WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual",   # reach the internet
              "install_for_instrument"}
-# tools whose results carry text from outside the lab: once a chat has read some, auto mode asks a person there
+# tools whose results carry text from the open web: once a chat has read some, auto mode asks a person there until
+# the person writes again (manuals, makers' files and instruments' replies are marked for the model, nothing more)
 OUTSIDE_TOOLS = {"read_web_page": "a web page", "web_search": "web search results", "search_papers": "paper search "
-                 "results", "read_paper": "a paper", "search_manual": "an instrument's manual", "read_examples":
-                 "a maker's example files", "library_api": "a maker's library", "run_on_board": "a board's output",
-                 "inspect_address": "what a network address answered", "inspect_serial": "what a serial port "
-                 "answered", "draft_card": "the maker's manual, through draft_card"}
+                 "results", "read_paper": "a paper"}
 COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
@@ -636,8 +634,8 @@ class ChatAgent:
                 self.active = dict(self.active or {}, wake=True)
             if attachments:
                 message["attachments"] = attachments
-                if any(a.get("text") for a in attachments):   # a document's text is from outside the lab
-                    chat["outside"] = "a file the person attached"
+            if not wake:   # the person is writing: what the chat read from the web before no longer pauses auto mode
+                chat.pop("outside", None)
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
@@ -651,7 +649,8 @@ class ChatAgent:
             chat["model"] = model_key
             self.store.save(chat)
             context = self.context(chat)  # fixed for the whole turn, so every step reuses the cached prefix
-            self.runtime.gate.outside_chat = chat.get("outside")   # auto mode asks a person in a chat that has
+            self.runtime.gate.in_chat = True
+            self.runtime.gate.outside_chat = chat.get("outside")   # web text read since the person last wrote
             await emit({"type": "turn_start", "model": model_key, "title": chat["title"]})
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
@@ -666,6 +665,7 @@ class ChatAgent:
         finally:
             self.runtime.attribution = {}
             self.runtime.gate.outside_chat = None
+            self.runtime.gate.in_chat = False
             self.active = None
             self._stream_task = None
 
@@ -817,7 +817,7 @@ class ChatAgent:
         if not found:
             return websearch.describe(found, by, problems), True
         from ..agent.server import outside
-        return outside(self.runtime, "web search results", websearch.describe(found, by, problems)), False
+        return outside(self.runtime, "web search results", websearch.describe(found, by, problems), web=True), False
 
     # ------------------------------------------------------------------ Claude Code bridge (temporary)
 
@@ -1089,8 +1089,7 @@ class ChatAgent:
                                        "compare": {"models": keys, "lanes": [], "chosen": 0}}
             if attachments:
                 message["attachments"] = attachments
-                if any(a.get("text") for a in attachments):
-                    chat["outside"] = "a file the person attached"
+            chat.pop("outside", None)
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
@@ -1327,9 +1326,15 @@ class ChatAgent:
                                   "; keeps " + ", ".join(s.keep) if s.keep else "") for s in recipe.stages]
         old = next((i for i in self.know.items(project) if i.kind == kind and i.name == name and i.scope == where),
                    None)
-        go = await self._ask_human(call["id"], emit, ApprovalRequest(
-            "Keep the %s “%s” for %s?%s" % (kind, name, whom, " It replaces the one kept before." if old else ""),
-            shown))
+        request = ApprovalRequest("Keep the %s “%s” for %s?%s" % (kind, name, whom, " It replaces the one kept before."
+                                                                if old else ""), shown)
+        why = "keeping a %s changes nothing in the lab; it can be read and deleted in Settings → Memory" % kind
+        go = self.runtime.gate.auto_simple(request, why)
+        if go:   # shown in the chat as auto mode's, like an auto-approved drive change
+            await emit({"type": "approval", "call_id": call["id"], "id": "auto-" + call["id"], "title": request.title,
+                        "items": request.items, "auto": True, "reasons": [why]})
+        else:
+            go = await self._ask_human(call["id"], emit, request)
         if not go:
             return "not kept: the person declined", True
         try:

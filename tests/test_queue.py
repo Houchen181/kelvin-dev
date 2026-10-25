@@ -138,3 +138,20 @@ def test_a_queue_is_not_dry_run_unless_asked(tmp_path, monkeypatch):
     assert rt.queue_start().startswith("queue started")
     rt._queue_thread.join(120)
     assert [i.status for i in rt.queue.items] == ["done", "done"] and rehearsed == []
+
+
+def test_auto_mode_starts_a_low_risk_queue_without_asking(tmp_path):
+    rt = runtime(tmp_path, [])                                  # nobody answers: asking would be an error
+    rt.gate.auto = True
+    rt.queue_add(SWEEP)
+    rt.queue_add(FIELD.replace("[0.5, 1]", "[0.25, 0.5]"))     # a sixth of the way to the magnet's limit
+    out = rt.queue_start()                                      # rehearsed on the simulated lab, every range small
+    assert out.startswith("queue started"), out
+    rt._queue_thread.join(120)
+    assert [i.status for i in rt.queue.items] == ["done", "done"]
+    asks = [e for e in rt.gate.log.events() if e.get("type") == "ask"]
+    assert asks[0]["answer"] == "auto-approved" and "the dry run finished cleanly" in asks[0]["note"]
+    rt.gate.approver = ScriptedApprover([False])
+    rt.queue_add("step: gate high\nset: { smu.V: 10 }")         # beyond the lab's auto range for smu.V
+    assert rt.queue_start().startswith("declined")
+    assert "Auto mode does not cover this: smu.V leaves its auto range" in str(rt.gate.approver.requests[0])

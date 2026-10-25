@@ -40,6 +40,6 @@ Tools:
 - **Kelvin itself:** `kelvin_help` searches Kelvin's own documentation and the map of its portal: where a person approves, changes limits, reviews an instrument or a card, protects a device.
 - **Literature and the web:** `search_papers`, `read_paper`; `read_web_page` (a page or a PDF on the web, with its links) and `save_manual` (keeps an instrument's manual, for its card and its folder). In the Kelvin app also `web_search`, through the model service's own web search.
 
-Text from outside the lab (web pages, papers, manuals, instruments' replies) comes back marked as `<outside_text>`; in auto mode, drive changes ask a person for 30 minutes after any was read.
+Text from outside the lab (web pages, papers, manuals, instruments' replies) comes back marked as `<outside_text>`; in auto mode, drive changes ask a person for 30 minutes after the agent read text from the web.
 
 **Security limit:** the access key keeps the model from approving its own requests through its tools. An agent that also has a shell on the same PC could still reach the page. For real hardware, run Kelvin on a machine where the agent has no shell.

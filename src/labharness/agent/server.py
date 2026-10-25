@@ -132,11 +132,13 @@ OUTSIDE = '<outside_text from="%s">\n%s\n</outside_text>'
 
 
 def outside(rt: LabRuntime, source: str, text: str, web: bool = False) -> str:
-    """A tool's text from outside the lab, marked as data for the model; auto mode asks a person for a while.
-    web: a tool that reads the web, which says so itself, unmarked, while searching outside the lab is switched off."""
-    if web and not rt.literature.enabled:
-        return text
-    rt.gate.note_outside(source)
+    """A tool's text from outside the lab, marked as data for the model. web: text from the open web, which also
+    makes auto mode ask a person for a while (an instrument's manual, a maker's files or an instrument's reply
+    don't); while searching outside the lab is switched off, such a tool says so itself, unmarked."""
+    if web:
+        if not rt.literature.enabled:
+            return text
+        rt.gate.note_outside(source)
     return OUTSIDE % (source, text)
 WEB = ToolAnnotations(readOnlyHint=True, openWorldHint=True)   # reads the public literature, never the lab
 ACT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)

@@ -137,3 +137,37 @@ def test_lab_config_auto_rules_are_checked():
         with pytest.raises(ConfigError) as e:
             load_lab_config(LAB.format(fraction=fraction, auto=auto), reg)
         assert msg in str(e.value)
+
+
+ATTODRY = """
+lab: attoDRY on its twin
+instruments:
+  attodry: { card: attocube/attodry, address: "lib://COM4?python=py", limits: { T_set: [1.65, 300], B_set: [-1, 1] } }
+"""
+
+
+def test_a_cryostat_without_physics_twin_dry_runs_and_auto_mode_covers_small_steps(tmp_path):
+    pytest.importorskip("mcp")
+    from labharness import ScriptedApprover, build_virtual_lab
+    from labharness.agent.runtime import LabRuntime
+    from labharness.sim.twin import GenericTwin
+    lab = build_virtual_lab(config=ATTODRY)
+    assert isinstance(lab.instruments["attodry"].backend, GenericTwin)
+    rt = LabRuntime(lab, ScriptedApprover([]), tmp_path / "data")           # nobody answers: asking would fail
+    plan = ("plan: cool\nsetup: {attodry.temperature_control: on}\nsweep: {attodry.T_set: {values: [4, 5]}}\n"
+            "measure: [attodry.T]")
+    assert rt.simulate(plan).splitlines()[0].endswith("done: 2 points, 0 s")   # the reading follows its set point
+    rt.gate.auto = True
+    assert rt.set("attodry", "temperature_control", True).endswith("(auto-approved)")
+    assert rt.set("attodry", "T_set", 4).endswith("(auto-approved)")         # 1% of the way from safe to the limit
+    assert "run" in rt.run(plan) and logged(tmp_path / "data")[-1]["answer"] == "auto-approved"
+
+
+def test_auto_mode_says_how_a_person_ends_the_doubt(lab, make_gate):
+    gate, approver = make_gate([False])
+    gate.auto = True
+    smu = lab.instruments["smu"]
+    smu.backend.simulated, smu.card.status = False, "draft"                   # a real instrument on a draft card
+    assert gate.set("smu", "V", 0.5).message.startswith("declined")
+    assert "Auto mode does not cover this: nothing on smu is automatic until a person reviews it: mark its card " \
+        "reviewed (Lab → Cards… → Mark reviewed)" in approver.requests[0].items

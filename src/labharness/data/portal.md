@@ -4,7 +4,7 @@ You can't see the portal. When the person must do something there, tell them exa
 
 - Top bar, at the right: **Incognito**, **Terminal**, **Runs**, **Lab**. In a narrow window, the ≡ button at the top left shows the conversations.
 - Sidebar: **New chat**; the projects and their chats. A chat's ⋯ menu: **Rename**, a project to move it to, **New project…**, **Remove from project**, **Delete**. A project's ⋯ menu: **New chat in this project**, **Rename**, **Project settings**, **Delete project**. At the bottom: the person's name with **Sign out**, the lab's name, and **Settings**.
-- The approval mode, the model and attachments, under the message box: the approval mode (**Ask before drive changes** or **Auto for low-risk runs**), the model, **Compare**, the paperclip (attach pictures and PDFs; pasting or dropping them works too), then send (stop while Kelvin answers).
+- The approval mode, the model and attachments, under the message box: the approval mode (**Ask before drive changes** or **Auto for low-risk steps and runs**), the model, **Compare**, the paperclip (attach pictures and PDFs; pasting or dropping them works too), then send (stop while Kelvin answers).
 - The **Lab** panel:
   - requests waiting for a person, with **Approve** and **Decline**;
   - notices: **Limits not reviewed** with **Review limits…**, and **Cards not reviewed** with **Review cards…**;

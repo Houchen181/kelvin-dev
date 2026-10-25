@@ -320,3 +320,23 @@ def test_in_a_chat_kelvin_sets_up_an_instrument_it_has_no_card_for(tmp_path, ben
     assert rt.lab.instruments["smu2"].card.status == "draft" and rt.lab.config.unreviewed() == ["smu2"]
     assert (tmp_path / "instruments" / "smu2" / "manual.pdf").exists() and settings.get("lab") == "mine"
     assert not any(e["type"] == "approval" for e in events)
+
+
+def test_auto_mode_adds_and_tries_at_an_address_the_scan_missed(tmp_path, bench):
+    rt = file_runtime(tmp_path, SMU_ONLY)
+    rt.scan()
+    rt.gate.auto = True                                                     # nobody answers: asking would fail
+    bench.devices["GPIB0::9::INSTR"] = Device("srs/sr830", name="sr830b")   # plugged in after the scan
+    tried = rt.try_card("srs/sr830", "GPIB0::9::INSTR")
+    assert "sr830" in tried.lower() and not tried.startswith("declined")   # trying only reads
+    assert rt.add_instrument("GPIB0::9::INSTR", card="srs/sr830").startswith("added lockin")
+    asks = [e for e in events(tmp_path, "ask")]
+    assert [e["answer"] for e in asks] == ["auto-approved", "auto-approved"]
+    assert "did not find an instrument at GPIB0::9::INSTR" in asks[1]["request"]
+    rt.gate.approver = ScriptedApprover([False])
+    assert rt.set("lockin", "amplitude", 0.1).startswith("declined")        # its outputs still ask
+    rt.gate.note_outside("a web page")                                      # after text from the web: a person
+    bench.devices["GPIB0::12::INSTR"] = Device("srs/sr830", name="sr830c")
+    rt.gate.approver = ScriptedApprover([False])
+    assert rt.add_instrument("GPIB0::12::INSTR", card="srs/sr830").startswith("declined")
+    assert "read text from the web (a web page)" in str(rt.gate.approver.requests[0])

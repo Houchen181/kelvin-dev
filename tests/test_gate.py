@@ -227,7 +227,8 @@ def test_instrument_kelvin_added_asks_even_inside_the_envelope_and_in_auto_mode(
     assert not problems and "isn't sure about lockin" in items[0] and "lockin.amplitude" in grants
     assert gate.auto_plan(grants, type("Sim", (), {"ok": True})()) == (False, [
         "lockin.amplitude: Kelvin added it to the lab itself, and its limits are the maker's: nobody has reviewed "
-        "them for this setup, so a person approves it"])
+        "them for this setup, so a person approves it until they check its limits and mark them reviewed (Lab → "
+        "Set up… → Limits reviewed…)"])
     with gate.preapproved(grants):                                          # the person approved the plan
         assert "plan approval" in gate.set("lockin", "amplitude", 0.01).message
     lockin.config.added_by = ""                                             # a person reviewed the limits

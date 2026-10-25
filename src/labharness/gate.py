@@ -120,7 +120,7 @@ def _same(spec: ParamSpec, a: Any, b: Any) -> bool:
     return a == b
 
 
-OUTSIDE_S = 1800   # how long auto mode pauses after the model read outside text, for clients without chats
+OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
 
 
 class SafetyGate:
@@ -138,6 +138,7 @@ class SafetyGate:
         # steer the model, so auto mode asks a person instead. outside_chat: the portal's chat has read some.
         self.outside: Optional[Tuple[float, str]] = None
         self.outside_chat: Optional[str] = None
+        self.in_chat = False   # a portal chat's turn: the chat's own account of web text counts, not the clock's
         self._grants: Dict[str, Allowed] = {}
         self._standing: Dict[str, Allowed] = {}   # what a person approved for a whole queue of scans, while it runs
         self._undo: List[Tuple[str, str, Any]] = []
@@ -337,18 +338,29 @@ class SafetyGate:
             key, 100 * worst, 100 * fraction)
 
     def note_outside(self, source: str) -> None:
-        """The model has read text from outside the lab: until it has been a while, auto mode asks a person."""
+        """The model has read text from the web: until it has been a while, auto mode asks a person (a portal chat
+        keeps its own account instead, in_chat and outside_chat)."""
         self.outside = (time.monotonic(), source)
 
     def outside_reason(self) -> Optional[str]:
-        """Why auto mode asks a person now, because of outside text the model has read; None when it hasn't."""
+        """Why auto mode asks a person now, because the model read text from the web; None when it hasn't. In a
+        portal chat, until the person writes again in it; for other clients, for OUTSIDE_S."""
         if self.outside_chat:
-            return ("this chat has read text from outside the lab (%s), which could try to steer a model, so a "
-                    "person approves" % self.outside_chat)
-        if self.outside is not None and time.monotonic() - self.outside[0] < OUTSIDE_S:
-            return ("Kelvin read text from outside the lab (%s) in the last %d minutes, which could try to steer a "
-                    "model, so a person approves" % (self.outside[1], OUTSIDE_S // 60))
+            return ("this chat has read text from the web (%s) since the person last wrote, which could try to "
+                    "steer a model, so a person approves" % self.outside_chat)
+        if not self.in_chat and self.outside is not None and time.monotonic() - self.outside[0] < OUTSIDE_S:
+            return ("Kelvin read text from the web (%s) in the last %d minutes, which could try to steer a model, "
+                    "so a person approves" % (self.outside[1], OUTSIDE_S // 60))
         return None
+
+    def review_steps(self, inst: Instrument) -> str:
+        """Where a person ends Kelvin's uncertainty about an instrument (unsure), in the portal."""
+        steps = []
+        if inst.card.status == "draft":
+            steps.append("mark its card reviewed (Lab → Cards… → Mark reviewed)")
+        if self.lab.config.observe_only or inst.config.added_by:
+            steps.append("check its limits and mark them reviewed (Lab → Set up… → Limits reviewed…)")
+        return " and ".join(steps)
 
     def auto_plan(self, grants: Dict[str, Allowed], dry_run: Any) -> Tuple[bool, List[str]]:
         """Can auto mode approve a plan with these drive ranges? Needs a clean dry run and every drive low-risk."""
@@ -364,7 +376,8 @@ class SafetyGate:
             inst, spec = self.lab.resolve(key)
             unsure = self.unsure(inst)
             if unsure:
-                blockers.append("%s: %s, so a person approves it" % (key, unsure))
+                blockers.append("%s: %s, so a person approves it until they %s" % (key, unsure,
+                                                                                  self.review_steps(inst)))
                 continue
             values = sorted(allowed.values, key=str) if allowed.values is not None else [allowed.lo, allowed.hi]
             ok, why = self.auto_verdict(inst, spec, values)
@@ -372,6 +385,19 @@ class SafetyGate:
         if blockers:
             return False, blockers
         return True, fine + ["the dry run finished cleanly"]
+
+    def auto_simple(self, request: ApprovalRequest, why: str) -> bool:
+        """Auto mode's yes to a simple, safe request that drives nothing (trying a card, adding an instrument at an
+        address, keeping a skill): approved without asking, and said so. False when auto mode is off, or the model
+        has read text from the web (then the request says so, and a person answers)."""
+        if not self.auto:
+            return False
+        outside = self.outside_reason()
+        if outside:
+            request.items.append("Auto mode does not cover this: " + outside)
+            return False
+        self.auto_approve(request, [why])
+        return True
 
     def auto_approve(self, request: ApprovalRequest, reasons: List[str]) -> None:
         """Approve without asking, and say so: in the event log and to the human's screen."""
@@ -508,7 +534,8 @@ class SafetyGate:
                     if not self.auto:
                         ok, why = False, ""
                     elif unsure:
-                        ok, why = False, "nothing on %s is automatic until a person reviews it" % inst.name
+                        ok, why = False, "nothing on %s is automatic until a person reviews it: %s" % (
+                            inst.name, self.review_steps(inst))
                     elif self.outside_reason():
                         ok, why = False, self.outside_reason()
                     else:

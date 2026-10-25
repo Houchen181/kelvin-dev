@@ -1365,7 +1365,19 @@ class LabRuntime:
             if lines:
                 request = ApprovalRequest(title, lines + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
-                if not self.gate.ask(request):
+                covered = False
+                if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
+                    failed = []
+                    if not dry_run:
+                        duration, failed = self._rehearse(items)
+                    rehearsal = type("Rehearsal", (), {"ok": not failed})()
+                    covered, why = self.gate.auto_plan(grants, rehearsal)
+                    if covered:
+                        self.gate.auto_approve(request, why)
+                    else:
+                        request.items.append("Auto mode does not cover this: " + "; ".join(
+                            why + ["the dry run: %s" % f for f in failed[:2]]))
+                if not covered and not self.gate.ask(request):
                     note = " (%s)" % request.note if request.note else ""
                     self.gate.log.write("queue_declined", by=by)
                     return "declined: the queue did not start%s" % note
@@ -1980,7 +1992,8 @@ class LabRuntime:
             request = ApprovalRequest("Try a card on %s?" % instrument, [
                 "Kelvin's last scan did not find an instrument at %s. Trying the %s card asks it who it is and reads "
                 "its readings; it sets nothing." % (instrument, card.model)])
-            if not self.gate.ask(request):
+            if not self.gate.auto_simple(request, "trying a card only asks the instrument who it is and reads it") \
+                    and not self.gate.ask(request):
                 note = " (%s)" % request.note if request.note else ""
                 return "declined: the person did not want Kelvin to try %s%s" % (instrument, note)
             address = instrument
@@ -2692,7 +2705,10 @@ class LabRuntime:
             if asks:
                 request = ApprovalRequest("Add %s to the lab?" % new, asks + [
                     "Every output change on it still asks you until you review its limits."])
-                if not self.gate.ask(request):
+                simple = len(asks) == 1 and on_file   # only an address the scan missed: it connects and reads
+                if not (simple and self.gate.auto_simple(request, "adding an instrument connects it and reads it; "
+                                                                  "every output change on it still asks")) \
+                        and not self.gate.ask(request):
                     note = " (%s)" % request.note if request.note else ""
                     return "declined: the person did not want %s added%s" % (new, note)
             try:   # on the person's lab: connect just this one; from the virtual lab: their whole lab, with it
@@ -3230,9 +3246,11 @@ class LabRuntime:
                     never.append(key)
                 elif isinstance(rule, Allowed):
                     ranges.append("%s %s" % (key, rule.show(card.params[param])))
-        rule = ("drive changes and runs go ahead without asking when every drive stays within %.0f%% of the way from "
-                "its safe value to its lab limit and switches move at most one step from safe; runs also need a clean "
-                "dry run" % (100 * cfg.auto_fraction))
+        rule = ("drive changes, runs and queues go ahead without asking when every drive stays within %.0f%% of the way "
+                "from its safe value to its lab limit and switches move at most one step from safe; runs and queues "
+                "also need a clean dry run. Trying a card, adding an instrument at an address and keeping a skill go "
+                "ahead too. Instruments Kelvin isn't sure about, installs and code on boards still ask"
+                % (100 * cfg.auto_fraction))
         if ranges:
             rule += ". Own auto ranges: " + ", ".join(ranges)
         if never:

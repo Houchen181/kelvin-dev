@@ -120,7 +120,7 @@ def test_attached_photos_and_pdfs(tmp_path):
     store, chat, events, agent = run_day(tmp_path, provider, ("is this wired right?",), attach)
     message = chat["messages"][0]
     assert [a["name"] for a in message["attachments"]] == ["wiring.png", "sheet.pdf"]
-    assert message["attachments"][1]["pages"] == 1 and chat["outside"] == "a file the person attached"
+    assert message["attachments"][1]["pages"] == 1 and "outside" not in chat   # marked for the model, no pause
     sent = seen[0][0]
     assert len(sent["images"]) == 1 and base64.b64decode(sent["images"][0]["data"]) == photo
     assert sent["attached_text"].startswith('<outside_text from="sheet.pdf, a PDF the person attached')

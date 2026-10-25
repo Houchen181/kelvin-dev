@@ -173,3 +173,19 @@ def test_unshared_work_keeps_its_know_how_in_its_project(parts):
     context = agent.context(store.load(incognito["id"]))
     names = [t["name"] for t in context["tools"]]
     assert "use_skill" in names and "save_skill" not in names and "- check-a-result:" in context["system"]
+
+
+def test_auto_mode_keeps_a_skill_without_asking(parts):
+    runtime_, settings, store = parts
+    runtime_.gate.auto = True                                    # a person switched auto mode on
+    main = bot("main", [tool("save_skill", {"name": "cool-down", "description": "Cooling the cryostat",
+                                            "steps": "1. Heater off.\n2. Wait for base."}), say("Kept.")])
+    client, headers = client_for(parts, {"main": main})
+    with client:
+        chat = client.post("/api/chats", json={"model": "main:m1"}, headers=headers).json()
+        events = stream_turn(client, headers, chat["id"], "keep that procedure", "main:m1")
+        items = client.get("/api/know?scope=global", headers=headers).json()["items"]
+    shown = next(e for e in events if e["type"] == "approval")
+    assert shown["auto"] and "changes nothing in the lab" in shown["reasons"][0]
+    assert any(i["name"] == "cool-down" and i["scope"] == "global" for i in items)
+    assert not runtime_.approver.pending_list()                  # nobody was asked

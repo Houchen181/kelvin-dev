@@ -27,7 +27,9 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 
 ### Text from outside the lab
 
-Web pages, papers, manuals, makers' example scripts, an instrument's or a board's replies and PDFs a person attaches can contain text written to steer a model. Kelvin's tools mark such text as outside text (`<outside_text from="...">`), and the models are told it is information, never instructions. In auto mode, once a chat has read outside text, its drive changes and runs ask a person instead of going ahead, and so do any for 30 minutes after outside text was read anywhere (an agent through MCP, too). The request says why.
+Web pages, papers, manuals, makers' example scripts, an instrument's or a board's replies and PDFs a person attaches can contain text written to steer a model. Kelvin's tools mark such text as outside text (`<outside_text from="...">`), and the models are told it is information, never instructions.
+
+Text from the open web (web pages, web search results, papers) is where such text would come from, so it also pauses auto mode: in a chat that has read some, drive changes and runs ask a person until the person writes again in that chat; for an agent through MCP, for 30 minutes. The request says why. An instrument's manual, a maker's files, an instrument's reply and a file a person attached are marked for the model but don't pause auto mode: reading the manual is part of using an instrument well.
 
 ### Checked like an experiment, not tested like code
 
@@ -42,15 +44,24 @@ Language models are trained largely on programming, where every step is tested a
 
 ### Auto mode
 
-A person can switch approvals from **Ask before drive changes** to **Auto for low-risk runs**, in the portal (next to the model picker) or on the approval page. No agent tool can switch it. Kelvin goes back to asking every time it restarts.
+A person can switch approvals from **Ask before drive changes** to **Auto for low-risk steps and runs**, in the portal (next to the model picker) or on the approval page. No agent tool can switch it. Kelvin goes back to asking every time it restarts. Auto mode lets everything simple and safe go ahead without asking: small drive changes, runs and queues, and the requests that change nothing on the sample.
 
-In auto mode, a drive change or a run goes ahead without asking when all of these hold:
+In auto mode, a drive change, a run or a queue goes ahead without asking when all of these hold:
 - Every drive stays within `auto_fraction` (default 25%) of the way from its safe value to its lab limit. Kelvin judges the target's distance from safe, not the step size, so creeping up in small steps doesn't get around the rule.
 - Switches (outputs, ranges) move at most one step from safe.
-- For a run, its dry run finishes cleanly. In auto mode a run is dry-run first, since no person looks at it.
+- For a run, its dry run finishes cleanly. In auto mode a run is dry-run first, since no person looks at it; a queue is rehearsed on the simulated lab as a whole, in order.
 - The lab config doesn't exclude the instrument.
+- Kelvin is sure about the instrument: its card has been reviewed, and if Kelvin added it to the lab, its limits have been reviewed too (see "When Kelvin isn't sure, it asks" above).
+- The chat hasn't read text from the web since you last wrote in it ([below](#text-from-outside-the-lab)).
 
-Anything else asks as usual, and the request says why auto mode didn't cover it. Each auto-approval shows in the conversation with its reasons and is written to the event log. Limits, interlocks, guard readings and Stop work the same in both modes.
+Auto mode also says yes, unless the chat has read text from the web since you last wrote, to:
+- trying a card on an address the last scan didn't find: it only asks the instrument who it is and reads it;
+- adding an instrument at such an address to your lab: it connects it and reads it, and every output change on it still asks until you review its limits;
+- keeping a skill or a recipe: it changes nothing in the lab, and you can read and delete it in Settings → **Memory**.
+
+It never covers what Kelvin can't judge, and these always ask: changes on an instrument Kelvin isn't sure about (a card nobody has checked could be in the wrong units), raw commands it can't classify, installing packages, running code on a board or over SSH, removing an instrument's environment, switching an instrument on, leaving a virtual lab you chose, and a second opinion's "stop".
+
+Anything else asks as usual, and the request says why auto mode didn't cover it, and when Kelvin isn't sure about an instrument, what ends that (**Lab** → **Cards…** → **Mark reviewed**, or **Lab** → **Set up…** → **Limits reviewed…**). Each auto-approval shows in the conversation with its reasons and is written to the event log. Limits, interlocks, guard readings and Stop work the same in both modes.
 
 Whoever sets up the lab writes the rule in the lab config:
 
