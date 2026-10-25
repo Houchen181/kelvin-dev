@@ -3203,6 +3203,13 @@
     const unreviewed = s.unreviewed || [];
     $("lab-observe").hidden = !unreviewed.length;
     if (unreviewed.length) $("lab-observe-who").textContent = "Kelvin added " + andList(unreviewed) + " itself.";
+    const drafts = s.drafts || [];   // real instruments whose card nobody has checked yet
+    $("lab-drafts").hidden = !drafts.length;
+    if (drafts.length) {
+      $("lab-drafts-who").textContent = drafts.length === 1
+        ? drafts[0] + " runs on a draft card: Kelvin asks you before each setting or output change on it until you check the card against the instrument and mark it reviewed."
+        : andList(drafts) + " run on draft cards: Kelvin asks you before each setting or output change on them until you check their cards against the instruments and mark them reviewed.";
+    }
     showWhy(s);
     const busySetup = s.setup && SETUP_BUSY.has(s.setup.state);
     $("lab-setting-up").hidden = !busySetup;
@@ -3329,7 +3336,25 @@
           try { await api("/api/cards/delete", { body: { id: c.id || c.file.replace(/\.yaml$/, "") } }); } catch (e) { $("cards-msg").textContent = e.message; }
           loadCards();
         }));
-    }) : [h("li", { class: "memory-empty" }, "No cards of your own yet.")]));
+    }) : [h("li", { class: "memory-empty" }, "No cards of your own yet.")]), ...(r.kelvins || []).map(kelvinsCard));
+  }
+  function kelvinsCard(c) {   // one of Kelvin's own cards that came as a draft and that this lab uses
+    const reviewed = c.status === "lab-verified";
+    const flip = h("button", { class: "link soft", type: "button" }, reviewed ? "Back to draft" : "Mark reviewed");
+    flip.addEventListener("click", () => setCardStatus(c, reviewed ? "draft" : "lab-verified"));
+    const view = h("button", { class: "link soft", type: "button" }, "View");
+    view.addEventListener("click", () => {
+      const open = item.querySelector(".know-body");
+      if (open) { open.remove(); view.textContent = "View"; return; }
+      item.querySelector(".memory-body").append(h("pre", { class: "know-body" }, c.yaml));
+      view.textContent = "Hide";
+    });
+    const item = h("li", { class: "memory-note" },
+      h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, reviewed ? "reviewed" : "draft"),
+      h("div", { class: "memory-body" }, h("span", {}, c.model),
+        h("span", { class: "memory-meta" }, c.id + " · comes with Kelvin · used by " + c.instruments.join(", "))),
+      h("span", { class: "card-actions" }, view, flip));
+    return item;
   }
   function showCardEditor(text, editing, problems, warnings, notes) {
     CARDS.editing = editing || null;
@@ -4739,6 +4764,8 @@
     $("lab-unlock").addEventListener("click", unlockLab);
     $("lab-setup-again").addEventListener("click", setupAgain);
     $("lab-observe-review").addEventListener("click", openLabSetup);
+    $("lab-drafts-review").addEventListener("click", openCards);
+    $("open-cards-lab").addEventListener("click", openCards);
     $("lab-why-details").addEventListener("click", toggleWhyDetails);
     $("lab-why-setup").addEventListener("click", openLabSetup);
     document.querySelector(".lab-chip").addEventListener("click", () => toggleLab(true));

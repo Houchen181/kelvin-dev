@@ -3276,6 +3276,8 @@ class LabRuntime:
                 "lab_info": self.lab_info,
                 "unavailable": self._unavailable_view(),
                 "unreviewed": self.lab.config.unreviewed(), "setup": self.setup_status, "survey": self.last_survey,
+                "drafts": sorted(n for n, i in self.lab.instruments.items()
+                                 if not i.simulated and i.card.status == "draft"),
                 "watches": self.monitor.list(),
                 "alarms": [a.view() for a in self.monitor.alarms[:10]],
                 "notices": list(self.notifier.notices)[-20:],

@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from mcp import Client
 
 from ..agent.runtime import LabRuntime
+from .. import guide
 from ..agent.server import INSTRUCTIONS, OUTSIDE
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
@@ -47,7 +48,9 @@ project's reading list; never invent a reference. Queries to search_papers leave
 physics, not confidential sample or project details.
 A user message may begin with a <second_opinion> block: another model's review of your previous answer, asked for by
 the user. Weigh it on its merits and say briefly where you agree or not. A run_plan result may start with a second
-opinion on the plan; mention its concerns if they matter."""
+opinion on the plan; mention its concerns if they matter.
+
+""" + guide.portal_map()   # where things are in the portal, so the model never guesses at a menu
 COMPARE = """# Comparing models
 The user is asking several models this same message and will compare the answers side by side. In this answer you
 may read the lab (status, values, runs, dry runs) but not change it. If something should be set or run, say exactly

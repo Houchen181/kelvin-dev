@@ -7,8 +7,11 @@ reviews the card and marks it lab-verified. Only a person can do that, and Kelvi
 has reviewed."""
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -243,6 +246,51 @@ def set_status(cards_dir: Path, card_id: str, status: str) -> Card:
         raise ValueError("the card has problems: " + "; ".join(problems[:8]))
     path.write_text(new, encoding="utf-8")
     return card
+
+
+REVIEWS = "_reviewed.json"   # in the person's cards folder: Kelvin's own draft cards they reviewed for their lab
+
+
+def card_sha(card: Card) -> str:
+    """The card's file as it is, so a review holds only for the card that was reviewed."""
+    try:
+        return hashlib.sha256(Path(card.source).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def builtin_reviews(cards_dir: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+    try:
+        data = json.loads((Path(cards_dir) / REVIEWS).read_text(encoding="utf-8")) if cards_dir else {}
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def review_builtin(cards_dir: Path, card: Card, status: str, by: str = "") -> None:
+    """A person marks one of Kelvin's own draft cards reviewed for their lab (lab-verified), or takes that back
+    (draft). Kept with the card's content: a later Kelvin whose card changed asks again until it is reviewed."""
+    if status not in ("lab-verified", "draft"):
+        raise ValueError("a card that comes with Kelvin is marked reviewed (lab-verified) or back to draft")
+    reviews = builtin_reviews(cards_dir)
+    if status == "draft":
+        reviews.pop(card.id, None)
+    else:
+        reviews[card.id] = {"status": status, "sha": card_sha(card), "by": by, "at": time.strftime("%Y-%m-%d")}
+    folder = Path(cards_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / (REVIEWS + ".tmp")
+    tmp.write_text(json.dumps(reviews, indent=1), encoding="utf-8")
+    os.replace(tmp, folder / REVIEWS)
+
+
+def apply_reviews(registry: Any, cards_dir: Optional[Path]) -> None:
+    """Kelvin's own draft cards a person reviewed for this lab count as reviewed, while the card is unchanged."""
+    for card_id, review in builtin_reviews(cards_dir).items():
+        if card_id in registry:
+            card = registry.get(card_id)
+            if isinstance(review, dict) and review.get("sha") and review["sha"] == card_sha(card):
+                card.status = str(review.get("status") or card.status)
 
 
 def delete(cards_dir: Path, card_id: str) -> None:

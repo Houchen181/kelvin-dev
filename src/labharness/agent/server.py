@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
 
-from .. import carddraft, expr
+from .. import carddraft, expr, guide
 from .._version import __version__
 from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
 from ..clock import ScaledClock, SimClock
@@ -53,6 +53,9 @@ You are connected to a physics lab through Kelvin.
   filters, settling), read its manual: instrument_info, then search_manual for the commands and their limits. Work
   from what the manual says, cite the page, and say so if it does not cover something.
 - If something looks wrong, stop and tell the user. Moving a drive back toward safe runs without asking.
+- What only a person does in Kelvin (approving, changing limits, reviewing an instrument Kelvin added or a draft
+  card, protecting a device, switching an instrument on) happens in Kelvin's portal. Tell them exactly where: look
+  it up with kelvin_help, never guess a menu or a button.
 - Before a long or unattended run, offer to watch the readings that matter (watch); alarms reach the user even when
   they are away. lab_status lists active alarms; mention any you see.
 - To plan an experiment, first look at what is known: search_papers, read the most relevant one or two, then
@@ -142,6 +145,14 @@ FETCH = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHin
 
 def build_server(rt: LabRuntime) -> MCPServer:
     server = MCPServer("kelvin", instructions=INSTRUCTIONS, version=__version__)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def kelvin_help(question: str) -> str:
+        """How Kelvin itself works and where things are in its portal, from Kelvin's own documentation: where a
+        person approves, changes an instrument's limits, marks an instrument Kelvin added or a draft card reviewed,
+        protects a device, sets up instruments, queues runs, keeps skills; what auto mode allows. Look it up before
+        telling a person where to click."""
+        return guide.search(question)
 
     @server.tool(annotations=READ, structured_output=False)
     def lab_status() -> str:

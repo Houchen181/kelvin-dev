@@ -43,7 +43,7 @@ kelvin-app = "labharness.desktop:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-labharness = ["data/*.yaml", "data/cards/*.yaml", "data/cards/*/*.yaml", "data/bridge/*.py", "data/skills/*.md", "agent/ui.html", "web/static/*"]
+labharness = ["data/*.yaml", "data/*.md", "data/cards/*.yaml", "data/cards/*/*.yaml", "data/bridge/*.py", "data/skills/*.md", "agent/ui.html", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

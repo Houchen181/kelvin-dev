@@ -211,7 +211,7 @@ def test_reading_list_in_projects_and_reports(runtime, tmp_path):
         assert "## Reading list" in bot.systems[-1] and "[id doi:10.1021/acs.nanolett.2c02863] — strain tuning" in bot.systems[-1]
         loose = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
         stream_turn(client, headers, loose["id"], "hello", "scripted:m1")
-        assert "save_paper" not in bot.tool_names[-1] and "Reading list" not in bot.systems[-1]
+        assert "save_paper" not in bot.tool_names[-1] and "## Reading list" not in bot.systems[-1]
 
         runtime.run("plan: scan\nsweep: {stage.position: {from: 0, to: 2, step: 1}}\nmeasure: [lockin.X]\n")
         r = client.post("/api/reports", json={"scope": "project", "chat_id": chat["id"]}, headers=headers)

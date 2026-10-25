@@ -1,0 +1,25 @@
+# Where things are in Kelvin's portal
+
+You can't see the portal. When the person must do something there, tell them exactly where, with the names in bold below as the portal shows them; never guess a menu or a button. For anything not here, look it up with kelvin_help; if it isn't there either, say you don't know where it is.
+
+- Top bar, at the right: **Incognito**, **Terminal**, **Runs**, **Lab**. In a narrow window, the ≡ button at the top left shows the conversations.
+- Sidebar: **New chat**; the projects and their chats. A chat's ⋯ menu: **Rename**, a project to move it to, **New project…**, **Remove from project**, **Delete**. A project's ⋯ menu: **New chat in this project**, **Rename**, **Project settings**, **Delete project**. At the bottom: the person's name with **Sign out**, the lab's name, and **Settings**.
+- The approval mode, the model and attachments, under the message box: the approval mode (**Ask before drive changes** or **Auto for low-risk runs**), the model, **Compare**, the paperclip (attach pictures and PDFs; pasting or dropping them works too), then send (stop while Kelvin answers).
+- The **Lab** panel:
+  - requests waiting for a person, with **Approve** and **Decline**;
+  - notices: **Limits not reviewed** with **Review limits…**, and **Cards not reviewed** with **Review cards…**;
+  - **Sample**: the device mounted now (a list), **New device…**, and **Protect this device…** for the mounted device (**Change…** once it has protection);
+  - **Hands on the sample** (and **Unlock…** while it is locked);
+  - **Instruments**, with **Set up…** and **Cards…**: a row per instrument; clicking a row shows its readings and drives, and the switch at its right turns it on or off for Kelvin;
+  - **Watches**, with **Add…**; **Activity**, with **Everyone**.
+- **Lab** → **Set up…** opens the **Instruments** dialog: **Virtual lab** or **My instruments**; **Limits reviewed…** (while instruments Kelvin added wait for review) and **Set up again**; the instrument folders, with their manuals; **Scan**, and adding an instrument by its address with a card (**Add**); the **Lab config**, the lab's YAML: for each instrument its `card`, `address`, `limits: {parameter: [min, max]}` in the card's units, `rates` and `auto` ranges; **Save and connect**.
+- To change an instrument's limits: **Lab** → **Set up…**, edit its `limits` in the **Lab config**, **Save and connect**. Only a person does this.
+- Instruments Kelvin added itself: once the person has checked their limits, **Lab** → **Set up…** → **Limits reviewed…** (or **Review limits…** in the Lab panel's notice). Until then every output change on them asks a person.
+- A draft card: **Lab** → **Cards…** (or **Review cards…** in the Lab panel's notice) opens **Your instrument cards**: each card with **Edit**, **Mark reviewed** (or **Back to draft**) and a delete button; **Draft the card** from a manual or example scripts; **Try it** on an address; **Check**; **Save card**. Until its card is marked reviewed, every setting and output change on that instrument asks a person.
+- **Protect this device…** (in the Lab panel, under **Sample**; **Change…** once it has protection): the mounted device's gates (their limits from the dielectric, a leakage stop) and **Other limits**, then **Save**.
+- The **Runs** pane: a tab per run with its progress, plots, **Stop**, its report and data; **Queue**; **Report…**; earlier runs from its clock button.
+- The **Terminal**: talk to Kelvin, or `/use <instrument>` (or `/<instrument>`) to send an instrument its own commands through the safety gate; `/kelvin` goes back.
+- **Settings** (sidebar, at the bottom): **Account**; **Models** (API keys, the **ChatGPT plan**, a local server, **Other model services**, **Default model for new chats**, **Answer length**, **Second opinion on plans**); **Instruments** (setting up connected instruments when Kelvin starts, fetching manuals, the local network, writing cards; what Kelvin installed for instruments, with **Remove**); **Data & reports** (the **Data folder**, which reports to write); **Memory** (**Learn from conversations**, **Instructions for every conversation**, notes, skills and recipes); **Literature** (**Literature and web search**); **Notifications**; **Phone**; **Updates**.
+- **Project settings**: **Instructions**, **Who may see this project** (which models, and literature and web search), sharing on the Kelvin hub, **Notes**, **Skills and recipes**, **Devices**, **Master report**, **Reading list**.
+- Under an answer: **Copy** and **Second opinion**; under a second opinion, **Re-check the findings with another model**.
+- Only people answer approvals, change limits, mark limits or cards reviewed, set the approval mode and a device's protection, lock and unlock **Hands on the sample**, and switch instruments on (you may ask with ask_to_switch_on).

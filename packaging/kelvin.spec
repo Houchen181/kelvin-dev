@@ -54,6 +54,10 @@ for package, dist, skip in PACKAGES:
     except Exception:
         pass
 
+# Kelvin's own documentation, which kelvin_help searches (labharness/guide.py)
+datas += [(str(ROOT / "docs" / name), "labharness/data/docs") for name in
+          ("portal.md", "safety.md", "data.md", "instruments.md", "agents.md", "hub.md")]
+
 # the helper for a maker's library runs as a script, with this app or another Python (labharness/library.py)
 datas.append((str(ROOT / "src" / "labharness" / "data" / "bridge" / "kelvin_bridge.py"), "labharness/data/bridge"))
 

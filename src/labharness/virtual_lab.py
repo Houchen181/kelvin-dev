@@ -42,6 +42,8 @@ def lab_registry(home: Any = None) -> CardRegistry:
                 continue
             if card.id not in registry:
                 registry.add(card)
+    from .carddraft import apply_reviews
+    apply_reviews(registry, folder)   # Kelvin's own draft cards a person reviewed for this lab
     return registry
 
 

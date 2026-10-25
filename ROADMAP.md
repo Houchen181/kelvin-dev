@@ -134,3 +134,10 @@ Also asked for (2026-10-25): look at other agent harnesses (Claude Code, Codex, 
 - **The fix:** the helper process for makers' libraries, and Kelvin's environments, no longer inherit API keys, tokens or passwords from Kelvin's environment.
 
 Tested with stand-in models in the portal (pictures under the step, attachments pasted in, the review card's findings and re-check, a chat continued after half a minute, the skills list). Not yet tried with real model services or on the lab PC.
+
+Also asked for (2026-10-25): testing 0.3.23, the model in Kelvin didn't know Kelvin's own portal. Asked where to change the attoDRY's limits or review it, it said it couldn't see the Lab panel and guessed at menus ("Lab → Cards") that didn't exist. Status: built, not yet released.
+- **A map of the portal** (data/portal.md) is in the portal models' instructions: every panel, dialog and button by its name, where limits are changed, where instruments Kelvin added and draft cards are reviewed, what only people do. A test checks every name on the map against the portal, so it can't drift from the page.
+- **`kelvin_help`** (every model, also through MCP) searches Kelvin's own documentation and the map; the app now carries the documentation. The instructions say to look things up there and never guess a menu.
+- **Cards, easier to reach:** the Lab panel has **Cards…** next to **Set up…**, and a **Cards not reviewed** notice names the instruments on draft cards, with **Review cards…**. Before, the cards were only behind a link at the bottom of the setup dialog.
+- **Kelvin's own draft cards can be reviewed:** the attoDRY's card comes with Kelvin as a draft, and the cards dialog listed only a person's own cards, so nobody could mark it reviewed and every change on the attoDRY asked forever. Kelvin's draft cards the lab uses are now listed too; a review holds for that lab and lapses if a later Kelvin changes the card.
+- **A review counts at once:** marking a card reviewed used to reach the connected instruments only when the lab reconnected; it now applies at once.

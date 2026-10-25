@@ -1439,7 +1439,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def cards_view(request: Request) -> Response:
         """GET: the user's cards. POST {yaml, replace}: check and keep one (a person may set any status)."""
         if request.method == "GET":
-            return JSONResponse({"cards": carddraft.user_cards(runtime.cards_dir), "folder": str(runtime.cards_dir)})
+            return JSONResponse({"cards": carddraft.user_cards(runtime.cards_dir), "folder": str(runtime.cards_dir),
+                                 "kelvins": kelvins_cards()})
         body = await request.json()
         try:
             card, path, warnings = carddraft.save(runtime.cards_dir, str(body.get("yaml") or ""), builtin_ids(), "human",
@@ -1456,15 +1457,44 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         card, problems, warnings = carddraft.check(str((await request.json()).get("yaml") or ""))
         return JSONResponse({"id": card.id if card else None, "problems": problems, "warnings": warnings})
 
+    def kelvins_cards() -> List[Dict[str, Any]]:
+        """Kelvin's own cards the lab uses that came as drafts: a person reviews them for their lab here too."""
+        reviewed = carddraft.builtin_reviews(runtime.cards_dir)
+        users: Dict[str, List[str]] = {}
+        for name, inst in runtime.lab.instruments.items():
+            users.setdefault(inst.card.id, []).append(name)
+        out = []
+        for card_id, names in sorted(users.items()):
+            if card_id not in builtin_ids():
+                continue
+            card = runtime.lab.registry.get(card_id)
+            if card.status == "draft" or card_id in reviewed:
+                try:
+                    text = Path(card.source).read_text(encoding="utf-8")
+                except OSError:
+                    text = ""
+                out.append({"id": card_id, "model": card.model, "status": card.status, "instruments": names,
+                            "yaml": text, "problems": [], "warnings": []})
+        return out
+
     async def card_status(request: Request) -> Response:
         body = await request.json()
+        card_id, status = str(body.get("id") or ""), str(body.get("status") or "")
         try:
-            card = carddraft.set_status(runtime.cards_dir, str(body.get("id") or ""), str(body.get("status") or ""))
+            if card_id in builtin_ids():   # one of Kelvin's own: reviewed for this lab, kept with its content
+                card = runtime.lab.registry.get(card_id)
+                carddraft.review_builtin(runtime.cards_dir, card, status, str(runtime.user or ""))
+                card.status = status
+            else:
+                card = carddraft.set_status(runtime.cards_dir, card_id, status)
+                runtime.lab.registry.put(card)
         except KeyError as e:
             return error(404, e.args[0])
         except ValueError as e:
             return error(400, str(e))
-        runtime.lab.registry.put(card)
+        for inst in runtime.lab.instruments.values():   # the connected instruments follow at once, not at reconnect
+            if inst.card.id == card.id:
+                inst.card.status = card.status
         runtime.gate.log.write("card", by="human", card=card.id, status=card.status)
         return JSONResponse({"id": card.id, "status": card.status})
 
