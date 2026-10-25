@@ -2172,6 +2172,54 @@ class LabRuntime:
                 return "%s (installed as a Python package)" % envs.site_packages(env, self.home)
             return str(envs.add_files(env, path, self.home))
 
+    def run_on_board(self, address: str, code: str = "", notebook: str = "", password: str = "",
+                     wait: float = 30) -> str:
+        """Run code on a lab board through its Jupyter server (a PYNQ board for QICK, a Red Pitaya), as a notebook
+        cell runs there: the code given, or one of the board's own notebooks, in a new kernel. Kelvin signs in first,
+        then a person approves the code. A cell still running after `wait` seconds (a server) is left running."""
+        import urllib.parse
+        from .. import boards, probe
+        try:
+            url = boards.board_url(address)
+            probe.local_ip(urllib.parse.urlparse(url).hostname or "")
+        except (ValueError, boards.JupyterError) as e:
+            return str(e)
+        if bool((code or "").strip()) == bool((notebook or "").strip()):
+            return "give the code to run, or the path of a notebook on the board: one of them"
+        wait = max(1.0, min(float(wait or 30), 300.0))
+        jupyter = boards.Jupyter(url, password)
+        try:
+            jupyter.login()
+            cells = jupyter.notebook(notebook) if notebook else [code]
+        except boards.JupyterError as e:
+            return "could not run it: %s" % e
+        if not cells:
+            return "the notebook %s has no code" % notebook
+        shown = "\n\n".join(cells)
+        host = urllib.parse.urlparse(url).hostname
+        request = ApprovalRequest("Run code on the board at %s?" % host, [
+            "%s:\n%s" % ("Its notebook %s, cell by cell" % notebook if notebook else "This code",
+                          shown[:3000] + (" ..." if len(shown) > 3000 else "")),
+            "In a new Python kernel on the board's Jupyter (%s)%s. A cell still running after %g s (a server) "
+            "keeps running there." % (url, ", signed in with the password given" if password else "", wait)])
+        if not self.gate.ask(request):
+            note = " (%s)" % request.note if request.note else ""
+            return "declined: nothing was run on the board%s" % note
+        try:
+            results = boards.run(url, cells, seconds=wait, jupyter=jupyter)
+        except boards.JupyterError as e:
+            return "could not run it: %s" % e
+        self.gate.log.write("board_run", by="agent", board=url, notebook=notebook or None, cells=len(cells),
+                            finished=[done for done, _ in results])
+        lines = []
+        for i, (done, said) in enumerate(results, 1):
+            said = said.strip()
+            lines.append("cell %d: %s%s" % (i, "done" if done else "still running (a server, left running on the "
+                                            "board)", ": " + said[-1500:] if said else ""))
+        if len(results) < len(cells):
+            lines.append("cells %d-%d not run" % (len(results) + 1, len(cells)))
+        return "\n".join(lines)
+
     def library_api(self, module: str, env: str = "") -> str:
         """A maker's Python package as its programmer sees it, for writing its library card when the maker gives
         no example scripts: its classes and functions with their arguments and documentation's first line. Read in

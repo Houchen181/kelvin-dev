@@ -105,8 +105,8 @@ class Qick(DriverBackend):
             raise AdapterError("%s: could not reach the QICK server %r through the name server at %s:%d (%s). On the "
                                "board, start the Pyro4 name server, then the QICK server under that name: on a PYNQ "
                                "board, in its Jupyter (http://%s:9090), run qick/pyro4/00_nameserver.ipynb, then "
-                               "01_server.ipynb." % (name, proxy, url.hostname, url.port or 8888, e,
-                                                     url.hostname)) from e
+                               "01_server.ipynb (Kelvin runs them with run_on_board once a person approves)."
+                               % (name, proxy, url.hostname, url.port or 8888, e, url.hostname)) from e
         # the board's QICK and this computer's should be the same version: Pyro hands objects over as they are
         self.versions = (str(self._cfg("sw_version") or ""), str(getattr(self.qick, "version", "") or ""))
         tprocs = self._cfg("tprocs") or [{}]

@@ -85,7 +85,8 @@ You are connected to a physics lab through Kelvin.
   the drivers environment for Kelvin's built-in drivers (a card's requires, or a driver saying a package is missing),
   or into an environment of its own for a library card (lib://<address>?env=<it>; Python and bitness as the library
   needs). With no example scripts, library_api shows the package's classes and functions. Don't ask the person to
-  pip install. Ask them only where you can't go on: a setting on the instrument
+  pip install. A board that runs its software in Jupyter (QICK on a PYNQ board): run_on_board starts its servers
+  from the board's own notebooks and reads its versions, once the person approves the code. Ask them only where you can't go on: a setting on the instrument
   itself (remote control, its address, a list of allowed computers), the maker's installer (a USB driver, a runtime
   that needs administrator rights: say which and where it is), a manual or specifications document nobody publishes
   (ask for its PDF, then draft_card with manual or specs), or an address nothing answers on.
@@ -356,6 +357,16 @@ def build_server(rt: LabRuntime) -> MCPServer:
         lib://<address>?env=<env>. Never ask the person to pip install. A maker's installer (a USB driver, a runtime)
         is theirs to run: say which and from where."""
         return rt.install_for_instrument(env, packages, python, bits, files, why)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def run_on_board(address: str, code: str = "", notebook: str = "", password: str = "", wait: float = 30) -> str:
+        """Run Python on a lab board through its Jupyter server (a PYNQ board for QICK, a Red Pitaya), once the
+        person approves the code: code, or notebook (the path of one of the board's own notebooks, run cell by
+        cell). address: the board (port 9090 unless given). password: the board's Jupyter password (PYNQ's default
+        is xilinx). A cell still running after wait seconds (a server) is left running on the board. For QICK: the
+        notebooks qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb, in two calls; the board's QICK version with
+        code "import qick; print(qick.__version__)"."""
+        return rt.run_on_board(address, code, notebook, password, wait)
 
     @server.tool(annotations=READ, structured_output=False)
     def library_api(module: str, env: str = "") -> str:
