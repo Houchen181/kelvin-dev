@@ -39,8 +39,9 @@ PACKAGES = [
     # installs from source (seabreeze, pypylon, pylablib)
     ("nidaqmx", "nidaqmx", ()),                    # NI DAQ cards (NI-DAQmx itself is NI's installer)
     # RFSoC boards running QICK, through its Pyro4 server (rfsoc.py): the client only, without the boards' firmware
-    ("qick", "qick", ("qick.qick", "qick.drivers", "qick.board_utils", "qick.ipq_pynq_utils", "qick.rfboard",
-                      "qick.ip", "qick.streamer")),
+    # (the board-side modules need PYNQ: they fail to load here and are left out; prefixes, so not qick.qick, which
+    # would also take qick.qick_asm)
+    ("qick", "qick", ("qick.drivers", "qick.board_utils", "qick.ipq_pynq_utils", "qick.rfboard", "qick.streamer")),
     ("Pyro4", "Pyro4", ()),
     ("serpent", "serpent", ()),
     ("tqdm", "tqdm", ()),
