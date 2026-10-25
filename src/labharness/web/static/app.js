@@ -1444,6 +1444,10 @@
       case "search_papers": return v("Searching", "Searched") + " the literature for " + code(a.query || "");
       case "read_paper": return v("Reading", "Read") + " " + code(a.paper || "") + (a.start ? " from character " + esc(String(a.start)) : "");
       case "save_paper": return v("Adding", "Added") + " " + code(a.paper || "") + " to the reading list";
+      case "web_search": return v("Searching", "Searched") + " the web for " + code(a.query || "");
+      case "read_web_page": return v("Reading", "Read") + " " + code(a.url || "") + (a.start ? " from character " + esc(String(a.start)) : "");
+      case "save_manual": return v("Keeping", "Kept") + " the manual " + code(a.source || "") +
+        (a.model ? " for the " + esc(String((a.maker ? a.maker + " " : "") + a.model)) : "");
       case "make_report": return v("Writing", "Wrote") + " a report" + (a.title ? ": " + esc(String(a.title)) : "");
       case "operate_computer": return v("Operating", "Operated") + " the computer: " + esc(String(a.task || ""));
       case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat" : " for this project") +

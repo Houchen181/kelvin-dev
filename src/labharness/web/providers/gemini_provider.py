@@ -44,10 +44,27 @@ def to_contents(history: List[Dict[str, Any]]) -> List[types.Content]:
 class GeminiProvider(Provider):
     name = "gemini"
     label = "Gemini"
+    can_search = True
 
     def __init__(self, api_key: Optional[str]):
         self.client = genai.Client(api_key=api_key) if api_key else None
         self._cache: Optional[List[ModelInfo]] = None
+
+    async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
+        """Gemini with Google Search: the pages its answer is grounded on (addresses through Google's redirect,
+        which read_web_page follows), then those it named."""
+        from ..websearch import PROMPT, merge, results_in
+        response = await self.client.aio.models.generate_content(
+            model=model, contents=PROMPT.format(query=query, limit=limit),
+            config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())]))
+        hits: List[Dict[str, str]] = []
+        for candidate in response.candidates or []:
+            meta = candidate.grounding_metadata
+            for chunk in (meta.grounding_chunks or []) if meta is not None else []:
+                web = chunk.web
+                if web is not None and web.uri:
+                    hits.append({"title": web.title or web.domain or "", "url": web.uri, "snippet": ""})
+        return merge(hits, results_in(response.text or ""), limit)
 
     def available(self) -> bool:
         return self.client is not None

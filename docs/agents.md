@@ -36,6 +36,6 @@ Tools:
 - **Plans and the queue:** `validate_plan`, `simulate_plan`, `run_plan`, `queue_show`, `queue_add`, `queue_edit`, `queue_change`, `queue_start`, `queue_pause`, `queue_save`, `queue_load`.
 - **Data:** `find_runs` and `query_runs` (every run in the data folder: filters, or read-only SQL over the catalog), `describe_run` (a run's card), `get_run_data` (with `where`), `compute` (arithmetic on a run's columns), `get_trace`, `analyze_run`, `list_runs`, `recent_events`, `make_report` (`kind`: runs, scan, device or project).
 - **New instruments:** `card_guide`, `check_card`, `read_examples`, `try_card`, `save_card`; in the Kelvin app also `draft_card` (a card from the maker's manual online) and `add_instrument` (adds a connected instrument to the lab, marked as added by Kelvin: every output change on it asks a person until they review its limits).
-- **Literature:** `search_papers`, `read_paper`.
+- **Literature and the web:** `search_papers`, `read_paper`; `read_web_page` (a page or a PDF on the web, with its links) and `save_manual` (keeps an instrument's manual, for its card and its folder). In the Kelvin app also `web_search`, through the model service's own web search.
 
 **Security limit:** the access key keeps the model from approving its own requests through its tools. An agent that also has a shell on the same PC could still reach the page. For real hardware, run Kelvin on a machine where the agent has no shell.

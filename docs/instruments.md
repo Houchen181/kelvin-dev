@@ -78,7 +78,10 @@ Real hardware gets the same gate as the virtual lab, and a few protections of it
 
 More instruments with a library of their own:
 - `pulsestreamer://<ip>` for a Swabian Pulse Streamer (`pip install pulsestreamer`), `pulseblaster://0?clock=500` for a SpinCore PulseBlaster (SpinCore's `spinapi`), and `timetagger://<serial>?click=1&gate=2` for a Swabian Time Tagger (Swabian's installer). A scan finds the Swabian devices.
-- `qick://<name server>:8888/<proxy name>` for an RFSoC board running QICK, through its Pyro4 server (`pip install qick Pyro4`, tProc v2 firmware). Kelvin plays one generator as a continuous tone or as pulses and reads I/Q from one readout. A tone keeps playing after a program ends, so Kelvin stops every generator (`reset_gens`) when the output goes off and when it disconnects.
+- `qick://<name server>:8888/<proxy name>` for an RFSoC board running QICK, through its Pyro4 server (tProc v2 firmware), e.g. `qick://192.168.3.1:8888/myqick` for an RFSoC 4x2 on its USB network.
+  - **Starting the server:** on a PYNQ board, in its Jupyter (`http://<board>:9090`), run `qick/pyro4/00_nameserver.ipynb`, then `01_server.ipynb`, whose proxy name goes in the address.
+  - **The client:** the private Kelvin app brings qick and Pyro4; from source, `pip install qick Pyro4`. The board's QICK and Kelvin's should be the same version, and the instrument's identity shows both.
+  - **What Kelvin does:** it plays one generator as a continuous tone or as pulses, and reads I/Q from one readout. A tone keeps playing after a program ends, so Kelvin stops every generator (`reset_gens`) when the output goes off and when it disconnects.
 
 **DAQ cards, spectrometers, monochromators, cameras and nanopositioners.**
 
@@ -98,7 +101,7 @@ More instruments with a library of their own:
 | Ocean Insight spectrometer | `seabreeze://<serial>` | Kelvin from source with `seabreeze` | `ocean/spectrometer` |
 | Basler camera | `pylon://<serial>` | Kelvin from source with `pypylon` | `basler/camera` |
 
-- **The app brings only what it needs:** nidaqmx, numpy, and pythonnet for LightField's automation. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a Python library the app doesn't carry, so run Kelvin from source for them.
+- **The app brings only what it needs:** nidaqmx, numpy, pythonnet for LightField's automation, and QICK's client (qick and Pyro4, without the boards' firmware). PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text. The last three rows need a Python library the app doesn't carry, so run Kelvin from source for them.
 
 - **Scans find them:** the NI devices, Princeton Instruments cameras, Andor spectrographs and sCMOS cameras (and, from source, Ocean spectrometers, Basler cameras and ANC350s), through their libraries, which only list what they see. Add the others by address. Andor SDK2 cameras aren't listed, because finding one means initializing it, which resets it.
 - **The scan says what PICam saw:** each camera that is free, each one open in another program (LightField, say), PICam missing, and whether LightField is installed. Kelvin never starts LightField by itself: add it in the Lab panel.
@@ -176,7 +179,7 @@ For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pu
 ## Cards for new instruments
 
 **Kelvin writes the card itself.** When a scan finds an instrument that says who it is but matches no card, Kelvin writes one. It does this at start-up, and when you press **Find its manual and write its card** on that instrument in **Set up…**.
-1. **It finds the manual.** Your default model suggests where the maker publishes it, and Kelvin also tries known addresses for some makers. On a product page, Kelvin follows the links on the maker's own site that look most like this model's manual (naming the model or its series, PDFs, "manual" or "programming"), skipping the site's general pages, and from a page about the model's manuals on to its PDFs. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
+1. **It finds the manual.** Kelvin searches the web for it, through your model service's own web search. It also tries the addresses your default model suggests, and known addresses for some makers. On a product page, Kelvin follows the links on the maker's own site that look most like this model's manual (naming the model or its series, PDFs, "manual" or "programming"), skipping the site's general pages, and from a page about the model's manuals on to its PDFs. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
 2. **It drafts the card.** The model writes the card from the manual's most useful pages, up to about 60,000 characters:
    - pages with this model's ranges;
    - pages on how to talk to it (serial settings, line ends, a handshake such as Pfeiffer's ACK and ENQ);
@@ -193,7 +196,7 @@ For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pu
    - The identity pattern is checked against the instrument's own reply. For an instrument that gave none (you named it), the manual's own identity check is kept, and trying the card tests it.
 4. **It sets the instrument up.** At start-up, the instrument joins the lab with the others, marked as added by Kelvin, and its folder gets the manual Kelvin downloaded. The card's first lines say where it came from and which model wrote it.
 
-In a chat, Kelvin does the same for an instrument you name (`draft_card`): with the maker and model from its identity reply, or from what you said for one that doesn't answer `*IDN?`. Then it tries the card (`try_card`) and adds the instrument (`add_instrument`), and tells you what the card left out. A manual or specifications document Kelvin can't get, you can give it (`draft_card` with `manual` or `specs`: a PDF on this computer or its web address).
+In a chat, Kelvin does the same for an instrument you name (`draft_card`): with the maker and model from its identity reply, or from what you said for one that doesn't answer `*IDN?`. Then it tries the card (`try_card`) and adds the instrument (`add_instrument`), and tells you what the card left out. Where the maker's site doesn't give the manual up, Kelvin searches the web for it (`web_search`), reads pages and PDFs (`read_web_page`), and keeps the manual (`save_manual`), which then goes into the instrument's folder. A manual or specifications document nobody publishes, you can give it (`draft_card` with `manual` or `specs`: a PDF on this computer or its web address).
 
 What leaves the computer: the maker and model name, and the manual's command pages, go to your model; the manual's address goes to the maker's site. The serial number never leaves. Switch this off with **Write cards for instruments Kelvin doesn't know** in Settings. If Kelvin can't find the manual (some makers want a sign-in) or there is no model, it says so; then draft the card from a PDF yourself:
 

@@ -74,6 +74,22 @@ class OpenAIProvider(Provider):
             self.client = openai.AsyncOpenAI(api_key=api_key or "local", base_url=base_url or None,
                                              default_headers=headers or None)
         self._cache: Optional[List[ModelInfo]] = None
+        self.can_search = name == "openai" and not base_url   # OpenAI's own web search (local services have none)
+
+    async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
+        """OpenAI's web search (the Responses API's web_search tool): the pages it cited, with its notes."""
+        from ..websearch import PROMPT, merge, results_in
+        response = await self.client.responses.create(model=model, tools=[{"type": "web_search"}],
+                                                      input=PROMPT.format(query=query, limit=limit))
+        hits: List[Dict[str, str]] = []
+        for item in response.output or []:
+            if getattr(item, "type", "") != "message":
+                continue
+            for part in getattr(item, "content", None) or []:
+                for a in getattr(part, "annotations", None) or []:
+                    if getattr(a, "type", "") == "url_citation":
+                        hits.append({"title": a.title or "", "url": a.url, "snippet": ""})
+        return merge(results_in(response.output_text or ""), hits, limit)
 
     def available(self) -> bool:
         return self.client is not None

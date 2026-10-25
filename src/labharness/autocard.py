@@ -239,6 +239,19 @@ def _clean(url: str) -> str:
     return quote(url, safe=":/?#[]@!$&'()*+,;=%~")
 
 
+def page_links(html: str, base: str) -> List[Tuple[str, str]]:
+    """The links on a web page as (label, address), each once: documents (PDFs) first, then the rest."""
+    docs: List[Tuple[str, str]] = []
+    rest: List[Tuple[str, str]] = []
+    for href, label in re.findall(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", html, re.I | re.S):
+        url = _clean(urljoin(base, html_lib.unescape(href.strip())))
+        if not url.startswith(("https://", "http://")) or _same_page(url, base) or any(u == url for _, u in docs + rest):
+            continue
+        text = re.sub(r"\s+", " ", html_lib.unescape(re.sub(r"<[^>]+>", " ", label))).strip()[:100]
+        (docs if url.lower().split("?")[0].split("#")[0].endswith(".pdf") else rest).append((text, url))
+    return docs + rest
+
+
 def pdf_links(html: str, base: str, model: str = "", want: Any = PROGRAMMING_WORDS) -> List[str]:
     """Links on a maker's page that may lead to the model's manual, best first: those naming the model (or its
     series), PDFs, and links that say programming (want: what else to look for) or manual. Pages are followed on the
@@ -266,15 +279,22 @@ def pdf_links(html: str, base: str, model: str = "", want: Any = PROGRAMMING_WOR
 def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
                 log: Callable[[str], None] = lambda m: None,
                 problems: Optional[List[str]] = None, document: str = "",
-                exclude: Any = ()) -> Optional[Dict[str, Any]]:
+                exclude: Any = (), search: Optional[Callable[[str], List[str]]] = None) -> Optional[Dict[str, Any]]:
     """The best manual Kelvin could download and check for this model, or None (and why, in `problems`). document:
     the one its ranges are in instead (a specifications document the manual names); the best has the most of this
-    model's values. exclude: addresses not to fetch (the manual itself)."""
+    model's values. exclude: addresses not to fetch (the manual itself). search: a web search (query -> addresses),
+    whose finds are tried before the addresses the model remembers."""
     queue: List[Tuple[str, int]] = []
     compact = re.sub(r"[^A-Za-z0-9]", "", model).upper()
     for rx, pattern in [] if document else KNOWN:
         if rx.search(maker):
             queue.append((pattern.format(MODEL=compact), 0))
+    if search is not None:
+        query = "%s %s %s pdf" % (maker, model, document or "programming manual")
+        try:
+            queue += [(u, 0) for u in search(query)[:5]]
+        except Exception as e:
+            log("web search for %r: %s" % (query, profiles._first_line(e)))
     if ask is not None:
         try:
             answer, _ = ask(SUGGEST_SYSTEM, suggest_prompt(maker, model, document))
@@ -526,7 +546,8 @@ def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, a
 
 
 def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: Optional[Fetch] = None,
-              builtin_ids: Any = (), log: Callable[[str], None] = lambda m: None) -> Dict[str, Any]:
+              builtin_ids: Any = (), log: Callable[[str], None] = lambda m: None,
+              search: Optional[Callable[[str], List[str]]] = None) -> Dict[str, Any]:
     """For an instrument that matches no card: find its manual (or read the one the person gave: found's manual, a
     file or a web address), write its card, keep it as a draft. Maker and model come from its identity reply, else
     from found's maker and model (what the person said it is). Where the model says the manual leaves some ranges to
@@ -554,7 +575,7 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
             return {"error": "%s does not name the %s %s: is it its manual?" % (given, maker, model)}
     else:
         asked: List[str] = []
-        manual = find_manual(maker, model, ask, fetch, log, asked)
+        manual = find_manual(maker, model, ask, fetch, log, asked, search=search)
         if manual is None and asked:
             return {"error": "Kelvin could not ask a model about the %s %s (%s)" % (maker, model, asked[0])}
         if manual is None:
@@ -578,7 +599,8 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
         return {"error": "Kelvin could not write the %s %s card: %s" % (maker, model, profiles._first_line(e))}
     ranges_in, about = ranges_named(notes)
     if ranges_in and specs is None:   # the manual leaves some ranges to another document: find it
-        specs = find_manual(maker, model, ask, fetch, log, document=ranges_in, exclude=[manual["url"]])
+        specs = find_manual(maker, model, ask, fetch, log, document=ranges_in, exclude=[manual["url"]],
+                            search=search)
         if specs is not None:
             log("%s: %s" % (ranges_in, specs["url"]))
     if specs is not None:   # and write the card again with its pages on those outputs

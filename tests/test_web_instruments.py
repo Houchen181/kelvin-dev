@@ -330,3 +330,24 @@ def test_qick_refuses_what_it_cannot_play():
     assert ("declare_readout", {"ch": 1, "length": 1.0, "freq": 100.0, "gen_ch": 1}) in soc.programs[-1].calls
     board.close()
     assert soc.resets == 1                                                  # disconnecting stops the tone
+
+
+def test_qick_says_which_versions_meet():
+    """Pyro hands objects over as they are, so the board's QICK and Kelvin's should match: the identity shows both,
+    and how to reach a board whose server isn't running."""
+    from labharness import builtin_registry
+    from labharness.rfsoc import Qick
+    card = builtin_registry().get("qick/rfsoc")
+    module = fake_qick(FakeSoc(), dict(SOCCFG, board="RFSoC4x2", sw_version="0.2.360"))
+    module.version = "0.2.436"
+    board = Qick("rf", card, "qick://192.168.3.1:8888/myqick", module)
+    assert board.identity() == ("QICK,RFSoC4x2,192.168.3.1:8888/myqick,board's qick 0.2.360, Kelvin's qick 0.2.436 "
+                                "(they differ: make them the same version)")
+    module.version = "0.2.360"
+    assert Qick("rf", card, "qick://192.168.3.1:8888/myqick", module).identity().endswith("Kelvin's qick 0.2.360")
+
+    def unreachable(ns_host, ns_port, proxy_name):
+        raise OSError("Failed to locate the nameserver")
+    module.make_proxy = unreachable
+    with pytest.raises(AdapterError, match=r"http://192\.168\.3\.1:9090.*00_nameserver\.ipynb, then 01_server"):
+        Qick("rf", card, "qick://192.168.3.1:8888/myqick", module)

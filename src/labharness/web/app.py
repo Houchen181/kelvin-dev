@@ -263,9 +263,28 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return await asyncio.wait_for(review.ask(provider, model_id, system, prompt), 300), key
         return asyncio.run_coroutine_threadsafe(go(), loop).result(timeout=330)
 
+    def search_web(query: str) -> List[str]:
+        """Web addresses for a query, through the card model's service if it can search, else another (websearch.py);
+        none when searching outside the lab is switched off."""
+        loop = loop_ref.get("loop")
+        if loop is None or not runtime.literature.enabled:
+            return []
+
+        async def go() -> List[str]:
+            from . import websearch
+            try:
+                key = await card_model()
+            except ValueError:
+                key = ""
+            found, _, problems = await websearch.search(agent.providers, key, query, 6)
+            if problems and not found:
+                setup_log.info("  web search: %s", "; ".join(problems))
+            return [r["url"] for r in found]
+        return asyncio.run_coroutine_threadsafe(go(), loop).result(timeout=330)
+
     def write_card(found: Dict[str, Any]) -> Dict[str, Any]:
         r = autocard.make_card(found, runtime.cards_dir, ask_model, builtin_ids=builtin_ids(),
-                               log=lambda m: setup_log.info("  %s", m))
+                               log=lambda m: setup_log.info("  %s", m), search=search_web)
         if r.get("path"):   # usable at once in Lab setup, like a card a person saves
             from ..cards import load_card
             runtime.lab.registry.put(load_card(r["path"]))

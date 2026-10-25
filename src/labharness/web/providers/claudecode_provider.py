@@ -107,11 +107,32 @@ class Shown:
 class ClaudeCodeProvider(Provider):
     name = "claudecode"
     label = "Claude Code"
+    can_search = True
 
     def __init__(self, cmd: Optional[List[str]], cwd: Optional[Path] = None, timeout: float = 600):
         self.cmd = cmd
         self.cwd = cwd or claudecode.workdir()
         self.timeout = timeout
+
+    async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
+        """Claude Code's WebSearch on the person's plan: one `claude -p` run with only that tool allowed."""
+        from ..websearch import PROMPT, results_in
+        args = ["-p", PROMPT.format(query=query, limit=limit), "--output-format", "stream-json", "--verbose",
+                "--tools", "WebSearch", "--allowedTools", "WebSearch", "--permission-mode", "dontAsk",
+                "--strict-mcp-config", "--no-session-persistence", "--max-turns", "8", "--model", model or "sonnet"]
+        words: List[str] = []
+        ends: List[Dict[str, Any]] = []
+        async for ev in claudecode.stream(self.cmd, args, "", self.cwd, timeout=300):
+            if ev.get("type") in ("result", "exit"):
+                ends.append(ev)
+            elif ev.get("type") == "assistant" and not ev.get("parent_tool_use_id"):
+                words += [b.get("text") or "" for b in ((ev.get("message") or {}).get("content") or [])
+                          if isinstance(b, dict) and b.get("type") == "text"]
+        problem = claudecode.failure(ends)
+        if problem:
+            raise RuntimeError(problem)
+        final = next((str(e.get("result")) for e in ends if e.get("type") == "result" and e.get("result")), "")
+        return results_in(final or "\n".join(words))[:limit]
 
     def available(self) -> bool:
         return bool(self.cmd)

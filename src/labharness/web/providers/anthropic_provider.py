@@ -58,9 +58,30 @@ def to_messages(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 class AnthropicProvider(Provider):
     name = "anthropic"
     label = "Claude"
+    can_search = True
 
     def __init__(self, api_key: Optional[str]):
         self.client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else None
+
+    async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
+        """Claude's web search (a server tool: Anthropic runs the searches). The results it found, with Claude's
+        notes on those worth opening first."""
+        from ..websearch import PROMPT, merge, results_in
+        message = await self.client.messages.create(
+            model=model, max_tokens=4000,
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+            messages=[{"role": "user", "content": PROMPT.format(query=query, limit=limit)}])
+        hits: List[Dict[str, str]] = []
+        words = []
+        for block in message.content:
+            if block.type == "web_search_tool_result":
+                if not isinstance(block.content, list):   # the search itself failed
+                    raise RuntimeError("Claude's web search: %s" % getattr(block.content, "error_code", "failed"))
+                hits += [{"title": r.title or "", "url": r.url, "snippet": ""} for r in block.content
+                         if getattr(r, "type", "") == "web_search_result"]
+            elif block.type == "text":
+                words.append(block.text)
+        return merge(results_in("".join(words)), hits, limit)
 
     def available(self) -> bool:
         return self.client is not None

@@ -162,8 +162,10 @@ def test_kelvins_approvals_are_locked_while_claude_operates(parts):
 
 
 def test_screen_tools(monkeypatch):
-    Image = pytest.importorskip("PIL.Image")   # screenshots need Pillow (the private build has it)
-    monkeypatch.setattr(screen, "grab", lambda: Image.new("RGB", (2732, 1536), "white"))
+    # a 2732 x 1536 screen, which Windows hands over scaled to 1366 x 768 (screenshots need no image library)
+    white = screen.png(b"\xff" * (1366 * 768 * 3), 1366, 768)
+    monkeypatch.setattr(screen, "WIN", True)
+    monkeypatch.setattr(screen, "_win_grab", lambda max_width: (white, (2732, 1536), (1366, 768)))
     png, note = screen.screenshot_png()
     assert png[:4] == b"\x89PNG" and "shown at 1366x768" in note
     assert screen.to_screen(100, 50) == (200, 100)                     # back to the screen's own pixels

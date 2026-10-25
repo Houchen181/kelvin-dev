@@ -472,9 +472,9 @@
         <section class="set-page" data-page="literature" hidden>
           <h3 class="set-title">Literature</h3>
           <div class="field">
-            <div class="field-row"><span class="field-label">Literature search</span>
+            <div class="field-row"><span class="field-label">Literature and web search</span>
               <label class="check"><input id="literature" type="checkbox"> On</label></div>
-            <span class="hint">Kelvin searches arXiv and journals (through OpenAlex) and reads papers to plan experiments and check results. Only the search words go to those public services, never your data or chats. Switch it off for confidential work.</span>
+            <span class="hint">Kelvin searches arXiv and journals (through OpenAlex) and reads papers to plan experiments and check results. It also searches the web, through your model service's own web search, and reads web pages and manuals: instruments' manuals, makers' pages, documentation. Only the search words and the pages it opens leave this computer, never your data or chats. Switch it off for confidential work.</span>
             <label for="k-openalex">OpenAlex API key <span class="muted">(optional; a free key raises the daily search allowance)</span></label>
             <div class="key-row"><input id="k-openalex" name="openalex_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="openalex_api_key">Remove</button></div>
             <span class="hint" data-hint="openalex_api_key"></span>
@@ -717,7 +717,7 @@
     <div class="field">
       <div class="field-row"><span class="field-label">Who may see this project</span><span id="rules-summary" class="hint"></span></div>
       <div class="checks" id="project-providers"></div>
-      <div class="checks"><label class="check"><input id="project-literature" type="checkbox"> Literature search (the search words leave this computer)</label></div>
+      <div class="checks"><label class="check"><input id="project-literature" type="checkbox"> Literature and web search (the search words leave this computer)</label></div>
       <span class="hint">For confidential work, allow only local models and switch off literature search. A chat that ran under these rules keeps them, even if it is moved out of the project or the project is deleted.</span>
     </div>
     <div id="project-sharing-field" class="field">

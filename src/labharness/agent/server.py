@@ -72,9 +72,12 @@ You are connected to a physics lab through Kelvin.
   finds the maker's manual online and writes a draft card), try_card it (it only reads) and check that its readings
   make sense, then add_instrument. Then tell the person in a line or two what you added, with a reading or two they
   can compare with the front panel, and what the card left out (draft_card's notes). Add only what they asked for.
+  When draft_card can't find the manual, or you need the maker's documentation, software or a driver, look it up
+  yourself: web_search, read_web_page (a page's text and its links, PDFs first), save_manual (keeps the PDF, with the
+  instrument's address), then draft_card with manual. Never use the screen to search or to download.
   Ask them only where you can't go on: a setting on the instrument itself (remote control, its address, a list of
-  allowed computers), the maker's software or driver to install, a manual or specifications document Kelvin can't
-  get (ask for its PDF or web address, then draft_card with manual or specs), or an address the scan didn't find.
+  allowed computers), the maker's software or driver to install, a manual or specifications document nobody
+  publishes (ask for its PDF, then draft_card with manual or specs), or an address the scan didn't find.
 - When draft_card can't write it (no public manual, or an instrument driven through the maker's library), or outside
   the Kelvin app, write the card yourself: the manual's command reference or the maker's example scripts (pasted, or
   read_examples on a file or folder the person names), card_guide, the card from that text only, check_card until
@@ -229,6 +232,21 @@ def build_server(rt: LabRuntime) -> MCPServer:
         there and Kelvin can't find it. Only the maker and model leave the computer. Takes a minute or two; sends the
         instrument nothing."""
         return rt.draft_card(address, maker, model, manual, specs)
+
+    @server.tool(annotations=WEB, structured_output=False)
+    def read_web_page(url: str, start: int = 0, max_chars: int = 12000) -> str:
+        """Read a web page or a document on the web (a PDF) as text: a maker's product or download page, a manual,
+        documentation. A page comes with its links, documents first, to follow. Reads only; keeps nothing. Long
+        texts come in parts (start)."""
+        return rt.read_web_page(url, start, max_chars)
+
+    @server.tool(annotations=FETCH, structured_output=False)
+    def save_manual(source: str, maker: str = "", model: str = "", address: str = "", instrument: str = "") -> str:
+        """Keep an instrument's manual: its web address (a PDF or a page) or a file on this computer. Kelvin checks
+        it names the model and keeps it in Kelvin's manuals folder. With address (an instrument not in the lab yet),
+        add_instrument puts it in the instrument's folder; then draft_card with manual=<the kept file>. With
+        instrument (one in the lab), it becomes that instrument's manual for search_manual."""
+        return rt.save_manual(source, maker, model, address, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
     def add_instrument(address: str, card: str = "", name: str = "", connection: Optional[Dict[str, Any]] = None,

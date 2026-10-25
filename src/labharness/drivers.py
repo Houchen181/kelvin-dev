@@ -685,7 +685,7 @@ def library_notes() -> List[str]:
 
 
 LIBRARIES = (("nidaqmx", "nidaqmx.system"), ("seabreeze", "seabreeze.spectrometers"), ("pypylon", "pypylon.pylon"),
-             ("pylablib", "pylablib.devices.Attocube"))
+             ("pylablib", "pylablib.devices.Attocube"), ("qick", "qick.pyro"))
 
 
 def instrument_libraries(problems: Optional[Dict[str, str]] = None) -> List[str]:

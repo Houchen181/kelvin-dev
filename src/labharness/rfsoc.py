@@ -31,11 +31,14 @@ READINGS = ("i", "q", "magnitude", "phase")
 
 def load_qick() -> Any:
     try:
+        import qick   # type: ignore
         from qick.pyro import make_proxy   # type: ignore
         from qick.asm_v2 import AveragerProgramV2   # type: ignore
     except ImportError as e:
-        raise AdapterError("QICK boards need the qick and Pyro4 packages: pip install qick Pyro4 (%s)" % e) from e
-    return SimpleNamespace(make_proxy=make_proxy, AveragerProgramV2=AveragerProgramV2)
+        raise AdapterError("QICK boards need the qick and Pyro4 packages: the private Kelvin app brings them; from "
+                           "source, pip install qick Pyro4 (%s)" % e) from e
+    return SimpleNamespace(make_proxy=make_proxy, AveragerProgramV2=AveragerProgramV2,
+                           version=str(getattr(qick, "__version__", "") or ""))
 
 
 def programs(base: Any) -> Dict[str, Any]:
@@ -97,9 +100,13 @@ class Qick(DriverBackend):
             self.soc, self.soccfg = self.qick.make_proxy(ns_host=url.hostname, ns_port=url.port or 8888,
                                                          proxy_name=proxy)
         except Exception as e:   # Pyro's NamingError, CommunicationError...
-            raise AdapterError("%s: could not reach the QICK server %r through the name server at %s:%d (%s). Start "
-                               "the name server, then the server, on the board." % (name, proxy, url.hostname,
-                                                                                   url.port or 8888, e)) from e
+            raise AdapterError("%s: could not reach the QICK server %r through the name server at %s:%d (%s). On the "
+                               "board, start the Pyro4 name server, then the QICK server under that name: on a PYNQ "
+                               "board, in its Jupyter (http://%s:9090), run qick/pyro4/00_nameserver.ipynb, then "
+                               "01_server.ipynb." % (name, proxy, url.hostname, url.port or 8888, e,
+                                                     url.hostname)) from e
+        # the board's QICK and this computer's should be the same version: Pyro hands objects over as they are
+        self.versions = (str(self._cfg("sw_version") or ""), str(getattr(self.qick, "version", "") or ""))
         tprocs = self._cfg("tprocs") or [{}]
         if tprocs[0].get("type") not in (None, "qick_processor"):
             raise AdapterError("%s: Kelvin runs tProc v2 programs; this board's firmware has %s"
@@ -200,7 +207,12 @@ class Qick(DriverBackend):
 
     def identity(self) -> str:
         board = self._cfg("board") or "RFSoC"
-        return "QICK,%s,%s" % (board, self.address.split("://", 1)[1])
+        text = "QICK,%s,%s" % (board, self.address.split("://", 1)[1])
+        theirs, ours = getattr(self, "versions", ("", ""))
+        if theirs or ours:
+            text += ",board's qick %s, Kelvin's qick %s%s" % (theirs or "?", ours or "?", "" if theirs == ours else
+                                                               " (they differ: make them the same version)")
+        return text
 
     def close(self) -> None:
         try:

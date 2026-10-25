@@ -41,6 +41,7 @@ class TurnResult:
 class Provider:
     name = "base"
     label = "Base"
+    can_search = False   # has a web search of its own (web/websearch.py)
 
     def available(self) -> bool:
         raise NotImplementedError
@@ -50,6 +51,10 @@ class Provider:
 
     async def stream(self, model: str, system: str, history: List[Dict[str, Any]],
                      tools: List[Dict[str, Any]], emit: Emit) -> TurnResult:
+        raise NotImplementedError
+
+    async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
+        """Web results ({title, url, snippet}) through this service's own web search."""
         raise NotImplementedError
 
 

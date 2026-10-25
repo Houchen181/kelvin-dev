@@ -181,6 +181,7 @@ class LabRuntime:
         # the app's model writing a card from the maker's manual (autocard.make_card); None outside the Kelvin app
         self.card_writer: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
         self.manuals_found: Dict[str, Dict[str, Any]] = {}  # by VISA resource: the manual found while writing a card
+        self.fetch_url: Optional[Callable[[str], bytes]] = None   # read_web_page and save_manual (profiles.http_get)
         # the app's part when Kelvin changes the lab itself ("added" an instrument, "switched" one on): keep it in
         # Settings and give a new instrument its folder, settings and manual
         self.lab_changed: Callable[[str], None] = lambda what: None
@@ -1823,6 +1824,100 @@ class LabRuntime:
                          "for its PDF or web address, then draft_card again with specs." % r["ranges_in"])
         lines.append("Next: try_card %s on %s and compare the readings with what the person sees; then "
                      "add_instrument." % (r["card_id"], address or "the instrument"))
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ the web: pages and manuals
+
+    def _get(self, url: str) -> bytes:
+        from .. import profiles
+        return (self.fetch_url or profiles.http_get)(url)
+
+    def read_web_page(self, url: str, start: int = 0, max_chars: int = 12000) -> str:
+        """A web page or a document on the web as text, for reading a maker's pages, a manual or documentation: from
+        `start`, up to `max_chars` characters, and for a page the links on it, documents first. Nothing is kept."""
+        from .. import profiles
+        from ..autocard import page_links
+        from ..literature import html_to_text
+        url = (url or "").strip()
+        if not self.literature.enabled:
+            return "searching outside the lab (literature and web) is switched off in Settings"
+        if not re.match(r"^https?://", url):
+            return "give a web address (http:// or https://)"
+        try:
+            data = self._get(url)
+        except Exception as e:
+            return "could not read %s: %s" % (url, profiles._first_line(e))
+        links: List[Tuple[str, str]] = []
+        if data[:5] == b"%PDF-":
+            try:
+                pages = profiles.pdf_pages(data)
+            except Exception as e:
+                return "%s is a PDF Kelvin could not read: %s" % (url, profiles._first_line(e))
+            text, kind = "\n\n".join("[page %d]\n%s" % (i + 1, p.strip()) for i, p in enumerate(pages)), \
+                "a PDF of %d pages" % len(pages)
+        else:
+            page = data.decode("utf-8", errors="replace")
+            text, kind, links = html_to_text(page), "a web page", page_links(page, url)
+        try:
+            start, max_chars = max(0, int(start)), max(1000, min(40000, int(max_chars)))
+        except (TypeError, ValueError):
+            start, max_chars = 0, 12000
+        lines = ["%s: %s, %d characters%s" % (url, kind, len(text), ", from character %d" % start if start else ""),
+                 text[start:start + max_chars].strip() or "(no text)"]
+        if start + max_chars < len(text):
+            lines.append("[more: read_web_page with start=%d]" % (start + max_chars))
+        if links:
+            lines.append("Links (documents first):\n" + "\n".join("- %s: %s" % (label or "(link)", u)
+                                                                  for label, u in links[:40]))
+        return "\n".join(lines)
+
+    def save_manual(self, source: str, maker: str = "", model: str = "", address: str = "",
+                    instrument: str = "") -> str:
+        """Keep an instrument's manual: download it from its web address (or take a file on this computer), check that
+        it names the model, and keep it in ~/Kelvin/manuals. For an instrument in the lab it goes into its folder
+        (search_manual reads it); for one not added yet (its address), add_instrument puts it there, and draft_card
+        writes the card from it (manual=<the kept file>)."""
+        from .. import autocard, profiles
+        from ..adapters import resource_name
+        source = (source or "").strip()
+        if not source:
+            return "give the manual's web address, or a file on this computer"
+        if re.match(r"^https?://", source) and not self.literature.enabled:
+            return "searching outside the lab (literature and web) is switched off in Settings"
+        if instrument and instrument not in self.lab.instruments:
+            return "no instrument %r in this lab" % instrument
+        try:
+            m = autocard.manual_from(source, self._get)
+        except Exception as e:
+            return "could not get %s: %s" % (source, profiles._first_line(e))
+        if m["kind"] not in ("pdf", "html"):
+            return "%s is neither a PDF nor a web page" % source
+        text = "\n".join(m["pages"])
+        name = re.sub(r"[^A-Za-z0-9]+", "-", "%s %s" % (maker, model)).strip("-") or \
+            re.sub(r"[^A-Za-z0-9]+", "-", Path(source.split("?")[0]).stem).strip("-") or "manual"
+        folder = Path(self.home) / "manuals"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / (name + (".pdf" if m["kind"] == "pdf" else ".html"))
+        path.write_bytes(m["data"])
+        what = "a PDF of %d pages" % len(m["pages"]) if m["kind"] == "pdf" else "a web page"
+        lines = ["kept %s (%s) as %s" % (m["url"], what, path)]
+        if model and not autocard.names_model(text, model):
+            lines.append("It does not name the %s: check it is the right manual." % model)
+        lines.append("It has a command reference (%d command lines)." % m["score"] if m["score"] >= 15 else
+                     "It has little command syntax (%d lines): for a card, look for the programming or remote-control "
+                     "manual too." % m["score"])
+        url = m["url"] if re.match(r"^https?://", m["url"] or "") else ""
+        if instrument:
+            profiles.store_manual(self.home, instrument, self.lab.instruments[instrument].card, m["data"], url)
+            lines.append("It is now %s's manual (search_manual reads it)." % instrument)
+        elif address:
+            self.manuals_found[resource_name(address)] = {"url": url, "data": m["data"], "kind": m["kind"]}
+            lines.append("It goes into the instrument's folder when add_instrument adds %s." % address)
+        if not instrument:
+            lines.append("Next: draft_card %s with manual=%s, then try_card and add_instrument."
+                         % (address or "<the instrument's address>", path))
+        self.gate.log.write("manual_kept", by="agent", source=source, file=str(path), instrument=instrument or None,
+                            address=address or None)
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ adding instruments to the lab

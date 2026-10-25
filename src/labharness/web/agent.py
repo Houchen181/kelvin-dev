@@ -49,7 +49,7 @@ what you would do; the user picks one answer to continue with."""
 CONFIDENTIAL = """# Confidential project
 This project's rules: {rules}. Keep its details inside this conversation: never suggest pasting them into outside
 services."""
-WEB_TOOLS = {"search_papers", "read_paper"}
+WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual"}   # reach the internet
 COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
@@ -125,6 +125,18 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
     return sorted(ids)
 
 
+WEB_SEARCH = {
+    "name": "web_search",
+    "description": "Search the web: an instrument's manual or programming guide, its maker's pages, drivers and "
+                   "software, documentation. Gives titles and web addresses, best first. Then read_web_page reads one, "
+                   "and save_manual keeps a manual for an instrument (draft_card writes its card from it). The query "
+                   "leaves this computer: put no confidential details in it.",
+    "schema": {"type": "object", "required": ["query"], "properties": {
+        "query": {"type": "string", "description": "What to look for, e.g. 'Pfeiffer TPG 362 communication protocol "
+                                                   "manual pdf'"},
+        "max_results": {"type": "integer", "minimum": 1, "maximum": 10, "description": "At most this many (8)"}}},
+}
+
 SAVE_PAPER = {
     "name": "save_paper",
     "description": "Put a paper on this project's reading list (the user sees it in the project's settings, and it is "
@@ -164,10 +176,12 @@ DEVICE_TOOLS = {"devices", "add_device", "mount_device"}
 OPERATE_COMPUTER = {
     "name": "operate_computer",
     "description": "Have Claude, through the Claude Code on this computer, use the screen, mouse and keyboard to do a "
-                   "task in another program: vendor software without an API, a web page, a file dialog. Say what to "
-                   "do, what done looks like, and what must not be touched. It returns what was done. Settings changed "
-                   "this way bypass Kelvin's safety gate: use Kelvin's own instrument tools whenever they can do it, "
-                   "and name in the task exactly which instrument settings may change.",
+                   "task in another program: vendor software without an API, a web app that needs a person's sign-in, "
+                   "a file dialog. Not for searching the web, reading pages or downloading files: web_search, "
+                   "read_web_page and save_manual do those directly. Say what to do, what done looks like, and what "
+                   "must not be touched. It returns what was done. Settings changed this way bypass Kelvin's safety "
+                   "gate: use Kelvin's own instrument tools whenever they can do it, and name in the task exactly "
+                   "which instrument settings may change.",
     "schema": {"type": "object", "required": ["task"], "properties": {
         "task": {"type": "string", "description": "The task, in plain words, with what done looks like"},
         "minutes": {"type": "number", "description": "Time limit in minutes (default 10, at most 30)"}}},
@@ -179,6 +193,7 @@ click_at, type_into, press_keys, scroll_at, drag_from_to, wait_seconds).
   computer's settings.
 - Change instrument settings only as the task says. If something looks unsafe, unexpected or different from the
   task, stop and say so.
+- If a screen tool fails, stop and report its error word for word; don't guess at the cause.
 - End with a short report: what you did, what you saw (with any numbers shown), and anything left undone."""
 
 
@@ -282,6 +297,8 @@ class ChatAgent:
         private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
         tools = self.tools + remember + ([SAVE_PAPER] if project else []) + [DEVICES, ADD_DEVICE, MOUNT_DEVICE]
+        if any(p.available() and getattr(p, "can_search", False) for p in self.providers.values()):
+            tools = tools + [WEB_SEARCH]
         if "claudecode" in self.providers and rulebook.allows(rules, "claudecode:opus"):   # Claude Code bridge
             tools = tools + [OPERATE_COMPUTER]
         if not rules["literature"]:
@@ -639,6 +656,8 @@ class ChatAgent:
                     content, is_error = await self._save_paper(chat, context, call["input"])
                 elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:
                     content, is_error = "not available: this project keeps its work off the internet", True
+                elif call["name"] == "web_search":
+                    content, is_error = await self._web_search(call["input"])
                 elif call["name"] == "make_report":
                     content, is_error = await self._report(chat, call["input"])
                 elif call["name"] == "operate_computer":   # Claude Code bridge
@@ -659,6 +678,23 @@ class ChatAgent:
             await emit({"type": "turn_end", "reason": "stopped"})
             return False
         return True
+
+    async def _web_search(self, args: Any) -> Tuple[str, bool]:
+        """Through the chat's own model service if it can search the web, else another that can (websearch.py)."""
+        from . import websearch
+        args = args if isinstance(args, dict) else {}
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return "say what to search for", True
+        if not self.runtime.literature.enabled:
+            return "searching outside the lab (literature and web) is switched off in Settings", True
+        try:
+            limit = max(1, min(10, int(args.get("max_results") or 8)))
+        except (TypeError, ValueError):
+            limit = 8
+        found, by, problems = await websearch.search(self.providers, (self.active or {}).get("model"), query, limit)
+        self.runtime.gate.log.write("web_search", by="agent", query=query, results=len(found), service=by)
+        return websearch.describe(found, by, problems), not found
 
     # ------------------------------------------------------------------ Claude Code bridge (temporary)
 

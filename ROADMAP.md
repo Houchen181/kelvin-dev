@@ -80,3 +80,18 @@ Also asked for (2026-10-24): try a few more instruments of different kinds and s
 Not yet tried on real hardware or with a model inside Kelvin.
 
 Also asked for (2026-10-24): testing 0.3.22 on the lab PC, Kelvin couldn't add an attoDRY2100 driven through attocube's `atto_device` Python package. Its functions sit on sub-objects (device.sample.getTemperature(); the package speaks JSON-RPC to the cryostat on TCP port 9090), and a library card could call functions on one object only. Status: built, not yet released. Library cards now call a function on a sub-object by its path (`GET sample.getTemperature`) and create the object with the address (`create_args: ["{address}"]`). The helper follows a path only through objects the maker's package made, and calls only the maker's own functions (its package's, or its DLL's). So a card can't reach Python's own modules through a library's imports; this is now checked for plain function names too. Tested with a library written like attocube's network API, against a JSON-RPC server standing in for the cryostat; not yet with the real `atto_device` or an attoDRY2100.
+
+Also asked for (2026-10-25): testing 0.3.22 on the lab PC, the RFSoC 4x2 didn't connect, and Kelvin again tried to use the screen and failed ("display locked"). The user asked why, and said Kelvin must search the web for instruments' manuals, download and keep them, and add the instruments, at once. Status: built, not yet released. What was wrong:
+- **No web tools.** Kelvin's models could reach the web only through draft_card's manual finder; Claude Code runs with its own tools off.
+- **No screenshots.** The screen tool took screenshots with Pillow, which the app doesn't carry, so every screen task failed at its first look and the model guessed at the cause.
+- **No QICK client.** The app carried no QICK client, so `qick://` could not work, and the model went looking for the board's QICK version through its Jupyter page.
+
+What changed:
+- **`web_search`** (every model) goes through the model service's own web search: Claude's web search tool, OpenAI's Responses API, Gemini's Google Search, or Claude Code's WebSearch on the person's plan. The chat's own service is asked first, then the others that are set up.
+- **`read_web_page`** reads a page or a PDF, with its links, documents first. **`save_manual`** keeps a manual in ~/Kelvin/manuals. With the instrument's address it goes into the instrument's folder when add_instrument adds it; with an instrument in the lab it becomes that instrument's manual.
+- **draft_card's manual finder** tries what the web search finds before the addresses the model remembers.
+- **Privacy:** the web tools follow literature search's switch, now "Literature and web search", in Settings and per project.
+- **Screenshots** use Windows' own GDI (scaled by Windows) or macOS's screencapture and sips, with Kelvin's own PNG writer: no image library. A screen Windows can't copy is reported as that, the screen task rules say to report a tool's error word for word, and operate_computer is no longer for searching or downloading.
+- **The private app brings QICK's client** (qick and Pyro4, without the boards' 100 MB of firmware), and the release check requires it. A QICK board's identity shows the board's QICK version and Kelvin's. A board whose server isn't running gets the notebooks to run (qick/pyro4/00_nameserver.ipynb, then 01_server.ipynb).
+
+Tested with model services and a board stood in for (their documented answers), and screenshots on this laptop. Not yet tried with a real API key's web search, the lab PC, or the RFSoC 4x2.
