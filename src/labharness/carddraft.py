@@ -62,7 +62,11 @@ CloseOutput] and set: "POST /v1/Basic/{value}". identify: {query: "GET /v1/...",
 Instruments the maker controls through a library (its example scripts in Python, MATLAB or C call a module or a
 DLL instead of sending text): the card gets a library section, and each command calls one function.
 - library: module: <the Python module the examples import> (object: <the class or object the functions hang on>;
-  create: true if the examples make an instance first). Or dll: <its file name>, prefix: <the part of the exported
+  create: true if the examples make an instance first, create_args: [<its arguments>], {address} for what the lab's
+  address names). Functions on its sub-objects are called by their path: attocube's network instruments
+  (device = Device(ip); device.connect(); device.sample.getTemperature()) are module: <their module>, object: Device,
+  create: true, create_args: ["{address}"], open: [connect], close: [close], get: "GET sample.getTemperature". Or
+  dll: <its file name>, prefix: <the part of the exported
   names before the function name>, convention: cdecl or stdcall, returns: error when every function returns an error
   code (0 = fine), and functions: for each function the card calls, its C arguments (args: [float]) and the one value
   it writes back through a pointer (out: float; out: str for a char buffer followed by its length). Types: int8 uint8

@@ -12,8 +12,11 @@ Requests (one JSON object per line):
     {"id": 2, "op": "load", "path": "C:/attocube/lib", "dll": "attoDRYLib.dll", "prefix": "AttoDRY_Interface_",
      "convention": "cdecl", "returns": "error", "functions": {"getSampleTemperature": {"out": "float"}}}
     {"id": 3, "op": "call", "name": "getSampleTemperature", "args": []}
+    {"id": 3, "op": "call", "name": "sample.getTemperature", "args": []}   (a function on a sub-object)
     {"id": 4, "op": "quit"}
 Replies: {"id": 1, "ok": true, "value": ...} or {"id": 1, "ok": false, "error": "..."}.
+A call follows sub-objects only when the maker's package made them (attocube's device.sample), never into Python's
+own modules or objects, and calls only the maker's own functions: its package's, or its DLL's.
 Runs on Python 3.6 and later; standard library only."""
 import ctypes
 import importlib
@@ -23,6 +26,7 @@ import os
 import re
 import struct
 import sys
+import types
 
 DENY_MODULES = {
     "os", "sys", "subprocess", "shutil", "builtins", "importlib", "runpy", "ctypes", "socket", "pathlib", "io",
@@ -33,6 +37,7 @@ DENY_MODULES = {
 DENY_DLLS = {"kernel32", "kernelbase", "user32", "advapi32", "msvcrt", "ucrtbase", "ntdll", "shell32", "ws2_32",
              "ole32", "oleaut32", "libc", "libsystem", "libdl", "libpthread", "python3", "vcruntime140"}
 NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+PATH = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)*$")   # a function, or sample.getTemperature
 TYPES = {
     "int8": ctypes.c_int8, "uint8": ctypes.c_uint8, "int16": ctypes.c_int16, "uint16": ctypes.c_uint16,
     "int32": ctypes.c_int32, "int": ctypes.c_int, "uint32": ctypes.c_uint32, "int64": ctypes.c_int64,
@@ -90,6 +95,7 @@ def _word(text):
 class Library:
     def __init__(self):
         self.target = None   # a module, a class, an instance (Python), or a DLL
+        self.packages = set()   # the maker's packages: a call goes only through their objects, to their functions
         self.dll = None
         self.spec = {}
 
@@ -116,10 +122,14 @@ class Library:
         if not ((path and _inside(spec.origin, path)) or any(_inside(spec.origin, d) for d in _site_dirs())):
             raise Refused("%s is part of Python itself, not a maker's library" % name)
         target = importlib.import_module(name)
+        self.packages = {name.split(".")[0]}
         if req.get("object"):
             if not NAME.match(str(req["object"])):
                 raise Refused("%r is not a name" % req["object"])
             target = getattr(target, req["object"])
+            cls = target if isinstance(target, type) else type(target)   # a class the module re-exports is the maker's too
+            if not isinstance(target, types.ModuleType):
+                self.packages.add(str(getattr(cls, "__module__", "") or "").split(".")[0])
             if req.get("create"):
                 target = target(*[_word(a) for a in req.get("create_args") or []])
         self.target = target
@@ -143,16 +153,31 @@ class Library:
         return {"dll": file, "functions": len(self.spec["functions"])}
 
     def call(self, name, args):
-        if not NAME.match(str(name)):
+        if not PATH.match(str(name)):
             raise Refused("%r is not a function name" % name)
         if self.dll is not None:
             return self._call_dll(name, args)
         if self.target is None:
             raise Refused("nothing is loaded")
-        fn = getattr(self.target, name, None)
+        parts, obj = str(name).split("."), self.target
+        for i, part in enumerate(parts[:-1]):   # a sub-object of the library's object: device.sample
+            obj = getattr(obj, part, None)
+            if obj is None or not self._makers(obj):
+                raise Refused("%s is not part of the maker's library" % ".".join(parts[:i + 1]))
+        fn = getattr(obj, parts[-1], None)
         if fn is None or not callable(fn):
             raise Refused("the library has no function %s" % name)
+        if not (isinstance(fn, ctypes._CFuncPtr) or self._mine(getattr(fn, "__module__", None))):
+            raise Refused("%s is not one of the maker's functions" % name)   # e.g. one it imported from Python
         return _plain(fn(*[_word(a) for a in args]))
+
+    def _mine(self, module):
+        return str(module or "").split(".")[0] in self.packages
+
+    def _makers(self, obj):
+        """The maker's own: a module of its package, or an object of a class its package defines. Not Python's own
+        modules or objects, through which a call could reach the operating system."""
+        return self._mine(obj.__name__ if isinstance(obj, types.ModuleType) else getattr(type(obj), "__module__", ""))
 
     def _call_dll(self, name, args):
         sig = self.spec["functions"].get(name)

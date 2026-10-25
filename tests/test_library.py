@@ -186,6 +186,155 @@ def test_a_dll_is_called_with_the_cards_c_signatures(tmp_path):
         b.stop()
 
 
+ACS_DEVICE = '''
+"""Written like attocube's network instruments' Python API: Device(address) speaks JSON-RPC over TCP; each subsystem
+is a sub-object whose functions call "com.attocube.cryostat.interface.<subsystem>.<function>"."""
+import json
+import socket
+from getpass import getuser            # a function of Python's own, imported as libraries often do
+
+from .sample import Sample
+from .vti import Vti
+from .magnet import Magnet
+
+
+class Device:
+    def __init__(self, address):
+        host, _, port = address.partition(":")
+        self.address, self.port = host, int(port or 9090)
+        self.sock = None
+        self.sample, self.vti, self.magnet = Sample(self), Vti(self), Magnet(self)
+
+    def connect(self):
+        self.sock = socket.create_connection((self.address, self.port), timeout=5)
+        self.reader = self.sock.makefile("r")
+
+    def close(self):
+        self.sock.close()
+
+    def request(self, method, params=()):
+        self.sock.sendall((json.dumps({"jsonrpc": "2.0", "method": method, "params": list(params), "id": 1}) + "\\n")
+                          .encode())
+        reply = json.loads(self.reader.readline())
+        if reply["result"][0] != 0:
+            raise RuntimeError("attoDRY error %d" % reply["result"][0])
+        return reply["result"][1] if len(reply["result"]) > 1 else None
+'''
+ACS_PART = '''
+class {cls}:
+    def __init__(self, device):
+        self.device = device
+        self.interface_name = "com.attocube.cryostat.interface.{part}"
+
+    def getTemperature(self):
+        return self.device.request(self.interface_name + ".getTemperature")
+
+    def getSetPoint(self):
+        return self.device.request(self.interface_name + ".getSetPoint")
+
+    def setSetPoint(self, value):
+        return self.device.request(self.interface_name + ".setSetPoint", [value])
+
+    def getField(self):
+        return self.device.request(self.interface_name + ".getField")
+'''
+NETWORK_CARD = """
+card: 1
+id: acme/cryo-net
+model: ACME network cryostat (Python library, sub-objects)
+vendor: ACME
+kind: cryostat
+status: lab-verified
+identify: { query: "GET system.getDeviceType", idn: "CRYO" }
+library:
+  module: atto_device.CRYO2100
+  object: Device
+  create: true
+  create_args: ["{address}"]
+  open: [connect]
+  close: [close]
+parameters:
+  T: { label: Sample temperature, kind: measure, unit: K, get: "GET sample.getTemperature" }
+  T_vti: { label: VTI temperature, kind: measure, unit: K, get: "GET vti.getTemperature" }
+  B: { label: Field, kind: measure, unit: T, get: "GET magnet.getField" }
+  T_set:
+    label: Sample set point
+    kind: drive
+    unit: K
+    set: "SET sample.setSetPoint {value}"
+    get: "GET sample.getSetPoint"
+    limits: [1.6, 300]
+    safe: 1.6
+"""
+
+
+@pytest.fixture
+def cryostat(tmp_path):
+    """The cryostat's JSON-RPC server on this computer, and attocube-style library files for it."""
+    import json
+    import socketserver
+    import threading
+    state = {"sample.getTemperature": 4.21, "vti.getTemperature": 3.9, "magnet.getField": 0.5,
+             "sample.getSetPoint": 4.2, "system.getDeviceType": "CRYO2100"}
+
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            for line in self.rfile:
+                req = json.loads(line)
+                method = req["method"].replace("com.attocube.cryostat.interface.", "")
+                if method == "sample.setSetPoint":
+                    state["sample.getSetPoint"] = state["sample.getTemperature"] = req["params"][0]
+                    result = [0]
+                else:
+                    result = [0, state[method]] if method in state else [3]
+                self.wfile.write((json.dumps({"jsonrpc": "2.0", "result": result, "id": req["id"]}) + "\n").encode())
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    package = tmp_path / "vendor" / "atto_device" / "CRYO2100"
+    package.mkdir(parents=True)
+    (package.parent / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__init__.py").write_text(ACS_DEVICE, encoding="utf-8")
+    for part, cls in (("sample", "Sample"), ("vti", "Vti"), ("magnet", "Magnet")):
+        (package / ("%s.py" % part)).write_text(ACS_PART.format(cls=cls, part=part), encoding="utf-8")
+    (tmp_path / "cards").mkdir()
+    (tmp_path / "cards" / "cryo-net.yaml").write_text(NETWORK_CARD, encoding="utf-8")
+    yield tmp_path / "vendor", server.server_address[1], state
+    server.shutdown()
+
+
+def test_a_cryostat_whose_library_puts_each_part_on_a_sub_object(cryostat, tmp_path):
+    """As attocube's network instruments: device.sample.getTemperature(), Device created with the address."""
+    vendor, port, state = cryostat
+    lab = build_lab("""
+lab: Cryostat
+instruments:
+  cryo: { card: acme/cryo-net, address: "lib://127.0.0.1:%d?path=%s" }
+""" % (port, vendor.as_posix()), registry=lab_registry(tmp_path))
+    inst = lab.instruments["cryo"]
+    try:
+        assert lab.read("cryo", "T") == pytest.approx(4.21) and lab.read("cryo", "T_vti") == pytest.approx(3.9)
+        assert lab.read("cryo", "B") == pytest.approx(0.5)
+        gate = SafetyGate(lab, ScriptedApprover([True] * 3), EventLog(tmp_path / "events.jsonl", lab.clock))
+        assert gate.set("cryo", "T_set", 10).ok and state["sample.getSetPoint"] == 10   # over JSON-RPC, read back
+        bridge = inst.backend.bridge
+        with pytest.raises(AdapterError, match="sock is not part of the maker's library"):
+            bridge.request("call", 10, name="sock.close", args=[])          # Python's own socket object
+        assert bridge.request("call", 10, name="sample.device.vti.getTemperature", args=[]) == pytest.approx(3.9)
+    finally:
+        lab.close()
+    b = Bridge("t", bridge_command())
+    try:   # the module itself, without the object: its imports are not the maker's
+        b.request("load", 30, path=str(vendor), module="atto_device.CRYO2100")
+        with pytest.raises(AdapterError, match="json is not part of the maker's library"):
+            b.request("call", 10, name="json.dumps", args=["x"])
+        with pytest.raises(AdapterError, match="getuser is not one of the maker's functions"):
+            b.request("call", 10, name="getuser", args=[])                  # imported from Python itself
+    finally:
+        b.stop()
+
+
 def test_library_cards_are_checked():
     base = load_yaml(CARD)
     bad = dict(base, library=dict(base["library"], module="subprocess"))

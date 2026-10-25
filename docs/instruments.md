@@ -216,7 +216,17 @@ cryo: { card: attocube/attodry, address: "lib://COM4?python=C:/Python38-32/pytho
 - `python` is a Python that can load the library: a 32-bit Python for a 32-bit DLL, or the Python that has the maker's package. Without it, Kelvin uses its own (64-bit).
 - `path` is the folder with the maker's module or DLL.
 
-Kelvin runs the library in a helper process, so a crash or a 32-bit DLL never takes Kelvin down. The helper loads only the module or DLL the card names, from that folder (or an installed package of the maker's), never part of Python itself or a system DLL. It calls only the functions on the card. Readings must call functions that only read (`get…`, `is…`, `query…`), and a switch that only toggles is read before it is toggled. The included attoDRY card is a draft written from attocube's header: try it, compare it with the touch screen, and mark it reviewed when it agrees.
+**Libraries with sub-objects.** Some libraries put each part of the instrument on a sub-object of the object you create. attocube's network instruments do this, for example the attoDRY2100 through its `atto_device` package:
+
+```python
+device = Device(ip)
+device.connect()
+device.sample.getTemperature()
+```
+
+Their card creates the object with the address (`object: Device`, `create: true`, `create_args: ["{address}"]`, `open: [connect]`, `close: [close]`) and calls each function by its path: `get: "GET sample.getTemperature"`. The address is then the instrument's IP: `lib://192.168.1.20?path=<the folder that holds atto_device>`.
+
+Kelvin runs the library in a helper process, so a crash or a 32-bit DLL never takes Kelvin down. The helper loads only the module or DLL the card names, from that folder (or an installed package of the maker's), never part of Python itself or a system DLL. It calls only the functions on the card, and only the maker's own: a path goes only through objects the maker's package made, never into Python's modules or objects, such as a socket the library holds. Readings must call functions that only read (`get…`, `is…`, `query…`), and a switch that only toggles is read before it is toggled. The included attoDRY card is a draft written from attocube's header (attoDRYLib, for the attoDRY's USB connection): try it, compare it with the touch screen, and mark it reviewed when it agrees.
 
 ## Writing a card
 

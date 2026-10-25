@@ -650,7 +650,9 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
 LIB_TYPES = ("int8", "uint8", "int16", "uint16", "int32", "int", "uint32", "int64", "uint64", "float", "double", "bool")
 LIB_DENY = ("os", "sys", "subprocess", "shutil", "builtins", "importlib", "runpy", "ctypes", "socket", "pathlib",
             "pickle", "marshal", "multiprocessing", "code", "codeop", "webbrowser", "urllib", "http", "asyncio")
-LIB_CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*)\b")
+# a function, or one on a sub-object of the library's object (attocube's network instruments: sample.getTemperature)
+LIB_PATH = r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*"
+LIB_CALL = re.compile(r"^\s*(SET|GET)\s+(" + LIB_PATH + r")(?![\w.])")
 LIB_READS = re.compile(r"^(get|is|has|query|read|measure|fetch|status|current|actual)", re.I)   # names that only read
 LIB_ACTS = re.compile(r"^(toggle|start|stop|go|sweep|move|set|apply|run|reset|calibrat|upload|download|delete|"
                       r"write|save|store|shutdown|home|zero|exchange|pump)", re.I)
@@ -666,6 +668,7 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
         err("library", "must be a mapping")
         return {}
     name = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+    path_name = re.compile("^" + LIB_PATH + "$")
     out = dict(lib)
     if bool(lib.get("module")) == bool(lib.get("dll")):
         err("library", "name either module (a Python module) or dll (a DLL file), not both")
@@ -674,7 +677,13 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
         if not all(name.match(p) for p in mod.split(".")) or mod.split(".")[0] in LIB_DENY:
             err("library.module", "%r is not a maker's module" % mod)
         if lib.get("object") is not None and not name.match(str(lib["object"])):
-            err("library.object", "must be a name")
+            err("library.object", "must be a name: the class or object the functions hang on (functions on its "
+                                  "sub-objects are called by their path, GET sample.getTemperature)")
+        create_args = lib.get("create_args")
+        if create_args is not None and (not isinstance(create_args, list) or not all(
+                isinstance(a, (str, int, float)) and not isinstance(a, bool) for a in create_args)):
+            err("library.create_args", "a list of the arguments the examples create the object with ({address} for "
+                                       "what the lab's address names)")
     functions: Dict[str, Any] = {}
     if lib.get("dll"):
         dll = str(lib["dll"])
@@ -709,7 +718,7 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
 
     def check_call(path: str, text: Any) -> None:
         parts = [p for p in re.split(r"[\s,]+", str(text).strip()) if p]
-        if not parts or not name.match(parts[0]):
+        if not parts or not path_name.match(parts[0]):
             err(path, "%r is not a function and its arguments" % text)
         elif parts[0] != "wait" and known is not None and parts[0] not in known:
             err(path, "%s is not under library.functions" % parts[0])
@@ -729,7 +738,7 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
             continue
         for key in ("toggle", "state"):
             check_call("library.toggles.%s.%s" % (t, key), spec[key])
-        if not LIB_READS.match(str(spec["state"])):
+        if not LIB_READS.match(str(spec["state"]).rsplit(".", 1)[-1]):
             err("library.toggles.%s.state" % t, "%s does not look like a function that only reads" % spec["state"])
     for p in params.values():
         for tmpl, verb in ((p.set_cmd, "SET"), (p.get_cmd, "GET")):
@@ -745,13 +754,14 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
                 continue
             if known is not None and fn not in known:
                 err(path, "%s is not under library.functions" % fn)
-            if verb == "GET" and (not LIB_READS.match(fn) or LIB_ACTS.match(fn)):
+            last = fn.rsplit(".", 1)[-1]   # sample.getTemperature reads as getTemperature
+            if verb == "GET" and (not LIB_READS.match(last) or LIB_ACTS.match(last)):
                 err(path, "%s does not look like a function that only reads (get..., is..., query...); a reading must "
                     "never start anything" % fn)
     query = str(identify.get("query") or "")
     if query and query != "*IDN?":
         m = LIB_CALL.match(query)
-        if not m or m.group(1).upper() != "GET" or not LIB_READS.match(m.group(2)):
+        if not m or m.group(1).upper() != "GET" or not LIB_READS.match(m.group(2).rsplit(".", 1)[-1]):
             err("identify.query", "with a library, GET <a function that reads the model or serial number>")
     out["toggles"] = toggles
     return out

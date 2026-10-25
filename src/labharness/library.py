@@ -19,8 +19,13 @@ The card says what to load and how to call it, under library:
       toggles:                             # a switch the library only toggles: Kelvin reads its state first
         setTemperatureControl: { toggle: toggleFullTemperatureControl, state: isControllingTemperature }
 Card commands call one function each: "GET getSampleTemperature", "SET setUserTemperature {value}" (more fixed
-arguments may follow the name). The library runs in a helper process (data/bridge/kelvin_bridge.py), so a crash or
-a 32-bit DLL never takes Kelvin down, and only functions the card names can be called."""
+arguments may follow the name). A library whose functions sit on sub-objects of the object it creates, as attocube's
+network instruments do (device = Device(ip); device.connect(); device.sample.getTemperature()), is written
+    library: { module: atto_device.CRYO2100, object: Device, create: true, create_args: ["{address}"],
+               open: [connect], close: [close] }
+with commands such as "GET sample.getTemperature". The library runs in a helper process (data/bridge/
+kelvin_bridge.py), so a crash or a 32-bit DLL never takes Kelvin down, only functions the card names can be called,
+and only on objects the maker's own package made."""
 from __future__ import annotations
 
 import collections
@@ -40,7 +45,7 @@ from .cards import Card
 from .drivers import DriverBackend
 
 BRIDGE = Path(__file__).parent / "data" / "bridge" / "kelvin_bridge.py"
-_CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*)(.*)$", re.I | re.S)
+_CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*)(.*)$", re.I | re.S)
 
 
 def bridge_command(python: Optional[str] = None) -> List[str]:
@@ -161,6 +166,9 @@ class LibraryInstrument(DriverBackend):
             self.python = self.bridge.request("ping", 30)
             load = {k: lib[k] for k in ("module", "object", "create", "create_args", "dll", "prefix", "convention",
                                          "returns", "functions") if k in lib}
+            if load.get("create_args"):   # Device(ip): the address as the examples pass it
+                load["create_args"] = [a.replace("{address}", self.target) if isinstance(a, str) else a
+                                       for a in load["create_args"]]
             self.loaded = self.bridge.request("load", 60, path=q.get("path", ""), **load)
             for step in lib.get("open") or []:
                 self._step(step)
