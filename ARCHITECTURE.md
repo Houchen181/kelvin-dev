@@ -107,9 +107,9 @@ on_abort: { smu.V: { ramp_to: 0, rate_V_per_s: 1 } }
 | 9 | Concise answers | Reply = answer (≤ 3 lines) + status/next action + collapsed details; units and run IDs always |
 | 10 | Mobile / remote | Web/mobile client over VPN or Tailscale; phone can view, approve and abort; never expose the runtime directly to the internet |
 | 11 | Better literature review | arXiv / Semantic Scholar / OpenAlex + Zotero + full-text index; every citation checked against its DOI |
-| 12 | Virtual reviewer | Separate agent on a different model; rubric from the domain pack (controls, systematics, reproducibility, alternative explanations, overclaiming); ranked issues |
+| 12 | Virtual reviewer | Separate agent on a different model; rubric from the domain pack (controls, systematics, reproducibility, alternative explanations, overclaiming); checks claims against the lab's records with read-only tools; ranked findings with confidence, re-checked by another model on request |
 | 13 | Monitor sensitive instruments | Monitor daemon with rules from cards and domain packs, independent of the LLM |
-| 14 | Scoped memory | Isolation enforced at the storage level; typed writes (decision, procedure, quirk, result) confirmed by the user; Q&A never stored; confidential projects never promote to global |
+| 14 | Scoped memory | Isolation enforced at the storage level; typed writes (decision, procedure, quirk, result) confirmed by the user; Q&A never stored; confidential projects never promote to global; skills (procedures in words) and recipes (staged plans that check their own results) at the same scopes, kept once a person approves |
 | 15 | Notifications | ntfy / Slack / Teams / email; info / warn / critical; critical repeats until acknowledged |
 | 16 | Multi-model | Model router: parallel ask, side-by-side comparison, cross-model review |
 

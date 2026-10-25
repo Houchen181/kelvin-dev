@@ -313,7 +313,8 @@ def test_in_a_chat_kelvin_sets_up_an_instrument_it_has_no_card_for(tmp_path, ben
     ends = {e["name"]: e for e in events if e["type"] == "tool_end"}
     assert not any(e.get("is_error") for e in ends.values()), ends
     assert "answered 'ACME,WIDGET 9000" in ends["scan_instruments"]["content"]
-    assert ends["draft_card"]["content"].startswith("drafted card acme/widget-9000")
+    drafted = ends["draft_card"]["content"]   # written from the maker's manual: text from outside the lab
+    assert drafted.startswith('<outside_text from="the maker\'s manual') and "\ndrafted card acme/widget-9000" in drafted
     assert "matches the card" in ends["try_card"]["content"]
     assert ends["add_instrument"]["content"].startswith("added smu2 (ACME Widget 9000 source, card acme/widget-9000, a draft)")
     assert rt.lab.instruments["smu2"].card.status == "draft" and rt.lab.config.unreviewed() == ["smu2"]

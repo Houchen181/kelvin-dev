@@ -4,6 +4,8 @@ History is provider-neutral and append-only:
     {"role": "user", "text": "...", "memory": [notes recalled for this message, optional]}
     {"role": "assistant", "provider": "anthropic", "model": "...", "blocks": [...], "raw": ...}
     {"role": "tool", "results": [{"id", "name", "content", "is_error"}]}
+Pictures: in the request the agent builds (agent.py, _pictures), a user message or a tool result may carry
+"images": [{"mime", "data" (base64)}] for a provider that sees_images; the stored chat keeps only their file names.
 Assistant blocks: {"type": "text", "text"}, {"type": "thinking", "text"},
 {"type": "tool_call", "id", "name", "input"} (input None = arguments were not valid JSON).
 `raw` is the provider's own form of the turn, replayed unchanged to the same
@@ -42,6 +44,7 @@ class Provider:
     name = "base"
     label = "Base"
     can_search = False   # has a web search of its own (web/websearch.py)
+    sees_images = False  # takes pictures in messages and tool results (look_at's plots, photos people attach)
 
     def available(self) -> bool:
         raise NotImplementedError
@@ -58,6 +61,13 @@ class Provider:
         raise NotImplementedError
 
 
+def data_url(image: Dict[str, str]) -> str:
+    return "data:%s;base64,%s" % (image["mime"], image["data"])
+
+
+PICTURES_NOTE = "The pictures from the tool results above, in order:"
+
+
 def safe_id(value: Any, n: int) -> str:
     """A tool-call id every provider accepts."""
     text = re.sub(r"[^A-Za-z0-9_-]", "_", str(value or ""))
@@ -70,6 +80,10 @@ def user_text(message: Dict[str, Any]) -> str:
     from ..memory import block
     notes = message.get("memory")
     text = block(notes, message.get("memory_project")) + "\n\n" + message["text"] if notes else message["text"]
+    if message.get("handoff"):   # the earlier turns, summarised (compaction.py)
+        text = "<lab_handoff>\n%s\n</lab_handoff>\n\n%s" % (message["handoff"], text)
+    if message.get("attached_text"):   # files the person attached (a PDF's text), set when the request is built
+        text = "%s\n\n%s" % (text, message["attached_text"])
     review = message.get("review")
     if review:   # a second opinion on the previous answer, asked for by the user
         text = '<second_opinion model="%s" verdict="%s">\n%s\n</second_opinion>\n\n%s' % (

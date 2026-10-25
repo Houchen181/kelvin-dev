@@ -155,10 +155,22 @@ def fetch_uv(home: Any = None, get: Optional[Callable[[str], bytes]] = None) -> 
     return folder / exe
 
 
+SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION", re.I)
+SECRET_PREFIXES = ("OPENAI", "ANTHROPIC", "GEMINI", "CLAUDE", "AWS_", "AZURE_", "GH_", "GITHUB_", "HF_", "HUGGINGFACE")
+
+
+def clean_environ(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The environment for a maker's code (its library in the helper, its package's build): this computer's, without
+    API keys, tokens, passwords or sign-ins a program could read and send elsewhere."""
+    env = dict(os.environ if base is None else base)
+    return {k: v for k, v in env.items() if not SECRET_NAME.search(k) and not k.upper().startswith(SECRET_PREFIXES)}
+
+
 def uv_env(home: Any = None) -> Dict[str, str]:
     """uv keeps everything in Kelvin's folder and uses only the Pythons it fetched (never one a program left)."""
     tools = root(home) / "tools"
-    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "CONDA_PREFIX")}
+    env = {k: v for k, v in clean_environ().items()
+           if k not in ("VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "CONDA_PREFIX")}
     env.update({"UV_PYTHON_INSTALL_DIR": str(tools / "python"), "UV_CACHE_DIR": str(tools / "uv-cache"),
                 "UV_MANAGED_PYTHON": "1", "UV_NO_PROGRESS": "1", "UV_NO_CONFIG": "1", "UV_LINK_MODE": "copy"})
     return env

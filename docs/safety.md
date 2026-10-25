@@ -21,6 +21,13 @@ Every command passes through the `SafetyGate`, both direct commands (`get`, `set
 - **When Kelvin isn't sure, it asks.** On a real instrument whose card is a draft (no one has checked it against the instrument), or one Kelvin added to the lab itself (marked `added_by: kelvin`; its limits are still the maker's), every output change away from safe asks a person, and the request says why Kelvin isn't sure. Neither auto mode nor a project envelope covers these changes; a plan or queue a person approved, with that line shown, does. On a draft card every settings change asks too, since its measure and drive tags are unchecked. Reading is free. Once a person reviews the limits (**Limits reviewed** in Lab setup) or marks the card reviewed, the usual rules apply.
 - **Kelvin may add instruments, not change limits.** When someone names an instrument connected to the computer, Kelvin adds it to the lab config with its card's own limits and the `added_by: kelvin` mark. Only a person tightens limits or removes the mark. An address the scan didn't find, or moving off a virtual lab the person chose, asks first. Every addition is in the event log and the person is told.
 - **Switched-off instruments stay off** until a person switches them on. Kelvin can ask (`ask_to_switch_on`, with its reason), and switches one on only on a yes. Switching off stays with people.
+- **What steers Kelvin later is a person's call.** Skills and recipes are kept only once a person approves each one. A recipe's stages are plans like any other: each goes through the gate (limits, approvals, device protection), a stage that fails its check after its retries ends the recipe, and so does a run that stops.
+- **Second opinions only read.** A reviewer's tools look things up in the lab's records; none changes anything, runs a plan or takes a camera frame.
+- **Makers' code gets no secrets.** The helper process for a maker's library, and Kelvin's own environments, run without the API keys, tokens and passwords in Kelvin's environment.
+
+### Text from outside the lab
+
+Web pages, papers, manuals, makers' example scripts, an instrument's or a board's replies and PDFs a person attaches can contain text written to steer a model. Kelvin's tools mark such text as outside text (`<outside_text from="...">`), and the models are told it is information, never instructions. In auto mode, once a chat has read outside text, its drive changes and runs ask a person instead of going ahead, and so do any for 30 minutes after outside text was read anywhere (an agent through MCP, too). The request says why.
 
 ### Checked like an experiment, not tested like code
 

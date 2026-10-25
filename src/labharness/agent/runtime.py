@@ -608,35 +608,127 @@ class LabRuntime:
         return self._do("dry run", run)
 
     def run(self, plan_text: str, dry_run: bool = False) -> str:
+        return self._do("running plan", lambda: self._run_once(plan_text, dry_run)[0])
+
+    def _run_once(self, plan_text: str, dry_run: bool = False) -> Tuple[str, Optional[RunReport]]:
+        """One plan, run (the caller holds the lock): run_plan's answer, and the run's report (None: not run)."""
+        try:
+            plan = self._plan(plan_text)
+        except PlanError as e:
+            return "invalid plan: %s" % e, None
+        meta = self._attribute(plan)
+        with self._device_protection(meta) as held:
+            report = self.engine.run(plan, dry_run=dry_run, meta=meta)
+        made = self._auto_report(report.run_id)
+        if report.run_id:
+            summary = (report.analysis or {}).get("assessment") or report.message
+            self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
+                          summary[:300])
+        lines = list(held)
+        if report.dry_run is not None and report.status in ("done", "aborted"):
+            lines.append(report.dry_run.message)
+        lines.append(report.message)
+        if report.analysis:
+            lines += self._analysis_lines(report.analysis)
+        else:
+            lines += self._preview(plan, report.rows)
+        lines += ["warning: " + w for w in report.warnings]
+        if made:
+            lines.append("saved in the run folder: run.h5 (every point, trace, setting and fit) and %s (made "
+                         "automatically; use make_report only for another selection or wording)" % " and ".join(made))
+        if report.run_id and report.rows:
+            lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
+        return "\n".join(lines), report
+
+    # ------------------------------------------------------------------ recipes (recipes.py)
+
+    def run_recipe(self, text: str, values: Optional[Dict[str, Any]] = None) -> str:
+        """A recipe's stages in order, each run through the gate like run_plan, then checked on its data; values
+        kept for later stages; retried with changed values when the recipe says so. Ends at a stage that does not
+        pass, or a run that stops."""
+        from .. import recipes
+        try:
+            recipe = recipes.parse(text)
+            vals = recipes.start_values(recipe, values)
+        except recipes.RecipeError as e:
+            return "recipe not run: %s" % e
+
         def run() -> str:
-            try:
-                plan = self._plan(plan_text)
-            except PlanError as e:
-                return "invalid plan: %s" % e
-            meta = self._attribute(plan)
-            with self._device_protection(meta) as held:
-                report = self.engine.run(plan, dry_run=dry_run, meta=meta)
-            made = self._auto_report(report.run_id)
-            if report.run_id:
-                summary = (report.analysis or {}).get("assessment") or report.message
-                self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
-                              summary[:300])
-            lines = list(held)
-            if report.dry_run is not None and report.status in ("done", "aborted"):
-                lines.append(report.dry_run.message)
-            lines.append(report.message)
-            if report.analysis:
-                lines += self._analysis_lines(report.analysis)
-            else:
-                lines += self._preview(plan, report.rows)
-            lines += ["warning: " + w for w in report.warnings]
-            if made:
-                lines.append("saved in the run folder: run.h5 (every point, trace, setting and fit) and %s (made "
-                             "automatically; use make_report only for another selection or wording)" % " and ".join(made))
-            if report.run_id and report.rows:
-                lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
+            lines = ["recipe %s (%d stages), values: %s" % (recipe.name, len(recipe.stages), recipes.shown(vals))]
+            for k, stage in enumerate(recipe.stages, 1):
+                for attempt in range(stage.retries + 1):
+                    try:
+                        if attempt:
+                            vals.update({name: recipes.calc(e, vals) for name, e in stage.retry.items()})
+                        plan_text = recipes.render(stage.plan, vals)
+                    except recipes.RecipeError as e:
+                        lines.append("stopped at stage %s: %s" % (stage.name, e))
+                        return "\n".join(lines)
+                    self.busy = "recipe %s, stage %d of %d: %s%s" % (recipe.name, k, len(recipe.stages), stage.name,
+                                                                     " (try %d)" % (attempt + 1) if attempt else "")
+                    answer, report = self._run_once(plan_text)
+                    if report is None or not report.run_id or report.status != "done":
+                        why = answer.splitlines()[0] if answer else "not run"
+                        lines.append("stopped at stage %s: %s" % (stage.name, why))
+                        return "\n".join(lines)
+                    try:
+                        passed = bool(self.value_of(report.run_id, recipes.render(stage.passes, vals))) \
+                            if stage.passes else True
+                        if passed:
+                            vals.update({name: self.value_of(report.run_id, recipes.render(e, vals))
+                                         for name, e in stage.keep.items()})
+                    except (ValueError, KeyError) as e:
+                        lines.append("stopped at stage %s: run %s could not be checked: %s" % (
+                            stage.name, report.run_id, e.args[0] if e.args else e))
+                        return "\n".join(lines)
+                    if passed:
+                        lines.append("stage %s: run %s passed%s%s" % (
+                            stage.name, report.run_id, " (%s)" % stage.passes if stage.passes else "",
+                            "; kept " + recipes.shown({n: vals[n] for n in stage.keep}) if stage.keep else ""))
+                        break
+                    lines.append("stage %s: run %s did not pass %s (try %d of %d)" % (
+                        stage.name, report.run_id, stage.passes, attempt + 1, stage.retries + 1))
+                else:
+                    lines.append("stopped: stage %s did not pass after %d %s; values: %s" % (
+                        stage.name, stage.retries + 1, "try" if not stage.retries else "tries", recipes.shown(vals)))
+                    return "\n".join(lines)
+            lines.append("done; values: %s" % recipes.shown(vals))
             return "\n".join(lines)
-        return self._do("running plan", run)
+        return self._do("running recipe %s" % recipe.name, run)
+
+    def check_recipe(self, text: str) -> Tuple[Optional[Any], str]:
+        """(the recipe, "") when it is well formed and every instrument parameter its plans use is in this lab; else
+        (None, what is wrong)."""
+        from .. import recipes
+        try:
+            recipe = recipes.parse(text)
+        except recipes.RecipeError as e:
+            return None, str(e)
+        known = dict(recipe.values)
+        for s in recipe.stages:
+            try:
+                plan = self._plan(recipes.render(s.plan, dict(known, **{k: 1.0 for k in s.keep})))
+            except (PlanError, recipes.RecipeError) as e:
+                return None, "stage %s: %s" % (s.name, e)
+            keys = [st.key for st in plan.setup] + [a.key for a in plan.axes if a.kind == "instrument"] + \
+                ["%s.%s" % m for m in plan.measure]
+            for key in keys:
+                if self._spec(key) is None:
+                    return None, "stage %s: this lab has no %s" % (s.name, key)
+            known.update({k: 1.0 for k in s.keep})
+        return recipe, ""
+
+    def value_of(self, run_id: str, expression: str) -> float:
+        """One number from a run's columns (a recipe's checks and kept values). ValueError: not one number."""
+        import numpy as np
+        from .. import expr
+        table = rundata.columns(self._run_dir(run_id))
+        if not table.n:
+            raise ValueError("run %s has no data" % run_id)
+        value = np.asarray(expr.evaluate(expression, lambda key: table.number(key), np), dtype=float)
+        if value.ndim:
+            raise ValueError("%s is not one number (it gives %d values)" % (expression, value.size))
+        return float(value)
 
     @staticmethod
     def _analysis_lines(a: Dict[str, Any]) -> List[str]:
@@ -1513,6 +1605,96 @@ class LabRuntime:
             lines.append("index,y")
             lines += ["%d,%.6g" % (i, values[i]) for i in range(0, n, step)]
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------ pictures (look_at)
+
+    def look(self, run_id: str = "", column: str = "", frame: str = "", camera: str = "") -> Tuple[Optional[bytes], str]:
+        """look_at: (a PNG, its caption), or (None, why not). A run's plots as its report draws them (one column's
+        alone; a 2-D scan with many rows as a map; a camera column as its last frame), a saved frame, or a frame
+        read now from a camera."""
+        from .. import pictures
+        try:
+            if camera:
+                return self._look_camera(camera.strip())
+            if frame and not run_id:
+                return self._look_file(Path(frame))
+            if not run_id:
+                return None, ("say what to look at: run_id (a run's plots; 'last' for the latest), frame (a saved "
+                              "frame's file) or camera (instrument.parameter, a frame read now)")
+            if run_id == "last":
+                ids = self.pick_runs(last=1)
+                if not ids:
+                    return None, "no runs yet"
+                run_id = ids[-1]
+            d = self._run_dir(run_id)
+            if frame:   # one of this run's frames, by the reference its data keep
+                return self._look_array(rundata.frame(d, frame), "%s, frame %s" % (run_id, frame))
+            rec = rundata.load(d)
+            cols = self._columns(rec)
+            part = self._collector().run(run_id, [])
+            head = "Run %s (%s, %s, %s points)" % (run_id, part.plan, part.status, part.points)
+            measures = cols.get("measures") or []
+            names = [m["key"] for m in measures]
+            if column and column not in names:
+                return None, "%s measured %s, not %s" % (run_id, ", ".join(names) or "nothing", column)
+            images = [m for m in measures if m.get("kind") == "image" and (not column or m["key"] == column)]
+            if images and (column or len(images) == len(measures)):   # a camera column: its last frame
+                key = images[0]["key"]
+                last = next((r for r in reversed(rec.rows) if r.get(key)), None)
+                if last is None:
+                    return None, "%s has no frame of %s yet" % (run_id, key)
+                return self._look_array(rundata.frame(d, str(last[key])), "%s: the last frame of %s (point %d of "
+                                        "%d)" % (head, key, rec.rows.index(last) + 1, len(rec.rows)))
+            axes = [a for a in cols.get("axes") or [] if a.get("kind") != "repeat"]
+            scalars = [m for m in measures if m.get("kind") not in ("trace", "image")]
+            if len(axes) >= 2 and scalars:   # many rows of a 2-D scan read best as a map
+                m = next((m for m in scalars if m["key"] == column), None if column else scalars[0])
+                grid = pictures.grid_of(rec.rows, axes[0]["key"], axes[-1]["key"], m["key"]) if m else None
+                if grid and len(grid[0]) > 8:
+                    outs, ins, z = grid
+                    args = (m["key"], outs, ins, z, axes[-1]["key"], axes[-1].get("unit", ""), axes[0]["key"],
+                            axes[0].get("unit", ""), m.get("unit", ""))
+                    others = [s["key"] for s in scalars if s is not m]
+                    return pictures.map_png(*args), "%s. %s%s" % (head, pictures.map_caption(*args), (
+                        " Also measured: %s (look_at with column)." % ", ".join(others)) if others else "")
+            charts = [c for c in part.charts if not column or c.title.split(" (")[0] == column]
+            if not charts:
+                return None, "%s has nothing to plot%s yet" % (run_id, " of " + column if column else "")
+            return pictures.charts_png(charts), "%s.\n%s" % (head, pictures.charts_caption(charts))
+        except (KeyError, ValueError, OSError, RuntimeError) as e:
+            return None, "nothing to show: %s" % (e.args[0] if e.args else e)
+        except ImportError:
+            return None, "pictures need NumPy, which this Kelvin does not have"
+
+    def _look_camera(self, key: str) -> Tuple[Optional[bytes], str]:
+        spec = self._spec(key)
+        if spec is None:
+            return None, "no reading %r (instrument.parameter)" % key
+        if spec.type != "image":
+            return None, "%s is not a camera frame; look_at shows frames, and runs as plots" % key
+        instr, _, param = key.partition(".")
+        r = self._do("reading %s" % key, lambda: self.gate.get(instr, param))
+        if isinstance(r, str):   # busy with the queue
+            return None, r
+        if not r.ok:
+            return None, r.message
+        return self._look_file(Path(str(r.value)), "%s, read now" % key)
+
+    def _look_file(self, path: Path, head: str = "") -> Tuple[Optional[bytes], str]:
+        """A frame read outside a run: only Kelvin's own (its frames folder), never any file on the computer."""
+        from .. import pictures
+        p, folder = path.resolve(), frames.folder().resolve()
+        if p.suffix.lower() != ".npy" or folder not in p.parents:
+            return None, "look_at shows Kelvin's own frames: a run's (give run_id), or one read outside a run"
+        if not p.is_file():
+            return None, "no frame %s" % path
+        return self._look_array(pictures.load_frame(p), head or p.name)
+
+    @staticmethod
+    def _look_array(frame: Any, head: str) -> Tuple[Optional[bytes], str]:
+        from .. import pictures
+        data, caption = pictures.frame_png(frame)
+        return data, "%s. %s" % (head, caption)
 
     def events(self, n: int = 20) -> str:
         return "\n".join(event_line(e) for e in tail_events(self.events_path, max(1, min(int(n), 200)))) or "no events yet"

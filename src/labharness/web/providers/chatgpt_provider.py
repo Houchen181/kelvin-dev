@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 import openai
 
 from ..chatgpt import MANAGE_USAGE, RESOURCE, NotSignedIn, SignIn
-from .base import Emit, ModelInfo, Provider, TurnResult, safe_id, text_of, user_text
+from .base import PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, safe_id, text_of, user_text
 
 NAMESPACE = "kelvin"
 LIMITS = {"subscription_sharing_usage_limit_exceeded": "Your ChatGPT plan's usage limit is reached for now.",
@@ -33,7 +33,9 @@ def to_input(history: List[Dict[str, Any]], provider: str) -> List[Dict[str, Any
     out: List[Dict[str, Any]] = []
     for m in history:
         if m["role"] == "user":
-            out.append({"role": "user", "content": user_text(m)})
+            images = m.get("images") or []
+            out.append({"role": "user", "content": [{"type": "input_text", "text": user_text(m)}] + [
+                {"type": "input_image", "image_url": data_url(i)} for i in images] if images else user_text(m)})
         elif m["role"] == "assistant":
             if m.get("provider") == provider and isinstance(m.get("raw"), list):
                 for item in m["raw"]:   # our own earlier output, replayed as it was (without server ids)
@@ -52,6 +54,10 @@ def to_input(history: List[Dict[str, Any]], provider: str) -> List[Dict[str, Any
             for r in m["results"]:
                 out.append({"type": "function_call_output", "call_id": safe_id(r["id"], 0),
                             "output": r["content"] or "(empty)"})
+            images = [i for r in m["results"] for i in r.get("images") or []]
+            if images:   # the pictures follow as the user's
+                out.append({"role": "user", "content": [{"type": "input_text", "text": PICTURES_NOTE}] + [
+                    {"type": "input_image", "image_url": data_url(i)} for i in images]})
     return out
 
 
@@ -65,6 +71,7 @@ def tool_list(tools: List[Dict[str, Any]], style: str) -> List[Dict[str, Any]]:
 
 class ChatGPTProvider(Provider):
     name, label = "chatgpt", "ChatGPT plan"
+    sees_images = True
 
     def __init__(self, signin: SignIn, client_factory: Any = None, http_get: Any = None):
         self.signin = signin

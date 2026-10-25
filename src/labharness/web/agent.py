@@ -10,6 +10,7 @@ per message (memory.py); incognito chats use and keep no memory.
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import json
 import re
@@ -21,16 +22,21 @@ from typing import Any, Dict, List, Optional, Tuple
 from mcp import Client
 
 from ..agent.runtime import LabRuntime
-from ..agent.server import INSTRUCTIONS
+from ..agent.server import INSTRUCTIONS, OUTSIDE
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
 from .providers.base import Emit, ModelInfo, Provider, text_of
-from . import brevity, memory, review, rules as rulebook
+from . import brevity, compaction, memory, review, rules as rulebook
+from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
+from .wakeups import WAKE_ME, Waker
 from .settings import Settings
 from .store import MAX_NOTE, ChatStore
 
 SYSTEM = INSTRUCTIONS + """
 You are Kelvin, the lab assistant in this portal, working with an experimental physicist.
+To wait longer than a minute (a cool-down, a temperature settling, a long queue), call wake_me and end your answer
+saying what you are waiting for: Kelvin continues this chat then, and other chats can run meanwhile. A message in
+<wake> is Kelvin continuing the chat for you, not the person: carry on with what the person asked, nothing new.
 Write in Markdown. Lead with the result in one or two sentences, then only what helps the next decision.
 Use units. Prefer a short list or small table over paragraphs. While a plan runs, the portal shows its
 progress and plots live in a Runs pane beside the chat; when it finishes, the conversation shows the automatic
@@ -51,6 +57,12 @@ This project's rules: {rules}. Keep its details inside this conversation: never 
 services."""
 WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual",   # reach the internet
              "install_for_instrument"}
+# tools whose results carry text from outside the lab: once a chat has read some, auto mode asks a person there
+OUTSIDE_TOOLS = {"read_web_page": "a web page", "web_search": "web search results", "search_papers": "paper search "
+                 "results", "read_paper": "a paper", "search_manual": "an instrument's manual", "read_examples":
+                 "a maker's example files", "library_api": "a maker's library", "run_on_board": "a board's output",
+                 "inspect_address": "what a network address answered", "inspect_serial": "what a serial port "
+                 "answered", "draft_card": "the maker's manual, through draft_card"}
 COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
@@ -97,6 +109,11 @@ def remember_tool(in_project: bool, everywhere: bool = True) -> Dict[str, Any]:
             "replaces": {"type": "string", "description": "id of an outdated note this one corrects (optional)"}}},
     }
 MAX_STEPS = 25
+MAX_PICTURES = 8          # the latest pictures a model sees again at each step; older ones by their captions
+REVIEW_S = 300            # a second opinion with its lookups
+MAX_ATTACHED_CHARS = 60000   # of an attached PDF's text, in the message
+PICTURE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+WAIT_S = 120   # the longest wait inside a turn: one turn runs at a time, so longer waits use wake_me
 _RUN_ID = re.compile(r"run_id='([^']+)'")
 
 
@@ -107,6 +124,34 @@ class Busy(Exception):
 def plan_name(args: Any) -> str:
     m = re.search(r"plan:\s*([^\n]+)", str((args or {}).get("plan") or "") if isinstance(args, dict) else "")
     return m.group(1).strip() if m else "(unnamed)"
+
+
+def _seconds(args: Any) -> float:
+    try:
+        return float(args.get("seconds") or 0) if isinstance(args, dict) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _answered(chat: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The chat's latest answer (an assistant message with words)."""
+    return next((m for m in reversed(chat["messages"]) if m.get("role") == "assistant"
+                 and any(b.get("type") == "text" and b.get("text", "").strip() for b in m.get("blocks") or [])), None)
+
+
+def _kind_of(data: bytes) -> Optional[str]:
+    """A file's kind from its first bytes: png, jpg, gif, webp or pdf (None: none of these)."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    if data[:5] == b"%PDF-":
+        return "pdf"
+    return None
 
 
 def run_id_of(text: str) -> Optional[str]:
@@ -125,6 +170,14 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
                     ids.append(rid)
     return sorted(ids)
 
+
+CHAT_HISTORY = {
+    "name": "chat_history",
+    "description": "Search this conversation's full history for a value, a run ID, an instruction or a result, also "
+                   "the earlier turns that a lab handoff now stands in for. Only this conversation.",
+    "schema": {"type": "object", "required": ["query"], "properties": {
+        "query": {"type": "string", "description": "The words to find, e.g. 'pi time' or a run ID"}}},
+}
 
 WEB_SEARCH = {
     "name": "web_search",
@@ -239,6 +292,9 @@ class ChatAgent:
         self.client: Any = None
         self.read_only: set = set()
         self._lanes: List[asyncio.Future] = []
+        self._images: Dict[str, List[Tuple[str, bytes]]] = {}   # pictures a tool call returned, by call id, until kept
+        self.waker = Waker(self)   # chats continued later (wake_me), when the time or the lab says
+        self.know = Know(store)    # skills and recipes (skills.py)
 
     async def start(self) -> None:
         self.client = await self._exit.enter_async_context(Client(self.mcp_server))
@@ -273,9 +329,12 @@ class ChatAgent:
         user's instructions, the project's instructions), so the cached prompt prefix survives; notes are recalled
         per message instead (see recall). A chat outside every project gets no project memory; an incognito chat
         gets no memory at all and cannot save any."""
-        if chat.get("incognito"):
-            return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO]), "tools": self.tools,
-                    "project": None, "learn": False}
+        if chat.get("incognito"):   # not kept, so never continued later either; Kelvin's own skills only
+            own = self.know.index(incognito=True)
+            return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO] +
+                                           ([READ_GUIDE + "\n" + own] if own else [])),
+                    "tools": self.tools + [CHAT_HISTORY] + ([USE_SKILL] if own else []), "project": None,
+                    "learn": False}
         parts = [SYSTEM] + self._brevity()
         mine = self.settings.get("instructions") if self.settings else None
         if mine:
@@ -292,12 +351,17 @@ class ChatAgent:
                     for e in papers[-40:]))
         learn = self.settings.learning if self.settings else True
         parts.append(MEMORY_RULES + ("\n" + LEARN_RULES if learn else ""))
+        know = self.know.index(project["id"] if project else None)
+        parts.append(SKILLS_GUIDE + ("\n" + know if know else ""))
         rules = self.chat_rules(chat)
         if rulebook.restrictive(rules):
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
         private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
-        tools = self.tools + remember + ([SAVE_PAPER] if project else []) + [DEVICES, ADD_DEVICE, MOUNT_DEVICE]
+        tools = self.tools + remember + ([SAVE_PAPER] if project else []) + [DEVICES, ADD_DEVICE, MOUNT_DEVICE,
+                                                                            CHAT_HISTORY, WAKE_ME, USE_SKILL]
+        if project or not private:   # unshared work keeps what it learned in its project
+            tools = tools + [SAVE_SKILL, SAVE_RECIPE]
         if any(p.available() and getattr(p, "can_search", False) for p in self.providers.values()):
             tools = tools + [WEB_SEARCH]
         if "claudecode" in self.providers and rulebook.allows(rules, "claudecode:opus"):   # Claude Code bridge
@@ -552,8 +616,11 @@ class ChatAgent:
             lane.cancel()
         return True
 
-    async def run_turn(self, chat_id: str, text: str, model_key: str, provider: Provider, emit: Emit) -> None:
-        """Call claim() first. Always releases the claim."""
+    async def run_turn(self, chat_id: str, text: str, model_key: str, provider: Provider, emit: Emit,
+                       wake: str = "", attachments: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Call claim() first. Always releases the claim. wake: Kelvin continuing the chat itself (wakeups.py), in
+        words for the person (text is for the model).
+        attachments: pictures and PDFs the person attached, as attach() kept them."""
         model_id = model_key.partition(":")[2]
         try:
             chat = self.store.load(chat_id)
@@ -561,6 +628,13 @@ class ChatAgent:
             self.runtime.attribution = {"project": None if chat.get("incognito") else self.store.project_of(chat_id),
                                         "chat": chat_id, "incognito": bool(chat.get("incognito"))}
             message: Dict[str, Any] = {"role": "user", "text": text}
+            if wake:
+                message["wake"] = wake
+                self.active = dict(self.active or {}, wake=True)
+            if attachments:
+                message["attachments"] = attachments
+                if any(a.get("text") for a in attachments):   # a document's text is from outside the lab
+                    chat["outside"] = "a file the person attached"
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
@@ -574,6 +648,7 @@ class ChatAgent:
             chat["model"] = model_key
             self.store.save(chat)
             context = self.context(chat)  # fixed for the whole turn, so every step reuses the cached prefix
+            self.runtime.gate.outside_chat = chat.get("outside")   # auto mode asks a person in a chat that has
             await emit({"type": "turn_start", "model": model_key, "title": chat["title"]})
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
@@ -587,6 +662,7 @@ class ChatAgent:
             await emit({"type": "turn_end", "reason": "error"})
         finally:
             self.runtime.attribution = {}
+            self.runtime.gate.outside_chat = None
             self.active = None
             self._stream_task = None
 
@@ -602,8 +678,23 @@ class ChatAgent:
                 partial.clear()
             await emit(event)
 
+        history = compaction.view(chat)
+        if compaction.size(context["system"], context["tools"], history) > \
+                compaction.SHARE * compaction.window(provider, model_id):   # a long day: earlier turns, summarised
+            self._stream_task = asyncio.ensure_future(compaction.compact(chat, provider, model_id))
+            try:
+                folded = await self._stream_task
+            finally:
+                self._stream_task = None
+            if folded:
+                self.store.save(chat)
+                history = compaction.view(chat)
+                await emit({"type": "note", "text": "Kelvin summarised the earlier part of this conversation for the "
+                                                    "model, to stay within what it can read at once. The whole chat "
+                                                    "stays here, and Kelvin can still search it."})
         self._stream_task = asyncio.ensure_future(
-            provider.stream(model_id, context["system"], chat["messages"], context["tools"], relay))
+            provider.stream(model_id, context["system"], self._pictures(chat, history, provider), context["tools"],
+                            relay))
         try:
             result = await self._stream_task
         except asyncio.CancelledError:
@@ -645,12 +736,30 @@ class ChatAgent:
         results = []
         for call in result.tool_calls:  # one at a time: the lab has one set of instruments
             opinion: Optional[Dict[str, Any]] = None
+            kept: List[Dict[str, str]] = []
             if self._stop:
                 content, is_error = "not run: the user pressed stop", True
             else:
                 await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
                 if call["name"] == "remember" and context["learn"]:
                     content, is_error = self._remember(chat, context, call["input"])
+                elif call["name"] == "wake_me" and not chat.get("incognito"):
+                    content, is_error = self.waker.add(chat["id"], call["input"])
+                elif call["name"] == "wait" and _seconds(call["input"]) > WAIT_S:   # other chats would wait too
+                    content, is_error = ("not waited: for more than %d s, call wake_me and end your answer, so other "
+                                         "chats can run meanwhile" % WAIT_S), True
+                elif call["name"] == "use_skill":
+                    content, is_error = self._use_skill(chat, context, call["input"])
+                elif call["name"] in ("save_skill", "save_recipe") and \
+                        call["name"] in {t["name"] for t in context["tools"]}:
+                    content, is_error = await self._keep_know(chat, context, call, emit)
+                elif call["name"] == "run_recipe" and isinstance(call["input"], dict) and \
+                        "\n" not in str(call["input"].get("recipe") or ""):   # a kept recipe, by its name
+                    named, problem = self._named_recipe(chat, context, call)
+                    content, is_error = (await self._call(named, emit)) if named else (problem, True)
+                elif call["name"] == "chat_history":
+                    query = str((call["input"] or {}).get("query") or "") if isinstance(call["input"], dict) else ""
+                    content, is_error = compaction.search(chat, query), False
                 elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):   # mounting may write caps
                     content, is_error = await asyncio.to_thread(self._device_tool, chat, call["name"], call["input"])
                 elif call["name"] == "save_paper" and context["project"]:
@@ -667,9 +776,16 @@ class ChatAgent:
                     content, is_error, opinion = await self._reviewed_run(chat, call, emit)
                 else:
                     content, is_error = await self._call(call, emit)
+                kept = self._keep_pictures(chat["id"], call["id"])
                 await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
-                            "is_error": is_error, "run_id": run_id_of(content) if call["name"] == "run_plan" else None})
+                            "is_error": is_error, "run_id": run_id_of(content) if call["name"] == "run_plan" else None,
+                            "images": [k["file"] for k in kept] or None})
+            if call["name"] in OUTSIDE_TOOLS and not is_error and "<outside_text from=" in content:   # remembered
+                chat["outside"] = OUTSIDE_TOOLS[call["name"]]
+                self.runtime.gate.outside_chat = chat["outside"]
             entry = {"id": call["id"], "name": call["name"], "content": content, "is_error": is_error}
+            if kept:
+                entry["images"] = kept   # the files, kept with the chat; the model gets them with each request
             if opinion:
                 entry["review"] = opinion   # shown again when the chat is reopened
             results.append(entry)
@@ -695,7 +811,10 @@ class ChatAgent:
             limit = 8
         found, by, problems = await websearch.search(self.providers, (self.active or {}).get("model"), query, limit)
         self.runtime.gate.log.write("web_search", by="agent", query=query, results=len(found), service=by)
-        return websearch.describe(found, by, problems), not found
+        if not found:
+            return websearch.describe(found, by, problems), True
+        from ..agent.server import outside
+        return outside(self.runtime, "web search results", websearch.describe(found, by, problems)), False
 
     # ------------------------------------------------------------------ Claude Code bridge (temporary)
 
@@ -775,7 +894,9 @@ class ChatAgent:
         """run_plan with a second opinion first. The reviewer only advises: a "stop" asks the user, who decides."""
         opinion = await self._review_plan(chat, call, emit)
         if opinion and opinion["verdict"] == "stop":
-            reasons = [line.lstrip("-• ").strip() for line in opinion["text"].splitlines() if line.strip()][:5]
+            sure = [f for f in opinion.get("findings") or [] if f["confidence"] >= review.SURE]
+            reasons = ["%s%s" % (f["problem"], " (%s)" % f["evidence"] if f["evidence"] else "") for f in sure][:5] or \
+                [line.lstrip("-• ").strip() for line in opinion["text"].splitlines() if line.strip()][:5]
             go = await self._ask_human(call["id"], emit, ApprovalRequest(
                 "Second opinion: %s advises not to run plan %s. Run it anyway?" % (
                     opinion["label"], plan_name(call["input"])), reasons or ["(no reasons given)"]))
@@ -803,7 +924,8 @@ class ChatAgent:
             status = await asyncio.to_thread(self.runtime.lab_status)
             checks = await asyncio.to_thread(self.runtime.validate, plan)
             prompt = review.plan_prompt(review.last_request(chat["messages"]), status, checks, plan)
-            text = await asyncio.wait_for(review.ask(provider, model_id, review.PLAN_SYSTEM, prompt), 180)
+            text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.PLAN_CHECK, prompt),
+                                                   REVIEW_S)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -812,10 +934,10 @@ class ChatAgent:
             await emit({"type": "review", "call_id": call["id"], "kind": "plan", "model": key, "label": self.label(key),
                         "verdict": "", "text": "No second opinion: %s" % reason})
             return None
-        verdict, body = review.parse(text, "plan")
-        opinion = {"kind": "plan", "model": key, "label": self.label(key), "verdict": verdict, "text": body,
-                   "at": time.time()}
-        self.runtime.gate.log.write("review", by=key, plan=plan_name(call["input"]), verdict=verdict, text=body[:500])
+        found = review.findings_of(text, "plan")
+        opinion = dict(found, kind="plan", model=key, label=self.label(key), lookups=lookups, at=time.time())
+        self.runtime.gate.log.write("review", by=key, plan=plan_name(call["input"]), verdict=opinion["verdict"],
+                                    text=opinion["text"][:500])
         await emit(dict(opinion, type="review", call_id=call["id"]))
         return opinion
 
@@ -827,17 +949,85 @@ class ChatAgent:
         chat = self.store.load(chat_id)
         self.check_model(chat, model_key)
         prompt = review.answer_context(chat["messages"])   # ValueError when there is nothing to review
-        text = await asyncio.wait_for(review.ask(provider, model_id, review.ANSWER_SYSTEM, prompt), 180)
-        verdict, body = review.parse(text, "answer")
-        opinion = {"kind": "answer", "model": model_key, "label": self.label(model_key), "verdict": verdict,
-                   "text": body, "at": time.time()}
+        text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.ANSWER_CHECK, prompt),
+                                               REVIEW_S)
+        opinion = dict(review.findings_of(text, "answer"), kind="answer", model=model_key, label=self.label(model_key),
+                       lookups=lookups, at=time.time())
         chat = self.store.load(chat_id)   # it may have been saved meanwhile
-        target = next((m for m in reversed(chat["messages"]) if m.get("role") == "assistant"
-                       and any(b.get("type") == "text" and b.get("text", "").strip() for b in m.get("blocks") or [])), None)
+        target = _answered(chat)
         if target is not None:
             target["review"] = opinion
             self.store.save(chat)
         return opinion
+
+    async def recheck_review(self, chat_id: str, model_key: str) -> Dict[str, Any]:
+        """Another model checks the findings of the second opinion on the chat's latest answer, against the lab's
+        records: the ones it confirms become sure, the ones it refutes are dropped. Kept with the answer."""
+        provider, model_id = self.provider_for(model_key)
+        chat = self.store.load(chat_id)
+        self.check_model(chat, model_key)
+        target = _answered(chat)
+        opinion = (target or {}).get("review")
+        if not opinion or not opinion.get("findings"):
+            raise ValueError("The second opinion has no findings to re-check.")
+        if opinion.get("model") == model_key:
+            raise ValueError("Pick a different model from the one that gave the second opinion.")
+        prompt = review.recheck_prompt(review.answer_context(chat["messages"]), opinion)
+        text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.RECHECK, prompt), REVIEW_S)
+        checked = review.apply_recheck(copy.deepcopy(opinion), text, "answer", self.label(model_key))
+        checked.update(given=False, recheck_lookups=lookups)   # the main model sees it with the next message
+        chat = self.store.load(chat_id)
+        target = _answered(chat)
+        if target is not None and target.get("review", {}).get("at") == opinion.get("at"):
+            target["review"] = checked
+            self.store.save(chat)
+        return checked
+
+    async def _review_loop(self, provider: Provider, model_id: str, system: str, prompt: str) -> Tuple[str, int]:
+        """The reviewer's answer after it has looked things up in the lab's records with read-only tools
+        (review.REVIEW_TOOLS; never a camera, never a change): (its answer, how many lookups it made)."""
+        tools = [t for t in self.tools if t["name"] in review.REVIEW_TOOLS and t["name"] in self.read_only]
+        allowed = {t["name"] for t in tools}
+        sees = getattr(provider, "sees_images", False)
+        history: List[Dict[str, Any]] = [{"role": "user", "text": prompt}]
+        lookups = 0
+
+        async def quiet(event: Dict[str, Any]) -> None:
+            return None
+        text = ""
+        for _ in range(review.MAX_ROUNDS):
+            result = await provider.stream(model_id, system, history, tools, quiet)
+            text = text_of(result.blocks) or text
+            history.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
+                            "blocks": result.blocks, "raw": result.raw})
+            if result.stop_reason != "tool_calls":
+                return text, lookups
+            results = []
+            for call in result.tool_calls:
+                lookups += 1
+                pictures: List[Dict[str, str]] = []
+                if lookups > review.MAX_LOOKUPS:
+                    content, is_error = "no more lookups: answer now with the JSON object", True
+                elif call["name"] not in allowed or not isinstance(call["input"], dict):
+                    content, is_error = "not available to the reviewer: it reads the lab's records only", True
+                elif call["name"] == "look_at" and call["input"].get("camera"):
+                    content, is_error = "the reviewer looks at saved runs and frames only, not at a camera", True
+                else:
+                    try:
+                        r = await self.client.call_tool(call["name"], call["input"])
+                        content = "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text")
+                        is_error = bool(r.is_error)
+                        pictures = [{"mime": c.mime_type, "data": c.data} for c in r.content
+                                    if sees and getattr(c, "type", "") == "image" and c.mime_type in PICTURE_TYPES]
+                    except Exception as e:
+                        content, is_error = "tool failed: %s" % e, True
+                entry: Dict[str, Any] = {"id": call["id"], "name": call["name"], "content": content,
+                                         "is_error": is_error}
+                if pictures:
+                    entry["images"] = pictures
+                results.append(entry)
+            history.append({"role": "tool", "results": results})
+        return text, lookups
 
     async def _ask_human(self, call_id: str, emit: Emit, request: ApprovalRequest) -> bool:
         """Ask the user through the approver (inline in the chat), outside any tool call."""
@@ -885,7 +1075,8 @@ class ChatAgent:
         self._stop = False
         return lanes
 
-    async def run_compare(self, chat_id: str, text: str, lanes: List[Tuple[str, Provider, str]], emit: Emit) -> None:
+    async def run_compare(self, chat_id: str, text: str, lanes: List[Tuple[str, Provider, str]], emit: Emit,
+                          attachments: Optional[List[Dict[str, Any]]] = None) -> None:
         """Every model answers the same message at once, able to read the lab but not change it. The first answer
         continues the chat unless the user picks another (choose)."""
         keys = [k for k, _, _ in lanes]
@@ -893,6 +1084,10 @@ class ChatAgent:
             chat = self.store.load(chat_id)
             message: Dict[str, Any] = {"role": "user", "text": text,
                                        "compare": {"models": keys, "lanes": [], "chosen": 0}}
+            if attachments:
+                message["attachments"] = attachments
+                if any(a.get("text") for a in attachments):
+                    chat["outside"] = "a file the person attached"
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
@@ -904,12 +1099,13 @@ class ChatAgent:
             context = self.context(chat)
             tools = [t for t in context["tools"] if t["name"] in self.read_only]   # already without web tools if barred
             system = context["system"] + "\n\n" + COMPARE
-            base = list(chat["messages"])
+            base = list(compaction.view(chat))   # with the lab handoff, on a long day
             await emit({"type": "compare_start", "models": keys, "labels": [self.label(k) for k in keys],
                         "title": chat["title"]})
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
-            self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit))
+            self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit,
+                                                            chat_id))
                            for i, (key, provider, model_id) in enumerate(lanes)]
             done = await asyncio.gather(*self._lanes, return_exceptions=True)
             results = []
@@ -937,7 +1133,8 @@ class ChatAgent:
             self.active = None
 
     async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
-                    base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit) -> Dict[str, Any]:
+                    base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit,
+                    chat_id: str = "") -> Dict[str, Any]:
         out: List[Dict[str, Any]] = []
 
         async def lane_emit(event: Dict[str, Any]) -> None:
@@ -945,7 +1142,8 @@ class ChatAgent:
 
         try:
             for _ in range(COMPARE_STEPS):
-                result = await provider.stream(model_id, system, base + out, tools, lane_emit)
+                result = await provider.stream(model_id, system, self._pictures({"id": chat_id}, base + out, provider),
+                                               tools, lane_emit)
                 out.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
                             "blocks": result.blocks, "raw": result.raw})
                 if result.stop_reason != "tool_calls":
@@ -953,6 +1151,7 @@ class ChatAgent:
                 results = []
                 for call in result.tool_calls:
                     await lane_emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
+                    kept: List[Dict[str, str]] = []
                     if call["name"] not in {t["name"] for t in tools}:
                         content, is_error = ("not available while comparing models: only tools that read the lab are "
                                              "(and only those this chat allows). Say what you would do instead."), True
@@ -963,11 +1162,16 @@ class ChatAgent:
                             r = await self.client.call_tool(call["name"], call["input"])
                             content = "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text")
                             is_error = bool(r.is_error)
+                            self._images[call["id"]] = [(c.mime_type, base64.b64decode(c.data)) for c in r.content
+                                                        if getattr(c, "type", "") == "image"
+                                                        and c.mime_type in PICTURE_TYPES]
+                            kept = self._keep_pictures(chat_id, call["id"])
                         except Exception as e:
                             content, is_error = "tool failed: %s" % e, True
                     await lane_emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
-                                     "is_error": is_error})
-                    results.append({"id": call["id"], "name": call["name"], "content": content, "is_error": is_error})
+                                     "is_error": is_error, "images": [k["file"] for k in kept] or None})
+                    results.append(dict({"id": call["id"], "name": call["name"], "content": content,
+                                         "is_error": is_error}, **({"images": kept} if kept else {})))
                 out.append({"role": "tool", "results": results})
             else:
                 out.append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
@@ -1060,4 +1264,192 @@ class ChatAgent:
         except Exception as e:  # a tool must never leave the history without its result
             return "tool failed: %s" % e, True
         text = "\n".join(c.text for c in result.content if getattr(c, "type", "") == "text")
+        pictures = [(c.mime_type, base64.b64decode(c.data)) for c in result.content
+                    if getattr(c, "type", "") == "image" and c.mime_type in PICTURE_TYPES]
+        if pictures:   # look_at's plots and frames: kept with the chat by the caller (_keep_pictures)
+            self._images[call["id"]] = pictures
         return text, bool(result.is_error)
+
+    # ------------------------------------------------------------------ skills and recipes (skills.py)
+
+    def _use_skill(self, chat: Dict[str, Any], context: Dict[str, Any], args: Any) -> Tuple[str, bool]:
+        name = str(args.get("name") or "") if isinstance(args, dict) else ""
+        item = self.know.find("skill", name, context["project"], bool(chat.get("incognito")))
+        if item is None:
+            names = [i.name for i in self.know.items(context["project"], bool(chat.get("incognito")))
+                     if i.kind == "skill"]
+            return "no skill %r here (there are: %s)" % (name, ", ".join(names) or "none"), True
+        whose = {"kelvin": "Kelvin's own", "global": "the person's"}.get(item.scope, "this project's")
+        return "Skill %s (%s): %s\n\n%s" % (item.name, whose, item.description, item.body), False
+
+    def _named_recipe(self, chat: Dict[str, Any], context: Dict[str, Any],
+                      call: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
+        """run_recipe with a kept recipe's name: the call with its YAML."""
+        name = str(call["input"].get("recipe") or "").strip()
+        item = self.know.find("recipe", name, context["project"], bool(chat.get("incognito")))
+        if item is None:
+            kept = [i.name for i in self.know.items(context["project"], bool(chat.get("incognito")))
+                    if i.kind == "recipe"]
+            return None, "no kept recipe %r (kept: %s); give the recipe's YAML instead" % (
+                name, ", ".join(kept) or "none")
+        return dict(call, input=dict(call["input"], recipe=item.body)), ""
+
+    async def _keep_know(self, chat: Dict[str, Any], context: Dict[str, Any], call: Dict[str, Any],
+                         emit: Emit) -> Tuple[str, bool]:
+        """save_skill and save_recipe: kept once a person approves (what steers Kelvin later is a person's call)."""
+        from .. import recipes
+        args = call["input"] if isinstance(call["input"], dict) else {}
+        project = context["project"]
+        scope = str(args.get("scope") or ("project" if project else "global"))
+        if scope == "project" and not project:
+            return "this chat is in no project: keep it for every project (scope global)", True
+        if scope == "global" and context.get("private"):
+            return "this chat's work is not shared, so what it learned stays in its project (scope project)", True
+        where = project if scope == "project" else "global"
+        whom = "this project" if scope == "project" else "every project"
+        if call["name"] == "save_skill":
+            kind, name = "skill", recipes.slug(args.get("name"))
+            steps = str(args.get("steps") or "").strip()
+            if not recipes.NAME.match(name) or not str(args.get("description") or "").strip() or not steps:
+                return "not kept: a skill needs a name, a description (when to use it) and its steps", True
+            shown = [str(args["description"]).strip()] + [line for line in steps.splitlines() if line.strip()][:12]
+            recipe = None
+        else:
+            recipe, problem = await asyncio.to_thread(self.runtime.check_recipe, str(args.get("recipe") or ""))
+            if recipe is None:
+                return "not kept: %s" % problem, True
+            kind, name = "recipe", recipe.name
+            shown = [recipe.description or "(no description)"] + [
+                "stage %s%s%s" % (s.name, ": passes when " + s.passes if s.passes else "",
+                                  "; keeps " + ", ".join(s.keep) if s.keep else "") for s in recipe.stages]
+        old = next((i for i in self.know.items(project) if i.kind == kind and i.name == name and i.scope == where),
+                   None)
+        go = await self._ask_human(call["id"], emit, ApprovalRequest(
+            "Keep the %s “%s” for %s?%s" % (kind, name, whom, " It replaces the one kept before." if old else ""),
+            shown))
+        if not go:
+            return "not kept: the person declined", True
+        try:
+            if recipe is not None:
+                self.know.save_recipe(recipe, where)
+            else:
+                self.know.save_skill(name, args["description"], steps, where, by=chat.get("title") or "")
+        except (KeyError, ValueError, OSError) as e:
+            return "not kept: %s" % (e.args[0] if e.args else e), True
+        return "kept the %s %s for %s; it is listed with the %ss from the next message on" % (kind, name, whom,
+                                                                                            kind), False
+
+    # ------------------------------------------------------------------ pictures and attached files
+
+    def _keep_pictures(self, chat_id: str, call_id: str) -> List[Dict[str, str]]:
+        """The pictures a tool call returned, kept with the chat: [{file, mime}]."""
+        out = []
+        pictures = self._images.pop(call_id, [])
+        for mime, data in pictures if chat_id else []:
+            try:
+                out.append({"file": self.store.put_media(chat_id, data, PICTURE_TYPES[mime]), "mime": mime})
+            except (KeyError, ValueError, OSError):
+                pass
+        return out
+
+    def attach(self, chat_id: str, name: str, data: bytes) -> Dict[str, Any]:
+        """A picture or PDF the person attached, kept with the chat for their next message: {name, file, mime} and,
+        for a PDF, its text (file) and pages. ValueError: not a kind Kelvin takes, or a PDF without text."""
+        kind = _kind_of(data)
+        if kind is None:
+            raise ValueError("Kelvin takes pictures (PNG, JPEG, GIF, WebP) and PDFs.")
+        name = re.sub(r"[\x00-\x1f/\\]+", "_", str(name or "attachment"))[-120:]
+        out: Dict[str, Any] = {"name": name, "file": self.store.put_media(chat_id, data, kind), "mime":
+                               {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "gif": "image/gif",
+                                "webp": "image/webp"}[kind]}
+        if kind == "pdf":
+            from ..profiles import pdf_pages
+            try:
+                pages = pdf_pages(data)
+            except RuntimeError as e:   # no pypdf here
+                raise ValueError(str(e))
+            except Exception as e:
+                raise ValueError("Kelvin could not read this PDF (%s)." % (str(e).splitlines()[0] if str(e) else e))
+            text = "\n\n".join("[page %d]\n%s" % (i + 1, p.strip()) for i, p in enumerate(pages) if p.strip())
+            if len(text) < 200:
+                raise ValueError("This PDF has almost no text (a scan?): attach pictures of its pages instead.")
+            out.update(text=self.store.put_media(chat_id, text.encode("utf-8"), "txt"), pages=len(pages))
+        return out
+
+    def check_attachments(self, chat_id: str, items: Any) -> List[Dict[str, Any]]:
+        """The attachments a message names, as attach() kept them (only files kept with this chat)."""
+        out = []
+        for a in (items if isinstance(items, list) else [])[:10]:
+            if not isinstance(a, dict):
+                continue
+            self.store.media(chat_id, str(a.get("file")))   # KeyError: not this chat's
+            ext = str(a["file"]).rsplit(".", 1)[-1]
+            one = {"name": str(a.get("name") or a["file"])[:120], "file": str(a["file"]),
+                   "mime": {"pdf": "application/pdf", "jpg": "image/jpeg"}.get(ext, "image/" + ext)}
+            if ext == "pdf":
+                if not a.get("text"):
+                    raise KeyError("no text for %s" % one["name"])
+                self.store.media(chat_id, str(a["text"]))
+                one.update(text=str(a["text"]), pages=int(a.get("pages") or 0))
+            out.append(one)
+        return out
+
+    def _picture(self, chat_id: str, item: Dict[str, str]) -> Optional[Dict[str, str]]:
+        try:
+            return {"mime": item["mime"], "data": base64.b64encode(self.store.media(chat_id, item["file"])).decode()}
+        except (KeyError, OSError):
+            return None
+
+    def _pictures(self, chat: Dict[str, Any], history: List[Dict[str, Any]], provider: Provider) -> List[Dict[str, Any]]:
+        """The history as the model gets it: the latest pictures inline (for a model that sees them; captions
+        otherwise), and the text of PDFs the person attached. The chat itself keeps only the files' names."""
+        if not any(m.get("attachments") or (m["role"] == "tool" and any(r.get("images") for r in m["results"]))
+                   for m in history):
+            return history
+        sees = getattr(provider, "sees_images", False)
+        left = MAX_PICTURES if sees else 0
+        out: List[Dict[str, Any]] = []
+        for m in reversed(history):   # the newest pictures are the ones still shown
+            if m["role"] == "tool" and any(r.get("images") for r in m["results"]):
+                results = []
+                for r in m["results"]:
+                    if r.get("images"):
+                        kept = r["images"]
+                        r = {k: v for k, v in r.items() if k != "images"}
+                        pictures = [p for p in (self._picture(chat["id"], i) for i in kept) if p]
+                        if pictures and left >= len(pictures):
+                            r["images"], left = pictures, left - len(pictures)
+                        else:
+                            r["content"] = "%s\n(%s)" % (r["content"] or "", "this model reads only the caption; the "
+                                                          "picture went to the person" if not sees else
+                                                          "an earlier picture, no longer shown: look_at again to see it")
+                    results.append(r)
+                m = dict(m, results=results)
+            elif m["role"] == "user" and m.get("attachments"):
+                m = dict(m)
+                pictures, texts = [], []
+                for a in m["attachments"]:
+                    if a.get("text"):
+                        try:
+                            body = self.store.media(chat["id"], a["text"]).decode("utf-8", "replace")
+                        except KeyError:
+                            continue
+                        if len(body) > MAX_ATTACHED_CHARS:
+                            body = body[:MAX_ATTACHED_CHARS] + "\n… (the rest of its %d pages is not shown)" % a.get(
+                                "pages", 0)
+                        texts.append(OUTSIDE % ("%s, a PDF the person attached (its text; figures are not "
+                                                "included)" % a["name"], body))
+                    elif a["mime"].startswith("image/"):
+                        p = self._picture(chat["id"], a) if left > 0 else None
+                        if p:
+                            pictures.append(p)
+                            left -= 1
+                        else:
+                            texts.append("(%s: a picture the person attached; %s)" % (
+                                a["name"], "this model cannot see pictures" if not sees else "no longer shown"))
+                if pictures:
+                    m["images"] = pictures
+                if texts:
+                    m["attached_text"] = "\n\n".join(texts)
+            out.append(m)
+        return out[::-1]

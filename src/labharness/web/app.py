@@ -59,6 +59,7 @@ log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/ke
 
 STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
+ATTACH_MAX = 40 * 2 ** 20   # a photo (the portal shrinks it first) or a PDF
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
 SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/accounts/remove",
               "/api/stop", "/api/runs/stop"}
@@ -198,6 +199,15 @@ SUMMARY_SYSTEM = ("You write the opening of a physics project's master report: t
                   "or references. Plain prose, no headings, no lists.")
 
 
+def shown(message: Dict[str, Any]) -> Dict[str, Any]:
+    """A chat message as the browser and phones get it: without the provider's own state, and Kelvin continuing a
+    chat by itself in words for people (its text is for the model)."""
+    out = {k: v for k, v in message.items() if k != "raw"}
+    if isinstance(out.get("wake"), str) and out["wake"]:
+        out["text"] = "Kelvin continued this chat: " + out["wake"]
+    return out
+
+
 def open_path(path: Path) -> None:
     """Open a file with the program the user has for it."""
     if sys.platform.startswith("win"):
@@ -327,6 +337,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def lifespan(app: Starlette):
         loop_ref["loop"] = asyncio.get_running_loop()
         await agent.start()
+        tasks.append(asyncio.ensure_future(agent.waker.run()))   # chats continued later (wakeups.py)
         configure_notifications()
         configure_literature()
         await start_phone()
@@ -1013,6 +1024,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 if agent.active and agent.active["chat_id"] == chat_id:
                     return error(409, "This conversation is still running.")
                 store.delete(chat_id)
+                agent.waker.cancel(chat_id)
                 return JSONResponse({"ok": True})
             data = store.load(chat_id)
             if request.method == "PATCH":
@@ -1025,7 +1037,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     store.save(data)
                 if "project" in body:  # file it under a project, or null to take it out
                     store.assign(chat_id, body["project"] or None)
-            out = dict(data, messages=[{k: v for k, v in m.items() if k != "raw"} for m in data["messages"]])
+            out = dict(data, messages=[shown(m) for m in data["messages"]])
             out["project"] = store.project_of(chat_id)  # the browser never needs provider-internal state
             out["rules"] = agent.chat_rules(data)
             return JSONResponse(out)
@@ -1246,6 +1258,29 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         may keep new ones. Project memory is under /api/projects/{id}."""
         return JSONResponse({"instructions": settings.get("instructions") or "", "learn": settings.learning,
                              "notes": store.global_notes()})
+
+    async def know_view(request: Request) -> Response:
+        """Skills and recipes (skills.py). ?scope=global: Kelvin's own and the person's; ?scope=<project id>: the
+        project's."""
+        scope = request.query_params.get("scope") or "global"
+        if scope == "global":
+            items = [i for i in agent.know.items() if i.scope in ("kelvin", "global")]
+        else:
+            try:
+                store.project(scope)
+            except KeyError as e:
+                return error(404, e.args[0])
+            items = [i for i in agent.know.items(scope, own=False) if i.scope == scope]
+        return JSONResponse({"items": [i.view() for i in items]})
+
+    async def know_item(request: Request) -> Response:
+        """DELETE a skill or recipe the person kept (Kelvin's own stay)."""
+        p = request.path_params
+        try:
+            gone = agent.know.delete(p["kind"], p["scope"], p["name"])
+        except KeyError as e:
+            return error(404, e.args[0])
+        return JSONResponse({"ok": gone}, status_code=200 if gone else 404)
 
     async def memory_note(request: Request) -> Response:
         try:
@@ -2034,6 +2069,44 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             items.append({"name": name, "card": card, "address": address, "note": str(it.get("note") or "")[:60]})
         return JSONResponse({"yaml": add_to_config(str(body.get("base") or ""), items, runtime.lab.registry)})
 
+    async def wake_view(request: Request) -> Response:
+        """DELETE: the person cancels the chat's wake-up (Kelvin would have continued it later)."""
+        chat_id = request.path_params["chat_id"]
+        try:
+            store.load(chat_id)   # only the signed-in person's chats
+        except KeyError as e:
+            return error(404, e.args[0])
+        return JSONResponse({"ok": agent.waker.cancel(chat_id)})
+
+    async def media(request: Request) -> Response:
+        """A picture or file kept with a chat: a plot look_at drew, a photo or PDF the person attached."""
+        from .store import MEDIA_TYPES
+        name = request.path_params["name"]
+        try:
+            data = store.media(request.path_params["chat_id"], name)
+        except KeyError as e:
+            return error(404, e.args[0])
+        return Response(data, media_type=MEDIA_TYPES[name.rsplit(".", 1)[-1]],
+                        headers={"Cache-Control": "private, max-age=31536000, immutable"})   # named by its content
+
+    async def attachments(request: Request) -> Response:
+        """POST the file's bytes (X-File-Name: its name, URL-encoded): kept with the chat for the next message."""
+        from urllib.parse import unquote
+        chat_id = request.path_params["chat_id"]
+        data = await request.body()
+        if not data:
+            return error(400, "The file is empty.")
+        if len(data) > ATTACH_MAX:
+            return error(413, "Kelvin takes files up to %d MB." % (ATTACH_MAX // 2 ** 20))
+        try:
+            store.load(chat_id)
+            return JSONResponse(await asyncio.to_thread(agent.attach, chat_id,
+                                                        unquote(request.headers.get("x-file-name", "")), data))
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ValueError as e:
+            return error(400, str(e))
+
     async def turn(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
         body = await request.json()
@@ -2041,6 +2114,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if not text:
             return error(400, "Say something first.")
         model = str(body.get("model") or "")
+        try:
+            attached = agent.check_attachments(chat_id, body.get("attachments"))
+        except KeyError:
+            return error(400, "An attached file is no longer there: attach it again.")
         try:
             provider = agent.claim(chat_id, model)
         except Busy as e:
@@ -2051,7 +2128,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
         async def run() -> None:
             try:
-                await agent.run_turn(chat_id, text, model, provider, queue.put)
+                await agent.run_turn(chat_id, text, model, provider, queue.put, attachments=attached)
             finally:
                 await queue.put(None)
 
@@ -2102,12 +2179,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, "Say something first.")
         models = body.get("models") if isinstance(body.get("models"), list) else []
         try:
+            attached = agent.check_attachments(chat_id, body.get("attachments"))
+        except KeyError:
+            return error(400, "An attached file is no longer there: attach it again.")
+        try:
             lanes = agent.claim_compare(chat_id, models)
         except Busy as e:
             return error(409, str(e))
         except (KeyError, ValueError) as e:
             return error(400, e.args[0])
-        return stream_events(lambda emit: agent.run_compare(chat_id, text, lanes, emit))
+        return stream_events(lambda emit: agent.run_compare(chat_id, text, lanes, emit, attached))
 
     async def choose(request: Request) -> Response:
         body = await request.json()
@@ -2121,10 +2202,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, str(e))
 
     async def second_opinion(request: Request) -> Response:
-        """Another model reviews the chat's latest answer."""
+        """Another model reviews the chat's latest answer, checking the lab's records. {recheck: true}: the model
+        checks the findings of the second opinion the answer has."""
         body = await request.json()
         try:
-            opinion = await agent.review_answer(request.path_params["chat_id"], str(body.get("model") or ""))
+            review = agent.recheck_review if body.get("recheck") else agent.review_answer
+            opinion = await review(request.path_params["chat_id"], str(body.get("model") or ""))
         except Busy as e:
             return error(409, str(e))
         except KeyError as e:
@@ -2132,7 +2215,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except ValueError as e:
             return error(400, str(e))
         except asyncio.TimeoutError:
-            return error(504, "The reviewer did not answer within 3 minutes.")
+            return error(504, "The reviewer did not answer within 5 minutes.")
         except Exception as e:
             return error(502, "The reviewer could not answer: %s" % str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
         return JSONResponse(opinion)
@@ -2150,6 +2233,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def state(request: Request) -> Response:
         data = await asyncio.to_thread(runtime.ui_state)  # may read instruments; keep the server responsive
         data["active"] = agent.active
+        data["wakes"], data["woke"] = agent.waker.view(), agent.waker.latest()
         return JSONResponse(data)
 
     async def approval_mode(request: Request) -> Response:
@@ -2327,6 +2411,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/hands", hands_view, methods=["POST"]),
         Route("/api/memory", memory_view),
         Route("/api/memory/notes/{note_id}", memory_note, methods=["DELETE"]),
+        Route("/api/know", know_view),
+        Route("/api/know/{kind}/{scope}/{name}", know_item, methods=["DELETE"]),
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/state", state),
@@ -2334,6 +2420,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/lab", lab_view, methods=["GET", "POST"]),
         Route("/api/lab/install", lab_install, methods=["POST"]),
         Route("/api/environments", environments_view, methods=["GET", "POST"]),
+        Route("/api/chats/{chat_id}/wake", wake_view, methods=["DELETE"]),
+        Route("/api/chats/{chat_id}/media/{name}", media, methods=["GET"]),
+        Route("/api/chats/{chat_id}/attachments", attachments, methods=["POST"]),
         Route("/api/reports", reports_view, methods=["GET", "POST"]),
         Route("/api/reports/tree", reports_tree),
         Route("/api/reports/refresh", reports_refresh, methods=["POST"]),

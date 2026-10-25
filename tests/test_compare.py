@@ -4,7 +4,7 @@ import pytest
 pytest.importorskip("starlette")
 pytest.importorskip("mcp")
 
-from labharness.web.review import answer_context, parse  # noqa: E402
+from labharness.web.review import REVIEW_TOOLS, answer_context, parse  # noqa: E402
 from test_web import Scripted, client_for, human, parts, stream_turn  # noqa: E402,F401
 
 
@@ -119,7 +119,8 @@ def test_a_second_opinion_on_every_plan(parts):
         assert start["model"] == "rev:m1" and opinion["verdict"] == "caution" and "settle longer" in opinion["text"]
         prompt = rev.prompts[0][0]
         assert "scan the stage" in prompt and "The lab now" in prompt and "stage_scan" in prompt
-        assert rev.tool_names[0] == []                                 # the reviewer gets no tools at all
+        looks = set(rev.tool_names[0])                                  # the reviewer may only look things up
+        assert "describe_run" in looks and looks <= set(REVIEW_TOOLS) and not {"run_plan", "set_value"} & looks
         end = next(e for e in events if e["type"] == "tool_end")
         assert end["content"].startswith("second opinion from Rev m1: verdict caution") and "done: 5 points" in end["content"]
         result = store.load(chat["id"])["messages"][2]["results"][0]

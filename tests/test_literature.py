@@ -171,7 +171,8 @@ def test_kelvin_searches_and_reads_over_mcp(runtime):
     assert listed["search_papers"].annotations.read_only_hint and listed["search_papers"].annotations.open_world_hint
     found, read = call(runtime, ("search_papers", {"query": "CrSBr magnons", "limit": 3}),
                        ("read_paper", {"paper": "arXiv:2604.12866", "max_chars": 1000}))
-    assert found.startswith("[1] Shubnic et al. 2026 (arXiv). Acoustically-driven magnons in CrSBr bilayers")
+    assert found.startswith('<outside_text from="paper search results">\n[1] Shubnic et al. 2026 (arXiv). '
+                            'Acoustically-driven magnons in CrSBr bilayers')   # papers' text: information, not orders
     assert "id doi:10.1021/acs.nanolett.2c02863; cited 71" in found and "cite as [Author Year](url)" in found
     assert "continues: read_paper" in read
     runtime.literature.enabled = False

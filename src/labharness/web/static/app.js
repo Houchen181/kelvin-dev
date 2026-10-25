@@ -1637,11 +1637,16 @@
       this.steps.set(id, step);
       this.el.append(step.el);
     }
-    toolEnd(id, content, isError, runId) {
+    toolEnd(id, content, isError, runId, images) {
       const step = this.steps.get(id);
       if (!step) return;
       step.finish(content, isError);
       step.done = true;
+      if (images && images.length && !step.pics) {   // what look_at showed the model
+        step.pics = h("div", { class: "tool-pics" }, ...images.map((f) => mediaImg(f, "What Kelvin looked at")));
+        (step.last || step.el).after(step.pics);
+        step.last = step.pics;
+      }
       const files = reportNames(content);
       if (files.length && !step.files) {
         step.files = reportFiles(files);
@@ -1697,7 +1702,12 @@
         if (step && step.last === pending) step.last = card;
       } else this.place(ev.call_id, card);
     }
-    answerReview(r) { this.endText(); this.el.append(reviewCard(r)); }
+    answerReview(r) {
+      this.endText();
+      this.reviewEl = reviewCard(r);
+      this.reviewData = r;
+      this.el.append(this.reviewEl);
+    }
     error(text) { this.endText(); this.el.append(h("div", { class: "callout" }, text)); }
     finish() {
       this.endText(); this.endThinking();
@@ -1718,7 +1728,42 @@
   const nearBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
   const toBottom = () => { scroller.scrollTop = scroller.scrollHeight; };
 
-  function userBubble(text) { return h("div", { class: "msg user" }, h("div", { class: "bubble" }, text)); }
+  function userBubble(text, attachments) {
+    const bubble = h("div", { class: "bubble" }, text);
+    if (!attachments || !attachments.length) return h("div", { class: "msg user" }, bubble);
+    const files = h("div", { class: "user-files" }, ...attachments.map((a) => String(a.mime).startsWith("image/")
+      ? mediaImg(a.file, a.name)
+      : h("span", { class: "file-chip", title: a.name }, svgIcon("M7 3h7l5 5v13H7zM14 3v5h5"),
+          a.name + (a.pages ? " · " + a.pages + " pages" : ""))));
+    return h("div", { class: "msg user" }, h("div", { class: "user-stack" }, files, bubble));
+  }
+  function svgIcon(d) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg"), path = document.createElementNS(ns, "path");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+    path.setAttribute("d", d); path.setAttribute("fill", "none"); path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.8"); path.setAttribute("stroke-linejoin", "round");
+    svg.append(path);
+    return svg;
+  }
+  // pictures kept with a chat (a plot look_at drew, a photo the person attached), fetched once with the token
+  const MEDIA = new Map();
+  function mediaImg(file, alt) {
+    const img = h("img", { class: "media-img", alt: alt || "A picture", title: "Click to enlarge" });
+    const key = S.chatId + "/" + file;
+    if (!MEDIA.has(key)) {
+      MEDIA.set(key, fetch("/api/chats/" + S.chatId + "/media/" + encodeURIComponent(file), { headers: { "X-Kelvin-Token": token } })
+        .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+        .then((b) => URL.createObjectURL(b)));
+    }
+    MEDIA.get(key).then((url) => { img.src = url; }).catch(() => { MEDIA.delete(key); img.alt = "(the picture is no longer there)"; });
+    img.addEventListener("click", () => img.classList.toggle("big"));
+    return img;
+  }
+  function wakeLine(m) {   // Kelvin continuing the chat itself (wake_me), not a message from the person
+    const why = typeof m.wake === "string" ? m.wake : String(m.text || "").replace(/^<wake>|<\/wake>$/g, "");
+    return h("div", { class: "msg wake note" }, "Kelvin continued this chat: " + why);
+  }
 
   async function copyText(text, btn) {
     try {
@@ -1750,7 +1795,7 @@
       for (const r of m.results) {
         if (r.review) reply.review(Object.assign({ call_id: r.id }, r.review));
         const run = r.name === "run_plan" ? (String(r.content).match(/run_id='([^']+)'/) || [])[1] : null;
-        reply.toolEnd(r.id, r.content, r.is_error, run);
+        reply.toolEnd(r.id, r.content, r.is_error, run, (r.images || []).map((i) => i.file));
       }
     }
   }
@@ -1765,7 +1810,7 @@
         if (reply) reply.finish();
         reply = null;
         recalled = m.memory || null;
-        thread.append(userBubble(m.text));
+        thread.append(m.wake ? wakeLine(m) : userBubble(m.text, m.attachments));
         const comp = m.compare;
         if (comp && comp.lanes && comp.lanes.length) {   // several models answered this message side by side
           if (recalled) { thread.append(recallBox(recalled)); recalled = null; }
@@ -1793,6 +1838,7 @@
     });
     if (reply) reply.finish();
     offerReview(S.lastReply);
+    offerRecheck(S.lastReply);
     showEmpty(!chat.messages.length);
     requestAnimationFrame(toBottom);
   }
@@ -2015,6 +2061,7 @@
     $("project-msg").textContent = "";
     renderNotes(p);
     renderPapers(p);
+    loadKnow(p.id, $("project-know"), $("know-count"), $("project-msg"));
     $("project-summary").value = p.summary || "";
     renderDevices(p);
     $("project-dialog").showModal();
@@ -2333,11 +2380,68 @@
   }
   function updateSend() {
     const send = $("send");
-    send.disabled = !S.streaming && (!$("input").value.trim() || !$("model").value);
+    send.disabled = !S.streaming && ((!$("input").value.trim() && !ATT.items.length) || !$("model").value);
+  }
+
+  // ------------------------------------------------------------------ attached pictures and PDFs
+  const ATT = { items: [] };
+  function addFiles(list) {
+    for (const f of list) {
+      if (!/^image\//.test(f.type) && f.type !== "application/pdf") { toast((f.name || "That file") + ": Kelvin takes pictures and PDFs."); continue; }
+      if (ATT.items.length >= 10) { toast("Up to 10 files with one message."); break; }
+      ATT.items.push(f);
+    }
+    renderAttachments();
+  }
+  function renderAttachments() {
+    $("attach-list").replaceChildren(...ATT.items.map((f, i) => {
+      const x = h("button", { class: "attach-x", type: "button", "aria-label": "Remove " + (f.name || "the picture") }, "×");
+      x.addEventListener("click", () => { ATT.items.splice(i, 1); renderAttachments(); });
+      return h("span", { class: "attach-chip", title: f.name || "" }, h("span", { class: "attach-name" }, f.name || "Pasted picture"), x);
+    }));
+    $("attach-list").hidden = !ATT.items.length;
+    updateSend();
+  }
+  async function shrink(file) {   // a phone's photo is megabytes; models read about 1600 pixels across
+    if (file.type === "application/pdf" || file.type === "image/gif") return file;
+    let bmp;
+    try { bmp = await createImageBitmap(file); } catch (e) { throw new Error((file.name || "The picture") + ": Kelvin can't read this picture. Save it as JPEG or PNG."); }
+    const scale = Math.min(1, 1568 / Math.max(bmp.width, bmp.height));
+    if (scale === 1 && file.size <= 3.5e6 && /^image\/(png|jpeg|webp)$/.test(file.type)) { if (bmp.close) bmp.close(); return file; }
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(bmp.width * scale)); c.height = Math.max(1, Math.round(bmp.height * scale));
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    if (bmp.close) bmp.close();
+    return await new Promise((ok) => c.toBlob(ok, file.type === "image/png" ? "image/png" : "image/jpeg", 0.88));
+  }
+  async function uploadAttachments(items) {   // kept with the chat; the message names them
+    const out = [];
+    for (const f of items) {
+      const res = await fetch("/api/chats/" + S.chatId + "/attachments", {
+        method: "POST", body: await shrink(f),
+        headers: { "X-Kelvin-Token": token, "Content-Type": "application/octet-stream",
+                   "X-File-Name": encodeURIComponent(f.name || "pasted-picture.png") },
+      });
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* not JSON */ }
+      if (!res.ok) throw new Error((f.name ? f.name + ": " : "") + ((data && data.error) || "HTTP " + res.status));
+      out.push(data);
+    }
+    return out;
+  }
+  async function takeAttachments() {   // null when an upload failed (said in a toast; the files stay attached)
+    if (!ATT.items.length) return [];
+    try {
+      const done = await uploadAttachments(ATT.items);
+      ATT.items = [];
+      renderAttachments();
+      return done;
+    } catch (e) { toast(e.message); return null; }
   }
 
   async function sendMessage(text) {
     text = text.trim();
+    if (!text && ATT.items.length) text = ATT.items.length > 1 ? "Look at the attached files." : "Look at the attached file.";
     if (!text || S.streaming) return;
     const model = $("model").value;
     if (!model) { openSettings(); return; }
@@ -2350,10 +2454,12 @@
       S.chatRules = rules;
       applyIncognito();
     }
+    const attachments = await takeAttachments();
+    if (attachments === null) return;
     $("input").value = ""; autosize();
     $("input").placeholder = askHint();
     showEmpty(false);
-    thread.append(userBubble(text));
+    thread.append(userBubble(text, attachments));
     const reply = new Reply(model);
     thread.append(reply.el);
     toBottom();
@@ -2362,7 +2468,7 @@
       const res = await fetch("/api/chats/" + S.chatId + "/turn", {
         method: "POST",
         headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
-        body: JSON.stringify({ text, model }),
+        body: JSON.stringify({ text, model, attachments }),
       });
       if (!res.ok) {
         let msg = "HTTP " + res.status;
@@ -2451,11 +2557,13 @@
       S.chatRules = rules;
       applyIncognito();
     }
+    const attachments = await takeAttachments();
+    if (attachments === null) return;
     $("input").value = ""; autosize();
     $("input").placeholder = askHint();
     showEmpty(false);
     for (const el of document.querySelectorAll(".msg-actions")) el.remove();
-    thread.append(userBubble(text));
+    thread.append(userBubble(text, attachments));
     const view = new CompareView(models);
     thread.append(view.el);
     toBottom();
@@ -2464,7 +2572,7 @@
       const res = await fetch("/api/chats/" + S.chatId + "/compare", {
         method: "POST",
         headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
-        body: JSON.stringify({ text, models }),
+        body: JSON.stringify({ text, models, attachments }),
       });
       if (!res.ok) {
         let msg = "HTTP " + res.status;
@@ -2769,13 +2877,65 @@
   // ------------------------------------------------------------------ second opinions
   const VERDICTS = { go: ["ok", "Go"], caution: ["warn", "Caution"], stop: ["bad", "Stop"],
     agree: ["ok", "Agrees"], partly: ["warn", "Partly agrees"], disagree: ["bad", "Disagrees"] };
+  const SURE = 0.7;   // as web/review.py: findings the reviewer is at least this sure of are passed on to Kelvin
   function reviewCard(r) {
     const [tone, word] = VERDICTS[r.verdict] || ["muted", "No verdict"];
     const who = S.labels[r.model] || r.label || r.model;
-    return h("div", { class: "review " + tone },
+    const card = h("div", { class: "review " + tone },
       h("div", { class: "review-head" }, h("span", { class: "verdict-chip" }, word),
-        h("span", { class: "review-who" }, "Second opinion" + (r.kind === "plan" ? " on the plan" : "") + " · " + who)),
-      h("div", { class: "md", html: md(r.text || "") }));
+        h("span", { class: "review-who" }, "Second opinion" + (r.kind === "plan" ? " on the plan" : "") + " · " + who +
+          (r.lookups ? " · looked up " + r.lookups + (r.lookups === 1 ? " record" : " records") : "") +
+          (r.rechecked ? " · re-checked by " + r.rechecked : ""))));
+    if (!r.findings) { card.append(h("div", { class: "md", html: md(r.text || "") })); return card; }   // words only
+    const sure = r.findings.filter((f) => f.confidence >= SURE && !f.refuted);
+    const unsure = r.findings.filter((f) => f.confidence < SURE || f.refuted);
+    card.append(sure.length ? h("ul", { class: "findings" }, ...sure.map(findingItem))
+      : h("div", { class: "review-checked" }, r.verdict === "go" || r.verdict === "agree" ? "No problems found." : "No problem it is sure of."));
+    if (r.checked && r.checked.length) card.append(h("div", { class: "review-checked" }, "Checked and right: " + r.checked.join("; ") + "."));
+    if (unsure.length) {
+      card.append(h("details", { class: "review-unsure" },
+        h("summary", {}, unsure.length + " less certain " + (unsure.length === 1 ? "note" : "notes") + ", not passed on to Kelvin"),
+        h("ul", { class: "findings" }, ...unsure.map(findingItem))));
+    }
+    return card;
+  }
+  function findingItem(f) {
+    const meta = Math.round(f.confidence * 100) + "% sure" + (f.recheck ? " · confirmed by " + f.recheck.label : "") +
+      (f.refuted ? " · not confirmed by " + f.refuted.label + (f.refuted.evidence ? ": " + f.refuted.evidence : "") : "");
+    return h("li", { class: "finding " + f.severity + (f.refuted ? " refuted" : "") }, h("span", { class: "sev" }, f.severity),
+      h("span", { class: "finding-body" }, h("span", { class: "finding-problem" }, f.problem),
+        f.evidence ? h("span", { class: "finding-evidence" }, f.evidence) : null, h("span", { class: "finding-meta" }, meta)));
+  }
+  function offerRecheck(reply) {   // the latest answer's second opinion: another model can check its findings
+    const r = reply && reply.reviewData, card = reply && reply.reviewEl;
+    if (!r || !card || r.kind !== "answer" || !(r.findings || []).length || r.rechecked || !card.isConnected) return;
+    const label = "Re-check the findings with another model";
+    const btn = h("button", { class: "link soft", type: "button", "aria-haspopup": "true" }, icon("check"), label);
+    const menu = h("div", { class: "pane-menu review-menu", hidden: true });
+    btn.addEventListener("click", () => {
+      if (!menu.hidden) { menu.hidden = true; return; }
+      const models = (S.groups || []).flatMap((g) => g.models.map((m) => ({ key: m.key, label: m.label, provider: g.label })))
+        .filter((m) => m.key !== r.model && modelAllowed(m.key, S.chatRules));
+      menu.replaceChildren(h("div", { class: "pane-menu-note" }, models.length ? "Which model should check these findings?"
+        : "Add another model in Settings to re-check."), ...models.map((m) => {
+        const item = h("button", { class: "pane-menu-item", type: "button" }, h("span", {}),
+          h("span", { class: "pm-name" }, m.label), h("span", { class: "pm-meta" }, m.provider));
+        item.addEventListener("click", async () => {
+          menu.hidden = true;
+          btn.disabled = true;
+          btn.lastChild.textContent = "Re-checking with " + m.label + "…";
+          try {
+            const checked = await api("/api/chats/" + S.chatId + "/review", { body: { model: m.key, recheck: true } });
+            const fresh = reviewCard(checked);
+            card.replaceWith(fresh);
+            reply.reviewEl = fresh; reply.reviewData = checked;
+          } catch (e) { toast(e.message); btn.disabled = false; btn.lastChild.textContent = label; }
+        });
+        return item;
+      }));
+      menu.hidden = false;
+    });
+    card.append(h("div", { class: "msg-actions pane-menu-wrap review-recheck" }, btn, menu));
   }
   function recallBox(notes) {
     return h("details", { class: "recall" },
@@ -2809,11 +2969,14 @@
   async function askReview(reply, wrap, model) {
     const pending = h("div", { class: "review pending" }, h("span", { class: "spinner" }),
       h("span", {}, "Asking " + (S.labels[model] || model) + " for a second opinion…"));
-    wrap.before(pending);
+    (reply.tools && reply.tools.contains(wrap) ? reply.tools : wrap).before(pending);   // above the answer's buttons
     wrap.hidden = true;
     try {
       const r = await api("/api/chats/" + S.chatId + "/review", { body: { model } });
-      pending.replaceWith(reviewCard(r));
+      const card = reviewCard(r);
+      pending.replaceWith(card);
+      reply.reviewEl = card; reply.reviewData = r;
+      offerRecheck(reply);
       $("input").placeholder = "Reply — Kelvin will see the second opinion";
     } catch (e) {
       pending.replaceWith(h("div", { class: "callout" }, e.message));
@@ -2835,7 +2998,7 @@
         if (card) card.close(card.choice === undefined ? "Closed" : card.choice ? "Approved" : "Declined", !!card.choice);
         break;
       }
-      case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id); pollState(); break;
+      case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images); pollState(); break;
       case "run_progress": reply.runProgress(ev); break;
       case "computer_step": reply.computerStep(ev); break;
       case "note": reply.note(ev.text); break;
@@ -2953,6 +3116,35 @@
       : [h("div", { class: "inst-empty" }, PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.")]));
   }
 
+  // ------------------------------------------------------------------ chats Kelvin continues later (wake_me)
+  const WAKE = { done: undefined, count: -1 };
+  function inTime(s) { return s < 90 ? s + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h"; }
+  async function wakeState(s) {
+    const active = s.active || {}, woke = s.woke || {};
+    const here = !!S.chatId && !S.streaming;
+    const running = !!active.wake && active.chat_id === S.chatId;
+    const mine = (s.wakes || []).find((w) => w.chat_id === S.chatId);
+    if (active.wake && !s.busy) {
+      $("agent-state").textContent = "Kelvin is continuing “" + (woke.title || "a chat") + "”";
+      $("agent-state").classList.add("busy");
+    }
+    $("wake-text").textContent = running ? "Kelvin is continuing this chat: " + (woke.why || "")
+      : mine ? "Kelvin continues this chat when " + mine.text + " (at most " + inTime(mine.left_s) + " from now)." : "";
+    $("wake-stop").hidden = !running;
+    $("wake-cancel").hidden = running || !mine;
+    $("wake-bar").hidden = !(here && (running || mine));
+    const finished = woke.done && woke.done !== WAKE.done;
+    if (WAKE.done === undefined) WAKE.done = woke.done || 0;   // the page just opened: nothing new yet
+    else if (finished) { WAKE.done = woke.done; refreshChats(); }
+    if (here && (running || (finished && woke.chat_id === S.chatId))) {   // show what Kelvin does as it does it
+      const id = S.chatId;
+      let chat;
+      try { chat = await api("/api/chats/" + id); } catch (e) { return; }
+      if (S.chatId !== id || S.streaming || (running && chat.messages.length === WAKE.count)) return;
+      WAKE.count = chat.messages.length;
+      renderChat(chat);
+    }
+  }
   async function pollState() {
     let s;
     try { s = await api("/api/state"); } catch (e) { return; }
@@ -2967,6 +3159,7 @@
       const who = e.user ? e.user + ": " : "";
       return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, who + m[2])) : h("li", {}, who + e.text);
     }));
+    wakeState(s);
     termState(s);   // the terminal first: an approval its own command needs is asked there
     // requests not already shown in a conversation (e.g. after a page reload)
     // requests no conversation shows (a queue started here, another agent's run): asked in the Lab panel, and kept
@@ -4197,6 +4390,39 @@
     renderGlobalNotes(null);
     $("settings-dialog").showModal();
     api("/api/memory").then((m) => renderGlobalNotes(m.notes)).catch(() => renderGlobalNotes([]));
+    loadKnow("global", $("global-know"), $("global-know-count"), $("settings-msg"));
+  }
+  // skills and recipes (web/skills.py): Kelvin's own, the person's, a project's
+  async function loadKnow(scope, list, count, msg) {
+    list.replaceChildren(h("li", { class: "memory-empty" }, "Loading…"));
+    let items;
+    try { items = (await api("/api/know?scope=" + encodeURIComponent(scope))).items; } catch (e) { items = []; }
+    renderKnow(scope, items, list, count, msg);
+  }
+  function renderKnow(scope, items, list, count, msg) {
+    const kept = items.filter((i) => i.scope !== "kelvin").length;
+    count.textContent = kept ? kept + " kept" : "";
+    if (!items.length) {
+      list.replaceChildren(h("li", { class: "memory-empty" }, "Nothing yet. When a procedure or a staged measurement works, Kelvin offers to keep it here."));
+      return;
+    }
+    list.replaceChildren(...items.map((it) => {
+      const body = h("pre", { class: "know-body", hidden: true }, it.body);
+      const show = h("button", { class: "link soft", type: "button" }, "Show");
+      show.addEventListener("click", () => { body.hidden = !body.hidden; show.textContent = body.hidden ? "Show" : "Hide"; });
+      const when = it.saved ? "kept " + new Date(it.saved * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : "comes with Kelvin";
+      const row = h("li", { class: "memory-note" }, h("span", { class: "memory-kind" }, it.kind),
+        h("div", { class: "memory-body" }, h("span", {}, h("b", {}, it.name), it.description ? " — " + it.description : ""),
+          h("span", { class: "memory-meta" }, when), show, body));
+      if (it.scope !== "kelvin") {
+        row.append(rowButton("trash", "Delete this " + it.kind, async () => {
+          try { await api("/api/know/" + it.kind + "/" + it.scope + "/" + encodeURIComponent(it.name), { method: "DELETE" }); }
+          catch (e) { msg.textContent = e.message; return; }
+          renderKnow(scope, items.filter((x) => x !== it), list, count, msg);
+        }));
+      }
+      return row;
+    }));
   }
   function renderGlobalNotes(notes) {
     const list = $("global-notes");
@@ -4459,6 +4685,27 @@
     $("protect-clear").addEventListener("click", () => saveProtection(true));
     $("hands-on").addEventListener("click", handsOn);
     $("hands-done").addEventListener("click", openUnlock);
+    $("wake-cancel").addEventListener("click", async () => {
+      if (!S.chatId) return;
+      try { await api("/api/chats/" + S.chatId + "/wake", { method: "DELETE" }); } catch (e) { toast(e.message); return; }
+      $("wake-bar").hidden = true;
+      toast("Kelvin won't continue this chat on its own.");
+    });
+    $("wake-stop").addEventListener("click", () => api("/api/stop", { body: {} }).catch(() => {}));
+    $("attach-btn").addEventListener("click", () => $("attach-input").click());
+    $("attach-input").addEventListener("change", (e) => { addFiles([...e.target.files]); e.target.value = ""; });
+    $("input").addEventListener("paste", (e) => {   // a screenshot pasted into the message
+      const files = [...((e.clipboardData && e.clipboardData.files) || [])];
+      if (!files.length) return;
+      if (!e.clipboardData.getData("text/plain")) e.preventDefault();
+      addFiles(files);
+    });
+    $("composer").addEventListener("dragover", (e) => { if ([...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+    $("composer").addEventListener("drop", (e) => {
+      if (!e.dataTransfer.files.length) return;
+      e.preventDefault();
+      addFiles([...e.dataTransfer.files]);
+    });
     $("hands-done-panel").addEventListener("click", openUnlock);
     $("hands-unlock").addEventListener("click", unlock);
     for (const c of document.querySelectorAll(".hands-check")) c.addEventListener("change", () => {

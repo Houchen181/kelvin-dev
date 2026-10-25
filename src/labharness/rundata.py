@@ -811,6 +811,26 @@ def trace_row(folder: Path, key: str, i: int) -> Optional[Dict[str, Any]]:
         return row
 
 
+def frame(folder: Path, ref: str) -> Any:
+    """One camera frame of a run, as a NumPy array, by the reference its row keeps: frames/<file>.npy while the run
+    is measured, run.h5:/frames/<key>[i] once it is packed. ValueError: not a frame of this run."""
+    import numpy as np
+    folder = Path(folder)
+    head, sep, rest = str(ref).partition(":/frames/")
+    if sep and head == RUN_FILE and rest.endswith("]") and "[" in rest:
+        key, _, i = rest[:-1].rpartition("[")
+        import h5py
+        with h5py.File(folder / RUN_FILE, "r") as f:
+            item = f["frames"][key]
+            if isinstance(item, h5py.Group):   # frames of different sizes: one dataset per point
+                return item["%05d" % int(i)][()]
+            return item[int(i)]
+    p = (folder / str(ref)).resolve()
+    if p.suffix.lower() != ".npy" or folder.resolve() not in p.parents:
+        raise ValueError("not a frame of this run: %s" % ref)
+    return np.load(str(p), allow_pickle=False)
+
+
 def meta(folder: Path) -> Dict[str, Any]:
     """A run's meta (status, points, times, project, device...), without reading its points."""
     return load(folder, with_rows=False).meta

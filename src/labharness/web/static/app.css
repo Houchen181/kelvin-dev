@@ -138,6 +138,25 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .update-bar[hidden] { display: none; }
 .update-bar span { flex: 1 1 220px; }
 .update-bar.warn { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn); }
+.wake-bar { margin: 0 0 8px; }
+.attach-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 2px 6px; }
+.attach-list[hidden] { display: none; }
+.attach-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 240px; padding: 3px 4px 3px 9px;
+  border: 1px solid var(--line-strong); border-radius: 999px; background: var(--hover); font-size: 13px; }
+.attach-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 4px; }
+.attach-x:hover { color: var(--danger); }
+.user-stack { display: grid; justify-items: end; gap: 6px; max-width: 100%; }
+.user-files, .tool-pics { display: flex; flex-wrap: wrap; gap: 8px; }
+.user-files { justify-content: flex-end; }
+.tool-pics { margin: 2px 0 8px 26px; }
+.media-img { display: block; max-width: min(100%, 420px); max-height: 280px; border: 1px solid var(--line); border-radius: 8px;
+  background: #fff; cursor: zoom-in; }
+.media-img.big { max-width: 100%; max-height: none; cursor: zoom-out; }
+.file-chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--line-strong);
+  border-radius: 10px; font-size: 13px; color: var(--text-2); }
+.file-chip svg { width: 15px; height: 15px; flex: none; }
+.msg.wake { margin: 18px 0 -6px; font-size: 13.5px; }
 
 /* ---------- layout ---------- */
 .app { display: flex; height: 100vh; height: 100dvh; overflow: hidden; }
@@ -659,6 +678,20 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .review { border: 1px solid var(--line); border-left: 3px solid var(--muted); border-radius: 10px; padding: 8px 12px;
   background: var(--panel); display: grid; gap: 4px; font-size: 14px; }
 .review.pending { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.findings { list-style: none; margin: 6px 0 2px; padding: 0; display: grid; gap: 7px; }
+.finding { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.finding .sev { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 6px;
+  background: var(--hover); color: var(--text-2); }
+.finding.high .sev { background: var(--danger-soft); color: var(--danger); }
+.finding.medium .sev { background: var(--warn-bg); color: var(--warn); }
+.finding-body { display: grid; gap: 2px; min-width: 0; }
+.finding-evidence { color: var(--text-2); font-size: 13px; }
+.finding-meta { color: var(--muted); font-size: 12px; }
+.finding.refuted .finding-problem { text-decoration: line-through; color: var(--muted); }
+.review-checked { color: var(--text-2); font-size: 13px; margin-top: 6px; }
+.review-unsure { margin-top: 6px; font-size: 13px; color: var(--muted); }
+.review-unsure summary { cursor: pointer; }
+.review-recheck { margin-top: 6px; }
 .review.ok { border-left-color: var(--ok); }
 .review.warn { border-left-color: var(--warn-line); }
 .review.bad { border-left-color: var(--danger); background: var(--danger-soft); }
@@ -718,6 +751,10 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 /* project notes: short facts, each deletable */
 .memory-notes { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; max-height: 240px; overflow: auto; }
 .memory-note { display: flex; align-items: flex-start; gap: 8px; padding: 8px 6px 8px 10px; border-top: 1px solid var(--line); font-size: 14px; }
+.know-body { margin: 6px 0 0; padding: 8px 10px; max-height: 260px; overflow: auto; border-radius: 8px; background: var(--hover);
+  font-size: 12.5px; white-space: pre-wrap; }
+.know-body[hidden] { display: none; }
+.memory-body > .link { justify-self: start; padding: 2px 0; }
 .memory-note:first-child { border-top: 0; }
 .memory-kind { flex: none; margin-top: 2px; font-size: 11px; padding: 0 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .memory-body { flex: 1; min-width: 0; display: grid; overflow-wrap: anywhere; }

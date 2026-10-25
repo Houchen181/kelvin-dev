@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -119,6 +120,9 @@ def _same(spec: ParamSpec, a: Any, b: Any) -> bool:
     return a == b
 
 
+OUTSIDE_S = 1800   # how long auto mode pauses after the model read outside text, for clients without chats
+
+
 class SafetyGate:
     def __init__(self, lab: Any, approver: Approver, log: Optional[EventLog] = None,
                  envelope: Optional[Envelope] = None, operator: str = "agent"):
@@ -130,6 +134,10 @@ class SafetyGate:
         self.envelope = envelope
         self.operator = operator
         self.auto = False  # auto mode: set by a person through the portal, never by the agent
+        # text from outside the lab the model has read (a web page, a manual, a board's output): it could try to
+        # steer the model, so auto mode asks a person instead. outside_chat: the portal's chat has read some.
+        self.outside: Optional[Tuple[float, str]] = None
+        self.outside_chat: Optional[str] = None
         self._grants: Dict[str, Allowed] = {}
         self._standing: Dict[str, Allowed] = {}   # what a person approved for a whole queue of scans, while it runs
         self._undo: List[Tuple[str, str, Any]] = []
@@ -328,10 +336,27 @@ class SafetyGate:
         return False, "%s goes %.0f%% of the way from safe to its limit (auto mode covers %.0f%%)" % (
             key, 100 * worst, 100 * fraction)
 
+    def note_outside(self, source: str) -> None:
+        """The model has read text from outside the lab: until it has been a while, auto mode asks a person."""
+        self.outside = (time.monotonic(), source)
+
+    def outside_reason(self) -> Optional[str]:
+        """Why auto mode asks a person now, because of outside text the model has read; None when it hasn't."""
+        if self.outside_chat:
+            return ("this chat has read text from outside the lab (%s), which could try to steer a model, so a "
+                    "person approves" % self.outside_chat)
+        if self.outside is not None and time.monotonic() - self.outside[0] < OUTSIDE_S:
+            return ("Kelvin read text from outside the lab (%s) in the last %d minutes, which could try to steer a "
+                    "model, so a person approves" % (self.outside[1], OUTSIDE_S // 60))
+        return None
+
     def auto_plan(self, grants: Dict[str, Allowed], dry_run: Any) -> Tuple[bool, List[str]]:
         """Can auto mode approve a plan with these drive ranges? Needs a clean dry run and every drive low-risk."""
         if not self.auto:
             return False, []
+        outside = self.outside_reason()
+        if outside:
+            return False, [outside]
         if dry_run is None or not getattr(dry_run, "ok", False):
             return False, ["the dry run did not finish cleanly"]
         fine, blockers = [], []
@@ -484,6 +509,8 @@ class SafetyGate:
                         ok, why = False, ""
                     elif unsure:
                         ok, why = False, "nothing on %s is automatic until a person reviews it" % inst.name
+                    elif self.outside_reason():
+                        ok, why = False, self.outside_reason()
                     else:
                         ok, why = self.auto_verdict(inst, spec, [target])
                     if ok:

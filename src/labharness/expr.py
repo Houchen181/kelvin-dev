@@ -42,19 +42,29 @@ def functions(np: Any) -> Dict[str, Callable[..., Any]]:
         order = np.argsort(x)
         return np.interp(x0, x[order], y[order])
 
+    def at_min(y: Any, x: Any) -> Any:
+        """x where y is smallest (e.g. the frequency of a dip)."""
+        return np.asarray(x, dtype=float)[int(np.nanargmin(y))]
+
+    def at_max(y: Any, x: Any) -> Any:
+        """x where y is largest (e.g. the gate voltage of a peak)."""
+        return np.asarray(x, dtype=float)[int(np.nanargmax(y))]
+
     return {"abs": np.abs, "sqrt": np.sqrt, "log": np.log, "log10": np.log10, "exp": np.exp, "sin": np.sin,
             "cos": np.cos, "tan": np.tan, "arcsin": np.arcsin, "arccos": np.arccos, "arctan": np.arctan,
             "arctan2": np.arctan2, "hypot": np.hypot, "sinh": np.sinh, "cosh": np.cosh, "tanh": np.tanh,
             "deg2rad": np.deg2rad, "rad2deg": np.rad2deg, "sign": np.sign, "floor": np.floor, "ceil": np.ceil,
             "round": np.round, "clip": np.clip, "where": np.where, "deriv": deriv, "diff": np.diff,
-            "cumsum": np.nancumsum, "smooth": smooth, "interp": interp, "mean": np.nanmean, "std": np.nanstd,
+            "cumsum": np.nancumsum, "smooth": smooth, "interp": interp, "at_min": at_min, "at_max": at_max,
+            "mean": np.nanmean, "std": np.nanstd,
             "min": np.nanmin, "max": np.nanmax, "sum": np.nansum, "median": np.nanmedian,
             "count": lambda a: np.float64(np.count_nonzero(np.isfinite(a)))}
 
 
 HELP = ("functions: abs sqrt log log10 exp sin cos tan arcsin arccos arctan arctan2 hypot sinh cosh tanh deg2rad "
         "rad2deg sign floor ceil round clip(a, lo, hi) where(cond, a, b) deriv(y, x) diff cumsum smooth(y, n) "
-        "interp(x0, x, y) mean std min max sum median count; constants: " + " ".join(CONSTANTS))
+        "interp(x0, x, y) at_min(y, x) at_max(y, x) (x where y is smallest or largest) mean std min max sum median "
+        "count; constants: " + " ".join(CONSTANTS))
 
 
 def _dotted(node: Any) -> str:

@@ -151,7 +151,13 @@
     </div>
 
     <div class="composer-wrap">
+      <div id="wake-bar" class="update-bar wake-bar" role="status" hidden>
+        <span id="wake-text"></span>
+        <button id="wake-stop" class="btn small" type="button" hidden>Stop</button>
+        <button id="wake-cancel" class="btn small" type="button" hidden>Don't continue</button>
+      </div>
       <form id="composer" class="composer">
+        <div id="attach-list" class="attach-list" hidden></div>
         <textarea id="input" rows="1" placeholder="Ask Kelvin…" aria-label="Message"></textarea>
         <div class="composer-row">
           <label id="mode-box" class="mode-picker" title="Who approves changes that drive the sample harder">
@@ -176,6 +182,11 @@
             </button>
             <div id="compare-menu" class="pane-menu compare-menu" hidden></div>
           </div>
+          <button id="attach-btn" class="compare-btn attach-btn" type="button" aria-label="Attach pictures or PDFs"
+                  title="Attach a photo, a screenshot or a PDF (you can also paste or drop them here)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/></svg>
+          </button>
+          <input id="attach-input" type="file" accept="image/*,application/pdf" multiple hidden>
           <div class="spacer"></div>
           <button id="send" class="send" type="submit" aria-label="Send">
             <svg class="i-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
@@ -472,6 +483,9 @@
             <div class="field-row"><span class="field-label small">What Kelvin keeps about you</span><span id="global-notes-count" class="hint"></span></div>
             <ul id="global-notes" class="memory-notes"></ul>
             <span class="hint">Preferences and conventions Kelvin kept from your chats, used in every conversation. Facts about an experiment are kept per project. Incognito chats use none of this and add nothing.</span>
+            <div class="field-row"><span class="field-label small">Skills and recipes for every project</span><span id="global-know-count" class="hint"></span></div>
+            <ul id="global-know" class="memory-notes"></ul>
+            <span class="hint">Skills are procedures; recipes are measurements in stages that check their own results. Kelvin keeps one when you approve it, and reads a skill when a task matches it. Kelvin's own skills come with it.</span>
           </div>
         </section>
         <section class="set-page" data-page="literature" hidden>
@@ -738,6 +752,11 @@
       <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>
       <ul id="project-notes" class="memory-notes"></ul>
       <span class="hint">Short facts Kelvin saved from this project's conversations. Delete any that are wrong or out of date; a deleted note is gone at once.</span>
+    </div>
+    <div class="field">
+      <div class="field-row"><span class="field-label">Skills and recipes</span><span id="know-count" class="hint"></span></div>
+      <ul id="project-know" class="memory-notes"></ul>
+      <span class="hint">Procedures and staged measurements kept for this project's chats, each once you approved it.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Devices</span><span id="devices-count" class="hint"></span></div>

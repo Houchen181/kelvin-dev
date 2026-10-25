@@ -484,7 +484,9 @@ def test_incognito_uses_and_keeps_no_memory(parts):
         chat = client.post("/api/chats", json={"model": "scripted:m1", "incognito": True}, headers=headers).json()
         assert chat["incognito"] is True and chat["title"] == "Incognito chat"
         events = stream_turn(client, headers, chat["id"], "what is a lock-in amplifier?", "scripted:m1")
-        assert bot.systems[-1] == "\n\n".join([SYSTEM, RULE.format(words=200), INCOGNITO])   # no instructions, no notes
+        head = "\n\n".join([SYSTEM, RULE.format(words=200), INCOGNITO])   # no instructions, no notes
+        assert bot.systems[-1].startswith(head + "\n\nSkills are procedures") and "save_skill" not in bot.systems[-1]
+        assert "(Kelvin's)" in bot.systems[-1] and "(yours)" not in bot.systems[-1]   # Kelvin's own skills only
         assert "remember" not in bot.tool_names[-1] and "set_value" in bot.tool_names[-1]
         assert not any(e["type"] == "memory" for e in events) and "<memory>" not in bot.prompts[-1][-1]
         events = stream_turn(client, headers, chat["id"], "remember that I like tesla", "scripted:m1")

@@ -23,6 +23,36 @@ Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points
 
 After a run, Kelvin classifies each measured curve and fits it: a peak or dip (Lorentzian or Gaussian: center, FWHM, height, Q for frequency axes), a straight line (slope, and resistance for I–V), an exponential relaxation (τ), a steady value or no signal. Every number has a one-standard-error uncertainty. It also tracks how the fitted feature changes along an outer loop, and it flags clipping, under-resolved or cut-off features, hysteresis, unsettled readings and stopped runs. The result is saved as `analysis.json` in the run folder; `analyze_run` re-fits a run with a chosen model.
 
+## Recipes
+
+A recipe is a measurement in stages that checks its own results, kept so that it can be run again (`run_recipe`; in the portal by its name). Each stage is a plan, a check on its run's data, values kept for the later stages, and how often to try again with changed values:
+
+```yaml
+recipe: find-resonance
+description: Coarse, then fine ODMR around the dip.
+values: {span: 2e8}
+stages:
+  - name: coarse
+    plan: |
+      plan: odmr_coarse
+      sweep: {mw.frequency: {from: {{2.87e9 - span / 2}}, to: {{2.87e9 + span / 2}}, points: 101}}
+      measure: [counter.rate]
+    pass: min(counter.rate) < 0.95 * median(counter.rate)     # a dip at least 5% deep
+    keep: {f0: "at_min(counter.rate, mw.frequency)"}           # its frequency, for the next stage
+    retries: 1
+    retry: {span: span * 2}                                     # try a wider range once
+  - name: fine
+    plan: |
+      plan: odmr_fine
+      sweep: {mw.frequency: {from: {{f0 - 1e7}}, to: {{f0 + 1e7}}, points: 81}}
+      measure: [counter.rate]
+```
+
+- **Numbers that change** are `{{...}}` in a stage's plan: a value, or arithmetic on values. `run_recipe` can give the values others (`values: {span: 4e8}`).
+- **Checks and kept values** are expressions over the run's columns, as `compute` takes them; `at_min(y, x)` and `at_max(y, x)` give x where y is smallest or largest. Put an expression with a comma in quotes.
+- **Each stage runs through the safety gate** like any plan. A stage whose check still fails after its retries ends the recipe, and so does a run that stops. The answer lists each stage's run and whether it passed, with the values kept.
+- **Kept** in the portal per person or per project, once a person approves (save_recipe; Settings → Memory and Project settings list them).
+
 ## The queue
 
 Line up scans to run one after another, overnight or while you are away, as in Special Measure's queue. Open **Queue** in the Runs pane, or ask Kelvin ("queue a gate sweep at 2, 5 and 10 K"). An item is a plan, or a step between scans:

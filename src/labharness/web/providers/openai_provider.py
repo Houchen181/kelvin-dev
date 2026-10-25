@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import openai
 
-from .base import Emit, ModelInfo, Provider, TurnResult, safe_id, text_of, user_text
+from .base import PICTURES_NOTE, Emit, ModelInfo, Provider, TurnResult, data_url, safe_id, text_of, user_text
 
 _SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
          "dall-e", "whisper", "davinci", "babbage")
@@ -23,7 +23,10 @@ def to_messages(system: str, history: List[Dict[str, Any]]) -> List[Dict[str, An
     n = 0
     for m in history:
         if m["role"] == "user":
-            out.append({"role": "user", "content": user_text(m)})
+            images = m.get("images") or []
+            out.append({"role": "user", "content": [{"type": "text", "text": user_text(m)}] + [
+                {"type": "image_url", "image_url": {"url": data_url(i)}} for i in images]
+                if images else user_text(m)})
         elif m["role"] == "assistant":
             calls = []
             for b in m["blocks"]:
@@ -41,6 +44,10 @@ def to_messages(system: str, history: List[Dict[str, Any]]) -> List[Dict[str, An
         elif m["role"] == "tool":
             for r in m["results"]:
                 out.append({"role": "tool", "tool_call_id": safe_id(r["id"], 0), "content": r["content"] or "(empty)"})
+            images = [i for r in m["results"] for i in r.get("images") or []]
+            if images:   # a tool message holds text only: its pictures follow as the user's
+                out.append({"role": "user", "content": [{"type": "text", "text": PICTURES_NOTE}] + [
+                    {"type": "image_url", "image_url": {"url": data_url(i)}} for i in images]})
     return out
 
 
@@ -75,6 +82,7 @@ class OpenAIProvider(Provider):
                                              default_headers=headers or None)
         self._cache: Optional[List[ModelInfo]] = None
         self.can_search = name == "openai" and not base_url   # OpenAI's own web search (local services have none)
+        self.sees_images = name == "openai" and not base_url  # other services may serve models that don't
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """OpenAI's web search (the Responses API's web_search tool): the pages it cited, with its notes."""

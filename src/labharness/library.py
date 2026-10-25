@@ -98,8 +98,9 @@ class Bridge:
         self.name = name
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
+            from .envs import clean_environ   # the maker's code never sees Kelvin's API keys or sign-ins
             self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.PIPE, creationflags=flags)
+                                         stderr=subprocess.PIPE, creationflags=flags, env=clean_environ())
         except OSError as e:
             raise AdapterError("%s: could not start %s (%s). Check python= in the address." % (name, command[0], e))
         self.lines: "queue.Queue[Optional[bytes]]" = queue.Queue()
