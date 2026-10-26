@@ -88,7 +88,7 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/web/remote.py`, `qr.py`, `static/mobile.*` | Phone access: pairing, device roles, the network listener, QR codes, the phone page |
 | `src/labharness/monitor.py`, `notify.py` | Watches and alarms on a background thread; in-app notices and the optional webhook |
 | `src/labharness/adapters.py`, `discovery.py` | VISA/serial connections for real instruments; the read-only scan that matches instruments to cards |
-| `src/labharness/collection.py` | The instrument collection from the public repository: the pinned, checked copy in `~/Kelvin/collection`, its cards, the instruments it knows without a card, and its experiments mapped to a lab's instruments |
+| `src/labharness/collection.py` | The instrument collection from the public repository (`Houchen181/kelvin-instruments`, to be renamed `Houchen181/Kelvin`; never the private source): the pinned, checked copy in `~/Kelvin/collection`, its cards, the instruments it knows without a card, and its experiments mapped to a lab's instruments |
 | `src/labharness/eventlog.py` | Append-only event log; one folder per run (plan, snapshots, data, meta) |
 | `src/labharness/sim/` | Twins that answer the card's own commands, plus a toy sample |
 | `src/labharness/agent/` | MCP server (`server.py`), plain-text tool answers (`runtime.py`), approval page (`approval.py`, `ui.html`) |

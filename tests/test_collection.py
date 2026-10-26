@@ -12,7 +12,7 @@ import yaml
 
 from labharness import autocard, build_virtual_lab, builtin_registry, carddraft, demo_envelope, load_plan
 from labharness.adapters import set_resource_manager
-from labharness.collection import COMMIT, FILE, REPO, Collection, adapt, own_versions, text_sha256
+from labharness.collection import API, COMMIT, FILE, REPO, Collection, adapt, own_versions, text_sha256
 from labharness.discovery import identify
 from labharness.gate import SafetyGate, ScriptedApprover
 from labharness.survey import Survey, reason
@@ -85,10 +85,12 @@ def with_status(text, status):
 
 
 class GitHub:
-    """The public repository as Kelvin reaches it: which commit is the newest, and each commit's files."""
+    """The public repository as Kelvin reaches it: the repository (its own name, after a rename, and whether it is
+    public), the newest commit of its default branch, and each commit's files."""
 
-    def __init__(self):
+    def __init__(self, name=REPO, private=False):
         self.commits, self.head, self.asked, self.down = {}, None, [], False
+        self.name, self.private = name, private
 
     def publish(self, commit, cards=(), catalog=(), experiments=(), labs=()):
         """A commit with its index.json, the way the collection's kic index writes it. Returns its files."""
@@ -120,9 +122,11 @@ class GitHub:
         self.asked.append(url)
         if self.down:
             raise urllib.error.URLError("no route to host")
-        if url == COMMIT % REPO:
+        if url == API % REPO:
+            return json.dumps({"full_name": self.name, "private": self.private, "default_branch": "main"}).encode()
+        if url == COMMIT % (self.name, "main"):
             return self.head.encode()
-        commit, path = url.split("/%s/" % REPO, 1)[1].split("/", 1)
+        commit, path = url.split("/%s/" % self.name, 1)[1].split("/", 1)
         if path not in self.commits.get(commit, {}):
             raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
         return self.commits[commit][path]
@@ -146,7 +150,7 @@ def test_the_copy_is_pinned_to_one_commit_and_checked_file_by_file(tmp_path):
     status = c.sync(gh)
     assert status["commit"] == A and status["error"] is None and status["cards"] == 1 and status["experiments"] == 1
     raw = [u for u in gh.asked if u.startswith("https://raw.githubusercontent.com/")]
-    assert gh.asked[0] == COMMIT % REPO and len(raw) == 4                    # the commit; index.json and three files
+    assert gh.asked[:2] == [API % REPO, COMMIT % (REPO, "main")] and len(raw) == 4   # index.json and three files
     assert all("/%s/%s/" % (REPO, A) in u for u in raw)                      # all of them from that one commit
     assert json.loads((tmp_path / "collection" / "state.json").read_text())["commit"] == A
     assert c.instrument_for("ACME,WIDGET,1,1")["id"] == "acme/widget"
@@ -156,7 +160,7 @@ def test_the_copy_is_pinned_to_one_commit_and_checked_file_by_file(tmp_path):
     assert c.cards() == [] and "does not match" in c.status()["left_out"][0]
     gh.asked.clear()
     assert c.sync(gh)["used"] == ["acme/widget"]                            # the next update puts it right ...
-    assert [u.rsplit("/", 1)[1] for u in gh.asked] == ["HEAD", "card.yaml"]  # ... fetching only that file
+    assert [u.rsplit("/", 1)[1] for u in gh.asked[2:]] == ["card.yaml"]      # ... fetching only that file
 
 
 def test_offline_or_with_a_bad_file_the_copy_kelvin_has_stays(tmp_path):
@@ -182,7 +186,7 @@ def test_offline_or_with_a_bad_file_the_copy_kelvin_has_stays(tmp_path):
     gh.asked.clear()
     status = c.sync(gh)
     assert status["commit"] == B and status["error"] is None and c.cards()[0].status == "lab-verified"
-    assert len(gh.asked) == 3                       # the commit, index.json and the card that changed; not the rest
+    assert len(gh.asked) == 4       # the repository, its commit, index.json and the card that changed; not the rest
     assert sorted(p.name for p in (tmp_path / "collection").iterdir()) == [B[:12], "state.json"]   # the old copy went
 
 
@@ -200,6 +204,26 @@ def test_the_index_cannot_point_outside_the_copy(tmp_path):
     assert FILE.match("instruments/electronics/lock-in/srs-sr830/card.yaml") and FILE.match("labs/nv-odmr.yaml")
     gh.head = "main"
     assert "which commit is the newest" in Collection(tmp_path).sync(gh)["error"]
+
+
+def test_only_a_public_repository_is_read_and_a_rename_is_followed(tmp_path):
+    private = GitHub(private=True)
+    private.publish(A, cards=[WIDGET])
+    status = Collection(tmp_path).sync(private)
+    assert "not public" in status["error"] and status["commit"] is None
+    assert private.asked == [API % REPO]                                     # nothing more is asked of it
+
+    gh = GitHub()
+    gh.publish(A, cards=[WIDGET])
+    c = Collection(tmp_path)
+    assert c.sync(gh)["repository"] == REPO
+    renamed = GitHub(name="Houchen181/Kelvin")      # renamed: GitHub sends the old name on to the repository
+    renamed.publish(B, cards=[with_status(WIDGET, "lab-verified")])
+    status = c.sync(renamed)
+    assert status["error"] is None and status["repository"] == "Houchen181/Kelvin" and status["commit"] == B
+    assert renamed.asked[1] == COMMIT % ("Houchen181/Kelvin", "main")
+    assert all("/Houchen181/Kelvin/%s/" % B in u for u in renamed.asked[2:])   # its files, under its own name
+    assert c.cards()[0].status == "lab-verified" and len(Collection(tmp_path).cards()) == 1
 
 
 # ------------------------------------------------------------------ which card Kelvin uses
@@ -481,7 +505,7 @@ def test_switched_off_kelvin_stays_off_the_network(tmp_path, monkeypatch):
             time.sleep(0.05)
         status = client.get("/api/collection", headers=h).json()
         assert status["on"] and status["commit"] == A and status["cards"] == 1 and status["instruments"] == 2
-        assert rt.collection is not None and gh.asked[0] == collection.COMMIT % collection.REPO
+        assert rt.collection is not None and gh.asked[0] == collection.API % collection.REPO
         r = client.post("/api/cards", json={"yaml": with_status(WIDGET, "draft")}, headers=h)
         assert r.status_code == 400 and "already has a card acme/widget" in r.json()["error"]
 

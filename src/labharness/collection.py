@@ -6,10 +6,13 @@ this computer so they work offline.
         <commit>/index.json   the collection's index at that commit
         <commit>/...          its cards, experiments and lab configs, in the repository's own folders
 
-- Pinned: Kelvin asks GitHub for the newest commit, then takes index.json and every file from that commit
-  (raw.githubusercontent.com), never from a branch that can move meanwhile. Each file must have the SHA-256 that
-  index.json gives it, when it arrives and every time it is read. Files that did not change come from the copy
-  before, and a new copy is used only once it is complete: state.json names it last.
+- Public: the collection is read from Kelvin's public repository (REPO), never the private source. Kelvin asks GitHub
+  for the repository first: one that says it is private is refused, and a renamed one is followed to its own name
+  (it is to become Houchen181/Kelvin, which until then is still the private source's old name).
+- Pinned: Kelvin takes the newest commit of the repository's default branch, then index.json and every file from
+  that commit (raw.githubusercontent.com), never from a branch that can move meanwhile. Each file must have the
+  SHA-256 that index.json gives it, when it arrives and every time it is read. Files that did not change come from
+  the copy before, and a new copy is used only once it is complete: state.json names it last.
 - Offline: everything is read from the copy here. Only sync() goes to the network, and Kelvin calls it only while
   the collection is switched on in Settings. Switched off, Kelvin leaves the copy alone and uses its own cards.
 - Cards (virtual_lab.lab_registry): a collection card replaces Kelvin's own card with the same id (a fix, or a lab's
@@ -38,13 +41,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ._version import __version__
 from .cards import Card, parse_card
 from .profiles import _first_line
-from .updater import REPOS
 from .yamlio import load_yaml
 
 log = logging.getLogger("kelvin")
 FOLDER = "collection"
-REPO = REPOS["stable"]   # the public repository: Kelvin's published releases and the instrument collection
-COMMIT = "https://api.github.com/repos/%s/commits/HEAD"
+# Kelvin's public repository (published releases and the instrument collection). It is to be renamed Houchen181/Kelvin
+# (updater.REPOS["stable"]), a name that until then still leads to the private source; this one leads to the public
+# repository before and after, and sync() follows it to the repository's own name.
+REPO = "Houchen181/kelvin-instruments"
+API = "https://api.github.com/repos/%s"
+COMMIT = "https://api.github.com/repos/%s/commits/%s"
 RAW = "https://raw.githubusercontent.com/%s/%s/%s"
 DATA = Path(__file__).parent / "data"
 MAX_BYTES = 16 * 1024 * 1024
@@ -64,8 +70,8 @@ class CollectionError(Exception):
 
 def http_get(url: str) -> bytes:
     headers = {"User-Agent": "Kelvin/%s (lab assistant)" % __version__}
-    if url.startswith("https://api.github.com/"):
-        headers["Accept"] = "application/vnd.github.sha"   # just the commit's SHA
+    if url.startswith("https://api.github.com/"):   # the repository as JSON; of a commit, just its SHA
+        headers["Accept"] = "application/vnd.github.sha" if "/commits/" in url else "application/vnd.github+json"
     with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as r:
         data = r.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
@@ -97,6 +103,21 @@ def own_versions() -> Dict[str, frozenset]:
         if m:
             out.setdefault(m.group(1).decode(), set()).add(text_sha256(data))
     return {k: frozenset(v) for k, v in out.items()}
+
+
+def public_repository(answer: bytes) -> Tuple[str, str]:
+    """The repository's own name and default branch from GitHub's answer. Only a public repository is read."""
+    try:
+        repo = json.loads(answer.decode("utf-8"))
+    except ValueError:
+        repo = None
+    name = str(repo.get("full_name") or "") if isinstance(repo, dict) else ""
+    branch = str(repo.get("default_branch") or "main") if isinstance(repo, dict) else ""
+    if not re.match(r"^[\w.-]+/[\w.-]+$", name) or not re.match(r"^[\w.-]+(?:/[\w.-]+)*$", branch):
+        raise CollectionError("GitHub did not describe the repository")
+    if repo.get("private") is not False:
+        raise CollectionError("%s is not public, and Kelvin reads the collection only from a public repository" % name)
+    return name, branch
 
 
 def latest_commit(answer: bytes) -> str:
@@ -176,7 +197,7 @@ class Collection:
 
     def _folder(self, state: Dict[str, Any]) -> Optional[Path]:
         commit = str(state.get("commit") or "")
-        if not SHA1.match(commit) or state.get("repository") != self.repo:   # nothing yet, or another repository's
+        if not SHA1.match(commit) or state.get("source") != self.repo:   # nothing yet, or another repository's
             return None
         return self.dir / commit[:12]
 
@@ -302,7 +323,7 @@ class Collection:
         state = self.state()
         index = self.index()
         cards, newer, left = self._cards() if index else ([], [], [])
-        return {"repository": self.repo, "commit": state.get("commit") if index else None,
+        return {"repository": state.get("repository") or self.repo, "commit": state.get("commit") if index else None,
                 "synced": state.get("synced") if index else None, "checked": state.get("checked"),
                 "error": state.get("error"), "instruments": len(index.get("instruments") or []),
                 "cards": sum(1 for i in index.get("instruments") or [] if isinstance(i, dict)
@@ -321,12 +342,13 @@ class Collection:
             state = self.state()
             now = time.time()
             try:
-                commit = latest_commit(fetch(COMMIT % self.repo))
+                name, branch = public_repository(fetch(API % self.repo))   # its own name, if it was renamed
+                commit = latest_commit(fetch(COMMIT % (name, branch)))
                 folder = self.dir / commit[:12]
                 same = commit == state.get("commit") and self._folder(state) == folder
                 raw = _matching(folder / "index.json", str(state.get("index_sha256"))) if same else None
                 if raw is None:
-                    raw = fetch(RAW % (self.repo, commit, "index.json"))
+                    raw = fetch(RAW % (name, commit, "index.json"))
                 index = read_index(raw)
                 before = self._folder(state)
                 fetched = 0
@@ -335,7 +357,7 @@ class Collection:
                         continue
                     data = _matching(before / path, digest) if before is not None else None
                     if data is None:
-                        data = fetch(RAW % (self.repo, commit, path))
+                        data = fetch(RAW % (name, commit, path))
                         fetched += 1
                         if sha256(data) != digest:
                             raise CollectionError("%s at %s does not match its SHA-256 in index.json" % (path, commit[:12]))
@@ -343,7 +365,7 @@ class Collection:
                 _write(folder / "index.json", raw)
                 with _LOCK:   # the switch: from now on the new copy is read
                     _write(self.dir / "state.json", json.dumps({
-                        "repository": self.repo, "commit": commit, "index_sha256": sha256(raw),
+                        "source": self.repo, "repository": name, "commit": commit, "index_sha256": sha256(raw),
                         "synced": state.get("synced") if same else now, "checked": now, "error": None},
                         indent=1).encode("utf-8"))
                     for other in self.dir.iterdir():   # the copies before
