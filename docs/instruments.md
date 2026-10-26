@@ -43,7 +43,7 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
 - **What it finds:** for each instrument the scripts open, its address, the connection settings they use (baud rate, line endings, timeout), the commands they send with the values used, and the Kelvin card that fits: a model named in the scripts (a comment, a driver's class) and how many of their commands are on the card. An instrument at a VISA address is asked who it is, as a scan asks, and its reply decides the card.
 - **Limits from the values used:** the range the scripts use (with the card's safe value), inside the maker's limits.
 - **Adding them:** tick the ones you want and press **Add the checked ones to the lab config**. They go into the draft with those limits and settings, marked "from your scripts" for you to check; then **Save and connect** as usual.
-- **Recipes:** **Turn the measurement scripts into recipes…** opens a chat where Kelvin proposes a recipe for each measurement script (its loops become sweeps, its readings the measure list, its waits the settle times) and keeps each one you agree to.
+- **Recipes:** **Turn the measurement scripts into recipes…** opens a new chat with that request written in. Send it, and Kelvin proposes a recipe for each measurement script (its loops become sweeps, its readings the measure list, its waits the settle times) and keeps each one you agree to.
 - **In a chat:** ask Kelvin to read your scripts and it does the same (`survey_scripts`).
 - **What it skips:** library folders (`site-packages`, `python_libs`, `venv`, `lib`, ...). It reads up to 300 files, each up to 1 MB.
 
