@@ -127,7 +127,16 @@ REVIEW_S = 300            # a second opinion with its lookups
 MAX_ATTACHED_CHARS = 60000   # of an attached PDF's text, in the message
 PICTURE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
 WAIT_S = 120   # the longest wait inside a turn: one turn runs at a time, so longer waits use wake_me
+STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the stop button
+STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
+                "lets it: a plan stops at once, an instrument still taking a reading is told to stop.")
 _RUN_ID = re.compile(r"run_id='([^']+)'")
+
+
+def _without_opinion(result: Any) -> Tuple[str, bool, None]:
+    """A tool's (text, failed) with no reviewer's opinion."""
+    content, is_error = result
+    return content, is_error, None
 
 
 class Busy(Exception):
@@ -949,47 +958,17 @@ class ChatAgent:
             await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
             if call["name"] in DEFERRED_NAMES:   # called by its name before find_tools: it is loaded now
                 self._load_tools(chat, context, [call["name"]])
-            if call["name"] == "find_tools":
-                content, is_error = self._find_tools(chat, context, call["input"])
-            elif call["name"] == "remember" and context["learn"]:
-                content, is_error = self._remember(chat, context, call["input"])
-            elif call["name"] == "wake_me" and not chat.get("incognito"):
-                content, is_error = self.waker.add(chat["id"], call["input"])
-            elif call["name"] == "wait" and _seconds(call["input"]) > WAIT_S:   # other chats would wait too
-                content, is_error = ("not waited: for more than %d s, call wake_me and end your answer, so other "
-                                     "chats can run meanwhile" % WAIT_S), True
-            elif call["name"] == "use_skill":
-                content, is_error = self._use_skill(chat, context, call["input"])
-            elif call["name"] in ("save_skill", "save_recipe") and \
-                    call["name"] in {t["name"] for t in context["tools"]}:
-                content, is_error = await self._keep_know(chat, context, call, emit)
-            elif call["name"] == "run_recipe" and isinstance(call["input"], dict) and \
-                    "\n" not in str(call["input"].get("recipe") or ""):   # a kept recipe, by its name
-                named, problem = self._named_recipe(chat, context, call)
-                content, is_error = (await self._call(named, emit)) if named else (problem, True)
-            elif call["name"] in ("list_folder", "read_file"):
-                content, is_error = await self._folder_file(chat, provider, call)
-            elif call["name"] == "read_skill_file":
-                content, is_error = await self._skill_file(chat, context, provider, call)
-            elif call["name"] == "chat_history":
-                query = str((call["input"] or {}).get("query") or "") if isinstance(call["input"], dict) else ""
-                content, is_error = compaction.search(chat, query), False
-            elif call["name"] in DEVICE_TOOLS and not chat.get("incognito"):   # mounting may write caps
-                content, is_error = await asyncio.to_thread(self._device_tool, chat, call["name"], call["input"])
-            elif call["name"] == "save_paper" and context["project"]:
-                content, is_error = await self._save_paper(chat, context, call["input"])
-            elif call["name"] in WEB_TOOLS and not context["rules"]["literature"]:
-                content, is_error = "not available: this project keeps its work off the internet", True
-            elif call["name"] == "web_search":
-                content, is_error = await self._web_search(call["input"])
-            elif call["name"] == "make_report":
-                content, is_error = await self._report(chat, call["input"])
-            elif call["name"] == "operate_computer":   # Claude Code bridge
-                content, is_error = await self._operate_computer(call, emit)
-            elif call["name"] == "run_plan" and self.settings and self.settings.get("reviewer"):
-                content, is_error, opinion = await self._reviewed_run(chat, call, emit)
+            work = asyncio.ensure_future(self._dispatch(chat, provider, context, call, emit))
+            while not work.done():   # a stop ends the call at once, even one an instrument holds up
+                await asyncio.wait({work}, timeout=STOP_POLL_S)
+                if self._stop and not work.done():
+                    work.cancel()
+                    await asyncio.wait({work}, timeout=1.0)
+                    break
+            if work.done() and not work.cancelled():
+                content, is_error, opinion = work.result()
             else:
-                content, is_error = await self._call(call, emit)
+                content, is_error = STOPPED_CALL, True
             kept = self._keep_pictures(chat["id"], call["id"])
             documents = self._keep_documents(chat["id"], call["id"])
             await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
@@ -1006,6 +985,49 @@ class ChatAgent:
         if opinion:
             entry["review"] = opinion   # shown again when the chat is reopened
         return entry
+
+    async def _dispatch(self, chat: Dict[str, Any], provider: Provider, context: Dict[str, Any],
+                        call: Dict[str, Any], emit: Emit) -> Tuple[str, bool, Optional[Dict[str, Any]]]:
+        """The tool call itself: its text, whether it failed, and a reviewer's opinion of a plan (if any)."""
+        name, args = call["name"], call["input"]
+        if name == "find_tools":
+            return _without_opinion(self._find_tools(chat, context, args))
+        if name == "remember" and context["learn"]:
+            return _without_opinion(self._remember(chat, context, args))
+        if name == "wake_me" and not chat.get("incognito"):
+            return _without_opinion(self.waker.add(chat["id"], args))
+        if name == "wait" and _seconds(args) > WAIT_S:   # other chats would wait too
+            return ("not waited: for more than %d s, call wake_me and end your answer, so other chats can run "
+                    "meanwhile" % WAIT_S), True, None
+        if name == "use_skill":
+            return _without_opinion(self._use_skill(chat, context, args))
+        if name in ("save_skill", "save_recipe") and name in {t["name"] for t in context["tools"]}:
+            return _without_opinion(await self._keep_know(chat, context, call, emit))
+        if name == "run_recipe" and isinstance(args, dict) and "\n" not in str(args.get("recipe") or ""):
+            named, problem = self._named_recipe(chat, context, call)   # a kept recipe, by its name
+            return _without_opinion((await self._call(named, emit)) if named else (problem, True))
+        if name in ("list_folder", "read_file"):
+            return _without_opinion(await self._folder_file(chat, provider, call))
+        if name == "read_skill_file":
+            return _without_opinion(await self._skill_file(chat, context, provider, call))
+        if name == "chat_history":
+            query = str((args or {}).get("query") or "") if isinstance(args, dict) else ""
+            return compaction.search(chat, query), False, None
+        if name in DEVICE_TOOLS and not chat.get("incognito"):   # mounting may write caps
+            return _without_opinion(await asyncio.to_thread(self._device_tool, chat, name, args))
+        if name == "save_paper" and context["project"]:
+            return _without_opinion(await self._save_paper(chat, context, args))
+        if name in WEB_TOOLS and not context["rules"]["literature"]:
+            return "not available: this project keeps its work off the internet", True, None
+        if name == "web_search":
+            return _without_opinion(await self._web_search(args))
+        if name == "make_report":
+            return _without_opinion(await self._report(chat, args))
+        if name == "operate_computer":   # Claude Code bridge
+            return _without_opinion(await self._operate_computer(call, emit))
+        if name == "run_plan" and self.settings and self.settings.get("reviewer"):
+            return await self._reviewed_run(chat, call, emit)
+        return _without_opinion(await self._call(call, emit))
 
     async def _web_search(self, args: Any) -> Tuple[str, bool]:
         """Through the chat's own model service if it can search the web, else another that can (websearch.py)."""
@@ -1464,6 +1486,9 @@ class ChatAgent:
             while not requests.empty():
                 await show(requests.get_nowait())
             await progress()
+        except asyncio.CancelledError:   # stopped: the tool may still finish in its thread, unwatched
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            raise
         finally:
             if unsubscribe:
                 unsubscribe()

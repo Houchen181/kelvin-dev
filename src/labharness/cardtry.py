@@ -38,7 +38,8 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
     if reuse is None and address.startswith("sim://"):
         raise AdapterError("%s is a simulated instrument; try the card on a real address" % address)
     backend = reuse or open_backend("try", _clone_without_connect(card) if not card.library else card, address)
-    inst = Instrument("try", card, backend, InstrumentConfig(name="try", card=card.id, address=address))
+    inst = Instrument("try", card, backend, InstrumentConfig(name="try", card=card.id, address=address),
+                      getattr(lab, "stops", None))   # a person's stop ends its waits too
     out: Dict[str, Any] = {"address": address, "card": card.id, "reused": reuse is not None, "readings": []}
     from .drivers import is_driver_address
     text = not card.library and not is_driver_address(address)   # a text instrument: only queries are sent

@@ -72,6 +72,7 @@ class Template:
 
     def __init__(self, text: str, prefix: bool = False):
         lead = re.match(r"^\s*\{value\}(.*)$", text or "", re.S)
+        self._attached = False
         if lead:   # the value comes first: "{value},1" with bool_text [ON, OFF] sends ON,1 or OFF,1
             if "{value}" in lead.group(1):
                 raise ValueError("only one {value} allowed in %r" % text)
@@ -94,13 +95,17 @@ class Template:
         self.has_value = "{value}" in rest
         self.is_query = rest.lstrip().startswith("?")
         self.prefix = prefix
-        # a header never runs into a letter: VOLT must not match the start of VOLTage:ILIMit (but SLVL5 is SLVL 5)
-        pattern = r"^\s*:?" + _header(head, any_channel=prefix) + r"(?![A-Za-z])"
+        # the value runs into the mnemonic, letters and all (HP's SOUP{value} sends SOUPON)
+        self._attached = rest.startswith("{value}") and not prefix
+        # otherwise a header never runs into a letter: VOLT must not match the start of VOLTage:ILIMit (but SLVL5 is
+        # SLVL 5)
+        pattern = r"^\s*:?" + _header(head, any_channel=prefix) + ("" if self._attached else r"(?![A-Za-z])")
         pattern += r"(?=$|[\s:?;,])" if prefix else _rest(rest) + r"\s*$"   # ',': COMMAND,ch,value instruments
         self._re = re.compile(pattern, re.IGNORECASE | re.S)
 
     def _literal(self, text: str, prefix: bool) -> None:
         """A command that isn't SCPI-shaped (Acton's ?NM and NM/MIN, Thorlabs' %): matched as written."""
+        self._attached = False
         text = text.strip()
         if text.count("{value}") > 1:
             raise ValueError("only one {value} allowed in %r" % text)
@@ -132,6 +137,8 @@ class Template:
         the values it can send (ON, OFF), so FREQ,1,80 is not taken for the switch ON,1."""
         if self._lead is not None:
             return _LeadPrefix(self._lead, words)
+        if self._attached:
+            return _AttachedPrefix(self.header, words)
         m = re.match(DRIVER_VERB, self.text, re.I)
         if m:
             return _PathPrefix(m.group(1), m.group(2))
@@ -158,6 +165,21 @@ class _LeadPrefix:
         if self._words is not None and word not in self._words and not re.match(r"^[+-]?[0-9.]", word):
             return None
         return ""
+
+
+class _AttachedPrefix:
+    """The family of a command whose value runs into its mnemonic (HP's SOUP{value}, Thorlabs' XV{value}): the
+    mnemonic followed by one of its values, a number, a query or nothing more, so SOUPON or SOUP1 counts as touching
+    the switch, while another mnemonic that merely starts the same way does not."""
+
+    def __init__(self, header: str, words: Optional[List[str]] = None):
+        self.text = header + "{value}"
+        after = [re.escape(w.strip()) + r"(?![A-Za-z])" for w in words or () if w.strip()]
+        after += [r"[+-]?[0-9.]", r"\?", r"\s", r"[;,]", r"$"]
+        self._re = re.compile(r"^\s*:?" + _header(header) + "(?:%s)" % "|".join(after), re.I)
+
+    def match(self, command: str) -> Optional[str]:
+        return "" if self._re.match(command) else None
 
 
 class _PathPrefix:

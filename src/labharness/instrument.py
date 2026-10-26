@@ -8,7 +8,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from .cards import Card, ParamSpec
+from .cards import BINARY_REPLY, Card, ParamSpec
+from .clock import Stops
 from .labconfig import Guard, InstrumentConfig
 
 
@@ -18,6 +19,10 @@ NOT_CONNECTED = "%s is not connected (%s): Kelvin sends it nothing until it conn
 
 class InstrumentOff(RuntimeError):
     """A command for an instrument a person switched off (Lab panel)."""
+
+
+class Stopped(RuntimeError):
+    """A person's stop ended a wait on the instrument (an acquisition it was still taking)."""
 
 
 class OffBackend:
@@ -53,11 +58,12 @@ class Unavailable(OffBackend):
 
 
 class Instrument:
-    def __init__(self, name: str, card: Card, backend: Any, config: InstrumentConfig):
+    def __init__(self, name: str, card: Card, backend: Any, config: InstrumentConfig, stops: Optional[Stops] = None):
         self.name = name
         self.card = card
         self.backend = backend
         self.config = config
+        self.stops = stops or Stops()   # the lab's: a person's stop ends a long wait on this instrument
         self._last: Dict[str, Any] = {}   # what Kelvin set, for parameters with no read-back
         # the mounted device's protection (protection.py): it only ever narrows the lab's limits and rates
         self.device_name: Optional[str] = None
@@ -117,17 +123,26 @@ class Instrument:
         try:
             if spec.wait_s and before is not None:
                 res.timeout = spec.wait_s * 1000.0
+            start = self.stops.count
+            waiting = getattr(self.backend, "query_waiting", None)
             for c in spec.get_before:
-                if is_query(c, bool(self.card.connection.get("enq"))):
-                    self.backend.query(c)   # *OPC?: answers when the acquisition is done
-                else:
+                if self.stops.since(start):
+                    raise Stopped("%s.%s: stopped by a person before the instrument was done" % (self.name, spec.name))
+                if not is_query(c, bool(self.card.connection.get("enq"))):
                     self.backend.write(c)
+                elif waiting is not None and spec.wait_s:   # *OPC?: answers when the acquisition is done
+                    waiting(c, spec.wait_s, lambda: self.stops.since(start))   # or a stop ends the wait
+                else:
+                    self.backend.query(c)
             if spec.type == "trace":
                 return self._trace(spec)
             return spec.from_wire(self.backend.query(spec.get_cmd.render()))
         finally:
             if spec.wait_s and before is not None:
-                res.timeout = before
+                try:
+                    res.timeout = before
+                except Exception:
+                    pass   # the connection was renewed after a stop
             if held is not None:
                 held.release()
 
@@ -145,27 +160,38 @@ class Instrument:
 
     def _trace(self, spec: ParamSpec) -> List[float]:
         """A trace: as text, or as a block of binary numbers (binary: on the card) where the connection can read one;
-        then in its units through the card's y expression of raw and the instrument's own scale readings."""
+        then in its units through the card's y expression of raw (or of re and im, for a trace sent as two numbers
+        per point) and the instrument's own scale readings."""
         command = spec.get_cmd.render()
         if spec.binary and hasattr(self.backend, "query_binary"):
             values = self.backend.query_binary(command, spec.binary)
         else:
-            values = spec.from_wire(self.backend.query(command))
+            query = getattr(self.backend, "query_trace", self.backend.query)   # a reply of many lines, read whole
+            try:
+                values = spec.from_wire(query(command))
+            except ValueError as e:
+                if str(e) == BINARY_REPLY and hasattr(self.backend, "drain"):
+                    self.backend.drain()   # the rest of the block would be taken for the next replies
+                raise ValueError("%s.%s: %s" % (self.name, spec.name, e)) from None
+        if spec.pairs and len(values) % 2:
+            raise ValueError("%s.%s: %d numbers came, not two per point (pairs)" % (self.name, spec.name, len(values)))
         if not spec.y or not values:
-            return values
+            return values[0::2] if spec.pairs else values
         import numpy as np
         from . import expr
         raw, known = np.asarray(values, dtype=float), {}
+        own = {"re": raw[0::2], "im": raw[1::2]} if spec.pairs else {"raw": raw}
 
         def column(name: str) -> Any:
-            if name == "raw":
-                return raw
+            if name in own:
+                return own[name]
             if name not in self.card.params:
                 raise KeyError("%s has no parameter %r" % (self.card.id, name))
             if name not in known:
                 known[name] = np.float64(float(self.read(name)))
             return known[name]
-        return [float(v) for v in np.broadcast_to(expr.evaluate(spec.y, column, np), raw.shape)]
+        shape = next(iter(own.values())).shape
+        return [float(v) for v in np.broadcast_to(expr.evaluate(spec.y, column, np), shape)]
 
     def write(self, param: str, value: Any) -> None:
         spec = self.spec(param)

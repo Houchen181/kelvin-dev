@@ -652,9 +652,11 @@
       }
     }
     for (const tr of data.traces) {
+      const points = tr.x.map((x, i) => ({ x, y: tr.y[i] })).filter((p) => typeof p.x === "number" && typeof p.y === "number");
+      if (!points.length) continue;   // a point the instrument could not measure (NaN) is left out, not drawn at 0
       grid.append(lineChart({ title: tr.key + (data.rows.length > 1 ? " (latest)" : ""), xKey: tr.x_unit === "Hz" ? "frequency" : "x",
         xUnit: tr.x_unit, yUnit: tr.unit, fit: fitFor(data.analysis, tr.key, true),
-        series: [{ name: tr.key, points: tr.x.map((x, i) => ({ x, y: tr.y[i] })) }] }));
+        series: [{ name: tr.key, points }] }));
     }
     return grid;
   }

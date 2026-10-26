@@ -184,7 +184,8 @@ def test_a_trace_is_read_alone_from_run_h5(tmp_path):
     data = rt.run_data(run_id).splitlines()
     assert data[1] == "i,t,smu.V,vna.S21,smu.I" and ",trace[401]," in data[2]
     trace = rt.trace(run_id, 1, "vna.S21", 10).splitlines()
-    assert trace[1] == "x,y" and len(trace) == 2 + 10                     # 401 points, every 41st
+    assert trace[1] == "x,y" and 2 + 4 <= len(trace) <= 2 + 10 and "of them shown" in trace[0]   # 401 points:
+    assert trace[2].startswith("3990000000,") and trace[-1].startswith("4010000000,")   # the ends, each stretch's extremes
     assert rt.trace(run_id, 7, "vna.S21") == "row must be 0…2" and "not a trace" in rt.trace(run_id, 0, "smu.I")
     assert "vna.S21 is a trace" in rt.compute(run_id, "mean(vna.S21)")
 

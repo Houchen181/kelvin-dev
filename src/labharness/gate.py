@@ -302,6 +302,17 @@ class SafetyGate:
 
     def request_abort(self) -> None:
         self._stop_gen += 1
+        stops = getattr(self.lab, "stops", None)
+        if stops is not None:
+            stops.pulse()   # every long wait ends now: a settle, a ramp's step, an instrument's sweep
+
+    def _pause(self, seconds: float, gen: int) -> None:
+        """The clock's sleep, cut short by a stop."""
+        stops = getattr(self.lab, "stops", None)
+        if stops is None or self._stop_gen != gen:
+            self.lab.clock.sleep(0 if self._stop_gen != gen else seconds)
+            return
+        stops.sleep(self.lab.clock, seconds, stops.count)
 
     @property
     def stop_generation(self) -> int:
@@ -762,7 +773,10 @@ class SafetyGate:
             if spec.type == "int":
                 v = int(round(v))
             inst.write(spec.name, v)
-            self.lab.clock.sleep(dwell)
+            if watch:
+                self._pause(dwell, gen)   # a stop ends the step's dwell; a ramp to safe never stops
+            else:
+                self.lab.clock.sleep(dwell)
             if watch:
                 trip = self._guard_trip(inst, spec)
                 if trip:
@@ -792,7 +806,10 @@ class SafetyGate:
             if clock.now() - t0 > timeout:
                 return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)" % (
                     key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
-            clock.sleep(poll)
+            if watch:
+                self._pause(poll, gen)
+            else:
+                clock.sleep(poll)
 
     def _guard_trip(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[Guard, float]]:
         for g in inst.guards(spec.name):

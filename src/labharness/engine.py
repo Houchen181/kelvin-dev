@@ -16,6 +16,7 @@ from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
+from .instrument import Stopped
 from .plans import Plan, PlanError, Stabilize, Step, load_plan
 
 # An instrument that passed its health check is checked again only after this long (or after a run on it fails):
@@ -322,7 +323,7 @@ class RunEngine:
                  meta: Optional[Dict[str, Any]] = None, folder: Any = None) -> RunReport:
         """expected_s: the dry run's duration (lab time), for an honest time-left estimate that counts ramps."""
         gate, lab, clock = self.gate, self.lab, self.lab.clock
-        gen = gate.stop_generation
+        gen, stops = gate.stop_generation, lab.stops.count
         rec = self.store.create(plan.name, plan.source, gate.operator, folder)
         rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
         rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
@@ -369,9 +370,12 @@ class RunEngine:
                             apply(axis.instr, axis.param, v)
                             if axis.stabilize:
                                 self._stabilize(axis.stabilize, gen, warnings)
-                            clock.sleep(axis.settle if axis.settle is not None else plan.settle)
+                            if not lab.stops.sleep(clock, axis.settle if axis.settle is not None else plan.settle,
+                                                   stops):
+                                raise _Abort("stop requested")   # a stop ends a settle at once
                         elif axis.kind == "time" and v:
-                            clock.sleep(axis.every)
+                            if not lab.stops.sleep(clock, axis.every, stops):
+                                raise _Abort("stop requested")
                     prev = list(combo)
                     row: Dict[str, Any] = {"i": n, "t": round(clock.now() - t0, 6)}
                     for axis, v in zip(plan.axes, combo):
@@ -406,6 +410,8 @@ class RunEngine:
                     apply(step.instr, step.param, step.value)
         except _Abort as e:
             status, reason = "aborted", str(e)
+        except Stopped:   # a stop that came while an instrument was still taking a reading
+            status, reason = "aborted", "stop requested"
         except Exception as e:
             status, reason = "aborted", "error: %s" % e
         cleanup: List[str] = []

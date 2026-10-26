@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Sequence, Tuple
 
-from ..cards import si_parts
+from ..cards import si_parts, thin
 
 PALETTE = ["2a78d6", "eb6834", "1baf7a", "eda100", "e87ba4", "008300", "6250d6", "e34948"]
 FIT = "3c4651"
@@ -106,10 +106,19 @@ def axis_label(key: str, unit: str) -> str:
 
 
 def _thin(points: List[Optional[Point]]) -> List[Optional[Point]]:
+    """At most about MAX_POINTS of them, keeping each stretch's lowest and highest (a narrow resonance stays in);
+    a gap (None) stays a gap."""
     if len(points) <= MAX_POINTS:
         return points
-    step = -(-len(points) // MAX_POINTS)
-    return points[::step] + ([points[-1]] if (len(points) - 1) % step else [])
+    keep = set(thin([None if p is None else p[1] for p in points], MAX_POINTS))
+    out: List[Optional[Point]] = []
+    for i, p in enumerate(points):
+        if p is None:
+            if out and out[-1] is not None:
+                out.append(None)
+        elif i in keep:
+            out.append(p)
+    return out
 
 
 def layout(chart: Chart, w: float, h: float, measure: Callable[[str, float], float], font: float = 8.0) -> Geometry:

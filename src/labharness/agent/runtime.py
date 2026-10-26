@@ -9,6 +9,7 @@ import contextlib
 import csv
 import io
 import json
+import math
 import re
 import sys
 import threading
@@ -20,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List,
 import yaml
 
 from .. import frames
-from ..cards import ParamSpec, num, trace_x
+from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunFolders, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from ..catalog import Catalog
 
 MAX_WAIT_S = 3600
+BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
 
 
 def default_project_info(project_id: Optional[str]) -> Dict[str, Any]:
@@ -276,13 +278,14 @@ class LabRuntime:
                 row = event["row"]
                 keep = {"i", "t"} | {a["key"] for a in self.live["axes"]} | \
                        {m["key"] for m in self.live["measures"] if m["kind"] == "scalar"}
-                self.live["rows"].append({k: v for k, v in row.items() if k in keep})
+                self.live["rows"].append({k: None if isinstance(v, float) and not math.isfinite(v) else v
+                                          for k, v in row.items() if k in keep})   # JSON has no NaN
                 for m in self.live["measures"]:
                     if m["kind"] == "trace" and isinstance(row.get(m["key"]), list):
                         ys = row[m["key"]]
-                        step = max(1, -(-len(ys) // 400))
+                        xs, ys = plot_points(trace_x(row, m["key"], len(ys)), ys, 400)
                         self.live["trace"] = {"key": m["key"], "unit": m["unit"], "x_unit": m.get("x_unit", ""),
-                                              "x": trace_x(row, m["key"], len(ys))[::step], "y": ys[::step]}
+                                              "x": xs, "y": ys}
                 self.live["done"], self.live["eta_s"], self.live["phase"] = event["done"], event["eta_s"], "measuring"
             elif event["event"] == "phase":  # after the last point: final values, or the stop/abort steps
                 self.live["phase"], self.live["eta_s"] = event["phase"], event.get("eta_s")
@@ -313,7 +316,10 @@ class LabRuntime:
             if self.queue.state in ("running", "pausing"):   # a queued scan may take hours: answer instead of waiting
                 return ("Kelvin is running the queue (%s). Ask again when this item is done, or pause or stop the "
                         "queue." % (self.busy or "a scan"))
-            self.lock.acquire()
+            if not self.lock.acquire(timeout=BUSY_WAIT_S):   # never a chat stuck behind an instrument that hangs
+                return ("Kelvin is still busy with %s: an instrument has not answered yet (a stop takes effect as "
+                        "soon as it does). Ask again in a moment; if this keeps happening, check that instrument's "
+                        "cable, power and address." % (self.busy or "an earlier request"))
         try:
             self.busy = what
             try:
@@ -616,7 +622,10 @@ class LabRuntime:
     def wait(self, seconds: float) -> str:
         seconds = max(0.0, min(float(seconds), MAX_WAIT_S))
         def run() -> str:
-            self.lab.clock.sleep(seconds)
+            stops, t0 = self.lab.stops.count, self.lab.clock.now()
+            if not self.lab.stops.sleep(self.lab.clock, seconds, stops):   # a person's stop ends the wait
+                return "stopped after %s of %s: a person pressed stop" % (_dur(self.lab.clock.now() - t0),
+                                                                          _dur(seconds))
             return "waited %s" % _dur(seconds)
         return self._do("waiting", run)
 
@@ -1707,18 +1716,22 @@ class LabRuntime:
         if not isinstance(values, list):
             return "%s is not a trace column" % column
         n = len(values)
-        step = max(1, -(-n // max(2, int(max_points))))
+        keep = thin(values, max(4, int(max_points)))   # a narrow dip or peak stays in, however few are shown
         axis = rows[row].get(column + ".axis") or rows[row].get(column + ".x")
         spec = self._spec(column)
         lines = ["%s row %d: %s%s" % (run_id, row, trace_summary(spec, values) if spec else "%d points" % n,
-                                      "" if step == 1 else "; every %dth point shown" % step)]
+                                      "" if len(keep) == n else "; %d of them shown: the first, the last and each "
+                                      "stretch's lowest and highest" % len(keep))]
+
+        def y(i: int) -> str:
+            return "nan" if values[i] is None else "%.6g" % values[i]
         if axis:
             xs = trace_x(rows[row], column, n)
             lines.append("x,y")
-            lines += ["%.12g,%.6g" % (xs[i], values[i]) for i in range(0, n, step)]
+            lines += ["%.12g,%s" % (xs[i], y(i)) for i in keep]
         else:
             lines.append("index,y")
-            lines += ["%d,%.6g" % (i, values[i]) for i in range(0, n, step)]
+            lines += ["%d,%s" % (i, y(i)) for i in keep]
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ pictures (look_at)

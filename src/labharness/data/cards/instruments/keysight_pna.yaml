@@ -1,0 +1,153 @@
+card: 1
+id: keysight/pna
+model: Keysight PNA-family network analyzer (PNA, PNA-L, PNA-X, E5080, P50xx, M98xx)
+vendor: Keysight
+kind: vna
+status: community
+manual: "Keysight PNA/PNA-X help: Programming, SCPI Command Finder (CALCulate:MEASure, SENSe, SOURce, FORMat)"
+manual_url: "https://helpfiles.keysight.com/csg/N52xxB/Programming/GP-IB_Command_Finder/Calculate/MeasureDATA.htm"
+notes:
+  - "LAN (HiSLIP: TCPIP0::host::hislip0::INSTR, or VXI-11: TCPIP0::host::inst0::INSTR) or GPIB. The frequency and power ranges depend on the model and its options: set the lab limits to yours."
+  - "Kelvin measures on channel 1 with its measurement 1 (every preset makes one). Each S-parameter reading sets measurement 1 to that parameter and format, takes one linear sweep (immediate trigger; point averaging when averaging is on) and reads it as text, so a binary data format left by another program does no harm. The channel then holds: choose Sweep > Continuous on the analyzer to watch it live again."
+  - "No measurement 1 on channel 1 (it was deleted)? Preset the analyzer, or send CALCulate1:MEASure1:DEFine 'S21' once."
+  - "The calibration is never touched: readings use the channel's correction as it is, and Kelvin blocks the calibration commands."
+  - "Uses the CALCulate:MEASure commands: firmware too old to have them answers each reading with an error."
+identify:
+  idn: "^(Keysight|Agilent) Technologies,\\s*(N52[2-4][0-9][AB]|E508[01][AB]|E5055A|P50[0-9]{2}[AB]|M98[0-9]{2}A)"
+  example: "Keysight Technologies,N5227B,MY12345678,A.17.20.05"
+error_query: "SYSTem:ERRor?"
+
+parameters:
+  f_start:
+    label: Start frequency
+    kind: measure
+    unit: Hz
+    set: "SENSe1:FREQuency:STARt {value}"
+    get: "SENSe1:FREQuency:STARt?"
+    limits: [9.0e3, 1.2e11]
+  f_stop:
+    label: Stop frequency
+    kind: measure
+    unit: Hz
+    set: "SENSe1:FREQuency:STOP {value}"
+    get: "SENSe1:FREQuency:STOP?"
+    limits: [9.0e3, 1.2e11]
+  points:
+    label: Points
+    kind: measure
+    type: int
+    set: "SENSe1:SWEep:POINts {value}"
+    get: "SENSe1:SWEep:POINts?"
+    limits: [1, 100003]
+  ifbw:
+    label: IF bandwidth
+    kind: measure
+    unit: Hz
+    set: "SENSe1:BANDwidth[:RESolution] {value}"
+    get: "SENSe1:BANDwidth[:RESolution]?"
+    limits: [1, 1.5e7]
+  averaging:
+    label: Averaging
+    kind: measure
+    type: bool
+    set: "SENSe1:AVERage:STATe {value}"
+    get: "SENSe1:AVERage:STATe?"
+  averages:
+    label: Averages
+    kind: measure
+    type: int
+    set: "SENSe1:AVERage:COUNt {value}"
+    get: "SENSe1:AVERage:COUNt?"
+    limits: [1, 65536]
+    description: Each point measured this many times and averaged, when averaging is on
+  rf:
+    label: RF output
+    kind: drive
+    type: bool
+    set: "OUTPut[:STATe] {value}"
+    get: "OUTPut[:STATe]?"
+    safe: off
+    enables: [power]
+  power:
+    label: Port power
+    applies_when: rf
+    kind: drive
+    unit: dBm
+    set: "SOURce1:POWer1[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: "SOURce1:POWer1[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-100, 30]
+    safe: -90
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+    description: Source power at port 1 (the other ports follow while the ports' powers are coupled)
+  S21:
+    label: S21
+    kind: measure
+    type: trace
+    unit: dB
+    get: ["FORMat:DATA ASCii,0", "TRIGger:SOURce IMMediate", "SENSe1:SWEep:TYPE LINear",
+          "CALCulate1:MEASure1:PARameter 'S21'", "CALCulate1:MEASure1:FORMat MLOGarithmic",
+          "SENSe1:AVERage:MODE POINt", "SENSe1:SWEep:MODE SINGle", "*OPC?", "CALCulate1:MEASure1:DATA:FDATA?"]
+    acquires: true
+    wait: 3600
+    axis: { start: f_start, stop: f_stop }
+    description: Transmission from port 1 to port 2, one sweep, in dB
+  S21_phase:
+    label: S21 phase
+    kind: measure
+    type: trace
+    unit: deg
+    get: ["FORMat:DATA ASCii,0", "TRIGger:SOURce IMMediate", "SENSe1:SWEep:TYPE LINear",
+          "CALCulate1:MEASure1:PARameter 'S21'", "CALCulate1:MEASure1:FORMat PHASe",
+          "SENSe1:AVERage:MODE POINt", "SENSe1:SWEep:MODE SINGle", "*OPC?", "CALCulate1:MEASure1:DATA:FDATA?"]
+    acquires: true
+    wait: 3600
+    axis: { start: f_start, stop: f_stop }
+    description: Phase of the transmission from port 1 to port 2, one sweep, in degrees
+  S11:
+    label: S11
+    kind: measure
+    type: trace
+    unit: dB
+    get: ["FORMat:DATA ASCii,0", "TRIGger:SOURce IMMediate", "SENSe1:SWEep:TYPE LINear",
+          "CALCulate1:MEASure1:PARameter 'S11'", "CALCulate1:MEASure1:FORMat MLOGarithmic",
+          "SENSe1:AVERage:MODE POINt", "SENSe1:SWEep:MODE SINGle", "*OPC?", "CALCulate1:MEASure1:DATA:FDATA?"]
+    acquires: true
+    wait: 3600
+    axis: { start: f_start, stop: f_stop }
+    description: Reflection at port 1, one sweep, in dB
+  S12:
+    label: S12
+    kind: measure
+    type: trace
+    unit: dB
+    get: ["FORMat:DATA ASCii,0", "TRIGger:SOURce IMMediate", "SENSe1:SWEep:TYPE LINear",
+          "CALCulate1:MEASure1:PARameter 'S12'", "CALCulate1:MEASure1:FORMat MLOGarithmic",
+          "SENSe1:AVERage:MODE POINt", "SENSe1:SWEep:MODE SINGle", "*OPC?", "CALCulate1:MEASure1:DATA:FDATA?"]
+    acquires: true
+    wait: 3600
+    axis: { start: f_start, stop: f_stop }
+    description: Transmission from port 2 to port 1 (port 2 sends), one sweep, in dB
+  S22:
+    label: S22
+    kind: measure
+    type: trace
+    unit: dB
+    get: ["FORMat:DATA ASCii,0", "TRIGger:SOURce IMMediate", "SENSe1:SWEep:TYPE LINear",
+          "CALCulate1:MEASure1:PARameter 'S22'", "CALCulate1:MEASure1:FORMat MLOGarithmic",
+          "SENSe1:AVERage:MODE POINt", "SENSe1:SWEep:MODE SINGle", "*OPC?", "CALCulate1:MEASure1:DATA:FDATA?"]
+    acquires: true
+    wait: 3600
+    axis: { start: f_start, stop: f_stop }
+    description: Reflection at port 2 (port 2 sends), one sweep, in dB
+
+safe_sequence: [rf, power]
+health:
+  - query: "SYSTem:ERRor?"
+    expect: "^\\+?0,"
+raw:
+  reset: ["*RST", "SYSTem:PRESet", "SYSTem:FPReset", "SYSTem:UPReset"]
+  blocked: ["SENSe:CORRection:COLLect", "SENSe:CORRection:CSET:DELete", "SENSe:CORRection:CSET:SAVE",
+            "SENSe:CORRection:CKIT", "CALibration", "SYSTem:SHUTdown", "SYSTem:SECurity", "MMEMory:DELete",
+            "*SAV"]

@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .cards import Card, CardRegistry, ParamSpec, num
-from .clock import SimClock
+from .adapters import timed_out
+from .clock import SimClock, Stops
 from .instrument import NOT_CONNECTED, OFF_TEXT, Instrument, OffBackend, Unavailable
 from .labconfig import InstrumentConfig, LabConfig
 
@@ -44,6 +45,7 @@ class Lab:
         self.config = config
         self.registry = registry
         self.clock = clock
+        self.stops = Stops()   # a person's stop, which every long wait (and instrument wait) watches
         self.world = world
         self._factory = backend_factory
         self._parked: Dict[str, Any] = {}   # connections set aside unclosed when switched off (closing would send)
@@ -60,7 +62,7 @@ class Lab:
                     if not partial:
                         raise
                     backend = Unavailable(name, first_line(e))
-            self.instruments[name] = Instrument(name, card, backend, ic)
+            self.instruments[name] = Instrument(name, card, backend, ic, self.stops)
 
     def instrument(self, name: str) -> Instrument:
         """The instrument to talk to; a switched-off one is refused (KeyError, so the gate refuses the command)."""
@@ -139,7 +141,7 @@ class Lab:
         except Exception:
             del self.config.instruments[ic.name]
             raise
-        inst = self.instruments[ic.name] = Instrument(ic.name, bound, backend, ic)
+        inst = self.instruments[ic.name] = Instrument(ic.name, bound, backend, ic, self.stops)
         return inst
 
     def remove(self, name: str) -> None:
@@ -168,14 +170,19 @@ class Lab:
             if not inst.enabled:
                 continue
             values: Dict[str, Any] = {}
+            silent = False
             for spec in inst.card.params.values():
                 if spec.type in ("trace", "image") or spec.acquires or (spec.get_cmd is None and
                                                                         spec.name not in inst._last):
                     continue   # traces, frames and acquisitions are read when asked or measured, not to look
+                if silent:   # it did not answer: each other reading would only wait as long again
+                    values[spec.name] = "ERROR: not read: %s did not answer" % name
+                    continue
                 try:
                     values[spec.name] = inst.read(spec.name)
                 except Exception as e:  # a snapshot must never stop a run
                     values[spec.name] = "ERROR: %s" % e
+                    silent = timed_out(e)
             snap[name] = values
         return snap
 

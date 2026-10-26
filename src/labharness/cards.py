@@ -12,7 +12,7 @@ import re
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .envs import PACKAGE
 from .expr import CONSTANTS
@@ -99,6 +99,7 @@ class ParamSpec:
     x_values: Optional[str] = None                 # or a trace of x values (a spectrometer's wavelengths)
     axis_step: Optional[Tuple[str, str]] = None    # or point i at origin + i * step (an oscilloscope's time axis)
     binary: Optional[str] = None                   # a trace sent as a block of binary numbers: "int16" ("... little")
+    pairs: bool = False                            # a trace sent as two numbers per point (re, im): y from re and im
     y: Optional[str] = None                        # a trace's values from its raw numbers: "(raw - yref) * yinc"
     applies_when: Optional[str] = None             # drive that must be on for this one to reach the sample
     label: str = ""                                # human name, e.g. "Compliance"
@@ -325,17 +326,53 @@ def trace_x(row: Dict[str, Any], key: str, n: int) -> List[float]:
     return [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(n)]
 
 
+def _finite(v: Any) -> bool:
+    return _is_number(v) and math.isfinite(v)
+
+
+def thin(ys: Sequence[Any], most: int) -> List[int]:
+    """Which of a trace's points to draw when it has more than `most`: the first and the last, and in each stretch the
+    lowest and the highest value, so a narrow dip or peak (a resonance) is never stepped over."""
+    n = len(ys)
+    if n <= most:
+        return list(range(n))
+    size = -(-n // max(1, (most - 2) // 2))
+    keep = {0, n - 1}
+    for start in range(0, n, size):
+        stretch = [i for i in range(start, min(n, start + size)) if _finite(ys[i])]
+        if stretch:
+            keep.update((min(stretch, key=ys.__getitem__), max(stretch, key=ys.__getitem__)))
+    return sorted(keep)
+
+
+def plot_points(xs: Sequence[Any], ys: Sequence[Any], most: int) -> Tuple[List[Any], List[Any]]:
+    """A trace as a plot draws it: thinned (thin), with None for a value that is not a number (NaN, inf)."""
+    keep = thin(ys, most)
+    return [xs[i] for i in keep], [ys[i] if _finite(ys[i]) else None for i in keep]
+
+
+BINARY_REPLY = ("the numbers came in binary, not as text: the instrument's data format was changed, perhaps by another "
+                "program (FORMat:DATA REAL,64 on many instruments). Send its text format first in the reading "
+                "(FORMat:DATA ASCii,0), or give the card binary: float64")
+
+
 def trace_numbers(text: str) -> List[float]:
-    """A trace's numbers from its reply: comma (or space) separated, after the IEEE 488.2 block header an instrument
-    may send first (#800012345 says 8 digits of length follow; #0 has none)."""
+    """A trace's numbers from its reply: separated by commas, spaces or line ends (HP's analyzers send a line per
+    point), after the IEEE 488.2 block header an instrument may send first (#800012345 says 8 digits of length
+    follow; #0 has none)."""
     text = text.strip()
     m = re.match(r"^#([1-9])", text)
     if m:
         text = text[2 + int(m.group(1)):]
     elif text.startswith("#0"):
         text = text[2:]
-    parts = text.split(",") if "," in text else text.split()
-    return [float(x) for x in parts if x.strip()]
+    parts = re.split(r"[,\s]+", text)
+    try:
+        return [float(x) for x in parts if x.strip()]
+    except ValueError:
+        if m or any(not (" " <= c <= "~" or c in "\t\r\n") for c in text[:256]):   # a block of bytes, not text
+            raise ValueError(BINARY_REPLY) from None
+        raise ValueError("the reply is not a list of numbers: %r" % text[:80]) from None
 
 
 def _is_number(x: Any) -> bool:
@@ -500,6 +537,11 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
                                   "comes first" % ", ".join(BINARY))
         else:
             spec.binary = str(binary).strip()
+    if p.get("pairs") is not None:
+        if typ != "trace" or not isinstance(p["pairs"], bool):
+            err(path + ".pairs", "a trace sent as two numbers per point (real and imaginary): pairs: true")
+        else:
+            spec.pairs = p["pairs"]
     if p.get("y") is not None:
         if typ != "trace":
             err(path + ".y", "only traces have y: their values from raw and the card's parameters")
@@ -636,10 +678,11 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         for ax in (spec.axis or ()) + (spec.axis_step or ()):
             if ax not in params or params[ax].get_cmd is None or not params[ax].numeric:
                 err(path + ".axis", "%r is not a readable numeric parameter" % ax)
+        own = ("re", "im") if spec.pairs else ("raw",)   # the reply's numbers: raw, or each point's pair
         for name in _y_names(spec.y, lambda problem: err(path + ".y", problem)):
-            if name != "raw" and name not in CONSTANTS and (name not in params or params[name].get_cmd is None
-                                                            or not params[name].numeric):
-                err(path + ".y", "%r is not raw or a readable numeric parameter on this card" % name)
+            if name not in own and name not in CONSTANTS and (name not in params or params[name].get_cmd is None
+                                                              or not params[name].numeric):
+                err(path + ".y", "%r is not %s or a readable numeric parameter on this card" % (name, " or ".join(own)))
         if spec.x_values and (spec.x_values not in params or params[spec.x_values].type != "trace"
                               or params[spec.x_values].get_cmd is None):
             err(path + ".axis", "%r is not a readable trace on this card" % spec.x_values)

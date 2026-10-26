@@ -238,6 +238,52 @@ def test_stop_button_ends_a_running_turn(parts):
     assert active is None
 
 
+def test_stop_ends_a_turn_whose_tool_an_instrument_holds_up(parts, monkeypatch):
+    """An instrument that stops answering holds a tool call in its thread: the stop button still ends the turn at
+    once, and a later request answers that Kelvin is busy instead of hanging the chat."""
+    from labharness.agent import runtime as runtime_module
+    runtime, _, store = parts
+    monkeypatch.setattr(runtime_module, "BUSY_WAIT_S", 0.5)
+    release = threading.Event()
+    backend = runtime.lab.instruments["smu"].backend
+    query = backend.query
+
+    def hung(cmd, *a, **k):   # the instrument has stopped answering (released at the end of the test)
+        release.wait(20)
+        return query(cmd, *a, **k)
+    monkeypatch.setattr(backend, "query", hung)
+    status = [{"type": "tool_call", "id": "c1", "name": "lab_status", "input": {}}]
+
+    async def main():
+        agent = ChatAgent(runtime, store, build_server(runtime), {"s": Scripted([status, DONE])})
+        await agent.start()
+        try:
+            chat = store.create("s:m1")
+            provider = agent.claim(chat["id"], "s:m1")
+            events = []
+
+            async def emit(e):
+                events.append(e)
+
+            task = asyncio.ensure_future(agent.run_turn(chat["id"], "how is the lab?", "s:m1", provider, emit))
+            await asyncio.sleep(0.5)
+            assert agent.stop()
+            t0 = time.time()
+            await asyncio.wait_for(task, 3)
+            stopped_in = time.time() - t0
+            busy = await asyncio.to_thread(runtime.lab_status)   # the hung call still holds the lab
+            return events, stopped_in, busy, agent.active
+        finally:
+            release.set()
+            await agent.close()
+
+    events, stopped_in, busy, active = anyio.run(main)
+    assert stopped_in < 2 and events[-1] == {"type": "turn_end", "reason": "stopped"} and active is None
+    end = next(e for e in events if e["type"] == "tool_end")
+    assert end["is_error"] and end["content"].startswith("stopped: the person pressed stop")
+    assert busy.startswith("Kelvin is still busy with reading status")
+
+
 def test_run_progress_and_the_runs_pane_api(tmp_path):
     lab = build_virtual_lab(clock=ScaledClock(60), seed=1)   # the 48 s demo sweep takes ~0.8 s
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))

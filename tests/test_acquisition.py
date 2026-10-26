@@ -45,15 +45,21 @@ parameters:
 
 
 class Resource:
+    """A bus as VISA gives it: a query's answer waits to be read, and each read has the timeout set then."""
+
     def __init__(self, idn):
-        self.idn, self.sent, self.timeouts = idn, [], []
+        self.idn, self.sent, self.timeouts, self.pending = idn, [], [], []
         self.timeout = 2000
         self.read_termination = self.write_termination = None
         self.armed, self.buffer, self.fired, self.count = False, [], 0, 3
 
     def write(self, cmd):
         self.sent.append(cmd)
-        if cmd == "INIT":
+        if cmd.endswith("?"):
+            answers = {"*IDN?": self.idn, "*OPC?": "1", "SAMP:COUN?": str(self.count), ":BURS:NCYC?": "10",
+                       "TRAC:DATA?": "#0" + ",".join("%.3f" % v for v in self.buffer)}
+            self.pending.append(answers.get(cmd, "0"))
+        elif cmd == "INIT":
             self.armed, self.buffer = True, []
         elif cmd == "*TRG" and self.armed:
             self.buffer, self.armed = [0.5 * (i + 1) for i in range(self.count)], False
@@ -63,14 +69,14 @@ class Resource:
             self.count = int(cmd.split()[1])
 
     def query(self, cmd, delay=None):
-        self.sent.append(cmd)
-        self.timeouts.append((cmd, self.timeout))
-        answers = {"*IDN?": self.idn, "*OPC?": "1", "SAMP:COUN?": str(self.count), ":BURS:NCYC?": "10",
-                   "TRAC:DATA?": "#0" + ",".join("%.3f" % v for v in self.buffer)}
-        return answers.get(cmd, "0")
+        self.write(cmd)
+        return self.read()
 
     def read(self):
-        raise TimeoutError("VI_ERROR_TMO")
+        self.timeouts.append((self.sent[-1], self.timeout))
+        if not self.pending:
+            raise TimeoutError("VI_ERROR_TMO")
+        return self.pending.pop(0)
 
     def close(self):
         pass
@@ -107,7 +113,8 @@ def test_a_buffered_reading_arms_triggers_waits_and_fetches(bench):
     assert lab.read("dmm", "buffer") == pytest.approx([0.5, 1.0, 1.5])
     assert dmm.sent[-4:] == ["INIT", "*TRG", "*OPC?", "TRAC:DATA?"]
     waited = dict(dmm.timeouts)
-    assert waited["*OPC?"] == 20000 and dmm.timeout == before         # the card's wait, then back
+    assert waited["TRAC:DATA?"] == 20000 and dmm.timeout == before    # the card's wait, then back
+    assert waited["*OPC?"] == 1000   # awaited a second at a time (up to the card's 20 s), so a stop ends it
 
 
 def test_actions_and_the_ones_that_drive_the_sample(bench, tmp_path):

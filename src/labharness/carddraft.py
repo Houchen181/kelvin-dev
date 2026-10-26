@@ -49,10 +49,17 @@ Each parameter:
   <param>} (a sweep's start and stop frequency), {origin: <param>, step: <param>} (a scope's first time and the time
   between points: XORigin, XINCrement) or {values: <trace param>}. Comma-separated replies, with or without the
   #<n><length> header, need nothing more; for a waveform sent as binary numbers (BYTE or WORD format), binary: int8,
-  uint8, int16, uint16, int32 or float32 (add "little" when the manual says the lowest byte comes first). When the
-  numbers are digitizer levels, y: their scaling from raw and the card's parameters that read it, as the manual
-  gives it, e.g. y: "(raw - yref) * yinc + yorig". Commands that choose the format or the points (WAVeform:FORMat,
-  DATa:ENCdg, :WAV:POINts) are settings of their own, never sent by a get.
+  uint8, int16, uint16, int32, float32 or float64 (add "little" when the manual says the lowest byte comes first).
+  When the numbers are digitizer levels, y: their scaling from raw and the card's parameters that read it, as the
+  manual gives it, e.g. y: "(raw - yref) * yinc + yorig". The number of points is a setting of its own, never sent
+  by a get; the reply's format is best sent first in the reading's get list (WAVeform:FORMat WORD, FORMat:DATA
+  ASCii,0), so another program changing it cannot break the reading.
+- A network analyzer's S-parameter (S21, S11): a trace in dB of its formatted data (log magnitude: one number per
+  point), taken by one sweep in the reading: get: [the text format (FORMat:DATA ASCii,0), the commands that make the
+  measurement that S-parameter in log magnitude, a single sweep, *OPC?, the data query], acquires: true, wait: the
+  longest sweep in seconds, axis: {start: <start frequency>, stop: <stop frequency>}. A reply of two numbers per
+  point (complex data: real and imaginary; some analyzers' formatted data: the value and 0): pairs: true, and y from
+  re and im, e.g. y: "20*log10(hypot(re, im))" for dB (without y, the first of each pair).
 - set: command template with {value}; get: the query. SCPI short/long forms as in the manual, optional nodes in
   [brackets], e.g. "SOURce:VOLTage[:LEVel] {value}".
 - limits: [min, max] the instrument accepts (the vendor's, not the lab's).
