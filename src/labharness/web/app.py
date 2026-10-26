@@ -30,7 +30,7 @@ from .._version import __version__
 from ..accounts import Accounts, cipher_for, has_legacy
 from .. import central
 from ..agent.approval import WebApprover
-from ..agent.runtime import LabRuntime, writable_folder
+from ..agent.runtime import SETUP_STEPS, LabRuntime, writable_folder
 from ..agent.server import build_server
 from ..adapters import AdapterError
 from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
@@ -346,8 +346,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
         if updater is not None:   # look for a newer Kelvin soon after start, then twice a day
             tasks.append(asyncio.ensure_future(update_loop()))
-        if auto_setup:   # find and set up connected instruments (or say why not: switched off, a lab chosen...)
-            setup.start("start")
+        if auto_setup or runtime.lab.connecting:   # connect the person's lab Kelvin opened before connecting it; find
+            setup.start("start" if auto_setup else "connect")   # and set up instruments (or say why not)
         hub.wake = asyncio.Event()
         if HUB_SHARING:
             tasks.append(asyncio.ensure_future(hub_loop()))
@@ -427,7 +427,21 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 "legacy": not listed and has_legacy(home) and not accounts.legacy_taken(),
                 "central": on, "hub": hub_address(), "account_url": hub_address() + "/account" if on else None,
                 "unlinked": accounts.unlinked() if on else [],
-                "relay": dict(relay_link.view(), on=settings.get("phone_relay") != "off") if on else None}
+                "relay": dict(relay_link.view(), on=settings.get("phone_relay") != "off") if on else None,
+                "setup": setup_brief()}
+
+    def setup_brief() -> Optional[Dict[str, Any]]:
+        """What the instrument setup is doing, for the sign-in screen: the step, not the instruments (anyone at the
+        screen sees it). None when it isn't at work."""
+        s = runtime.setup_status
+        if s.get("state") not in SETUP_STEPS:
+            return None
+        text = {"connecting": "Connecting the lab's instruments", "scanning": "Looking for connected instruments",
+                "drafting": "Writing the card for an instrument Kelvin doesn't know yet",
+                "reading": "Reading the instruments' settings"}[s["state"]]
+        if s.get("steps"):
+            text += " (%s of %s)" % (s.get("step"), s["steps"])
+        return {"state": s["state"], "message": text}
 
     # ------------------------------------------------------------------ phones through the Kelvin hub (relay.py)
 
@@ -2513,7 +2527,23 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         data["active"] = agent.active
         data["answering"] = agent.answering()   # every chat answering now: the portal marks them
         data["wakes"], data["woke"] = agent.waker.view(), agent.waker.latest()
+        data["ask_scripts"] = setup.first and settings.lab_scripts is None   # the first setup: the lab's scripts?
         return JSONResponse(data)
+
+    async def scripts_folder(request: Request) -> Response:
+        """POST {folder}: a person's answer to the first setup's question, the folder of the scripts the lab runs its
+        instruments with. The setup reads them (never runs them) for the names, settings and values the lab uses,
+        and for instruments the scan can't tell; "" when there are none (not asked again)."""
+        folder = str((await request.json()).get("folder") or "").strip()
+        if not folder:
+            settings.set_lab_scripts("")
+            return JSONResponse({"ok": True, "now": False})
+        try:
+            answer = await asyncio.to_thread(setup.use_scripts, folder)
+        except (OSError, ValueError) as e:
+            return error(400, str(e))
+        settings.set_lab_scripts(folder)
+        return JSONResponse(dict(answer, ok=True))
 
     async def approval_mode(request: Request) -> Response:
         """Ask before every drive increase, or auto-approve low-risk ones. People only: no agent tool reaches this."""
@@ -2720,6 +2750,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/notify/test", notify_test, methods=["POST"]),
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
         Route("/api/instruments/scripts", scripts_view, methods=["POST"]),
+        Route("/api/instruments/scripts-folder", scripts_folder, methods=["POST"]),
         Route("/api/instruments/{name}/limits", instrument_limits, methods=["GET", "POST"]),
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
         Route("/api/terminal", terminal, methods=["POST"]),
@@ -2747,6 +2778,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     app.state.remote = remote
     app.state.signin = signin
     app.state.hub = hub
+    app.state.setup = setup
     if accounts is not None:   # one person without a password goes straight in; otherwise the sign-in screen
         runtime.shared_log = home / "instrument-log.jsonl"
         listed = accounts.list()
@@ -2847,7 +2879,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         envelope = None
     else:   # the user's lab.yaml next to the settings, if they have one; otherwise the virtual lab
         lab, envelope, info = open_home_lab(Path(args.settings).parent, settings.get("lab") or "auto", args.speed,
-                                            settings.switched_off)
+                                            settings.switched_off, connect=False)   # connected once the portal is up
     home = Path(args.settings).parent
     accounts = None if (args.no_accounts or args.data_dir) else Accounts(home)   # people sign in (accounts.py)
     if accounts is not None:

@@ -75,6 +75,7 @@
     <button id="central-create" class="link" type="button" hidden>Create a Kelvin account</button>
     <button id="signin-remove-link" class="link" type="button" hidden>Remove someone from this computer</button>
     <p id="signin-msg" class="signin-msg" role="status"></p>
+    <div id="signin-setup" class="signin-setup" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="signin-setup-text"></span></div>
     <div id="signin-busy" class="signin-busy" hidden><span id="signin-busy-text"></span><button id="signin-stop" class="btn small" type="button">Stop it</button></div>
     <p id="signin-foot" class="muted small signin-foot">Everyone here is equal. Each person has their own chats, projects, memory, API keys, data folder and record. The instruments, their cards and the lab's instrument log are shared.</p>
     <p class="muted small signin-foot"><span id="central-hub-text">Accounts on this computer only.</span> <button id="central-hub-edit" class="link" type="button">Use a Kelvin hub</button></p>
@@ -857,6 +858,28 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Keep locked</button>
       <button id="hands-unlock" class="btn primary" type="button" disabled>Unlock</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="setup-wait" class="dialog" aria-labelledby="setup-wait-title">
+  <form method="dialog">
+    <header class="dialog-head">
+      <span id="setup-wait-spin" class="spinner" aria-hidden="true"></span>
+      <h2 id="setup-wait-title">Setting up your instruments</h2>
+    </header>
+    <p id="setup-wait-step" class="setup-wait-step" role="status"></p>
+    <div id="setup-wait-bar" class="setup-wait-bar" hidden><span id="setup-wait-fill"></span></div>
+    <p id="setup-wait-hint" class="muted small setup-wait-hint">Kelvin connects to each instrument and reads its settings before it uses it. This can take a few minutes. Wait here, or use Kelvin meanwhile: it uses each instrument once it is ready.</p>
+    <section id="setup-scripts" class="setup-scripts" hidden>
+      <h3>Does your lab run its instruments from scripts?</h3>
+      <p class="muted small">Python, notebooks or MATLAB. Kelvin reads them, and never runs them, to recognise your instruments, the connection settings they need and the values your lab uses, which become their limits for you to check.</p>
+      <div class="field-actions"><button id="setup-scripts-choose" class="btn small primary" type="button">Choose the scripts folder…</button><button id="setup-scripts-none" class="btn small" type="button">No scripts</button></div>
+    </section>
+    <p id="setup-scripts-msg" class="muted small setup-scripts-msg" hidden></p>
+    <footer class="dialog-foot">
+      <div class="spacer"></div>
+      <button id="setup-wait-close" class="btn" value="close" type="submit">Use Kelvin meanwhile</button>
     </footer>
   </form>
 </dialog>

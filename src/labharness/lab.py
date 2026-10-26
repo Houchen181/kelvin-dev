@@ -36,12 +36,18 @@ def first_line(e: BaseException) -> str:
     return str(e).splitlines()[0][:300] if str(e).strip() else type(e).__name__
 
 
+CONNECTING = "Kelvin is connecting it as it starts"   # an instrument of a lab opened before connecting (later=True)
+
+
 class Lab:
     def __init__(self, config: LabConfig, registry: CardRegistry, backend_factory: BackendFactory,
-                 clock: Any, world: Any = None, switched_off: Optional[SwitchedOff] = None, partial: bool = False):
+                 clock: Any, world: Any = None, switched_off: Optional[SwitchedOff] = None, partial: bool = False,
+                 later: bool = False):
         """switched_off: the instruments a person switched off (Lab panel). They are never connected, so nothing,
         not even the connecting, is sent to them. partial: an instrument that can't be connected is set aside, with
-        the reason, and the others are used (otherwise its error is raised)."""
+        the reason, and the others are used (otherwise its error is raised). later: none is connected yet, so Kelvin
+        opens at once (connecting can take minutes: timeouts, makers' drivers); each waits, as connecting, until
+        reconnect connects it."""
         self.config = config
         self.registry = registry
         self.clock = clock
@@ -55,6 +61,8 @@ class Lab:
             card = registry.get(ic.card).bind(ic.vars)   # with this installation's sensor or channel names
             if name in off:
                 backend = OffBackend(name)
+            elif later:
+                backend = Unavailable(name, CONNECTING)
             else:
                 try:
                     backend = backend_factory(name, card, ic.address)
@@ -83,6 +91,11 @@ class Lab:
     def unavailable(self) -> Dict[str, str]:
         """The instruments that could not be connected, with why."""
         return {name: inst.unavailable for name, inst in self.instruments.items() if inst.unavailable is not None}
+
+    @property
+    def connecting(self) -> List[str]:
+        """The instruments still to be connected (a lab opened with later=True)."""
+        return [name for name, why in self.unavailable.items() if why == CONNECTING]
 
     def away(self, name: str) -> Optional[str]:
         """Why an instrument of this lab is not in use (switched off, or not connected), or None."""

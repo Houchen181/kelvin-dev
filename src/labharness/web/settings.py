@@ -34,7 +34,7 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
-       "account_hub", "hub_installation", "instruments_off", "hands_on"}
+       "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 MAX_RECENT_FOLDERS = 8   # chats' folders the folder menu offers again
@@ -465,6 +465,17 @@ class Settings:
             self._lab["hands_on"] = {"by": str(hands.get("by") or ""), "since": str(hands.get("since") or "")}
         else:
             self._lab.pop("hands_on", None)
+        self._save()
+
+    @property
+    def lab_scripts(self) -> Optional[str]:
+        """The folder of the scripts the lab runs its instruments with, which Kelvin reads to set them up (scripts.py):
+        "" once a person said there are none, None while nobody has been asked."""
+        value = self._lab.get("lab_scripts")
+        return None if value is None else str(value)
+
+    def set_lab_scripts(self, folder: str) -> None:
+        self._lab["lab_scripts"] = str(folder or "")
         self._save()
 
     def set_phone(self, on: bool, port: int) -> None:

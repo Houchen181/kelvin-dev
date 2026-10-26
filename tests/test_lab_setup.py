@@ -117,3 +117,30 @@ def test_no_agent_tool_changes_the_lab():
     names = anyio.run(main)
     assert "scan_instruments" in names and not [n for n in names if "lab" in n and n != "lab_status"]
     assert builtin_registry().get("keithley/2400")
+
+
+def test_kelvin_opens_before_connecting_the_persons_lab(bench):
+    import time
+    (_, settings, store), bus, home = bench
+    (home / "lab.yaml").write_text("lab: Bench\ninstruments:\n"
+                                   "  smu: {card: keithley/2400, address: 'GPIB0::24::INSTR'}\n"
+                                   "  lockin: {card: srs/sr830, address: 'GPIB0::8::INSTR'}\n"
+                                   "  gone: {card: srs/sr830, address: 'GPIB0::30::INSTR'}\n", encoding="utf-8")
+    lab, envelope, info = open_home_lab(home, connect=False)
+    assert info["kind"] == "file" and lab.connecting == ["smu", "lockin", "gone"]
+    assert all(d.sent == [] for d in bus.devices.values())                # nothing asked yet: Kelvin opens at once
+    assert "connecting" in lab.away("smu")
+    runtime = LabRuntime(lab, WebApprover(timeout=5), home / "data")
+    runtime.lab_info = info
+    client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
+    with client:   # the portal is up; the instrument setup connects them, one after another
+        for _ in range(100):
+            if runtime.setup_status.get("state") == "done":
+                break
+            time.sleep(0.05)
+        status = runtime.setup_status
+        assert status["state"] == "done" and status["message"].startswith("Connected smu, lockin"), status
+        assert "not connected: gone" in status["message"] and not lab.connecting
+        assert lab.instruments["smu"].enabled and "gone" in lab.unavailable and runtime.lab is lab   # no virtual lab
+        state = client.get("/api/state", headers=headers).json()
+        assert state["simulated"] is False and set(state["status"]) >= {"smu", "lockin"}

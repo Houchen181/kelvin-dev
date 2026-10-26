@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
 MAX_WAIT_S = 3600
 BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
+SETUP_STEPS = ("connecting", "scanning", "drafting", "reading")   # the instrument setup at work (autosetup.py)
 SCRIPTS_NEXT = ("Next, with the person (nothing above was sent to any instrument): add each instrument that is not in "
                 "the lab yet with add_instrument at its address, with the likely card and the connection settings "
                 "above (Kelvin checks who answers there first); one with no card fitting: draft_card, saying which "
@@ -538,8 +539,12 @@ class LabRuntime:
         asking: one person's yes is not another's."""
         new = Path(data_dir)
         new.mkdir(parents=True, exist_ok=True)
-        if not self.lock.acquire(blocking=False):
+        held = self.lock.acquire(timeout=1.0)
+        if not held and not self.setting_up:
             raise RuntimeError("Kelvin is busy (%s); try again when it is idle" % (self.busy or "working"))
+        # held by the instrument setup (connecting, scanning, reading settings: minutes, at start): nobody's work is
+        # running, so the person comes in at once; their sample's caps are written to the instruments once Kelvin is
+        # idle, as after any switch (recheck below)
         try:
             if self.live and self.live.get("status") == "running":
                 raise RuntimeError("A plan is running; wait for it to finish or stop it first.")
@@ -571,7 +576,13 @@ class LabRuntime:
                 self.gate.log.write("signed_in", user=user, data=str(new))
             self.tidy_later()
         finally:
-            self.lock.release()
+            if held:
+                self.lock.release()
+
+    @property
+    def setting_up(self) -> bool:
+        """The instrument setup is at work (autosetup.py: connecting, scanning, writing cards, reading settings)."""
+        return self.setup_status.get("state") in SETUP_STEPS
 
     # ------------------------------------------------------------------ a person's terminal (people only)
 
@@ -2106,12 +2117,14 @@ class LabRuntime:
         """The lab's own scripts, read for how the lab works now (scripts.py): each instrument's address, settings,
         commands and the values used, the card that fits, and each script's outline. Nothing in them is run."""
         from .. import scripts as lab_scripts
+        from ..adapters import resource_name
         try:
             found = lab_scripts.survey(path, self.script_cards())
         except (OSError, ValueError) as e:
             return "not read: %s" % e
-        in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()}
-        here = ["%s (%s)" % (i.address, in_lab[i.address]) for i in found.instruments if i.address in in_lab]
+        in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
+        here = ["%s (%s)" % (i.address, in_lab[resource_name(i.address)]) for i in found.instruments
+                if i.address and resource_name(i.address) in in_lab]
         return found.text() + ("\n\nAlready in this lab: " + ", ".join(here) if here else "") + "\n\n" + SCRIPTS_NEXT
 
     def scripts_found(self, folder: str) -> Dict[str, Any]:
@@ -2120,18 +2133,25 @@ class LabRuntime:
         (*IDN? only; a serial port isn't tried, as its framing takes long to find). An identity reply decides the
         card. Raises OSError for a folder that isn't there."""
         from .. import scripts as lab_scripts
+        from ..adapters import resource_name
         from ..discovery import SHORT_NAMES, identify
         registry = self.script_cards()
         found = lab_scripts.survey(folder, registry)
         view = found.view()
-        in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()}
+        in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
         taken = [n for n, ic in self.lab.config.instruments.items() if not ic.address.startswith("sim://")]
         with self.lock:
             self.busy = "asking the scripts' instruments who they are"
             try:
                 for item, inst in zip(view["instruments"], found.instruments):
-                    item["in_lab"] = in_lab.get(inst.address)
+                    item["in_lab"] = in_lab.get(resource_name(inst.address)) if inst.address else None
                     item["idn"] = ""
+                    if item["in_lab"] in self.lab.instruments:   # its card here: the limits the scripts' values give
+                        card = self.lab.instruments[item["in_lab"]].card
+                        item["card"] = {"id": card.id, "model": card.model, "kind": card.kind, "sure": True,
+                                        "why": "in this lab as %s" % item["in_lab"],
+                                        "mapped": lab_scripts.mapping(card, inst.commands),
+                                        "limits": lab_scripts.limits(card, inst.commands)}
                     if not inst.address or item["in_lab"]:
                         continue
                     if inst.address.startswith("serial://"):
@@ -2672,6 +2692,37 @@ class LabRuntime:
         def run() -> str:
             return self.gate.act(instrument, action).message
         return self._do("%s.%s" % (instrument, action), run)
+
+    def connect_pending(self, progress: Optional[Callable[[str, int, int], None]] = None) -> Dict[str, Any]:
+        """Connect the instruments of a lab Kelvin opened before connecting them (open_home_lab connect=False), one
+        at a time, holding the lab for each only: a request for one already connected doesn't wait for the rest. One
+        that can't be connected is set aside with why, as at any start. progress(name, i, n) before each."""
+        lab = self.lab
+        names = lab.connecting
+        done: List[str] = []
+        for i, name in enumerate(names):
+            if self.lab is not lab:   # a person switched labs meanwhile
+                break
+            if name not in lab.connecting:   # a person switched it off meanwhile (or it connected another way)
+                continue
+            if progress is not None:
+                progress(name, i, len(names))
+            with self.lock:
+                self.busy = "connecting %s" % name
+                try:
+                    lab.reconnect(name)
+                    done.append(name)
+                except Exception:
+                    pass   # set aside with why: the Lab panel says it (and offers the install a missing package needs)
+                finally:
+                    self.busy = None
+        with self.lock:
+            self._apply_protection(recheck=True)   # the mounted device's caps, written now that they can be
+            self._caps_if_waiting()
+            self._refresh()
+        missing = {n: why for n, why in lab.unavailable.items() if n in names}
+        self.gate.log.write("lab_connected", lab=lab.config.name, instruments=done, not_connected=missing or None)
+        return {"connected": done, "not_connected": missing}
 
     def reconnect_instrument(self, name: str, by: str = "agent") -> str:
         """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package

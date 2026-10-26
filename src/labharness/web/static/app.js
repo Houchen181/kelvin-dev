@@ -275,6 +275,17 @@
       $("signin-busy-text").textContent = s.busy ? (s.busy_user ? s.busy_user + "'s work: " : "") + s.busy : "";
     };
     busy(session);
+    const setupNote = (s) => {   // the instruments set up meanwhile: signing in doesn't wait for them
+      $("signin-setup").hidden = !s.setup;
+      if (s.setup) $("signin-setup-text").textContent = s.setup.message + "… You can sign in meanwhile.";
+      return !!s.setup;
+    };
+    if (setupNote(session)) {
+      const watch = setInterval(async () => {
+        if ($("signin").hidden) { clearInterval(watch); return; }
+        try { if (!setupNote(await api("/api/session"))) clearInterval(watch); } catch (e) { /* keep what is shown */ }
+      }, 3000);
+    }
     let note = "";
     try { note = sessionStorage.getItem("kelvin-signin-msg") || ""; sessionStorage.removeItem("kelvin-signin-msg"); } catch (e) { /* no storage */ }
     if (note) say(note);
@@ -3438,6 +3449,7 @@
     if (busySetup) $("lab-setting-up").textContent = "Setting up instruments: " + (s.setup.message || "") + "…";
     if (S.setupState && SETUP_BUSY.has(S.setupState) && s.setup && !busySetup && $("lab-dialog").open) refreshLabSetup();
     S.setupState = s.setup && s.setup.state;
+    setupWait(s);
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
     queueFromState(s.queue);
     showMounted(s.mounted);
@@ -3870,6 +3882,64 @@
     $("lab-why-details").setAttribute("aria-expanded", String(!list.hidden));
   }
 
+  // ------------------------------------------------------------------ waiting while the instruments are set up
+  // shown when the portal opens during the setup (Kelvin starting), and for the first setup's question about the lab's
+  // scripts; closed, it stays closed (the Lab panel still says what the setup is doing). later: a scripts folder
+  // named too late to shape the first lab config, opened in Set up once the setup is done
+  const WAIT = { shown: false, closed: false, later: "", said: "" };
+  function setupWait(s) {
+    const setup = s.setup || {}, busy = SETUP_BUSY.has(setup.state), ask = !!s.ask_scripts, dlg = $("setup-wait");
+    if (!busy && WAIT.later) {
+      const folder = WAIT.later;
+      WAIT.later = "";
+      if (dlg.open) dlg.close();
+      openLabSetup().then(() => surveyScripts(folder));
+      return;
+    }
+    if (!dlg.open) {
+      if (WAIT.closed || WAIT.shown || !(ask || (busy && performance.now() < 20000))) return;
+      WAIT.shown = true;
+      dlg.showModal();
+    } else if (!busy && !ask && !WAIT.said) {   // done: say so, and get out of the way
+      dlg.close();
+      toast(setup.message || "Your instruments are ready.");
+      return;
+    }
+    $("setup-wait-title").textContent = busy ? "Setting up your instruments" : "Your instruments are set up";
+    $("setup-wait-spin").hidden = !busy;
+    $("setup-wait-step").textContent = (setup.message || "Starting") + (busy ? "…" : "");
+    $("setup-wait-bar").hidden = !(busy && setup.steps);
+    if (busy && setup.steps) $("setup-wait-fill").style.width = Math.round(100 * (setup.step - 1) / setup.steps) + "%";
+    $("setup-wait-hint").hidden = !busy;
+    $("setup-scripts").hidden = !ask;
+    $("setup-scripts-msg").hidden = !WAIT.said;
+    $("setup-scripts-msg").textContent = WAIT.said;
+    $("setup-wait-close").textContent = busy ? "Use Kelvin meanwhile" : "Done";
+  }
+  async function answerScripts(none) {   // the first setup's question: the folder of the lab's scripts, or none
+    let folder = "";
+    if (!none) {
+      folder = await pickFolder(LAB.scriptsFolder || "", "The folder with your lab's scripts (Python, notebooks, MATLAB):");
+      if (!folder) return;
+    }
+    const msg = $("setup-scripts-msg");
+    msg.hidden = false;
+    msg.textContent = none ? "" : "Reading the scripts in " + folder + " (never running them)…";
+    try {
+      const r = await api("/api/instruments/scripts-folder", { body: { folder } });
+      $("setup-scripts").hidden = true;
+      if (none) { msg.hidden = true; return; }
+      LAB.scriptsFolder = folder;
+      const n = r.instruments, k = r.scripts;
+      WAIT.said = !n ? "No instrument work in the scripts there. Set up… reads another folder any time."
+        : "Read " + k + " script" + (k === 1 ? "" : "s") + " using " + n + " instrument" + (n === 1 ? "" : "s") + ". " +
+          (r.now ? "Kelvin sets them up the way your scripts use them: names, settings, and limits from the values used, for you to check."
+            : "When the setup is done, Set up shows what they add: instruments to add, and limits from the values they use.");
+      msg.textContent = WAIT.said;
+      if (n && !r.now) WAIT.later = folder;
+    } catch (e) { msg.textContent = e.message; }
+  }
+
   // ------------------------------------------------------------------ setting up connected instruments
   const SETUP_BUSY = new Set(["scanning", "drafting", "connecting", "reading"]);
   function andList(names) {
@@ -4122,7 +4192,9 @@
   // ------------------------------------------------------------------ setting up from the lab's own scripts
   async function fromScripts() {
     const folder = await pickFolder(LAB.scriptsFolder || "", "The folder with your lab's scripts (Python, notebooks, MATLAB):");
-    if (!folder) return;
+    if (folder) await surveyScripts(folder);
+  }
+  async function surveyScripts(folder) {
     LAB.scriptsFolder = folder;
     const btn = $("lab-scripts");
     btn.disabled = true; btn.textContent = "Reading your scripts…";
@@ -4147,8 +4219,20 @@
     box.replaceChildren(h("p", { class: "hint" }, "In " + r.folder + ": " + r.scripts.length + " script" + (r.scripts.length === 1 ? "" : "s") + " read, none run."),
       ...r.instruments.map((it) => {
         if (it.in_lab) {
-          return h("div", { class: "found in-lab" }, h("span", { class: "found-name" }, it.in_lab),
+          const row = h("div", { class: "found in-lab" }, h("span", { class: "found-name" }, it.in_lab),
             h("span", { class: "found-model" }, "already in this lab"), h("code", { class: "found-addr" }, it.address));
+          const lim = it.card && Object.keys(it.card.limits || {}).length ? it.card.limits : null;
+          if (!lim) return row;
+          const use = h("button", { class: "link soft", type: "button" }, "Use these limits");
+          const note = h("div", { class: "found-write muted small" }, "Limits from the values your scripts use: " + span(lim) + " ", use);
+          use.addEventListener("click", async () => {   // a person's choice, like Save limits in Limits…
+            try {
+              await api("/api/instruments/" + encodeURIComponent(it.in_lab) + "/limits", { body: { limits: lim } });
+              note.textContent = "Kelvin holds " + it.in_lab + " to " + span(lim) + " from now on.";
+              refreshLabSetup(false);
+            } catch (e) { note.textContent = e.message; }
+          });
+          return h("div", { class: "found-wrap" }, row, note);
         }
         const card = it.card || null;
         const was = it.ui && { check: it.ui.check.checked, name: it.ui.name.value, card: it.ui.model.value,
@@ -5212,6 +5296,9 @@
     $("lab-scan").addEventListener("click", scanLab);
     $("lab-add-found").addEventListener("click", addFound);
     $("lab-scripts").addEventListener("click", fromScripts);
+    $("setup-scripts-choose").addEventListener("click", () => answerScripts(false));
+    $("setup-scripts-none").addEventListener("click", () => answerScripts(true));
+    $("setup-wait").addEventListener("close", () => { WAIT.closed = true; });
     $("lab-add-scripts").addEventListener("click", addScripts);
     $("lab-recipes").addEventListener("click", recipesFromScripts);
     $("lab-add").addEventListener("click", addByAddress);

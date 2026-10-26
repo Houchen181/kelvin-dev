@@ -124,6 +124,9 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .signin-busy { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 1px solid var(--warn-line); border-radius: 10px; background: var(--warn-bg); color: var(--warn); font-size: 14px; text-align: left; }
 .signin-busy[hidden] { display: none; }
 .signin-busy span { flex: 1; }
+.signin-setup { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--accent-soft); font-size: 14px; text-align: left; }
+.signin-setup[hidden] { display: none; }
+.signin-setup .spinner { flex: none; }
 .signin-foot { max-width: 360px; margin: 4px 0 0; }
 .account-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px 8px; }
 .account-row[hidden] { display: none; }
@@ -582,6 +585,17 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .field textarea { resize: vertical; min-height: 84px; max-height: 50vh; line-height: 1.45; }
 .field-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .dialog.wide { width: min(760px, calc(100vw - 32px)); }
+/* waiting while the instruments are set up (Kelvin starting), and the first setup's question about the lab's scripts */
+#setup-wait .dialog-head { gap: 10px; }
+#setup-wait .spinner[hidden] { display: none; }
+.setup-wait-step { margin: 0; font-weight: 550; }
+.setup-wait-hint, .setup-scripts-msg { margin: 0; }
+.setup-wait-bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.setup-wait-bar[hidden], .setup-scripts[hidden], .setup-scripts-msg[hidden] { display: none; }
+.setup-wait-bar span { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+.setup-scripts { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--raised); }
+.setup-scripts h3 { margin: 0; font-size: 15px; }
+.setup-scripts p { margin: 0; }
 /* Settings: a list of sections on the left, one section at a time on the right */
 .dialog.settings { width: min(900px, calc(100vw - 32px)); }
 .dialog.settings form { height: min(720px, calc(100vh - 48px)); height: min(720px, calc(100dvh - 48px)); grid-template-rows: auto minmax(0, 1fr) auto; }

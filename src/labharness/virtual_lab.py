@@ -61,7 +61,7 @@ def is_simulated(config: LabConfig) -> bool:
 
 
 def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[CardRegistry] = None,
-              switched_off: Optional[SwitchedOff] = None, partial: bool = False) -> Lab:
+              switched_off: Optional[SwitchedOff] = None, partial: bool = False, later: bool = False) -> Lab:
     """A lab from a lab config whose instruments may be real (VISA/serial addresses) or simulated (sim://).
     switched_off: the instruments a person switched off in the Lab panel, never connected.
 
@@ -88,7 +88,7 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
         return backend
 
     try:
-        return Lab(cfg, registry, factory, clock, world, switched_off, partial)
+        return Lab(cfg, registry, factory, clock, world, switched_off, partial, later)
     except Exception:
         for backend in opened:  # one instrument failed: let go of the ones already opened
             backend.close()
@@ -99,16 +99,20 @@ def demo_envelope(lab: Lab) -> Envelope:
     return load_envelope(DATA / "demo_project.yaml", lab.config, lab.registry)
 
 
-def open_home_lab(home: Any, choice: str = "auto", speed: float = 10,
-                  switched_off: Optional[SwitchedOff] = None) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
+def open_home_lab(home: Any, choice: str = "auto", speed: float = 10, switched_off: Optional[SwitchedOff] = None,
+                  connect: bool = True) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
     """The lab an installed Kelvin controls: the user's own lab.yaml in `home` if there is one (unless they chose
     the virtual lab), otherwise the virtual lab at `speed`x real time. If the user's lab cannot be connected, Kelvin
-    still starts, on the virtual lab, and says why."""
+    still starts, on the virtual lab, and says why. connect=False: the user's lab opens at once, its instruments
+    connected afterwards in the background (LabRuntime.connect_pending), each one that can't be set aside with why."""
     path = Path(home) / "lab.yaml"
     info: Dict[str, Any] = {"kind": "virtual", "path": str(path), "error": None, "has_file": path.exists()}
     registry = lab_registry(home)
     if choice != "virtual" and path.exists():
         try:   # an instrument that can't be connected is set aside, with why, and the rest of the lab used
+            if not connect:
+                lab = build_lab(path, registry=registry, switched_off=switched_off, later=True)
+                return lab, None, dict(info, kind="file")
             lab = build_lab(path, registry=registry, switched_off=switched_off, partial=True)
             tried = [n for n in lab.instruments if n not in lab.switched_off]
             if tried and len(lab.unavailable) == len(tried):   # none of them: say why, on the virtual lab

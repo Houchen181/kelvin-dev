@@ -145,7 +145,7 @@ class Survey:
                 "skipped": self.skipped,
                 "instruments": [{"address": i.address, "expression": i.expression, "names": i.names,
                                  "name": i.name, "library": i.library, "where": i.where[:6],
-                                 "connection": _connection(i.settings), "hints": i.hints[:6],
+                                 "connection": connection(i.settings), "hints": i.hints[:6],
                                  "commands": len(i.commands), "calls": i.calls[:10],
                                  "card": i.card} for i in self.instruments]}
 
@@ -154,7 +154,7 @@ def _num(x: float) -> str:
     return ("%.12g" % x) if isinstance(x, float) else str(x)
 
 
-def _connection(settings: Dict[str, Any]) -> Dict[str, Any]:
+def connection(settings: Dict[str, Any]) -> Dict[str, Any]:
     """The settings a lab config's connection: takes (timeouts in ms)."""
     out = {}
     for key in ("baud_rate", "read_termination", "write_termination", "timeout_ms", "data_bits", "stop_bits",

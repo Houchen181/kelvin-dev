@@ -362,3 +362,28 @@ def test_kelvin_can_read_the_folders_over_mcp(tmp_path):
         assert listed[name].annotations.read_only_hint and not listed[name].annotations.open_world_hint
     assert "search_manual" in INSTRUCTIONS
     assert "simulated" in rt.instrument_info("lockin") and "simulated" in rt.search_manual("lockin", "OFLT")
+
+
+def test_the_first_setup_uses_the_labs_scripts(tmp_path, bench, pdf):
+    bench.devices["ASRL9::INSTR"] = Device(silent=True)   # says nothing to who-are-you, as many serial devices
+    folder = tmp_path / "scripts"
+    folder.mkdir()
+    (folder / "iv.py").write_text('import pyvisa\nbias = pyvisa.ResourceManager().open_resource("GPIB0::24::INSTR")\n'
+                                  'for v in [0, 0.5, 1.0]:\n    bias.write(":SOUR:VOLT %g" % v)\n', encoding="utf-8")
+    (folder / "temp.py").write_text('import serial\ncryo = serial.Serial("COM9", 57600)   # Lake Shore 336\n'
+                                    'cryo.write(b"SETP 1,4.2")\n', encoding="utf-8")
+    rt = runtime_for(tmp_path)
+    setup = AutoSetup(rt, FakeSettings(), tmp_path, fetch=lambda url: pdf)
+    assert setup.use_scripts(str(folder))["instruments"] == 2       # read (never run) before the scan drafts the lab
+    status = setup.run()
+    assert status["state"] == "done" and status["first"], status
+    text = (tmp_path / "lab.yaml").read_text(encoding="utf-8")
+    cfg = load_lab_config(text, builtin_registry())
+    assert cfg.instruments["bias"].card == "keithley/2400"           # the scripts' name for it
+    assert cfg.instruments["bias"].limits["V"] == (0, 1) and "from your scripts" in text   # the values they use
+    cryo = cfg.instruments["cryo"]                                    # one the scan could not tell, by the scripts
+    assert cryo.card == "lakeshore/336" and cryo.address == "ASRL9::INSTR" and cryo.connection["baud_rate"] == 57600
+    assert {"lockin", "tc"} <= set(cfg.instruments) and "GPIB0::5::INSTR" not in text   # the rest as without scripts
+    assert sorted(cfg.unreviewed()) == ["bias", "cryo", "lockin", "tc"]   # every one still asks until reviewed
+    assert any("bias (" in n["text"] for n in rt.notifier.notices if n["kind"] == "setup")   # named as the lab does
+    assert drive_commands(bench) == []

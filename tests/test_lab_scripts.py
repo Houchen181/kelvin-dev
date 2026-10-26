@@ -159,3 +159,27 @@ def test_the_cards_matched_against_follow_the_labs_cards_folder(tmp_path):
     (tmp_path / "cards").mkdir()
     (tmp_path / "cards" / "acme_widget.yaml").write_text(WIDGET, encoding="utf-8")
     assert rt.script_cards().get("acme/widget-9000").model == "ACME Widget 9000"   # and again for a new card
+
+
+def test_the_first_setup_asks_for_the_labs_scripts(bench):
+    (runtime, settings, store), bus, home = bench
+    folder = scripts_in(home / "lab scripts")
+    client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
+    with client:
+        assert client.get("/api/state", headers=headers).json()["ask_scripts"] is False   # not a first setup
+        client.app.app.state.setup.first = True                                   # Kelvin setting up a new lab
+        assert client.get("/api/state", headers=headers).json()["ask_scripts"] is True
+        r = client.post("/api/instruments/scripts-folder", json={"folder": str(home / "nope")}, headers=headers)
+        assert r.status_code == 400 and settings.lab_scripts is None
+        r = client.post("/api/instruments/scripts-folder", json={"folder": str(folder)}, headers=headers).json()
+        assert r["ok"] and r["instruments"] == 4 and r["now"] is False             # the setup isn't running now
+        assert settings.lab_scripts == str(folder) and client.app.app.state.setup.scripts is not None
+        assert client.get("/api/state", headers=headers).json()["ask_scripts"] is False   # asked once
+        assert client.post("/api/instruments/scripts-folder", json={"folder": ""}, headers=headers).json()["ok"]
+        assert settings.lab_scripts == ""                                           # no scripts: not asked again
+
+        assert client.post("/api/lab", json={"yaml": LAB}, headers=headers).json()["ok"]   # smu in the lab now
+        view = client.post("/api/instruments/scripts", json={"folder": str(folder)}, headers=headers).json()
+        smu = next(i for i in view["instruments"] if i["address"] == "GPIB0::24::INSTR")
+        assert smu["in_lab"] == "smu" and smu["card"]["why"] == "in this lab as smu"   # its card in the lab
+        assert smu["card"]["limits"]["V"] == [0.0, 1.0]                            # to use as its limits
