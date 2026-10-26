@@ -6,9 +6,9 @@ this computer so they work offline.
         <commit>/index.json   the collection's index at that commit
         <commit>/...          its cards, experiments and lab configs, in the repository's own folders
 
-- Public: the collection is read from Kelvin's public repository (REPO), never the private source. Kelvin asks GitHub
-  for the repository first: one that says it is private is refused, and a renamed one is followed to its own name
-  (it is to become Houchen181/Kelvin, which until then is still the private source's old name).
+- Public: the collection is read from Kelvin's public repository (REPO, where published builds update from too),
+  never the private source. Kelvin asks GitHub for the repository first: one that says it is private is refused, and
+  a renamed one is followed to its own name.
 - Pinned: Kelvin takes the newest commit of the repository's default branch, then index.json and every file from
   that commit (raw.githubusercontent.com), never from a branch that can move meanwhile. Each file must have the
   SHA-256 that index.json gives it, when it arrives and every time it is read. Files that did not change come from
@@ -41,14 +41,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ._version import __version__
 from .cards import Card, parse_card
 from .profiles import _first_line
+from .updater import REPOS
 from .yamlio import load_yaml
 
 log = logging.getLogger("kelvin")
 FOLDER = "collection"
-# Kelvin's public repository (published releases and the instrument collection). It is to be renamed Houchen181/Kelvin
-# (updater.REPOS["stable"]), a name that until then still leads to the private source; this one leads to the public
-# repository before and after, and sync() follows it to the repository's own name.
-REPO = "Houchen181/kelvin-instruments"
+REPO = REPOS["stable"]   # Kelvin's public repository: published releases and the instrument collection
 API = "https://api.github.com/repos/%s"
 COMMIT = "https://api.github.com/repos/%s/commits/%s"
 RAW = "https://raw.githubusercontent.com/%s/%s/%s"

@@ -16,6 +16,7 @@ from labharness.collection import API, COMMIT, FILE, REPO, Collection, adapt, ow
 from labharness.discovery import identify
 from labharness.gate import SafetyGate, ScriptedApprover
 from labharness.survey import Survey, reason
+from labharness.updater import REPOS
 from labharness.virtual_lab import DATA, INSTALLED, build_lab, kelvin_ids, lab_registry
 from labharness.yamlio import load_yaml
 from test_hardware import Bus, Device
@@ -216,13 +217,14 @@ def test_only_a_public_repository_is_read_and_a_rename_is_followed(tmp_path):
     gh = GitHub()
     gh.publish(A, cards=[WIDGET])
     c = Collection(tmp_path)
+    assert REPO == REPOS["stable"] != REPOS["private"]          # where published builds update from, not the source
     assert c.sync(gh)["repository"] == REPO
-    renamed = GitHub(name="Houchen181/Kelvin")      # renamed: GitHub sends the old name on to the repository
+    renamed = GitHub(name="Houchen181/kelvin-public")   # renamed: GitHub sends the old name on to the repository
     renamed.publish(B, cards=[with_status(WIDGET, "lab-verified")])
     status = c.sync(renamed)
-    assert status["error"] is None and status["repository"] == "Houchen181/Kelvin" and status["commit"] == B
-    assert renamed.asked[1] == COMMIT % ("Houchen181/Kelvin", "main")
-    assert all("/Houchen181/Kelvin/%s/" % B in u for u in renamed.asked[2:])   # its files, under its own name
+    assert status["error"] is None and status["repository"] == "Houchen181/kelvin-public" and status["commit"] == B
+    assert renamed.asked[1] == COMMIT % ("Houchen181/kelvin-public", "main")
+    assert all("/Houchen181/kelvin-public/%s/" % B in u for u in renamed.asked[2:])   # its files, under its own name
     assert c.cards()[0].status == "lab-verified" and len(Collection(tmp_path).cards()) == 1
 
 

@@ -137,7 +137,7 @@ instruments:
 
 ## The instrument collection
 
-Kelvin's public repository, [Houchen181/kelvin-instruments](https://github.com/Houchen181/kelvin-instruments) (to be renamed Houchen181/Kelvin), holds its releases and an instrument collection: cards, where each maker publishes its manuals, experiments with plans, and lab configs for common setups. Kelvin keeps a copy in `~/Kelvin/collection/` and works from it, offline too.
+Kelvin's public repository, [Houchen181/Kelvin](https://github.com/Houchen181/Kelvin), holds its releases and an instrument collection: cards, where each maker publishes its manuals, experiments with plans, and lab configs for common setups. Kelvin keeps a copy in `~/Kelvin/collection/` and works from it, offline too.
 
 - **From the public repository only.** Kelvin asks GitHub for the repository first. It refuses one that GitHub reports as private, so it never reads the private source, and it follows a rename to the repository's new name.
 - **Kept up to date, and checked.** Soon after Kelvin starts, then twice a day, it asks GitHub for the newest commit and takes `index.json` and every card, experiment and lab config from that commit (`raw.githubusercontent.com`), so nothing can change halfway. Every file must have the SHA-256 that `index.json` gives it, when it arrives and each time Kelvin reads it. If anything is missing or doesn't match, or GitHub can't be reached, the copy Kelvin has stays in use. Only files that changed are fetched, and Kelvin only downloads: nothing about your lab goes to GitHub. **Update now** in Settings → Instruments looks at once; Settings also shows which commit Kelvin has and what it holds.
