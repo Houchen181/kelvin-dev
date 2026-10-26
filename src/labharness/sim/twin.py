@@ -2,7 +2,9 @@
 
 A twin answers the same SCPI strings a real instrument would, so dry runs
 exercise the exact command path used on hardware. A card can name a twin
-class with physics; otherwise the generic Twin just stores values.
+class with physics; otherwise the generic Twin stores values, carries out the
+ramps the card leaves to the instrument, and answers the card's health checks
+as a healthy instrument would.
 """
 from __future__ import annotations
 
@@ -13,8 +15,75 @@ import re
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from ..cards import Card
-from ..scpi import split_compound
+from ..cards import Card, HealthCheck, ParamSpec, _is_number
+from ..scpi import Template, split_compound
+
+try:
+    from re import _parser as sre_parse   # Python 3.11+
+except ImportError:
+    import sre_parse
+
+_CLASS_CHAR = {"CATEGORY_DIGIT": "0", "CATEGORY_SPACE": " ", "CATEGORY_NOT_WORD": "-"}   # \d, \s, \W; others "a"
+
+
+def _bare(command: str) -> str:
+    """A command as an instrument compares it: no surrounding space, no leading colon, any case."""
+    return command.strip().lstrip(":").lower()
+
+
+def _written(command: str) -> Optional[str]:
+    """The command a card's manual notation stands for (optional [nodes] left out), or None if it can't be read."""
+    try:
+        return Template(command).render()
+    except ValueError:
+        return None
+
+
+def _reply_matching(pattern: str) -> Optional[str]:
+    """A short text that `pattern` finds (as a health check matches a reply), or None if none can be made. Follows
+    what cards write there: literals, classes, repeats, groups, alternatives and anchors."""
+    def text(items: Any, fill: str, groups: Dict[Any, str]) -> str:
+        out = []
+        for op, av in items:
+            name = op.name
+            if name == "LITERAL":
+                out.append(chr(av))
+            elif name == "ANY":
+                out.append(fill)
+            elif name == "NOT_LITERAL":   # [^x]
+                out.append(fill if ord(fill) != av else "b")
+            elif name == "IN":   # a class: its first member, or the fill for [^...]
+                kind, first = av[0][0].name, av[0][1]
+                if kind == "LITERAL":
+                    out.append(chr(first))
+                elif kind == "RANGE":
+                    out.append(chr(first[0]))
+                elif kind == "CATEGORY":
+                    out.append(_CLASS_CHAR.get(first.name, "a"))
+                else:
+                    out.append(fill)
+            elif name == "BRANCH":
+                out.append(text(av[1][0], fill, groups))
+            elif name == "SUBPATTERN":
+                groups[av[0]] = text(av[-1], fill, groups)
+                out.append(groups[av[0]])
+            elif name in ("MAX_REPEAT", "MIN_REPEAT", "POSSESSIVE_REPEAT"):
+                out.append(text(av[2], fill, groups) * av[0])
+            elif name == "ATOMIC_GROUP":
+                out.append(text(av, fill, groups))
+            elif name == "GROUPREF":
+                out.append(groups.get(av, ""))
+        return "".join(out)   # anchors and lookarounds add nothing
+
+    try:
+        parsed = sre_parse.parse(pattern)
+        for fill in "a0 .":   # a stand-in for "any character" that the rest of the pattern accepts
+            reply = text(parsed, fill, {}).strip()
+            if re.search(pattern, reply):
+                return reply
+    except Exception:   # a pattern this can't follow gets no made-up reply
+        pass
+    return None
 
 
 class World:
@@ -97,6 +166,8 @@ class Twin:
         self.errors: List[str] = []
         self.fault: Optional[str] = None  # e.g. "offline": stop answering
         self.state: Dict[str, Any] = {}
+        # setpoints the instrument ramps to by itself, each with the reading that follows it (see evolve)
+        self.ramps = [spec for spec in card.params.values() if spec.ramp == "instrument" and spec.readback]
         self.reset()
         world.add(name, self)
 
@@ -117,9 +188,44 @@ class Twin:
             else:
                 v = spec.limits[0] if spec.limits and spec.limits[0] > 0 else 0.0
             self.state[spec.name] = v
+        for spec in self.ramps:   # at rest: a reading with no default of its own is where its setpoint is
+            if self.card.params[spec.readback].default is None and _is_number(self.state[spec.name]):
+                self.state[spec.readback] = self.state[spec.name]
+        for check in self.card.health:   # set up the way the card's health checks expect (field units in tesla, ...)
+            if check.query and check.expect:
+                self._meet(check)
+
+    def _meet(self, check: HealthCheck) -> None:
+        """Give the setting a health query reads a value whose reply the check accepts, if the card has one."""
+        try:
+            expect = re.compile(check.expect)
+        except re.error:
+            return
+        command = _written(check.query)
+        hits = [s for s in self.card.getters if command is not None and s.get_cmd.match(command) is not None]
+        if len(hits) != 1 or hits[0].field is not None or hasattr(self, "measure_" + hits[0].name):
+            return
+        spec = hits[0]
+        choices = [self.state[spec.name]]
+        if spec.type == "enum":
+            choices += list(spec.values or {})
+        elif spec.type == "bool":
+            choices += [True, False]
+        elif spec.type in ("str", "float", "int"):
+            made = _reply_matching(check.expect)
+            try:
+                choices += [] if made is None else [spec.from_wire(made)]
+            except ValueError:   # e.g. a number the check wants written in a way this card doesn't read
+                pass
+        for value in choices:
+            if expect.search(spec.to_wire(value)):
+                self.state[spec.name] = value
+                return
 
     def idn(self) -> str:
-        return self.card.idn_example or "VIRTUAL,%s,0,0" % self.card.model
+        """The card's example reply, else one its identify pattern accepts, so the identity check passes."""
+        pattern = self.card.idn_pattern
+        return self.card.idn_example or (pattern and _reply_matching(pattern)) or "VIRTUAL,%s,0,0" % self.card.model
 
     # --- backend interface (same as a VISA resource) ---
 
@@ -167,7 +273,28 @@ class Twin:
         return fn() if fn else self.state[param]
 
     def evolve(self, dt: float) -> None:
-        pass
+        """Advance dt seconds (0: only what happens at once). A reading follows the setpoint the instrument ramps to
+        by itself, at the card's ramp rate (or at once if it gives none), while that setpoint reaches the sample."""
+        for spec in self.ramps:
+            target, actual = self.state[spec.name], self.state[spec.readback]
+            if not (_is_number(target) and _is_number(actual)) or target == actual or not self._applied(spec):
+                continue
+            rate = self._ramp_rate(spec)
+            step = math.inf if rate is None else rate * dt
+            self.state[spec.readback] = (target if abs(target - actual) <= step
+                                         else actual + math.copysign(step, target - actual))
+
+    def _ramp_rate(self, spec: ParamSpec) -> Optional[float]:
+        """Units per second: the value of the card's rate parameter, else its max_rate; None (at once) for neither."""
+        rate = self.state.get(spec.rate_param) if spec.rate_param else None
+        if _is_number(rate) and rate > 0:
+            return rate / (60.0 if spec.rate_per == "min" else 1.0)
+        return spec.max_rate if spec.max_rate and spec.max_rate > 0 else None
+
+    def _applied(self, spec: ParamSpec) -> bool:
+        """Whether a setpoint reaches the sample: no switch, or its switch (applies_when) away from safe."""
+        switch = self.card.params.get(spec.applies_when) if spec.applies_when else None
+        return switch is None or switch.distance(self.state[switch.name]) > 0
 
     def take_time(self, seconds: float) -> None:
         """Model acquisition time (instant on a SimClock)."""
@@ -198,10 +325,35 @@ class Twin:
                 self.errors.append('-222,"Data out of range"')
                 return
             self.apply(spec.name, value)
+            self.evolve(0.0)   # what follows at once, e.g. a reading whose ramp has no rate
             return
         self.errors.append('-113,"Undefined header"')
 
     def _query_one(self, cmd: str) -> str:
+        reply = self._answer(cmd)
+        if reply is None:
+            reply = self._health_reply(cmd)
+        if reply is None:
+            self.errors.append('-113,"Undefined header"')
+            raise TimeoutError("%s: no response to %r" % (self.name, cmd))
+        return reply
+
+    def _health_reply(self, cmd: str) -> Optional[str]:
+        """A health query, sent as the card writes it, that the commands above don't answer: in manual notation
+        (:SYSTem:ERRor[:NEXT]?) it is answered as the command it stands for (a queued error still shows); otherwise
+        with a reply its expect accepts, as a healthy instrument's would be."""
+        for check in self.card.health:
+            if not check.query or _bare(check.query) != _bare(cmd):
+                continue
+            command = _written(check.query)
+            reply = self._answer(command) if command is not None and _bare(command) != _bare(cmd) else None
+            if reply is None and check.expect is not None:
+                reply = _reply_matching(check.expect)
+            return reply
+        return None
+
+    def _answer(self, cmd: str) -> Optional[str]:
+        """The reply to one query, or None if the instrument has no such query."""
         if re.match(r"^\s*\*IDN\?\s*$", cmd, re.I):
             return self.idn()
         if re.match(r"^\s*\*OPC\?\s*$", cmd, re.I):
@@ -218,8 +370,7 @@ class Twin:
             return ",".join(reply)
         if hits:
             return hits[0].to_wire(self.read(hits[0].name))
-        self.errors.append('-113,"Undefined header"')
-        raise TimeoutError("%s: no response to %r" % (self.name, cmd))
+        return None
 
 
 def make_twin_backend(card: Card, world: World, name: str) -> Twin:
