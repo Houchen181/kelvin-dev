@@ -10,7 +10,7 @@ from labharness import build_virtual_lab  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.gate import ScriptedApprover  # noqa: E402
-from labharness.web.agent import ChatAgent  # noqa: E402
+from labharness.web.agent import ChatAgent, _Turn  # noqa: E402
 from labharness.web.store import ChatStore  # noqa: E402
 from test_web import Scripted, client_for, parts  # noqa: E402,F401
 
@@ -95,8 +95,8 @@ def test_the_portal_takes_it_only_while_kelvin_works_on_that_chat(parts):
         idle = client.post("/api/chats/%s/steer" % chat["id"], json={"text": "hello"}, headers=headers)
         assert idle.status_code == 409 and "new message" in idle.json()["error"]
         agent = client.app.app.state.agent
-        agent.active = {"chat_id": chat["id"], "model": "scripted:m1"}
+        agent.turns[chat["id"]] = _Turn({"chat_id": chat["id"], "model": "scripted:m1"})   # Kelvin answering it
         assert client.post("/api/chats/%s/steer" % chat["id"], json={"text": "also Y"}, headers=headers).json() == {
             "ok": True}
         assert agent._steer[chat["id"]] == ["also Y"]
-        agent.active = None
+        del agent.turns[chat["id"]]

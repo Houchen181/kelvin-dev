@@ -284,6 +284,100 @@ def test_stop_ends_a_turn_whose_tool_an_instrument_holds_up(parts, monkeypatch):
     assert busy.startswith("Kelvin is still busy with reading status")
 
 
+LOOK_PLAN = "plan: look\nrepeat: 3\nmeasure: [lockin.X]\n"
+
+
+def emitter(events, chat_id):
+    async def emit(e):
+        events.setdefault(chat_id, []).append(e)
+    return emit
+
+
+def test_two_chats_answer_at_once_and_each_run_is_filed_under_its_own(parts, tmp_path):
+    runtime, _, store = parts
+    plan = [{"type": "tool_call", "id": "r1", "name": "run_plan", "input": {"plan": LOOK_PLAN}}]
+    providers = {"a": Scripted([plan, DONE], delay=0.2), "b": Scripted([plan, DONE], delay=0.2)}
+
+    async def main():
+        agent = ChatAgent(runtime, store, build_server(runtime), providers)
+        await agent.start()
+        try:
+            chats, events, tasks = [], {}, []
+            for key in "ab":
+                chat = store.create(key + ":m1")
+                (tmp_path / key).mkdir()
+                chat["folder"] = str(tmp_path / key)   # where this chat's runs go
+                store.save(chat)
+                chats.append(chat)
+                provider = agent.claim(chat["id"], key + ":m1")
+                tasks.append(asyncio.ensure_future(
+                    agent.run_turn(chat["id"], "measure", key + ":m1", provider, emitter(events, chat["id"]))))
+            await asyncio.sleep(0.1)
+            both = len(agent.answering())
+            await asyncio.wait_for(asyncio.gather(*tasks), 30)
+            return chats, events, both, agent.answering()
+        finally:
+            await agent.close()
+
+    chats, events, both, after = anyio.run(main)
+    assert both == 2 and after == []   # side by side, then neither
+    for chat, key in zip(chats, "ab"):
+        end = next(e for e in events[chat["id"]] if e["type"] == "tool_end")
+        assert "saved in " + str(tmp_path / key) in end["content"], end["content"]
+        assert events[chat["id"]][-1] == {"type": "turn_end", "reason": "end"}
+
+
+def test_a_chat_waits_for_another_chats_lab_call_then_says_so(parts, monkeypatch):
+    from labharness.web import agent as agent_module
+    from labharness.web.agent import Busy
+    runtime, _, store = parts
+    monkeypatch.setattr(agent_module, "LAB_WAIT_S", 0.5)
+    release = threading.Event()
+    backend = runtime.lab.instruments["smu"].backend
+    query = backend.query
+
+    def hung(cmd, *a, **k):   # chat A's lab call is held up by an instrument (released at the end)
+        release.wait(20)
+        return query(cmd, *a, **k)
+    monkeypatch.setattr(backend, "query", hung)
+    status = [{"type": "tool_call", "id": "s1", "name": "lab_status", "input": {}}]
+    talk = [{"type": "text", "text": "Just talking."}]
+    providers = {"a": Scripted([status, DONE]), "b": Scripted([status, DONE]), "c": Scripted([talk])}
+
+    async def main():
+        agent = ChatAgent(runtime, store, build_server(runtime), providers)
+        await agent.start()
+        try:
+            events, ids = {}, {}
+            for key in "abc":
+                ids[key] = store.create(key + ":m1")["id"]
+
+            def start(key, text):
+                provider = agent.claim(ids[key], key + ":m1")
+                return asyncio.ensure_future(agent.run_turn(ids[key], text, key + ":m1", provider,
+                                                            emitter(events, ids[key])))
+            ta = start("a", "how is the lab?")
+            await asyncio.sleep(0.5)   # A's call works the lab now
+            with pytest.raises(Busy):
+                agent.claim(ids["a"], "a:m1")   # one answer at a time in a chat
+            tb, tc = start("b", "and the source?"), start("c", "hello")
+            await asyncio.wait_for(asyncio.gather(tb, tc), 10)
+            waiting = agent.answering(ids["a"])
+            stopped_b, stopped_a = agent.stop(ids["b"]), agent.stop(ids["a"])
+            await asyncio.wait_for(ta, 5)
+            return events, ids, waiting, stopped_b, stopped_a
+        finally:
+            release.set()
+            await agent.close()
+
+    events, ids, waiting, stopped_b, stopped_a = anyio.run(main)
+    b_end = next(e for e in events[ids["b"]] if e["type"] == "tool_end")
+    assert b_end["content"].startswith("not run: another conversation (“how is the lab?”) is working the lab")
+    assert events[ids["c"]][-1] == {"type": "turn_end", "reason": "end"}   # talking needs no lab
+    assert waiting and not stopped_b and stopped_a   # B had finished; A's stop ends A
+    assert events[ids["a"]][-1] == {"type": "turn_end", "reason": "stopped"}
+
+
 def test_run_progress_and_the_runs_pane_api(tmp_path):
     lab = build_virtual_lab(clock=ScaledClock(60), seed=1)   # the 48 s demo sweep takes ~0.8 s
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))

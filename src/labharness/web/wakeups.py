@@ -1,9 +1,9 @@
 """Waiting without freezing every chat: a chat asks to be continued later (wake_me), its turn ends, and Kelvin
 continues it when the time comes, a reading holds a condition, or the lab's run or queue finishes.
 
-Only one turn runs at a time across all chats (the lab has one set of instruments), so a long wait inside a turn
-would block every other chat. With wake_me, the model ends its answer instead; meanwhile people can talk to Kelvin in
-other chats. When the moment comes and no other turn is running, Kelvin starts a turn in that chat with a <wake>
+A wait inside a turn holds the lab (it has one set of instruments: one chat's call works it at a time), so a long
+wait would keep every other chat off the lab. With wake_me, the model ends its answer instead; meanwhile other chats
+use the lab. When the moment comes and the chat isn't answering, Kelvin starts a turn in that chat with a <wake>
 message saying why, and tells the person. A chat may be woken at most WAKES_PER_DAY times a day, and only while
 its owner's chats are the ones open (on a shared computer, another person may be signed in meanwhile). Wake-ups are
 kept in the person's chat folder (_wakes.json), so a restart (an update, a crash) during a long wait loses none."""
@@ -28,7 +28,8 @@ WAKE_ME = {
     "description": "Continue this chat later instead of waiting in it: after calling this, end your answer saying "
                    "what you are waiting for. Kelvin continues the chat when the time comes (after_minutes), when a "
                    "reading holds a condition (until, e.g. 'tc.T_sample < 4.3', for hold_minutes), or when the lab's "
-                   "run or queue finishes (run_ends); meanwhile other chats can run. Use it for any wait longer than "
+                   "run or queue finishes (run_ends); meanwhile the lab is free for other chats. Use it for any wait "
+                   "longer than "
                    "a minute: a cool-down, a temperature to settle, a long queue. note: what to do then, for "
                    "yourself. One wake-up per chat; a new one replaces it.",
     "schema": {"type": "object", "required": ["note"], "properties": {
@@ -220,8 +221,8 @@ class Waker:
     async def tick(self) -> None:
         self._restore()
         for chat_id, w in list(self.pending.items()):
-            if self.agent.active:   # another turn is running: wake when it ends
-                return
+            if self.agent.answering(chat_id):   # the chat is answering now: wake it when that ends
+                continue
             if w.root != self._root():   # another person is signed in: wait for the owner, a while
                 if time.monotonic() - w.created > MAX_HOURS * 3600:
                     self.pending.pop(chat_id, None)

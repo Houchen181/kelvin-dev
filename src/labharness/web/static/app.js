@@ -3,8 +3,13 @@
   const token = decodeURIComponent(location.hash.slice(1));
   const $ = (id) => document.getElementById(id);
   const SVGNS = "http://www.w3.org/2000/svg";
-  const S = { compare: [], lastReply: null, chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map(),
-    steers: [] };   // what the person wrote while Kelvin works, until Kelvin reads it
+  const S = { compare: [], lastReply: null, chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, labOpen: false, settings: null, approvals: new Map(),
+    // the chats answering in this window, by chat id: {reply, from, steers (what the person wrote meanwhile, until
+    // Kelvin reads it), title}; answering: every chat the portal says answers now (from any window, or Kelvin's own);
+    // unread: answers that came while another chat was open; asking: chats with an approval waiting
+    live: new Map(), answering: new Set(), unread: new Set(), asking: new Set() };
+  Object.defineProperty(S, "streaming", { get: () => !!S.chatId && S.live.has(S.chatId) });   // this chat is answering
+  const liveHere = () => S.live.get(S.chatId);
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -400,13 +405,15 @@
   }
 
   let toastTimer = null;
-  function toast(text) {
+  function toast(text, onClick) {   // onClick: what a click on it does (open the chat it is about)
     let t = document.querySelector(".toast");
     if (!t) { t = h("div", { class: "toast", role: "status" }); document.body.append(t); }
     t.textContent = text;
+    t.classList.toggle("link", !!onClick);
+    t.onclick = onClick ? () => { t.classList.remove("show"); onClick(); } : null;
     t.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove("show"), 4000);
+    toastTimer = setTimeout(() => t.classList.remove("show"), onClick ? 8000 : 4000);
   }
 
   // ------------------------------------------------------------------ markdown (safe subset)
@@ -1922,7 +1929,12 @@
       return nameInput("chat:" + c.id, c.title || "New chat", "Conversation name", (t) => renameChat(c, t), () => { SIDE.renaming = null; renderChats(); });
     }
     const more = rowButton("dots", "Options for this conversation", (e) => chatMenu(e.currentTarget, c));
-    const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : ""), role: "button", tabindex: "0", draggable: "true" },
+    const answering = S.live.has(c.id) || S.answering.has(c.id);
+    const mark = S.asking.has(c.id) ? ["asking", "Kelvin asks for your approval here"]
+      : answering ? ["answering", "Kelvin is answering here"] : S.unread.has(c.id) ? ["unread", "A new answer"] : null;
+    const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : "") + (mark ? " " + mark[0] : ""),
+      role: "button", tabindex: "0", draggable: "true" },
+      mark ? h("span", { class: "chat-dot", title: mark[1], "aria-label": mark[1] }) : null,
       h("span", { class: "t" }, c.title || "New chat"), more);
     item.addEventListener("click", () => openChat(c.id));
     item.addEventListener("keydown", (e) => { if (e.key === "Enter") openChat(c.id); });
@@ -2339,7 +2351,6 @@
     $("input").placeholder = askHint();
   }
   function toggleIncognito() {
-    if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
     if (S.incognito) { newChat(); return; }   // leaving: forget it and start a normal chat
     if (S.chatId) newChat();
     S.incognito = true;
@@ -2350,24 +2361,33 @@
     $("input").focus();
   }
 
-  async function openChat(id) {
-    if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
+  async function openChat(id) {   // another chat may go on answering meanwhile: its answer waits for you there
     let chat;
     try { chat = await api("/api/chats/" + id); } catch (e) { toast(e.message); return; }
     leaveIncognito();
     S.chatId = id;
+    S.unread.delete(id);
     SIDE.newProject = null;
     S.chatRules = chat.rules || null;
-    renderChat(chat);
+    showChat(chat);
     setTitle(chat.title, chat.project);
     showFolder(chat.folder, chat.own_folder);
     if (chat.model && S.labels[chat.model]) $("model").value = chat.model;
     applyRules();
     renderChats();
+    refreshComposer();
     closeSidebar();
   }
+  function showChat(chat) {   // a chat still answering in this window: what it said before, then its answer as it goes
+    const live = S.live.get(chat.id);
+    if (!live) { renderChat(chat); return; }
+    const upTo = live.from === null ? chat.messages.length : live.from + 1;   // up to the message it answers
+    renderChat(Object.assign({}, chat, { messages: chat.messages.slice(0, upTo) }));
+    thread.append(live.box);
+    requestAnimationFrame(toBottom);
+  }
+  const titleOf = (id) => (S.chats.find((c) => c.id === id) || {}).title || "a chat";
   function newChat(projectId, ask) {   // ask: the person started it, so the folder picker opens (in the app)
-    if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
     leaveIncognito();
     S.chatId = null;
     S.chatRules = null;
@@ -2377,6 +2397,7 @@
     showEmpty(true);
     setTitle("", SIDE.newProject);
     renderChats();
+    refreshComposer();
     closeSidebar();
     applyIncognito();
     if (ask) askFolder(); else loadNewFolder();
@@ -2448,9 +2469,8 @@
   }
 
   // ------------------------------------------------------------------ sending
-  function setStreaming(on) {
-    S.streaming = on;
-    $("input").placeholder = on ? "Add to what Kelvin is doing: it reads this after the step it is on" : askHint();
+  function refreshComposer() {   // this chat answering: what you write adds to what Kelvin is doing; else it asks
+    $("input").placeholder = S.streaming ? "Add to what Kelvin is doing: it reads this after the step it is on" : askHint();
     updateSend();
   }
   function updateSend() {   // while Kelvin works: Stop, or Send once something is typed (Kelvin reads it next step)
@@ -2507,29 +2527,30 @@
     return true;
   }
   async function steerMessage(text) {   // written while Kelvin works: it reads it at its next step
-    if (!text || !S.chatId) return;
+    const live = liveHere(), chatId = S.chatId;
+    if (!text || !live) return;
     $("input").value = ""; autosize(); updateSend();
     const el = userBubble(text, []);
     el.classList.add("pending");
     el.title = "Kelvin reads this after the step it is on";
-    thread.append(el);
+    live.box.append(el);
     toBottom();
     const one = { text, el };
-    S.steers.push(one);
-    try { await api("/api/chats/" + S.chatId + "/steer", { body: { text } }); } catch (e) { one.late = true; }   // sent after
+    live.steers.push(one);
+    try { await api("/api/chats/" + chatId + "/steer", { body: { text } }); } catch (e) { one.late = true; }   // sent after
   }
-  function steered(reply, texts, model) {   // Kelvin read them: they stand in the chat, and its answer goes on below
-    reply.finish();
+  function steered(live, texts, model) {   // Kelvin read them: they stand in the chat, and its answer goes on below
+    live.reply.finish();
     for (const text of texts) {
-      const i = S.steers.findIndex((s) => s.text === text && !s.late);
+      const i = live.steers.findIndex((s) => s.text === text && !s.late);
       if (i < 0) continue;
-      S.steers[i].el.classList.remove("pending");
-      S.steers[i].el.removeAttribute("title");
-      S.steers.splice(i, 1);
+      live.steers[i].el.classList.remove("pending");
+      live.steers[i].el.removeAttribute("title");
+      live.steers.splice(i, 1);
     }
     const next = new Reply(model);
-    const waiting = S.steers.find((s) => s.el.isConnected);
-    if (waiting) thread.insertBefore(next.el, waiting.el); else thread.append(next.el);
+    const waiting = live.steers.find((s) => s.el.parentNode === live.box);
+    if (waiting) live.box.insertBefore(next.el, waiting.el); else live.box.append(next.el);
     return next;
   }
 
@@ -2615,12 +2636,16 @@
     $("input").placeholder = askHint();
     showEmpty(false);
     thread.append(userBubble(text, attachments));
-    let reply = new Reply(model);
-    thread.append(reply.el);
+    const chatId = S.chatId;
+    const live = { reply: new Reply(model), box: h("div", { class: "turn-live" }), from: null, steers: [] };
+    live.box.append(live.reply.el);   // this answer's own place: it goes on there while you are in another chat
+    thread.append(live.box);
+    S.live.set(chatId, live);
     toBottom();
-    setStreaming(true);
+    refreshComposer();
+    renderChats();
     try {
-      const res = await fetch("/api/chats/" + S.chatId + "/turn", {
+      const res = await fetch("/api/chats/" + chatId + "/turn", {
         method: "POST",
         headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
         body: JSON.stringify({ text, model, attachments }),
@@ -2628,7 +2653,7 @@
       if (!res.ok) {
         let msg = "HTTP " + res.status;
         try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
-        reply.error(msg);
+        live.reply.error(msg);
         return;
       }
       const reader = res.body.getReader();
@@ -2644,22 +2669,35 @@
           buf = buf.slice(nl + 1);
           if (!line.trim()) continue;
           const ev = JSON.parse(line);
-          if (ev.type === "steered") reply = steered(reply, ev.texts || [], model);
-          else handle(reply, ev);
+          if (ev.type === "turn_start" && Number.isInteger(ev.from)) live.from = ev.from;
+          if (ev.type === "steered") live.reply = steered(live, ev.texts || [], model);
+          else handle(live.reply, ev, chatId);
         }
       }
     } catch (e) {
-      reply.error("Lost the connection to the portal (" + e.message + "). The lab keeps its own log.");
+      live.reply.error("Lost the connection to the portal (" + e.message + "). The lab keeps its own log.");
     } finally {
-      reply.finish();
-      setStreaming(false);
-      refreshChats();
-      pollState();
-      offerReview(reply);
-      const left = S.steers.splice(0);   // written too late for this answer: the next message
-      for (const s of left) s.el.remove();
-      if (left.length) sendMessage(left.map((s) => s.text).join("\n\n"));
+      live.reply.finish();
+      if (S.chatId === chatId) offerReview(live.reply);
+      finishLive(chatId, live);
     }
+  }
+  function finishLive(chatId, live) {   // a chat's answer ended: here, or in a chat you left (then it says so)
+    S.live.delete(chatId);
+    S.asking.delete(chatId);
+    const here = S.chatId === chatId;
+    if (!here) {
+      S.unread.add(chatId);
+      toast("Kelvin answered in “" + titleOf(chatId) + "”", () => openChat(chatId));
+    }
+    refreshComposer();
+    refreshChats();
+    pollState();
+    const left = live.steers.splice(0);   // written too late for this answer: the next message
+    for (const s of left) s.el.remove();
+    if (!left.length) return;
+    if (here) sendMessage(left.map((s) => s.text).join("\n\n"));
+    else toast("What you added in “" + titleOf(chatId) + "” came after its answer ended: send it there again.");
   }
 
   // ------------------------------------------------------------------ several models at once
@@ -2730,11 +2768,16 @@
     for (const el of document.querySelectorAll(".msg-actions")) el.remove();
     thread.append(userBubble(text, attachments));
     const view = new CompareView(models);
-    thread.append(view.el);
+    const chatId = S.chatId;
+    const live = { reply: view.lanes[0].reply, box: h("div", { class: "turn-live" }), from: null, steers: [] };
+    live.box.append(view.el);
+    thread.append(live.box);
+    S.live.set(chatId, live);
     toBottom();
-    setStreaming(true);
+    refreshComposer();
+    renderChats();
     try {
-      const res = await fetch("/api/chats/" + S.chatId + "/compare", {
+      const res = await fetch("/api/chats/" + chatId + "/compare", {
         method: "POST",
         headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
         body: JSON.stringify({ text, models, attachments }),
@@ -2746,14 +2789,19 @@
         return;
       }
       await readEvents(res, (ev) => {
-        const stick = nearBottom();
+        const here = S.chatId === chatId;
+        const stick = here && nearBottom();
         if (ev.lane !== undefined) {
           const lane = view.lanes[ev.lane];
           if (lane && ev.type === "lane_end") lane.reply.finish();
-          else if (lane) handle(lane.reply, ev);
-        } else if (ev.type === "compare_start") { setTitle(ev.title, currentProject()); refreshChats(); }
+          else if (lane) handle(lane.reply, ev, chatId);
+        } else if (ev.type === "compare_start") {
+          if (Number.isInteger(ev.from)) live.from = ev.from;
+          if (here) setTitle(ev.title, currentProject());
+          refreshChats();
+        }
         else if (ev.type === "memory") view.el.before(recallBox(ev.notes));
-        else if (ev.type === "compare_end") { view.setChosen(ev.chosen, true); S.lastReply = view.lanes[ev.chosen].reply; }
+        else if (ev.type === "compare_end") { view.setChosen(ev.chosen, true); if (here) S.lastReply = view.lanes[ev.chosen].reply; }
         else if (ev.type === "error") view.lanes[0].reply.error(ev.message);
         if (stick) toBottom();
       });
@@ -2761,13 +2809,8 @@
       view.lanes[0].reply.error("Lost the connection to the portal (" + e.message + ").");
     } finally {
       for (const l of view.lanes) l.reply.finish();
-      setStreaming(false);
-      refreshChats();
-      pollState();
-      offerReview(S.lastReply);
-      const left = S.steers.splice(0);   // models being compared read nothing meanwhile: the next message
-      for (const s of left) s.el.remove();
-      if (left.length) sendMessage(left.map((s) => s.text).join("\n\n"));
+      if (S.chatId === chatId) offerReview(S.lastReply);
+      finishLive(chatId, live);   // models being compared read nothing meanwhile: what you added is the next message
     }
   }
   function compareLabel() {
@@ -3152,18 +3195,27 @@
     }
   }
 
-  function handle(reply, ev) {
-    const stick = nearBottom();
+  function handle(reply, ev, chatId) {   // chatId: the chat answering (it may not be the one on screen)
+    const here = chatId === undefined || chatId === S.chatId;
+    const stick = here && nearBottom();
     switch (ev.type) {
-      case "turn_start": reply.setModel(ev.model); setTitle(ev.title, currentProject()); refreshChats(); break;
+      case "turn_start": reply.setModel(ev.model); if (here) setTitle(ev.title, currentProject()); refreshChats(); break;
       case "text": reply.addText(ev.delta); break;
       case "thinking": reply.addThinking(ev.delta); break;
       case "reset": reply.resetText(); break;
       case "tool_start": reply.toolStart(ev.id, ev.name, ev.input); break;
-      case "approval": reply.approval(ev); break;
+      case "approval":
+        reply.approval(ev);
+        if (!here) {   // asked in a chat you left: say where, and take you there
+          S.asking.add(chatId);
+          renderChats();
+          toast("Kelvin asks for your approval in “" + titleOf(chatId) + "”", () => openChat(chatId));
+        }
+        break;
       case "approval_closed": {
         const card = S.approvals.get(ev.id);
         if (card) card.close(card.choice === undefined ? "Closed" : card.choice ? "Approved" : "Declined", !!card.choice);
+        if (chatId !== undefined && S.asking.delete(chatId)) renderChats();
         break;
       }
       case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images); pollState(); break;
@@ -3288,11 +3340,13 @@
   const WAKE = { done: undefined, count: -1 };
   function inTime(s) { return s < 90 ? s + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h"; }
   async function wakeState(s) {
-    const active = s.active || {}, woke = s.woke || {};
+    const answering = s.answering || (s.active ? [s.active] : []), woke = s.woke || {};
+    const ids = new Set(answering.map((t) => t.chat_id));   // the chats answering now, from any window: marked
+    if (ids.size !== S.answering.size || [...ids].some((id) => !S.answering.has(id))) { S.answering = ids; renderChats(); }
     const here = !!S.chatId && !S.streaming;
-    const running = !!active.wake && active.chat_id === S.chatId;
+    const running = answering.some((t) => t.wake && t.chat_id === S.chatId);
     const mine = (s.wakes || []).find((w) => w.chat_id === S.chatId);
-    if (active.wake && !s.busy) {
+    if (answering.some((t) => t.wake) && !s.busy) {
       $("agent-state").textContent = "Kelvin is continuing “" + (woke.title || "a chat") + "”";
       $("agent-state").classList.add("busy");
     }
@@ -4211,7 +4265,7 @@
     } else if (e.key === "Escape" || (e.ctrlKey && (e.key === "c" || e.key === "C") &&
                input.selectionStart === input.selectionEnd && !window.getSelection().toString())) {
       if (e.key !== "Escape") e.preventDefault();
-      if (TERM.busy && !TERM.ask) { api("/api/stop", { body: {} }).catch(() => {}); termLine("^C stopping Kelvin's answer", "dim"); }
+      if (TERM.busy && !TERM.ask) { api("/api/stop", { body: { chat_id: TERM.chatId } }).catch(() => {}); termLine("^C stopping Kelvin's answer", "dim"); }
       else if (e.key !== "Escape") { termLine(termPrompt() + " " + input.value + "^C", "cmd"); input.value = ""; }
     }
   }
@@ -4315,7 +4369,7 @@
       }
       case "/new": TERM.chatId = null; termLine("your next message starts a new conversation with Kelvin", "dim"); return;
       case "/stop":
-        try { await api("/api/stop", { body: {} }); await api("/api/runs/stop", { body: {} }); termLine("stopped", "dim"); }
+        try { await api("/api/stop", { body: { chat_id: TERM.chatId } }); await api("/api/runs/stop", { body: {} }); termLine("stopped", "dim"); }
         catch (e) { termLine(e.message, "err"); }
         return;
       default:
@@ -4875,7 +4929,7 @@
 
     $("composer").addEventListener("submit", (e) => {
       e.preventDefault();
-      if (S.streaming && !$("input").value.trim()) api("/api/stop", { body: {} }).catch(() => {});
+      if (S.streaming && !$("input").value.trim()) api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {});
       else sendMessage($("input").value);
     });
     $("input").addEventListener("input", () => { autosize(); updateSend(); slashMenu(); });
@@ -4964,7 +5018,7 @@
       $("wake-bar").hidden = true;
       toast("Kelvin won't continue this chat on its own.");
     });
-    $("wake-stop").addEventListener("click", () => api("/api/stop", { body: {} }).catch(() => {}));
+    $("wake-stop").addEventListener("click", () => api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {}));
     $("attach-btn").addEventListener("click", () => $("attach-input").click());
     $("attach-input").addEventListener("change", (e) => { addFiles([...e.target.files]); e.target.value = ""; });
     $("input").addEventListener("paste", (e) => {   // a screenshot pasted into the message
@@ -5055,7 +5109,7 @@
       });
     }
     window.addEventListener("resize", syncScrim);
-    setInterval(() => { if (S.labOpen || S.streaming || !$("lab-badge").hidden) pollState(); }, 1500);
+    setInterval(() => { if (S.labOpen || S.live.size || S.answering.size || !$("lab-badge").hidden) pollState(); }, 1500);
     setInterval(pollState, 4000);   // often enough that an alarm shows within seconds
     pollState();
     $("input").focus();

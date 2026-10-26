@@ -618,12 +618,8 @@ def test_unshared_work_keeps_its_place_and_its_notes(tmp_path, monkeypatch):
 
 
 class Recorder(Provider):
-    """A model that answers "ok", noting how a run started now would be filed."""
+    """A model that answers "ok"."""
     name, label = "scripted", "Scripted"
-    runtime = None
-
-    def __init__(self):
-        self.metas = []
 
     def available(self):
         return True
@@ -632,7 +628,6 @@ class Recorder(Provider):
         return [ModelInfo("m1", "Model One", self.name)]
 
     async def stream(self, model, system, history, tools, emit):
-        self.metas.append(self.runtime._attribute(SimpleNamespace(device=None)))
         await emit({"type": "text", "delta": "ok"})
         return TurnResult([{"type": "text", "text": "ok"}], stop_reason="end", model=model)
 
@@ -648,7 +643,7 @@ def test_runs_from_a_chat_that_keeps_unshared_marks_stay_here(tmp_path, monkeypa
     hub, browser = the_hub(tmp_path)
     recorder = Recorder()
     k = portal(tmp_path, monkeypatch, browser, providers={"scripted": recorder})
-    recorder.runtime = k.runtime
+    agent = k.client.app.app.state.agent
     store = k.store
     secret = store.create_project("Secret")
     store.set_sharing(secret["id"], "confidential")
@@ -658,10 +653,14 @@ def test_runs_from_a_chat_that_keeps_unshared_marks_stay_here(tmp_path, monkeypa
     store.set_rules(quiet["id"], {"providers": None, "literature": False})
     ran = chat(store, "ran without search", quiet["id"])                # it runs under the limit: it keeps it
     plain = chat(store, "plain")
+    metas = []
     for c in (left, ran, plain):
-        turn(k, c["id"])
-    assert [m.get("unshared", False) for m in recorder.metas] == [True, True, False]
-    assert recorder.metas[0]["project"] is None                         # filed under General, yet never shared
+        turn(k, c["id"])   # a turn notes the limits a chat ran under
+        k.runtime.attribution = agent._attribution(store.load(c["id"]))   # what its steps on the lab are filed under
+        metas.append(k.runtime._attribute(SimpleNamespace(device=None)))
+        k.runtime.attribution = {}
+    assert [m.get("unshared", False) for m in metas] == [True, True, False]
+    assert metas[0]["project"] is None                                  # filed under General, yet never shared
     k.runtime.attribution = {"project": None, "chat": left["id"], "unshared": True}
     assert k.runtime.queue_add(SWEEP).startswith("added") and k.runtime.queue.items[-1].unshared   # queued: too
     k.runtime.attribution = {}

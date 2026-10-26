@@ -136,7 +136,7 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
         closer["fn"] = window.destroy
 
     def on_closing() -> bool:
-        if agent.active:
+        if agent.answering():
             if not window.create_confirmation_dialog(
                     "Quit Kelvin?", "Kelvin is still working on a request. Quitting stops it where it is."):
                 return False

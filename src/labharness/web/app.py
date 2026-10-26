@@ -393,7 +393,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             "lab": runtime.lab.config.name,
             "simulated": all(i.simulated for i in runtime.lab.instruments.values()),
             "chats": store.list(), "projects": store.projects(), "models": models, "default_model": default,
-            "settings": settings.public(), "active": agent.active, "can_quit": on_quit is not None,
+            "settings": settings.public(), "active": agent.active, "answering": agent.answering(),
+            "can_quit": on_quit is not None,
             "account": session_data(),
             "claude_code": claude_code_enabled(),
             "hub_sharing": HUB_SHARING,
@@ -1060,7 +1061,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         chat_id = request.path_params["chat_id"]
         try:
             if request.method == "DELETE":
-                if agent.active and agent.active["chat_id"] == chat_id:
+                if agent.answering(chat_id):
                     return error(409, "This conversation is still running.")
                 store.delete(chat_id)
                 agent.waker.cancel(chat_id)
@@ -1070,14 +1071,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 body = await request.json()
                 title = str(body.get("title") or "").strip()[:80]
                 if title:
-                    if agent.active and agent.active["chat_id"] == chat_id:
+                    if agent.answering(chat_id):
                         return error(409, "Rename it when the current answer is done.")
                     data["title"] = title
                     store.save(data)
                 if "project" in body:  # file it under a project, or null to take it out
                     store.assign(chat_id, body["project"] or None)
                 if "folder" in body:   # where its runs go: a folder the person chose, or null for the data folder
-                    if agent.active and agent.active["chat_id"] == chat_id:
+                    if agent.answering(chat_id):
                         return error(409, "Change the folder when the current answer is done.")
                     if runtime.operating:   # a person's choice, like the data folder
                         return error(423, "Claude is operating this computer, so the chat's folder is locked until "
@@ -1911,7 +1912,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     # ------------------------------------------------------------------ the lab Kelvin controls (people only)
 
     def busy_problem() -> Optional[str]:
-        if agent.active:
+        if agent.answering():
             return "Kelvin is answering; wait for it or press stop first."
         live = runtime.live
         if live and live.get("status") == "running":
@@ -2405,7 +2406,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse(opinion)
 
     async def stop(request: Request) -> Response:
-        return JSONResponse({"ok": agent.stop()})
+        """{chat_id}: stop that chat's answer (and the lab's work when it is that chat's); without one, every chat's."""
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        chat_id = body.get("chat_id") if isinstance(body, dict) else None
+        return JSONResponse({"ok": agent.stop(str(chat_id) if chat_id else None)})
 
     async def approval(request: Request) -> Response:
         body = await request.json()
@@ -2417,6 +2424,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def state(request: Request) -> Response:
         data = await asyncio.to_thread(runtime.ui_state)  # may read instruments; keep the server responsive
         data["active"] = agent.active
+        data["answering"] = agent.answering()   # every chat answering now: the portal marks them
         data["wakes"], data["woke"] = agent.waker.view(), agent.waker.latest()
         return JSONResponse(data)
 

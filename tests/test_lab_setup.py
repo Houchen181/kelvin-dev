@@ -75,10 +75,11 @@ def test_switching_waits_for_kelvin_to_be_idle(bench):
     (runtime, settings, store), bus, home = bench
     client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
     with client:
-        client.app.app.state.agent.active = {"chat_id": "x", "model": "m"}
+        from labharness.web.agent import _Turn
+        client.app.app.state.agent.turns["x"] = _Turn({"chat_id": "x", "model": "m"})   # Kelvin answering a chat
         assert client.post("/api/lab", json={"use": "virtual"}, headers=headers).status_code == 409
         assert client.post("/api/instruments/scan", json={}, headers=headers).status_code == 409
-        client.app.app.state.agent.active = None
+        del client.app.app.state.agent.turns["x"]
 
 
 def test_health_check_catches_the_wrong_instrument_at_an_address(bench):

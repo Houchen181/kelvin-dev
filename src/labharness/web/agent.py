@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import copy
 import json
 import re
@@ -38,7 +39,7 @@ from .store import MAX_NOTE, ChatStore
 SYSTEM = INSTRUCTIONS + """
 You are Kelvin, the lab assistant in this portal, working with an experimental physicist.
 To wait longer than a minute (a cool-down, a temperature settling, a long queue), call wake_me and end your answer
-saying what you are waiting for: Kelvin continues this chat then, and other chats can run meanwhile. A message in
+saying what you are waiting for: Kelvin continues this chat then, and the lab is free for other chats meanwhile. A message in
 <wake> is Kelvin continuing the chat for you, not the person: carry on with what the person asked, nothing new.
 Write in Markdown. Lead with the result in one or two sentences, then only what helps the next decision.
 Use units. Prefer a short list or small table over paragraphs. While a plan runs, the portal shows its
@@ -126,7 +127,7 @@ MAX_DOCUMENTS = 2         # and the latest PDFs it reads whole (read_file's page
 REVIEW_S = 300            # a second opinion with its lookups
 MAX_ATTACHED_CHARS = 60000   # of an attached PDF's text, in the message
 PICTURE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
-WAIT_S = 120   # the longest wait inside a turn: one turn runs at a time, so longer waits use wake_me
+WAIT_S = 120   # the longest wait inside a turn: a wait holds the lab, so longer waits use wake_me
 STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the stop button
 STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
                 "lets it: a plan stops at once, an instrument still taking a reading is told to stop.")
@@ -141,6 +142,19 @@ def _without_opinion(result: Any) -> Tuple[str, bool, None]:
 
 class Busy(Exception):
     pass
+
+
+class _Turn:
+    """One chat's answer in progress: what the portal shows of it (info), and what a stop of that chat reaches."""
+
+    def __init__(self, info: Dict[str, Any]):
+        self.info = info
+        self.stop = False
+        self.stream_task: Optional[asyncio.Future] = None
+        self.lanes: List[asyncio.Future] = []
+
+
+_TURN: "contextvars.ContextVar[Optional[_Turn]]" = contextvars.ContextVar("kelvin_turn", default=None)   # this task's
 
 
 def plan_name(args: Any) -> str:
@@ -213,6 +227,10 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
            "use_skill", "read_skill_file"}
+# what never works the lab: everything else runs one call at a time across chats, filed under its own chat
+OFF_LAB = LOOKUPS | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe", "save_paper", "make_report"}
+MAX_TURNS = 4      # chats answering at once
+LAB_WAIT_S = 10.0  # how long a chat's lab call waits while another chat works the lab, before it says so
 
 FIND_TOOLS = {
     "name": "find_tools",
@@ -362,18 +380,68 @@ class ChatAgent:
         self.mcp_server = mcp_server
         self.providers = providers
         self.tools: List[Dict[str, Any]] = []
-        self.active: Optional[Dict[str, Any]] = None
-        self._stop = False
-        self._stream_task: Optional[asyncio.Future] = None
+        self.turns: Dict[str, _Turn] = {}   # the chats answering now, by chat id (each its own turn, side by side)
+        self._lab: Optional[asyncio.Lock] = None   # one chat's lab call at a time, filed under that chat
+        self.lab_holder: Optional[str] = None   # the chat whose call works the lab now
         self._exit = AsyncExitStack()
         self.client: Any = None
         self.read_only: set = set()
-        self._lanes: List[asyncio.Future] = []
         self._images: Dict[str, List[Tuple[str, bytes]]] = {}   # pictures a tool call returned, by call id, until kept
         self._documents: Dict[str, List[Tuple[str, bytes]]] = {}   # and PDF pages to read whole: (name, bytes)
         self._steer: Dict[str, List[str]] = {}   # what the person wrote while Kelvin worked, by chat, until read
         self.waker = Waker(self)   # chats continued later (wake_me), when the time or the lab says
         self.know = Know(store)    # skills and recipes (skills.py)
+
+    # ------------------------------------------------------------------ the chats answering now
+    # Each chat's turn runs in its own task; _TURN holds that chat's turn there (and in the tasks it starts), so the
+    # code of a turn reads its own stop, stream and lanes.
+
+    @property
+    def active(self) -> Optional[Dict[str, Any]]:
+        """The chat answering in this task's turn; outside a turn, the one that started last (None: none is)."""
+        turn = _TURN.get()
+        if turn is not None:
+            return turn.info
+        return list(self.turns.values())[-1].info if self.turns else None
+
+    def answering(self, chat_id: Optional[str] = None) -> Any:
+        """Is this chat answering now? Without a chat: the chats answering, as the portal shows them."""
+        if chat_id is not None:
+            return chat_id in self.turns
+        return [dict(t.info) for t in self.turns.values()]
+
+    @property
+    def _stop(self) -> bool:
+        turn = _TURN.get()
+        return bool(turn is not None and turn.stop)
+
+    @property
+    def _stream_task(self) -> Optional[asyncio.Future]:
+        turn = _TURN.get()
+        return turn.stream_task if turn is not None else None
+
+    @_stream_task.setter
+    def _stream_task(self, task: Optional[asyncio.Future]) -> None:
+        turn = _TURN.get()
+        if turn is not None:
+            turn.stream_task = task
+
+    @property
+    def _lanes(self) -> List[asyncio.Future]:
+        turn = _TURN.get()
+        return turn.lanes if turn is not None else []
+
+    @_lanes.setter
+    def _lanes(self, lanes: List[asyncio.Future]) -> None:
+        turn = _TURN.get()
+        if turn is not None:
+            turn.lanes = lanes
+
+    def _may_start(self, chat_id: str) -> None:
+        if chat_id in self.turns:
+            raise Busy("This conversation is still answering.")
+        if len(self.turns) >= MAX_TURNS:
+            raise Busy("Kelvin is answering in %d conversations; wait for one of them to finish." % MAX_TURNS)
 
     async def start(self) -> None:
         self.client = await self._exit.enter_async_context(Client(self.mcp_server))
@@ -491,8 +559,8 @@ class ChatAgent:
     def steer(self, chat_id: str, text: str) -> bool:
         """A message the person wrote while Kelvin works on this chat: Kelvin reads it at its next step. False when
         Kelvin isn't working on this chat (then it is an ordinary message)."""
-        a = self.active
-        if not a or a.get("chat_id") != chat_id or a.get("compare") or not str(text or "").strip():
+        turn = self.turns.get(chat_id)
+        if turn is None or turn.info.get("compare") or not str(text or "").strip():
             return False
         self._steer.setdefault(chat_id, []).append(str(text).strip())
         return True
@@ -785,26 +853,29 @@ class ChatAgent:
         return "%s %s" % (provider.label, model_key.partition(":")[2]) if provider else model_key
 
     def claim(self, chat_id: str, model_key: str) -> Provider:
-        if self.active:
-            raise Busy("Another conversation is still running.")
+        self._may_start(chat_id)
         provider, _ = self.provider_for(model_key)
         self.check_model(self.store.load(chat_id), model_key, "Pick one of the allowed models.")   # KeyError: no chat
-        self.active = {"chat_id": chat_id, "model": model_key}
-        self._stop = False
+        self.turns[chat_id] = _Turn({"chat_id": chat_id, "model": model_key})
         return provider
 
-    def stop(self) -> bool:
-        if not self.active:
+    def stop(self, chat_id: Optional[str] = None) -> bool:
+        """Stop this chat's answer (None: every chat's). The lab's ramp or plan stops too when it is that chat's
+        call working the lab, and always when every chat is stopped."""
+        turns = [self.turns[chat_id]] if chat_id in self.turns else [] if chat_id else list(self.turns.values())
+        if not turns:
             return False
-        self._stop = True
-        decline_all = getattr(self.runtime.approver, "decline_all", None)
-        if decline_all:
-            decline_all("stop button")
-        self.runtime.gate.request_abort()
-        if self._stream_task is not None:
-            self._stream_task.cancel()
-        for lane in self._lanes:
-            lane.cancel()
+        for turn in turns:
+            turn.stop = True
+            if turn.stream_task is not None:
+                turn.stream_task.cancel()
+            for lane in turn.lanes:
+                lane.cancel()
+        if chat_id is None or self.lab_holder == chat_id:
+            decline_all = getattr(self.runtime.approver, "decline_all", None)
+            if decline_all:
+                decline_all("stop button")
+            self.runtime.gate.request_abort()
         return True
 
     async def run_turn(self, chat_id: str, text: str, model_key: str, provider: Provider, emit: Emit,
@@ -813,16 +884,14 @@ class ChatAgent:
         words for the person (text is for the model).
         attachments: pictures and PDFs the person attached, as attach() kept them."""
         model_id = model_key.partition(":")[2]
+        turn = self.turns.setdefault(chat_id, _Turn({"chat_id": chat_id, "model": model_key}))   # claim() made it
+        held = _TURN.set(turn)   # this task's turn, and the tasks it starts
         try:
             chat = self.store.load(chat_id)
-            # the project scans started in this turn belong to, when no device is mounted
-            self.runtime.attribution = {"project": None if chat.get("incognito") else self.store.project_of(chat_id),
-                                        "chat": chat_id, "incognito": bool(chat.get("incognito")),
-                                        "folder": chat.get("folder")}   # where its runs go
             message: Dict[str, Any] = {"role": "user", "text": text}
             if wake:
                 message["wake"] = wake
-                self.active = dict(self.active or {}, wake=True)
+                turn.info["wake"] = True
             if attachments:
                 message["attachments"] = attachments
             if not wake:   # the person is writing: what the chat read from the web before no longer pauses auto mode
@@ -831,9 +900,6 @@ class ChatAgent:
             self.recall(chat, message)
             self._attach_review(chat, message)
             self._stamp(chat)
-            # a chat that keeps unshared work's marks or limits (it left such a project, or ran under its rules):
-            # its runs are never shared, wherever they are filed
-            self.runtime.attribution["unshared"] = unshared(chat)
             chat["messages"].append(message)
             if chat.get("title", "New chat") == "New chat":
                 first = text.strip().splitlines()[0]
@@ -841,9 +907,8 @@ class ChatAgent:
             chat["model"] = model_key
             self.store.save(chat)
             context = self.context(chat)  # fixed for the whole turn, so every step reuses the cached prefix
-            self.runtime.gate.in_chat = True
-            self.runtime.gate.outside_chat = chat.get("outside")   # web text read since the person last wrote
-            await emit({"type": "turn_start", "model": model_key, "title": chat["title"]})
+            await emit({"type": "turn_start", "model": model_key, "title": chat["title"], "chat_id": chat_id,
+                        "from": len(chat["messages"]) - 1})   # where this turn begins in the chat: its message
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
             for _ in range(MAX_STEPS):
@@ -855,12 +920,54 @@ class ChatAgent:
             await emit({"type": "error", "message": describe_error(provider, e)})
             await emit({"type": "turn_end", "reason": "error"})
         finally:
+            if self.turns.get(chat_id) is turn:
+                del self.turns[chat_id]
+            _TURN.reset(held)
+            self._steer.pop(chat_id, None)   # not read in time: the portal sends it as the next message
+
+    def _attribution(self, chat: Dict[str, Any]) -> Dict[str, Any]:
+        """What a run this chat starts is filed under: its project (not an incognito chat's, and only when no device
+        is mounted), the chat, its folder, and whether the chat keeps unshared work's marks or limits (it left such a
+        project, or ran under its rules): its runs are then never shared, wherever they are filed."""
+        return {"project": None if chat.get("incognito") else self.store.project_of(chat["id"]), "chat": chat["id"],
+                "incognito": bool(chat.get("incognito")), "folder": chat.get("folder"), "unshared": unshared(chat)}
+
+    async def _work(self, chat: Dict[str, Any], provider: Provider, context: Dict[str, Any], call: Dict[str, Any],
+                    emit: Emit) -> Tuple[str, bool, Optional[Dict[str, Any]]]:
+        """The call; one that works the lab has the lab to itself, under its chat's name (another chat's lab call
+        waits a little, then hears why), as the lab has one set of instruments."""
+        if call["name"] in OFF_LAB:
+            return await self._dispatch(chat, provider, context, call, emit)
+        if self._lab is None:
+            self._lab = asyncio.Lock()
+        until = time.monotonic() + LAB_WAIT_S
+        while self._lab.locked():
+            if time.monotonic() > until:
+                return self._lab_busy(), True, None
+            await asyncio.sleep(0.1)
+        await self._lab.acquire()   # free: taken at once
+        self.lab_holder = chat["id"]
+        self.runtime.attribution = self._attribution(chat)
+        self.runtime.gate.in_chat = True
+        self.runtime.gate.outside_chat = chat.get("outside")   # web text read since the person last wrote
+        try:
+            return await self._dispatch(chat, provider, context, call, emit)
+        finally:
             self.runtime.attribution = {}
             self.runtime.gate.outside_chat = None
             self.runtime.gate.in_chat = False
-            self.active = None
-            self._stream_task = None
-            self._steer.pop(chat_id, None)   # not read in time: the portal sends it as the next message
+            self.lab_holder = None
+            self._lab.release()
+
+    def _lab_busy(self) -> str:
+        holder = self.lab_holder
+        try:
+            title = self.store.load(holder).get("title") if holder else None
+        except KeyError:
+            title = None
+        return ("not run: %s is working the lab (%s). Kelvin does one thing on the lab at a time; try again when it "
+                "is done, or tell the person." % ("another conversation (“%s”)" % title if title else
+                                                  "another conversation", self.runtime.busy or "a request"))
 
     async def _step(self, chat: Dict[str, Any], provider: Provider, model_id: str, context: Dict[str, Any],
                     emit: Emit) -> bool:
@@ -958,7 +1065,7 @@ class ChatAgent:
             await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
             if call["name"] in DEFERRED_NAMES:   # called by its name before find_tools: it is loaded now
                 self._load_tools(chat, context, [call["name"]])
-            work = asyncio.ensure_future(self._dispatch(chat, provider, context, call, emit))
+            work = asyncio.ensure_future(self._work(chat, provider, context, call, emit))
             while not work.done():   # a stop ends the call at once, even one an instrument holds up
                 await asyncio.wait({work}, timeout=STOP_POLL_S)
                 if self._stop and not work.done():
@@ -975,8 +1082,7 @@ class ChatAgent:
                         "is_error": is_error, "run_id": run_id_of(content) if call["name"] == "run_plan" else None,
                         "images": [k["file"] for k in kept] or None})
         if call["name"] in OUTSIDE_TOOLS and not is_error and "<outside_text from=" in content:   # remembered
-            chat["outside"] = OUTSIDE_TOOLS[call["name"]]
-            self.runtime.gate.outside_chat = chat["outside"]
+            chat["outside"] = OUTSIDE_TOOLS[call["name"]]   # the gate reads it with the chat's next lab call
         entry = {"id": call["id"], "name": call["name"], "content": content, "is_error": is_error}
         if kept:
             entry["images"] = kept   # the files, kept with the chat; the model gets them with each request
@@ -997,8 +1103,8 @@ class ChatAgent:
         if name == "wake_me" and not chat.get("incognito"):
             return _without_opinion(self.waker.add(chat["id"], args))
         if name == "wait" and _seconds(args) > WAIT_S:   # other chats would wait too
-            return ("not waited: for more than %d s, call wake_me and end your answer, so other chats can run "
-                    "meanwhile" % WAIT_S), True, None
+            return ("not waited: for more than %d s, call wake_me and end your answer, so the lab is free for other "
+                    "chats meanwhile" % WAIT_S), True, None
         if name == "use_skill":
             return _without_opinion(self._use_skill(chat, context, args))
         if name in ("save_skill", "save_recipe") and name in {t["name"] for t in context["tools"]}:
@@ -1176,7 +1282,7 @@ class ChatAgent:
 
     async def review_answer(self, chat_id: str, model_key: str) -> Dict[str, Any]:
         """A second opinion on the chat's latest answer, kept with it; the main model sees it with the next message."""
-        if self.active:
+        if chat_id in self.turns:
             raise Busy("Wait until Kelvin has finished answering.")
         provider, model_id = self.provider_for(model_key)
         chat = self.store.load(chat_id)
@@ -1295,8 +1401,7 @@ class ChatAgent:
     # ------------------------------------------------------------------ several models at once
 
     def claim_compare(self, chat_id: str, model_keys: List[str]) -> List[Tuple[str, Provider, str]]:
-        if self.active:
-            raise Busy("Another conversation is still running.")
+        self._may_start(chat_id)
         keys = list(dict.fromkeys(str(k) for k in model_keys if k))
         if not 2 <= len(keys) <= MAX_LANES:
             raise ValueError("Pick two or three different models to compare.")
@@ -1304,8 +1409,7 @@ class ChatAgent:
         chat = self.store.load(chat_id)  # raises KeyError for an unknown chat
         for k in keys:
             self.check_model(chat, k)
-        self.active = {"chat_id": chat_id, "model": keys[0], "compare": keys}
-        self._stop = False
+        self.turns[chat_id] = _Turn({"chat_id": chat_id, "model": keys[0], "compare": keys})
         return lanes
 
     async def run_compare(self, chat_id: str, text: str, lanes: List[Tuple[str, Provider, str]], emit: Emit,
@@ -1313,6 +1417,8 @@ class ChatAgent:
         """Every model answers the same message at once, able to read the lab but not change it. The first answer
         continues the chat unless the user picks another (choose)."""
         keys = [k for k, _, _ in lanes]
+        turn = self.turns.setdefault(chat_id, _Turn({"chat_id": chat_id, "model": keys[0], "compare": keys}))
+        held = _TURN.set(turn)
         try:
             chat = self.store.load(chat_id)
             message: Dict[str, Any] = {"role": "user", "text": text,
@@ -1333,7 +1439,7 @@ class ChatAgent:
             system = context["system"] + "\n\n" + COMPARE
             base = list(compaction.view(chat))   # with the lab handoff, on a long day
             await emit({"type": "compare_start", "models": keys, "labels": [self.label(k) for k in keys],
-                        "title": chat["title"]})
+                        "title": chat["title"], "from": len(chat["messages"]) - 1})
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
             self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit,
@@ -1361,8 +1467,9 @@ class ChatAgent:
             await emit({"type": "error", "message": "Could not compare: %s" % e})
             await emit({"type": "turn_end", "reason": "error"})
         finally:
-            self._lanes = []
-            self.active = None
+            if self.turns.get(chat_id) is turn:
+                del self.turns[chat_id]
+            _TURN.reset(held)
 
     async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
                     base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit,
@@ -1424,7 +1531,7 @@ class ChatAgent:
 
     def choose(self, chat_id: str, index: int) -> Dict[str, Any]:
         """Continue the chat with another model's answer from the last comparison."""
-        if self.active:
+        if chat_id in self.turns:
             raise Busy("Wait until the answers are finished.")
         chat = self.store.load(chat_id)
         at = max((i for i, m in enumerate(chat["messages"]) if m.get("role") == "user"), default=-1)
@@ -1448,7 +1555,9 @@ class ChatAgent:
             return "the arguments were not valid JSON; send the call again", True
         loop = asyncio.get_running_loop()
         requests: asyncio.Queue = asyncio.Queue()
-        subscribe = getattr(self.runtime.approver, "subscribe", None)
+        # approvals come from the lab call working the lab (one at a time): shown in its chat, not in one that looks
+        # something up meanwhile
+        subscribe = getattr(self.runtime.approver, "subscribe", None) if call["name"] not in OFF_LAB else None
         unsubscribe = subscribe(lambda r: loop.call_soon_threadsafe(requests.put_nowait, r)) if subscribe else None
         shown: List[str] = []
 
