@@ -45,6 +45,15 @@ if TYPE_CHECKING:
 
 MAX_WAIT_S = 3600
 BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
+SCRIPTS_NEXT = ("Next, with the person (nothing above was sent to any instrument): add each instrument that is not in "
+                "the lab yet with add_instrument at its address, with the likely card and the connection settings "
+                "above (Kelvin checks who answers there first); one with no card fitting: draft_card, saying which "
+                "commands the scripts use, as those are the ones this lab relies on. The limits above come from the "
+                "values the scripts use: propose them and set them only once the person agrees. Then offer to keep "
+                "each measurement script as a recipe (save_recipe; the person approves it): its loops become sweeps "
+                "(an outer loop, the outer axis), its readings the measure list, its waits the settle times, its "
+                "setup and its end the setup and after steps; say what it can't carry over (the script's own "
+                "processing, plotting). Never run the scripts.")
 
 
 def default_project_info(project_id: Optional[str]) -> Dict[str, Any]:
@@ -209,6 +218,7 @@ class LabRuntime:
         self.engine = RunEngine(self.gate, self._store())
         self.engine.progress = self._on_progress
         self.lock = threading.RLock()
+        self._script_cards: Optional[Tuple[Any, Any]] = None   # (the lab's cards folder as it was, the registry)
         self.busy: Optional[str] = None
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
@@ -2076,6 +2086,93 @@ class LabRuntime:
         except (OSError, ValueError) as e:
             return "not read: %s" % e
 
+    def script_cards(self) -> Any:
+        """Every card Kelvin can use here, to match the lab's scripts against: Kelvin's own and the lab's. Kept
+        while the lab's cards folder stays as it was, as reading every card takes a second. Only read from."""
+        from ..virtual_lab import lab_registry
+        if self.home is None:
+            return self.lab.registry
+        folder = Path(self.home) / "cards"
+        try:
+            files = sorted(folder.iterdir()) if folder.is_dir() else []
+            stamp = tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in files)
+        except OSError:
+            stamp = None
+        if stamp is None or self._script_cards is None or self._script_cards[0] != stamp:
+            self._script_cards = (stamp, lab_registry(self.home))
+        return self._script_cards[1]
+
+    def survey_scripts(self, path: str) -> str:
+        """The lab's own scripts, read for how the lab works now (scripts.py): each instrument's address, settings,
+        commands and the values used, the card that fits, and each script's outline. Nothing in them is run."""
+        from .. import scripts as lab_scripts
+        try:
+            found = lab_scripts.survey(path, self.script_cards())
+        except (OSError, ValueError) as e:
+            return "not read: %s" % e
+        in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()}
+        here = ["%s (%s)" % (i.address, in_lab[i.address]) for i in found.instruments if i.address in in_lab]
+        return found.text() + ("\n\nAlready in this lab: " + ", ".join(here) if here else "") + "\n\n" + SCRIPTS_NEXT
+
+    def scripts_found(self, folder: str) -> Dict[str, Any]:
+        """The lab's scripts read for the Set up panel (a person chose the folder): each instrument with its likely
+        card, the limits from the values the scripts use, and who answers at its address now, asked as a scan asks
+        (*IDN? only; a serial port isn't tried, as its framing takes long to find). An identity reply decides the
+        card. Raises OSError for a folder that isn't there."""
+        from .. import scripts as lab_scripts
+        from ..discovery import SHORT_NAMES, identify
+        registry = self.script_cards()
+        found = lab_scripts.survey(folder, registry)
+        view = found.view()
+        in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()}
+        taken = [n for n, ic in self.lab.config.instruments.items() if not ic.address.startswith("sim://")]
+        with self.lock:
+            self.busy = "asking the scripts' instruments who they are"
+            try:
+                for item, inst in zip(view["instruments"], found.instruments):
+                    item["in_lab"] = in_lab.get(inst.address)
+                    item["idn"] = ""
+                    if not inst.address or item["in_lab"]:
+                        continue
+                    if inst.address.startswith("serial://"):
+                        item["asked"] = "not asked: a serial port (Scan tries each card's framing on it)"
+                        continue
+                    queries = ["*IDN?"]   # and the likely card's own identity query
+                    likely = registry.get(item["card"]["id"]) if item["card"] else None
+                    if likely is not None and likely.idn_query not in queries:
+                        queries.append(likely.idn_query)
+                    try:
+                        answer = identify(inst.address, registry, timeout_ms=800, queries=queries)
+                    except Exception as e:   # no VISA on this computer
+                        why = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
+                        item["asked"] = "not asked: %s" % why
+                        continue
+                    item["idn"] = answer.idn
+                    if not answer.idn:
+                        item["asked"] = "no answer at its address now"
+                    if answer.card_id and (not item["card"] or item["card"]["id"] != answer.card_id):
+                        card = registry.get(answer.card_id)
+                        item["card"] = {"id": card.id, "model": card.model, "kind": card.kind, "sure": True,
+                                        "why": "it answered %s" % answer.idn[:60],
+                                        "mapped": lab_scripts.mapping(card, inst.commands),
+                                        "limits": lab_scripts.limits(card, inst.commands)}
+                    elif answer.card_id:
+                        item["card"]["why"] += "; it answered %s" % answer.idn[:60]
+                        item["card"]["sure"] = True
+            finally:
+                self.busy = None
+        for item in view["instruments"]:   # a name for each, from the scripts or the kind of instrument
+            if item["in_lab"]:
+                continue
+            kind = (item["card"] or {}).get("kind", "")
+            base = item["name"] or SHORT_NAMES.get(kind, re.sub(r"[^a-z0-9]+", "", kind.lower()) or "instr")
+            name, i = base, 2
+            while name in taken:
+                name, i = "%s%d" % (base, i), i + 1
+            taken.append(name)
+            item["name"] = name
+        return view
+
     def _saved_card(self, ref: str) -> Any:
         """A card Kelvin has, by its id (Kelvin's own, or one in ~/Kelvin/cards); None if there is none."""
         from ..virtual_lab import lab_registry
@@ -2859,12 +2956,19 @@ class LabRuntime:
                 return "not added: %s" % "; ".join(health.problems)
             try:
                 lab_file.parent.mkdir(parents=True, exist_ok=True)
+                fresh = lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""
+                if fresh != text:   # a person changed it meanwhile (an instrument's limits in Set up): add to theirs
+                    new_text = add_to_config(fresh, [item], registry)
+                    load_lab_config(new_text, registry)
                 tmp = lab_file.with_suffix(".tmp")
                 tmp.write_text(new_text, encoding="utf-8")
                 tmp.replace(lab_file)
             except OSError as e:
                 undo()
                 return "not added: Kelvin could not save the lab config: %s" % e
+            except (ConfigError, ValueError, StopIteration, yaml.YAMLError):
+                undo()
+                return "not added: the lab config changed while Kelvin was adding it; try again"
             if not on_file:
                 info = {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
                 try:

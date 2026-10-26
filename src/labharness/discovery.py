@@ -16,7 +16,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .adapters import AdapterError, apply_serial_settings, is_serial, resource_manager
+from .adapters import AdapterError, apply_serial_settings, is_serial, resource_manager, resource_name
 from .cards import Card, CardRegistry
 
 SHORT_NAMES = {"source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
@@ -145,15 +145,17 @@ def _usb_ids() -> Dict[str, str]:
 
 
 def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: int = 1000,
-             usb: Optional[Dict[str, str]] = None) -> Found:
-    """Ask one instrument who it is, and match the answer to a card."""
+             usb: Optional[Dict[str, str]] = None, queries: Optional[List[str]] = None) -> Found:
+    """Ask one instrument who it is, and match the answer to a card. queries: only these (not on a serial port),
+    for a quick ask where the likely card is known: each one opens the address again, which for a network
+    address nobody answers at takes the connect timeout each time."""
     rm = rm or resource_manager()
     found = Found(address)
     tries: List[Tuple[str, Optional[Dict[str, Any]]]]
     if is_serial(address):
         tries = [(s["query"], s) for s in _serial_settings(registry)]
     else:
-        queries = ["*IDN?"] + sorted({c.idn_query for c in registry if c.idn_query != "*IDN?"})
+        queries = queries or ["*IDN?"] + sorted({c.idn_query for c in registry if c.idn_query != "*IDN?"})
         tries = [(q, None) for q in queries]
     for query, settings in tries:
         try:
@@ -243,8 +245,13 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
     card = registry.get(item["card"])
     note = item.get("note") or card.model.split(" (")[0]
     lines = ["  %s:" % item["name"], "    card: %s        # %s" % (card.id, note), "    address: %s" % json.dumps(item["address"])]
-    lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives if p.numeric and p.limits]
-    if lim:
+    used = {p: v for p, v in (item.get("limits") or {}).items() if p in card.params}   # what the lab's scripts use
+    lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives
+           if p.numeric and p.limits and p.name not in used]
+    if used:
+        lines.append("    limits: { %s }   # from your scripts (the values they use): check them, and tighten the "
+                     "rest" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim))
+    elif lim:
         lines.append("    limits: { %s }   # vendor limits: tighten to what your sample can take" % ", ".join(lim))
     if card.kind in ("laser", "laser-driver"):
         lines.append("    auto: never        # a person approves every laser change")
@@ -274,16 +281,44 @@ def draft_from(items: Sequence[Dict[str, Any]], registry: CardRegistry, lab_name
     return "\n".join(lines) + "\n"
 
 
-def add_to_config(text: str, items: Sequence[Dict[str, Any]], registry: CardRegistry) -> str:
-    """Add instruments to an existing lab config text, keeping what is there (and its comments)."""
+def instrument_key(entry: Dict[str, Any]) -> Tuple[str, str, str]:
+    """Which instrument a lab config entry is: its address, card and card variables (one address can hold two
+    entries, such as a temperature controller's two loops)."""
+    variables = {str(k): str(v) for k, v in (entry.get("vars") or {}).items()}
+    return (resource_name(str(entry.get("address") or "")), str(entry.get("card") or ""),
+            json.dumps(variables, sort_keys=True))
+
+
+def listed(text: str) -> Dict[Tuple[str, str, str], str]:
+    """The instruments a lab config text lists, by instrument_key, with their names."""
     from .yamlio import load_yaml
+    try:
+        data = load_yaml(text) if text.strip() else None
+    except Exception:
+        return {}
+    entries = data.get("instruments") if isinstance(data, dict) else None
+    if not isinstance(entries, dict):
+        return {}
+    return {instrument_key(e): str(n) for n, e in entries.items() if isinstance(e, dict)}
+
+
+def add_to_config(text: str, items: Sequence[Dict[str, Any]], registry: CardRegistry) -> str:
+    """Add instruments to an existing lab config text, keeping what is there (and its comments). One it lists
+    already (the same address, card and variables) is not added again."""
+    from .yamlio import load_yaml
+    there = set(listed(text))
+    fresh = []
+    for item in items:
+        if instrument_key(item) not in there:
+            there.add(instrument_key(item))
+            fresh.append(item)
     data = load_yaml(text) if text.strip() else None
     if not isinstance(data, dict) or not isinstance(data.get("instruments"), dict) or not data["instruments"]:
         name = data.get("lab", "My lab") if isinstance(data, dict) else "My lab"
-        return draft_from(items, registry, name)
+        return draft_from(fresh, registry, name)
     taken = set(data["instruments"])
     blocks: List[str] = []
-    for item in items:
+    for item in fresh:
         item = dict(item)
         if item["name"] in taken:
             base, i = item["name"], 2
@@ -299,6 +334,67 @@ def add_to_config(text: str, items: Sequence[Dict[str, Any]], registry: CardRegi
     while end > start + 1 and not lines[end - 1].strip():
         end -= 1
     return "\n".join(lines[:end] + blocks + lines[end:]) + "\n"
+
+
+def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]], reviewed: bool = False) -> str:
+    """The lab config text with one instrument's limits changed (None takes a limit out), the rest of the text and
+    its comments kept; reviewed: without the instrument's added_by: kelvin mark (a person checked its limits)."""
+    from .yamlio import load_yaml
+    data = load_yaml(text) if text.strip() else None
+    entry = (data.get("instruments") or {}).get(name) if isinstance(data, dict) else None
+    if not isinstance(entry, dict):
+        raise KeyError("no instrument %r in the lab config" % name)
+    merged: Dict[str, List[float]] = {str(k): list(v) for k, v in (entry.get("limits") or {}).items()}
+    for p, lim in limits.items():
+        if lim is None:
+            merged.pop(p, None)
+        else:
+            merged[p] = [float(lim[0]), float(lim[1])]
+    lines = text.split("\n")
+    start = next(i for i, l in enumerate(lines) if re.match(r"^instruments\s*:", l))
+    at = next((i for i in range(start + 1, len(lines))
+               if re.match(r"^(\s+)%s\s*:" % re.escape(name), lines[i])), None)
+    if at is None:
+        raise KeyError("no instrument %r in the lab config" % name)
+    indent = len(lines[at]) - len(lines[at].lstrip())
+    head, _, rest = lines[at].partition(":")
+    if rest.strip() and not rest.strip().startswith("#"):   # written on one line: name: { card: ..., ... }
+        entry = dict(entry, limits=merged) if merged else {k: v for k, v in entry.items() if k != "limits"}
+        if reviewed:
+            entry.pop("added_by", None)
+        lines[at] = "%s: %s" % (head, _flow(entry))
+        return "\n".join(lines)
+    end = at + 1
+    while end < len(lines) and (not lines[end].strip() or len(lines[end]) - len(lines[end].lstrip()) > indent):
+        end += 1
+    while end > at + 1 and not lines[end - 1].strip():
+        end -= 1
+    block = lines[at + 1:end]
+    child = min((len(l) - len(l.lstrip()) for l in block if l.strip() and not l.lstrip().startswith("#")),
+                default=indent + 2)
+    out, i, placed = [], 0, False
+    new = ("%slimits: { %s }   # set in Kelvin (Set up, Limits…)" % (" " * child, ", ".join(
+        "%s: [%g, %g]" % (p, v[0], v[1]) for p, v in merged.items()))) if merged else None
+    while i < len(block):
+        line = block[i]
+        depth = len(line) - len(line.lstrip())
+        if depth == child and re.match(r"^\s*limits\s*:", line):
+            i += 1
+            while i < len(block) and (not block[i].strip() or len(block[i]) - len(block[i].lstrip()) > child):
+                i += 1   # a limits mapping written as a block: its lines go too
+            if new:
+                out.append(new)
+            placed = True
+            continue
+        if reviewed and depth == child and re.match(r"^\s*added_by\s*:", line):
+            i += 1
+            continue
+        out.append(line)
+        i += 1
+    if not placed and new:
+        after = next((k for k, l in enumerate(out) if re.match(r"^\s*address\s*:", l)), len(out) - 1)
+        out.insert(after + 1, new)
+    return "\n".join(lines[:at + 1] + out + lines[end:])
 
 
 def main(argv: Optional[List[str]] = None) -> int:

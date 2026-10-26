@@ -63,10 +63,12 @@ This project's rules: {rules}. Keep its details inside this conversation: never 
 services."""
 WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save_manual",   # reach the internet
              "install_for_instrument"}
-# tools whose results carry text from the open web: once a chat has read some, auto mode asks a person there until
-# the person writes again (manuals, makers' files and instruments' replies are marked for the model, nothing more)
+# tools whose results carry text from outside the lab (the open web, the chat's files, the lab's scripts): once a chat
+# has read some, auto mode asks a person there until the person writes again (manuals, makers' files and
+# instruments' replies are marked for the model, nothing more)
 OUTSIDE_TOOLS = {"read_web_page": "a web page", "web_search": "web search results", "search_papers": "paper search "
-                 "results", "read_paper": "a paper", "read_file": "a file in the chat's folder"}
+                 "results", "read_paper": "a paper", "read_file": "a file in the chat's folder",
+                 "survey_scripts": "the lab's scripts"}
 COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
@@ -210,7 +212,7 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
 # Kelvin's rarer tools, loaded in a chat when it needs them (find_tools), so every step doesn't carry them all
 DEFERRED = {
     "setting up instruments": ["scan_instruments", "connected_devices", "inspect_address", "inspect_serial",
-                               "add_instrument", "reconnect_instrument", "ask_to_switch_on"],
+                               "add_instrument", "reconnect_instrument", "ask_to_switch_on", "survey_scripts"],
     "writing and trying cards": ["card_guide", "draft_card", "check_card", "try_card", "save_card", "read_examples",
                                  "find_maker_files", "library_api", "save_manual"],
     "makers' software": ["install_for_instrument", "installed_software", "environments", "remove_environment"],
@@ -226,7 +228,7 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "recent_events", "kelvin_help", "describe_instrument", "search_manual", "instrument_info", "card_guide",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
-           "use_skill", "read_skill_file"}
+           "use_skill", "read_skill_file", "survey_scripts"}
 # what never works the lab: everything else runs one call at a time across chats, filed under its own chat
 OFF_LAB = LOOKUPS | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe", "save_paper", "make_report"}
 MAX_TURNS = 4      # chats answering at once

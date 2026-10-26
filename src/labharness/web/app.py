@@ -38,7 +38,7 @@ from ..cards import plot_points, trace_x
 from .. import autocard
 from .. import profiles
 from ..clock import ScaledClock, SimClock
-from ..discovery import add_to_config
+from ..discovery import add_to_config, instrument_key, listed as config_lists, set_limits
 from ..labconfig import ConfigError, load_lab_config, same_setup
 from .. import carddraft
 from .. import protection
@@ -2236,11 +2236,98 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             if not address:
                 return error(400, "%s needs an address" % name)
             try:
-                runtime.lab.registry.get(card)
+                spec_card = runtime.script_cards().get(card)
             except KeyError:
                 return error(400, "%s: choose a card" % name)
-            items.append({"name": name, "card": card, "address": address, "note": str(it.get("note") or "")[:60]})
-        return JSONResponse({"yaml": add_to_config(str(body.get("base") or ""), items, runtime.lab.registry)})
+            item = {"name": name, "card": card, "address": address, "note": str(it.get("note") or "")[:60]}
+            limits = it.get("limits")   # from the lab's scripts: the values they use (the person reviews them)
+            if isinstance(limits, dict):
+                item["limits"] = {str(p): [float(v[0]), float(v[1])] for p, v in limits.items()
+                                  if str(p) in spec_card.params and isinstance(v, (list, tuple)) and len(v) == 2
+                                  and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)}
+            if isinstance(it.get("connection"), dict):   # the scripts' baud rate, line endings, timeout
+                item["connection"] = {str(k): v for k, v in it["connection"].items()
+                                      if k in ("baud_rate", "read_termination", "write_termination", "timeout_ms",
+                                               "data_bits", "stop_bits", "parity", "query_delay")}
+            items.append(item)
+        base = str(body.get("base") or "")
+        there = config_lists(base)   # in the config already (added twice, or found by a scan and in the scripts): kept once
+        already = [{"item": k, "name": there[instrument_key(i)], "address": i["address"]}
+                   for k, i in enumerate(items) if instrument_key(i) in there]
+        return JSONResponse({"yaml": add_to_config(base, items, runtime.script_cards()), "already": already})
+
+    async def scripts_view(request: Request) -> Response:
+        """The lab's own scripts, read (never run) to set the lab up the way it already works: {folder}. Each
+        instrument comes with its likely card, the limits from the values the scripts use, and who answers at its
+        address now (asked as a scan asks)."""
+        problem = busy_problem()
+        if problem:
+            return error(409, problem)
+        body = await request.json()
+        folder = str(body.get("folder") or "").strip()
+        if not folder:
+            return error(400, "Choose the folder with your scripts.")
+        try:
+            return JSONResponse(await asyncio.to_thread(runtime.scripts_found, folder))
+        except (OSError, ValueError) as e:
+            return error(400, str(e))
+
+    def limits_view(name: str) -> Dict[str, Any]:
+        inst = runtime.lab.instruments[name]
+        ic = runtime.lab.config.instruments[name]
+        rows = [{"param": s.name, "label": s.title, "unit": s.unit, "drive": s.is_drive,
+                 "vendor": list(s.limits) if s.limits else None,
+                 "lab": list(ic.limits[s.name]) if s.name in ic.limits else None,
+                 "safe": s.safe if isinstance(s.safe, (int, float)) and not isinstance(s.safe, bool) else None}
+                for s in inst.card.params.values() if s.numeric and s.set_cmd is not None]
+        rows.sort(key=lambda r: not r["drive"])   # what drives the sample first
+        return {"instrument": name, "model": inst.card.model, "rows": rows,
+                "reviewed": name not in runtime.lab.config.unreviewed(),
+                "editable": runtime.lab_info.get("kind") == "file" and lab_file.exists()}
+
+    async def instrument_limits(request: Request) -> Response:
+        """GET: an instrument's numeric settings, with the card's limits and the lab's. POST {limits: {param:
+        [low, high] or null}, reviewed}: change the lab's in the lab config, at once (a person's; no Kelvin tool
+        reaches this). reviewed: the person checked them, so Kelvin's mark on an instrument it added goes."""
+        name = request.path_params["name"]
+        if name not in runtime.lab.instruments:
+            return error(404, "no instrument %r in the lab" % name)
+        if request.method == "GET":
+            return JSONResponse(limits_view(name))
+        if runtime.lab_info.get("kind") != "file" or not lab_file.exists():
+            return error(409, "Limits are set for your own lab (My instruments); the virtual lab's are fixed.")
+        body = await request.json()   # any time, a run or a chat going on too: the gate checks each change against them
+        card = runtime.lab.instruments[name].card
+        changes: Dict[str, Any] = {}
+        for p, lim in (body.get("limits") or {}).items():
+            spec = card.params.get(str(p))
+            if spec is None or not spec.numeric or spec.set_cmd is None:   # the settings limits_view lists
+                return error(400, "%s has no numeric setting %r" % (name, p))
+            if lim is None:
+                changes[spec.name] = None
+                continue
+            if not (isinstance(lim, (list, tuple)) and len(lim) == 2 and all(
+                    isinstance(x, (int, float)) and not isinstance(x, bool) for x in lim) and lim[0] <= lim[1]):
+                return error(400, "%s: give the lowest and the highest value, lowest first" % spec.title)
+            changes[spec.name] = [float(lim[0]), float(lim[1])]
+        reviewed = bool(body.get("reviewed"))
+        try:
+            text = set_limits(lab_file.read_text(encoding="utf-8"), name, changes, reviewed)
+            cfg = load_lab_config(text, lab_registry(lab_file.parent))   # a limit beyond the card's is refused here
+        except KeyError as e:
+            return error(404, e.args[0])
+        except ConfigError as e:
+            return error(400, "; ".join(e.errors[:3]))
+        tmp = lab_file.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(lab_file)
+        ic = runtime.lab.config.instruments[name]   # the running lab's: in force at once, no reconnecting
+        ic.limits = dict(cfg.instruments[name].limits)
+        if reviewed:
+            ic.added_by = ""
+        runtime.gate.log.write("limits", by="human (portal)", instrument=name,
+                               limits={p: list(v) for p, v in ic.limits.items()}, reviewed=reviewed)
+        return JSONResponse(limits_view(name))
 
     async def wake_view(request: Request) -> Response:
         """DELETE: the person cancels the chat's wake-up (Kelvin would have continued it later)."""
@@ -2632,6 +2719,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/alarms/{alarm_id}/ack", alarm_ack, methods=["POST"]),
         Route("/api/notify/test", notify_test, methods=["POST"]),
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
+        Route("/api/instruments/scripts", scripts_view, methods=["POST"]),
+        Route("/api/instruments/{name}/limits", instrument_limits, methods=["GET", "POST"]),
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
         Route("/api/terminal", terminal, methods=["POST"]),
         Route("/api/data-folder", data_folder, methods=["GET", "POST"]),

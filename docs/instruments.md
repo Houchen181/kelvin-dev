@@ -39,6 +39,20 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
 2. Review the drafted lab config, mainly the limits.
 3. **Save and connect** saves it as `~/Kelvin/lab.yaml` and health-checks every instrument. It checks that each one is the model its card says, so a changed address can't send commands to the wrong instrument. It also reads every reading once and checks that drives sit inside your limits.
 
+**From your lab's scripts.** Many labs already run their instruments from their own Python, Jupyter or MATLAB scripts. In **Set up…**, **From your scripts…** reads the scripts in a folder you choose. It never runs or imports them, and sends nothing from them to an instrument.
+- **What it finds:** for each instrument the scripts open, its address, the connection settings they use (baud rate, line endings, timeout), the commands they send with the values used, and the Kelvin card that fits: a model named in the scripts (a comment, a driver's class) and how many of their commands are on the card. An instrument at a VISA address is asked who it is, as a scan asks, and its reply decides the card.
+- **Limits from the values used:** the range the scripts use (with the card's safe value), inside the maker's limits.
+- **Adding them:** tick the ones you want and press **Add the checked ones to the lab config**. They go into the draft with those limits and settings, marked "from your scripts" for you to check; then **Save and connect** as usual.
+- **Recipes:** **Turn the measurement scripts into recipes…** opens a chat where Kelvin proposes a recipe for each measurement script (its loops become sweeps, its readings the measure list, its waits the settle times) and keeps each one you agree to.
+- **In a chat:** ask Kelvin to read your scripts and it does the same (`survey_scripts`).
+- **What it skips:** library folders (`site-packages`, `python_libs`, `venv`, `lib`, ...). It reads up to 300 files, each up to 1 MB.
+
+**Limits for one instrument.** In **Set up…**, each instrument of your lab has **Limits…** on its row. It lists the instrument's numeric settings, outputs first, with the card's limits and your lab's.
+- **Changing them:** set the lowest and highest values (leave both empty for the card's limits) and press **Save limits**. They are written into `lab.yaml`, and the rest of the file, comments included, stays as it was. They hold at once, also during a run, without reconnecting.
+- **Beyond the card:** a limit beyond the card's own is refused; that needs [your version of the card](#cards-for-new-instruments).
+- **Instruments Kelvin added:** tick **I checked these for my sample** to take out its `added_by: kelvin` mark when you save.
+- **Only people:** Kelvin can't change limits. Only a person can, here or in the lab config.
+
 Kelvin opens on your lab from then on. You can switch back to the virtual lab at any time. If your lab can't be connected at start-up, Kelvin opens the virtual lab and says why. Kelvin only switches labs while it is idle, and approvals go back to asking.
 
 From a terminal:

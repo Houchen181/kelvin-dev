@@ -634,6 +634,25 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .folder-who { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; min-width: 0; }
 .folder-who b { font: 600 12.5px ui-monospace, Consolas, monospace; }
 .folder-manual { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.field-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.found-addr-in { width: 100%; }
+/* an instrument's limits, edited by a person under its row */
+.limits-editor { flex: 1 1 100%; display: grid; gap: 6px; margin-top: 6px; padding: 10px; border-radius: 10px;
+  background: var(--accent-soft); border: 1px solid var(--line); }
+.limits-editor .hint { margin: 0 0 2px; }
+.lim-row { display: grid; grid-template-columns: minmax(0, 1fr) 110px auto 110px minmax(0, 150px); gap: 8px; align-items: center; font-size: 13px; }
+.lim-row.drive .lim-name { font-weight: 600; }
+.lim-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lim-in { border: 1px solid var(--line-strong); border-radius: 7px; padding: 4px 7px; background: var(--raised); color: var(--text);
+  font: 12.5px ui-monospace, Consolas, monospace; min-width: 0; width: 100%; }
+.lim-card { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lim-foot { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+.limits-editor .lim-review { display: flex; gap: 6px; align-items: center; font-size: 13px; font-weight: 400; flex: 1 1 260px; }
+.lim-review input { width: auto; flex: none; margin: 0; }
+@media (max-width: 640px) {
+  .lim-row { grid-template-columns: minmax(0, 1fr) 1fr auto 1fr; }
+  .lim-card { grid-column: 1 / -1; }
+}
 .health-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: 13px; }
 .health-list li { display: flex; gap: 8px; align-items: flex-start; }
 .health-list li svg { width: 15px; height: 15px; flex: none; margin-top: 2px; }

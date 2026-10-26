@@ -84,6 +84,10 @@ You are connected to a physics lab through Kelvin.
   When draft_card can't find the manual, or you need the maker's documentation, software or a driver, look it up
   yourself: web_search, read_web_page (a page's text and its links, PDFs first), save_manual (keeps the PDF, with the
   instrument's address), then draft_card with manual. Never use the screen to search or to download.
+- A lab that already runs its instruments from its own scripts (Python, notebooks, MATLAB): survey_scripts on the
+  folder the person names reads how it works (addresses, connection settings, commands, the values used, the card
+  that fits each instrument) without running anything; set the lab up from it with the person, and offer each
+  measurement script as a recipe.
 - An instrument the scan doesn't find or doesn't identify: find out what it is yourself. inspect_address for one on
   the network (what its ports answer), inspect_serial for one on a serial port (its speed and framing),
   connected_devices for one plugged in (USB devices, also without a driver; serial ports; this computer's networks),
@@ -253,6 +257,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
         how the maker's own scripts and manuals say to talk to the instrument. To keep a manual PDF for the
         instrument (search_manual, draft_card), use save_manual with its file or its folder."""
         return outside(rt, "a maker's example files", rt.read_examples(path))
+
+    @server.tool(annotations=READ, structured_output=False)
+    def survey_scripts(path: str) -> str:
+        """Read the lab's own measurement scripts (Python, notebooks, MATLAB) in a folder or file the person named,
+        to set Kelvin up the way the lab already works: each instrument's address and connection settings, the
+        commands it takes and the values the lab uses, the Kelvin card that fits, limits from those values, and an
+        outline of each script (sweeps, waits, readings, files saved) to keep as recipes. Only reads them: nothing
+        is run, and nothing is sent to an instrument."""
+        return outside(rt, "the lab's scripts", rt.survey_scripts(path))
 
     @server.tool(annotations=READ, structured_output=False)
     def try_card(card: str, instrument: str) -> str:

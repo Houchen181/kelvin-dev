@@ -340,3 +340,21 @@ def test_auto_mode_adds_and_tries_at_an_address_the_scan_missed(tmp_path, bench)
     rt.gate.approver = ScriptedApprover([False])
     assert rt.add_instrument("GPIB0::12::INSTR", card="srs/sr830").startswith("declined")
     assert "read text from the web (a web page)" in str(rt.gate.approver.requests[0])
+
+
+def test_a_persons_change_while_kelvin_asks_stays_in_the_lab_config(tmp_path, bench):
+    from labharness.discovery import set_limits
+    rt = file_runtime(tmp_path, SMU_ONLY)
+    rt.scan()
+    bench.devices["GPIB0::9::INSTR"] = Device("srs/sr830", name="sr830b")   # not in the scan: Kelvin asks first
+    lab_file = tmp_path / "lab.yaml"
+
+    class Person(ScriptedApprover):
+        def approve(self, request):   # while Kelvin's question waits, the person sets the smu's limits in Set up
+            lab_file.write_text(set_limits(lab_file.read_text(encoding="utf-8"), "smu", {"V": [-1, 1]}),
+                                encoding="utf-8")
+            return True
+    rt.gate.approver = Person()
+    assert rt.add_instrument("GPIB0::9::INSTR", card="srs/sr830").startswith("added lockin")
+    cfg = load_lab_config(lab_file.read_text(encoding="utf-8"), lab_registry(tmp_path))
+    assert cfg.instruments["smu"].limits["V"] == (-1, 1) and cfg.instruments["lockin"].added_by == "kelvin"

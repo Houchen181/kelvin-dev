@@ -607,8 +607,14 @@
       <input id="lab-pdf" type="file" accept="application/pdf,.pdf" hidden>
     </div>
     <div class="field">
-      <div class="field-row"><span class="field-label">Find instruments</span><button id="lab-scan" class="btn small" type="button">Scan</button></div>
-      <span class="hint">Asks each connected instrument (GPIB, USB, LAN, serial) who it is. Nothing is set.</span>
+      <div class="field-row"><span class="field-label">Find instruments</span>
+        <span class="field-actions"><button id="lab-scripts" class="btn small" type="button">From your scripts…</button><button id="lab-scan" class="btn small" type="button">Scan</button></span></div>
+      <span class="hint">Scan asks each connected instrument (GPIB, USB, LAN, serial) who it is; nothing is set. From your scripts reads the Python, notebook and MATLAB scripts your lab runs its instruments with (it never runs them) and lists their instruments, with the card and limits they suggest.</span>
+      <div id="lab-from-scripts" class="found-list" hidden></div>
+      <div class="field-actions" id="lab-scripts-actions" hidden>
+        <button id="lab-add-scripts" class="btn small" type="button">Add the checked ones to the lab config</button>
+        <button id="lab-recipes" class="btn small" type="button">Turn the measurement scripts into recipes…</button>
+      </div>
       <div id="lab-survey" class="survey-box" hidden><p id="lab-survey-why"></p><ul id="lab-survey-lines" class="why-lines"></ul></div>
       <div id="lab-found" class="found-list" hidden></div>
       <button id="lab-add-found" class="btn small" type="button" hidden>Add the checked ones to the lab config</button>

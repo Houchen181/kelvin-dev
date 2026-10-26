@@ -2421,11 +2421,11 @@
     if (!S.chatId) showFolder(r.folder, r.folder !== r.data);
   }
   function hasPicker() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_folder); }
-  async function pickFolder(start) {   // the computer's own folder picker in the Kelvin app; in a browser, the path typed
+  async function pickFolder(start, question) {   // the computer's own folder picker in the Kelvin app; in a browser, the path typed
     if (hasPicker()) {
       try { return (await window.pywebview.api.pick_folder(start || "")) || ""; } catch (e) { return ""; }
     }
-    const typed = window.prompt("The folder's full path, where this chat saves its runs:", start || "");
+    const typed = window.prompt(question || "The folder's full path, where this chat saves its runs:", start || "");
     return typed ? typed.trim() : "";
   }
   async function useFolder(path) {   // path null: the data folder
@@ -3512,7 +3512,7 @@
   const KIND_NAME = { "source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
     "laser": "laser", "laser-driver": "laser", "power-meter": "pm", "preamp": "preamp", "multimeter": "dmm",
     "nanovoltmeter": "nvm", "function-generator": "fg", "voltage-source": "vsrc", "vna": "vna" };
-  const LAB = { cards: [], found: [] };
+  const LAB = { cards: [], found: [], scripts: null, scriptsFolder: "" };
 
   function cardSelect(selected, placeholder) {
     const sel = h("select", { "aria-label": "Card" });
@@ -3879,7 +3879,9 @@
     const busy = setup && SETUP_BUSY.has(setup.state);
     const waiting = (unreviewed || []).length > 0;
     const text = waiting
-      ? "Kelvin added " + andList(unreviewed) + " itself. Check their limits in the lab config below: until you mark them reviewed, Kelvin asks you before each output change on them."
+      ? "Kelvin added " + andList(unreviewed) + " itself. Check " + (unreviewed.length === 1 ? "its" : "their") +
+        " limits with Limits… on " + (unreviewed.length === 1 ? "its row" : "each one's row") + " below: until you mark them reviewed, Kelvin asks you before each output change on " +
+        (unreviewed.length === 1 ? "it." : "them.")
       : (setup && setup.message ? setup.message + (busy ? "…" : "") : "");
     $("lab-setup-box").hidden = !text;
     $("lab-setup-box").classList.toggle("locked", waiting);
@@ -3897,15 +3899,75 @@
         ? h("span", { title: f.manual_from || "added by hand" }, "Manual, " + (f.manual_pages || "?") + " pages")
         : h("span", { class: "muted" }, f.manual_url ? "No manual yet" : "Its card names no manual address");
       const acts = [];
-      const act = (label, fn) => { const b = h("button", { class: "link soft", type: "button" }, label); b.addEventListener("click", fn); acts.push(b); };
+      const act = (label, fn) => { const b = h("button", { class: "link soft", type: "button" }, label); b.addEventListener("click", fn); acts.push(b); return b; };
       if (f.manual) act("Open", () => openInstrument(f.name, "manual"));
       else if (f.manual_url) act("Fetch from the maker", () => fetchManual(f.name));
       act(f.manual ? "Use another PDF…" : "Choose PDF…", () => choosePdf(f.name));
       act("Folder", () => openInstrument(f.name, "folder"));
-      return h("li", { class: "folder-row" },
+      const li = h("li", { class: "folder-row" },
         h("div", { class: "folder-who" }, h("b", {}, f.name), h("span", {}, f.model), who ? h("span", { class: "muted small" }, who) : null),
         h("div", { class: "folder-manual" }, manual, ...acts));
+      const limitsBtn = act("Limits…", () => editLimits(f.name, li, limitsBtn));
+      limitsBtn.classList.add("limits-btn");
+      li.querySelector(".folder-manual").append(limitsBtn);
+      return li;
     }));
+  }
+  // ------------------------------------------------------------------ an instrument's limits, set by a person
+  async function editLimits(name, li, btn) {
+    const open = li.querySelector(".limits-editor");
+    if (open) { open.remove(); btn.setAttribute("aria-expanded", "false"); return; }
+    let r;
+    try { r = await api("/api/instruments/" + encodeURIComponent(name) + "/limits"); } catch (e) { $("lab-msg").textContent = e.message; return; }
+    btn.setAttribute("aria-expanded", "true");
+    const box = h("div", { class: "limits-editor" });
+    const show = (v) => (v === null || v === undefined ? "" : String(Number(v.toPrecision ? v.toPrecision(8) : v)));
+    const rows = r.rows.map((row) => {
+      const lo = h("input", { class: "lim-in", type: "number", step: "any", value: row.lab ? show(row.lab[0]) : "",
+        placeholder: row.vendor ? show(row.vendor[0]) : "", "aria-label": row.label + ": lowest", disabled: !r.editable });
+      const hi = h("input", { class: "lim-in", type: "number", step: "any", value: row.lab ? show(row.lab[1]) : "",
+        placeholder: row.vendor ? show(row.vendor[1]) : "", "aria-label": row.label + ": highest", disabled: !r.editable });
+      row.ui = { lo, hi };
+      return h("div", { class: "lim-row" + (row.drive ? " drive" : "") },
+        h("span", { class: "lim-name", title: row.param }, row.label + (row.unit && !/\)$/.test(row.label) ? " (" + row.unit + ")" : "")),
+        lo, h("span", { class: "muted small" }, "to"), hi,
+        h("span", { class: "muted small lim-card" }, row.vendor ? "card: " + show(row.vendor[0]) + " to " + show(row.vendor[1]) : "no limit on its card"));
+    });
+    const msg = h("span", { class: "muted small" });
+    box.append(h("p", { class: "hint" }, r.rows.length
+      ? "What " + name + " may reach. Kelvin refuses anything beyond these and asks before driving harder. Empty: the card's limits." +
+        (r.editable ? "" : " The virtual lab's limits are fixed; your own lab's are set here.")
+      : name + " has no numeric setting to limit."), ...rows);
+    if (r.editable && r.rows.length) {
+      const reviewed = h("input", { type: "checkbox" });   // the person ticks it themselves
+      const save = h("button", { class: "btn small primary", type: "button" }, "Save limits");
+      save.addEventListener("click", async () => {
+        const limits = {};
+        for (const row of r.rows) {
+          const a = row.ui.lo.value.trim(), b = row.ui.hi.value.trim();
+          if (!a && !b) { if (row.lab) limits[row.param] = null; continue; }
+          if (!a || !b) { msg.textContent = row.label + ": give both the lowest and the highest."; return; }
+          limits[row.param] = [Number(a), Number(b)];
+        }
+        save.disabled = true;
+        try {
+          const saved = await api("/api/instruments/" + encodeURIComponent(name) + "/limits", { body: { limits, reviewed: !r.reviewed && reviewed.checked } });
+          const now = new Map(saved.rows.map((x) => [x.param, x.lab]));
+          for (const row of r.rows) row.lab = now.get(row.param) || null;
+          const checked = saved.reviewed && !r.reviewed;
+          if (checked) { r.reviewed = true; tick.remove(); }
+          msg.textContent = "Saved: Kelvin holds " + name + " to these from now on" + (checked ? ", and treats it like your other instruments." : ".");
+          refreshLabSetup(false);   // the lab config and the notices; this editor stays open
+        } catch (e) { msg.textContent = e.message; }
+        finally { save.disabled = false; }
+      });
+      const foot = h("div", { class: "lim-foot" });
+      const tick = h("label", { class: "lim-review" }, reviewed, " I checked these for my sample: Kelvin may treat " + name + " like my other instruments");
+      if (!r.reviewed) foot.append(tick);
+      foot.append(save, msg);
+      box.append(foot);
+    }
+    li.append(box);
   }
   async function openInstrument(name, what) {
     try { await api("/api/instruments/" + encodeURIComponent(name) + "/open", { body: { what } }); } catch (e) { $("lab-msg").textContent = e.message; }
@@ -3952,12 +4014,19 @@
     refreshLabSetup();
   }
   // what setting up changed (status, marks, folders, the lab config Kelvin wrote), without touching the rest
-  async function refreshLabSetup() {
+  async function refreshLabSetup(folders = true) {
     let r;
     try { r = await api("/api/lab"); } catch (e) { return; }
     showLabState(r.info, r.name);
     showSetup(r.setup, r.unreviewed);
-    renderFolders(r.folders || []);
+    if (folders) {
+      renderFolders(r.folders || []);
+      if (LAB.scripts) {
+        const at = new Map((r.folders || []).map((f) => [f.address, f.name]));
+        for (const it of LAB.scripts.instruments) it.in_lab = at.get(it.address) || null;
+        renderScripts();
+      }
+    }
     if (document.activeElement !== $("lab-yaml")) $("lab-yaml").value = r.yaml || "";
   }
 
@@ -3971,6 +4040,7 @@
     $("lab-card").replaceWith(Object.assign(cardSelect("", "Card…"), { id: "lab-card" }));
     $("lab-yaml").value = r.yaml || "";
     $("lab-found").hidden = $("lab-add-found").hidden = $("lab-survey").hidden = true;
+    renderScripts();   // what the lab's scripts showed, kept while the portal is open
     $("lab-health").hidden = true;
     $("lab-msg").textContent = r.info && r.info.error ? r.info.error : "";
     $("lab-dialog").showModal();
@@ -4043,8 +4113,87 @@
     try {
       const r = await api("/api/instruments/draft", { body: { items, base: $("lab-yaml").value } });
       $("lab-yaml").value = r.yaml;
-      $("lab-msg").textContent = "Added " + items.map((i) => i.name).join(", ") + ". Review the limits, then save and connect.";
+      const already = r.already || [], there = new Set(already.map((a) => a.item));
+      const added = items.filter((i, k) => !there.has(k)).map((i) => i.name);
+      $("lab-msg").textContent = [added.length ? "Added " + added.join(", ") + ". Review the limits, then save and connect." : "",
+        already.length ? already.map((a) => a.name + " (" + a.address + ")").join(", ") + (already.length === 1 ? " is" : " are") + " in the lab config already." : ""].filter(Boolean).join(" ");
     } catch (e) { $("lab-msg").textContent = e.message; }
+  }
+  // ------------------------------------------------------------------ setting up from the lab's own scripts
+  async function fromScripts() {
+    const folder = await pickFolder(LAB.scriptsFolder || "", "The folder with your lab's scripts (Python, notebooks, MATLAB):");
+    if (!folder) return;
+    LAB.scriptsFolder = folder;
+    const btn = $("lab-scripts");
+    btn.disabled = true; btn.textContent = "Reading your scripts…";
+    $("lab-msg").textContent = "Reading the scripts in " + folder + " (never running them), then asking each instrument who it is…";
+    try {
+      LAB.scripts = await api("/api/instruments/scripts", { body: { folder } });
+      renderScripts();
+      const n = LAB.scripts.instruments.length, s = LAB.scripts.scripts.length;
+      $("lab-msg").textContent = n ? "Found " + n + " instrument" + (n === 1 ? "" : "s") + " in " + s + " script" + (s === 1 ? "" : "s") +
+        ". Check the cards and limits, then add the ones you want." : "No instrument work in the scripts there.";
+    } catch (e) { $("lab-msg").textContent = e.message; }
+    finally { btn.disabled = false; btn.textContent = "From your scripts…"; }
+  }
+  function renderScripts() {
+    const r = LAB.scripts, box = $("lab-from-scripts");
+    box.hidden = !r || !r.instruments.length;
+    $("lab-scripts-actions").hidden = !r || (!r.instruments.length && !r.scripts.length);
+    $("lab-add-scripts").hidden = !r || !r.instruments.some((it) => !it.in_lab);
+    $("lab-recipes").hidden = !r || !r.scripts.length;
+    if (!r) return;
+    const span = (lim) => Object.entries(lim || {}).map(([p, v]) => p + " " + v[0] + " to " + v[1]).join(", ");
+    box.replaceChildren(h("p", { class: "hint" }, "In " + r.folder + ": " + r.scripts.length + " script" + (r.scripts.length === 1 ? "" : "s") + " read, none run."),
+      ...r.instruments.map((it) => {
+        if (it.in_lab) {
+          return h("div", { class: "found in-lab" }, h("span", { class: "found-name" }, it.in_lab),
+            h("span", { class: "found-model" }, "already in this lab"), h("code", { class: "found-addr" }, it.address));
+        }
+        const card = it.card || null;
+        const was = it.ui && { check: it.ui.check.checked, name: it.ui.name.value, card: it.ui.model.value,
+          addr: it.address ? "" : it.ui.addr.value };   // what the person changed, kept when the list is drawn again
+        const check = h("input", { type: "checkbox", "aria-label": "Add " + (it.address || it.name) });
+        check.checked = was ? was.check : !!(card && card.id && it.address);
+        const name = h("input", { class: "found-input", value: was ? was.name : it.name || "", placeholder: "name", spellcheck: "false", "aria-label": "Name" });
+        const model = cardSelect(was ? was.card : card ? card.id : "", "Choose its card…");
+        model.addEventListener("change", () => { if (model.value && (it.address || it.ui.addr.value.trim())) check.checked = true; });
+        const addr = it.address ? h("code", { class: "found-addr", title: it.where.join(", ") }, it.address)
+          : h("input", { class: "found-input found-addr-in", placeholder: "its address", spellcheck: "false", "aria-label": "Address",
+            title: "The scripts set it as " + (it.expression || "?"), value: was ? was.addr : "" });
+        it.ui = { check, name, model, addr };
+        const why = [card ? card.why : "no card of Kelvin's fits: choose one, or make one under Cards",
+          it.idn && !(card && card.why.includes("answered")) ? "answered " + it.idn.slice(0, 60) : it.asked || "",
+          card && Object.keys(card.limits || {}).length ? "limits from the values used: " + span(card.limits) : "",
+          it.address ? "" : "address set at run time (" + (it.expression || "?") + "): type it",
+          "in " + it.where.slice(0, 2).join(", ")].filter(Boolean).join(" · ");
+        return h("div", { class: "found-wrap" }, h("label", { class: "found" }, check, name, model, addr),
+          h("div", { class: "found-write muted small" }, why));
+      }));
+  }
+  function addScripts() {
+    const items = [];
+    for (const it of (LAB.scripts || {}).instruments || []) {
+      if (!it.ui || !it.ui.check.checked) continue;
+      const address = it.address || it.ui.addr.value.trim(), card = it.ui.model.value;
+      if (!address || !card) { $("lab-msg").textContent = (it.ui.name.value || "An instrument") + " needs its address and its card."; return; }
+      items.push({ name: it.ui.name.value.trim() || "instr", card, address, connection: it.connection,
+        limits: it.card && it.card.id === card ? it.card.limits : null,
+        note: (it.idn || (it.card && it.card.why) || "from your scripts").slice(0, 60) });
+    }
+    addToConfig(items);
+  }
+  function recipesFromScripts() {   // in a new chat: Kelvin proposes a recipe per script, and keeps each one you agree to
+    const folder = LAB.scripts && LAB.scripts.folder;
+    if (!folder) return;
+    $("lab-dialog").close();
+    newChat();
+    $("input").value = "Turn the measurement scripts in " + folder + " into recipes: read them with survey_scripts, " +
+      "then propose a recipe for each measurement script, with this lab's instruments, and keep each with " +
+      "save_recipe once I agree. Say what a recipe can't carry over.";
+    autosize();
+    updateSend();
+    $("input").focus();
   }
   function addFound() {
     addToConfig(LAB.found.filter((f) => f.ui && f.ui.check.checked).map((f) => ({
@@ -4073,6 +4222,7 @@
         : body.reviewed && !r.health.length ? "Marked reviewed: Kelvin treats them like your other instruments now."
         : "Connected to " + r.name + ". Every instrument answered as expected.";
       pollState();
+      refreshLabSetup();   // each instrument's row (its Limits…), and the scripts' instruments now in the lab
     } catch (e) {
       $("lab-msg").replaceChildren(h("span", {}, e.message), ...installOffer(e.data && e.data.install));
     } finally { save.disabled = false; }
@@ -5061,6 +5211,9 @@
     });
     $("lab-scan").addEventListener("click", scanLab);
     $("lab-add-found").addEventListener("click", addFound);
+    $("lab-scripts").addEventListener("click", fromScripts);
+    $("lab-add-scripts").addEventListener("click", addScripts);
+    $("lab-recipes").addEventListener("click", recipesFromScripts);
     $("lab-add").addEventListener("click", addByAddress);
     $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value }));
     $("lab-unlock").addEventListener("click", unlockLab);
