@@ -57,9 +57,9 @@ python -m venv .venv
 
 ## Releasing
 
-To publish a new version: bump the version in `src/labharness/_version.py` and `pyproject.toml`, then push a tag such as `v0.3.14`. GitHub builds both apps, tests them, and publishes the release. The tag must match the version.
+To publish a new version: bump the version in `src/labharness/_version.py` and `pyproject.toml`, then push a tag such as `v0.3.14`. GitHub builds both apps, tests them, and publishes the release in the public repository [Houchen181/Kelvin](https://github.com/Houchen181/Kelvin), which holds the published releases and the instrument collection but no source. The tag must match the version. Publishing there needs the repository secret `PUBLIC_RELEASES_TOKEN`: a fine-grained personal access token with **Contents: read and write** on Houchen181/Kelvin only.
 
-Installed Kelvins find the release by themselves (`updater.py`): twice a day they look at this repository's releases, download the installer for their channel, check it against the SHA-256 digest GitHub reports for the file, and install it when Kelvin closes (or at once with **Restart to update**). While the repository is private, they reach it through the GitHub CLI (`gh`) signed in on that computer; anonymous checks start working once it is public. On macOS Kelvin only says a new version is out and links to it.
+Installed Kelvins find the release by themselves (`updater.py`): twice a day they look at the releases for their channel, download the installer, check it against the SHA-256 digest GitHub reports for the file, and install it when Kelvin closes (or at once with **Restart to update**). Published builds look at the public Houchen181/Kelvin, which needs no sign-in; private builds look at this private repository through the GitHub CLI (`gh`) signed in on that computer. On macOS Kelvin only says a new version is out and links to it.
 
 ## Claude Code bridge (temporary, developer only)
 

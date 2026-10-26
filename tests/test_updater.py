@@ -50,8 +50,22 @@ def fetcher(files):
     return fetch
 
 
+def test_published_builds_come_from_the_public_repository_and_private_ones_from_the_source(tmp_path):
+    asked = []
+
+    def fetch(url):
+        asked.append(url)
+        return json.dumps(RELEASES).encode()
+    stable = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetch)
+    assert stable.check()["state"] == "available" and stable.via == "web"     # public: no sign-in needed
+    assert asked == ["https://api.github.com/repos/Houchen181/Kelvin/releases?per_page=30"]
+    private = Updater(tmp_path, current="0.3.5", chan="private", plat="win32", gh=[], fetch=fetch)
+    assert private.repo == "Houchen181/kelvin-dev"
+    assert updater.api("private") == "https://api.github.com/repos/Houchen181/kelvin-dev/releases?per_page=30"
+
+
 def test_download_check_and_install(tmp_path):
-    files = {updater.API: json.dumps(RELEASES).encode(), "https://dl/Kelvin-Setup-0.3.6.exe": SETUP}
+    files = {updater.api("stable"): json.dumps(RELEASES).encode(), "https://dl/Kelvin-Setup-0.3.6.exe": SETUP}
     u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher(files))
     state = u.run_once("ask")
     assert state["state"] == "available" and state["latest"] == "0.3.6" and u.pending() is None   # asks first
@@ -70,7 +84,7 @@ def test_download_check_and_install(tmp_path):
 
 
 def test_a_download_that_does_not_match_is_thrown_away(tmp_path):
-    files = {updater.API: json.dumps(RELEASES).encode(), "https://dl/Kelvin-Setup-0.3.6.exe": b"something else"}
+    files = {updater.api("stable"): json.dumps(RELEASES).encode(), "https://dl/Kelvin-Setup-0.3.6.exe": b"something else"}
     u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher(files))
     u.check()
     with pytest.raises(UpdateError, match="checksum"):
@@ -80,7 +94,7 @@ def test_a_download_that_does_not_match_is_thrown_away(tmp_path):
         u.install(1, relaunch=False, spawn=lambda c: None)                 # nothing checked to install
     no_digest = [dict(RELEASES[0], assets=[dict(RELEASES[0]["assets"][0], digest=None)])]
     u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[],
-                fetch=fetcher({updater.API: json.dumps(no_digest).encode()}))
+                fetch=fetcher({updater.api("stable"): json.dumps(no_digest).encode()}))
     u.check()
     with pytest.raises(UpdateError, match="no checksum"):
         u.download()
@@ -120,7 +134,7 @@ def test_the_portal_installs_only_when_nothing_runs(tmp_path):
     from labharness.web.settings import Settings
     from labharness.web.store import ChatStore
 
-    files = {updater.API: json.dumps(RELEASES).encode(), "https://dl/Kelvin-Setup-0.3.6.exe": SETUP}
+    files = {updater.api("stable"): json.dumps(RELEASES).encode(), "https://dl/Kelvin-Setup-0.3.6.exe": SETUP}
     u = Updater(tmp_path, current="0.3.5", chan="stable", plat="win32", gh=[], fetch=fetcher(files))
     started, closed = [], []
     real_install = u.install
