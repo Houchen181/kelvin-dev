@@ -1,9 +1,11 @@
 """Kelvin writes the card for an instrument it does not know: it finds the maker's manual, drafts the card from the
 manual's command reference with your model, and makes it safe to try whatever the model wrote.
 
-    1. The manual. Addresses your model suggests on the maker's own site, and known patterns for some makers. A web
-       page is followed one step to the PDFs it links. A document counts only once Kelvin has downloaded it and its
-       text names the model; of those, the one with the most command syntax wins.
+    1. The manual. The addresses the instrument collection gives for the model (collection.py), when it knows it.
+       Otherwise, or if none of those is a command reference: addresses your model suggests on the maker's own site,
+       and known patterns for some makers. A web page is followed one step to the PDFs it links. A document counts
+       only once Kelvin has downloaded it and its text names the model; of those, the one with the most command
+       syntax wins. The collection also names the card (its id, model name and kind).
     2. The card. The model writes it from the command reference (the pages densest in commands), the card checker
        reviews it, and the model fixes what the checker found, once.
     3. Safe to try. Status draft: on real hardware its outputs stay simulation-only and every setting change asks a
@@ -17,7 +19,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urljoin, urlparse
 
 from . import carddraft, profiles
@@ -92,26 +94,42 @@ def pdf_links(html: str, base: str) -> List[str]:
     return out[:8]
 
 
-def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
-                log: Callable[[str], None] = lambda m: None,
-                problems: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
-    """The best manual Kelvin could download and check for this model, or None (and why, in `problems`)."""
-    queue: List[Tuple[str, int]] = []
+def guesses(maker: str, model: str, ask: Optional[Ask], log: Callable[[str], None] = lambda m: None,
+            problems: Optional[List[str]] = None) -> List[str]:
+    """Where the maker may publish the manual: known patterns for some makers, then what the model suggests."""
     compact = re.sub(r"[^A-Za-z0-9]", "", model).upper()
-    for rx, pattern in KNOWN:
-        if rx.search(maker):
-            queue.append((pattern.format(MODEL=compact), 0))
+    out = [pattern.format(MODEL=compact) for rx, pattern in KNOWN if rx.search(maker)]
     if ask is not None:
         try:
             answer, _ = ask(SUGGEST_SYSTEM, suggest_prompt(maker, model))
-            queue += [(u, 0) for u in urls_in(answer)[:6]]
+            out += urls_in(answer)[:6]
         except Exception as e:
             log("could not ask the model for the manual's address: %s" % profiles._first_line(e))
             if problems is not None:
                 problems.append(profiles._first_line(e))
+    return out
+
+
+def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
+                log: Callable[[str], None] = lambda m: None,
+                problems: Optional[List[str]] = None, known: Sequence[str] = ()) -> Optional[Dict[str, Any]]:
+    """The best manual Kelvin could download and check for this model, or None (and why, in `problems`). `known`:
+    the addresses the instrument collection gives for it, tried first; Kelvin guesses only when none of them is a
+    command reference."""
+    queue: List[Tuple[str, int]] = [(u, 0) for u in known]
+    guessed = not known
+    if guessed:
+        queue = [(u, 0) for u in guesses(maker, model, ask, log, problems)]
     best: Optional[Dict[str, Any]] = None
     seen, fetches = set(), 0
-    while queue and fetches < MAX_FETCHES:
+    while fetches < MAX_FETCHES:
+        if not queue:
+            if guessed or (best is not None and best["score"] >= GOOD):
+                break
+            log("the instrument collection's manual addresses gave no command reference; looking further")
+            guessed = True
+            queue = [(u, 0) for u in guesses(maker, model, ask, log, problems)]
+            continue
         url, depth = queue.pop(0)
         if url in seen:
             continue
@@ -168,14 +186,23 @@ def command_excerpt(pages: List[str], limit: int = carddraft.MAX_MANUAL) -> str:
     return "\n\n".join("[page %d]\n%s" % (i + 1, pages[i].strip()) for i in sorted(chosen))
 
 
-def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: str) -> Tuple[str, List[str]]:
-    """The card as Kelvin keeps it, whatever the model wrote (see the module's notes), and what was changed."""
+def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: str,
+              entry: Optional[Dict[str, Any]] = None) -> Tuple[str, List[str]]:
+    """The card as Kelvin keeps it, whatever the model wrote (see the module's notes), and what was changed. `entry`:
+    the instrument collection's entry for the instrument, which names the card."""
     import yaml
     data = yaml.safe_load(carddraft.extract_yaml(text))
     if not isinstance(data, dict):
         raise ValueError("the model did not answer with a card")
     changed: List[str] = []
     data["status"] = "draft"
+    if entry:   # the collection's id, name and kind, so a card it adds for this model later replaces this draft
+        named = {"id": str(entry["id"]), "model": str(entry.get("name") or data.get("model") or ""),
+                 "kind": str(entry.get("kind") or data.get("kind") or "")}
+        if any(data.get(k) != v for k, v in named.items()):
+            changed.append("named it as the instrument collection does (%s)" % entry["id"])
+        data.update(named)
+        data.setdefault("vendor", str(entry.get("maker") or maker))
     if data.pop("on_connect", None):
         changed.append("left out the commands on connect")
     ident = data.get("identify") if isinstance(data.get("identify"), dict) else {}
@@ -185,8 +212,10 @@ def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: 
     except re.error:
         fits = False
     if not fits:
-        ident["idn"] = "^%s\\s*,\\s*%s\\b" % (re.escape(maker), re.escape(model))
-        changed.append("set the identity pattern from the instrument's own reply")
+        known = str(((entry or {}).get("identify") or {}).get("idn") or "")   # it found the entry: it fits the reply
+        ident["idn"] = known or "^%s\\s*,\\s*%s\\b" % (re.escape(maker), re.escape(model))
+        changed.append("set the identity pattern from %s" % ("the instrument collection" if known else
+                                                              "the instrument's own reply"))
     ident["example"] = idn
     data["identify"] = ident
     params = data.get("parameters") if isinstance(data.get("parameters"), dict) else {}
@@ -218,15 +247,19 @@ def make_safe(text: str, maker: str, model: str, idn: str, url: str, model_key: 
     return head + yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=110), changed
 
 
-def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, ask: Ask) -> Tuple[str, List[str], str]:
+def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, ask: Ask,
+          entry: Optional[Dict[str, Any]] = None) -> Tuple[str, List[str], str]:
     """Write the card with the model, check it, and have the model repair it once. Returns (card text, changes, model)."""
     name = "%s %s (it answers *IDN? with %r)" % (maker, model, ",".join(idn.split(",")[:2]))
+    if entry:
+        name = "%s (%s in Kelvin's instrument collection: use that id; it answers *IDN? with %r)" % (
+            entry.get("name") or "%s %s" % (maker, model), entry["id"], ",".join(idn.split(",")[:2]))
     answer, key = ask(carddraft.DRAFT_SYSTEM, carddraft.draft_prompt(command_excerpt(manual_pages), name))
-    text, changed = make_safe(answer, maker, model, idn, url, key)
+    text, changed = make_safe(answer, maker, model, idn, url, key, entry)
     card, problems, _ = carddraft.check(text)
     if problems:
         answer, key = ask(carddraft.DRAFT_SYSTEM, carddraft.repair_prompt(text, problems))
-        text, changed = make_safe(answer, maker, model, idn, url, key)
+        text, changed = make_safe(answer, maker, model, idn, url, key, entry)
         card, problems, _ = carddraft.check(text)
     if problems:
         raise ValueError("the card the model wrote still has problems: " + "; ".join(problems[:4]))
@@ -234,18 +267,25 @@ def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, a
 
 
 def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: Optional[Fetch] = None,
-              builtin_ids: Any = (), log: Callable[[str], None] = lambda m: None) -> Dict[str, Any]:
+              builtin_ids: Any = (), log: Callable[[str], None] = lambda m: None,
+              catalog: Any = None) -> Dict[str, Any]:
     """For an instrument that answered but matches no card: find its manual, write its card, keep it as a draft.
+    builtin_ids: the ids Kelvin has cards for (its own and the collection's). catalog: the instrument collection
+    (collection.py), when it is on: if it knows the instrument, its manual addresses come first and it names the card.
     Returns {card_id, model, kind, manual: {url, data, kind}, changed} or {error}."""
     fetch = fetch or profiles.http_get
     idn = str(found.get("idn") or "")
+    entry = catalog.instrument_for(idn) if catalog is not None and idn else None
     maker, model = maker_model(idn)
+    if entry and not (maker and model):
+        maker, model = str(entry.get("maker") or ""), str(entry.get("model") or "")
     if not maker or not model:
         return {"error": "its identity reply %r does not say maker and model" % idn[:60]}
     if ask is None:
         return {"error": "Kelvin needs a model to write the %s %s card: add an API key in Settings" % (maker, model)}
     asked: List[str] = []
-    manual = find_manual(maker, model, ask, fetch, log, asked)
+    from .collection import manuals
+    manual = find_manual(maker, model, ask, fetch, log, asked, known=manuals(entry) if entry else ())
     if manual is None and asked:
         return {"error": "Kelvin could not ask a model about the %s %s (%s)" % (maker, model, asked[0])}
     if manual is None:
@@ -255,7 +295,7 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
         return {"error": "the %s %s manual Kelvin found (%s) has no command reference: choose the programming "
                          "manual's PDF in Lab setup" % (maker, model, manual["url"])}
     try:
-        text, changed, key = draft(manual["pages"], maker, model, idn, manual["url"], ask)
+        text, changed, key = draft(manual["pages"], maker, model, idn, manual["url"], ask, entry)
         card, path, _ = carddraft.save(cards_dir, text, builtin_ids, by="kelvin")
     except Exception as e:
         return {"error": "Kelvin could not write the %s %s card: %s" % (maker, model, profiles._first_line(e))}

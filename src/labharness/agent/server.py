@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import webbrowser
 from pathlib import Path
@@ -17,6 +18,7 @@ from mcp.types import ToolAnnotations
 from .. import carddraft
 from .._version import __version__
 from ..clock import ScaledClock, SimClock
+from ..collection import Collection
 from ..labconfig import load_envelope
 from ..virtual_lab import build_virtual_lab, demo_envelope
 from .approval import ApprovalServer, WebApprover
@@ -47,6 +49,8 @@ You are connected to a physics lab through Kelvin.
   they are away. lab_status lists active alarms; mention any you see.
 - To plan an experiment, first look at what is known: search_papers, read the most relevant one or two, then
   propose parameters with reasons and cite them as [Author Year](url). Never invent a reference or a number.
+  For a standard measurement (R(T), Hall, gate sweeps, I-V, ODMR, FMR...), experiment_guide has the procedure,
+  pitfalls and plans to start from, with this lab's instrument names.
 - Spin experiments (NV centres; atoms or ions with an AOM and a microwave or RF drive) go in this order: CW ODMR
   (sweep the MW frequency, read the counter's rate) to find the resonance; Rabi (pulse generator protocol rabi,
   sweep its tau, read the counter's signal, reference and contrast) for the pi time; then pulsed ODMR with that
@@ -61,7 +65,8 @@ You are connected to a physics lab through Kelvin.
   A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
   queued and roughly how long it takes; queue_show follows it.
 - For an instrument Kelvin has no card for: get its manual's command reference or the maker's example scripts
-  (pasted, or read_examples on a file or folder the person names), read card_guide, and write the card from that
+  (pasted, or read_examples on a file or folder the person names; when the instrument collection knows the model,
+  scan_instruments gives its manual's address to point them to), read card_guide, and write the card from that
   text only. check_card until it is valid; try_card on the instrument (it only reads) and compare the readings with
   what the person sees; fix and try again; then save_card. A person adds it to the lab and reviews it.
 - Work like an experimentalist at the bench, not like a programmer testing code:
@@ -172,6 +177,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """How to write a card for an instrument Kelvin does not know: the format, the rules, and a full example.
         Read it before writing a card from a manual."""
         return carddraft.guide()
+
+    @server.tool(annotations=READ, structured_output=False)
+    def experiment_guide(experiment: str = "", query: str = "") -> str:
+        """Experiments from Kelvin's instrument collection: what to measure and how (roles, setup, procedure,
+        analysis, pitfalls) with plans to start from. query: find experiments (e.g. "Hall", "NV ODMR", "R(T)");
+        experiment: one of them by its id, with its plans' instrument names changed to this lab's. Fit the values to
+        the sample, then run them with run_plan as usual."""
+        return rt.experiment_guide(experiment, query)
 
     @server.tool(annotations=READ, structured_output=False)
     def check_card(card: str) -> str:
@@ -369,6 +382,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     data_dir = args.data_dir or home / ("agents" if (home / "accounts.json").exists() else "virtual-lab")
     runtime = LabRuntime(lab, approver, data_dir, envelope)
     runtime.cards_dir = Path.home() / "Kelvin" / "cards"
+    try:   # the instrument collection's experiments, from the copy the app keeps (this server never fetches it)
+        off = json.loads((home / "settings.json").read_text(encoding="utf-8")).get("collection") == "off"
+    except (OSError, ValueError, AttributeError):
+        off = False
+    runtime.collection = None if off else Collection(home)
     runtime.monitor.start()
     ui = ApprovalServer(runtime, port=args.ui_port).start()
 

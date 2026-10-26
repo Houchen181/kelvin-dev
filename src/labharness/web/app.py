@@ -33,10 +33,11 @@ from ..cards import trace_x
 from .. import autocard
 from .. import profiles
 from ..clock import ScaledClock, SimClock
+from ..collection import Collection
 from ..discovery import add_to_config
 from ..labconfig import ConfigError, load_lab_config
 from .. import carddraft
-from ..virtual_lab import build_lab, builtin_ids, builtin_registry, is_simulated, lab_registry, open_home_lab
+from ..virtual_lab import build_lab, builtin_registry, is_simulated, kelvin_ids, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in
 from . import review, rules as rulebook
 from .chatgpt import SignIn, SignInError
@@ -55,7 +56,8 @@ SIGNED_OUT = {"/api/session", "/api/accounts", "/api/stop", "/api/runs/stop"}
 LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
                           "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/phone",
                           "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount", "/api/quit",
-                          "/api/update", "/api/hub")
+                          "/api/update", "/api/hub", "/api/collection")
+COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
 
 
 def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
@@ -199,10 +201,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None,
                auto_setup: bool = False, accounts: Optional[Accounts] = None, updater: Any = None,
-               on_exit: Optional[Any] = None) -> Any:
+               on_exit: Optional[Any] = None, sync_collection: bool = False) -> Any:
     """accounts: people sign in, each to their own settings, keys, chats, data folder and record (accounts.py).
     Without it, one person uses Kelvin, as before accounts. updater: keeps an installed Kelvin up to date
-    (updater.py); on_exit closes the app (the desktop window), so an update can install."""
+    (updater.py); on_exit closes the app (the desktop window), so an update can install. sync_collection: keep the
+    instrument collection up to date from GitHub while it is switched on (collection.py); without it, Kelvin only
+    reads the copy it has."""
     signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
     hub = HubLink(settings, store, lambda: runtime.data_dir)   # the Kelvin hub: the person's account across labs
     agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo, signin), settings)
@@ -215,6 +219,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
+    collection = Collection(home)                         # the instrument collection's copy: ~/Kelvin/collection
+
+    def collection_on() -> Optional[Collection]:
+        """The instrument collection while it is switched on in Settings (it is, unless switched off)."""
+        return collection if settings.get("collection") != "off" else None
+
+    runtime.collection = collection_on()
     default_data = home / "virtual-lab"                   # runs, record and reports unless the user chose a folder
     loop_ref: Dict[str, Any] = {}
     session: Dict[str, Any] = {"user": None}              # who is signed in (with accounts); everyone is equal
@@ -250,12 +261,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return asyncio.run_coroutine_threadsafe(go(), loop).result(timeout=330)
 
     def write_card(found: Dict[str, Any]) -> Dict[str, Any]:
-        r = autocard.make_card(found, runtime.cards_dir, ask_model, builtin_ids=builtin_ids(),
-                               log=lambda m: setup_log.info("  %s", m))
+        r = autocard.make_card(found, runtime.cards_dir, ask_model, builtin_ids=kelvin_ids(runtime.collection),
+                               log=lambda m: setup_log.info("  %s", m), catalog=runtime.collection)
         if r.get("path"):   # usable at once in Lab setup, like a card a person saves
-            from ..cards import load_card
-            runtime.lab.registry.put(load_card(r["path"]))
+            runtime.refresh_cards([r["card_id"]])
         return r
+
+    def sync_collection() -> Dict[str, Any]:
+        """Bring the instrument collection's copy here up to date (the network). Cards for models the lab's registry
+        has none for can be used at once; a newer card for one it has is used when the lab is next opened."""
+        status = collection.sync()
+        if runtime.collection is not None:
+            runtime.refresh_cards([c.id for c in collection.cards() if c.id not in runtime.lab.registry])
+        return status
 
     setup = AutoSetup(runtime, settings, home, can_switch=lambda: busy_problem() is None, make_card=write_card)
     tasks: List[asyncio.Task] = []
@@ -264,6 +282,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         runtime.literature.enabled = settings.get("literature") != "off"
         runtime.literature.openalex_key = settings.get("openalex_api_key") or ""
         runtime.scan_network = settings.get("scan_network") != "off"   # scans also look on the local network
+        runtime.collection = collection_on()                            # scans, cards and experiments use it
         runtime.auto_report = settings.get("auto_report") or "both"     # a report after every run and queue
         runtime.report_kinds = set(settings.report_kinds)                # scan, device and project reports
 
@@ -287,6 +306,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             setup.start("start")
         hub.wake = asyncio.Event()
         tasks.append(asyncio.ensure_future(hub_loop()))
+        if sync_collection:   # the instrument collection, while it is switched on
+            loop_ref["collection"] = asyncio.Event()
+            tasks.append(asyncio.ensure_future(collection_loop()))
         try:
             yield
         finally:
@@ -527,6 +549,39 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             else:
                 return error(400, "unknown update operation %r" % op)
         return JSONResponse(updates.view(updater, settings.updates))
+
+    # ------------------------------------------------------------------ the instrument collection (collection.py)
+
+    async def collection_loop() -> None:
+        """Keep the collection's copy here up to date while it is switched on: soon after start, twice a day, and at
+        once when a person switches it on."""
+        wake = loop_ref["collection"]
+        try:
+            await asyncio.wait_for(wake.wait(), 30)
+        except asyncio.TimeoutError:
+            pass
+        while True:
+            wake.clear()
+            if collection_on() is not None:
+                try:
+                    await asyncio.to_thread(sync_collection)
+                except Exception:   # never let one bad update end the updating
+                    setup_log.exception("instrument collection")
+            try:
+                await asyncio.wait_for(wake.wait(), COLLECTION_EVERY)
+            except asyncio.TimeoutError:
+                pass
+
+    async def collection_view(request: Request) -> Response:
+        """GET: where the collection's copy here is from and what it holds. POST {op: sync}: look for a newer one
+        now (only while it is switched on: switched off, Kelvin does not go to the network for it)."""
+        if request.method == "POST":
+            if collection_on() is None:
+                return error(409, "The instrument collection is switched off in Settings.")
+            if str((await request.json()).get("op") or "") != "sync":
+                return error(400, "unknown collection operation")
+            await asyncio.to_thread(sync_collection)
+        return JSONResponse(dict(await asyncio.to_thread(collection.status), on=collection_on() is not None))
 
     async def lab_log(request: Request) -> Response:
         """The lab's instrument log: the latest events of everyone who used these instruments, with their names."""
@@ -906,16 +961,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def cards_view(request: Request) -> Response:
         """GET: the user's cards. POST {yaml, replace}: check and keep one (a person may set any status)."""
         if request.method == "GET":
-            return JSONResponse({"cards": carddraft.user_cards(runtime.cards_dir), "folder": str(runtime.cards_dir)})
+            return JSONResponse({"cards": carddraft.user_cards(runtime.cards_dir, kelvin_ids(runtime.collection)),
+                                 "folder": str(runtime.cards_dir)})
         body = await request.json()
         try:
-            card, path, warnings = carddraft.save(runtime.cards_dir, str(body.get("yaml") or ""), builtin_ids(), "human",
+            card, path, warnings = carddraft.save(runtime.cards_dir, str(body.get("yaml") or ""),
+                                                  kelvin_ids(runtime.collection), "human",
                                                   str(body.get("replace") or "") or None)
         except ValueError as e:
             return error(400, str(e))
-        if body.get("replace") and body["replace"] != card.id and body["replace"] not in builtin_ids():
-            runtime.lab.registry.remove(body["replace"])
-        runtime.lab.registry.put(card)
+        runtime.refresh_cards([card.id] + ([str(body["replace"])] if body.get("replace") else []))
         runtime.gate.log.write("card", by="human", card=card.id, status=card.status, file=path.name)
         return JSONResponse({"id": card.id, "file": path.name, "status": card.status, "warnings": warnings})
 
@@ -931,7 +986,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(404, e.args[0])
         except ValueError as e:
             return error(400, str(e))
-        runtime.lab.registry.put(card)
+        runtime.refresh_cards([card.id])   # reviewed, a person's card wins; back to draft, Kelvin's own may
         runtime.gate.log.write("card", by="human", card=card.id, status=card.status)
         return JSONResponse({"id": card.id, "status": card.status})
 
@@ -941,8 +996,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             carddraft.delete(runtime.cards_dir, card_id)
         except KeyError as e:
             return error(404, e.args[0])
-        if card_id not in builtin_ids():
-            runtime.lab.registry.remove(card_id)
+        runtime.refresh_cards([card_id])   # Kelvin's own card of that id, if it has one, or none
         return JSONResponse({"ok": True})
 
     async def card_try(request: Request) -> Response:
@@ -1230,13 +1284,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         try:
             if use == "virtual":
                 lab, envelope, info = await asyncio.to_thread(open_home_lab, lab_file.parent, "virtual", 10,
-                                                              settings.switched_off)
+                                                              settings.switched_off, runtime.collection)
             else:
                 text = str(body.get("yaml") or "") if use != "mine" else (
                     lab_file.read_text(encoding="utf-8") if lab_file.exists() else "")
                 if not text.strip():
                     return error(400, "There is no lab config yet; scan for instruments or write one first.")
-                registry = lab_registry(lab_file.parent)   # Kelvin's cards and the user's own
+                registry = lab_registry(lab_file.parent, runtime.collection)   # Kelvin's, the collection's, the user's
                 load_lab_config(text, registry)   # check it before touching any instrument
                 lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off)
                 envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
@@ -1557,12 +1611,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def settings_view(request: Request) -> Response:
         if request.method == "POST":
+            was_on = collection_on() is not None
             try:
                 settings.update(await request.json())
             except ValueError as e:
                 return error(400, str(e))
             configure_notifications()
             configure_literature()
+            if collection_on() is not None and not was_on and loop_ref.get("collection") is not None:
+                loop_ref["collection"].set()   # switched on: fetch it now
             agent.providers = make_providers(settings, demo, signin) if providers is None else providers
         return JSONResponse({"settings": settings.public(), "models": await agent.models()})
 
@@ -1702,6 +1759,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/lab-log", lab_log),
         Route("/api/claude-code", claude_code_view),
         Route("/api/update", update_view, methods=["GET", "POST"]),
+        Route("/api/collection", collection_view, methods=["GET", "POST"]),
         Route("/api/chats", chats, methods=["GET", "POST"]),
         Route("/api/chats/{chat_id}", chat, methods=["GET", "PATCH", "DELETE"]),
         Route("/api/chats/{chat_id}/turn", turn, methods=["POST"]),
@@ -1849,6 +1907,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = ap.parse_args(argv)
 
     settings = Settings(args.settings)
+    home = Path(args.settings).parent
     info = None
     if args.lab:  # an explicit lab config: simulated ones run at --speed, real ones on real time
         simulated = is_simulated(load_lab_config(args.lab, builtin_registry()))
@@ -1856,9 +1915,8 @@ def main(argv: Optional[List[str]] = None) -> None:
                         seed=args.seed, switched_off=settings.switched_off)
         envelope = None
     else:   # the user's lab.yaml next to the settings, if they have one; otherwise the virtual lab
-        lab, envelope, info = open_home_lab(Path(args.settings).parent, settings.get("lab") or "auto", args.speed,
-                                            settings.switched_off)
-    home = Path(args.settings).parent
+        lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", args.speed, settings.switched_off,
+                                            Collection(home) if settings.get("collection") != "off" else None)
     accounts = None if (args.no_accounts or args.data_dir) else Accounts(home)   # people sign in (accounts.py)
     if accounts is not None:
         data_dir, problem = home / "lab", None   # until someone signs in
@@ -1874,7 +1932,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         store = ChatStore(Path(args.data_dir or home / "virtual-lab") / "chats")
     hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)
     app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts, auto_setup=not (args.no_setup or args.lab),
-                     accounts=accounts)
+                     accounts=accounts, sync_collection=True)
     url = "http://127.0.0.1:%d/#%s" % (args.port, settings.access_key)
     print("Kelvin portal: %s" % url, file=sys.stderr, flush=True)
     if not args.no_browser:

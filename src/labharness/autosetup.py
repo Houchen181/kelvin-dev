@@ -122,9 +122,11 @@ class AutoSetup:
                     return self._done(" ".join(card_problems), found=0, unknown=len(unknown),
                                       lines=looked.get("lines") or [])
                 if not matched:
+                    named = [f["model"] for f in unknown if f.get("collection") and f.get("model")]
                     return self._done(looked.get("reason") or (
-                        "%d instrument%s answered but Kelvin has no card for %s yet; make one in Lab setup"
-                        % (len(unknown), "" if len(unknown) == 1 else "s", "it" if len(unknown) == 1 else "them")
+                        "%d instrument%s answered but Kelvin has no card for %s yet%s; make one in Lab setup"
+                        % (len(unknown), "" if len(unknown) == 1 else "s", "it" if len(unknown) == 1 else "them",
+                           " (%s)" % ", ".join(named) if named else "")
                         if unknown else "No instruments found on this computer"),
                         found=0, unknown=len(unknown), lines=looked.get("lines") or [])
                 if not self._connect(matched):
@@ -174,8 +176,9 @@ class AutoSetup:
         taken = [f.get("suggested") for f in matched if f.get("suggested")]
         for f in unknown:
             maker, model = maker_model(str(f.get("idn") or ""))
-            self._set("drafting", message="Finding the %s %s manual and writing its card (a minute or two)"
-                      % (maker or "unknown", model or "instrument"))
+            name = f.get("model") if f.get("collection") else ""   # the instrument collection's name for it
+            self._set("drafting", message="Finding the %s manual and writing its card (a minute or two)"
+                      % (name or "%s %s" % (maker or "unknown", model or "instrument")))
             log.info("  writing a card for %s at %s", f.get("idn"), f["address"])
             try:
                 r = self.make_card(f)
@@ -201,7 +204,7 @@ class AutoSetup:
         """Write the observed lab and connect to it. False (and a status saying why) if that is not possible now."""
         from .virtual_lab import build_lab, lab_registry
         rt = self.runtime
-        registry = lab_registry(self.home)
+        registry = lab_registry(self.home, rt.collection)
         text = draft_observed(matched, registry)
         names = ", ".join("%s (%s)" % (f.get("suggested"), f.get("model")) for f in matched)
         self._set("connecting", message="Found %s; connecting" % names, found=len(matched))

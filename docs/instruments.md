@@ -13,7 +13,7 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
   - `settings.json`: every setting and reading it had (ranges, time constants, sensitivities...), refreshed on every start.
   - `manual.pdf`: the maker's own manual, fetched once from the address on the card, and `manual.txt` with its text by page.
 - **Manuals for involved scans.** Before a scan that uses buffers, triggers, sweep or list modes, fast acquisition, ranges or filters, Kelvin reads the instrument's manual with `instrument_info` and `search_manual`. It works from the passages it finds and cites the page. Search weighs rare words most, so a mnemonic such as `OFLT` or a SCPI path such as `SOURce:CURRent:LIMit` finds its own entry.
-- **Manuals you add yourself.** 27 of the 37 cards carry the maker's link. Keysight hands out some manuals only after a sign-in, the Oxford Mercury iTC manual is no longer public, SpinCore's is behind its support pages, and M Squared, Light Conversion and TOPTICA give their protocol documents to owners. QICK's documentation is on its project site. For these, or for any other instrument, choose the PDF in **Set up…** (**Choose PDF…**) or put it in the folder as `manual.pdf`.
+- **Manuals you add yourself.** 28 of the 49 cards carry the maker's link, the Oxford Mercury iTC's among them (Oxford Instruments publishes its manual on the Mercury support site). Keysight hands out some manuals only after a sign-in, SpinCore's is behind its support pages, and M Squared, Light Conversion and TOPTICA give their protocol documents to owners. The cards for instruments driven through a maker's library follow its SDK's documentation, and QICK's documentation is on its project site. For these, or for any other instrument, choose the PDF in **Set up…** (**Choose PDF…**) or put it in the folder as `manual.pdf`.
 - **Switching it off.** Settings has **Set them up when Kelvin starts**, **Fetch their manuals from the makers** and **Look on the local network too**. Fetching a manual sends only its address to the maker's site. An existing `lab.yaml` is never rewritten. Instruments it doesn't list are only reported.
 
 **Where a scan looks.** No vendor driver is needed for the network or USB.
@@ -135,6 +135,22 @@ instruments:
   li:     { card: zhinst/mfli, address: "zhinst://dev5678", limits: { amplitude: [0, 0.5] } }
 ```
 
+## The instrument collection
+
+Kelvin's public repository, [Houchen181/Kelvin](https://github.com/Houchen181/Kelvin), holds its releases and an instrument collection: cards, where each maker publishes its manuals, experiments with plans, and lab configs for common setups. Kelvin keeps a copy in `~/Kelvin/collection/` and works from it, offline too.
+
+- **Kept up to date, and checked.** Soon after Kelvin starts, then twice a day, it asks GitHub for the collection's newest commit and takes `index.json` and every card, experiment and lab config from that commit (`raw.githubusercontent.com`), so nothing can change halfway. Every file must have the SHA-256 that `index.json` gives it, when it arrives and each time Kelvin reads it. If anything is missing or doesn't match, or GitHub can't be reached, the copy Kelvin has stays in use. Only files that changed are fetched, and Kelvin only downloads: nothing about your lab goes to GitHub. **Update now** in Settings → Instruments looks at once; Settings also shows which commit Kelvin has and what it holds.
+- **Which card Kelvin uses.** For each instrument model, the first of:
+  1. your card in `~/Kelvin/cards`, if a person reviewed it on this computer (marked it reviewed, or saved it as community or lab-verified). Nothing replaces it;
+  2. the collection's card: a fix of one of Kelvin's own cards, a lab's check of it on hardware, or a card Kelvin doesn't bring. A collection card that is a copy of an older version of Kelvin's own card never replaces the newer one Kelvin brings: Kelvin knows every version of its cards (`card_versions.json`);
+  3. Kelvin's own card;
+  4. your draft. The Cards dialog says when Kelvin uses its own card instead.
+
+  A collection card keeps its status, so a draft stays simulation-only on real hardware. A card for a model the lab has no card for can be used at once; a newer card for one the lab uses takes effect when the lab is next connected. Cards that the collection's `kic install` copied into `~/Kelvin/cards` count as the collection's while nobody has changed them, so its newer versions replace them.
+- **Instruments without a card.** When a scan gets an identity reply that no card matches, Kelvin looks it up in the collection, which names the instrument (*Keithley 6221 AC and DC current source* rather than its reply). To write its card, Kelvin starts from the public manual the collection links, and asks your model where the maker publishes it only if that is not a command reference. The draft gets the collection's id, name and kind, so a card the collection adds for that model later replaces the draft, unless you reviewed it.
+- **Experiments.** In a chat, Kelvin finds the collection's experiments with `experiment_guide`: what each needs (its roles), setup, procedure, analysis, pitfalls and plans. The plans are written for one of the collection's lab configs. Kelvin renames their instruments to yours (the instrument with the same card, otherwise one of a kind the role takes), says which have no match in your lab, and lists parameters your cards don't have. They are a starting point: every plan goes through the same checks and approvals as any other.
+- **Switching it off.** Settings → Instruments → **Use Kelvin's instrument collection**. When it is off, Kelvin doesn't contact GitHub for it; scans and `experiment_guide` stop using it at once, and from the next time the lab is connected Kelvin uses only its own cards and yours. The copy stays on disk, for when it is switched on again.
+
 ## Spin experiments (NV centers)
 
 Kelvin builds the pulse sequences for spin experiments itself, checks them, and plays them on a pulse generator:
@@ -169,7 +185,7 @@ For pulsing the SG384 from the pulse generator, set its `mod_type` to pulse, `pu
 ## Cards for new instruments
 
 **Kelvin writes the card itself.** When a scan finds an instrument that says who it is but matches no card, Kelvin writes one. It does this at start-up, and when you press **Find its manual and write its card** on that instrument in **Set up…**.
-1. **It finds the manual.** Your default model suggests where the maker publishes it, and Kelvin also tries known addresses for some makers. A product or support page is followed one step to the PDFs it links, on the maker's own site only. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
+1. **It finds the manual.** If the [instrument collection](#the-instrument-collection) knows the model, Kelvin starts from the manual it links. Otherwise, or if that manual has no command reference, your default model suggests where the maker publishes it, and Kelvin also tries known addresses for some makers. A product or support page is followed one step to the PDFs it links, on the maker's own site only. A document counts only once Kelvin has downloaded it and its text names the model. Of those, the one with the most command syntax wins.
 2. **It drafts the card.** The model writes the card from the manual's command pages, the card checker reviews it, and the model fixes what the checker found, once.
 3. **It makes the card safe to try, whatever the model wrote:**
    - The card is a draft. On real hardware its outputs stay simulation-only, and every setting change asks you.

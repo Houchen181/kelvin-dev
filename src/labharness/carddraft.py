@@ -134,14 +134,19 @@ def file_for(card_id: str) -> str:
     return re.sub(r"[^\w.-]+", "_", card_id).strip("_") + ".yaml"
 
 
-def user_cards(cards_dir: Optional[Path]) -> List[Dict[str, Any]]:
-    """The user's own cards, with any problems (a broken file is listed, not skipped silently)."""
+def user_cards(cards_dir: Optional[Path], kelvin_ids: Iterable[str] = ()) -> List[Dict[str, Any]]:
+    """The user's own cards, with any problems (a broken file is listed, not skipped silently). kelvin_ids: the ids
+    Kelvin has cards for itself (its own, the collection's), which it uses instead of a draft of the same id."""
     out = []
     if not cards_dir or not Path(cards_dir).is_dir():
         return out
+    kelvin_ids = set(kelvin_ids)
     for path in sorted(Path(cards_dir).glob("*.yaml")):
         text = path.read_text(encoding="utf-8")
         card, problems, warnings = check(text, path.name)
+        if card is not None and card.id in kelvin_ids and card.status == "draft":
+            warnings = ["Kelvin has a card %s of its own and uses that instead of this draft, until a person marks "
+                        "this one reviewed" % card.id] + warnings
         out.append({"file": path.name, "id": card.id if card else None, "model": card.model if card else path.stem,
                     "kind": card.kind if card else "", "vendor": card.vendor if card else "",
                     "status": card.status if card else "broken", "problems": problems, "warnings": warnings,
@@ -149,20 +154,22 @@ def user_cards(cards_dir: Optional[Path]) -> List[Dict[str, Any]]:
     return out
 
 
-def save(cards_dir: Path, text: str, builtin_ids: Iterable[str], by: str = "human",
+def save(cards_dir: Path, text: str, kelvin_ids: Iterable[str], by: str = "human",
          replace: Optional[str] = None) -> Tuple[Card, Path, List[str]]:
-    """Check and keep a card. Kelvin's cards must be drafts and may not replace a card a person reviewed."""
+    """Check and keep a card. kelvin_ids: the ids Kelvin has cards for itself (its own, and the instrument
+    collection's); a new card may not take one, though a person's card that has one already can be changed. Kelvin's
+    cards must be drafts and may not replace a card a person reviewed."""
     card, problems, warnings = check(text)
     if card is None:
         raise ValueError("the card has problems: " + "; ".join(problems[:8]))
-    if card.id in set(builtin_ids):
+    cards_dir = Path(cards_dir)
+    path = cards_dir / file_for(card.id)
+    if card.id in set(kelvin_ids) and not path.exists():
         raise ValueError("Kelvin already has a card %s; give yours another id, e.g. %s" % (
             card.id, "mylab/" + card.id.split("/")[-1]))
     if by != "human" and card.status != "draft":
         raise ValueError("a card Kelvin writes must have status: draft; a person reviews it and marks it lab-verified")
-    cards_dir = Path(cards_dir)
     cards_dir.mkdir(parents=True, exist_ok=True)
-    path = cards_dir / file_for(card.id)
     if path.exists() and by != "human":
         old, _, _ = check(path.read_text(encoding="utf-8"))
         if old is not None and old.status != "draft":

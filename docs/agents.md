@@ -36,6 +36,7 @@ Tools:
 - **Plans and the queue:** `validate_plan`, `simulate_plan`, `run_plan`, `queue_show`, `queue_add`, `queue_edit`, `queue_change`, `queue_start`, `queue_pause`, `queue_save`, `queue_load`.
 - **Data:** `analyze_run`, `list_runs`, `get_run_data`, `get_trace`, `recent_events`, `make_report` (`kind`: runs, scan, device or project).
 - **New instruments:** `card_guide`, `check_card`, `read_examples`, `try_card`, `save_card`.
+- **Experiments:** `experiment_guide`: the instrument collection's experiments, with their plans' instrument names changed to the lab's ([instruments.md](instruments.md#the-instrument-collection)).
 - **Literature:** `search_papers`, `read_paper`.
 
 **Security limit:** the access key keeps the model from approving its own requests through its tools. An agent that also has a shell on the same PC could still reach the page. For real hardware, run Kelvin on a machine where the agent has no shell.

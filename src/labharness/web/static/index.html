@@ -356,6 +356,14 @@
             </div>
             <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows, with their outputs locked at safe until you review them. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website. Looking on the local network finds instruments that announce themselves (LXI); the first time, Windows may ask whether Kelvin may use the network: allow private networks. For an instrument it doesn't know, Kelvin finds the maker's manual and writes a draft card with your default model (it sends the maker, the model and the manual's command pages, never the serial number). A draft's outputs stay simulation-only and its setting changes ask you until you review it.</span>
           </div>
+          <div class="field">
+            <div class="field-row"><span class="field-label">Instrument collection</span><button id="collection-sync" class="link" type="button">Update now</button></div>
+            <div class="checks">
+              <label class="check"><input id="collection" type="checkbox"> Use Kelvin's instrument collection</label>
+            </div>
+            <span id="collection-status" class="hint"></span>
+            <span class="hint">Cards, the makers' manual addresses and experiments from Kelvin's public repository on GitHub, kept in ~/Kelvin/collection so they work offline. Kelvin looks for a newer collection twice a day and checks every file against the collection's index. A collection card replaces Kelvin's own card for the same instrument (a fix, or a lab's check on hardware) when the lab is next connected, but never a card you reviewed on this computer, and a draft stays simulation-only. A scan names instruments the collection knows and takes their manuals from it. Switched off, Kelvin doesn't go to GitHub for it, and uses only its own cards and yours once the lab is next connected.</span>
+          </div>
         </section>
         <section class="set-page" data-page="data" hidden>
           <h3 class="set-title">Data &amp; reports</h3>

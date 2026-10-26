@@ -754,4 +754,4 @@ class CardRegistry:
             raise KeyError("no card %r (known: %s)" % (card_id, ", ".join(sorted(self._cards))))
 
     def __iter__(self):
-        return iter(self._cards.values())
+        return iter(list(self._cards.values()))   # a snapshot: cards may be added while a scan goes through them
