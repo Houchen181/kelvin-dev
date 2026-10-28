@@ -115,6 +115,8 @@ def _dur(seconds: float) -> str:
 
 
 def _same(spec: ParamSpec, a: Any, b: Any) -> bool:
+    if a is None or b is None:   # a setting with no read-back, not set since connecting: unknown, never the same
+        return False
     if spec.numeric:
         return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-15)
     return a == b

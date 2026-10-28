@@ -32,9 +32,14 @@ Top level:
   status: draft (always, for a card you write); manual: which manual and chapter it came from.
 - identify: {idn: a regex matching the *IDN? reply, example: a real reply}. Add query: if the instrument does not
   answer *IDN?.
-- error_query: the command that reads the error queue, if any (e.g. "SYSTem:ERRor?").
-- connection (only if the manual requires it): read_termination, write_termination, baud_rate, data_bits, parity,
-  stop_bits, timeout_ms, write_only (a listen-only instrument), ack (a reply every set returns), enq: true (each
+- error_query: the command that reads the error queue, if any (e.g. "SYSTem:ERRor?"). Replies starting with 0 ("0,No
+  error", 0000) mean no error; for any other way of saying it, no_error: a regex for that reply (Newport's "1TE@").
+- connection (only if the manual requires it): read_termination, write_termination, baud_rate, data_bits, parity
+  (none, odd, even; or the manual's N, O, E), stop_bits, or framing: "8N1" for all three; timeout_ms, write_only (a
+  listen-only instrument), set_reply (a regex for the reply every set command gets, while queries get only their
+  answer: an Arduino's "^OK$", Oxford Mercury's ":VALID$"), ack (the line sent after every command, queries too, as
+  Coherent OBIS sends OK after each answer), echo: true (each command is echoed as a line first), greeting_lines (lines
+  the instrument sends by itself when a connection opens, e.g. 2 for the AMI 430 on its LAN port), enq: true (each
   command is answered ACK or NAK and the reply comes only on ENQ, as on Pfeiffer's gauge controllers; a get is then
   the bare mnemonic, e.g. "PR1", and a set the mnemonic with its parameters, e.g. "SEN,{value},0").
 - parameters: one entry per quantity, keyed by a short name.

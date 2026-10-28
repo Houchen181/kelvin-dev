@@ -209,6 +209,8 @@ class Instrument:
         if self.card.error_query is None:
             return None
         resp = self.backend.query(self.card.error_query.render()).strip()
+        if self.card.no_error and re.search(self.card.no_error, resp):   # the card's own no-error reply: 1TE@ (SMC100)
+            return None
         return None if re.match(r"^\+?0+\s*(,|$)", resp) else resp   # "0,No error", 0 (SRS LERR?), 0000 (Pfeiffer ERR)
 
     def limits(self, param: str) -> Optional[Tuple[float, float]]:
