@@ -504,3 +504,74 @@ def test_a_draft_for_a_model_kelvins_card_does_not_fit_gets_its_own_id(tmp_path)
     card, problems, _ = check((tmp_path / "cards" / "keithley_6220.yaml").read_text(encoding="utf-8"))
     assert problems == [] and re.search(card.idn_pattern, "KEITHLEY INSTRUMENTS INC.,MODEL 6220,4321,D04", re.I)
     assert not re.search(card.idn_pattern, "KEITHLEY INSTRUMENTS INC.,MODEL 6221,1,D04", re.I)   # never Kelvin's 6221
+
+
+# ------------------------------------------------------------------ 16: reconnecting takes the card as it is now
+
+PLATE = """card: 1
+id: student/hotplate
+model: Student hot plate
+kind: temperature-controller
+status: draft
+identify: { idn: "^HEATER" }
+connection: { ack: OK }
+parameters:
+  T: { label: Temperature, kind: measure, unit: degC, get: "T?" }
+  setpoint: { label: Setpoint, kind: drive, unit: degC, set: "SET {value}", get: "SET?", limits: [0, 100], safe: 0 }
+"""
+
+
+@pytest.fixture
+def plate(tmp_path):
+    """l07's hot plate, as it is: OK after each set only, and a card that said ack (an OK after every command)."""
+    from labharness.adapters import set_resource_manager
+    sent, state = [], {"SET?": "0", "T?": "22.4", "*IDN?": "HEATER-ARDUINO v2"}
+
+    def answer(cmd):
+        if cmd in state:
+            return state[cmd]
+        if cmd.startswith("SET "):
+            state["SET?"] = cmd.split()[1]
+            return "OK"
+        return None
+    line = Line(answer)
+    line.sent = sent
+
+    class Rm:
+        def open_resource(self, name):
+            line.pending.clear()
+            return line
+    set_resource_manager(Rm())
+    (tmp_path / "cards").mkdir()
+    (tmp_path / "cards" / "student_hotplate.yaml").write_text(PLATE, encoding="utf-8")
+    (tmp_path / "lab.yaml").write_text("lab: Bench\ninstruments:\n  hotplate: { card: student/hotplate, address: "
+                                       "\"ASRL4::INSTR\", limits: { setpoint: [0, 60] } }\n", encoding="utf-8")
+    yield sent, state
+    set_resource_manager(None)
+
+
+def test_reconnecting_an_instrument_uses_its_card_as_it_is_now(tmp_path, plate):
+    """l01, l03, l06, l07: every card fix needed a Kelvin restart, as reconnect_instrument kept the card the
+    instrument connected with; one run went out with the old card and heated the plate. Reconnecting takes the card
+    from disk, and connects again when its connection settings changed."""
+    pytest.importorskip("mcp")
+    from labharness.agent.runtime import LabRuntime
+    from labharness.virtual_lab import build_lab, lab_registry
+    sent, state = plate
+    lab = build_lab(tmp_path / "lab.yaml", registry=lab_registry(tmp_path))
+    rt = LabRuntime(lab, ScriptedApprover([]), tmp_path / "data")
+    rt.home, rt.cards_dir = tmp_path, tmp_path / "cards"
+    with pytest.raises(Exception):
+        lab.read("hotplate", "T")                                              # ack after a query: never comes
+    fixed = PLATE.replace("connection: { ack: OK }", "connection: { set_reply: \"^OK$\" }")
+    (tmp_path / "cards" / "student_hotplate.yaml").write_text(fixed, encoding="utf-8")
+    said = rt.reconnect_instrument("hotplate")
+    assert "card student/hotplate as it is now" in said and "connected again" in said, said
+    assert lab.read("hotplate", "T") == pytest.approx(22.4)
+    assert lab.instruments["hotplate"].card.connection == {"set_reply": "^OK$"}
+    assert rt.reconnect_instrument("hotplate") == "hotplate is connected, with its card as it is now"   # no change
+    broken = fixed.replace("  setpoint:", "  target:")                         # the lab config limits setpoint
+    (tmp_path / "cards" / "student_hotplate.yaml").write_text(broken, encoding="utf-8")
+    said = rt.reconnect_instrument("hotplate")
+    assert "keeps the card it connected with" in said and "setpoint" in said, said
+    assert "setpoint" in lab.instruments["hotplate"].card.params

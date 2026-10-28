@@ -36,6 +36,16 @@ def first_line(e: BaseException) -> str:
     return str(e).splitlines()[0][:300] if str(e).strip() else type(e).__name__
 
 
+def same_card(a: Card, b: Card) -> bool:
+    """The same card, as written and bound to the same variables (a card file edited since gives False)."""
+    return a.id == b.id and a.data == b.data and a.bound == b.bound and a.status == b.status
+
+
+def connection_of(card: Card) -> Tuple[Any, ...]:
+    """What a connection is made with: a change here needs the instrument connected again."""
+    return (card.connection, card.on_connect, card.library, card.requires)
+
+
 CONNECTING = "Kelvin is connecting it as it starts"   # an instrument of a lab opened before connecting (later=True)
 
 
@@ -104,17 +114,36 @@ class Lab:
             return None
         return "not connected (%s)" % inst.unavailable if inst.unavailable else "switched off in the Lab panel"
 
-    def reconnect(self, name: str) -> None:
+    def reconnect(self, name: str, card: Optional[Card] = None) -> str:
         """Connect an instrument that could not be connected; it stays set aside, with the new reason, if it still
-        can't (the error is raised)."""
+        can't (the error is raised). card: its card as it is now, when it may have changed since the instrument
+        connected (a card fixed meanwhile): the instrument takes it, and a connection whose settings it changed
+        (line ends, an ack, serial framing) is made again, as closing a VISA session sends the instrument nothing.
+        A maker's driver, whose closing could send something, keeps its connection until Kelvin next opens the lab.
+        Returns what changed, in words ('' for nothing)."""
         inst = self.instruments[name]
+        news = ""
+        if card is not None:
+            bound = card.bind(inst.config.vars)
+            if not same_card(bound, inst.card):
+                news = "its card %s as it is now" % card.id
+                old, inst.card = inst.card, bound
+                if hasattr(inst.backend, "card"):
+                    inst.backend.card = bound   # a driver translates the card's commands
+                if inst.enabled and connection_of(old) != connection_of(bound):
+                    if not getattr(inst.backend, "quiet_close", False):
+                        return news + "; its new connection settings apply when Kelvin next opens the lab"
+                    inst.backend.close()
+                    inst.backend = Unavailable(name, "connecting again with its card as it is now")
+                    news += ", connected again with its new connection settings"
         if inst.unavailable is None:
-            return
+            return news
         try:
             inst.backend = self._factory(name, inst.card, inst.config.address)
         except Exception as e:
             inst.backend = Unavailable(name, first_line(e))
             raise
+        return news
 
     def switch(self, name: str, on: bool) -> None:
         """Switch an instrument on or off for this lab. Off sends nothing: a plain VISA session is closed (that

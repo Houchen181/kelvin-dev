@@ -94,6 +94,41 @@ def lab_registry(home: Any = None, collection: Any = None) -> CardRegistry:
     return registry
 
 
+def card_now(lab: Lab, name: str, home: Any = None, collection: Any = None) -> Optional[Card]:
+    """The card an instrument of `lab` has on disk now, by the layers a lab opens with (lab_registry), when it differs
+    from the one it connected with (a card fixed since); None when it is the same. The lab's registry takes it.
+    ValueError when the card is gone, or the lab config would not be valid with it (a limit on a parameter it no
+    longer has): then the instrument keeps the card it has."""
+    from .labconfig import ConfigError
+    from .lab import same_card
+    inst = lab.instruments[name]
+    fresh = lab_registry(home, collection)
+    if inst.card.id not in fresh:
+        raise ValueError("Kelvin has no card %s any more" % inst.card.id)
+    card = fresh.get(inst.card.id)
+    if same_card(card.bind(inst.config.vars), inst.card):
+        return None
+    ic = inst.config
+    named = set(ic.limits) | set(ic.rates) | set(getattr(ic, "auto", {}) or {}) | set(getattr(ic, "guards", {}) or {})
+    missing = sorted(p for p in named if p not in card.params)
+    if missing:
+        raise ValueError("the lab config names %s, which %s has no longer" % (", ".join(missing), card.id))
+    source = Path(lab.config.source) if lab.config.source and not lab.config.source.startswith("<") else None
+    if source is not None and source.is_file():   # the whole config, as the next start would read it
+        registry = CardRegistry()
+        for c in lab.registry:
+            registry.put(c)
+        registry.put(card)
+        try:
+            load_lab_config(source, registry)
+        except ConfigError as e:
+            ours = [x for x in e.errors if "instruments.%s" % name in x] or e.errors
+            raise ValueError("the lab config would have problems with %s as it is now: %s" % (card.id,
+                                                                                           "; ".join(ours[:3])))
+    lab.registry.put(card)
+    return card
+
+
 def build_virtual_lab(clock: Any = None, seed: int = 0, config: Optional[Any] = None,
                       registry: Optional[CardRegistry] = None, switched_off: Optional[SwitchedOff] = None) -> Lab:
     clock = clock or SimClock()

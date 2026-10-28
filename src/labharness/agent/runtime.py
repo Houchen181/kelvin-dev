@@ -2789,26 +2789,36 @@ class LabRuntime:
 
     def reconnect_instrument(self, name: str, by: str = "agent") -> str:
         """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package
-        installed, the instrument switched on or plugged in). Connecting changes nothing on it."""
+        installed, the instrument switched on or plugged in), with its card as it is on disk now: a card fixed since
+        it connected is used from now on (lab.Lab.reconnect). Connecting changes nothing on it."""
+        from ..virtual_lab import card_now
         inst = self.lab.instruments.get(name)
         if inst is None:
             return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
-        if inst.enabled:
-            return "%s is connected" % name
-        if not inst.unavailable:
-            return "%s is switched off in the Lab panel: ask_to_switch_on asks the person" % name
+        try:
+            card = card_now(self.lab, name, self.home, self.collection)
+        except ValueError as e:   # the card is gone, or no longer fits the lab config: the instrument keeps its own
+            return "%s keeps the card it connected with: %s" % (name, e)
+        if not inst.enabled and not inst.unavailable:
+            news = self.lab.reconnect(name, card)
+            return "%s is switched off in the Lab panel: ask_to_switch_on asks the person%s" % (
+                name, " (it will use %s)" % news if news else "")
+        if inst.enabled and card is None:
+            return "%s is connected, with its card as it is now" % name
         with self.lock:
             try:
-                self.lab.reconnect(name)
+                news = self.lab.reconnect(name, card)
             except Exception as e:
                 self.gate.log.write("reconnect_failed", by=by, instrument=name, error=inst.unavailable)
                 return "%s is still not connected: %s" % (name, inst.unavailable or e)
-            self.gate.log.write("instrument_connected", by=by, instrument=name)
+            self.gate.log.write("instrument_connected", by=by, instrument=name, card=inst.card.id,
+                                reloaded=bool(news))
             self._caps_if_waiting()
             self._refresh()
         health = self.lab.health_check([name])[0]
-        return "%s is connected now%s" % (name, ": " + "; ".join(health.problems) if health.problems else
-                                          " and answers as its card expects")
+        return "%s is connected now%s%s" % (name, ", with " + news if news else "",
+                                            ": " + "; ".join(health.problems) if health.problems else
+                                            " and answers as its card expects")
 
     def _fetch_files(self, env: str, source: str) -> str:
         """A maker's files into an environment: a folder or file on this computer, or a web address. A Python package
