@@ -29,6 +29,7 @@ parameters:
     tol: 0.002
     rate_param: velocity
     timeout: 600
+    busy: { get: "{controller}TS", match: "(28|1E)$" }
     description: An absolute move (PA), in the stage's units (mm for linear stages); Kelvin waits until the stage is there. Moves are refused until the stage is homed (do_action home) and outside the controller's software limits.
   position_actual:
     label: Position
