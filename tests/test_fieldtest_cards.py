@@ -666,3 +666,93 @@ def test_add_instrument_takes_the_card_a_name_means(tmp_path):
         assert said.startswith("not added: ") and "find_card" in said, said
     finally:
         set_resource_manager(None)
+
+
+# ------------------------------------------------------------------ 13b: the instrument collection, used
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows' 260-character path limit")
+def test_the_collection_is_kept_under_a_long_home_folder(tmp_path):
+    """l08, l09, l10: five of ten Kelvins could not keep the collection (its deepest file reached 253 characters,
+    longer home folders went over Windows' 260), and one path aborted the whole update, saying so only in the log."""
+    from labharness.collection import Collection
+    from test_collection import A, WIDGET, GitHub
+    home = tmp_path / ("a-rather-long-folder-name-" * 6) / ("for-a-tester-home-" * 3)
+    gh = GitHub()
+    gh.publish(A, cards=[WIDGET])
+    c = Collection(home)
+    deepest = max(len(str(c.dir / A[:12] / p)) for p in gh.commits[A] if p != "index.json")
+    assert deepest > 260
+    status = c.sync(gh)
+    assert status["error"] is None and [card.id for card in c.cards()] == ["acme/widget"]
+
+
+def test_a_file_the_collection_cant_keep_leaves_out_its_card_and_is_said(tmp_path, monkeypatch):
+    """One file this computer can't write leaves out that card only, and the portal hears of it once; a failing
+    update is said there too, once, as it starts to fail."""
+    from labharness import collection as coll
+    from test_collection import A, B, WIDGET, GitHub
+    other = WIDGET.replace("acme/widget", "acme/gadget").replace("ACME Widget source", "ACME Gadget").replace(
+        "^ACME,WIDGET", "^ACME,GADGET")
+    gh = GitHub()
+    gh.publish(A, cards=[WIDGET, other])
+    write = coll._write
+
+    def refuse(path, data):
+        if "acme-gadget" in str(path):
+            raise OSError("[WinError 3] The system cannot find the path specified")
+        write(path, data)
+    monkeypatch.setattr(coll, "_write", refuse)
+    c = coll.Collection(tmp_path)
+    told = []
+    c.notify = lambda title, text: told.append((title, text))
+    status = c.sync(gh)
+    assert [card.id for card in c.cards()] == ["acme/widget"]                  # the rest of the collection works
+    assert "could not be stored" in status["error"] and "acme-gadget" in status["error"]
+    assert any("acme/gadget" in x for x in status["left_out"]) and len(told) == 1
+    monkeypatch.setattr(coll, "_write", write)
+    gh.publish(B, cards=[WIDGET, other])
+    assert c.sync(gh)["error"] is None and len(c.cards()) == 2
+    gh.down = True
+    c.sync(gh)
+    c.sync(gh)
+    assert len(told) == 2 and "Kelvin uses the copy it has meanwhile" in told[-1][1]   # once, when it starts
+
+
+def test_first_start_takes_the_collections_card_before_drafting(tmp_path):
+    """l08: the first-run card writer started before the collection had arrived, guessed manuals on the web and never
+    tried the collection's. Setting up, Kelvin brings the collection up to date first and uses its card."""
+    pytest.importorskip("mcp")
+    from labharness.adapters import set_resource_manager
+    from labharness.autosetup import AutoSetup
+    from test_autosetup import FakeSettings, runtime_for
+    from test_collection import WIDGET
+
+    class Fresh:   # the collection: its copy arrives with this sync
+        def __init__(self):
+            self.synced = 0
+
+        def sync(self):
+            self.synced += 1
+            return {"error": None}
+
+        def cards(self):
+            return [parse_card(__import__("yaml").safe_load(WIDGET), "collection")] if self.synced else []
+
+        def index(self):
+            return {}
+    widget = Device(idn="ACME,WIDGET 9000,1,1.0")
+    widget.twin = type("Answers", (), {"query": staticmethod(lambda cmd: "0"), "write": staticmethod(lambda c: None)})()
+    set_resource_manager(Bus({"GPIB0::5::INSTR": widget}))
+    try:
+        rt = runtime_for(tmp_path)
+        rt.collection = Fresh()
+        unknown = [{"address": "GPIB0::5::INSTR", "idn": "ACME,WIDGET 9000,1,1.0", "card_id": None, "model": "",
+                    "kind": "", "how": "no card matches the reply"}]
+        setup = AutoSetup(rt, FakeSettings(), tmp_path, scan=lambda: unknown,
+                          make_card=lambda found: pytest.fail("drafted a card the collection has"))
+        status = setup.run()
+        assert rt.collection.synced == 1 and status["state"] == "done", status
+        assert "card: acme/widget" in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
+    finally:
+        set_resource_manager(None)
