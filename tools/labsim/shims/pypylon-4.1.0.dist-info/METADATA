@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: pypylon
+Version: 4.1.0
+Summary: labsim stand-in for pypylon (talks to a labsim bench, not to hardware)

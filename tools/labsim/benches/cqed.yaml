@@ -1,0 +1,26 @@
+# Superconducting resonators and a flux-tunable transmon at the mixing chamber: a PNA on HiSLIP, a GS200 driving the
+# flux coil through 1 kOhm, an SMB100A for the qubit tone, a Lake Shore 350 on the mixing chamber, an MFLI spare.
+name: cQED dilution fridge (labsim)
+world:
+  cryostat: {base_K: 0.012, start_K: 0.012, tau_s: 20, span_K: 4.0, heater_max_W: 0.0001}
+  chip: {input_attenuation_dB: 70, gain_dB: 62}
+instruments:
+  vna:
+    model: keysight_pna
+    address: TCPIP0::A-N5222B-11204::hislip0::INSTR
+    connect: {port1: chip_in, port2: chip_out}
+  flux:
+    model: yokogawa_gs200
+    address: USB0::0x0B21::0x0039::91T810993::INSTR
+    connect: {out: {to: flux, series_ohm: 1000}}
+  drive:
+    model: rs_smb100a
+    address: TCPIP0::192.168.1.41::inst0::INSTR
+    connect: {rf: qubit_drive}
+  mxc:
+    model: lakeshore_350
+    address: GPIB0::12::INSTR
+    sensors: {A: sample, B: stage}
+  mfli:
+    model: zhinst_mfli
+    address: "sdk:zhinst:dev5678"

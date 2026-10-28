@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: Swabian-TimeTagger
+Version: 2.17.2
+Summary: labsim stand-in for Swabian-TimeTagger (talks to a labsim bench, not to hardware)

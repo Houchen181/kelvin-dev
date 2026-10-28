@@ -1,0 +1,47 @@
+# A dilution-fridge-style transport set-up: a graphene Hall bar on a Si/SiO2 back gate, AC current from a 6221,
+# two SR830s on Vxx and Vxy locked to the 6221's phase marker, a 2400 on the gate, a 2182A on Vxx, a Lake Shore
+# 336 on USB, an AMI 430 on the LAN, a 34401A reading a Cernox on the stage, a GS200 nobody wired yet.
+name: Transport B214 (labsim)
+gpib_boards: 1
+com_ports: [1]
+world:
+  cryostat: {base_K: 1.6, start_K: 295, tau_s: 45, heater_max_W: 1.0}
+  magnet: {max_T: 9, quench_T_s: 0.02}
+  sample: {model: hallbar, material: graphene, mobility_m2_Vs: 1.8, dirac_V: 1.1, gate_nm: 285, breakdown_V: 95}
+instruments:
+  gate:
+    model: keithley_2400
+    address: GPIB0::24::INSTR
+    connect: {out: gate}
+  isrc:
+    model: keithley_6221
+    address: GPIB0::12::INSTR
+    connect: {out: bias, ref: ref}
+  li_xx:
+    model: srs_sr830
+    address: GPIB0::8::INSTR
+    connect: {A: vxx, ref_in: ref}
+  li_xy:
+    model: srs_sr830
+    address: GPIB0::9::INSTR
+    serial_number: "86422"
+    connect: {A: vxy, ref_in: ref}
+  nvm:
+    model: keithley_2182a
+    address: GPIB0::7::INSTR
+    connect: {in: vxx}
+  tc:
+    model: lakeshore_336
+    address: COM3
+    sensors: {A: sample, B: stage}
+  magnet:
+    model: ami_430
+    address: TCPIP0::192.168.10.30::7180::SOCKET
+    coil_T_per_A: 0.1
+  dmm:
+    model: hp_34401a
+    address: GPIB0::22::INSTR
+    connect: {res: "rtd:stage"}
+  yoko:
+    model: yokogawa_gs200
+    address: USB0::0x0B21::0x0039::91T810992::INSTR

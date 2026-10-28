@@ -1,0 +1,33 @@
+# Degenerate pump-probe: a delay line on an SMC100, an OBIS each for pump and probe, an SR830 on the balanced
+# photodiode locked to the chopper (1170 Hz), a PM100D, a Pfeiffer gauge on the sample chamber.
+name: Pump-probe B310 (labsim)
+world:
+  optics: {pump_probe: {tau1_ps: 0.8, tau2_ps: 25, irf_ps: 0.15, time_zero_mm: 12.345, chop_Hz: 1170}}
+  vacuum: {base_mbar: 3e-7, start_mbar: 2e-5, tau_s: 120}
+instruments:
+  delay:
+    model: newport_smc100
+    address: COM6
+  pump:
+    model: coherent_obis
+    address: COM8
+    wavelength_nm: 515
+    max_power_W: 0.05
+    path: pump
+  probe:
+    model: coherent_obis
+    address: COM9
+    wavelength_nm: 515
+    max_power_W: 0.01
+    path: probe
+  li:
+    model: srs_sr830
+    address: GPIB0::8::INSTR
+    outx: 1
+    connect: {A: pd, ref_in: chopper}
+  pm:
+    model: thorlabs_pm100d
+    address: USB0::0x1313::0x8078::P0015056::INSTR
+  gauge:
+    model: pfeiffer_tpg362
+    address: COM3

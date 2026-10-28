@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: pyAndorSDK2
+Version: 2.104.30065
+Summary: labsim stand-in for pyAndorSDK2 (talks to a labsim bench, not to hardware)

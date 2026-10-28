@@ -1,0 +1,23 @@
+# A PPMS DynaCool run through MultiVu (MultiPyVu server on 127.0.0.1:5000), a superconducting film on the puck,
+# a 6221 + 2182A pair on the sample (delta mode isn't modelled: use DC or the 6221's sine with an SR860).
+name: PPMS DynaCool (labsim)
+world:
+  cryostat: {base_K: 1.8, start_K: 300, tau_s: 20}
+  magnet: {max_T: 9, quench_T_s: 0.03}
+  sample: {model: superconductor, Tc_K: 8.6, Rn_ohm: 420, Bc2_T: 11}
+instruments:
+  ppms:
+    model: qd_ppms
+    address: "sdk:ppms:127.0.0.1:5000"
+  isrc:
+    model: keithley_6221
+    address: GPIB0::12::INSTR
+    connect: {out: bias, ref: ref}
+  nvm:
+    model: keithley_2182a
+    address: GPIB0::7::INSTR
+    connect: {in: vxx}
+  li:
+    model: srs_sr860
+    address: USB0::0xB506::0x2000::003456::INSTR
+    connect: {A: vxx, ref_in: ref}

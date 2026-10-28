@@ -1,0 +1,4 @@
+Metadata-Version: 2.1
+Name: MultiPyVu
+Version: 2.2.1
+Summary: labsim stand-in for MultiPyVu (talks to a labsim bench, not to hardware)

@@ -1,0 +1,55 @@
+# A home-built confocal microscope at room temperature: quantum emitters on a silicon chip. Lasers and positioners on
+# serial ports, a PI piezo on the LAN, cameras and the spectrometer through their makers' libraries.
+name: Confocal B114 (labsim)
+com_ports: [1]
+world:
+  cryostat: {base_K: 294, start_K: 295, tau_s: 30}
+  optics: {emitters: 60, focus_um: 23.7, transmission: 0.4, bleach_W: 0.004}
+  sample: {model: open}
+instruments:
+  laser:
+    model: coherent_obis
+    address: COM5
+    wavelength_nm: 532
+    max_power_W: 0.02
+    shutter: shutter
+  pm:
+    model: thorlabs_pm100d
+    address: USB0::0x1313::0x8078::P0015055::INSTR
+  piezo:
+    model: pi_e727
+    address: TCPIP0::192.168.0.27::50000::SOCKET
+    axes: {1: x, 2: y, 3: z}
+  coarse:
+    model: attocube_anc300
+    address: COM7
+    tcp: 7230
+    axes: {1: x, 2: y, 3: z}
+  shutter_box:
+    model: arduino_heater
+    address: COM4
+  spec:
+    model: andor_shamrock
+    address: "sdk:shamrock:SR-3195"
+  ccd:
+    model: andor_ccd
+    address: "sdk:andor2:12345"
+    spectrograph: spec
+  cam:
+    model: basler_ace
+    address: "sdk:pylon:40012345"
+  zyla:
+    model: andor_zyla
+    address: "sdk:andor3:VSC-01234"
+  tagger:
+    model: swabian_timetagger
+    address: "sdk:timetagger:1910000123"
+    channels: {1: apd, 2: apd2}
+  daq:
+    model: ni_daq
+    address: "sdk:nidaq:Dev1"
+    ai: {0: pd}
+    ao: {0: galvo_x, 1: galvo_y}
+  fiber_spec:
+    model: ocean_usb4000
+    address: "sdk:seabreeze:USB4F12345"

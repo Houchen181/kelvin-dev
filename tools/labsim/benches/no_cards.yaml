@@ -1,0 +1,14 @@
+# Instruments Kelvin has no card for (yet): a 6221 current source, an HP 34401A, a Pfeiffer gauge controller, a
+# student's Arduino hot plate, an Oxford Mercury iTC on the LAN, a Newport SMC100 delay stage.
+name: New instruments (labsim)
+com_ports: [1, 2]
+world:
+  cryostat: {base_K: 3.5, start_K: 295, tau_s: 40}
+  sample: {model: metal, R0_ohm: 120}
+instruments:
+  isrc: {model: keithley_6221, address: GPIB0::12::INSTR, connect: {out: bias}}
+  dmm: {model: hp_34401a, address: GPIB0::22::INSTR, connect: {in: vxx}}
+  gauge: {model: pfeiffer_tpg362, address: COM3}
+  hotplate: {model: arduino_heater, address: COM4}
+  itc: {model: oxford_mercury_itc, address: TCPIP0::192.168.1.60::7020::SOCKET, sensors: {MB1.T1: sample, DB8.T1: stage}}
+  stage: {model: newport_smc100, address: COM6}

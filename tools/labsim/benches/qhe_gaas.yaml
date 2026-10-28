@@ -1,0 +1,33 @@
+# Quantum Hall production on a GaAs/AlGaAs Hall bar with a Schottky top gate, in a 1.6 K VTI with a 9 T magnet.
+# Constant AC current from the first SR860's sine out through 10 MOhm; the second SR860 reads Vxy on the first's
+# reference. A 2450 on the gate (USB), a Lake Shore 350 (GPIB), the AMI 430 on RS-232.
+name: QHE GaAs VTI (labsim)
+gpib_boards: 1
+com_ports: [1]
+world:
+  cryostat: {base_K: 1.6, start_K: 295, tau_s: 45, heater_max_W: 1.0}
+  magnet: {max_T: 9, quench_T_s: 0.01}
+  sample: {model: hallbar, material: gaas, mobility_m2_Vs: 80, n0_m2: 2.4e15, gate_nm: 60, gate_eps: 12.9, breakdown_V: 6}
+instruments:
+  li_xx:
+    model: srs_sr860
+    address: USB0::0xB506::0x2000::003101::INSTR
+    serial_number: "003101"
+    connect: {sine_out: {to: bias, series_ohm: 1.0e7}, A: vxx, ref_out: ref}
+  li_xy:
+    model: srs_sr860
+    address: USB0::0xB506::0x2000::003102::INSTR
+    serial_number: "003102"
+    connect: {A: vxy, ref_in: ref}
+  gate:
+    model: keithley_2450
+    address: USB0::0x05E6::0x2450::04412345::INSTR
+    connect: {out: gate}
+  tc:
+    model: lakeshore_350
+    address: GPIB0::13::INSTR
+    sensors: {A: sample, B: stage}
+  magnet:
+    model: ami_430
+    address: COM4
+    coil_T_per_A: 0.1
