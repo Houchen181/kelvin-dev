@@ -772,7 +772,11 @@ class SafetyGate:
         (a 2400 held on its 21 V range under a ±60 V limit stopped at -21 V). rng: the range to check against."""
         if not isinstance(target, (int, float)):
             return None
-        rng = self.fixed_range(inst, spec) if rng is None else rng
+        if rng is None:
+            try:
+                rng = self.fixed_range(inst, spec)
+            except Exception:   # its range can't be read now: the change's own checks say what the instrument does
+                return None
         if rng is None or abs(target) <= rng * (1 + 1e-9):
             return None
         bigger = next((r for r in spec.range_steps if r >= abs(target) * (1 - 1e-9)), None)

@@ -93,7 +93,7 @@ A finished device (a 2D heterostructure, a nanowire, a fragile flake) is often w
 
 Only a person sets or changes a device's protection. Kelvin reads it (the lab status shows it), and while a protected device is mounted it can't change what is mounted.
 
-**No switching glitches, no clipped sweeps.** A source's range, or its autorange switch, changes only while its level is at safe. While its range is fixed (autorange off), a level beyond the range is refused up front, saying which range it needs, and a plan that would pass it is refused before it starts, unless its setup sets that range first. The gate refuses it otherwise, whether it comes from a plan, the agent or a raw command. Outputs already switch cleanly: a drive is parked at safe before its output switches on, and ramped to safe before it switches off.
+**No switching glitches, no clipped sweeps.** A source's range, or its autorange switch, changes only while its level is at safe. The gate refuses it otherwise, whether it comes from a plan, the agent or a raw command. While the range is fixed (autorange off), a level beyond it is refused up front, saying which range it needs, and a plan that would pass it is refused before it starts, unless its setup sets that range first. Outputs already switch cleanly: a drive is parked at safe before its output switches on, and ramped to safe before it switches off.
 
 **A run measures at what you approved.** Parking a level at safe must not leave a run measuring in the dark:
 - A plan switches its outputs on (laser emission, RF, a source's output) before the levels they apply, whatever order it writes them in.

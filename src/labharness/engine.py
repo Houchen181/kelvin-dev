@@ -256,9 +256,9 @@ class RunEngine:
                 continue
             if now is None:   # read only while its switch is on, and that is off: nothing to compare
                 continue
-            if spec.numeric:
+            if spec.numeric:   # a set point reads back as set, give or take its rounding: 2 pA is not 50 nA
                 lim = inst.limits(spec.name)
-                close = max(spec.tol, 0.01 * abs(want), 1e-3 * (lim[1] - lim[0]) if lim else 0.0, 1e-12)
+                close = max(spec.tol, 0.01 * abs(want), 1e-9 * (lim[1] - lim[0]) if lim else 0.0, 1e-15)
                 same = isinstance(now, (int, float)) and abs(now - want) <= close
             else:
                 try:

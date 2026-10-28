@@ -74,6 +74,15 @@ def test_a_level_the_instrument_does_not_take_stops_the_run_before_the_first_poi
     assert lab.read("laser", "emission") is False and lab.read("laser", "power") == 0    # then back to safe
 
 
+def test_a_small_level_is_compared_as_itself_not_against_the_whole_range(lab, make_engine):
+    engine, gate, approver = make_engine([True])
+    twin = lab.instruments["smu"].backend
+    real = twin.apply
+    twin.apply = lambda param, value: real(param, 2e-12 if param == "compliance_I" else value)   # 2 pA, not 50 nA
+    report = engine.run("plan: small\nsetup: { smu.compliance_I: 5.0e-8 }\nmeasure: [smu.I]\n")
+    assert report.status == "aborted" and "smu.compliance_I reads 2 pA, not the 50 nA the plan set" in report.message
+
+
 def test_a_level_lost_during_the_sweep_is_an_issue_not_no_problems_found(lab, make_engine):
     engine, gate, approver = make_engine([True])
     twin = lab.instruments["laser"].backend
