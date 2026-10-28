@@ -1,7 +1,9 @@
 """Kelvin keeps itself up to date, and there is only ever one Kelvin on a computer.
 
-- Where: the GitHub releases of the Kelvin repository. While the repository is private, Kelvin asks through the
-  GitHub CLI (`gh`) signed in on this computer; Kelvin never sees its token.
+- Where: GitHub releases. Published builds come from the public Kelvin repository (releases and the instrument
+  collection, no source); private builds from the source repository, kelvin-dev, public too: no sign-in is needed.
+  If GitHub refuses an anonymous look, Kelvin asks through the GitHub CLI (`gh`) signed in on this computer;
+  Kelvin never sees its token.
 - Which: published builds follow published releases (vX.Y.Z); the private build follows private-vX.Y.Z
   pre-releases (see claudecode.py). Only a newer version is taken.
 - Checked: the download's SHA-256 must match the digest GitHub reports for that file, or it is thrown away.
@@ -33,8 +35,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ._version import __version__
 
 log = logging.getLogger("kelvin")
-REPO = "Houchen181/kelvin"
-API = "https://api.github.com/repos/%s/releases?per_page=30" % REPO
+REPOS = {"stable": "Houchen181/Kelvin", "private": "Houchen181/kelvin-dev"}   # published releases; the source's
 TAGS = {"stable": re.compile(r"^v(\d+\.\d+\.\d+)$"), "private": re.compile(r"^private-v(\d+\.\d+\.\d+)$")}
 ASSETS = {("stable", "win32"): r"^Kelvin-Setup-(\d+\.\d+\.\d+)\.exe$",
           ("private", "win32"): r"^Kelvin-Setup-(\d+\.\d+\.\d+)-private\.exe$",
@@ -44,6 +45,11 @@ INSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{8C0F6E5A-3B
 
 class UpdateError(Exception):
     pass
+
+
+def api(chan: str) -> str:
+    """Where a channel's releases are listed."""
+    return "https://api.github.com/repos/%s/releases?per_page=30" % REPOS.get(chan, REPOS["stable"])
 
 
 def version(text: str) -> Tuple[int, ...]:
@@ -122,6 +128,7 @@ class Updater:
         self.dir = Path(home) / "updates"
         self.current = current
         self.channel = chan or channel()
+        self.repo = REPOS.get(self.channel, REPOS["stable"])
         self.platform = plat or platform_key()
         found = shutil.which("gh")
         self.gh: List[str] = gh if gh is not None else ([found] if found else [])
@@ -154,13 +161,14 @@ class Updater:
         return p.stdout
 
     def releases(self) -> List[Dict[str, Any]]:
+        url = api(self.channel)
         try:
-            data = json.loads(self._fetch(API))
+            data = json.loads(self._fetch(url))
             self.via = "web"
         except urllib.error.HTTPError as e:
             if e.code not in (401, 403, 404):
                 raise UpdateError("GitHub answered %s" % e.code)
-            data = json.loads(self._gh(["api", API.split("api.github.com/", 1)[1]], timeout=60))   # private repo
+            data = json.loads(self._gh(["api", url.split("api.github.com/", 1)[1]], timeout=60))   # private repo
             self.via = "gh"
         except (urllib.error.URLError, OSError, ValueError) as e:
             raise UpdateError("could not reach GitHub: %s" % getattr(e, "reason", e))
@@ -208,7 +216,7 @@ class Updater:
         self._set(state="downloading", latest=found["version"], url=found["url"], notes=found["notes"])
         try:
             if self.via == "gh":
-                self._gh(["release", "download", found["tag"], "--repo", REPO, "--pattern", asset["name"],
+                self._gh(["release", "download", found["tag"], "--repo", self.repo, "--pattern", asset["name"],
                           "--dir", str(self.dir), "--clobber"])
             else:
                 path.write_bytes(self._fetch(asset["browser_download_url"]))

@@ -1,7 +1,9 @@
 name: release
 
-# Builds the desktop apps. Push a tag like v0.1.0 to also publish a GitHub Release;
-# run it by hand (Actions > release > Run workflow) to only build and test.
+# Builds the desktop apps. Push a tag like v0.1.0 to also publish a GitHub Release in the public repository
+# Houchen181/Kelvin (it holds the releases and the instrument collection; the source stays here). That needs the
+# secret PUBLIC_RELEASES_TOKEN: a fine-grained token with Contents read and write on Houchen181/Kelvin only.
+# Run it by hand (Actions > release > Run workflow) to only build and test.
 # A tag like private-v0.3.6 makes the private Windows build (the temporary Claude Code bridge, see
 # claudecode.py) as a pre-release, never "latest"; installed Kelvins with the bridge update from those.
 on:
@@ -165,11 +167,15 @@ jobs:
           # releases/latest/download/Kelvin-Setup.exe then always gives the newest installer (the README links it)
           cp out/Kelvin-Setup-*.exe out/Kelvin-Setup.exe
           cp out/Kelvin-*-macOS.zip out/Kelvin-macOS.zip
-      - name: Create the release
+      - name: Create the release, in the public repository
         if: startsWith(github.ref, 'refs/tags/v')
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASES_TOKEN }}
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Add the secret PUBLIC_RELEASES_TOKEN (Contents read and write on Houchen181/Kelvin) to publish"
+            exit 1
+          fi
           cat > notes.md <<'EOF'
           ## Install
 
@@ -184,5 +190,5 @@ jobs:
           It starts with a simulated lab and a scripted demo model; add an API key under Settings
           to talk to Claude, GPT or Gemini.
           EOF
-          gh release create "$GITHUB_REF_NAME" out/* --repo "$GITHUB_REPOSITORY" \
+          gh release create "$GITHUB_REF_NAME" out/* --repo Houchen181/Kelvin --target main \
             --title "Kelvin ${GITHUB_REF_NAME#v}" --notes-file notes.md
