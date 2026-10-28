@@ -122,8 +122,8 @@ def cards_named(name: str, registry: CardRegistry) -> List[Card]:
     for card in registry:
         have = " ".join([card.id, card.model, card.vendor]).lower()
         mine = set(_words(have))
-        if numbered:
-            fits = all(w in mine or w in re.sub(r"[^a-z0-9]+", "", have) for w in numbered) and \
+        if numbered:   # a model number as a word, or inside one (smc100 in newport/smc100), never a bare digit or two
+            fits = all(w in mine or len(w) > 2 and w in re.sub(r"[^a-z0-9]+", "", have) for w in numbered) and \
                 (not plain or any(near(w, mine) for w in plain))
         else:
             fits = bool(plain) and all(near(w, mine) for w in plain)
@@ -142,7 +142,7 @@ def card_for(address: str, registry: CardRegistry, idn: str = "", name: str = ""
             return named[0], "" if named[0].id == name.strip() else "its name (%s)" % name
         if named:
             return None, "several cards fit %r: %s; give card=<one of them>" % (name, ", ".join(c.id for c in named))
-        return None, "Kelvin has no card %r" % name
+        return None, "there is no card %r" % name
     if idn:
         card = match_card(idn, registry)
         if card is not None:
