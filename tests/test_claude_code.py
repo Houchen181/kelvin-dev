@@ -175,6 +175,16 @@ def test_results_the_model_writes_itself_never_show():
     assert r.words.strip() == "The gate is at 0 V." and not r.markup and streamed(talk).strip() == r.words.strip()
 
 
+def test_markup_quoted_in_words_stays_words():
+    about = ("Kelvin sends each result back in a `<tool_result>` element, so I never write one myself. A call looks "
+             'like `<invoke name="set_value">{"instrument": "smu", "parameter": "V", "value": 5}</invoke>`.')
+    r = read(about)
+    assert r.words == about and not r.run and not r.markup and not r.made_up
+    assert streamed(about, 1) == about and streamed(about, 7) == about   # also when a piece ends mid-line
+    fenced = 'Status first.\n```xml\n<invoke name="lab_status">\n</invoke>\n```'   # a call in a fence still runs
+    assert calls(parse(fenced)) == [("lab_status", {})]
+
+
 def test_calls_kelvin_cannot_read_do_not_run():
     # not closed (the turn may have been cut short), or neither JSON nor parameters: the model is told to send it again
     assert calls(parse('Switching off.\n<invoke name="set_value">\n<parameter name="instrument">smu</parameter>')) == \

@@ -126,20 +126,22 @@ class Reading:
             for _, name, args in self.run]
 
 
-def read(text: str, final: bool = True, schemas: Optional[Dict[str, Any]] = None) -> Reading:
+def read(text: str, final: bool = True, schemas: Optional[Dict[str, Any]] = None, start: int = 0) -> Reading:
     """A turn as Kelvin takes it. final=False reads a turn still arriving: whatever might still turn out to be
     markup (a tag half written, a call not yet closed) is left out of the words for now, and nothing shown so far
-    changes later. schemas: the tools' argument schemas, so a <parameter> gets its type (5 a number, "smu" text)."""
-    r, words, pos = Reading(), [], 0
+    changes later. schemas: the tools' argument schemas, so a <parameter> gets its type (5 a number, "smu" text).
+    start: read on from there (a place an earlier reading settled, Reading.upto)."""
+    r, words, pos = Reading(), [], start
     while pos < len(text):
         lt = text.find("<", pos)
         if lt < 0:
             words.append(text[pos:])
             pos = len(text)
             break
-        m = TAG.match(text, lt)
+        code = _in_code(text, lt)
+        m = None if code else TAG.match(text, lt)
         if m is None:
-            if not final and _maybe_tag(text, lt):   # a tag may be arriving
+            if not final and not code and _maybe_tag(text, lt):   # a tag may be arriving
                 words.append(text[pos:lt])
                 pos = lt
                 break
@@ -166,7 +168,7 @@ def read(text: str, final: bool = True, schemas: Optional[Dict[str, Any]] = None
                 r.calls.append((tag, name, {}))
             pos = m.end()
             continue
-        end, made, after = (rx.search(text, m.end()) for rx in (CLOSE, MADE_UP, OPENER))
+        end, made, after = CLOSE.search(text, m.end()), _find(MADE_UP, text, m.end()), _find(OPENER, text, m.end())
         if end is not None and all(x is None or end.start() < x.start() for x in (made, after)):
             if name:
                 props = ((schemas or {}).get(name) or {}).get("properties") or {}
@@ -193,6 +195,21 @@ def _held(words: str, stopped: bool, final: bool) -> str:
     after it; while the turn is arriving, also without a last line that may still become one."""
     cut = _speaker(words, whole=True) if stopped else -1 if final else _speaker(words, whole=False)
     return words[:cut] if cut >= 0 else words
+
+
+def _find(rx: "re.Pattern[str]", text: str, at: int) -> Optional["re.Match[str]"]:
+    """rx's first match from at on that isn't inside inline code."""
+    m = rx.search(text, at)
+    while m is not None and _in_code(text, m.start()):
+        m = rx.search(text, m.end())
+    return m
+
+
+def _in_code(text: str, lt: int) -> bool:
+    """Is the "<" at lt inside inline code, as in words about the markup ("each result comes in a `<tool_result>`")
+    or a call quoted as an example? An odd number of backticks before it on its line says so (a fence's ``` aside);
+    calls are written on lines of their own."""
+    return text[text.rfind("\n", 0, lt) + 1:lt].replace("```", "").count("`") % 2 == 1
 
 
 def _maybe_tag(text: str, lt: int) -> bool:
@@ -307,8 +324,8 @@ class Shown:
 
     def _words(self, final: bool) -> str:
         if not self.stopped:
-            r = read(self.text[self.base:], final)
-            self.base, self.settled, self.stopped = self.base + r.upto, self.settled + r.raw, r.stopped
+            r = read(self.text, final, start=self.base)
+            self.base, self.settled, self.stopped = r.upto, self.settled + r.raw, r.stopped
         return _held(self.settled, self.stopped, final)
 
     def _more(self, words: str) -> Optional[str]:
