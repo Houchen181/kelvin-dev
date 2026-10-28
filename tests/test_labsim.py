@@ -2,7 +2,7 @@
 and a Kelvin lab connected to a running bench through the reusable fixture in labsim_bench.py."""
 import pytest
 
-from labsim_bench import advance, labsim_offline  # noqa: F401
+from labsim_bench import advance, labsim_bench, labsim_offline  # noqa: F401
 
 
 def test_a_ppms_settles_on_its_set_point(labsim_offline):
@@ -75,3 +75,56 @@ def test_sr830_keeps_its_reference_trigger(labsim_offline):
     lockin.handle("*RST")
     assert lockin.handle("RSLP?") == "0"
 
+
+LAB = """lab: labsim transport
+instruments:
+  gate:
+    card: keithley/2400
+    address: "GPIB0::24::INSTR"
+    limits: { V: [-5, 5], compliance_I: [1e-09, 1e-06] }
+  lockin:
+    card: srs/sr830
+    address: "GPIB0::8::INSTR"
+    limits: { amplitude: [0.004, 1] }
+"""
+
+
+def test_a_kelvin_lab_on_a_labsim_bench(labsim_bench, tmp_path):
+    """The fixture's example: a Kelvin lab built from a lab config, on simulated instruments it takes for real."""
+    from labharness.virtual_lab import build_lab
+    bench = labsim_bench("transport")
+    (tmp_path / "lab.yaml").write_text(LAB, encoding="utf-8")
+    lab = build_lab(tmp_path / "lab.yaml", partial=True)
+    try:
+        assert lab.unavailable == {} and not lab.instrument("gate").simulated
+        assert lab.read("gate", "V") == pytest.approx(0.0, abs=1e-3)
+        assert lab.read("lockin", "frequency") == pytest.approx(1000.0)   # the SR830's power-on reference
+        assert abs(lab.read("lockin", "X")) < 1e-3
+        sent = [line for line in bench.ctl("log", "li_xx", 50)["lines"] if line[1] == "<"]
+        assert any(text.startswith("FREQ?") for _, _, text in sent)   # it went through the bench's SR830
+        assert bench.ctl("status")["bench"] == "Transport B214 (labsim)"
+        assert bench.env["KELVIN_VISA_BACKEND"] == "@labsim"
+    finally:
+        lab.close()
+
+
+PPMS_LAB = """lab: labsim PPMS
+instruments:
+  ppms:
+    card: qd/multivu
+    address: "qd://127.0.0.1:5000"
+    limits: { T_set: [1.8, 400], B_set: [-9, 9], T_rate: [0.01, 20], B_rate: [1e-05, 0.01] }
+"""
+
+
+def test_a_kelvin_lab_on_a_bench_with_a_makers_library(labsim_bench, tmp_path):
+    """sdk=True: Kelvin's qd/multivu card opens MultiPyVu, which is labsim's stand-in talking to the bench's PPMS."""
+    from labharness.virtual_lab import build_lab
+    labsim_bench("ppms", sdk=True)
+    (tmp_path / "lab.yaml").write_text(PPMS_LAB, encoding="utf-8")
+    lab = build_lab(tmp_path / "lab.yaml", partial=True)
+    try:
+        assert lab.unavailable == {}
+        assert lab.read("ppms", "T") == pytest.approx(300.0, abs=1.0)   # the bench starts warm
+    finally:
+        lab.close()
