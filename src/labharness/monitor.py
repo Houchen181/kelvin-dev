@@ -14,8 +14,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .instrument import SensorError
+
 FAILS_BEFORE_ALARM = 3       # consecutive failed reads before "not answering"
 ERROR_CHECK_EVERY = 60.0     # lab seconds between error-queue checks on real instruments
+INTERLOCK_EVERY = 5.0        # lab seconds between checks of the interlocks whose drive is away from safe
 _ids = itertools.count(1)
 
 
@@ -82,6 +85,8 @@ class Monitor:
         self._silent: Dict[str, Alarm] = {}
         self._errors: Dict[str, Alarm] = {}
         self._last_error_check: Dict[str, float] = {}
+        self._last_interlock_check = -1e18
+        self._broken: Dict[int, Alarm] = {}   # interlocks found broken (by their place in the lab config)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -166,6 +171,12 @@ class Monitor:
                 continue
             try:
                 value = self.lab.read(*w.key.split(".", 1))
+            except SensorError as e:   # it answers, but says its sensor is faulty: the reading is unknown, so alarm
+                self._answered(instr)
+                w.value = None
+                if w.alarm is None:
+                    self._raise(w, "%s can't be read: %s" % (w.key, str(e).splitlines()[0][:200]))
+                continue
             except Exception as e:
                 self._failed(instr, e)
                 continue
@@ -184,6 +195,7 @@ class Monitor:
                 w.since = now
             if w.alarm is None and now - w.since >= w.for_s:
                 self._raise_reading(w, value)
+        self._check_interlocks(now)
         self._check_errors(now)
 
     # ------------------------------------------------------------------ alarms
@@ -206,19 +218,57 @@ class Monitor:
         unit = self.lab.resolve(w.key)[1].unit
         text = "%s = %s is %s%s%s" % (w.key, self._show(w.key, value), which, " " + unit if unit else "",
                                      " for %gs" % w.for_s if w.for_s else "")
+        self._raise(w, text)
+
+    def _raise(self, w: Watch, text: str) -> None:
+        """The watch's alarm and its actions: for a reading out of range, or one that can't be had (a sensor fault),
+        which acts the same, since the value could be anything."""
         a = self._new("reading", w.key, text)
         w.alarm = a.id
         if w.stop_run:
             self.gate.request_abort()
             a.actions.append("stopped the running plan")
         for instr, param, safe in w.then:   # only ever toward safe: lab-config watches name safe values
-            try:
-                r = self.gate._set(instr, param, safe, False, "monitor")
-                a.actions.append(r.message if r.ok else "could not set %s.%s: %s" % (instr, param, r.message))
+            try:   # its switch goes off too (gate.cut): V = 0 does nothing on a source in current mode
+                a.actions += [r.message if r.ok else "could not set %s.%s: %s" % (instr, param, r.message)
+                              for r in self.gate.cut(instr, param, "monitor")]
             except Exception as e:
                 a.actions.append("could not set %s.%s: %s" % (instr, param, e))
         self.gate.log.write("alarm", by="monitor", watch=w.id, text=text, actions=a.actions or None)
         self.notify("alarm", "Alarm: " + text, "; ".join(a.actions) or (w.note or "Kelvin is watching it."))
+
+    def _check_interlocks(self, now: float) -> None:
+        """The interlocks are enforced, not only checked when their drive moves: every INTERLOCK_EVERY lab seconds,
+        each one whose drive is away from safe has its condition read. When it fails, or can't be read (an open
+        sensor, its instrument gone), an alarm goes up, the running plan stops and the drive goes to safe (or holds
+        where the lab config says hold). The alarm clears once the condition holds again or the drive is at safe."""
+        if now - self._last_interlock_check < INTERLOCK_EVERY:
+            return
+        self._last_interlock_check = now
+        from .gate import interlock_problem
+        for i, lock in enumerate(self.lab.config.interlocks):
+            try:
+                inst, spec = self.lab.resolve(lock.drive)
+                if not inst.enabled:
+                    continue   # switched off: Kelvin sends it nothing, and nothing reaches the sample from it
+                at = self.gate._current(inst, spec)
+            except Exception:
+                continue   # its drive can't be read: silence is the read failures' job
+            broken = None if at is not None and spec.distance(at) == 0 else interlock_problem(self.lab, lock)
+            if broken is None:
+                if i in self._broken:
+                    self._clear(self._broken.pop(i).id, "interlock %s: %s holds again, or the drive is at safe"
+                                % (lock.drive, lock.require.text))
+                continue
+            if i in self._broken:
+                continue
+            text = "Interlock: %s is at %s, which needs %s%s" % (lock.drive, spec.show(at), lock.require.text, broken)
+            a = self._broken[i] = self._new("interlock", lock.drive, text)
+            self.gate.request_abort()
+            a.actions.append("stopped the running plan")
+            a.actions += [r.message for r in self.gate.abort_to_safe([lock.drive], "monitor")]
+            self.gate.log.write("alarm", by="monitor", interlock=lock.drive, text=text, actions=a.actions or None)
+            self.notify("alarm", "Alarm: " + text, "; ".join(a.actions))
 
     def _clear(self, alarm_id: str, text: str) -> None:
         for a in self.alarms:

@@ -187,6 +187,8 @@ class Twin:
                 v = ""
             else:
                 v = spec.limits[0] if spec.limits and spec.limits[0] > 0 else 0.0
+            if spec.plausible and _is_number(v):   # a healthy sensor's reading, not an open one's 0 K
+                v = min(max(v, spec.plausible[0]), spec.plausible[1])
             self.state[spec.name] = v
         for spec in self.ramps:   # at rest: a reading with no default of its own is where its setpoint is
             if self.card.params[spec.readback].default is None and _is_number(self.state[spec.name]):
@@ -362,6 +364,9 @@ class Twin:
             return self.errors.pop(0) if self.errors else '0,"No error"'
         if cmd.strip().lower() == self.card.idn_query.strip().lower():
             return self.idn()
+        for s in self.card.params.values():   # a reading's status query: a healthy sensor's reply
+            if s.status_cmd is not None and s.status_cmd.match(cmd) is not None:
+                return _reply_matching(s.status_ok) or "0"
         hits = [s for s in self.card.getters if s.get_cmd.match(cmd) is not None]
         if any(s.field is not None for s in hits):  # one query, several values: answer like the instrument
             reply = ["0"] * (max(s.field or 0 for s in hits) + 1)

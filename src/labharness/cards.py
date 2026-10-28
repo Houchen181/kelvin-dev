@@ -116,6 +116,11 @@ class ParamSpec:
     autorange_param: Optional[str] = None          # its autorange switch, kept off so the range can't grow
     range_steps: Tuple[float, ...] = ()            # the ranges it has
     current_limit: Optional[str] = None            # the source's own current limit (compliance)
+    # a reading Kelvin can vouch for (Instrument.read raises SensorError otherwise): an open thermometer reads 0 K,
+    # which passed a "T < 10 K" interlock
+    status_cmd: Optional[Template] = None          # a query saying whether the reading is valid (Lake Shore RDGST? A)
+    status_ok: str = r"^\s*\+?0+\s*$"              # what its reply matches when it is (Lake Shore: 0)
+    plausible: Optional[Tuple[float, float]] = None   # a reading outside this is a fault, not a value
 
     @property
     def title(self) -> str:
@@ -512,6 +517,30 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
             spec.range_steps = tuple(sorted(float(x) for x in steps))
     if p.get("current_limit") is not None:
         spec.current_limit = str(p["current_limit"])
+    status = p.get("status")
+    if status is not None:   # status: "RDGST? A", or {get: "RDGST? A", ok: "^0+$"}
+        status = {"get": status} if isinstance(status, str) else status
+        if not isinstance(status, dict) or not status.get("get") or set(status) - {"get", "ok"} \
+                or not get or typ not in ("float", "int"):
+            err(path + ".status", "a reading's status query, e.g. \"RDGST? A\", or {get: query, ok: regex its reply "
+                                  "matches while the reading is valid (default: 0)}")
+        else:
+            spec.status_cmd = _template(status["get"], err, path + ".status")
+            if status.get("ok") is not None:
+                try:
+                    re.compile(str(status["ok"]))
+                    spec.status_ok = str(status["ok"])
+                except re.error as e:
+                    err(path + ".status.ok", "not a valid regex: %s" % e)
+    plausible = p.get("plausible")
+    if plausible is not None:
+        if typ not in ("float", "int") or not (isinstance(plausible, (list, tuple)) and len(plausible) == 2
+                                                and all(_is_number(x) for x in plausible)
+                                                and plausible[0] < plausible[1]):
+            err(path + ".plausible", "the range a reading can really have, [low, high]: outside it the sensor is "
+                                     "faulty (an open thermometer reads 0 K)")
+        else:
+            spec.plausible = (float(plausible[0]), float(plausible[1]))
     words = p.get("words")
     if words is not None:
         if typ != "bool" or not (isinstance(words, (list, tuple)) and len(words) == 2):

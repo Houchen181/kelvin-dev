@@ -25,6 +25,12 @@ class Stopped(RuntimeError):
     """A person's stop ended a wait on the instrument (an acquisition it was still taking)."""
 
 
+class SensorError(RuntimeError):
+    """The instrument answered, but the reading isn't one: its card's status query flags it, or it is outside what it
+    can be (an open thermometer's 0 K). Raised instead of returning it, so a guard trips, an interlock fails and a
+    run stops rather than taking it for a value."""
+
+
 class OffBackend:
     """Stands in for a switched-off instrument's connection: it sends nothing, and refuses every command."""
     simulated = False
@@ -108,7 +114,22 @@ class Instrument:
             return self._acquire(spec)
         if spec.type == "trace":
             return self._trace(spec)
-        return spec.from_wire(self.backend.query(spec.get_cmd.render()))
+        value = spec.from_wire(self.backend.query(spec.get_cmd.render()))
+        if spec.status_cmd is not None or spec.plausible is not None:
+            self._vouch(spec, value)
+        return value
+
+    def _vouch(self, spec: ParamSpec, value: Any) -> None:
+        """SensorError unless the card's status query says the reading is valid and it is plausible."""
+        if spec.status_cmd is not None:
+            reply = self.backend.query(spec.status_cmd.render()).strip()
+            if not re.search(spec.status_ok, reply):
+                raise SensorError("%s.%s: the instrument flags this reading (%s → %s): the sensor may be open, shorted "
+                                  "or out of its range" % (self.name, spec.name, spec.status_cmd.render(), reply))
+        lim = spec.plausible
+        if lim is not None and not (isinstance(value, (int, float)) and lim[0] <= value <= lim[1]):
+            raise SensorError("%s.%s reads %s, which it can't really be (%s to %s): the sensor may be open or shorted"
+                              % (self.name, spec.name, spec.show(value), spec.show(lim[0]), spec.show(lim[1])))
 
     def _acquire(self, spec: ParamSpec) -> Any:
         """A reading that runs an acquisition: its commands first (arm, trigger; *OPC? waits until it is done), then
