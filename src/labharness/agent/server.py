@@ -87,7 +87,9 @@ You are connected to a physics lab through Kelvin.
   A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
   queued and roughly how long it takes; queue_show follows it.
 - When the person names an instrument connected to this computer, or wants to use one the lab doesn't have yet,
-  set it up yourself: scan_instruments to find it; if a card matched, add_instrument; if none did, draft_card (Kelvin
+  set it up yourself: scan_instruments to find it; if a card matched, add_instrument; if none did, find_card by its
+  maker and model (Kelvin's own cards, the collection's and the lab's: one that fits is used as it is, never drafted
+  again); if Kelvin has none, draft_card (Kelvin
   finds the maker's manual online and writes a draft card; when the instrument collection knows the model, the scan
   names it and the card starts from the manual the collection links), try_card it (it only reads) and check that its readings
   make sense, then add_instrument. Then tell the person in a line or two what you added, with a reading or two they
@@ -272,6 +274,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.experiment_guide(experiment, query)
 
     @server.tool(annotations=READ, structured_output=False)
+    def find_card(query: str = "") -> str:
+        """The cards Kelvin has for an instrument: its own, the instrument collection's and the lab's, by maker and
+        model (e.g. "AMI 430", "Mercury iTC"), kind ("lock-in"), identity reply or driver address (qd://...); and the
+        instruments the collection knows that have no card yet, with their manuals. Look here before draft_card or
+        writing a card: a card Kelvin has is used as it is. No query lists every card."""
+        return rt.find_card(query)
+
+    @server.tool(annotations=READ, structured_output=False)
     def check_card(card: str) -> str:
         """Check a card (YAML text) without saving it: what is wrong, or what it offers and what to improve."""
         return rt.check_card(card)
@@ -302,13 +312,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.try_card(card, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
-    def save_card(card: str) -> str:
+    def save_card(card: str, version: bool = False) -> str:
         """Keep a new instrument card (status draft) with the user's cards. Only from the manual text the user gave;
         never invent commands. Then try_card and add_instrument; until a person reviews it, every setting and output
-        change on it asks them. When one of Kelvin's cards doesn't fit this lab's instrument (another firmware, a
-        wider range, a different command), save the corrected card under the same id: it becomes this lab's version
-        of Kelvin's card and replaces it here only."""
-        return rt.save_card(card)
+        change on it asks them. A card under the id of one of Kelvin's cards (find_card) is refused: use Kelvin's.
+        Only when Kelvin's card doesn't fit this lab's instrument (another firmware, a wider range, a different
+        command), save the corrected card under the same id with version: true: it becomes this lab's version of
+        Kelvin's card and replaces it here only."""
+        return rt.save_card(card, version=version)
 
     @server.tool(annotations=FETCH, structured_output=False)
     def draft_card(address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:

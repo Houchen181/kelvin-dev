@@ -234,6 +234,11 @@ def save(cards_dir: Path, text: str, kelvin_ids: Iterable[str], by: str = "human
     cards_dir = Path(cards_dir)
     path = cards_dir / file_for(card.id)
     if card.id in set(kelvin_ids) and not version and not path.exists():
+        if by != "human":   # Kelvin: use the card it has, unless this lab's instrument really differs
+            raise ValueError("Kelvin already has a card %s: use it (add_instrument card=%s, try_card %s). Only when "
+                             "it doesn't fit this lab's instrument (another firmware, a wider range, a different "
+                             "command), save_card with version: true makes yours this lab's version of it, or give "
+                             "yours another id" % (card.id, card.id, card.id))
         raise ValueError("Kelvin already has a card %s; give yours another id (e.g. %s), or make it this lab's "
                          "version of Kelvin's card (in the portal: Lab, Cards…, Make your version)" % (
                              card.id, "mylab/" + card.id.split("/")[-1]))

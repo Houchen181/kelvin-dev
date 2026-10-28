@@ -575,3 +575,94 @@ def test_reconnecting_an_instrument_uses_its_card_as_it_is_now(tmp_path, plate):
     said = rt.reconnect_instrument("hotplate")
     assert "keeps the card it connected with" in said and "setpoint" in said, said
     assert "setpoint" in lab.instruments["hotplate"].card.params
+
+
+# ------------------------------------------------------------------ 15: Kelvin finds the cards it has
+
+
+class Catalog:
+    """The instrument collection's copy: one instrument with a card Kelvin also has, one without a card."""
+
+    def index(self):
+        return {"instruments": [
+            {"id": "ami/430", "name": "American Magnetics Model 430", "maker": "American Magnetics", "model": "430",
+             "kind": "magnet-supply", "card": {"path": "instruments/x/card.yaml", "sha256": "0" * 64}},
+            {"id": "keysight/b2987", "name": "Keysight B2987B electrometer", "maker": "Keysight", "model": "B2987B",
+             "kind": "electrometer", "identify": {"idn": "^Keysight Technologies,B2987"},
+             "manuals": [{"url": "https://www.keysight.com/b2980-programming.pdf", "access": "public"}]}]}
+
+    def instrument_for(self, idn):
+        return self.index()["instruments"][1] if idn.startswith("Keysight Technologies,B2987") else None
+
+    def cards(self):
+        return []
+
+
+def test_cards_are_found_by_scheme_name_and_identity():
+    """l03, l05, l09, l10: Kelvin said there was no card for qd://, ami/430 and pi/gcs-piezo, and drafted worse ones.
+    A driver address, a maker and model, or an identity reply find the card Kelvin has."""
+    from labharness.discovery import by_scheme, card_for, cards_named, find_cards
+    reg = builtin_registry()
+    assert [c.id for c in by_scheme("qd://127.0.0.1:5000", reg)] == ["qd/multivu"]
+    assert [c.id for c in by_scheme("andor://0?sdk=2", reg)] == ["andor/ccd"]
+    assert [c.id for c in by_scheme("andor://0?sdk=3", reg)] == ["andor/scmos"]
+    assert by_scheme("http://10.0.0.7/v1", reg) == [] and by_scheme("GPIB0::8::INSTR", reg) == []
+    assert [c.id for c in cards_named("american-magnetics/430", reg)] == ["ami/430"]
+    assert [c.id for c in cards_named("AMI 430", reg)] == ["ami/430"]
+    assert [c.id for c in cards_named("Oxford Instruments Mercury iTC", reg)] == ["oxford/mercury-itc"]
+    assert [c.id for c in cards_named("Newport SMC100", reg)] == ["newport/smc100"]   # not R&S's SMC100A
+    card, how = card_for("qd://127.0.0.1:5000", reg)
+    assert card.id == "qd/multivu" and "qd://" in how
+    card, how = card_for("GPIB0::8::INSTR", reg, idn="Stanford_Research_Systems,SR830,s/n86422,ver1.07")
+    assert card.id == "srs/sr830" and how == "its identity reply"
+    assert card_for("GPIB0::8::INSTR", reg, name="acme/nothing")[0] is None
+    found = find_cards("AMI 430", reg, Catalog())
+    assert [c.id for c in found["cards"]] == ["ami/430"] and found["entries"] == []   # its card: no entry twice
+    found = find_cards("electrometer", reg, Catalog())
+    assert found["cards"] == [] and [e["id"] for e in found["entries"]] == ["keysight/b2987"]
+    found = find_cards("Keysight Technologies,B2987B,MY123,1.0", reg, Catalog())
+    assert [e["id"] for e in found["entries"]] == ["keysight/b2987"]
+
+
+def test_kelvin_uses_its_card_before_drafting_or_shadowing_one(tmp_path):
+    """l07: Kelvin drafted its own oxford/mercury-itc and saved it as this lab's version of the built-in card, which
+    lacked the card's set_reply and broke a run. find_card shows the card, draft_card won't write one Kelvin has, and
+    save_card takes a Kelvin card's id only when asked to make this lab's version (version: true)."""
+    pytest.importorskip("mcp")
+    from pathlib import Path
+    from labharness import build_virtual_lab
+    from labharness.agent.runtime import LabRuntime
+    rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")
+    rt.home, rt.cards_dir, rt.collection = tmp_path, tmp_path / "cards", Catalog()
+    rt.card_writer = lambda found: pytest.fail("a card Kelvin has was drafted again")
+    said = rt.find_card("Mercury iTC")
+    assert "oxford/mercury-itc" in said and "Kelvin's" in said and "add_instrument" in said
+    said = rt.draft_card("TCPIP0::192.168.1.60::7020::SOCKET", maker="Oxford Instruments", model="Mercury iTC")
+    assert said.startswith("Kelvin already has a card for it: oxford/mercury-itc")
+    assert "keysight/b2987" in rt.find_card("Keysight B2987") and "b2980-programming.pdf" in rt.find_card("B2987")
+    mercury = Path(builtin_registry().get("oxford/mercury-itc").source).read_text(encoding="utf-8")
+    worse = mercury.replace("status: community", "status: draft").replace(', set_reply: ":VALID$"', "")
+    said = rt.save_card(worse)
+    assert said.startswith("not saved: Kelvin already has a card oxford/mercury-itc: use it"), said
+    assert not (tmp_path / "cards").exists() or not list((tmp_path / "cards").glob("*.yaml"))
+    assert rt.save_card(worse, version=True).startswith("saved draft card oxford/mercury-itc")
+
+
+def test_add_instrument_takes_the_card_a_name_means(tmp_path):
+    """l10: Kelvin guessed card ids (american-magnetics/430) and, finding none, drafted. add_instrument takes the
+    card a maker and model name means, and says which several fit."""
+    pytest.importorskip("mcp")
+    from labharness.adapters import set_resource_manager
+    from test_add_instrument import SMU_ONLY, file_runtime
+    set_resource_manager(Bus({"GPIB0::24::INSTR": Device("keithley/2400", name="k2400"),
+                              "GPIB0::8::INSTR": Device("srs/sr830", name="sr830")}))
+    try:
+        rt = file_runtime(tmp_path, SMU_ONLY)
+        rt.gate.approver = ScriptedApprover([True])
+        said = rt.add_instrument("GPIB0::8::INSTR", card="Stanford SR830", name="lockin")
+        assert said.startswith("added lockin (Stanford Research SR830") and "card srs/sr830" in said, said
+        assert "found by its name" in said
+        said = rt.add_instrument("GPIB0::9::INSTR", card="Keithley 24")
+        assert said.startswith("not added: ") and "find_card" in said, said
+    finally:
+        set_resource_manager(None)

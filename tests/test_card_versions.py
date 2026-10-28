@@ -50,7 +50,8 @@ def test_kelvin_can_draft_the_labs_version_of_its_card(parts, tmp_path):
     runtime, settings, store = parts
     client_for(parts, {})                                                       # sets the cards folder
     ours = kelvins_attodry().replace("limits: [1.65, 300]", "limits: [1.65, 320]")
-    out = runtime.save_card(ours)
+    assert runtime.save_card(ours).startswith("not saved: Kelvin already has a card attocube/attodry: use it")
+    out = runtime.save_card(ours, version=True)                                 # only on purpose
     assert out.startswith("saved draft card attocube/attodry") and "this lab's version of Kelvin's card" in out
     assert lab_registry(tmp_path).get("attocube/attodry").status == "draft"     # a person reviews it before outputs
     reviewed = ours.replace("status: draft", "status: lab-verified")

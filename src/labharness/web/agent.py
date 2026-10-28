@@ -237,7 +237,7 @@ MAX_FOUND = 10
 # lookups that touch no instrument and change nothing: several in one step run side by side
 LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", "query_runs", "list_runs", "analyze_run",
            "recent_events", "kelvin_help", "describe_instrument", "search_manual", "instrument_info", "lab_config",
-           "card_guide",
+           "card_guide", "find_card",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
            "use_skill", "read_skill_file", "survey_scripts"}

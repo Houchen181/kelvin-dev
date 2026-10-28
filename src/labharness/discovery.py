@@ -73,6 +73,136 @@ def match_card(idn: str, registry: CardRegistry) -> Optional[Card]:
     return max(hits, key=lambda c: len(c.idn_pattern or "")) if hits else None
 
 
+GENERIC_SCHEMES = ("http", "https", "lib", "serial", "visa", "sim", "modbus")   # any instrument's: no card follows
+_OPTION = re.compile(r"[?&]([a-z0-9_]+=[^&\s\"',)]+)", re.I)
+
+
+def by_scheme(address: str, registry: CardRegistry) -> List[Card]:
+    """The cards for a maker's-driver address (qd://... is a Quantum Design system: qd/multivu), from the addresses
+    the cards themselves give; where several share the scheme, those whose example has the address's options
+    (andor://0?sdk=2 is the SDK2 camera), then those that name it most."""
+    scheme = address.split("://", 1)[0].lower() if "://" in address else ""
+    if not scheme or scheme in GENERIC_SCHEMES:
+        return []
+    hits = []
+    for card in registry:
+        text = json.dumps(card.data, ensure_ascii=False) if card.data else " ".join(card.notes)
+        examples = re.findall(r"(?<![a-z0-9])%s://[^\s\"',)]*" % re.escape(scheme), text, re.I)
+        if examples:
+            hits.append((card, examples))
+    options = set(o.lower() for o in _OPTION.findall(address))
+    if len(hits) > 1 and options:
+        same = [h for h in hits if options & {o.lower() for e in h[1] for o in _OPTION.findall(e)}]
+        hits = same or hits
+    if len(hits) > 1:
+        most = max(len(examples) for _, examples in hits)
+        hits = [h for h in hits if len(h[1]) == most]
+    return [card for card, _ in hits]
+
+
+def _words(text: str) -> List[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in ("model", "the", "and", "card")]
+
+
+def cards_named(name: str, registry: CardRegistry) -> List[Card]:
+    """The cards a name means (american-magnetics/430, AMI 430, smc100, Mercury iTC): the card with that id, else those
+    whose id or model has every word of the name that has a digit in it and one of its other words (the maker's), or,
+    for a name without a number, all of its words."""
+    flat = re.sub(r"[^a-z0-9]+", "", name.lower())
+    exact = [c for c in registry if re.sub(r"[^a-z0-9]+", "", c.id.lower()) == flat]
+    if exact or not flat:
+        return exact
+    words = _words(name)
+    numbered = [w for w in words if any(ch.isdigit() for ch in w)]
+    plain = [w for w in words if w not in numbered and len(w) > 2]
+
+    def near(w: str, mine: set) -> bool:
+        return w in mine or any(m.startswith(w) or w.startswith(m) for m in mine if len(m) > 2)
+    out = []
+    for card in registry:
+        have = " ".join([card.id, card.model, card.vendor]).lower()
+        mine = set(_words(have))
+        if numbered:
+            fits = all(w in mine or w in re.sub(r"[^a-z0-9]+", "", have) for w in numbered) and \
+                (not plain or any(near(w, mine) for w in plain))
+        else:
+            fits = bool(plain) and all(near(w, mine) for w in plain)
+        if fits:
+            out.append(card)
+    return out
+
+
+def card_for(address: str, registry: CardRegistry, idn: str = "", name: str = "") -> Tuple[Optional[Card], str]:
+    """The card for an instrument Kelvin is about to add, before anyone drafts one: the one named (by id, or by maker
+    and model: name), the one its identity reply matches, or the one its driver address calls for (qd://). (card,
+    how it was found), or (None, why not: the candidates when several fit)."""
+    if name:
+        named = cards_named(name, registry)
+        if len(named) == 1:
+            return named[0], "" if named[0].id == name.strip() else "its name (%s)" % name
+        if named:
+            return None, "several cards fit %r: %s; give card=<one of them>" % (name, ", ".join(c.id for c in named))
+        return None, "Kelvin has no card %r" % name
+    if idn:
+        card = match_card(idn, registry)
+        if card is not None:
+            return card, "its identity reply"
+    schemed = by_scheme(address, registry)
+    if len(schemed) == 1:
+        return schemed[0], "its address (%s://)" % address.split("://", 1)[0]
+    if schemed:
+        return None, "several cards fit %s addresses: %s; give card=<one of them>" % (
+            address.split("://", 1)[0], ", ".join(c.id for c in schemed))
+    return None, ""
+
+
+def find_cards(query: str, registry: CardRegistry, catalog: Any = None, limit: int = 10) -> Dict[str, Any]:
+    """Kelvin's cards (its own, the instrument collection's and the lab's, as the registry has them) and the
+    collection's instruments that have no card yet, for a query: words (maker, model, kind), an identity reply, or a
+    driver address. {cards: [Card], entries: [collection entries without a card]}, the best first."""
+    query = (query or "").strip()
+    if "://" in query:
+        return {"cards": by_scheme(query, registry)[:limit], "entries": []}
+    cards: List[Card] = []
+    entries: List[Dict[str, Any]] = []
+    if "," in query and len(query) > 12:   # an identity reply: what it matches
+        card = match_card(query, registry)
+        cards = [card] if card else []
+        entry = catalog.instrument_for(query) if catalog is not None else None
+        if entry and not isinstance(entry.get("card"), dict):
+            entries.append(entry)
+        if cards or entries:
+            return {"cards": cards, "entries": entries}
+    words = [w for w in _words(query) if len(w) > 1]
+    if not words:
+        return {"cards": sorted(registry, key=lambda c: c.id)[:limit] if not query else [], "entries": []}
+
+    def score(text: str, name: str) -> int:
+        hay, title = set(_words(text)), set(_words(name))
+        hits = [w for w in words if w in hay or (len(w) > 3 and any(h.startswith(w) for h in hay))]
+        if len(hits) < len(words) and not any(any(ch.isdigit() for ch in w) and w in hay for w in words):
+            return 0   # every word, or the model number
+        return sum(3 if w in title else 1 for w in hits)
+    ranked = []
+    for card in registry:
+        s = score(" ".join([card.id, card.model, card.vendor, card.kind] + card.notes[:2]), card.id + " " + card.model)
+        if s:
+            ranked.append((-s, card.id, card))
+    cards = [c for _, _, c in sorted(ranked, key=lambda r: r[:2])][:limit]
+    if catalog is not None:
+        have = {c.id for c in registry}
+        found = []
+        for entry in catalog.index().get("instruments") or []:
+            if not isinstance(entry, dict) or isinstance(entry.get("card"), dict) or entry.get("id") in have:
+                continue
+            s = score(" ".join(str(entry.get(k) or "") for k in ("id", "maker", "model", "name", "kind")),
+                      "%s %s" % (entry.get("id") or "", entry.get("name") or ""))
+            if s:
+                found.append((-s, str(entry.get("id")), entry))
+        entries = [e for _, _, e in sorted(found, key=lambda r: r[:2])][:limit]
+    return {"cards": cards, "entries": entries}
+
+
 def look_up(found: Found, catalog: Any) -> Found:
     """An instrument that answered but matches no card: its name, kind and public manuals from the instrument
     collection (collection.Collection), if the collection knows its identity reply."""
