@@ -122,8 +122,8 @@
             if (confirm("Done with the sample? Check that it is wired as the next measurement needs and that nobody is touching the setup.")) await api("/api/hands", { on: false });
           })) : h("p", { class: "muted" }, "Unlock on the Kelvin computer."));
       } else {
-        rows.push(h("div", { class: "row" }, act("Hands on the sample", "", async () => {
-          if (confirm("Hands on the sample? Kelvin stops what runs and brings everything that reaches the sample to safe until a person unlocks.")) await api("/api/hands", { on: true });
+        rows.push(h("div", { class: "row" }, act("Hands on the sample", "", async () => {   // at once: no dialog on the stop path
+          await api("/api/hands", { on: true });
         })));
       }
       $("sample").className = "card" + (hands ? " locked" : "");
@@ -137,8 +137,8 @@
         $("run").replaceChildren(h("h2", {}, "Running " + live.plan),
           h("div", { class: "bar" }, h("i", { id: "run-bar" })),
           h("div", { class: "row" }, h("span", { class: "grow muted", id: "run-info" }),
-            act("Stop", "danger", async () => {
-              if (confirm("Stop " + live.plan + "? Its safe-stop steps run.")) await api("/api/runs/stop", {});
+            act("Stop", "danger", async () => {   // at once: no dialog on the stop path
+              await api("/api/runs/stop", {});
             })));
       } else {
         $("run").replaceChildren(h("h2", {}, "No run in progress"),

@@ -17,7 +17,9 @@ By default the server starts the virtual lab in instant simulated time. Use `--s
 On the approval page you can:
 - **Approve or decline** what the agent asks for. An unanswered request is declined after 120 s (`--approval-timeout`). No MCP tool can answer approvals.
 - **Watch** every instrument (drives away from safe are highlighted) and the activity log.
-- **Press Stop.** This declines open requests and stops the agent's current ramp or plan. Drives stay where they are; a stopped plan runs its own `on_abort` steps. It works even while an instrument holds Kelvin up: a sweep the instrument is still taking, a settle or a wait ends within a second, and in the portal the chat's step ends at once.
+- **Press Stop.** This declines open requests and stops the agent's current ramp or plan, and the queue. Drives stay where they are; a stopped plan runs its own `on_abort` steps. It works even while an instrument holds Kelvin up: a sweep the instrument is still taking, a settle or a wait ends within a second, and in the portal the chat's step ends at once. Calls the agent made that were still waiting for the lab are not run: they answer that a person pressed Stop.
+
+**Cancelling a call** (the client's `notifications/cancelled`, or the client disconnecting) ends it, so nothing happens for a caller that is gone: what it asked a person for is declined, the ramp or run it started stops as at Stop, and a call still waiting for the lab is never run. The record says `call_cancelled`.
 
 Client setup. Use the full path to the venv's `kelvin-mcp` (or its Python with `-m labharness.agent`):
 

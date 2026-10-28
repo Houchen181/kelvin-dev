@@ -9,7 +9,7 @@ import itertools
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import frames
 from ._version import __version__
@@ -237,6 +237,7 @@ class RunEngine:
         (dry_run), or in auto mode for a run nobody approves: there the dry run stands in for the person's look.
         Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal.
         folder: where the run's folder goes (its chat's folder; else the data folder's runs/)."""
+        since = self.gate.stop_generation, self.lab.stops.count   # a stop while it is checked or approved ends it too
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan)
         except PlanError as e:
@@ -286,7 +287,8 @@ class RunEngine:
                 report = RunReport("declined", plan.name, "declined: plan %s not run%s" % (plan.name, why), dry_run=sim)
                 self.gate.log.write("run_declined", by=self.gate.operator, plan=plan.name)
                 return report
-        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta, folder)
+        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta, folder,
+                               since)
         report.dry_run = sim
         if report.status != "done":   # something went wrong on them: check them again before the next run
             for name in plan.requires:
@@ -320,10 +322,11 @@ class RunEngine:
             clock.sleep(max(0.05, min(2.0, st.duration / 10)))
 
     def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
-                 meta: Optional[Dict[str, Any]] = None, folder: Any = None) -> RunReport:
+                 meta: Optional[Dict[str, Any]] = None, folder: Any = None,
+                 since: Optional[Tuple[int, int]] = None) -> RunReport:
         """expected_s: the dry run's duration (lab time), for an honest time-left estimate that counts ramps."""
         gate, lab, clock = self.gate, self.lab, self.lab.clock
-        gen, stops = gate.stop_generation, lab.stops.count
+        gen, stops = since if since is not None else (gate.stop_generation, lab.stops.count)
         rec = self.store.create(plan.name, plan.source, gate.operator, folder)
         rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
         rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
@@ -352,6 +355,8 @@ class RunEngine:
 
         try:
             with gate.preapproved(grants):
+                if gate.stop_generation != gen:   # stopped before it began: not even its setup
+                    raise _Abort("stop requested")
                 for step in plan.setup:
                     apply(step.instr, step.param, step.value)
                 # the conditions it measured in: the settings at its start with the plan's setup applied

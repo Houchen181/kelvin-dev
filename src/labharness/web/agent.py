@@ -136,6 +136,13 @@ STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the s
 STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
                 "lets it: a plan stops at once, an instrument still taking a reading is told to stop.")
 _RUN_ID = re.compile(r"run_id='([^']+)'")
+# a message that only says stop: STOP, stop!, Stop now, abort, /stop. A hard stop, never words for the model to read
+# at its next step (a run or a wait could last hours before it got there)
+_TYPED_STOP = re.compile(r"\s*/?(?:stop|abort|halt)(?:\s+(?:it|now|everything|all|stop|abort))*\s*[.!]*\s*", re.I)
+
+
+def typed_stop(text: Any) -> bool:
+    return bool(_TYPED_STOP.fullmatch(str(text or "")))
 
 
 def _within(path: Path, folder: Path) -> bool:

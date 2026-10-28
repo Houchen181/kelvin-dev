@@ -46,7 +46,7 @@ from .. import protection
 from .. import rundata
 from ..virtual_lab import (build_lab, builtin_ids, builtin_registry, collection_ids, is_simulated, kelvin_ids,
                            lab_registry, open_home_lab)
-from .agent import Busy, ChatAgent, runs_in
+from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
@@ -195,6 +195,16 @@ class Guard:
 
 def role_of(request: Request) -> str:
     return (request.scope.get("kelvin") or {}).get("role") or "owner"
+
+
+def person(request: Request) -> str:
+    """Who a person's request is from, as the lab's record names them: the Kelvin computer or a paired phone."""
+    device = (request.scope.get("kelvin") or {}).get("device")
+    return "human (phone %s)" % device.get("name") if device else "human (portal)"
+
+
+STOPPED = ("Stopped: Kelvin's answer, the ramp or run in progress (a run's safe-stop steps run) and the queue; open "
+           "approvals were declined.")
 
 
 SUMMARY_SYSTEM = ("You write the opening of a physics project's master report: two or three short paragraphs "
@@ -2433,12 +2443,26 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except ValueError as e:
             return error(400, str(e))
 
+    async def hard_stop(chat_id: str, request: Request) -> None:
+        """A typed STOP: this chat's answer and the lab's work, whoever started it, as the Stop for everything."""
+        agent.stop(chat_id)
+        await asyncio.to_thread(runtime.stop, person(request)[:-1] + ", typed STOP)")
+
     async def turn(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
         body = await request.json()
         text = str(body.get("text") or "").strip()
         if not text:
             return error(400, "Say something first.")
+        if typed_stop(text):   # the lab stops now; the model is not asked
+            try:
+                store.load(chat_id)   # only the signed-in person's chats
+            except KeyError as e:
+                return error(404, e.args[0])
+            await hard_stop(chat_id, request)
+            said = [{"type": "note", "text": STOPPED}, {"type": "turn_end", "reason": "stopped"}]
+            return Response("".join(json.dumps(e) + "\n" for e in said), media_type="application/x-ndjson",
+                            headers={"Cache-Control": "no-store"})
         model = str(body.get("model") or "")
         try:
             attached = agent.check_attachments(chat_id, body.get("attachments"))
@@ -2480,6 +2504,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, "Say something first.")
         if len(text) > 20000:
             return error(400, "That message is too long.")
+        if typed_stop(text):   # not for Kelvin's next step: now
+            await hard_stop(request.path_params["chat_id"], request)
+            return JSONResponse({"ok": True, "stopped": True, "message": STOPPED})
         if not agent.steer(request.path_params["chat_id"], text):
             return error(409, "Kelvin isn't working on this chat now: send it as a new message.")
         return JSONResponse({"ok": True})
@@ -2559,13 +2586,21 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse(opinion)
 
     async def stop(request: Request) -> Response:
-        """{chat_id}: stop that chat's answer (and the lab's work when it is that chat's); without one, every chat's."""
+        """{chat_id}: stop that chat's answer (and the lab's work when it is that chat's). Without one, the Stop for
+        everything: every chat's answer and the lab's work (its ramp or run, the queue, open approvals), also when no
+        chat is answering, as a queue runs by itself. {chat_id, lab: true}: that chat's answer and the lab's work (a
+        typed STOP)."""
         try:
             body = await request.json()
         except ValueError:
             body = {}
-        chat_id = body.get("chat_id") if isinstance(body, dict) else None
-        return JSONResponse({"ok": agent.stop(str(chat_id) if chat_id else None)})
+        body = body if isinstance(body, dict) else {}
+        chat_id = body.get("chat_id")
+        stopped = agent.stop(str(chat_id) if chat_id else None)
+        if not chat_id or body.get("lab"):
+            await asyncio.to_thread(runtime.stop, person(request))
+            stopped = True
+        return JSONResponse({"ok": stopped, "message": STOPPED if stopped and (not chat_id or body.get("lab")) else ""})
 
     async def approval(request: Request) -> Response:
         body = await request.json()
@@ -2671,9 +2706,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except ValueError:
             body = {}
         if isinstance(body, dict) and body.get("queue"):   # the queue too: nothing else starts after this scan
-            runtime.stop("human (portal)")
+            runtime.stop(person(request))
             return JSONResponse({"ok": True})
-        return JSONResponse({"ok": runtime.stop_run()})
+        return JSONResponse({"ok": runtime.stop_run(person(request))})
 
     async def queue(request: Request) -> Response:
         """GET: the scan queue. POST {op, ...}: a person's change to it. start asks for the queue's approval as usual

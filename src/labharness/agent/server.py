@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 import webbrowser
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+import anyio
+import anyio.to_thread
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
 
@@ -23,12 +26,14 @@ from ..collection import Collection
 from ..labconfig import load_envelope
 from ..virtual_lab import build_virtual_lab, demo_envelope
 from .approval import ApprovalServer, WebApprover
-from .runtime import LabRuntime
+from .runtime import ClientCall, LabRuntime
 
 INSTRUCTIONS = """\
 You are connected to a physics lab through Kelvin.
 - Measurement and configuration (reading values, time constants, averaging, spans, moving a delay stage...) run immediately.
 - Changes that drive the sample harder (more power, voltage, current, field, temperature, outputs on) wait for a human to approve them on the Kelvin approval page, unless the project envelope covers them. Your call blocks until they answer or the request times out. You cannot approve requests yourself; do not try.
+- Cancelling a call (or disconnecting) ends it: what it asked a person for is declined, the ramp or run it started
+  stops, and a call still waiting for the lab is not run. A person's Stop also ends the calls waiting for the lab.
 - A person may switch on auto mode. Then drive changes and runs that stay well inside the lab's limits (and pass
   a clean dry run) go ahead without asking; lab_status says when it is on. Only a person can switch it.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. Do not try to work around a refusal; tell the user.
@@ -163,6 +168,27 @@ FETCH = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHin
 def build_server(rt: LabRuntime) -> MCPServer:
     server = MCPServer("kelvin", instructions=INSTRUCTIONS, version=__version__)
 
+    def cancellable(fn: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
+        """A tool that changes something or asks a person, which the client may cancel (notifications/cancelled) or
+        leave by disconnecting. Kelvin then does nothing more for the call instead of finishing it for nobody
+        (LabRuntime.cancel_call): what it asked a person for is declined, the ramp or run it has the lab for stops,
+        and a call still waiting for the lab never runs."""
+        @functools.wraps(fn)
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            token = ClientCall(fn.__name__)
+
+            def work() -> Any:
+                with rt.client_call(token):
+                    if token.cancelled:
+                        return "not run: the client cancelled this call"
+                    return fn(*args, **kwargs)
+            try:
+                return await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
+            except anyio.get_cancelled_exc_class():
+                rt.cancel_call(token)
+                raise
+        return call
+
     @server.tool(annotations=READ, structured_output=False)
     def kelvin_help(question: str) -> str:
         """How Kelvin itself works and where things are in its portal, from Kelvin's own documentation: where a
@@ -216,23 +242,27 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.get(instrument, parameter)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def set_value(instrument: str, parameter: str, value: float | bool | str) -> str:
         """Set one parameter. Measurement settings apply at once. Drive increases wait for human
         approval (unless inside the project envelope), then ramp at a safe rate while guards are watched."""
         return rt.set(instrument, parameter, value)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def send_raw(instrument: str, command: str) -> str:
         """Send a raw instrument command (e.g. SCPI). Same rules as set_value: queries and configuration
         run; anything touching a drive goes through the gate; blocked commands are refused."""
         return rt.raw(instrument, command)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def undo_last() -> str:
         """Undo the last successful set_value (through the same safety rules)."""
         return rt.undo()
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def watch(reading: str, above: Optional[float] = None, below: Optional[float] = None, for_seconds: float = 0,
               note: str = "") -> str:
         """Watch a reading (e.g. tc.T_A) and alert the user when it goes above/below a value for `for_seconds`.
@@ -249,6 +279,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.watches_text()
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def unwatch(watch_id: str) -> str:
         """Stop a watch you or the user added (watches from the lab config stay)."""
         try:
@@ -302,6 +333,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.try_card(card, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def save_card(card: str) -> str:
         """Keep a new instrument card (status draft) with the user's cards. Only from the manual text the user gave;
         never invent commands. Then try_card and add_instrument; until a person reviews it, every setting and output
@@ -311,6 +343,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.save_card(card)
 
     @server.tool(annotations=FETCH, structured_output=False)
+    @cancellable
     def draft_card(address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
         """Write a card for a connected instrument Kelvin has none for: Kelvin finds the maker's manual online, writes
         the card from its command reference, checks it and keeps it as a draft. Maker and model come from the
@@ -329,6 +362,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "a web page", rt.read_web_page(url, start, max_chars), web=True)
 
     @server.tool(annotations=FETCH, structured_output=False)
+    @cancellable
     def save_manual(source: str, maker: str = "", model: str = "", address: str = "", instrument: str = "") -> str:
         """Keep an instrument's manual: its web address (a PDF or a page) or a file on this computer. Kelvin checks
         it names the model and keeps it in Kelvin's manuals folder. With address (an instrument not in the lab yet),
@@ -337,6 +371,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.save_manual(source, maker, model, address, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def add_instrument(address: str, card: str = "", name: str = "", connection: Optional[Dict[str, Any]] = None,
                        vars: Optional[Dict[str, str]] = None) -> str:
         """Add an instrument connected to this computer to the lab, once the person has asked for it. address: from
@@ -349,6 +384,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.add_instrument(address, card, name, connection, vars)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def do_action(instrument: str, action: str) -> str:
         """Do one of an instrument's named actions, as its card lists them (describe_instrument): trigger a
         measurement, arm an acquisition, fire a burst. One that drives the sample asks the person first. In a plan,
@@ -356,6 +392,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.do_action(instrument, action)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def reconnect_instrument(instrument: str) -> str:
         """Connect an instrument of the lab that could not be connected (lab_status says why), once that is fixed:
         its package installed (install_for_instrument does this by itself), the instrument switched on or plugged in.
@@ -363,6 +400,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.reconnect_instrument(instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def ask_to_switch_on(instrument: str, why: str) -> str:
         """Ask the person to switch on an instrument they switched off in the Lab panel, saying why you need it.
         It is switched on only if they say yes."""
@@ -384,6 +422,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "a paper", rt.read_paper(paper, start, max_chars), web=True)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def make_report(runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
                     summary: str = "", format: str = "pdf", kind: str = "runs", device: str = "") -> str:
         """Reports. Kelvin already keeps three up to date by itself: each run's scan report (in its folder), each
@@ -444,6 +483,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.environments()
 
     @server.tool(annotations=FETCH, structured_output=False)
+    @cancellable
     def install_for_instrument(env: str, packages: Optional[List[str]] = None, python: str = "", bits: int = 64,
                                files: str = "", why: str = "") -> str:
         """Install what an instrument needs on this computer (the chat shows what, which version and from where;
@@ -457,6 +497,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.install_for_instrument(env, packages, python, bits, files, why)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def run_on_board(address: str, code: str = "", notebook: str = "", password: str = "", wait: float = 30) -> str:
         """Run Python on a lab board through its Jupyter server (a PYNQ board for QICK, a Red Pitaya), once the
         person approves the code: code, or notebook (the path of one of the board's own notebooks, run cell by
@@ -480,6 +521,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True,
                                              openWorldHint=False), structured_output=False)
+    @cancellable
     def remove_environment(env: str) -> str:
         """Remove one of Kelvin's instrument environments, e.g. one an instrument no longer needs. One an instrument
         in the lab uses asks the person first: that instrument stops connecting until it is installed again."""
@@ -511,6 +553,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.simulate(plan)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def run_plan(plan: str, dry_run: bool = False) -> str:
         """Run a plan (YAML text): validate, health check (of instruments not checked in the last 10 minutes), one
         human approval for its drive ranges, run, log, then analyse automatically. Call it directly, without
@@ -519,6 +562,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.run(plan, dry_run=bool(dry_run))
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def run_recipe(recipe: str, values: Optional[Dict[str, float]] = None) -> str:
         """Run a recipe: a measurement in stages, each a plan whose run must pass the recipe's check (an expression
         over its data) before the next stage starts; a stage can keep values for the later ones (at_max(lockin.X,
@@ -535,6 +579,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.queue_show()
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def queue_add(item: str, position: Optional[int] = None, note: str = "") -> str:
         """Add to the scan queue (it does not start it): a plan (YAML, as for run_plan) or a step between scans, e.g.
         "step: cool to 2 K\nset: {tc.T_set: 2}\nstabilize: {read: tc.T, within: 0.02, for: 120, timeout: 7200}\n
@@ -542,17 +587,20 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.queue_add(item, position, note)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def queue_edit(item: str, text: str) -> str:
         """Replace a waiting or finished queue item (by its number or id) with new plan or step text."""
         return rt.queue_edit(item, text)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def queue_change(action: str, item: Optional[str] = None, position: Optional[int] = None) -> str:
         """Rearrange the queue. action: move (item to position), remove (item), again (put a finished item back in
         line) or clear (remove every finished item). Items are named by their number in queue_show, or their id."""
         return rt.queue_change(action, item, position)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def queue_start(dry_run: bool = False) -> str:
         """Start the queue: check every waiting item, ask a person once for every drive range they use, then run
         them one after another in the background. dry_run: true first runs the whole queue in order on the simulated
@@ -560,16 +608,19 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.queue_start(dry_run=bool(dry_run))
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def queue_pause() -> str:
         """Pause the queue after the item that is running (the Stop button ends that item too)."""
         return rt.queue_pause()
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def queue_save(name: str) -> str:
         """Keep the waiting items as a named queue, to load again later (queue_load)."""
         return rt.queue_save(name)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def queue_load(name: str) -> str:
         """Add a saved queue's items to the end of the queue."""
         return rt.queue_load(name)
@@ -602,6 +653,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.query_runs(sql)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def import_data(paths: str, name: str = "") -> str:
         """Make data Kelvin didn't measure into a run, so the run tools work on it (describe_run, get_run_data,
         compute, look_at, reports, the automatic fits): another program's tables (CSV, TSV, text with a header) and
@@ -654,6 +706,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.events(n)
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def wait(seconds: float) -> str:
         """Let time pass (e.g. for thermalization), up to 3600 s."""
         return rt.wait(seconds)

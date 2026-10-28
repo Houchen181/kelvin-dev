@@ -37,6 +37,9 @@ class WebApprover(Approver):
         self._history: Deque[Dict[str, Any]] = deque(maxlen=20)
         self._seq = 0
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
+        # who declines a request before anyone sees it (asked from the requesting thread): the client that cancelled
+        # the call asking it (LabRuntime.cancel_call). None: it is shown as usual
+        self.vetoes: List[Callable[[], Optional[str]]] = []
 
     def subscribe(self, listener: Callable[[Dict[str, Any]], None]) -> Callable[[], None]:
         """Call `listener(request)` for every new request (from the requesting thread). Returns unsubscribe."""
@@ -44,11 +47,18 @@ class WebApprover(Approver):
         return lambda: self._listeners.remove(listener) if listener in self._listeners else None
 
     def approve(self, request: ApprovalRequest) -> bool:
+        why = next((w for w in (veto() for veto in list(self.vetoes)) if w), None)
         with self._cv:
             self._seq += 1
             now = time.time()
             entry = {"id": "r%d" % self._seq, "title": request.title, "items": list(request.items),
-                     "created": now, "expires": now + self.timeout, "answer": None, "by": None}
+                     "created": now, "expires": now + self.timeout, "answer": None, "by": None,
+                     "thread": threading.get_ident()}
+            if why:   # never shown: nobody is left to act on a yes
+                entry.update(answer=False, by=why, decided=now)
+                self._history.appendleft(entry)
+                request.note = "declined by %s" % why
+                return False
             self._pending[entry["id"]] = entry
             self._cv.notify_all()
         public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "seconds_left": int(self.timeout)}
@@ -99,10 +109,14 @@ class WebApprover(Approver):
             return True
 
     def decline_all(self, by: str = "stop button") -> int:
+        return self.decline_from(None, by)
+
+    def decline_from(self, thread: Optional[int], by: str) -> int:
+        """Decline the open requests asked from that thread (None: every open request). How many were declined."""
         with self._cv:
             n = 0
             for entry in self._pending.values():
-                if entry["answer"] is None:
+                if entry["answer"] is None and thread in (None, entry.get("thread")):
                     entry["answer"], entry["by"] = False, by
                     n += 1
             self._cv.notify_all()

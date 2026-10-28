@@ -113,6 +113,9 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "stop":
         text = "stopped the current ramp or plan" + (
             "; declined %d open request(s)" % e["declined"] if e.get("declined") else "")
+    elif kind == "call_cancelled":
+        text = "the client cancelled %s%s%s" % (e.get("tool"), "; its work stopped" if e.get("stopped") else "",
+                                                "; declined what it asked for" if e.get("declined") else "")
     elif kind == "alarm":
         text = "ALARM: %s%s" % (e.get("text"), " -> " + "; ".join(e["actions"]) if e.get("actions") else "")
     elif kind == "alarm_cleared":
@@ -209,6 +212,18 @@ def _installed_by_a_maker(folder: str) -> bool:
     return False
 
 
+class ClientCall:
+    """A tool call an MCP client made, while Kelvin works on it (agent/server.py). The client may cancel it or go away;
+    then Kelvin does nothing more for it (LabRuntime.cancel_call)."""
+    CANCELLED = "the client, which cancelled the call"   # who declined what it asked for
+
+    def __init__(self, tool: str):
+        self.tool = tool
+        self.thread: Optional[int] = None   # the worker thread doing it, once it has started
+        self.waiting = False                # waiting for the lab, which another call or a run has
+        self.cancelled = False
+
+
 class LabRuntime:
     def __init__(self, lab: Lab, approver: Approver, data_dir: Any, envelope: Optional[Envelope] = None):
         self.lab = lab
@@ -224,6 +239,8 @@ class LabRuntime:
         self.engine = RunEngine(self.gate, self._store())
         self.engine.progress = self._on_progress
         self.lock = threading.RLock()
+        self._client = threading.local()   # the MCP client's call this thread works for (ClientCall), if any
+        self._holder: Optional["ClientCall"] = None   # the client's call that has the lab now, if one has
         self._script_cards: Optional[Tuple[Any, Any]] = None   # (the lab's cards folder as it was, the registry)
         self.busy: Optional[str] = None
         self._status: Dict[str, Dict[str, Any]] = {}
@@ -279,6 +296,10 @@ class LabRuntime:
         if subscribe:  # a person is needed: tell them, wherever they are
             subscribe(lambda r: None if r.get("auto") else self.notifier(
                 "approval", "Approval needed: " + r["title"], (r.get("items") or [""])[0]))
+        vetoes = getattr(approver, "vetoes", None)
+        if vetoes is not None:   # a cancelled call asks nobody: no one is left to act on a yes
+            vetoes.append(lambda: ClientCall.CANCELLED if getattr(getattr(self._client, "call", None), "cancelled",
+                                                                  False) else None)
         with self.lock:
             self._refresh()
 
@@ -328,21 +349,38 @@ class LabRuntime:
         except Exception:
             pass
 
-    def _do(self, what: str, fn: Callable[[], str]) -> str:
-        if not self.lock.acquire(timeout=2.0):
-            if self.queue.state in ("running", "pausing"):   # a queued scan may take hours: answer instead of waiting
-                return ("Kelvin is running the queue (%s). Ask again when this item is done, or pause or stop the "
-                        "queue." % (self.busy or "a scan"))
-            if not self.lock.acquire(timeout=BUSY_WAIT_S):   # never a chat stuck behind an instrument that hangs
-                return ("Kelvin is still busy with %s: an instrument has not answered yet (a stop takes effect as "
-                        "soon as it does). Ask again in a moment; if this keeps happening, check that instrument's "
-                        "cable, power and address." % (self.busy or "an earlier request"))
+    def _do(self, what: str, fn: Callable[[], str], stoppable: bool = False) -> str:
+        """fn with the lab to itself. stoppable: a call that changes the lab (a drive, a run, the queue) or waits on
+        it; one still waiting for the lab when a person presses Stop, or when the client that made it cancels it,
+        is not run (a Stop ends what is lined up behind the stopped work too, not only what was showing)."""
+        gate, stops = self.gate, self.gate.stop_generation
+        call = getattr(self._client, "call", None)   # the client's call this thread works for (agent/server.py)
+        if call is not None:
+            call.waiting = True
         try:
+            if not self.lock.acquire(timeout=2.0):
+                if self.queue.state in ("running", "pausing"):   # a queued scan may take hours: answer, don't wait
+                    return ("Kelvin is running the queue (%s). Ask again when this item is done, or pause or stop the "
+                            "queue." % (self.busy or "a scan"))
+                if not self.lock.acquire(timeout=BUSY_WAIT_S):   # never a chat stuck behind an instrument that hangs
+                    return ("Kelvin is still busy with %s: an instrument has not answered yet (a stop takes effect as "
+                            "soon as it does). Ask again in a moment; if this keeps happening, check that "
+                            "instrument's cable, power and address." % (self.busy or "an earlier request"))
+        finally:
+            if call is not None:
+                call.waiting = False
+        try:
+            if call is not None and call.cancelled:
+                return "not run: the client cancelled this call while it waited for the lab"
+            if stoppable and gate.stop_generation != stops:
+                return ("not run: a person pressed Stop while this waited for the lab. Ask them before trying it "
+                        "again.")
+            held, self._holder = self._holder, call or self._holder
             self.busy = what
             try:
                 return fn()
             finally:
-                self.busy = None
+                self.busy, self._holder = None, held
                 self._caps_if_waiting()
                 self._refresh()
         finally:
@@ -454,13 +492,14 @@ class LabRuntime:
 
     def set(self, instrument: str, parameter: str, value: Any) -> str:
         return self._do("setting %s.%s" % (instrument, parameter),
-                        lambda: self.gate.set(instrument, parameter, value).message)
+                        lambda: self.gate.set(instrument, parameter, value).message, stoppable=True)
 
     def raw(self, instrument: str, command: str) -> str:
-        return self._do("raw command to " + instrument, lambda: self.gate.raw(instrument, command).message)
+        return self._do("raw command to " + instrument, lambda: self.gate.raw(instrument, command).message,
+                        stoppable=True)
 
     def undo(self) -> str:
-        return self._do("undo", lambda: self.gate.undo().message)
+        return self._do("undo", lambda: self.gate.undo().message, stoppable=True)
 
     # ------------------------------------------------------------------ where the data go (people only)
 
@@ -630,15 +669,41 @@ class LabRuntime:
 
     def stop(self, by: str = "human") -> int:
         """A person's stop: decline open requests and stop the current ramp or plan. Drives stay where they are
-        (a stopped plan still runs its own on_abort steps). Returns how many requests were declined."""
+        (a stopped plan still runs its own on_abort steps). The queue stops after the scan it ends, and a call still
+        waiting for the lab is not run (_do). Returns how many requests were declined."""
         decline_all = getattr(self.approver, "decline_all", None)
         declined = decline_all("stop button") if decline_all else 0
         with self.queue.lock:   # a stop also stops the queue: nothing else starts after the stopped scan
             if self.queue.state in ("running", "pausing"):
                 self.queue.state, self.queue.reason = "pausing", "stopped by %s" % by
+                self.queue.save()
         self.gate.request_abort()
         self.gate.log.write("stop", by=by, declined=declined)
         return declined
+
+    @contextlib.contextmanager
+    def client_call(self, call: ClientCall) -> Iterator[None]:
+        """This thread works for an MCP client's call (agent/server.py), so a cancel reaches what it does."""
+        call.thread = threading.get_ident()
+        self._client.call = call
+        try:
+            yield
+        finally:
+            self._client.call = None
+
+    def cancel_call(self, call: ClientCall) -> None:
+        """The client cancelled a call, or went away: Kelvin does nothing more for it. What it asked a person for is
+        declined (and anything it would ask), the ramp, run or wait it has the lab for stops as at a person's Stop,
+        and a call still waiting for the lab is never run. Another call's work goes on."""
+        call.cancelled = True
+        decline = getattr(self.approver, "decline_from", None)
+        declined = decline(call.thread, ClientCall.CANCELLED) if decline and call.thread is not None else 0
+        working = self._holder is call
+        if working:
+            self.gate.request_abort()
+        if declined or working:
+            self.gate.log.write("call_cancelled", by="MCP client", tool=call.tool, declined=declined,
+                                stopped=working)
 
     def health(self, instruments: Optional[List[str]] = None) -> str:
         return self._do("health check", lambda: "\n".join(
@@ -654,7 +719,7 @@ class LabRuntime:
                 return "stopped after %s of %s: a person pressed stop" % (_dur(self.lab.clock.now() - t0),
                                                                           _dur(seconds))
             return "waited %s" % _dur(seconds)
-        return self._do("waiting", run)
+        return self._do("waiting", run, stoppable=True)
 
     def validate(self, plan_text: str) -> str:
         def run() -> str:
@@ -686,7 +751,7 @@ class LabRuntime:
         return self._do("dry run", run)
 
     def run(self, plan_text: str, dry_run: bool = False) -> str:
-        return self._do("running plan", lambda: self._run_once(plan_text, dry_run)[0])
+        return self._do("running plan", lambda: self._run_once(plan_text, dry_run)[0], stoppable=True)
 
     def _run_once(self, plan_text: str, dry_run: bool = False) -> Tuple[str, Optional[RunReport]]:
         """One plan, run (the caller holds the lock): run_plan's answer, and the run's report (None: not run)."""
@@ -773,7 +838,7 @@ class LabRuntime:
                     return "\n".join(lines)
             lines.append("done; values: %s" % recipes.shown(vals))
             return "\n".join(lines)
-        return self._do("running recipe %s" % recipe.name, run)
+        return self._do("running recipe %s" % recipe.name, run, stoppable=True)
 
     def check_recipe(self, text: str) -> Tuple[Optional[Any], str]:
         """(the recipe, "") when it is well formed and every instrument parameter its plans use is in this lab; else
@@ -1109,12 +1174,14 @@ class LabRuntime:
             return "\n".join(lines)
         return self._do("importing data", run)
 
-    def stop_run(self) -> bool:
-        """Stop the plan that is running (its on_abort steps then run). False if none is running."""
+    def stop_run(self, by: str = "human") -> bool:
+        """Stop the plan that is running (its on_abort steps then run); a queue it is part of stops after it.
+        False if none is running."""
         live = self.live_view(10 ** 9)
         if not live or live["status"] != "running":
             return False
         self.gate.request_abort()
+        self.gate.log.write("stop", by=by, run=live["run_id"])
         return True
 
     # ------------------------------------------------------------------ the scan queue
@@ -1529,7 +1596,7 @@ class LabRuntime:
                                                   name="kelvin-queue")
             self._queue_thread.start()
             return "queue started: %s\n%s" % (title[len("Run the queue: "):], self.queue.text())
-        return self._do("starting the queue", prepare)
+        return self._do("starting the queue", prepare, stoppable=True)
 
     def queue_pause(self, by: str = "agent") -> str:
         """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan."""
@@ -1557,8 +1624,8 @@ class LabRuntime:
                 q.mark(item, "running")
                 position = q.items.index(item) + 1
             ok, message = self._queue_item(item, position, grants, by)
-            with q.lock:
-                if not ok and q.state == "running" and q.on_error == "pause":
+            with q.lock:   # a person's stop of the scan is never an error to go on after
+                if not ok and q.state == "running" and (q.on_error == "pause" or item.status == "stopped"):
                     q.state, q.reason = "pausing", "%s: %s" % (item.name, message)
                     q.save()
         done = sum(1 for i in q.items if i.status == "done")
@@ -1578,7 +1645,11 @@ class LabRuntime:
     def _queue_item(self, item: Item, position: int, grants: Dict[str, Allowed], by: str) -> Tuple[bool, str]:
         """Run one item under the queue's approval. (ok, message)"""
         q = self.queue
+        stops = self.gate.stop_generation
         with self.lock:
+            if self.gate.stop_generation != stops:   # stopped while it waited for the lab: it never starts
+                q.mark(item, "stopped", "a person pressed Stop before it started")
+                return False, "stopped before it started"
             self.busy = "queue %d/%d: %s" % (position, len(q.items), item.name)
             try:
                 with self.gate.standing(grants), self.gate.acting_as("queue (started by %s)" % by):
@@ -2754,7 +2825,7 @@ class LabRuntime:
         sample asks the person first."""
         def run() -> str:
             return self.gate.act(instrument, action).message
-        return self._do("%s.%s" % (instrument, action), run)
+        return self._do("%s.%s" % (instrument, action), run, stoppable=True)
 
     def connect_pending(self, progress: Optional[Callable[[str, int, int], None]] = None) -> Dict[str, Any]:
         """Connect the instruments of a lab Kelvin opened before connecting them (open_home_lab connect=False), one

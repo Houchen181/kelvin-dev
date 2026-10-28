@@ -853,9 +853,9 @@
     const v = {};
     v.state = h("span", { class: "state" });
     v.stop = h("button", { class: "btn small", type: "button" }, "Stop run");
-    v.stop.addEventListener("click", async () => {
-      if (!confirm("Stop this run? The drives it touched go back to safe (or its on_abort steps run).")) return;
-      try { await api("/api/runs/stop", { body: {} }); } catch (e) { toast(e.message); }
+    v.stop.addEventListener("click", async () => {   // at once: a stop never waits behind a dialog
+      try { await api("/api/runs/stop", { body: {} }); toast("Stopping the run: its safe-stop steps run now."); }
+      catch (e) { toast(e.message); }
     });
     v.count = h("span", { class: "rv-count" });
     v.bar = h("i");
@@ -1257,8 +1257,7 @@
     $("hands-text").textContent = "Locked" + (at ? " at " + at : "") + (who && who !== "portal" ? " from " + who : "")
       + ". Everything that reaches the sample stays at safe until you unlock; Kelvin can still read and measure.";
   }
-  async function handsOn() {
-    if (PROT.busy && !confirm("Kelvin is " + PROT.busy + ". Stop it and bring everything that reaches the sample to safe?")) return;
+  async function handsOn() {   // at once, also while Kelvin works: it stops that work (no dialog on the stop path)
     $("hands-on").disabled = true;
     try {
       const r = await api("/api/hands", { body: { on: true } });
@@ -2628,8 +2627,17 @@
     } catch (e) { toast(e.message); return null; }
   }
 
+  // a message that only says stop (web/agent.py typed_stop): Kelvin's answer and the lab's work stop now
+  const TYPED_STOP = /^\s*\/?(?:stop|abort|halt)(?:\s+(?:it|now|everything|all|stop|abort))*\s*[.!]*\s*$/i;
+  async function hardStop() {
+    $("input").value = ""; autosize(); updateSend();
+    try { const r = await api("/api/stop", { body: { chat_id: S.chatId, lab: true } }); toast(r.message || "Stopped."); }
+    catch (e) { toast(e.message); }
+    pollState();
+  }
   async function sendMessage(text) {
     text = text.trim();
+    if (TYPED_STOP.test(text)) return hardStop();
     if (S.streaming) return steerMessage(text);   // attachments wait for the next message
     if (!text && ATT.items.length) text = ATT.items.length > 1 ? "Look at the attached files." : "Look at the attached file.";
     if (!text) return;
@@ -4472,7 +4480,7 @@
     "  /describe [name]     parameters, units, limits and safe values",
     "  /manual <words>      search the instrument's manual",
     "  /new                 start a new conversation with Kelvin",
-    "  /stop                stop Kelvin's answer and any run",
+    "  /stop                stop Kelvin's answer, any ramp or run, and the queue",
     "  /clear               clear the screen (Ctrl+L)",
     "",
     "Up/Down: history  ·  Tab: complete  ·  Esc: stop Kelvin's answer  ·  Ctrl+`: show or hide the terminal",
@@ -4686,7 +4694,7 @@
       }
       case "/new": TERM.chatId = null; termLine("your next message starts a new conversation with Kelvin", "dim"); return;
       case "/stop":
-        try { await api("/api/stop", { body: { chat_id: TERM.chatId } }); await api("/api/runs/stop", { body: {} }); termLine("stopped", "dim"); }
+        try { const r = await api("/api/stop", { body: { chat_id: TERM.chatId, lab: true } }); termLine(r.message || "stopped", "dim"); }
         catch (e) { termLine(e.message, "err"); }
         return;
       default:

@@ -67,7 +67,7 @@ wait: 300                                                          # then wait 5
 - **Building it.** Add an item at the end or at a position, with a note that is kept with its run. Reorder with ↑ ↓ (or select an item and press `u` / `d`), edit, or remove it (Delete). **Add to the queue** under a finished run's plan queues that scan again. You can change the queue while it runs; only the running item is fixed.
 - **One approval.** **Start** checks every waiting item, then asks you once for every drive range the queue uses. Anything outside what you approved asks again. Asked to (`dry_run`), Start first runs the whole queue in order on the simulated lab, so a step that cools the sample counts for the scans after it, and says how long it takes.
 - **Running.** Items run in the background, one at a time, each scan in its own run folder that records its place in the queue. Chat keeps working; a tool that needs the instruments says the queue is busy instead of waiting.
-- **Stopping.** **Pause** stops after the item that is running. **Stop** ends that item as well. A failed, declined or stopped item pauses the queue, unless you choose to go on to the next item. The queue never starts by itself, even after Kelvin restarts.
+- **Stopping.** **Pause** stops after the item that is running. **Stop** (any of them, also the runs pane's **Stop run**) ends that item as well, and the queue pauses there. A failed or declined item pauses the queue too, unless you choose to go on to the next item. The queue never starts by itself, even after Kelvin restarts.
 - **Keeping queues.** **Save as…** keeps the waiting items under a name (`queues/<name>.yaml` in the data folder), and **Load** adds them again. The queue itself is kept in `queue.json`.
 
 ## Your data
