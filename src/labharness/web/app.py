@@ -203,6 +203,12 @@ def person(request: Request) -> str:
     return "human (phone %s)" % device.get("name") if device else "human (portal)"
 
 
+def channel(request: Request) -> Tuple[str, Optional[str]]:
+    """Where a person's request comes from: ("portal", None) or ("phone", the phone's name)."""
+    device = (request.scope.get("kelvin") or {}).get("device")
+    return ("phone", str(device.get("name") or "")) if device else ("portal", None)
+
+
 STOPPED = ("Stopped: Kelvin's answer, the ramp or run in progress (a run's safe-stop steps run) and the queue; open "
            "approvals were declined.")
 
@@ -2634,7 +2640,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         body = await request.json()
         if body.get("approve") and role_of(request) == "watch":
             return error(403, "This phone can watch and decline, not approve. Approve on the Kelvin computer.")
-        ok = runtime.approver.answer(request.path_params["request_id"], bool(body.get("approve")))
+        ok = runtime.answer(request.path_params["request_id"], bool(body.get("approve")), person(request),
+                            *channel(request))
         return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
     async def state(request: Request) -> Response:

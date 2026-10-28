@@ -55,7 +55,8 @@ You are connected to a physics lab through Kelvin.
 - For sweeps, write a plan and call run_plan directly. It checks the plan, health-checks the instruments it uses,
   asks once for its drive ranges, runs, logs and analyses the data. Report its assessment and key numbers (with
   uncertainties) rather than raw rows. A dry run (simulate_plan, or run_plan with dry_run: true) is not a routine
-  step, even for a plan that drives: only when the person asks, or to estimate how long a long plan takes.
+  step, even for a plan that drives: only when the person asks, or to estimate how long a long plan takes. It is
+  only a rehearsal on the simulated lab: the real run is its own run_plan call, when the person asks for it.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - A camera's frame is an image: measure cam.frame to keep images (each run keeps them in its run.h5), and its mean,
   max or sum for numbers to fit. A spectrum is recorded with its wavelengths.
@@ -557,8 +558,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def run_plan(plan: str, dry_run: bool = False) -> str:
         """Run a plan (YAML text): validate, health check (of instruments not checked in the last 10 minutes), one
         human approval for its drive ranges, run, log, then analyse automatically. Call it directly, without
-        validate_plan or simulate_plan first. dry_run: true runs it on the simulated lab first (only when the person
-        asks, or to show how long it takes). Returns the assessment, key results and the run id."""
+        validate_plan or simulate_plan first. dry_run: true only rehearses it on the simulated lab (when the person
+        asks, or to show how long it takes): nothing runs on the instruments, and the real run is another call.
+        Returns the assessment, key results and the run id."""
         return rt.run(plan, dry_run=bool(dry_run))
 
     @server.tool(annotations=ACT, structured_output=False)
@@ -603,8 +605,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @cancellable
     def queue_start(dry_run: bool = False) -> str:
         """Start the queue: check every waiting item, ask a person once for every drive range they use, then run
-        them one after another in the background. dry_run: true first runs the whole queue in order on the simulated
-        lab (only when the person asks, or to say how long it takes)."""
+        them one after another in the background. dry_run: true only rehearses the whole queue in order on the
+        simulated lab (when the person asks, or to say how long it takes); the queue does not start."""
         return rt.queue_start(dry_run=bool(dry_run))
 
     @server.tool(annotations=ACT, structured_output=False)

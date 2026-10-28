@@ -1552,13 +1552,16 @@
     title.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
   }
 
+  // where a request acts (runtime.where): a request on the simulator once looked just like one on the instruments
+  const whereTag = (where) => where ? h("span", { class: "where " + (where === "SIMULATOR" ? "sim" : "real"),
+    title: where === "SIMULATOR" ? "Only simulated instruments: nothing real moves" : "Real instruments" }, where) : null;
   function makeApproval(ev) {
     const verdict = h("span", { class: "verdict" });
     const count = h("span", { class: "muted small" });
     const yes = h("button", { class: "btn primary", type: "button" }, "Approve");
     const no = h("button", { class: "btn", type: "button" }, "Decline");
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
-    const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title));
+    const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title), whereTag(ev.where));
     const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title,
       h("ul", {}, ...ev.items.map(approvalItem)), actions);
     let left = ev.seconds_left;

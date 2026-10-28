@@ -49,6 +49,9 @@ BACKGROUND_S = 5.0    # how often Kelvin looks for that, and (once, after a star
 BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
 SETUP_STEPS = ("connecting", "scanning", "drafting", "reading")   # the instrument setup at work (autosetup.py)
+# a rehearsal is never a run (field tests: run_plan with dry_run: true went on to run for real)
+REHEARSAL = ("REHEARSAL ONLY, on the simulated lab: nothing was sent to the instruments. A real run is its own call "
+             "(%s without dry_run), made when the person asks for it.")
 SCRIPTS_NEXT = ("Next, with the person (nothing above was sent to any instrument): add each instrument that is not in "
                 "the lab yet with add_instrument at its address, with the likely card and the connection settings "
                 "above (Kelvin checks who answers there first); one with no card fitting: draft_card, saying which "
@@ -105,8 +108,16 @@ def event_line(e: Dict[str, Any]) -> str:
         text = e.get("message", "")
     elif kind == "ask":
         lines = str(e.get("request", "")).splitlines()
-        text = "%s%s: %s" % (e.get("answer"), " (%s)" % e["note"] if e.get("note") else "",
-                             lines[1].strip(" -") if len(lines) > 1 else (lines[0] if lines else ""))
+        what = lines[1].strip(" -") if len(lines) > 1 else (lines[0] if lines else "")
+        note = str(e.get("note") or "")
+        said = note if note.startswith(str(e.get("answer"))) else "%s%s" % (e.get("answer"), " (%s)" % note if note
+                                                                           else "")
+        return "%s %s (asked by %s): %s" % (t, said, e.get("by") or "?", what)
+    elif kind == "answer":
+        from .approval import who_text
+        text = "%s %s: %s" % (who_text({"account": e.get("account"), "channel": e.get("channel"),
+                                        "device": e.get("device")}), e.get("answer"), e.get("request"))
+        return "%s %s" % (t, text)
     elif kind == "run_start":
         text = "run %s started, %s points" % (e.get("run"), e.get("points"))
     elif kind == "run_end":
@@ -326,6 +337,8 @@ class LabRuntime:
         if subscribe:  # a person is needed: tell them, wherever they are
             subscribe(lambda r: None if r.get("auto") else self.notifier(
                 "approval", "Approval needed: " + r["title"], (r.get("items") or [""])[0]))
+        if hasattr(approver, "where"):   # each card says where it acts: SIMULATOR or REAL HARDWARE
+            approver.where = self.where
         vetoes = getattr(approver, "vetoes", None)
         if vetoes is not None:   # a cancelled call asks nobody: no one is left to act on a yes
             vetoes.append(lambda: ClientCall.CANCELLED if getattr(getattr(self._client, "call", None), "cancelled",
@@ -706,6 +719,33 @@ class LabRuntime:
             self._refresh()
             self.lock.release()
 
+    def where(self, request: ApprovalRequest) -> Optional[str]:
+        """Where a request acts, for its card: SIMULATOR when every instrument it names is a simulated one, else
+        REAL HARDWARE (a request asked in the virtual lab once looked just like one on the instruments). None for a
+        request that names no instrument (installing a package, saving a file)."""
+        text = " ".join([request.title] + [str(i) for i in request.items])
+        named = [inst for name, inst in self.lab.instruments.items()
+                 if re.search(r"(?<![\w.])%s(?![\w])" % re.escape(name), text)]
+        if not named:
+            return None
+        return "SIMULATOR" if all(inst.simulated for inst in named) else "REAL HARDWARE"
+
+    def answer(self, request_id: str, approve: bool, by: str = "human", channel: str = "portal",
+               device: Optional[str] = None) -> bool:
+        """A person's answer to a request, kept with who they are: their account (the person signed in), where they
+        answered (portal, phone, approval page) and the device, so the record and the reports never take a person's
+        yes for the agent's. False when the request is no longer open."""
+        who = {"account": self.user, "channel": channel, "device": device}
+        title = getattr(self.approver, "title_of", lambda _: None)(request_id)
+        try:
+            ok = self.approver.answer(request_id, approve, by, who)
+        except TypeError:   # an approver that takes no account of who
+            ok = self.approver.answer(request_id, approve)
+        if ok:
+            self.gate.log.write("answer", by=by, request=title, answer="approved" if approve else "declined",
+                                account=self.user, channel=channel, device=device)
+        return ok
+
     def stop(self, by: str = "human") -> int:
         """A person's stop: decline open requests and stop the current ramp or plan. Drives stay where they are
         (a stopped plan still runs its own on_abort steps). The queue stops after the scan it ends, and a call still
@@ -717,7 +757,7 @@ class LabRuntime:
                 self.queue.state, self.queue.reason = "pausing", "stopped by %s" % by
                 self.queue.save()
         self.gate.request_abort()
-        self.gate.log.write("stop", by=by, declined=declined)
+        self.gate.log.write("stop", by=by, account=self.user, declined=declined)
         return declined
 
     @contextlib.contextmanager
@@ -790,7 +830,10 @@ class LabRuntime:
         return self._do("dry run", run)
 
     def run(self, plan_text: str, dry_run: bool = False) -> str:
-        return self._do("running plan", lambda: self._run_once(plan_text, dry_run)[0], stoppable=True)
+        """run_plan. dry_run: only a rehearsal on the simulated lab, never followed by the real run."""
+        if dry_run:
+            return REHEARSAL % "run_plan" + "\n" + self.simulate(plan_text)
+        return self._do("running plan", lambda: self._run_once(plan_text)[0], stoppable=True)
 
     def _run_once(self, plan_text: str, dry_run: bool = False) -> Tuple[str, Optional[RunReport]]:
         """One plan, run (the caller holds the lock): run_plan's answer, and the run's report (None: not run)."""
@@ -1222,7 +1265,7 @@ class LabRuntime:
         if not live or live["status"] != "running":
             return False
         self.gate.request_abort()
-        self.gate.log.write("stop", by=by, run=live["run_id"])
+        self.gate.log.write("stop", by=by, account=self.user, run=live["run_id"])
         return True
 
     # ------------------------------------------------------------------ the scan queue
@@ -1579,8 +1622,8 @@ class LabRuntime:
 
     def queue_start(self, by: str = "agent", dry_run: bool = False) -> str:
         """Check every waiting item, ask a person once for every drive range, then run the queue in the background.
-        With dry_run, the whole queue is first run in order on the simulated lab (for its time, or a person who
-        wants to see it). Returns at once after the approval; queue_show follows it."""
+        Returns at once after the approval; queue_show follows it. dry_run: only a rehearsal of the whole queue in
+        order on the simulated lab (how long it takes, what would fail); the queue does not start."""
         with self.queue.lock:
             if self.queue.state in ("running", "pausing"):
                 return "the queue is already running\n" + self.queue.text()
@@ -1588,23 +1631,36 @@ class LabRuntime:
         if not items:
             return "nothing is waiting in the queue"
 
-        def prepare() -> str:
+        def check() -> List[str]:
             problems = []
             for n, item in enumerate(items, 1):
                 try:
                     problems += ["#%d %s: %s" % (n, item.name, p) for p in self._queue_problems(item.text)]
                 except PlanError as e:
                     problems.append("#%d %s: %s" % (n, item.name, e))
+            return problems
+
+        def rehearse() -> str:
+            problems = check()
+            if problems:
+                return REHEARSAL % "queue_start" + "\nnot rehearsed:\n" + "\n".join(problems[:8])
+            duration, failed = self._rehearse(items)
+            _, _, refusals = self.gate.plan_approval(self._queue_drives(items))
+            return "\n".join([REHEARSAL % "queue_start", "the %d waiting item%s would take ~%s" % (
+                len(items), "" if len(items) == 1 else "s", _dur(duration))]
+                + ["would fail: " + f for f in failed[:8]] + ["would be refused: " + r for r in refusals[:8]])
+
+        if dry_run:
+            return self._do("rehearsing the queue", rehearse)
+
+        def prepare() -> str:
+            problems = check()
             if problems:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
             lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
             duration = None
-            if dry_run:
-                duration, failed = self._rehearse(items)
-                if failed:
-                    return "the queue did not start; its dry run failed:\n" + "\n".join(failed[:8])
             scans = sum(1 for i in items if i.kind == "plan")
             steps = len(items) - scans
             title = "Run the queue: %d scan%s%s%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
@@ -1614,9 +1670,7 @@ class LabRuntime:
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
                 covered = False
                 if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
-                    failed = []
-                    if not dry_run:
-                        duration, failed = self._rehearse(items)
+                    duration, failed = self._rehearse(items)
                     rehearsal = type("Rehearsal", (), {"ok": not failed})()
                     covered, why = self.gate.auto_plan(grants, rehearsal)
                     if covered:

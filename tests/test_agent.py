@@ -94,10 +94,12 @@ def test_unanswered_request_is_declined_with_a_reason(runtime):
 
 def test_plan_over_mcp(runtime):
     human(runtime.approver, [True])
-    validate, run = call(runtime, ("validate_plan", {"plan": GATE_SWEEP}),
-                         ("run_plan", {"plan": GATE_SWEEP, "dry_run": True}))   # a dry run, because asked for
+    validate, rehearsal, run = call(runtime, ("validate_plan", {"plan": GATE_SWEEP}),
+                                    ("run_plan", {"plan": GATE_SWEEP, "dry_run": True}),   # asked for: only that
+                                    ("run_plan", {"plan": GATE_SWEEP}))
     assert "ok: gate_sweep, 21 points" in validate and "needs approval: smu.V" in validate
-    assert "dry run: run" in run and "done: 21 points" in run
+    assert rehearsal.startswith("REHEARSAL ONLY") and "run_id=" not in rehearsal
+    assert "done: 21 points" in run
     center = re.search(r"assessment: lockin\.X has a peak at smu\.V = ([\d.]+) ± ", run)
     assert center and abs(float(center.group(1)) - 1.5) < 0.01 and "\nnext: " in run
     assert "smu.I [linear]" in run and "resistance (1/slope)" in run

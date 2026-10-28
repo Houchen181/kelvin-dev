@@ -137,7 +137,7 @@ function renderPending(list) {
     ok.addEventListener("click", () => answer(r.id, true, [ok, no]));
     no.addEventListener("click", () => answer(r.id, false, [ok, no]));
     box.append(el("div", { class: "request" },
-      el("h3", {}, r.title),
+      el("h3", {}, (r.where ? "[" + r.where + "] " : "") + r.title),
       el("ul", {}, ...r.items.map((i) => el("li", {}, i))),
       el("div", { class: "actions" }, ok, no, el("span", { class: "muted" }, "declines itself in " + r.seconds_left + " s"))));
     if (!seen.has(r.id)) {
@@ -190,8 +190,7 @@ $("mode").addEventListener("change", async (e) => {
   refresh();
 });
 
-$("stop").addEventListener("click", async () => {
-  if (!confirm("Stop the agent's current ramp or plan and decline open requests? Drives stay where they are.")) return;
+$("stop").addEventListener("click", async () => {   // at once: no dialog on the stop path
   try { await api("/api/stop", {}); } catch (e) { alert("Stop failed: " + e.message); }
   refresh();
 });
