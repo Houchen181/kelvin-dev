@@ -199,6 +199,7 @@ def _unreachable(spec: ParamSpec) -> bool:
 
 
 OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
+ARRIVED_SETTLE = 5.0   # lab seconds a reading may take to settle once its stage's status says the move is over
 
 
 class SafetyGate:
@@ -913,6 +914,11 @@ class SafetyGate:
                 return stop
         else:
             inst.write(spec.name, target)
+            if wait and (moving or (spec.ramp == "instrument" and spec.readback)):
+                err = self._new_error(inst, stale, standing)   # a refused move (a stage not homed) says so now,
+                if err:                                          # not after the whole wait for it
+                    return Result(False, "error", key, value=target, before=current,
+                                  message="%s: instrument reported %s" % (key, err))
             if moving and wait:   # its read-back means something only once it is there
                 stop = self._arrive(inst, spec, current, target, gen)
                 if stop is not None:
@@ -921,7 +927,7 @@ class SafetyGate:
                 notes.append("moving")
             if spec.ramp == "instrument" and spec.readback:
                 if wait:
-                    stop = self._wait(inst, spec, current, target, watch=away, gen=gen)
+                    stop = self._wait(inst, spec, current, target, watch=away, gen=gen, arrived=moving)
                     if stop is not None:
                         return stop
                 else:
@@ -1013,14 +1019,16 @@ class SafetyGate:
         return None
 
     def _wait(self, inst: Instrument, spec: ParamSpec, current: Any, target: float,
-              watch: bool, gen: int) -> Optional[Result]:
+              watch: bool, gen: int, arrived: bool = False) -> Optional[Result]:
         """Follow a set point the instrument ramps to by itself until its reading arrives. A stop ends every such
         wait, toward safe too (a PPMS cooling down held a stopped run for ten minutes): away from safe the set point is
-        held where the reading is; toward safe it goes on there by itself, and only the waiting ends."""
+        held where the reading is; toward safe it goes on there by itself, and only the waiting ends. arrived: its
+        status already says the move is over, so the reading only settles: a stage that stopped short isn't waited for
+        until the move's whole timeout."""
         clock = self.lab.clock
         key = "%s.%s" % (inst.name, spec.name)
         eta = self._eta(inst, spec, current, target)
-        timeout = 1.5 * eta + 60 if eta else spec.timeout
+        timeout = ARRIVED_SETTLE if arrived else 1.5 * eta + 60 if eta else spec.timeout
         poll = max(0.1, min(5.0, (eta or 10.0) / 50))
         t0 = clock.now()
         while True:
@@ -1039,6 +1047,10 @@ class SafetyGate:
                 return Result(False, "stopped", key, value=val, message="%s: stopped waiting at %s (stop requested); "
                               "it goes on to %s by itself" % (key, spec.show(val), spec.show(target)))
             if clock.now() - t0 > timeout:
+                if arrived:
+                    return Result(False, "error", key, value=val, message=(
+                        "%s: its status says the move is over, but %s is %s, not %s: it stopped short or refused the "
+                        "move" % (key, spec.readback, spec.show(val), spec.show(target))))
                 return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)" % (
                     key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
             self._pause(poll, gen)   # a stop wakes it at once

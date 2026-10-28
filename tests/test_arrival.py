@@ -80,6 +80,64 @@ def test_a_stage_that_never_arrives_times_out_and_says_so(tmp_path):
     assert r.action == "timeout" and "its status says it isn't at 10 mm after 30 s" in r.message
 
 
+class NotHomed(Twin):
+    """Like an SMC100 after power-up: refuses every move until homed, and its error query says why (H)."""
+
+    def reset(self):
+        super().reset()
+        self.err = None
+
+    def apply(self, param, value):
+        if param == "position":
+            self.err = "H"   # not referenced: the stage stays where it is
+        else:
+            super().apply(param, value)
+
+    def _answer(self, cmd):
+        if cmd.strip().upper() == "TE?":
+            err, self.err = self.err, None
+            return err or "0"
+        return super()._answer(cmd)
+
+
+def encoder_card(**status):
+    """A move followed on the encoder (its readback), as Kelvin's SMC100 card does."""
+    return parse_card({
+        "card": 1, "id": "test/encoder-stage", "model": "Stage followed on its encoder", "kind": "motion-stage",
+        "status": "community", "error_query": "TE?",
+        "parameters": {"position": dict({"kind": "measure", "unit": "mm", "set": "1PA{value}", "get": "1PA?",
+                                         "limits": [0, 25], "ramp": "instrument", "readback": "position_actual",
+                                         "tol": 0.002, "timeout": 600}, **status),
+                       "position_actual": {"kind": "measure", "unit": "mm", "get": "1TP?"}}})
+
+
+def test_a_refused_move_fails_at_once_instead_of_waiting_out_its_timeout(tmp_path):
+    card = encoder_card()
+    registry = builtin_registry()
+    registry.put(card)
+    lab = build_virtual_lab(config={"lab": "stage", "instruments": {"stage": {"card": card.id}}}, registry=registry)
+    lab.instruments["stage"].backend = NotHomed(card, lab.world, "stage")
+    gate = SafetyGate(lab, ScriptedApprover([]), EventLog(tmp_path / "events.jsonl", lab.clock))
+    t0 = lab.clock.now()
+    r = gate.set("stage", "position", 10)
+    assert r.action == "error" and "instrument reported H" in r.message and lab.clock.now() - t0 < 5
+
+
+def test_a_stage_whose_status_says_done_short_of_its_target_is_not_waited_for(tmp_path):
+    card = encoder_card(busy={"get": "1TS", "match": "(28|1E)$"})
+    registry = builtin_registry()
+    registry.put(card)
+    lab = build_virtual_lab(config={"lab": "stage", "instruments": {"stage": {"card": card.id}}}, registry=registry)
+    twin = lab.instruments["stage"].backend   # a generic twin: says ready, and its encoder stays at 0 (stopped short)
+    twin.apply = lambda param, value: twin.state.update({param: value}) if param != "position_actual" else None
+    twin.ramps = []
+    gate = SafetyGate(lab, ScriptedApprover([]), EventLog(tmp_path / "events.jsonl", lab.clock))
+    t0 = lab.clock.now()
+    r = gate.set("stage", "position", 10)
+    assert r.action == "error" and "its status says the move is over, but position_actual is 0 mm" in r.message
+    assert lab.clock.now() - t0 < 10                                 # not the move's 600 s
+
+
 def test_busy_and_arrived_need_a_query_and_a_pattern():
     with pytest.raises(CardError, match="busy"):
         delay_card(busy={"get": "1TS"})
