@@ -54,6 +54,7 @@ python -m venv .venv
 - [VISION.md](../VISION.md) is the spec. [ARCHITECTURE.md](../ARCHITECTURE.md) records the design decisions and the build order; update it when a decision changes.
 - Never commit API keys, lab data, or a machine-specific `.mcp.json`. `.gitignore` already excludes them; keys live in `~/Kelvin/users/<name>/settings.json`.
 - Changes to the safety gate (`gate.py`), the card format (`cards.py`) or the approval path need a test that shows the rule holds.
+- Changing a card Kelvin brings (`src/labharness/data/cards/`): add the new version's SHA-256 to `src/labharness/data/card_versions.json`; `tests/test_collection.py` fails with the line to add. Kelvin knows every version of its own cards that way, so a copy of an older one in the instrument collection never replaces the card it brings.
 
 ## Releasing
 
@@ -87,11 +88,12 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/web/remote.py`, `qr.py`, `static/mobile.*` | Phone access: pairing, device roles, the network listener, QR codes, the phone page |
 | `src/labharness/monitor.py`, `notify.py` | Watches and alarms on a background thread; in-app notices and the optional webhook |
 | `src/labharness/adapters.py`, `discovery.py` | VISA/serial connections for real instruments; the read-only scan that matches instruments to cards |
+| `src/labharness/collection.py` | The instrument collection from the public repository (`Houchen181/Kelvin`, where published builds update from; never the private source): the pinned, checked copy in `~/Kelvin/collection`, its cards, the instruments it knows without a card, and its experiments mapped to a lab's instruments |
 | `src/labharness/eventlog.py` | Append-only event log; one folder per run (plan, snapshots, data, meta) |
 | `src/labharness/sim/` | Twins that answer the card's own commands, plus a toy sample |
 | `src/labharness/agent/` | MCP server (`server.py`), plain-text tool answers (`runtime.py`), approval page (`approval.py`, `ui.html`) |
 | `src/labharness/web/` | The portal: web API (`app.py`), chat loop (`agent.py`), short answers (`brevity.py`), one module per model provider (`providers/`), chats and settings, browser UI and the logo (`static/`) |
-| `src/labharness/data/` | Cards for the virtual lab, its lab config and a demo envelope |
+| `src/labharness/data/` | Cards for the virtual lab, its lab config and a demo envelope; `card_versions.json`, every version of the cards Kelvin brings |
 | `src/labharness/hub/` | The Kelvin hub: online accounts across labs and the work Kelvins share (`db.py`), its web server and API (`server.py`, `kelvin-hub`), and a Kelvin's side of it (`client.py`; in the portal, `web/hubsync.py`: Settings → Account → Kelvin hub, and the background sync). See [hub.md](hub.md) |
 | `src/labharness/desktop.py` | The desktop app: the portal in a native window, one copy at a time, `--self-test` |
 | `packaging/` | PyInstaller recipe (`kelvin.spec`), Windows installer (`kelvin.iss`), app icons (`make_icons.py`, `icons/`, and the iPhone app's) |

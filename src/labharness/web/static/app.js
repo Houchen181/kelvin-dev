@@ -1447,6 +1447,8 @@
       case "show_sequence": return v("Drawing", "Drew") + " the " + code(a.protocol || "") + " pulse sequence";
       case "read_examples": return v("Reading", "Read") + " the maker's examples in " + code(a.path || "");
       case "try_card": return v("Trying", "Tried") + " the card on " + code(a.instrument || "");
+      case "experiment_guide": return a.experiment ? v("Reading", "Read") + " the experiment " + code(a.experiment)
+        : v("Looking for", "Looked for") + " experiments" + (a.query ? " on " + code(a.query) : "") + " in the instrument collection";
       case "get_value": return v("Reading", "Read") + " " + code(a.instrument + "." + a.parameter);
       case "set_value": return v("Setting", "Set") + " " + code(a.instrument + "." + a.parameter) + " → " + esc(String(a.value));
       case "send_raw": return v("Sending", "Sent") + " " + code(a.command) + " to " + esc(a.instrument);
@@ -4237,7 +4239,8 @@
       const write = h("button", { class: "link", type: "button" }, "Find its manual and write its card");
       write.addEventListener("click", (e) => { e.preventDefault(); writeCardFor(f, write); });
       return h("div", { class: "found-wrap" }, row, h("div", { class: "found-write" }, write,
-        h("span", { class: "muted small" }, f.idn.split(",").slice(0, 2).join(" "))));
+        h("span", { class: "muted small", title: f.idn }, f.collection ? f.model + " (the instrument collection knows it)"
+          : f.idn.split(",").slice(0, 2).join(" "))));
     }));
   }
   async function writeCardFor(f, btn) {
@@ -4951,6 +4954,8 @@
     $("scan-network").checked = !S.settings || S.settings.scan_network !== false;
     $("auto-cards").checked = !S.settings || S.settings.auto_cards !== false;
     $("manuals").checked = !S.settings || S.settings.manuals !== false;
+    $("collection").checked = !S.settings || S.settings.collection !== false;
+    loadCollection();
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     $("ask-folder").checked = !S.settings || S.settings.ask_folder !== false;
     $("data-choose").hidden = !hasPicker();
@@ -5115,6 +5120,21 @@
     $("update-status").textContent = "Looking for a newer Kelvin…";
     try { showUpdate(await api("/api/update", { body: { op: "check" } })); } catch (e) { $("update-status").textContent = e.message; }
   }
+  // ------------------------------------------------------------------ the instrument collection (collection.py)
+  function collectionText(c) {
+    if (!c.commit) return c.error ? "No copy yet: Kelvin " + c.error + "." : c.on ? "No copy yet; Kelvin fetches it from GitHub." : "No copy on this computer.";
+    const when = new Date(c.synced * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+    const use = c.used.length ? "Kelvin uses " + c.used.length + " of its " + c.cards + " cards" +
+      (c.newer.length ? " (newer than its own for " + c.newer.join(", ") + ")" : "") : "none of its " + c.cards + " cards is newer than Kelvin's own";
+    return "From " + c.repository + " at " + c.commit.slice(0, 7) + " (" + when + "): " + c.instruments + " instruments and " +
+      c.experiments + " experiments; " + use + "." + (c.left_out.length ? " Left out: " + c.left_out.join("; ") + "." : "") +
+      (c.error ? " At the last check Kelvin " + c.error + "; it uses the copy it has." : "");
+  }
+  async function loadCollection(sync) {
+    $("collection-status").textContent = sync ? "Looking for a newer collection…" : "…";
+    try { $("collection-status").textContent = collectionText(await api("/api/collection", sync ? { body: { op: "sync" } } : undefined)); }
+    catch (e) { $("collection-status").textContent = e.message; }
+  }
 
   async function loadClaudeCode() {   // Claude Code bridge (temporary): found here? signed in?
     $("cc-field").hidden = !S.claudeCode;
@@ -5149,6 +5169,7 @@
     body.scan_network = $("scan-network").checked ? "on" : "off";
     body.auto_cards = $("auto-cards").checked ? "on" : "off";
     body.manuals = $("manuals").checked ? "on" : "off";
+    body.collection = $("collection").checked ? "on" : "off";
     body.auto_report = $("auto-report").value;
     body.ask_folder = $("ask-folder").checked ? "on" : "off";
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
@@ -5316,6 +5337,7 @@
     $("hub-connect").addEventListener("click", connectHub);
     $("hub-url").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); connectHub(); } });
     $("hub-sync").addEventListener("click", syncHub);
+    $("collection-sync").addEventListener("click", () => loadCollection(true));
     $("hub-disconnect").addEventListener("click", disconnectHub);
     $("svc-add").addEventListener("click", addService);
     $("data-path").addEventListener("input", dataPathChanged);

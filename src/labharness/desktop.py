@@ -247,6 +247,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     from .accounts import Accounts
     from .agent.approval import WebApprover
     from .agent.runtime import LabRuntime
+    from .collection import Collection
     from .virtual_lab import open_home_lab
     from .web.app import create_app
     from .web.settings import Settings
@@ -273,9 +274,12 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     import uvicorn
 
     port = args.port or _free_port()
-    # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time. Theirs are
-    # connected once the window is open (the instrument setup does it, saying which), as that can take minutes
-    lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10, settings.switched_off, connect=False)
+    # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time; with the
+    # instrument collection's cards (the copy here) unless it is switched off. The user's instruments are connected
+    # once the window is open (the instrument setup does it, saying which), as that can take minutes
+    collection = Collection(home) if settings.get("collection") != "off" else None
+    lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10, settings.switched_off, collection,
+                                        connect=False)
     # people sign in, each to their own data folder; until someone does, what happens is the lab's (~/Kelvin/lab).
     # The self-test checks the app, not a person, so it runs without accounts.
     accounts = None if args.self_test else Accounts(home)
@@ -294,7 +298,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
                      auto_setup=not (args.self_test or args.no_setup),   # set up connected instruments on start
                      hosts=("127.0.0.1:%d" % port, "localhost:%d" % port),
                      on_quit=quit_event.set if args.browser else None, accounts=accounts, updater=updater,
-                     on_exit=lambda: (closer["fn"] or quit_event.set)())
+                     on_exit=lambda: (closer["fn"] or quit_event.set)(), sync_collection=not args.self_test)
     agent = app.app.state.agent
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_config=None, log_level="warning"))
     thread = threading.Thread(target=server.run, name="kelvin-server", daemon=True)

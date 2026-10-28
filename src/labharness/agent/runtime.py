@@ -238,6 +238,7 @@ class LabRuntime:
         self.literature = Literature()
         self.cards_dir: Optional[Path] = None   # the user's own cards (~/Kelvin/cards); set by the app
         self.home: Optional[Path] = None        # ~/Kelvin, where each instrument has its folder; set by the app
+        self.collection: Any = None             # the instrument collection (collection.py) while it is switched on
         self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
         self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
         self.scan_network = True                    # scans also look on the local network (a Settings switch)
@@ -1982,7 +1983,8 @@ class LabRuntime:
         with self.lock:
             self.busy = "scanning for instruments"
             try:
-                found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network)
+                found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
+                                            catalog=self.collection)
             finally:
                 self.busy = None
         self._remember_scan(found, looked)
@@ -2306,12 +2308,12 @@ class LabRuntime:
     def save_card(self, text: str, by: str = "agent") -> str:
         if self.cards_dir is None:
             return "not saved: this Kelvin has no folder for your cards"
-        from ..virtual_lab import builtin_ids
+        from ..virtual_lab import builtin_ids, kelvin_ids
         try:
-            card, path, warnings = carddraft.save(self.cards_dir, text, builtin_ids(), by, version=True)
+            card, path, warnings = carddraft.save(self.cards_dir, text, kelvin_ids(self.collection), by, version=True)
         except ValueError as e:
             return "not saved: %s" % e
-        self.lab.registry.put(card)
+        self.refresh_cards([card.id])
         self.gate.log.write("card", by=by, card=card.id, status=card.status, file=path.name)
         users = sorted(n for n, i in self.lab.instruments.items() if i.card.id == card.id)
         return "\n".join(["saved %s card %s as %s%s. try_card it on the instrument, then add_instrument%s. Until a "
@@ -3113,6 +3115,89 @@ class LabRuntime:
                        " (" + lim + ")" if lim else ""))
         return self._do("adding an instrument", run)
 
+    def refresh_cards(self, ids: Iterable[str]) -> None:
+        """After cards changed (the user's, or a new copy of the collection): the card the lab's registry has for each
+        of these ids, by the same layers a lab is opened with (virtual_lab.lab_registry). Instruments already
+        connected keep theirs until the lab is opened again."""
+        from ..virtual_lab import lab_registry
+        ids = list(ids)
+        if not ids:
+            return
+        fresh = lab_registry(self.cards_dir.parent if self.cards_dir else None, self.collection)
+        for card_id in ids:
+            if card_id in fresh:
+                self.lab.registry.put(fresh.get(card_id))
+            else:
+                self.lab.registry.remove(card_id)
+
+    # ------------------------------------------------------------------ experiments (the instrument collection)
+
+    def experiment_guide(self, experiment: str = "", query: str = "") -> str:
+        """The instrument collection's experiments, or one of them with its plans' instrument names changed to this
+        lab's (collection.adapt). Only reads the copy of the collection on this computer."""
+        from .. import collection as coll
+        c = self.collection
+        if c is None:
+            return ("the instrument collection is not switched on in this Kelvin (Settings, Instruments), so its "
+                    "experiments are not available here")
+        if not c.index():
+            return "Kelvin has no copy of the instrument collection yet; it fetches one when it can reach GitHub"
+        if not experiment:
+            found = c.experiments(query)
+            if not found:
+                return "no experiment in the collection fits %r; experiment_guide() lists them all" % query
+            lines = ["Experiments in Kelvin's instrument collection%s:" % (" for %r" % query if query else "")]
+            for e in found[:12 if query else 60]:
+                roles = "; ".join("%s: %s%s" % (r, " or ".join((v or {}).get("kind") or []),
+                                                ", optional" if (v or {}).get("optional") else "")
+                                  for r, v in (e.get("roles") or {}).items())
+                summary = str(e.get("summary") or "").split(". ")[0].rstrip(".")
+                lines.append("- %s: %s. %s. Roles: %s" % (e["id"], e.get("title"), summary, roles))
+            lines.append("experiment_guide(experiment=<id>): its procedure and plans, with this lab's instrument names")
+            return "\n".join(lines)
+        try:
+            doc = c.experiment(experiment)
+        except KeyError as e:
+            return e.args[0]
+        lab = {n: i.card for n, i in self.lab.instruments.items() if i.enabled}   # switched off: not part of it
+
+        def kind_of(card_id: str) -> str:
+            if card_id in self.lab.registry:
+                return self.lab.registry.get(card_id).kind
+            return str((c.instrument(card_id) or {}).get("kind") or "")
+        a = coll.adapt(doc, lab, kind_of)
+        lines = ["%s (%s), from Kelvin's instrument collection at %s" % (doc.get("title"), experiment,
+                                                                         str(c.state().get("commit"))[:12]),
+                 " ".join(str(doc.get("summary") or "").split()), "Roles:"]
+        for r in a["roles"]:
+            lines.append("- %s (%s%s): %s Here: %s" % (r["role"], " or ".join(r["kinds"]),
+                                                       ", optional" if r["optional"] else "", r["does"],
+                                                       ", ".join(r["here"]) or "nothing in this lab"))
+        for key, title in (("setup", "Setup"), ("procedure", "Procedure")):
+            if doc.get(key):
+                lines += [title + ":"] + ["- " + str(s) for s in doc[key]]
+        if a["plans"]:
+            renamed = ", ".join("%s -> %s" % kv for kv in a["names"].items() if kv[0] != kv[1])
+            lines.append("Plans, written for the collection's %s%s%s:" % (
+                doc.get("lab") or "lab config", "; instrument names changed to this lab's: " + renamed if renamed else "",
+                "; not in this lab: %s (leave out what they do, or ask the person)" % ", ".join(a["missing"])
+                if a["missing"] else ""))
+            for i, p in enumerate(a["plans"], 1):
+                lines.append("%d. %s" % (i, p["title"]))
+                lines.append(yaml.safe_dump(p["plan"], sort_keys=False, default_flow_style=None, width=1000,
+                                            allow_unicode=True).rstrip())   # one line per section, never wrapped
+                lines += ["   check: " + x for x in p["problems"]]
+        for key, title in (("analysis", "Analysis"), ("pitfalls", "Pitfalls"), ("safety", "Safety")):
+            if doc.get(key):
+                lines += [title + ":"] + ["- " + str(s) for s in doc[key]]
+        refs = [r for r in doc.get("references") or [] if isinstance(r, dict)]
+        if refs:
+            lines += ["References:"] + ["- %s%s" % (r.get("title"), " (doi:%s)" % r["doi"] if r.get("doi") else
+                                                    " (%s)" % r["url"] if r.get("url") else "") for r in refs]
+        lines.append("These plans are a starting point: fit the values to this sample and the lab's limits, then run "
+                     "them with run_plan as usual (the same checks and approvals apply).")
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------ literature
 
     def search_papers(self, query: str, limit: int = 8, since_year: Optional[int] = None) -> str:
@@ -3565,7 +3650,8 @@ class LabRuntime:
             in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                       if not ic.address.startswith("sim://")}
             try:
-                found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network)
+                found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network,
+                                            catalog=self.collection)
             except AdapterError as e:
                 return str(e)
             self._remember_scan(found, looked)

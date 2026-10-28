@@ -1,16 +1,19 @@
 """The virtual lab: common instruments, all simulated, ready to try with no hardware."""
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from .cards import CardRegistry, load_card
+from .cards import Card, CardRegistry, load_card
 from .clock import RealClock, ScaledClock, SimClock
 from .lab import Lab, SwitchedOff
 from .labconfig import Envelope, LabConfig, load_envelope, load_lab_config
 from .sim.twin import World, sim_backend_factory
 
 DATA = Path(__file__).parent / "data"
+INSTALLED = ".kelvin-instruments.json"   # the cards `kic install` (the collection's own tool) copied, by SHA-256
 
 
 def builtin_registry() -> CardRegistry:
@@ -29,18 +32,62 @@ def builtin_ids() -> frozenset:
     return _BUILTIN_IDS
 
 
-def lab_registry(home: Any = None) -> CardRegistry:
-    """Kelvin's cards plus the user's own from `home`/cards. A user card under the id of one of Kelvin's is this
-    lab's version of it and replaces Kelvin's here. A broken user card is left out (Kelvin's, if any, stays); the
-    Cards dialog lists it with its problems."""
+def collection_ids(collection: Any = None) -> frozenset:
+    """The ids the instrument collection has cards for, when it is on (collection.py)."""
+    return frozenset(c.id for c in (collection.cards() if collection is not None else []))
+
+
+def kelvin_ids(collection: Any = None) -> frozenset:
+    """The ids Kelvin has cards for: its own, and the instrument collection's when it is on (collection.py)."""
+    return builtin_ids() | collection_ids(collection)
+
+
+def own_cards(cards_dir: Any) -> List[Tuple[Card, bool, bool]]:
+    """The user's cards in `cards_dir` (the first file for each id; broken ones left out), each with whether a person
+    reviewed it on this computer (not a draft, and not a card `kic install` copied there and nobody changed since),
+    and whether it is such a copy."""
+    folder = Path(cards_dir) if cards_dir else None
+    if folder is None or not folder.is_dir():
+        return []
+    try:
+        copied = json.loads((folder / INSTALLED).read_text(encoding="utf-8")).get("installed") or {}
+    except (OSError, ValueError, AttributeError):
+        copied = {}
+    out, seen = [], set()
+    for path in sorted(folder.glob("*.yaml")):
+        try:
+            card = load_card(path)
+        except Exception:
+            continue
+        if card.id in seen:
+            continue
+        seen.add(card.id)
+        as_copied = copied.get(path.name) == hashlib.sha256(path.read_bytes()).hexdigest()
+        out.append((card, card.status != "draft" and not as_copied, as_copied))
+    return out
+
+
+def lab_registry(home: Any = None, collection: Any = None) -> CardRegistry:
+    """The cards a lab can use, in layers: Kelvin's own; the instrument collection's when it is on (`collection`, see
+    collection.py), which replace Kelvin's own with the same id; and the user's own from `home`/cards.
+
+    A user card a person reviewed on this computer wins over both. A draft of the lab's own under the id of one of
+    Kelvin's cards is this lab's version of it (another firmware, a wider range; Kelvin may write one): it replaces
+    Kelvin's card here, every output change asking until a person reviews it, but gives way to the collection's card,
+    which is newer. A card `kic install` copied and nobody changed gives way to both. A broken user card is left out;
+    the Cards dialog lists it with its problems. Kelvin's own draft cards a person reviewed for this lab count as
+    reviewed here (carddraft.apply_reviews)."""
     registry = builtin_registry()
     folder = Path(home) / "cards" if home else None
-    if folder is not None and folder.is_dir():
-        for path in sorted(folder.glob("*.yaml")):
-            try:
-                card = load_card(path)
-            except Exception:
-                continue
+    mine = own_cards(folder)
+    reviewed = {card.id for card, here, _ in mine if here}
+    shared = set()
+    for card in collection.cards() if collection is not None else []:
+        if card.id not in reviewed:
+            registry.put(card)
+            shared.add(card.id)
+    for card, here, copied in mine:
+        if here or card.id not in registry or not (copied or card.id in shared):
             registry.put(card)
     from .carddraft import apply_reviews
     apply_reviews(registry, folder)   # Kelvin's own draft cards a person reviewed for this lab
@@ -100,14 +147,15 @@ def demo_envelope(lab: Lab) -> Envelope:
 
 
 def open_home_lab(home: Any, choice: str = "auto", speed: float = 10, switched_off: Optional[SwitchedOff] = None,
-                  connect: bool = True) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
+                  collection: Any = None, connect: bool = True) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
     """The lab an installed Kelvin controls: the user's own lab.yaml in `home` if there is one (unless they chose
     the virtual lab), otherwise the virtual lab at `speed`x real time. If the user's lab cannot be connected, Kelvin
-    still starts, on the virtual lab, and says why. connect=False: the user's lab opens at once, its instruments
-    connected afterwards in the background (LabRuntime.connect_pending), each one that can't be set aside with why."""
+    still starts, on the virtual lab, and says why. `collection`: the instrument collection, when it is on.
+    connect=False: the user's lab opens at once, its instruments connected afterwards in the background
+    (LabRuntime.connect_pending), each one that can't be set aside with why."""
     path = Path(home) / "lab.yaml"
     info: Dict[str, Any] = {"kind": "virtual", "path": str(path), "error": None, "has_file": path.exists()}
-    registry = lab_registry(home)
+    registry = lab_registry(home, collection)
     if choice != "virtual" and path.exists():
         try:   # an instrument that can't be connected is set aside, with why, and the rest of the lab used
             if not connect:

@@ -31,10 +31,10 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "answer_words", "phone_relay", "ask_folder", "text_size",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
-                     "updates", "hub_old_runs"}
+                     "updates", "hub_old_runs", "collection"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
-       "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts"}
+       "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 MAX_RECENT_FOLDERS = 8   # chats' folders the folder menu offers again
@@ -207,6 +207,8 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name in ("auto_setup", "manuals", "scan_network", "auto_cards"):  # setting up instruments: on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "collection":  # the instrument collection (collection.py): on unless off; off, no network
+                value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "updates":  # keeping Kelvin up to date (updater.py): auto (the default), ask or off
                 value = value if value in ("ask", "off") else ""
             if name == "claude_code":  # Claude Code bridge (temporary): on unless off
@@ -308,6 +310,7 @@ class Settings:
             "manuals": self._lab.get("manuals") != "off",
             "scan_network": self._lab.get("scan_network") != "off",
             "auto_cards": self._lab.get("auto_cards") != "off",
+            "collection": self._lab.get("collection") != "off",
             "auto_report": self._user.get("auto_report") or "both",
             "report_kinds": self.report_kinds,
             "ask_folder": self._user.get("ask_folder") != "off",

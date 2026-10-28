@@ -3,6 +3,8 @@
 Discovery only asks instruments who they are (*IDN? or the card's own identity query). It never sets anything,
 so it is safe to run with a sample mounted. Serial ports are tried with each card's own framing (baud rate,
 data bits, parity, terminations) rather than a blind sweep. Instruments the lab already uses are left alone.
+An identity reply no card matches is looked up in the instrument collection (`catalog`, collection.py), which
+names the instrument and says where its maker publishes the manual.
 
     python -m labharness.discovery                 # list what is connected
     python -m labharness.discovery --write lab.yaml   # and draft a lab config to review
@@ -39,6 +41,8 @@ class Found:
     settings: str = ""     # serial settings that answered, e.g. "57600 7O1"
     in_lab: Optional[str] = None
     serial: Dict[str, Any] = field(default_factory=dict)   # those settings, as a card's or lab's connection
+    collection: str = ""   # no card matches, but the instrument collection knows it: its id there
+    manuals: List[str] = field(default_factory=list)   # and the addresses of its public manuals
 
     def suggest_name(self, taken: Iterable[str] = ()) -> str:
         base = SHORT_NAMES.get(self.kind, re.sub(r"[^a-z0-9]+", "", self.kind.lower()) or "instr")
@@ -54,6 +58,10 @@ class Found:
         where = " (in this lab as %s)" % self.in_lab if self.in_lab else ""
         if self.card_id:
             return "%s: %s → card %s (%s)%s" % (self.address, self.model, self.card_id, self.kind, where)
+        if self.idn and self.collection:
+            return ("%s: %s (%s in the instrument collection) answered, but there is no card for it yet; a card can be "
+                    "drafted from its manual%s%s" % (self.address, self.model, self.collection,
+                                                     " (%s)" % self.manuals[0] if self.manuals else "", where))
         if self.idn:
             return "%s: answered %r but no card matches; a card can be drafted for it%s" % (self.address, self.idn[:80], where)
         return "%s: %s%s" % (self.address, self.how or "no answer", where)
@@ -63,6 +71,19 @@ def match_card(idn: str, registry: CardRegistry) -> Optional[Card]:
     """The card whose identity pattern fits this reply; the most specific pattern wins."""
     hits = [c for c in registry if c.idn_pattern and re.search(c.idn_pattern, idn, re.I)]
     return max(hits, key=lambda c: len(c.idn_pattern or "")) if hits else None
+
+
+def look_up(found: Found, catalog: Any) -> Found:
+    """An instrument that answered but matches no card: its name, kind and public manuals from the instrument
+    collection (collection.Collection), if the collection knows its identity reply."""
+    entry = catalog.instrument_for(found.idn) if catalog is not None and found.idn else None
+    if entry:
+        from .collection import manuals
+        found.collection, found.manuals = str(entry["id"]), manuals(entry)
+        found.model = str(entry.get("name") or "%s %s" % (entry.get("maker", ""), entry.get("model", ""))).strip()
+        found.kind = str(entry.get("kind") or "")
+        found.how = "no card yet; the instrument collection knows it as %s" % entry["id"]
+    return found
 
 
 def _serial_settings(registry: CardRegistry) -> List[Dict[str, Any]]:
@@ -145,10 +166,10 @@ def _usb_ids() -> Dict[str, str]:
 
 
 def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: int = 1000,
-             usb: Optional[Dict[str, str]] = None, queries: Optional[List[str]] = None) -> Found:
-    """Ask one instrument who it is, and match the answer to a card. queries: only these (not on a serial port),
-    for a quick ask where the likely card is known: each one opens the address again, which for a network
-    address nobody answers at takes the connect timeout each time."""
+             usb: Optional[Dict[str, str]] = None, queries: Optional[List[str]] = None, catalog: Any = None) -> Found:
+    """Ask one instrument who it is, and match the answer to a card (or look it up in `catalog`, the instrument
+    collection). queries: only these (not on a serial port), for a quick ask where the likely card is known: each one
+    opens the address again, which for a network address nobody answers at takes the connect timeout each time."""
     rm = rm or resource_manager()
     found = Found(address)
     tries: List[Tuple[str, Optional[Dict[str, Any]]]]
@@ -172,7 +193,7 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
             found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "identity reply"
             return found
         found.how = "no card matches the reply"
-        return found
+        return look_up(found, catalog)
     vid_pid = (usb if usb is not None else _usb_ids()).get(address)
     if vid_pid:
         cards = [c for c in registry if vid_pid in c.usb_ids]
@@ -185,14 +206,15 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
 
 
 def scan(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]] = None,
-         timeout_ms: int = 800, network: bool = True) -> List[Found]:
+         timeout_ms: int = 800, network: bool = True, catalog: Any = None) -> List[Found]:
     """Every instrument VISA can see, identified. `in_lab` maps addresses already used by the lab to their names;
-    those are not queried (they may be busy), only listed."""
-    return scan_survey(registry, rm, in_lab, timeout_ms, network)[0]
+    those are not queried (they may be busy), only listed. `catalog`: the instrument collection, if it is on."""
+    return scan_survey(registry, rm, in_lab, timeout_ms, network, catalog)[0]
 
 
 def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]] = None,
-                timeout_ms: int = 800, network: bool = True, **survey_options: Any) -> Tuple[List[Found], Any]:
+                timeout_ms: int = 800, network: bool = True, catalog: Any = None,
+                **survey_options: Any) -> Tuple[List[Found], Any]:
     """The scan, and what it looked through (survey.py): VISA, the local network, USB, serial ports and GPIB."""
     from .adapters import resource_name
     from .survey import survey
@@ -206,7 +228,7 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
         if name in in_lab:
             out.append(Found(name, how="already in this lab", in_lab=in_lab[name]))
             continue
-        out.append(identify(name, registry, rm, timeout_ms, usb))
+        out.append(identify(name, registry, rm, timeout_ms, usb, catalog=catalog))
     from .drivers import MODULES, discover_libraries, discover_swabian, discover_zhinst, library_notes
     # instruments behind vendor software: Zurich Instruments (LabOne), Swabian Pulse Streamers and Time Taggers,
     # NI DAQ cards, Ocean spectrometers, Andor and Basler cameras, Andor spectrographs, attocube ANC350s
@@ -215,8 +237,9 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
             out.append(Found(address, how="already in this lab", in_lab=in_lab[address]))
             continue
         card = match_card(idn, registry)
-        out.append(Found(address, idn, card.id if card else None, card.model if card else "", card.kind if card else "",
-                         "found by its maker's library" if card else "no card for this model yet"))
+        found = Found(address, idn, card.id if card else None, card.model if card else "", card.kind if card else "",
+                      "found by its maker's library" if card else "no card for this model yet")
+        out.append(found if card else look_up(found, catalog))
     looked.libraries = library_notes()
     return out, looked
 

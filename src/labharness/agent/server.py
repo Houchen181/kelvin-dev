@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import webbrowser
 from pathlib import Path
@@ -18,6 +19,7 @@ from .. import carddraft, expr, guide
 from .._version import __version__
 from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
 from ..clock import ScaledClock, SimClock
+from ..collection import Collection
 from ..labconfig import load_envelope
 from ..virtual_lab import build_virtual_lab, demo_envelope
 from .approval import ApprovalServer, WebApprover
@@ -66,6 +68,8 @@ You are connected to a physics lab through Kelvin.
   they are away. lab_status lists active alarms; mention any you see.
 - To plan an experiment, first look at what is known: search_papers, read the most relevant one or two, then
   propose parameters with reasons and cite them as [Author Year](url). Never invent a reference or a number.
+  For a standard measurement (R(T), Hall, gate sweeps, I-V, ODMR, FMR...), experiment_guide has the procedure,
+  pitfalls and plans to start from, with this lab's instrument names.
 - Spin experiments (NV centres; atoms or ions with an AOM and a microwave or RF drive) go in this order: CW ODMR
   (sweep the MW frequency, read the counter's rate) to find the resonance; Rabi (pulse generator protocol rabi,
   sweep its tau, read the counter's signal, reference and contrast) for the pi time; then pulsed ODMR with that
@@ -84,7 +88,8 @@ You are connected to a physics lab through Kelvin.
   queued and roughly how long it takes; queue_show follows it.
 - When the person names an instrument connected to this computer, or wants to use one the lab doesn't have yet,
   set it up yourself: scan_instruments to find it; if a card matched, add_instrument; if none did, draft_card (Kelvin
-  finds the maker's manual online and writes a draft card), try_card it (it only reads) and check that its readings
+  finds the maker's manual online and writes a draft card; when the instrument collection knows the model, the scan
+  names it and the card starts from the manual the collection links), try_card it (it only reads) and check that its readings
   make sense, then add_instrument. Then tell the person in a line or two what you added, with a reading or two they
   can compare with the front panel, and what the card left out (draft_card's notes). Add only what they asked for.
   When draft_card can't find the manual, or you need the maker's documentation, software or a driver, look it up
@@ -257,6 +262,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """How to write a card for an instrument Kelvin does not know: the format, the rules, and a full example.
         Read it before writing a card from a manual."""
         return carddraft.guide()
+
+    @server.tool(annotations=READ, structured_output=False)
+    def experiment_guide(experiment: str = "", query: str = "") -> str:
+        """Experiments from Kelvin's instrument collection: what to measure and how (roles, setup, procedure,
+        analysis, pitfalls) with plans to start from. query: find experiments (e.g. "Hall", "NV ODMR", "R(T)");
+        experiment: one of them by its id, with its plans' instrument names changed to this lab's. Fit the values to
+        the sample, then run them with run_plan as usual."""
+        return rt.experiment_guide(experiment, query)
 
     @server.tool(annotations=READ, structured_output=False)
     def check_card(card: str) -> str:
@@ -676,6 +689,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     from .. import envs
     envs.cleanup()
     envs.attach(envs.DRIVERS)   # makers' packages Kelvin installed for its built-in drivers (envs.py)
+    try:   # the instrument collection's experiments, from the copy the app keeps (this server never fetches it)
+        off = json.loads((home / "settings.json").read_text(encoding="utf-8")).get("collection") == "off"
+    except (OSError, ValueError, AttributeError):
+        off = False
+    runtime.collection = None if off else Collection(home)
     runtime.monitor.start()
     runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
     ui = ApprovalServer(runtime, port=args.ui_port).start()

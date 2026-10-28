@@ -105,10 +105,13 @@ def test_identity_replies_are_split_into_maker_model_serial_firmware():
 def test_cards_say_where_the_makers_publish_their_manuals():
     makers = ("americanmagnetics.com", "coherent.com", "tek.com", "lakeshore.com", "qdusa.com", "thinksrs.com",
               "thorlabs.com", "yokogawa.com", "zhinst.com", "swabianinstruments.com", "rohde-schwarz.com", "keysight.com",
-              "rigoltech.com", "svdcdn.com", "novatechsales.com", "windfreaktech.com")
+              "rigoltech.com", "svdcdn.com", "novatechsales.com", "windfreaktech.com",
+              "mymercurysupport.com")   # Oxford Instruments' Mercury support site
     real = [c for c in builtin_registry() if not c.id.startswith("virtual/") and c.manual]
     with_url = [c for c in real if c.manual_url]
-    assert len(with_url) >= 17
+    assert len(with_url) >= 28
+    assert builtin_registry().get("oxford/mercury-itc").manual_url == \
+        "https://www.mymercurysupport.com/sites/default/files/59_UMC0071_EN_02.pdf"   # public now; 0.3.24 had none
     for c in with_url:   # the makers' own sites, nobody's mirror
         host = c.manual_url.split("/")[2]
         assert c.manual_url.startswith("https://") and host.endswith(makers), c.id
