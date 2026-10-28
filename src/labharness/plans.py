@@ -14,7 +14,7 @@
     trigger: [dmm.arm, gen.fire]             # the card's actions, at every point, after settling, before measuring
     measure: [lockin.X, lockin.Y, smu.I]
     after:   { smu.V: 0 }
-    on_abort: { smu.V: 0 }                   # default: every drive the plan touched goes to safe
+    on_abort: { smu.V: 0 }                   # added after every drive the plan touched has gone to safe
 """
 from __future__ import annotations
 

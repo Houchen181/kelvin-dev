@@ -375,7 +375,7 @@ class RunEngine:
                 return
             if self.gate.stop_generation != gen:
                 raise _Abort("stop requested")
-            clock.sleep(max(0.05, min(2.0, st.duration / 10)))
+            self.gate._pause(max(0.05, min(2.0, st.duration / 10)), gen)   # a stop wakes it at once
 
     def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
                  meta: Optional[Dict[str, Any]] = None, folder: Any = None) -> RunReport:
@@ -398,7 +398,9 @@ class RunEngine:
         warnings: List[str] = [rec.moved] if getattr(rec, "moved", None) else []
 
         def apply(instr: str, param: str, value: Any) -> None:
-            r = gate._set(instr, param, value, True, "plan:" + plan.name)
+            if gate.stop_generation != gen:   # a stop that came between steps (or while the run was starting)
+                raise _Abort("stop requested")
+            r = gate._set(instr, param, value, True, "plan:" + plan.name, gen=gen)   # and one during it ends its waits
             if not r.ok:
                 raise _Abort(r.message)
 
@@ -516,18 +518,19 @@ class RunEngine:
                          str(rec.path) if rec.path else None, analysis=analysis, warnings=warnings)
 
     def _on_abort(self, plan: Plan) -> List[str]:
-        steps = plan.on_abort
-        if steps is None:  # default: every drive the plan touched goes to safe, unless the lab says hold
-            seen: Dict[str, Step] = {}
-            for key in self.drive_values(plan):
-                _, spec = self.lab.resolve(key)
-                if self.lab.config.safe_actions.get(key) != "hold":
-                    instr, _, param = key.partition(".")
-                    seen[key] = Step(instr, param, spec.safe)
-            steps = list(seen.values())
-        out = []
-        for step in steps:
-            r = self.gate._set(step.instr, step.param, step.value, True, "abort:" + plan.name)
+        """After a stop or a failure, first every drive the plan touched goes to safe, in its card's safe order, or
+        holds where the lab config's safe_actions says hold. Then the plan's own on_abort steps, which add to that
+        and never replace it: a plan's on_abort that only zeroed a voltage once left the output on, and one ramped a
+        magnet the lab holds. A set point the instrument ramps to by itself is set and not waited for, so a stop never
+        hangs on a cool-down (gate.abort_to_safe)."""
+        by = "abort:" + plan.name
+        out = [r.message for r in self.gate.abort_to_safe(list(self.drive_values(plan)), by)]
+        for step in plan.on_abort or []:
+            if self.lab.config.safe_actions.get(step.key) == "hold":
+                out.append("%s stays held: the lab config holds it on a stop (on_abort asked for %s)"
+                           % (step.key, self.lab.resolve(step.key)[1].show(step.value)))
+                continue
+            r = self.gate._set(step.instr, step.param, step.value, False, by)
             if r.action != "no-change":
                 out.append(r.message)
         return out
