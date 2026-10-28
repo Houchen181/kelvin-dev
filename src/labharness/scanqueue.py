@@ -125,6 +125,7 @@ class ScanQueue:
         self.reason = ""             # why it paused or stopped
         self.on_error = "pause"      # pause | continue
         self.changed = time.time()
+        self.cut_short: List[Item] = []   # the items that were running when Kelvin last closed
         if path is not None:
             self._load()
 
@@ -144,6 +145,7 @@ class ScanQueue:
                 item.legacy = True                              # have come from one, so shared only with older runs
             if item.status == "running":   # Kelvin closed in the middle of it
                 item.status, item.message = "stopped", "Kelvin closed while it ran"
+                self.cut_short.append(item)
             self.items.append(item)
         self.on_error = data.get("on_error") if data.get("on_error") in ("pause", "continue") else "pause"
         if any(i.status == "waiting" for i in self.items):

@@ -351,6 +351,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     tasks: List[asyncio.Task] = []
 
     def configure_literature() -> None:
+        runtime.idle_off_s = settings.idle_off_minutes * 60 or None     # outputs left on idle go to safe after this
         runtime.literature.enabled = settings.get("literature") != "off"
         runtime.literature.openalex_key = settings.get("openalex_api_key") or ""
         runtime.scan_network = settings.get("scan_network") != "off"   # scans also look on the local network
@@ -372,7 +373,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_notifications()
         configure_literature()
         await start_phone()
-        runtime.monitor.start()
+        runtime.start_watching()   # the watches; what a restart left; outputs left on idle
         runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
         if updater is not None:   # look for a newer Kelvin soon after start, then twice a day
             tasks.append(asyncio.ensure_future(update_loop()))
@@ -393,7 +394,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             hub.stopping = True   # a sync in progress stops at its next file
             for t in tasks:
                 t.cancel()
-            runtime.monitor.stop()
+            runtime.stop_watching()
             await remote.stop()
             await agent.close()
 
@@ -2615,6 +2616,20 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             stopped = True
         return JSONResponse({"ok": stopped, "message": STOPPED if stopped and (not chat_id or body.get("lab")) else ""})
 
+    async def incident(request: Request) -> Response:
+        """The card Kelvin shows after a restart that left something behind (outputs on, runs or a queue cut short).
+        POST {action: "safe"}: the outputs still on go to safe; {action: "dismiss"}: the card goes."""
+        action = str((await request.json()).get("action") or "")
+        if action == "safe":
+            if role_of(request) == "watch":
+                return error(403, "This phone can watch, not act. Use the Kelvin computer, or Hands on the sample.")
+            lines = await asyncio.to_thread(runtime.incident_safe, person(request))
+            return JSONResponse({"ok": True, "lines": lines})
+        if action == "dismiss":
+            runtime.dismiss_incident(person(request))
+            return JSONResponse({"ok": True})
+        return error(400, "action is safe or dismiss")
+
     async def approval(request: Request) -> Response:
         body = await request.json()
         if body.get("approve") and role_of(request) == "watch":
@@ -2834,6 +2849,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/skills/export/{scope}/{name}", skill_export),
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
+        Route("/api/incident", incident, methods=["POST"]),
         Route("/api/state", state),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/lab", lab_view, methods=["GET", "POST"]),

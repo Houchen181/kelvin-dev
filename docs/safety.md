@@ -109,6 +109,12 @@ Who can add a watch, and what it may do:
 
 Lab watches can't be removed from the portal or by the agent; they change only in the lab config.
 
+**Watches and alarms outlast a restart.** Your watches and Kelvin's are kept for each lab in `watches.json` in the data folder, next to the queue, and the latest alarms in `alarms.json`. When Kelvin starts again (an update, a crash, a power cut), when the lab is connected again, or when you sign in, they come back. One whose reading the lab no longer has is dropped and said so. An alarm that was on when Kelvin stopped shows as ended by the stop; its watch raises it again if it still holds.
+
+**After a restart, Kelvin says what the stop left behind.** Once the instruments are connected, a card above the chat (and the agent's `lab_status`) lists what reaches the sample and was left on (a source's output, a laser, RF), runs it cut short (kept up to their last point), the queue item it was running, alarms that were on, and watches it couldn't bring back; with them, temperature, field and positions as they were. **Bring the outputs to safe** does that, as **Hands on the sample** would (temperature, field and positions stay as they are); **Dismiss** closes the card. When the work it cut short ran unattended (a queue), the outputs go to safe at once and the card says so.
+
+**Outputs left on with nothing happening go to safe.** When nothing has happened for an hour (no command, run or queue: a turn that died, a usage limit, a person who left), Kelvin brings what reaches the sample (sources, excitations, light, RF) to safe, records it and tells you; temperature, field and positions stay. Settings → **Switch off outputs left idle** sets the time (5 minutes to a day) or turns it off.
+
 ```yaml
 watch:
   - read: tc.T_sample

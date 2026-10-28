@@ -3430,7 +3430,7 @@
     badge.hidden = !s.pending.length;
     if (fresh && !S.labOpen) toggleLab(true);
     showMode(s.approval_mode, s.approval_rule);
-    renderAlerts(s.alarms);
+    renderAlerts(s.alarms, s.incident);
     renderWatches(s.watches || [], s.status);
     notifySystem(s.notices);
     $("lab-name").textContent = s.lab;
@@ -3472,17 +3472,34 @@
     PROT.busy = s.busy;
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
-  function renderAlerts(alarms) {
+  function incidentCard(i) {   // what the last stop left behind: outputs on, runs or a queue cut short (runtime.py)
+    const act = (label, action, primary) => {
+      const b = h("button", { class: "btn small" + (primary ? " primary" : ""), type: "button" }, label);
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try { const r = await api("/api/incident", { body: { action } }); if (r.lines) toast(r.lines.join("; ")); }
+        catch (e) { toast(e.message); }
+        pollState();
+      });
+      return b;
+    };
+    const on = i.outputs.length && !i.safe.length;
+    return h("div", { class: "alert incident" }, icon("warn"), h("div", { class: "alert-body" },
+      h("b", {}, "Kelvin restarted" + (i.at ? " at " + String(i.at).slice(11, 16) : "") + ". Check the lab before you go on:"),
+      ...i.lines.map((l) => h("span", {}, l))),
+      on ? act("Bring the outputs to safe", "safe", true) : null, act("Dismiss", "dismiss", false));
+  }
+  function renderAlerts(alarms, incident) {
     const live = (alarms || []).filter((a) => !a.cleared && !a.acknowledged);
     const box = $("alerts");
-    box.hidden = !live.length;
-    box.replaceChildren(...live.map((a) => {
+    box.hidden = !live.length && !incident;
+    box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...live.map((a) => {
       const ok = h("button", { class: "btn small", type: "button" }, "Got it");
       ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
       return h("div", { class: "alert" }, icon("warn"), h("div", { class: "alert-body" }, h("b", {}, a.text),
         a.actions.length ? h("span", {}, "Kelvin " + a.actions.join("; ")) : null), ok);
     }));
-    document.title = (live.length ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
+    document.title = (live.length || incident ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
   }
   function notifySystem(notices) {
     if (!notices || !notices.length) return;
@@ -4965,6 +4982,10 @@
     $("collection").checked = !S.settings || S.settings.collection !== false;
     loadCollection();
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
+    const idle = S.settings && S.settings.idle_off !== undefined ? S.settings.idle_off : 60, idleSel = $("idle-off");
+    const idleValue = idle ? String(idle) : "off";
+    if (![...idleSel.options].some((o) => o.value === idleValue)) idleSel.append(h("option", { value: idleValue }, "After " + idle + " minutes"));
+    idleSel.value = idleValue;
     $("ask-folder").checked = !S.settings || S.settings.ask_folder !== false;
     $("data-choose").hidden = !hasPicker();
     const reportKinds = (S.settings && S.settings.report_kinds) || ["scan", "device", "project"];
@@ -5179,6 +5200,7 @@
     body.manuals = $("manuals").checked ? "on" : "off";
     body.collection = $("collection").checked ? "on" : "off";
     body.auto_report = $("auto-report").value;
+    body.idle_off = $("idle-off").value;
     body.ask_folder = $("ask-folder").checked ? "on" : "off";
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";

@@ -747,7 +747,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     except (OSError, ValueError, AttributeError):
         off = False
     runtime.collection = None if off else Collection(home)
-    runtime.monitor.start()
+    runtime.start_watching()   # the watches; what a restart left; outputs left on idle
     runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
     ui = ApprovalServer(runtime, port=args.ui_port).start()
 

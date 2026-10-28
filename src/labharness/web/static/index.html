@@ -540,6 +540,17 @@
             </div>
             <span class="hint">Only what you tick goes to that address, which then holds lab details; use a private topic or channel.</span>
           </div>
+          <div class="field">
+            <label for="idle-off">Switch off outputs left idle</label>
+            <select id="idle-off" name="idle_off">
+              <option value="15">After 15 minutes with nothing happening</option>
+              <option value="30">After 30 minutes</option>
+              <option value="60">After an hour</option>
+              <option value="240">After 4 hours</option>
+              <option value="off">Never</option>
+            </select>
+            <span class="hint">When no command, run or queue has touched the lab for that long, Kelvin brings what reaches the sample (sources, excitations, lasers, RF) to safe and tells you. Temperature, field and positions stay.</span>
+          </div>
         </section>
         <section class="set-page" data-page="phone" hidden>
           <h3 class="set-title">Phone</h3>
