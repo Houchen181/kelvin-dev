@@ -15,6 +15,7 @@ from .autocard import ACTION_READ
 from .cards import Card
 from .instrument import Instrument
 from .labconfig import InstrumentConfig
+from .scpi import is_query
 
 
 def _clone_without_connect(card: Card) -> Card:
@@ -37,7 +38,8 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
     if reuse is None and address.startswith("sim://"):
         raise AdapterError("%s is a simulated instrument; try the card on a real address" % address)
     backend = reuse or open_backend("try", _clone_without_connect(card) if not card.library else card, address)
-    inst = Instrument("try", card, backend, InstrumentConfig(name="try", card=card.id, address=address))
+    inst = Instrument("try", card, backend, InstrumentConfig(name="try", card=card.id, address=address),
+                      getattr(lab, "stops", None))   # a person's stop ends its waits too
     out: Dict[str, Any] = {"address": address, "card": card.id, "reused": reuse is not None, "readings": []}
     from .drivers import is_driver_address
     text = not card.library and not is_driver_address(address)   # a text instrument: only queries are sent
@@ -47,8 +49,7 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
             return None
         if ACTION_READ.match(command):
             return "this read may start a measurement or a test; try it with the instrument in the lab"
-        first = command.split(None, 1)[0] if command.strip() else ""
-        if "?" not in first:
+        if not is_query(command, bool(card.connection.get("enq"))):   # on an ENQ instrument, PR1 is a read
             return "not a query (no ?), so it might change something; check it in the manual"
         return None
 
@@ -68,6 +69,9 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
             row: Dict[str, Any] = {"name": spec.name, "label": spec.label or spec.name, "unit": spec.unit,
                                    "kind": spec.kind}
             why = unsafe(spec.get_cmd.render() if "{value}" not in spec.get_cmd.text else spec.get_cmd.text)
+            if spec.get_before and not why:
+                why = "this reading runs an acquisition (%s); try it with the instrument in the lab" % "; ".join(
+                    spec.get_before)
             if why:
                 row["skipped"] = why
                 out["readings"].append(row)

@@ -4,16 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kelvin-lab"
-version = "0.3.14"
+version = "0.3.24"
 description = "Kelvin, the coolest cat in the lab: a safety-gated AI lab assistant for experimental physicists"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = ["PyYAML>=5.4"]
 
 [project.optional-dependencies]
-agent = ["mcp>=2.3"]           # the MCP server needs Python >= 3.10
+agent = ["mcp>=2.3",           # the MCP server needs Python >= 3.10
+         "numpy>=1.21", "h5py>=3.8"]   # each run's data file, run.h5 (rundata.py), and compute (expr.py)
 web = ["mcp>=2.3", "starlette", "uvicorn", "anthropic>=1.15", "openai>=3", "google-genai>=2",
-       "cryptography>=3.4"]   # a person's API keys, encrypted with their password
+       "cryptography>=3.4",   # a person's API keys, encrypted with their password
+       "websockets>=13",      # phones through the Kelvin hub (web/relay.py)
+       "numpy>=1.21", "h5py>=3.8"]   # each run's data file, run.h5 (rundata.py), and compute (expr.py)
 # real instruments (VISA, serial; USB and the local network without vendor drivers) and their manuals
 hardware = ["pyvisa>=1.13", "pyvisa-py>=0.7", "pyserial>=3.5", "pyusb>=1.2", "libusb-package>=1.0", "psutil>=5.9",
             "zeroconf>=0.130", "pypdf[crypto]>=4"]
@@ -24,7 +27,7 @@ ocean = ["seabreeze"]           # Ocean Insight spectrometers
 basler = ["pypylon"]            # Basler cameras
 pylablib = ["pylablib"]         # attocube ANC300/ANC350, Andor Shamrock/Kymera spectrographs
 desktop = ["kelvin-lab[web,hardware]", "pywebview>=5"]
-hub = ["starlette", "uvicorn"]  # the Kelvin hub server (accounts across labs): `kelvin-hub`
+hub = ["starlette", "uvicorn", "websockets>=13"]  # the Kelvin hub server (accounts, the phones' relay): `kelvin-hub`
 dev = ["pytest>=6", "httpx", "pypdf>=4"]
 
 [project.scripts]
@@ -40,7 +43,7 @@ kelvin-app = "labharness.desktop:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-labharness = ["data/*.yaml", "data/cards/*.yaml", "data/cards/*/*.yaml", "data/bridge/*.py", "agent/ui.html", "web/static/*"]
+labharness = ["data/*.yaml", "data/*.md", "data/cards/*.yaml", "data/cards/*/*.yaml", "data/bridge/*.py", "data/skills/*.md", "agent/ui.html", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

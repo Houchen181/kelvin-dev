@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import functools
 import hmac
 import html
+import io
 import ipaddress
 import json
 import logging
@@ -40,6 +42,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Redire
 from starlette.routing import Route
 
 from .._version import __version__
+from . import relay as relaying
 from .db import DEFAULTS, SESSION_TTL, Busy, Hub, HubError, TooMuch, installation, loopback, log, previous_ids
 
 COOKIE = "kelvin_hub"
@@ -130,6 +133,32 @@ Leaving a lab takes your work out of its view.</li>
 <b>Delete account</b>, both on your account page. Daily database backups are kept for up to 30 days, then
 removed.</li>
 </ul>"""
+
+
+TERMS_ACCOUNTS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms before the hub opens to the
+public.</p>
+<ul class="plain">
+<li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer.</li>
+<li>Your work stays on your computers: the hub receives no chats, projects, runs or data.</li>
+<li>The Kelvin team runs the hub and may disable an account that abuses it.</li>
+<li>The hub is provided as it is, without warranty.</li>
+</ul>"""
+
+PRIVACY_ACCOUNTS = """<p class="note"><b>Draft.</b> The Kelvin team must review this notice before the hub opens to
+the public.</p>
+<ul class="plain">
+<li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password), and
+the computers you sign in to Kelvin on: their name, operating system and Kelvin version, and when.</li>
+<li><b>What it never receives:</b> your work (chats, projects, runs, data), API keys, and ChatGPT or Claude Code
+sign-ins. They stay on your computers.</li>
+<li><b>Who sees your account:</b> you, and the Kelvin team, who run the hub. No other user does.</li>
+<li><b>Records:</b> the hub logs sign-ins and changes, with the IP address, for security.</li>
+<li><b>Your rights:</b> download your account with <b>Export</b>, and delete it with <b>Delete account</b>, both on
+your account page. Daily database backups are kept for up to 30 days, then removed.</li>
+</ul>"""
+
+PAGE_SIZE = 200   # people per page on the operator page
+STAT_NAMES = {"kelvins": "computers", "connections": "signed in on computers", "active_30d": "active in 30 days"}
 
 
 def e(value: Any) -> str:
@@ -303,8 +332,10 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         return response
 
     def page(title: str, body: str, sess: Optional[Dict[str, Any]] = None, status: int = 200,
-             error: Optional[str] = None, note: Optional[str] = None) -> HTMLResponse:
-        if sess:
+             error: Optional[str] = None, note: Optional[str] = None, nav: Optional[str] = None) -> HTMLResponse:
+        if nav is not None:
+            pass   # the owner console's own
+        elif sess:
             nav = ('<a href="/account">%s</a><form class="inline" method="post" action="/signout">%s'
                    '<button>Sign out</button></form>' % (e(sess["user"]["name"]), csrf_field(sess)))
         else:
@@ -349,10 +380,28 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
 
     # ------------------------------------------------------------------ public pages
 
+    def sharing_only(endpoint: Any) -> Any:
+        """Labs, connected Kelvins and shared work: not found while the hub keeps accounts only (hub.json sharing)."""
+        async def wrapped(request: Request) -> Response:
+            if hub.sharing:
+                return await endpoint(request)
+            if request.url.path.startswith("/api/"):
+                return api_error("not found", 404)
+            return page("Not found", "<p>This hub keeps Kelvin accounts only.</p>", await session_of(request), 404)
+        return wrapped
+
     async def home(request: Request) -> Response:
         sess = await session_of(request)
         if sess:
             return RedirectResponse("/account", 303)
+        if not hub.sharing:
+            return page("Your Kelvin account", (
+                '<p>One email and password sign you in to Kelvin on every computer. You can make your account in '
+                'Kelvin itself, on its sign-in screen. Here you can change your name or password, export your account '
+                'or delete it.</p><p>Your work stays on your computers: the hub keeps your account only.</p>'
+                '<p class="row"><a class="button" href="/signin">Sign in</a>'
+                '<a class="button plain" href="/register">Create account</a></p>'
+                '<p class="muted"><a href="/terms">Terms</a> · <a href="/privacy">Privacy</a></p>'))
         return page("One account for Kelvin, in every lab", (
             '<p>Make one account, join your lab, and connect each Kelvin you use. Kelvin then shares your work with '
             'your labmates here: normal projects and unfiled chats, with their runs and whole conversations.</p>'
@@ -366,13 +415,13 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
 
     async def terms(request: Request) -> Response:
         custom = hub.home / "terms.html"
-        return page("Terms", custom.read_text(encoding="utf-8") if custom.exists() else TERMS,
-                    await session_of(request))
+        return page("Terms", custom.read_text(encoding="utf-8") if custom.exists() else
+                    TERMS if hub.sharing else TERMS_ACCOUNTS, await session_of(request))
 
     async def privacy(request: Request) -> Response:
         custom = hub.home / "privacy.html"
-        return page("Privacy", custom.read_text(encoding="utf-8") if custom.exists() else PRIVACY,
-                    await session_of(request))
+        return page("Privacy", custom.read_text(encoding="utf-8") if custom.exists() else
+                    PRIVACY if hub.sharing else PRIVACY_ACCOUNTS, await session_of(request))
 
     def register_form(values: Dict[str, str], error: Optional[str] = None) -> HTMLResponse:
         return page("Create your account", (
@@ -514,15 +563,46 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return redirect
         user = sess["user"]
         uid = user["id"]
-        labs, connections, shared = await asyncio.gather(
-            call(hub.labs_of, uid), call(hub.connections, uid), call(hub.shared_with, uid))
         csrf = csrf_field(sess)
         parts = []
         if not user["email_confirmed_at"]:
             parts.append('<div class="note">Please confirm <b>%s</b> with the link we sent. '
                          '<form class="inline" method="post" action="/account/confirm">%s<button class="plain">'
                          'Send it again</button></form></div>' % (e(user["email"]), csrf))
+        if hub.sharing:
+            await sharing_sections(parts, uid, csrf)
+        parts.append(
+            '<h2>Your profile</h2><form class="stack" method="post" action="/account/profile">%s'
+            '<label>Email<input type="email" value="%s" disabled></label>'
+            '<label>Name<input type="text" name="name" required maxlength="80" value="%s"></label>'
+            '<label>ORCID iD <span class="muted">(optional)</span><input type="text" name="orcid" value="%s"></label>'
+            '<button>Save</button></form>'
+            '<h2>Password</h2><form class="stack" method="post" action="/account/password">%s'
+            '<label>Current password<input type="password" name="old" autocomplete="current-password" required></label>'
+            '<label>New password<input type="password" name="new" autocomplete="new-password" required minlength="8">'
+            '</label><button>Change password</button></form>'
+            '<h2>Your data</h2><p><a href="/account/export">Export everything</a> <span class="muted">(a zip of %s)'
+            '</span></p>'
+            '<details><summary>Delete your account</summary><form class="stack" method="post" '
+            'action="/account/delete">%s<p>%s It can\'t be undone.</p><label>Password<input type="password" '
+            'name="password" autocomplete="current-password" required></label><label class="check"><input '
+            'type="checkbox" name="sure" value="yes" required><span>Yes, delete my account.</span></label>'
+            '<button class="danger">Delete my account</button></form></details>'
+            '<p class="muted">Account made %s · agreed to the terms of %s · <a href="/terms">Terms</a> · '
+            '<a href="/privacy">Privacy</a></p>'
+            % (csrf, e(user["email"]), e(user["name"]), e(user["orcid"] or ""), csrf,
+               "your account, labs, connections, and all you shared" if hub.sharing else "your account and the hub's "
+               "record of it", csrf,
+               "This deletes your account and everything your Kelvins shared to the hub. Your own computers keep "
+               "their copies." if hub.sharing else "This deletes your Kelvin account. Your computers keep your chats "
+               "and data.", when(user["created_at"]), e(user["consent_version"])))
+        note = NOTES.get(request.query_params.get("note", ""))
+        return page("Your account", "".join(parts), sess, error=error, note=note, status=400 if error else 200)
 
+    async def sharing_sections(parts: List[str], uid: int, csrf: str) -> None:
+        """The account page's labs, connected Kelvins and shared work (only while the hub shares work)."""
+        labs, connections, shared = await asyncio.gather(
+            call(hub.labs_of, uid), call(hub.connections, uid), call(hub.shared_with, uid))
         parts.append('<h2>Shared in your labs</h2>')
         if shared["chats"] or shared["runs"] or shared["projects"]:
             if shared["projects"]:
@@ -585,31 +665,6 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         else:
             parts.append('<p class="muted">None yet. Start the connection from the Kelvin you want to connect; it '
                          'opens this hub in your browser to ask you.</p>')
-
-        parts.append(
-            '<h2>Your profile</h2><form class="stack" method="post" action="/account/profile">%s'
-            '<label>Email<input type="email" value="%s" disabled></label>'
-            '<label>Name<input type="text" name="name" required maxlength="80" value="%s"></label>'
-            '<label>ORCID iD <span class="muted">(optional)</span><input type="text" name="orcid" value="%s"></label>'
-            '<button>Save</button></form>'
-            '<h2>Password</h2><form class="stack" method="post" action="/account/password">%s'
-            '<label>Current password<input type="password" name="old" autocomplete="current-password" required></label>'
-            '<label>New password<input type="password" name="new" autocomplete="new-password" required minlength="8">'
-            '</label><button>Change password</button></form>'
-            '<h2>Your data</h2><p><a href="/account/export">Export everything</a> <span class="muted">(a zip of your '
-            'account, labs, connections, and all you shared)</span></p>'
-            '<details><summary>Delete your account</summary><form class="stack" method="post" '
-            'action="/account/delete">%s<p>This deletes your account and everything your Kelvins shared to the hub. '
-            'Your own computers keep their copies. It can\'t be undone.</p><label>Password<input type="password" '
-            'name="password" autocomplete="current-password" required></label><label class="check"><input '
-            'type="checkbox" name="sure" value="yes" required><span>Yes, delete my account.</span></label>'
-            '<button class="danger">Delete my account</button></form></details>'
-            '<p class="muted">Account made %s · agreed to the terms of %s · <a href="/terms">Terms</a> · '
-            '<a href="/privacy">Privacy</a></p>'
-            % (csrf, e(user["email"]), e(user["name"]), e(user["orcid"] or ""), csrf, csrf, when(user["created_at"]),
-               e(user["consent_version"])))
-        note = NOTES.get(request.query_params.get("note", ""))
-        return page("Your account", "".join(parts), sess, error=error, note=note, status=400 if error else 200)
 
     def account_action(fn: Any, any_consent: bool = False) -> Any:
         """A form on the account page: signed in, anti-forgery checked; a HubError shows on the page."""
@@ -880,6 +935,137 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             return api_error("invalid_grant", 400, error_description=str(err))
         return JSONResponse(result)
 
+    # ------------------------------------------------------------------ Kelvin's own sign-in (central accounts)
+
+    async def json_body(request: Request) -> Dict[str, Any]:
+        body = json.loads(await read_body(request, MAX_TOKEN))
+        if not isinstance(body, dict):
+            raise HubError("send a JSON object")
+        return body
+
+    def kelvin_of(body: Dict[str, Any]) -> Dict[str, str]:
+        """The JSON API's {"installation": {"id", "name", "platform", "version"}} (/connect's query has the id as
+        installation=, the rest beside it)."""
+        i = body.get("installation") if isinstance(body.get("installation"), dict) else {}
+        if not i.get("id"):
+            raise HubError("Kelvin didn't say which installation it is: send \"installation\": {\"id\", \"name\", "
+                           "\"platform\", \"version\"}.")
+        return installation({"installation": i.get("id"), "name": i.get("name"), "platform": i.get("platform"),
+                             "version": i.get("version")})
+
+    async def api_signin(request: Request) -> Response:
+        """Kelvin's sign-in: {email, password, installation: {id, name, platform, version}} -> a token for this
+        Kelvin and who the person is. Same lockouts as the sign-in page."""
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        keys = ("signin:" + str(body.get("email") or "").strip().lower(), "signin-ip:" + who(request))
+        if any(signin_tries.blocked(k) for k in keys):
+            return api_error("Too many tries. Wait 15 minutes, or reset your password.", 429)
+        try:
+            result = await call(hub.sign_in_app, body.get("email"), body.get("password"), kelvin_of(body),
+                                ip_of(request))
+        except (TooMuch, Busy) as err:
+            return api_error(str(err), err.status)
+        except HubError as err:
+            if str(err).startswith("Wrong email or password"):
+                for k in keys:
+                    signin_tries.hit(k)
+                return api_error(str(err), 401)
+            return api_error(str(err), 403 if "disabled" in str(err) or "Confirm" in str(err) else 400)
+        signin_tries.clear(keys[0])
+        return JSONResponse(result)
+
+    async def api_register(request: Request) -> Response:
+        """Kelvin's Create account: {name, email, password, consent: true, orcid?, installation} -> the account, a
+        confirmation mail, and a token for this Kelvin. Same limits as the registration page."""
+        try:
+            body = await json_body(request)
+            inst = kelvin_of(body)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        if form_tries.blocked("register:" + who(request)):
+            return api_error("Too many new accounts from this address. Try again later.", 429)
+        ip = ip_of(request) or "?"
+        try:
+            user = await call(hub.register, body.get("email"), body.get("name"), body.get("password"),
+                              body.get("consent") is True, body.get("orcid") or "", ip)
+        except HubError as err:
+            return api_error(str(err))
+        form_tries.hit("register:" + who(request))
+        await call(hub.send_confirmation, user)
+        try:
+            return JSONResponse(await call(hub.sign_in_app, body.get("email"), body.get("password"), inst, ip))
+        except HubError as err:   # e.g. the hub wants the email confirmed first
+            return api_error(str(err), 403, registered=True)
+
+    async def api_reset(request: Request) -> Response:
+        """{email}: mail a link to choose a new password. Answers the same whether or not the account exists."""
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        response = JSONResponse({"ok": True})
+        if not form_tries.blocked("reset:" + who(request)):
+            form_tries.hit("reset:" + who(request))
+            response.background = BackgroundTask(hub.start_reset, body.get("email"), ip_of(request) or "?")
+        return response
+
+    async def api_password(request: Request) -> Response:
+        """{old, new}: change the password of the person signed in to this Kelvin. Their Kelvins stay signed in."""
+        app = await app_of(request)
+        if app is None:
+            return api_error("not connected", 401)
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        key = "signin:" + app["user"]["email"]
+        if signin_tries.blocked(key):
+            return api_error("Too many tries. Wait 15 minutes, or reset your password.", 429)
+        try:
+            await call(hub.change_password, app["user"]["id"], body.get("old"), body.get("new"), None, ip_of(request))
+        except HubError as err:
+            if str(err).startswith("Wrong email or password"):
+                signin_tries.hit(key)
+                return api_error("Wrong current password.", 401)
+            return api_error(str(err))
+        return JSONResponse({"ok": True})
+
+    async def api_signout(request: Request) -> Response:
+        """A Kelvin or a phone signs out of the person's Kelvin account: its token stops working."""
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not token or not await call(hub.sign_out_app, token, ip_of(request)):
+            return api_error("not signed in", 401)
+        return Response(status_code=204)
+
+    async def api_account_delete(request: Request) -> Response:
+        """Delete account from Kelvin or a phone: {email, password} -> the account deleted, as on the account page.
+        The password, never only a token: a computer that merely stayed signed in can't delete anyone. Same lockouts
+        as signing in."""
+        try:
+            body = await json_body(request)
+        except (HubError, ValueError) as err:
+            return api_error(str(err))
+        keys = ("signin:" + str(body.get("email") or "").strip().lower(), "signin-ip:" + who(request))
+        if any(signin_tries.blocked(k) for k in keys):
+            return api_error("Too many tries. Wait 15 minutes, or reset your password.", 429)
+        try:
+            user = await call(hub.authenticate, body.get("email"), body.get("password"), ip_of(request))
+        except (TooMuch, Busy) as err:
+            return api_error(str(err), err.status)
+        except HubError as err:
+            if str(err).startswith("Wrong email or password"):
+                for k in keys:
+                    signin_tries.hit(k)
+                return api_error(str(err), 401)
+            return api_error(str(err), 403)
+        signin_tries.clear(keys[0])
+        await call(hub.delete_user, user["id"], "user", ip_of(request))
+        return JSONResponse({"deleted": True})
+
     async def me(request: Request) -> Response:
         app = await app_of(request)
         if app is None:
@@ -965,47 +1151,133 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         return op
 
     def admin_page(op: Dict[str, Any], body: str, error: Optional[str] = None, note: Optional[str] = None) -> Response:
-        signout_form = ('<form class="inline" method="post" action="/admin/signout"><input type="hidden" name="csrf" '
-                        'value="%s"><button class="plain">Leave the operator page</button></form>' % e(op["csrf"]))
-        return page("Kelvin hub · operator", body + signout_form, error=error, note=note, status=400 if error else 200)
+        """The owner console: for the Kelvin team, who run the hub (operator key), never for its users."""
+        nav = ('<a href="/admin">Everyone</a><form class="inline" method="post" action="/admin/signout"><input '
+               'type="hidden" name="csrf" value="%s"><button>Leave</button></form>' % e(op["csrf"]))
+        return page("Owner console", body, error=error, note=note, status=400 if error else 200, nav=nav)
 
     async def admin(request: Request, error: Optional[str] = None, note: Optional[str] = None) -> Response:
         op = operator_of(request)
         if op is None:
-            return page("Kelvin hub · operator", (
+            return page("Owner console", (
+                '<p class="muted">For the Kelvin team, who run this hub.</p>'
                 '<form class="stack" method="post" action="/admin/signin"><label>Operator key<input type="password" '
                 'name="key" autocomplete="off" required></label><button>Open</button></form><p class="muted">The key '
                 'is in operator-key.txt in the hub\'s folder when the hub is first set up; '
                 '<code>kelvin-hub operator-key</code> makes a new one.</p>'), error=error,
                 status=400 if error else 200)
         query = request.query_params.get("q", "")
-        stats, people, activity = await asyncio.gather(call(hub.stats), call(hub.find_users, query, 100),
-                                                       call(hub.recent_activity, 60))
+        try:
+            start = max(0, int(request.query_params.get("from", "0")))
+        except ValueError:
+            start = 0
+        stats, people, total, activity = await asyncio.gather(
+            call(hub.stats), call(hub.find_users, query, PAGE_SIZE, start), call(hub.count_users, query),
+            call(hub.recent_activity, 60))
         csrf = '<input type="hidden" name="csrf" value="%s">' % e(op["csrf"])
         rows = "".join(
-            '<tr><td>%d</td><td>%s<br><span class="muted">%s</span></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>'
-            '<td><form class="inline" method="post" action="/admin/users/%d/%s">%s<button class="plain">%s</button>'
-            '</form></td></tr>'
-            % (u["id"], e(u["name"]), e(u["email"]), "yes" if u["email_confirmed_at"] else "no", u["labs"],
+            '<tr><td>%d</td><td><a href="/admin/users/%d">%s</a><br><span class="muted">%s</span></td><td>%s</td>'
+            '%s<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><form class="inline" method="post" '
+            'action="/admin/users/%d/%s">%s<button class="plain">%s</button></form></td></tr>'
+            % (u["id"], u["id"], e(u["name"]), e(u["email"]), "yes" if u["email_confirmed_at"] else "no",
+               "<td>%s</td>" % u["labs"] if hub.sharing else "", u["computers"], e(u["kelvin"] or "–"),
                when(u["created_at"]), when(u["last_seen"]), u["id"], "enable" if u["disabled_at"] else "disable",
                csrf, "Enable" if u["disabled_at"] else "Disable") for u in people)
+        pages = []
+        if start > 0:
+            pages.append('<a href="/admin?%s">Newer</a>' % e(urlencode({"q": query, "from": max(0, start - PAGE_SIZE)})))
+        if start + PAGE_SIZE < total:
+            pages.append('<a href="/admin?%s">Older</a>' % e(urlencode({"q": query, "from": start + PAGE_SIZE})))
+        shown = "%d–%d of %d" % (start + 1, start + len(people), total) if people else "none of %d" % total
         events = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
-                         % (when(a["at"]), e(a["actor"]), e(a["action"]), e(a["user_id"] or ""), e(a["detail"]))
-                         for a in activity)
-        stats_rows = "".join('<tr><th>%s</th><td>%s</td></tr>' % (e(k.replace("_", " ")),
+                         % (when(a["at"]), e(a["actor"]), e(a["action"]),
+                            '<a href="/admin/users/%d">%d</a>' % (a["user_id"], a["user_id"]) if a["user_id"] else "",
+                            e(a["detail"])) for a in activity)
+        shared_keys = {"labs", "projects", "chats", "runs", "run_bytes"}
+        stats_rows = "".join('<tr><th>%s</th><td>%s</td></tr>' % (e(STAT_NAMES.get(k, k.replace("_", " "))),
                                                                    e(size(v) if k.endswith("bytes") else v))
-                             for k, v in stats.items())
+                             for k, v in stats.items() if hub.sharing or k not in shared_keys)
         return admin_page(op, (
             '<h2>The hub</h2><div class="scroll"><table>%s</table></div>'
             '<form class="inline" method="post" action="/admin/backup">%s<button class="plain">Back up the database '
             'now</button></form>'
             '<h2>People</h2><form class="row" method="get" action="/admin"><input type="search" name="q" value="%s" '
-            'placeholder="Name or email" style="max-width:20rem"><button class="plain">Find</button></form>'
-            '<div class="scroll"><table><tr><th>#</th><th>Person</th><th>Confirmed</th><th>Labs</th><th>Joined</th>'
-            '<th>Last seen</th><th></th></tr>%s</table></div>'
+            'placeholder="Name or email" style="max-width:20rem"><button class="plain">Find</button>'
+            '<a href="/admin/people.csv">Download everyone (CSV)</a></form>'
+            '<p class="muted">%s · newest first%s</p>'
+            '<div class="scroll"><table><tr><th>#</th><th>Person</th><th>Confirmed</th>%s<th>Computers</th>'
+            '<th>Kelvin</th><th>Joined</th><th>Last seen</th><th></th></tr>%s</table></div><p class="row">%s</p>'
             '<h2>Recent activity</h2><div class="scroll"><table><tr><th>When</th><th>Who</th><th>What</th><th>Account'
-            '</th><th>Detail</th></tr>%s</table></div>' % (stats_rows, csrf, e(query), rows, events)),
+            '</th><th>Detail</th></tr>%s</table></div>'
+            % (stats_rows, csrf, e(query), shown, " · matching “%s”" % e(query) if query else "",
+               "<th>Labs</th>" if hub.sharing else "", rows, " ".join(pages), events)),
             error=error, note=note)
+
+    async def admin_person(request: Request, error: Optional[str] = None, note: Optional[str] = None) -> Response:
+        """One person, for the operator: the account, the computers they sign in to Kelvin on, and its record."""
+        op = operator_of(request)
+        if op is None:
+            return RedirectResponse("/admin", 303)
+        uid = int(request.path_params["user_id"])
+        try:
+            user = await call(hub.user, uid)
+        except HubError as err:
+            return await admin(request, error="Account %d: %s" % (uid, err))
+        computers, activity, labs = await asyncio.gather(
+            call(hub.connections, uid), call(hub.activity_of, uid, 200),
+            call(hub.labs_of, uid) if hub.sharing else asyncio.sleep(0, []))
+        csrf = '<input type="hidden" name="csrf" value="%s">' % e(op["csrf"])
+        facts = [("Email", e(user["email"])), ("ORCID iD", e(user["orcid"] or "–")),
+                 ("Email confirmed", when(user["email_confirmed_at"]) if user["email_confirmed_at"] else "not yet"),
+                 ("Joined", when(user["created_at"])), ("Last seen", when(user["last_seen"])),
+                 ("Terms agreed", "%s (%s)" % (e(user["consent_version"] or "–"), when(user["consent_at"]))),
+                 ("Status", "disabled since %s" % when(user["disabled_at"]) if user["disabled_at"] else "active")]
+        if hub.sharing:
+            facts.append(("Labs", e(", ".join(lab["name"] for lab in labs) or "none")))
+        machines = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                           % (e(c["name"] or "Kelvin"), e(c["platform"] or "–"), e(c["version"] or "–"),
+                              when(c["created_at"]), when(c["last_used"])) for c in computers)
+        record = "".join('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                         % (when(a["at"]), e(a["actor"]), e(a["action"]), e(a["detail"]), e(a["ip"] or ""))
+                         for a in activity)
+        verb = "enable" if user["disabled_at"] else "disable"
+        return admin_page(op, (
+            '<p><a href="/admin">← Everyone</a></p><h2>%s <span class="muted">#%d</span></h2>'
+            '<div class="scroll"><table>%s</table></div>'
+            '<form class="inline" method="post" action="/admin/users/%d/%s">%s<input type="hidden" name="back" '
+            'value="person"><button class="plain">%s this account</button></form>'
+            '<h2>Computers</h2>%s'
+            '<h2>Activity</h2><div class="scroll"><table><tr><th>When</th><th>Who</th><th>What</th><th>Detail</th>'
+            '<th>IP</th></tr>%s</table></div>'
+            % (e(user["name"]), uid, "".join('<tr><th>%s</th><td>%s</td></tr>' % kv for kv in facts), uid, verb, csrf,
+               verb.capitalize(),
+               '<div class="scroll"><table><tr><th>Computer</th><th>System</th><th>Kelvin</th><th>First signed in'
+               '</th><th>Last used</th></tr>%s</table></div>' % machines if computers else
+               '<p class="muted">Not signed in on any computer now.</p>', record)),
+            error=error, note=note)
+
+    async def admin_people_csv(request: Request) -> Response:
+        """Everyone, as a table for the operator: no passwords, nothing anyone shared."""
+        if operator_of(request) is None:
+            return RedirectResponse("/admin", 303)
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["id", "name", "email", "orcid", "email_confirmed", "joined", "last_seen", "disabled",
+                    "computers", "kelvin_version", "terms_agreed"])
+        start = 0
+        while True:
+            people = await call(hub.find_users, "", 1000, start)
+            for u in people:
+                w.writerow([u["id"], u["name"], u["email"], u["orcid"] or "", when(u["email_confirmed_at"])
+                            if u["email_confirmed_at"] else "", when(u["created_at"]), when(u["last_seen"]),
+                            when(u["disabled_at"]) if u["disabled_at"] else "", u["computers"], u["kelvin"],
+                            u["consent_version"] or ""])
+            if len(people) < 1000:
+                break
+            start += 1000
+        return Response(out.getvalue(), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="kelvin-people.csv"',
+                                 "Cache-Control": "no-store"})
 
     async def admin_signin(request: Request) -> Response:
         ip = ip_of(request) or "?"
@@ -1031,11 +1303,12 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             f = await form_of(request)
             if op is None or not hmac.compare_digest(f.get("csrf", ""), op["csrf"]):
                 return RedirectResponse("/admin", 303)
+            back = admin_person if f.get("back") == "person" and "user_id" in request.path_params else admin
             try:
                 note = await fn(request, f)
             except HubError as err:
-                return await admin(request, error=str(err))
-            return await admin(request, note=note)
+                return await back(request, error=str(err))
+            return await back(request, note=note)
         return endpoint
 
     async def admin_signout(request: Request) -> Response:
@@ -1086,6 +1359,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         if task:
             task.cancel()
 
+    relay, relay_routes = relaying.routes(hub, call, read_body, api_error)
     routes = [
         Route("/", home),
         Route("/kelvin.svg", logo),
@@ -1105,27 +1379,37 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/account/delete", delete_page),
         Route("/account/delete", account_action(delete_account, any_consent=True), methods=["POST"]),
         Route("/account/export", export),
-        Route("/labs", account_action(make_lab), methods=["POST"]),
-        Route("/labs/join", account_action(join_lab), methods=["POST"]),
-        Route("/labs/{lab_id:int}/leave", account_action(leave_lab), methods=["POST"]),
-        Route("/connections/{token_id:int}/revoke", account_action(revoke), methods=["POST"]),
-        Route("/shared/chats/{chat_id:int}", shared_chat),
-        Route("/shared/runs/{run_id:int}", shared_run),
-        Route("/shared/runs/{run_id:int}/files/{name:path}", shared_run_file),
-        Route("/connect", connect, methods=["GET", "POST"]),
+        Route("/labs", sharing_only(account_action(make_lab)), methods=["POST"]),
+        Route("/labs/join", sharing_only(account_action(join_lab)), methods=["POST"]),
+        Route("/labs/{lab_id:int}/leave", sharing_only(account_action(leave_lab)), methods=["POST"]),
+        Route("/connections/{token_id:int}/revoke", sharing_only(account_action(revoke)), methods=["POST"]),
+        Route("/shared/chats/{chat_id:int}", sharing_only(shared_chat)),
+        Route("/shared/runs/{run_id:int}", sharing_only(shared_run)),
+        Route("/shared/runs/{run_id:int}/files/{name:path}", sharing_only(shared_run_file)),
+        Route("/connect", sharing_only(connect), methods=["GET", "POST"]),
         Route("/admin", admin),
+        Route("/admin/people.csv", admin_people_csv),
         Route("/admin/signin", admin_signin, methods=["POST"]),
         Route("/admin/signout", admin_signout, methods=["POST"]),
+        Route("/admin/users/{user_id:int}", admin_person),
         Route("/admin/users/{user_id:int}/{verb}", operator_action(admin_disable), methods=["POST"]),
         Route("/admin/backup", operator_action(admin_backup), methods=["POST"]),
         Route("/api/health", health),
-        Route("/api/token", token, methods=["POST", "DELETE"]),
-        Route("/api/me", me),
-        Route("/api/sync", sync, methods=["POST"]),
-        Route("/api/sync/runs/{run_id}/files/{name:path}", run_file_upload, methods=["PUT"]),
+        Route("/api/token", sharing_only(token), methods=["POST", "DELETE"]),
+        Route("/api/signin", api_signin, methods=["POST"]),
+        Route("/api/register", api_register, methods=["POST"]),
+        Route("/api/reset", api_reset, methods=["POST"]),
+        Route("/api/password", api_password, methods=["POST"]),
+        Route("/api/signout", api_signout, methods=["POST"]),
+        Route("/api/account/delete", api_account_delete, methods=["POST"]),
+        *relay_routes,
+        Route("/api/me", sharing_only(me)),
+        Route("/api/sync", sharing_only(sync), methods=["POST"]),
+        Route("/api/sync/runs/{run_id}/files/{name:path}", sharing_only(run_file_upload), methods=["PUT"]),
         Route("/api/admin/stats", admin_stats),
     ]
     app = Starlette(routes=routes, lifespan=lifespan, exception_handlers={Exception: failed, HubError: failed})
+    app.state.relay = relay
     return Gate(app, hosts)
 
 

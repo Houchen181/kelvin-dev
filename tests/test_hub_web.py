@@ -1,5 +1,7 @@
 """The Kelvin hub's web side: registering, signing in, connecting a Kelvin through the browser, the sync API, and the
 operator's page."""
+import csv
+import io
 import re
 import zipfile
 from io import BytesIO
@@ -19,8 +21,10 @@ from labharness.hub.server import create_app  # noqa: E402
 CALLBACK = "http://127.0.0.1:8770/hub/callback"
 
 
-def make(tmp_path):
+def make(tmp_path, sharing=True):
+    """sharing: labs, connected Kelvins and shared work (off on a hub that keeps Kelvin accounts only)."""
     hub = Hub(tmp_path / "hub")
+    hub.config["sharing"] = sharing
     return hub, TestClient(create_app(hub, hosts=["testserver"], backups=False))
 
 
@@ -331,6 +335,7 @@ def test_one_persons_flood_never_holds_up_anyone_else(tmp_path, monkeypatch):
     from labharness.hub.db import challenge_of
     monkeypatch.setattr(hubdb, "LOCK_WAIT", 4.0)   # longer than the other person may wait
     hub = Hub(tmp_path / "hub")
+    hub.config["sharing"] = True
     with TestClient(create_app(hub, hosts=["testserver"], backups=False)) as client:   # one event loop, one pool
         register(client)                                                # Ada, in the browser
         m = hub.register("m@example.org", "M", "correct horse", consent=True)
@@ -394,6 +399,7 @@ def test_many_people_syncing_at_once_leave_threads_for_everyone_else(tmp_path, m
     from labharness.hub.db import challenge_of
     monkeypatch.setattr(hubdb, "LOCK_WAIT", 4.0)
     hub = Hub(tmp_path / "hub")
+    hub.config["sharing"] = True
     with TestClient(create_app(hub, hosts=["testserver"], backups=False)) as client:   # one event loop, one pool
         register(client)                                                # Ada, in the browser
         bearers, locks = [], []
@@ -435,6 +441,7 @@ def test_a_sync_is_read_off_the_event_loop(tmp_path, monkeypatch):
     import json
     from labharness.hub.db import challenge_of
     hub = Hub(tmp_path / "hub")
+    hub.config["sharing"] = True
     p = hub.register("p@example.org", "P", "correct horse", consent=True)
     inst = {"id": "urn:uuid:5f0c1c55-0000-4000-8000-0000000000f1", "name": "PC", "platform": "", "version": ""}
     code = hub.connect_code(p, CALLBACK, challenge_of("v" * 50), inst, None)
@@ -455,3 +462,100 @@ def test_a_sync_is_read_off_the_event_loop(tmp_path, monkeypatch):
         r = client.post("/api/sync", json={"chats": [{"id": "aaaaaaaaaaaa", "title": "off-the-loop-probe",
                                                       "messages": []}]}, headers=bearer)
     assert r.status_code == 200 and where == ["a worker thread"]
+
+
+def test_kelvin_signs_in_with_its_own_api(tmp_path):
+    """Central Kelvin accounts: Kelvin's own sign-in screen talks JSON to these (central.py)."""
+    hub, client = make(tmp_path, sharing=False)
+    kelvin = {"id": "urn:uuid:one", "name": "Lab PC", "platform": "win32", "version": "0.4.0"}
+    ada = {"name": "Ada", "email": "ada@example.org", "password": "correct horse", "installation": kelvin}
+    r = client.post("/api/register", json=ada)
+    assert r.status_code == 400 and "terms" in r.json()["error"]              # consent is required
+    r = client.post("/api/signin", json={"email": "a@b.org", "password": "x", "installation": {"installation": "u"}})
+    assert r.status_code == 400 and '"installation": {"id"' in r.json()["error"]   # says what shape it wants
+    r = client.post("/api/register", json=dict(ada, consent=True))
+    assert r.status_code == 200 and r.json()["access_token"].startswith("khub_")
+    assert r.json()["user"] == {"name": "Ada", "email": "ada@example.org", "email_confirmed": False}
+    assert "/confirm?code=" in next((tmp_path / "hub" / "outbox").glob("*.txt")).read_text(encoding="utf-8")
+    assert client.post("/api/register", json=dict(ada, consent=True)).status_code == 400   # one account per email
+
+    r = client.post("/api/signin", json={"email": "ADA@example.org ", "password": "nope nope", "installation": kelvin})
+    assert r.status_code == 401
+    r = client.post("/api/signin", json={"email": "ADA@example.org ", "password": "correct horse",
+                                         "installation": kelvin})
+    assert r.status_code == 200
+    token = r.json()["access_token"]
+    auth = {"Authorization": "Bearer " + token}
+    assert client.get("/api/me", headers=auth).status_code == 404               # sharing's API is off
+    r = client.post("/api/password", headers=auth, json={"old": "wrong", "new": "battery staple"})
+    assert r.status_code == 401
+    assert client.post("/api/password", json={"old": "correct horse", "new": "battery staple"}).status_code == 401
+    r = client.post("/api/password", headers=auth, json={"old": "correct horse", "new": "battery staple"})
+    assert r.status_code == 200
+    r = client.post("/api/password", headers=auth, json={"old": "wrong", "new": "battery staple"})
+    assert r.json()["error"] == "Wrong current password."                     # this Kelvin stays signed in
+
+    assert client.post("/api/reset", json={"email": "nobody@example.org"}).json() == {"ok": True}   # says nothing
+    assert client.post("/api/reset", json={"email": "ada@example.org"}).json() == {"ok": True}
+    mails = "".join(p.read_text(encoding="utf-8") for p in (tmp_path / "hub" / "outbox").glob("*.txt"))
+    assert mails.count("/reset/new?code=") == 1
+
+    hub.set_disabled(hub.authenticate("ada@example.org", "battery staple")["id"], True)
+    r = client.post("/api/signin", json={"email": "ada@example.org", "password": "battery staple",
+                                         "installation": kelvin})
+    assert r.status_code == 403
+    for _ in range(10):
+        client.post("/api/signin", json={"email": "ada@example.org", "password": "guess", "installation": kelvin})
+    r = client.post("/api/signin", json={"email": "ada@example.org", "password": "battery staple",
+                                         "installation": kelvin})
+    assert r.status_code == 429                                               # no fast guessing
+
+    hub.config["require_confirmed_email"] = True
+    r = client.post("/api/register", json=dict(ada, email="ben@example.org", name="Ben", consent=True))
+    assert r.status_code == 403 and r.json()["registered"] and "Confirm" in r.json()["error"]
+
+
+def test_a_hub_for_kelvin_accounts_only(tmp_path, monkeypatch):
+    """The default: the hub keeps Kelvin accounts for the Kelvin team, and is no place for labs to share work."""
+    import labharness.hub.server as hub_server
+    hub, client = make(tmp_path, sharing=False)
+    home = client.get("/").text
+    assert "Your Kelvin account" in home and "labmates" not in home
+    assert "No other user does" in client.get("/privacy").text and "join code" not in client.get("/terms").text
+    register(client)
+    page = client.get("/account")
+    for want in ("Your profile", "Password", "Export everything", "Delete your account"):
+        assert want in page.text, want
+    for gone in ("Your labs", "Connected Kelvins", "Shared in your labs", "Join a lab"):
+        assert gone not in page.text, gone
+    for path in ("/connect", "/shared/chats/1", "/shared/runs/1"):
+        assert client.get(path).status_code == 404, path
+    assert client.post("/labs", data={"name": "Smith Lab", "csrf": csrf(page)}).status_code == 404
+    assert client.post("/api/sync", json={}).status_code == 404 and client.post("/api/token", json={}).status_code == 404
+    for n, name in ((1, "Lab PC"), (2, "Laptop")):                           # Ada signs in to Kelvin on two computers
+        r = client.post("/api/signin", json={"email": "ada@example.org", "password": "correct horse", "installation": {
+            "id": "urn:uuid:pc-%d" % n, "name": name, "platform": "win32", "version": "0.3.1%d" % n}})
+        assert r.status_code == 200
+    for n in range(3):
+        hub.register("p%d@example.org" % n, "P%d" % n, "correct horse", consent=True)
+
+    key = hub.ensure_operator_key().read_text(encoding="utf-8").split()[-1]   # the Kelvin team
+    client.cookies.clear()
+    monkeypatch.setattr(hub_server, "PAGE_SIZE", 2)
+    admin = client.post("/admin/signin", data={"key": key}).text
+    assert "1–2 of 4" in admin and "Older" in admin and "Labs</th>" not in admin and "computers" in admin
+    older = client.get("/admin", params={"from": 2}).text
+    assert "3–4 of 4" in older and "ada@example.org" in older and "Newer" in older
+    assert '<td>2</td><td>0.3.12</td>' in older                                 # her two computers, Kelvin last used
+    person = client.get("/admin/users/1").text
+    for want in ("Ada", "ada@example.org", "Lab PC", "Laptop", "win32", "signed in from Kelvin", "registered"):
+        assert want in person, want
+    r = client.post("/admin/users/1/disable", data={"csrf": csrf(client.get("/admin")), "back": "person"})
+    assert "Account 1 is disabled" in r.text and "Not signed in on any computer now" in r.text
+    people = client.get("/admin/people.csv")
+    assert people.headers["content-type"].startswith("text/csv") and "attachment" in people.headers["content-disposition"]
+    rows = list(csv.reader(io.StringIO(people.text)))
+    assert rows[0][:3] == ["id", "name", "email"] and len(rows) == 5 and "hash" not in people.text
+    client.cookies.clear()
+    assert client.get("/admin/people.csv", follow_redirects=False).status_code == 303   # owners only
+    assert client.get("/admin/users/1", follow_redirects=False).status_code == 303

@@ -1,10 +1,13 @@
 """Cameras: a frame is an image reading, kept as a .npy file (frames.py); its mean, max, min and sum are readings.
 
-    pylon://<serial>         Basler cameras (ace, dart, boost, pulse...) through pypylon (pip install pypylon).
+    pylon://<serial>         Basler cameras (ace, dart, boost, pulse...) through pypylon.
                              pylon:// is the first one found.
     andor://<index>?sdk=3    Andor sCMOS cameras (Zyla, Neo, Sona, Marana) through Andor's pyAndorSDK3
     andor://<index>?sdk=2    Andor CCD and EMCCD cameras (iXon, Newton, iDus, Luca, Clara) through pyAndorSDK2
                              (both come with Andor's SDK; sdk=3 is the default).
+    uvc://<index>            USB video cameras (webcams, microscope cameras) through OpenCV
+    genicam://<serial>       GenICam industrial cameras through Harvesters and the maker's GenTL producer (.cti)
+                             (OpenCV and Harvesters: Kelvin installs them once a person approves)
 
 Connecting opens the camera and sets nothing. A Basler camera keeps every setting. Andor's SDK2 starts each session
 from its own defaults (the SDK, not Kelvin, does that; cooling is off until someone turns it on); Kelvin then changes
@@ -16,6 +19,7 @@ import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import envs
 from . import frames
 from .adapters import AdapterError
 from .cards import Card
@@ -74,7 +78,7 @@ class BaslerCamera(Camera):
             try:
                 from pypylon import pylon as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs pypylon: pip install pypylon" % name) from e
+                raise AdapterError("%s needs pypylon: %s" % (name, envs.missing("pypylon"))) from e
         self.pylon = module
         serial, _ = _target(address)
         tl = module.TlFactory.GetInstance()
@@ -182,8 +186,10 @@ class AndorCamera(Camera):
                 else:
                     import pyAndorSDK2 as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs Andor's pyAndorSDK%s, from Andor's SDK (its Python folder: pip install "
-                                   "it from there)" % (name, self.sdk_version)) from e
+                raise AdapterError("%s needs Andor's pyAndorSDK%s, from Andor's SDK: Kelvin installs it from the SDK's "
+                                   "Python folder into its drivers environment once a person approves "
+                                   "(install_for_instrument, env %s, files <that folder>)"
+                                   % (name, self.sdk_version, envs.DRIVERS)) from e
         self.mod = module
         try:
             if self.sdk_version == "3":
@@ -314,3 +320,165 @@ def discover_andor(modules: Optional[Dict[str, Any]] = None) -> List[Tuple[str, 
         return [("andor://%d?sdk=3" % i, "Andor,sCMOS camera,%d" % i) for i in range(int(mod.AndorSDK3().DeviceCount))]
     except Exception:
         return []
+
+
+# ------------------------------------------------------------------ USB video cameras (webcams, microscope cameras)
+
+class UsbCamera(Camera):
+    """A USB video camera (UVC: webcams, microscope and inspection cameras) through OpenCV, which Kelvin installs once
+    a person approves. Address uvc://<index> (uvc://0 for the first). Paths: exposure and gain in the camera driver's
+    own units (as OpenCV passes them), brightness, width and height. A frame is grey: its colours averaged, 0-255."""
+    PROPS = {"exposure": "CAP_PROP_EXPOSURE", "gain": "CAP_PROP_GAIN", "brightness": "CAP_PROP_BRIGHTNESS",
+             "width": "CAP_PROP_FRAME_WIDTH", "height": "CAP_PROP_FRAME_HEIGHT"}
+
+    def __init__(self, name: str, card: Card, address: str, module: Any = None):
+        super().__init__(name, card, address)
+        if module is None:
+            try:
+                import cv2 as module   # type: ignore
+            except ImportError as e:
+                raise AdapterError("%s: %s" % (name, envs.missing("opencv-python-headless"))) from e
+        self.cv2 = module
+        index, _ = _target(address)
+        try:
+            self.index = int(index or 0)
+        except ValueError:
+            raise AdapterError("%s: a USB camera's address is uvc://<index> (uvc://0 for the first)" % name)
+        import sys
+        api = getattr(module, "CAP_DSHOW", 0) if sys.platform.startswith("win") else getattr(module, "CAP_ANY", 0)
+        self.cap = module.VideoCapture(self.index, api)
+        if not self.cap.isOpened():
+            raise AdapterError("%s: no USB camera %d, or another program is using it" % (name, self.index))
+
+    def get_setting(self, path: str) -> Any:
+        if path in self.PROPS:
+            return float(self.cap.get(getattr(self.cv2, self.PROPS[path])))
+        return super().get_setting(path)
+
+    def set(self, path: str, value: Any) -> None:
+        if path not in ("exposure", "gain", "brightness"):
+            raise AdapterError("%s: %r can't be set" % (self.name, path))
+        if path == "exposure" and hasattr(self.cv2, "CAP_PROP_AUTO_EXPOSURE"):
+            self.cap.set(self.cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)   # manual exposure, so the value holds
+        if not self.cap.set(getattr(self.cv2, self.PROPS[path]), float(value)):
+            raise AdapterError("%s: the camera did not take %s %s" % (self.name, path, value))
+        self._last = None
+
+    def snap(self) -> Any:
+        self.cap.grab()   # the frame waiting in the driver's buffer is an old one
+        ok, image = self.cap.read()
+        if not ok or image is None:
+            raise AdapterError("%s: the camera gave no frame" % self.name)
+        if getattr(image, "ndim", 2) == 3:
+            image = self.cv2.cvtColor(image, self.cv2.COLOR_BGR2GRAY)
+        return image
+
+    def identity(self) -> str:
+        return "USB camera,UVC,%d" % self.index
+
+    def close(self) -> None:
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+
+
+# ------------------------------------------------------------------ GenICam cameras (Harvesters + the maker's GenTL)
+
+class GenicamCamera(Camera):
+    """Industrial cameras that follow GenICam (Teledyne FLIR, Allied Vision, IDS, The Imaging Source, Lucid...)
+    through Harvesters, which Kelvin installs once a person approves, and the camera maker's GenTL producer: the .cti
+    file its SDK installs. Address genicam://<serial>?cti=<that .cti file> (genicam:// for the first camera; without
+    cti, the producers the makers' SDKs list in GENICAM_GENTL64_PATH). Paths: exposure (s), gain (dB), width, height."""
+
+    def __init__(self, name: str, card: Card, address: str, module: Any = None):
+        super().__init__(name, card, address)
+        if module is None:
+            try:
+                from harvesters.core import Harvester as module   # type: ignore
+            except ImportError as e:
+                raise AdapterError("%s: %s; it also needs the camera maker's GenTL producer (.cti), from its SDK"
+                                   % (name, envs.missing("harvesters"))) from e
+        serial, q = _target(address)
+        producers = [q["cti"]] if q.get("cti") else self.producers()
+        if not producers:
+            raise AdapterError("%s: no GenTL producer: install the camera maker's SDK (it brings a .cti file), or "
+                               "give one with ?cti=<path to the .cti file>" % name)
+        self.h = module()
+        try:
+            for cti in producers:
+                self.h.add_file(cti)
+            self.h.update()
+            infos = list(self.h.device_info_list)
+            pick = next((i for i, d in enumerate(infos) if not serial or getattr(d, "serial_number", "") == serial),
+                        None)
+            if pick is None:
+                raise AdapterError("%s: no GenICam camera %s (the producers see: %s)" % (
+                    name, serial, ", ".join(str(getattr(d, "serial_number", "?")) for d in infos) or "none"))
+            self.info = infos[pick]
+            self.ia = self.h.create(pick)   # opens it; every setting stays as it is
+        except AdapterError:
+            self.h.reset()
+            raise
+        except Exception as e:
+            self.h.reset()
+            raise AdapterError("%s: could not open the camera: %s" % (name, str(e).splitlines()[0])) from e
+
+    @staticmethod
+    def producers() -> List[str]:
+        """The GenTL producers the makers' SDKs installed (GENICAM_GENTL64_PATH or GENICAM_GENTL32_PATH)."""
+        import os
+        import struct
+        out: List[str] = []
+        var = "GENICAM_GENTL64_PATH" if struct.calcsize("P") == 8 else "GENICAM_GENTL32_PATH"
+        for folder in filter(None, os.environ.get(var, "").split(os.pathsep)):
+            if os.path.isdir(folder):
+                out += sorted(os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".cti"))
+        return out
+
+    def _node(self, *names: str) -> Any:
+        nodes = self.ia.remote_device.node_map
+        for n in names:
+            node = getattr(nodes, n, None)
+            if node is not None:
+                return node
+        raise AdapterError("%s: this camera has no %s" % (self.name, " or ".join(names)))
+
+    def get_setting(self, path: str) -> Any:
+        if path == "exposure":
+            return float(self._node("ExposureTime", "ExposureTimeAbs").value) * 1e-6
+        if path == "gain":
+            return float(self._node("Gain", "GainRaw").value)
+        if path in ("width", "height"):
+            return int(self._node(path.capitalize()).value)
+        return super().get_setting(path)
+
+    def set(self, path: str, value: Any) -> None:
+        if path == "exposure":
+            self._node("ExposureTime", "ExposureTimeAbs").value = float(value) * 1e6
+        elif path == "gain":
+            self._node("Gain", "GainRaw").value = float(value)
+        else:
+            raise AdapterError("%s: %r can't be set" % (self.name, path))
+        self._last = None
+
+    def snap(self) -> Any:
+        timeout = self.get_setting("exposure") + 5.0
+        self.ia.start()
+        try:
+            with self.ia.fetch(timeout=timeout) as buffer:
+                c = buffer.payload.components[0]
+                return c.data.reshape(c.height, c.width).copy()
+        finally:
+            self.ia.stop()
+
+    def identity(self) -> str:
+        return "%s,%s,%s" % (getattr(self.info, "vendor", "") or "GenICam", getattr(self.info, "model", "") or "camera",
+                             getattr(self.info, "serial_number", ""))
+
+    def close(self) -> None:
+        try:
+            self.ia.destroy()
+            self.h.reset()
+        except Exception:
+            pass

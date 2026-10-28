@@ -27,7 +27,7 @@ def test_measurement_and_configuration_never_ask(lab, make_gate):
 def test_measurement_still_respects_limits(make_gate):
     gate, approver = make_gate([])
     r = gate.set("lockin", "tc", 1e6)
-    assert r.action == "refused" and "vendor limits" in r.message
+    assert r.action == "refused" and "its card's limits" in r.message
 
 
 # --- drives ---------------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def test_sign_flip_counts_as_away(make_gate):
 def test_beyond_lab_limits_is_refused_without_asking(make_gate):
     gate, approver = make_gate([])
     r = gate.set("smu", "V", 20)
-    assert r.action == "refused" and "lab limits [-15, 15]" in r.message
+    assert r.action == "refused" and "the lab config's limits [-15, 15]" in r.message
 
 
 def test_envelope_runs_inside_and_asks_outside(lab, make_gate):
@@ -149,7 +149,7 @@ def test_raw_drive_is_treated_as_a_drive(lab, make_gate):
 
 def test_raw_command_touching_a_drive_family_asks(make_gate):
     gate, approver = make_gate([False])
-    r = gate.raw("smu", "SOUR:VOLT:RANG 20")
+    r = gate.raw("smu", "SOUR:VOLT:PROT 20")
     assert r.action == "declined" and "touches drive V" in str(approver.requests[0])
 
 
@@ -190,19 +190,50 @@ def test_every_command_is_logged(make_gate, tmp_path):
     assert ("command", "set") in kinds and ("ask", None) in kinds and ("command", "get") in kinds
 
 
-def test_draft_card_on_real_hardware_keeps_drives_off(lab, make_gate):
-    gate, approver = make_gate([False, True])
+def test_draft_card_on_real_hardware_asks_before_every_output_change(lab, make_gate):
+    gate, approver = make_gate([False, True, False, True])
     inst = lab.instruments["smu"]
     inst.backend.simulated = False
     inst.card.status = "draft"
     r = gate.set("smu", "V", 1)
-    assert r.action == "refused" and "draft card" in r.message
+    assert r.action == "declined" and read(lab, "smu.V") == 0
+    asked = approver.requests[0].items
+    assert "0 V → 1 V" in asked[0] and "isn't sure about smu" in asked[1] and "draft" in asked[1]
+    assert gate.set("smu", "V", 1).ok and read(lab, "smu.V") == 1        # the person said yes
+    assert "not sure yet" in gate.describe("smu")
     assert gate.get("smu", "nplc").ok                       # reading is free
     # nobody has checked a draft's measure/drive tags: even a "setting" asks a person first
     r = gate.set("smu", "nplc", 2)
-    assert r.action == "declined" and "draft" in approver.requests[0].items[0]
-    assert gate.set("smu", "nplc", 2).ok and len(approver.requests) == 2
-    assert gate.set("smu", "nplc", 2).ok and len(approver.requests) == 2   # the value it has already: no question
+    assert r.action == "declined" and "draft" in approver.requests[2].items[0]
+    assert gate.set("smu", "nplc", 2).ok and len(approver.requests) == 4
+    assert gate.set("smu", "nplc", 2).ok and len(approver.requests) == 4   # the value it has already: no question
+
+
+def test_instrument_kelvin_added_asks_even_inside_the_envelope_and_in_auto_mode(lab, make_gate):
+    gate, approver = make_gate([True, False])
+    lockin = lab.instruments["lockin"]
+    assert "envelope" in gate.set("lockin", "amplitude", 0.05).message     # reviewed: the envelope covers it
+    gate.set("lockin", "amplitude", 0.0)
+    lockin.backend.simulated = False
+    lockin.config.added_by = "kelvin"
+    r = gate.set("lockin", "amplitude", 0.05)                               # inside the envelope, still asks
+    assert r.ok and "approved" in r.message and "limits are the maker's" in approver.requests[0].items[1]
+    gate.set("lockin", "amplitude", 0.0)
+    gate.auto = True                                                        # a person turned auto mode on
+    assert gate.auto_verdict(lockin, lockin.spec("amplitude"), [0.01])[0]   # low-risk on a reviewed instrument
+    r = gate.set("lockin", "amplitude", 0.01)
+    assert r.action == "declined" and "nothing on lockin is automatic" in approver.requests[1].items[-1]
+    items, grants, problems = gate.plan_approval({"lockin.amplitude": [0.0, 0.01]})
+    assert not problems and "isn't sure about lockin" in items[0] and "lockin.amplitude" in grants
+    assert gate.auto_plan(grants, type("Sim", (), {"ok": True})()) == (False, [
+        "lockin.amplitude: Kelvin added it to the lab itself, and its limits are the maker's: nobody has reviewed "
+        "them for this setup, so a person approves it until they check its limits and mark them reviewed (Lab → "
+        "Set up… → Limits reviewed…)"])
+    with gate.preapproved(grants):                                          # the person approved the plan
+        assert "plan approval" in gate.set("lockin", "amplitude", 0.01).message
+    lockin.config.added_by = ""                                             # a person reviewed the limits
+    assert gate.set("lockin", "amplitude", 0.02).message.endswith("(envelope)")
+    assert len(approver.requests) == 2
 
 
 def test_simulation_approver_is_refused_on_real_hardware(lab):

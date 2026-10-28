@@ -98,20 +98,16 @@ class Collector:
     # ------------------------------------------------------------------ one run
 
     def run(self, run_id: str, events: Sequence[Dict[str, Any]]) -> RunPart:
+        from .. import rundata
         d = self.runs_dir / run_id
         if not d.is_dir():
             raise KeyError("no run %r" % run_id)
-        meta = _read_json(d / "meta.json") or {}
-        analysis = _read_json(d / "analysis.json") or {}
-        plan_text = (d / "plan.yaml").read_text(encoding="utf-8") if (d / "plan.yaml").exists() else ""
+        rec = rundata.load(d)
+        meta, analysis, plan_text, rows = rec.meta, rec.analysis or {}, rec.plan_text, rec.rows
         try:
             plan = yaml.safe_load(plan_text) or {}
         except yaml.YAMLError:
             plan = {}
-        rows = []
-        if (d / "data.jsonl").exists():
-            with open(d / "data.jsonl", encoding="utf-8") as f:
-                rows = [json.loads(line) for line in f if line.strip()]
         status = meta.get("status") or "unfinished"
         part = RunPart(run_id=run_id, plan=str(plan.get("plan") or meta.get("plan") or run_id.split("-", 2)[-1]),
                        status=status, when=_when(meta.get("started"), meta.get("finished")),
@@ -128,8 +124,8 @@ class Collector:
         cols = self.columns(run_id)
         part.charts = self._charts(rows, cols, plan, analysis)
         part.results = self._results(analysis)
-        start = _read_json(d / "snapshot_start.json") or {}
-        end = _read_json(d / "snapshot_end.json") or {}
+        start = rec.snapshots.get("start") or {}
+        end = rec.snapshots.get("end") or {}
         part.conditions = self._conditions(start)
         part.away = self._away(start)
         part.found = self._found(start, plan)
@@ -329,8 +325,12 @@ class Collector:
         log: List[Tuple[str, str]] = []
         chosen = set(run_ids)
         windows = []   # each run's own stretch of the log: its approval just before, through its end
+        from .. import rundata
         for r, part in zip(run_ids, runs):
-            meta = _read_json(self.runs_dir / r / "meta.json") or {}
+            try:
+                meta = rundata.meta(self.runs_dir / r)
+            except (KeyError, OSError, ValueError):
+                meta = {}
             try:
                 t0 = datetime.fromisoformat(meta["started"])
                 t1 = datetime.fromisoformat(meta["finished"]) if meta.get("finished") else datetime.max

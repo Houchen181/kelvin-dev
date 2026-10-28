@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -39,7 +40,21 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_OPENER = urllib.request.build_opener(_NoRedirects)
+def ssl_context() -> ssl.SSLContext:
+    """The computer's trusted certificates and, as a browser has, a list of Kelvin's own (certifi, when it is there).
+    Python only trusts the roots Windows already keeps, and Windows fetches one (Let's Encrypt's ISRG Root X1, which
+    the hub's certificate needs) only when a Windows program first asks for it: a computer that uses Chrome or Firefox
+    may never have, and its browser opens the hub while Kelvin can't."""
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except (ImportError, OSError, ssl.SSLError):
+        pass
+    return ctx
+
+
+_OPENER = urllib.request.build_opener(_NoRedirects, urllib.request.HTTPSHandler(context=ssl_context()))
 
 
 def _http(method: str, url: str, body: Optional[bytes] = None, headers: Optional[Dict[str, str]] = None) -> Tuple[int, Any]:

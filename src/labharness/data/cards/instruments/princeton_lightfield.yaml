@@ -1,0 +1,113 @@
+card: 1
+id: princeton/lightfield
+model: Teledyne Princeton Instruments camera and spectrograph through LightField (PyLoN, PIXIS, ProEM, BLAZE, KURO on an IsoPlane, SpectraPro or HRS)
+vendor: Teledyne Princeton Instruments
+kind: spectrometer
+status: community
+manual: "LightField Add-ins and Automation: Automation, IExperiment (Load, Capture, GetValue, SetValue, Exists, IsReadyToRun, IsRunning, SystemColumnCalibration), CameraSettings.ShutterTimingExposureTime (ms), SensorTemperatureReading / SensorTemperatureSetPoint / SensorTemperatureStatus, ExperimentSettings.AcquisitionFramesToStore (FrameSettingsFramesToStore before LightField 6), SpectrometerSettings.Grating / GratingCenterWavelength (nm)"
+notes:
+  - "Address lightfield://<experiment>: the experiment saved in LightField to load (lightfield:// keeps the one LightField opens). Add ?visible=0 to start LightField without its window. Needs LightField, with its license, on this computer, and pythonnet, which Kelvin installs on this computer once a person approves."
+  - "Kelvin starts LightField itself, a normal window you can watch and use, and that LightField then has the camera: close a LightField you opened by hand first. Don't also add the same camera through PICam (picam://): one program per camera."
+  - "Kelvin changes only what a person or a plan sets; the experiment as saved in LightField stays as it was."
+  - "Each reading captures the experiment's frames (no file is saved) and averages them. Spectrum sums each column's rows; its wavelengths come from LightField's calibration of the spectrograph (column numbers when the experiment has none)."
+  - "A grating is given as LightField names it ([550nm,900][1][0]) or by its grooves per mm (900). Kelvin waits while the spectrograph moves to a new grating or center wavelength."
+  - "Not yet tried with LightField itself: watch the first runs."
+requires: [pythonnet]
+identify:
+  idn: "^Teledyne Princeton Instruments,LightField,"
+  example: "Teledyne Princeton Instruments,LightField,PL spectra"
+
+parameters:
+  spectrum:
+    label: Spectrum
+    kind: measure
+    type: trace
+    unit: counts
+    get: "GET spectrum"
+    axis: { values: wavelengths }
+  wavelengths:
+    label: Wavelengths
+    kind: measure
+    type: trace
+    unit: nm
+    get: "GET wavelengths"
+    description: LightField's calibration of the spectrograph, for the latest frame's columns
+  frame:
+    label: Frame
+    kind: measure
+    type: image
+    get: "GET frame"
+  mean:
+    label: Mean
+    kind: measure
+    unit: counts
+    get: "GET mean"
+    acquires: true
+  max:
+    label: Max
+    kind: measure
+    unit: counts
+    get: "GET max"
+    acquires: true
+  sum:
+    label: Sum
+    kind: measure
+    unit: counts
+    get: "GET sum"
+    acquires: true
+  exposure:
+    label: Exposure
+    kind: measure
+    unit: s
+    set: "SET exposure {value}"
+    get: "GET exposure"
+    limits: [0, 3600]
+  frames:
+    label: Frames
+    kind: measure
+    type: int
+    set: "SET frames {value}"
+    get: "GET frames"
+    limits: [1, 10000]
+    description: Frames captured per reading, averaged
+  grating:
+    label: Grating
+    kind: measure
+    type: str
+    set: "SET grating {value}"
+    get: "GET grating"
+    description: As LightField names it ([blaze,grooves][index][turret]), or its grooves per mm
+  center_wavelength:
+    label: Center wavelength
+    kind: measure
+    unit: nm
+    set: "SET center_wavelength {value}"
+    get: "GET center_wavelength"
+    limits: [0, 3000]
+    description: The spectrograph's own range is checked too
+  temperature:
+    label: Sensor temperature
+    kind: measure
+    unit: C
+    get: "GET temperature"
+  temperature_status:
+    label: Temperature
+    kind: measure
+    type: str
+    get: "GET temperature_status"
+    description: locked once the sensor holds its setpoint
+  setpoint:
+    label: Temperature setpoint
+    kind: measure
+    unit: C
+    set: "SET setpoint {value}"
+    get: "GET setpoint"
+    limits: [-130, 30]
+  experiment:
+    label: Experiment
+    kind: measure
+    type: str
+    get: "GET experiment"
+    description: The LightField experiment in use
+display:
+  headline: temperature

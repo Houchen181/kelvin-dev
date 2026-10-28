@@ -4,6 +4,7 @@ import pytest
 
 from labharness import load_plan
 from labharness.plans import PlanError
+from labharness import rundata
 
 GATE_SWEEP = """
 plan: gate_sweep
@@ -34,10 +35,11 @@ def test_plan_runs_with_a_single_approval(lab, make_engine, tmp_path):
     assert 1.0 <= peak["smu.V"] <= 2.0          # the toy sample's peak sits at 1.5 V
     assert lab.read("smu", "V") == 0            # `after` ran
     run_dir = tmp_path / "runs" / report.run_id
-    for name in ("plan.yaml", "data.jsonl", "meta.json", "snapshot_start.json", "snapshot_end.json"):
-        assert (run_dir / name).exists(), name
-    meta = json.loads((run_dir / "meta.json").read_text())
-    assert meta["status"] == "done" and meta["points"] == 21
+    rec = rundata.load(run_dir)
+    assert "gate_sweep" in rec.plan_text and rec.snapshots["start"] and rec.snapshots["end"]
+    assert rec.meta["status"] == "done" and rec.meta["points"] == 21 and len(rec.rows) == 21
+    # one data file per run (run.h5); Kelvin's core alone keeps the record it would be written from
+    assert sorted(p.name for p in run_dir.iterdir()) == (["run.h5"] if rundata.have_h5() else ["record.bin"])
 
 
 def test_dry_run_leaves_the_lab_untouched(lab, make_engine):
@@ -68,7 +70,7 @@ def test_declined_plan_does_nothing(lab, make_engine):
 
 def test_invalid_plans_are_refused_before_anything_runs(make_engine):
     engine, gate, approver = make_engine([])
-    assert "lab limits" in engine.run(GATE_SWEEP.replace("to: 5", "to: 30")).message
+    assert "the lab config's limits" in engine.run(GATE_SWEEP.replace("to: 5", "to: 30")).message
     assert "no parameter 'Vg'" in engine.run(GATE_SWEEP.replace("smu.V: {", "smu.Vg: {")).message
     assert "unknown key" in engine.run(GATE_SWEEP + "\nrepeats: 3\n").message
     assert approver.requests == []
@@ -175,7 +177,7 @@ def test_run_reports_progress_and_analyses_itself(make_engine, tmp_path):
     assert abs(peak["params"]["center"][0] - 1.5) < 0.05
     assert a["series"][1]["kind"] == "linear"
     assert "peak" in a["assessment"] and a["next"]
-    saved = json.loads((tmp_path / "runs" / report.run_id / "analysis.json").read_text(encoding="utf-8"))
+    saved = rundata.load(tmp_path / "runs" / report.run_id, with_rows=False).analysis
     assert saved["assessment"] == a["assessment"]
 
 

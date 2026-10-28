@@ -3,6 +3,13 @@ import pytest
 from labharness import EventLog, RunEngine, RunStore, SafetyGate, ScriptedApprover, build_virtual_lab, demo_envelope
 
 
+@pytest.fixture(autouse=True)
+def no_real_hub(monkeypatch):
+    """Tests never reach the real Kelvin hub: one that needs a hub names its own."""
+    from labharness import central
+    monkeypatch.setattr(central, "DEFAULT_HUB", "")
+
+
 @pytest.fixture
 def lab():
     return build_virtual_lab(seed=1)

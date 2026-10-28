@@ -1,7 +1,8 @@
 """Teledyne Princeton Instruments cameras (PyLoN, PIXIS, ProEM, BLAZE, KURO, SOPHIA) through PICam, Princeton's
 camera library (Picam.dll, installed with PICam or LightField). Address picam://<serial> (picam:// for the first).
 
-No Python package is needed: Kelvin calls the DLL directly (ctypes). Close LightField first: one program at a time.
+No Python package is needed: Kelvin calls the DLL directly (ctypes). Close LightField first: one program at a time
+(or drive the camera through LightField instead: lightfield.py).
 
 Paths: exposure (s), temperature (sensor, C), setpoint (C), temperature_status (locked / unlocked / faulted),
 adc_speed (MHz), adc_gain (low / medium / high), shutter (normal / closed / open), roi ("x,width,xbin,y,height,ybin"),
@@ -45,6 +46,14 @@ STATUS = {1: "unlocked", 2: "locked", 3: "faulted"}
 GAINS = {1: "low", 2: "medium", 3: "high"}
 SHUTTERS = {1: "normal", 2: "closed", 3: "open"}
 RUNTIME = r"Princeton Instruments\PICam\Runtime"
+ERROR_TYPE, MODEL_TYPE = 1, 2      # PicamEnumeratedType_Error, _Model: PICam names its codes itself
+ACQUISITION_ERRORS = {1: "data were lost", 2: "the connection to the camera was lost"}
+DOING = {"Picam_InitializeLibrary": "start", "Picam_GetAvailableCameraIDs": "list the cameras",
+         "Picam_OpenCamera": "open the camera", "Picam_OpenFirstCamera": "open the camera",
+         "Picam_Acquire": "acquire", "Picam_CommitParameters": "send the settings to the camera",
+         "Picam_GetParameterRoisValue": "read the region of interest",
+         "Picam_SetParameterRoisValue": "set the region of interest"}
+LAST = {"picam": ""}   # what the last scan saw through PICam, in words (drivers.library_notes)
 _users = [0]   # cameras open: PICam is initialized once for all of them (and a scan leaves it alone meanwhile)
 
 
@@ -66,14 +75,22 @@ class AvailableData(ctypes.Structure):
     _fields_ = [("initial_readout", ctypes.c_void_p), ("readout_count", ctypes.c_longlong)]
 
 
+def runtime_folders() -> List[str]:
+    """Where Picam.dll may be: PICam's runtime folder, LightField's (which installs PICam), and PATH."""
+    folders = [os.path.join(os.environ.get(v, ""), RUNTIME) for v in ("ProgramFiles", "ProgramFiles(x86)")]
+    folders += [os.environ.get("LIGHTFIELD_ROOT", ""),
+                os.path.join(os.environ.get("ProgramFiles", ""), "Princeton Instruments", "LightField")]
+    folders += [p for p in os.environ.get("PATH", "").split(os.pathsep) if os.path.isfile(os.path.join(p, "Picam.dll"))]
+    return [f for f in dict.fromkeys(folders) if f and os.path.isdir(f)]
+
+
 def load_picam() -> Any:
-    """Picam.dll from PICam's runtime folder (or wherever Windows finds it), its functions declared."""
+    """Picam.dll from PICam's runtime folder, LightField's, or a folder on PATH; its functions declared."""
     if sys.platform != "win32" or not hasattr(ctypes, "WinDLL"):
         raise AdapterError("PICam (Princeton Instruments cameras) runs on Windows")
-    folders = [os.path.join(os.environ.get(v, ""), RUNTIME) for v in ("ProgramFiles", "ProgramFiles(x86)")]
+    folders = runtime_folders()
     for f in folders:
-        if os.path.isdir(f):
-            os.add_dll_directory(f)
+        os.add_dll_directory(f)
     for name in [os.path.join(f, "Picam.dll") for f in folders] + ["Picam.dll"]:
         try:
             lib = ctypes.WinDLL(name)
@@ -81,7 +98,8 @@ def load_picam() -> Any:
         except OSError:
             continue
     else:
-        raise AdapterError("Princeton Instruments' PICam isn't installed here (Picam.dll): install PICam, or LightField")
+        raise AdapterError("Princeton Instruments' PICam isn't installed here (no Picam.dll in its runtime folder, "
+                           "LightField's or on PATH): install PICam, or LightField")
     h, i, f, p = ctypes.c_void_p, ctypes.c_int, ctypes.c_double, ctypes.POINTER
     for fn, args in (("Picam_InitializeLibrary", []), ("Picam_UninitializeLibrary", []),
                      ("Picam_GetAvailableCameraIDs", [p(p(CameraID)), p(i)]), ("Picam_DestroyCameraIDs", [p(CameraID)]),
@@ -95,10 +113,48 @@ def load_picam() -> Any:
                      ("Picam_GetParameterRoisValue", [h, i, p(p(Rois))]), ("Picam_SetParameterRoisValue", [h, i, p(Rois)]),
                      ("Picam_DestroyRois", [p(Rois)]), ("Picam_CommitParameters", [h, p(p(i)), p(i)]),
                      ("Picam_DestroyParameters", [p(i)]), ("Picam_AreParametersCommitted", [h, p(i)]),
-                     ("Picam_Acquire", [h, ctypes.c_longlong, i, p(AvailableData), p(i)])):
-        func = getattr(lib, fn)
+                     ("Picam_Acquire", [h, ctypes.c_longlong, i, p(AvailableData), p(i)]),
+                     ("Picam_GetUnavailableCameraIDs", [p(p(CameraID)), p(i)]),
+                     ("Picam_GetEnumerationString", [i, i, p(ctypes.c_char_p)]),
+                     ("Picam_DestroyString", [ctypes.c_char_p])):
+        try:
+            func = getattr(lib, fn)
+        except AttributeError:   # an older PICam: Kelvin does without (unavailable cameras, error names)
+            continue
         func.argtypes, func.restype = args, ctypes.c_int
     return lib
+
+
+def _named(lib: Any, kind: int, value: int) -> str:
+    """PICam's own name for an error code or a camera model ("" if it has none)."""
+    s = ctypes.c_char_p()
+    try:
+        if lib.Picam_GetEnumerationString(kind, value, ctypes.byref(s)) != 0 or not s.value:
+            return ""
+        text = s.value.decode(errors="replace")
+        lib.Picam_DestroyString(s)
+        return text
+    except Exception:
+        return ""
+
+
+def explain(lib: Any, fn: str, code: int) -> str:
+    """A failed PICam call in words: what Kelvin was doing, PICam's name for the error, and what helps."""
+    named = _named(lib, ERROR_TYPE, code)
+    words = named.lower()
+    hint = ""
+    if "elsewhere" in words or "in use" in words or "already opened" in words or "unavailable" in words:
+        hint = (". Another program has the camera (LightField?): close it, or use the camera through LightField "
+                "(Teledyne LightField, lightfield://<experiment>)")
+    elif "time out" in words or "timeout" in words:
+        hint = ". The camera didn't deliver in time: check its cable and that it is cooled and connected"
+    elif "disconnected" in words or "communication" in words or "not connected" in words:
+        hint = ". Check the camera's cable and power"
+    return "PICam couldn't %s: %s%s" % (DOING.get(fn, fn.replace("Picam_", "do ")), named or "error %d" % code, hint)
+
+
+def _model(lib: Any, cid: Any) -> str:
+    return _named(lib, MODEL_TYPE, cid.model) or cid.sensor_name.decode(errors="replace") or "camera"
 
 
 class PicamCamera(Camera):
@@ -133,7 +189,7 @@ class PicamCamera(Camera):
     def _call(self, fn: str, *args: Any) -> None:
         code = getattr(self.lib, fn)(*args)
         if code != 0:
-            raise AdapterError("%s: PICam %s failed (error %s)" % (self.name, fn.replace("Picam_", ""), code))
+            raise AdapterError("%s: %s" % (self.name, explain(self.lib, fn, code)))
 
     def _float(self, param: int, read: bool = False) -> float:
         v = ctypes.c_double()
@@ -227,7 +283,9 @@ class PicamCamera(Camera):
         data, errors = AvailableData(), ctypes.c_int()
         self._call("Picam_Acquire", self.handle, 1, timeout_ms, ctypes.byref(data), ctypes.byref(errors))
         if errors.value or not data.readout_count:
-            raise AdapterError("%s: the acquisition failed (PICam error %d)" % (self.name, errors.value))
+            why = [w for bit, w in ACQUISITION_ERRORS.items() if errors.value & bit] or (
+                ["PICam acquisition errors 0x%x" % errors.value] if errors.value else ["no frame came back"])
+            raise AdapterError("%s: the acquisition failed: %s" % (self.name, ", ".join(why)))
         raw = ctypes.string_at(data.initial_readout, stride)
         size = 2 if depth <= 16 else 4
         n = width * height
@@ -260,26 +318,47 @@ class PicamCamera(Camera):
 
 
 def discover_picam(module: Any = None) -> List[Tuple[str, str]]:
-    """(address, identity) of each camera PICam sees. Listing opens none; while Kelvin has a camera open, PICam is
-    left alone (initializing it again would fail, uninitializing it would close that camera)."""
+    """(address, identity) of each camera PICam sees, free to open. Listing opens none; while Kelvin has a camera
+    open, PICam is left alone (initializing it again would fail, uninitializing it would close that camera). What it
+    saw, in words, goes to LAST["picam"] for the scan's report: not installed, a camera another program has open..."""
+    title = "PICam (Princeton Instruments cameras): "
     if _users[0]:
+        LAST["picam"] = title + "in use by Kelvin (%d camera%s open)" % (_users[0], "" if _users[0] == 1 else "s")
         return []
     try:
         lib = module if module is not None else load_picam()
-    except Exception:   # not installed here (or not Windows): nothing to list
+    except Exception as e:   # not installed here (or not Windows): nothing to list
+        LAST["picam"] = title + "not installed here" if sys.platform == "win32" and "isn't installed" in str(e) else ""
         return []
+    found: List[Tuple[str, str]] = []
+    busy: List[str] = []
     try:
-        if lib.Picam_InitializeLibrary() != 0:
+        code = lib.Picam_InitializeLibrary()
+        if code != 0:
+            LAST["picam"] = title + explain(lib, "Picam_InitializeLibrary", code)
             return []
-        ids, n = ctypes.POINTER(CameraID)(), ctypes.c_int()
-        if lib.Picam_GetAvailableCameraIDs(ctypes.byref(ids), ctypes.byref(n)) != 0:
-            return []
-        found = [("picam://%s" % ids[k].serial_number.decode(errors="replace"), "Princeton Instruments,%s,%s"
-                  % (ids[k].sensor_name.decode(errors="replace"), ids[k].serial_number.decode(errors="replace")))
-                 for k in range(n.value)]
-        lib.Picam_DestroyCameraIDs(ids)
+        for fn, into in (("Picam_GetAvailableCameraIDs", "found"), ("Picam_GetUnavailableCameraIDs", "busy")):
+            ids, n = ctypes.POINTER(CameraID)(), ctypes.c_int()
+            try:
+                if getattr(lib, fn)(ctypes.byref(ids), ctypes.byref(n)) != 0:
+                    continue
+            except AttributeError:   # an older PICam lists only the free cameras
+                continue
+            for k in range(n.value):
+                serial, model = ids[k].serial_number.decode(errors="replace"), _model(lib, ids[k])
+                if into == "found":
+                    found.append(("picam://%s" % serial, "Princeton Instruments,%s,%s" % (model, serial)))
+                else:
+                    busy.append("%s (%s)" % (model, serial))
+            if ids:   # PICam's list, even an empty one, is PICam's to free
+                lib.Picam_DestroyCameraIDs(ids)
+        parts = ["%s (%s) found" % (idn.split(",")[1], addr[len("picam://"):]) for addr, idn in found]
+        parts += ["%s is open in another program (LightField?): close it for Kelvin to use it through PICam, or use "
+                  "it through LightField (Teledyne LightField, lightfield://<experiment>)" % b for b in busy]
+        LAST["picam"] = title + ("; ".join(parts) if parts else "no camera connected")
         return found
-    except Exception:
+    except Exception as e:
+        LAST["picam"] = title + "couldn't list the cameras (%s)" % (str(e).splitlines()[0][:160] if str(e) else e)
         return []
     finally:
         try:

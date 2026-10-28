@@ -62,6 +62,28 @@ def _running_copy(lock: Path) -> Optional[int]:
         return None
 
 
+def _run_file_ok() -> bool:
+    """A run recorded, kept as run.h5 and read back: h5py and its HDF5 library are in the app."""
+    import tempfile
+    from . import rundata
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            r = rundata.Recorder(folder)
+            r.write("start", {"plan": "plan: self_test\n", "meta": {"run_id": "self-test"}})
+            r.write("row", values={"i": 0, "t": 0.0, "x": [1.0, 2.0]})
+            r.write("finish", {"meta": {"run_id": "self-test", "status": "done", "points": 1}})
+            r.close()
+            try:
+                kept = rundata.finish(folder)
+            finally:
+                r.release()
+            return kept is not None and rundata.load(folder).rows[0]["x"] == [1.0, 2.0]
+    except Exception as e:
+        log.info("run.h5 self-test failed: %s", e)
+        return False
+
+
 def _self_test(port: int, key: str) -> int:
     base = "http://127.0.0.1:%d" % port
     with urllib.request.urlopen(base + "/", timeout=10) as r:
@@ -83,35 +105,64 @@ def _self_test(port: int, key: str) -> int:
     except ImportError:
         hardware = False
     if getattr(sys, "frozen", False):   # the app must bring them; a source checkout may be installed without them
-        page_ok = page_ok and hardware
+        page_ok = page_ok and hardware and _run_file_ok()
     from . import library
     bridge_ok = library.self_test()   # the helper for makers' libraries starts (Kelvin.exe --bridge) and answers
     page_ok = page_ok and bridge_ok
     ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
-    message = "Kelvin self-test: %s (lab %r)" % ("ok" if ok else "FAILED", boot.get("lab"))
+    extra = ""
+    if os.environ.get("KELVIN_SELFTEST_ENVS") == "1":   # the release builds, which have the network (envs.py)
+        from . import envs
+        try:
+            extra = " (instrument environments: ok, %s)" % envs.self_test()
+        except Exception as e:
+            ok, extra = False, " (instrument environments FAILED: %s)" % (str(e).splitlines()[0][:300] if str(e)
+                                                                           else type(e).__name__)
+    message = "Kelvin self-test: %s (lab %r)%s" % ("ok" if ok else "FAILED", boot.get("lab"), extra)
     if boot.get("claude_code"):   # Claude Code bridge: only in a private build, never in a published one
         message += " (Claude Code bridge on)"
-    problems: dict = {}
-    loaded = drivers.instrument_libraries(problems)   # the makers' libraries bundled in the private build
-    if loaded:
-        message += " (instrument libraries: %s)" % ", ".join(loaded)
-        for name, why in problems.items():
-            log.info("instrument library %s did not load: %s", name, why)
     log.info(message)
     print(message, flush=True)
     return 0 if ok else 1
+
+
+def _zoom(window: Any, factor: float) -> bool:
+    """Scale the window's page like a browser's zoom, on the window's own thread: the web view's zoom factor on
+    Windows (WebView2), its page zoom on a Mac (WKWebView, macOS 11 and later). False where it has neither."""
+    if sys.platform == "win32":
+        form = getattr(window, "native", None)   # pywebview's form, which holds the WebView2 control
+        view = getattr(getattr(form, "browser", None), "webview", None)
+        if view is None:
+            return False
+        import clr  # noqa: F401  (pythonnet, which pywebview runs on here: loaded before System)
+        from System import Func, Type
+
+        def apply() -> None:
+            view.ZoomFactor = factor
+        form.Invoke(Func[Type](apply))
+        return True
+    if sys.platform == "darwin":
+        from PyObjCTools import AppHelper
+        from webview.platforms.cocoa import BrowserView
+        view = getattr(BrowserView.instances.get(window.uid), "webview", None)
+        if view is None or not hasattr(view, "setPageZoom_"):
+            return False
+        AppHelper.callAfter(view.setPageZoom_, factor)
+        return True
+    return False
 
 
 def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dict] = None) -> None:
     import webview  # imported here so headless self-tests never need a GUI toolkit
 
     window = webview.create_window("Kelvin", url, width=1280, height=860, min_size=(420, 560),
-                                   background_color="#f6f8fb")
+                                   background_color="#f6f8fb",
+                                   text_select=True)   # pywebview blocks selecting text unless asked: chats are to copy
     if closer is not None:   # Restart to update closes the window like the person would
         closer["fn"] = window.destroy
 
     def on_closing() -> bool:
-        if agent.active:
+        if agent.answering():
             if not window.create_confirmation_dialog(
                     "Quit Kelvin?", "Kelvin is still working on a request. Quitting stops it where it is."):
                 return False
@@ -119,6 +170,26 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
         return True
 
     window.events.closing += on_closing
+
+    def pick_folder(start: str = "") -> str:
+        """The computer's own folder picker, for the portal (a chat's folder, the data folder): the folder the person
+        chose, or "" if they closed it."""
+        kind = getattr(getattr(webview, "FileDialog", None), "FOLDER", None) or webview.FOLDER_DIALOG
+        try:
+            chosen = window.create_file_dialog(kind, directory=start if start and os.path.isdir(start) else "")
+        except Exception:
+            return ""
+        return str(chosen[0]) if chosen else ""
+
+    def set_zoom(factor: float) -> bool:
+        """The person's text size: this window's page scaled like a browser's zoom (the window's own Ctrl+ and Ctrl-
+        are off). False where this window can't."""
+        try:
+            return _zoom(window, min(2.0, max(0.5, float(factor))))
+        except Exception:
+            return False
+
+    window.expose(pick_folder, set_zoom)
     try:
         webview.settings["ALLOW_DOWNLOADS"] = True   # reports can be saved from the window too
     except (AttributeError, TypeError):
@@ -202,8 +273,9 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     import uvicorn
 
     port = args.port or _free_port()
-    # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time
-    lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10, settings.switched_off)
+    # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time. Theirs are
+    # connected once the window is open (the instrument setup does it, saying which), as that can take minutes
+    lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10, settings.switched_off, connect=False)
     # people sign in, each to their own data folder; until someone does, what happens is the lab's (~/Kelvin/lab).
     # The self-test checks the app, not a person, so it runs without accounts.
     accounts = None if args.self_test else Accounts(home)

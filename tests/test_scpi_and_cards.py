@@ -61,3 +61,13 @@ def test_a_header_does_not_split_a_word():
     assert v.match(":SOURce:VOLTage:ILIMit 1e-09") is None       # not "VOLT" + "age:ILIMit ..."
     assert v.match(":SOUR:VOLT 1.5") == "1.5" and v.match(":SOURce:VOLTage:LEVel 2") == "2"
     assert Template("SLVL {value}").match("SLVL5") == "5"           # no space is still the same setting
+
+
+def test_a_value_that_runs_into_its_mnemonic():
+    soup = Template("SOUP{value}")                                   # HP's source power: SOUPON, SOUPOFF
+    assert soup.match("SOUPON") == "ON" and soup.match("soupoff") == "off" and soup.render("ON") == "SOUPON"
+    family = soup.header_prefix(["ON", "OFF"])                       # a raw SOUPON or SOUP1 touches the switch
+    assert family.match("SOUPON") == "" and family.match("SOUP1") == "" and family.match("SOUP?") == ""
+    assert family.match("SOUPX") is None
+    xv = Template("XV{value}")                                       # Thorlabs' piezo controller: XV10
+    assert xv.match("XV10") == "10" and xv.header_prefix().match("XV10") == "" and xv.header_prefix().match("XVMAX") is None

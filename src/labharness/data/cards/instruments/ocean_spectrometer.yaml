@@ -6,9 +6,10 @@ kind: spectrometer
 status: community
 manual: "python-seabreeze: Spectrometer.integration_time_micros, intensities, wavelengths"
 notes:
-  - "Address seabreeze://<serial> (seabreeze:// for the first). Needs pip install seabreeze, then seabreeze_os_setup once for its USB driver. Close OceanView first: one program at a time."
+  - "Address seabreeze://<serial> (seabreeze:// for the first). Needs seabreeze, which Kelvin installs on this computer once a person approves; on Windows its USB driver too, once: seabreeze_os_setup from the Scripts folder of Kelvin's drivers environment, run as administrator. Close OceanView first: one program at a time."
   - "The integration time can't be read back: Kelvin shows it once it has set it, and leaves it as it is until then."
   - "Each spectrum is recorded with its wavelengths (they aren't evenly spaced), and goes to its own CSV in the run's folder."
+requires: [seabreeze]
 identify:
   idn: "^Ocean Insight,"
   example: "Ocean Insight,USB4000,USB4F01234"

@@ -5,24 +5,31 @@ agent call and a plan never talk to an instrument at the same time. The approval
 """
 from __future__ import annotations
 
+import contextlib
+import csv
+import io
 import json
+import math
 import re
+import sys
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import yaml
 
 from .. import frames
-from ..cards import ParamSpec, num, trace_x
+from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
-from ..eventlog import EventLog, RunStore
+from ..eventlog import EventLog, RunFolders, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
 from ..lab import Lab
-from ..labconfig import Allowed, Envelope
+from ..labconfig import Allowed, ConfigError, Envelope, load_lab_config
 from .. import carddraft
+from .. import protection
+from .. import rundata
 from ..literature import Literature
 from ..monitor import Monitor, Watch
 from ..notify import Notifier
@@ -33,13 +40,32 @@ from ..reports import kinds as report_kinds
 from ..reports.document import write_document_pdf, write_document_pptx
 from ..yamlio import load_yaml
 
+if TYPE_CHECKING:
+    from ..catalog import Catalog
+
 MAX_WAIT_S = 3600
+BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
+MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
+SETUP_STEPS = ("connecting", "scanning", "drafting", "reading")   # the instrument setup at work (autosetup.py)
+SCRIPTS_NEXT = ("Next, with the person (nothing above was sent to any instrument): add each instrument that is not in "
+                "the lab yet with add_instrument at its address, with the likely card and the connection settings "
+                "above (Kelvin checks who answers there first); one with no card fitting: draft_card, saying which "
+                "commands the scripts use, as those are the ones this lab relies on. The limits above come from the "
+                "values the scripts use: propose them and set them only once the person agrees. Then offer to keep "
+                "each measurement script as a recipe (save_recipe; it shows in the chat): its loops become sweeps "
+                "(an outer loop, the outer axis), its readings the measure list, its waits the settle times, its "
+                "setup and its end the setup and after steps; say what it can't carry over (the script's own "
+                "processing, plotting). Never run the scripts.")
 
 
 def default_project_info(project_id: Optional[str]) -> Dict[str, Any]:
     """Without the portal there are no projects: everything is the General workspace."""
     return {"id": project_id, "name": "General" if not project_id else project_id, "devices": [], "notes": [],
             "references": [], "summary": "", "private": False, "unshared": False}
+
+
+def _limits_text(limits: Dict[str, Tuple[float, float]]) -> str:
+    return ", ".join("%s [%s, %s]" % (p, num(lo), num(hi)) for p, (lo, hi) in sorted(limits.items())) or "none"
 
 
 def tail_events(path: Path, n: int) -> List[Dict[str, Any]]:
@@ -130,6 +156,59 @@ def trace_summary(spec: ParamSpec, values: List[float]) -> str:
     return "%d points; min %s%s at #%d; max %s%s at #%d" % (len(values), num(values[lo]), u, lo, num(values[hi]), u, hi)
 
 
+def _runs_a_program(address: str) -> bool:
+    """A lib:// address that names a Python (python=), a folder of files anywhere (path=), or neither, runs a
+    program a person chose: only a person writes one (Lab setup); Kelvin uses it once it is in the lab. One that
+    names an environment Kelvin installed with a person's approval (env=, envs.py), or the folder a maker's installer
+    put its library in (path= in Program Files, /Applications or /opt), Kelvin may try and add itself."""
+    import urllib.parse
+    if not address.strip().lower().startswith("lib://"):
+        return False
+    q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(address.strip()).query))
+    if q.get("python"):
+        return True
+    if q.get("path"):
+        return not _installed_by_a_maker(q["path"])
+    return not q.get("env")
+
+
+def writable_folder(path: Any) -> Path:
+    """A folder a person chose for Kelvin's files (the data folder, a chat's folder): its full path, made if it is
+    missing, checked that Kelvin can write there."""
+    import os
+    text = str(path or "").strip()
+    new = Path(text).expanduser()
+    if not text or not new.is_absolute():
+        raise ValueError("give the folder's full path, such as D:\\Data\\Kelvin or /Users/me/Data/Kelvin")
+    new = Path(os.path.abspath(new))
+    try:
+        new.mkdir(parents=True, exist_ok=True)
+        probe = new / ".kelvin-write-test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        raise ValueError("Kelvin cannot write to %s: %s" % (new, e.strerror or e))
+    return new
+
+
+def _installed_by_a_maker(folder: str) -> bool:
+    """A folder a maker's installer wrote: in Program Files (only an administrator writes there), /Applications or
+    /opt."""
+    import os
+    roots = [os.environ.get(k) for k in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    roots += ["/Applications", "/opt", "/Library/Frameworks"]
+    try:
+        path = Path(folder).resolve()
+    except (OSError, ValueError):
+        return False
+    for r in roots:
+        if r and Path(r).is_dir():
+            root = Path(r).resolve()
+            if path == root or root in path.parents:
+                return path != root
+    return False
+
+
 class LabRuntime:
     def __init__(self, lab: Lab, approver: Approver, data_dir: Any, envelope: Optional[Envelope] = None):
         self.lab = lab
@@ -142,13 +221,16 @@ class LabRuntime:
         self.shared_log: Optional[Path] = None      # the lab's instrument log, everyone's events; set by the app
         self.operating: Optional[str] = None        # Claude Code bridge: the task Claude is doing on the screen now
         self.gate = SafetyGate(lab, approver, self._new_log(lab.clock), envelope, operator="agent")
-        self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
+        self.engine = RunEngine(self.gate, self._store())
         self.engine.progress = self._on_progress
         self.lock = threading.RLock()
+        self._script_cards: Optional[Tuple[Any, Any]] = None   # (the lab's cards folder as it was, the registry)
         self.busy: Optional[str] = None
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
         self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
+        self._catalog: Optional["Catalog"] = None    # every run in the data folder (catalog.py); see .catalog
+        self._tidy_lock = threading.Lock()
         self._live_lock = threading.Lock()
         self.lab_info: Dict[str, Any] = {"kind": "virtual" if all(i.simulated for i in lab.instruments.values()) else "file",
                                          "path": None, "error": None, "has_file": False}
@@ -161,10 +243,26 @@ class LabRuntime:
         self.scan_network = True                    # scans also look on the local network (a Settings switch)
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
+        self.found_info: Dict[str, Dict[str, Any]] = {}     # what it learnt of each, by VISA resource: identity, card
+        # the app's model writing a card from the maker's manual (autocard.make_card); None outside the Kelvin app
+        self.card_writer: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
+        self.manuals_found: Dict[str, Dict[str, Any]] = {}  # by VISA resource: the manual found while writing a card
+        self.fetch_url: Optional[Callable[[str], bytes]] = None   # read_web_page and save_manual (profiles.http_get)
+        # the app's part when Kelvin changes the lab itself ("added" an instrument, "switched" one on): keep it in
+        # Settings and give a new instrument its folder, settings and manual
+        self.lab_changed: Callable[[str], None] = lambda what: None
+        self.switched_off_for: Optional[Callable[[str], Iterable[str]]] = None   # who a person switched off, per lab
         self.queue = ScanQueue(self.data_dir / "queue.json")   # scans lined up to run one after another
         self.auto_report = "both"   # after each run (in its folder) and each queue (in reports/): both, pdf, pptx, off
         self.mounted: Dict[str, Any] = self._load_mounted()   # the sample in the setup now (project, device, since)
+        # a person's hands on the sample (who, since): every drive held at safe; the app keeps it across restarts
+        self.hands: Optional[Dict[str, Any]] = None
+        self.protection_missing: List[str] = []   # the mounted device's protection names what this lab lacks
+        # the mounted device's caps that are not in the instruments yet: written when Kelvin is next idle
+        self.caps_waiting = False
+        self._apply_protection(recheck=True)
         self.attribution: Dict[str, Any] = {}       # the project of the chat whose turn this is (portal), and incognito
+        self.running_meta: Dict[str, Any] = {}      # the running plan's project and marks (_attribute), while it runs
         # what Kelvin knows about a project (name, devices, notes, references, summary); the portal sets this
         self.project_info: Callable[[Optional[str]], Dict[str, Any]] = default_project_info
         self.project_ids: Callable[[], List[Optional[str]]] = lambda: [None]   # None is the General workspace
@@ -196,13 +294,14 @@ class LabRuntime:
                 row = event["row"]
                 keep = {"i", "t"} | {a["key"] for a in self.live["axes"]} | \
                        {m["key"] for m in self.live["measures"] if m["kind"] == "scalar"}
-                self.live["rows"].append({k: v for k, v in row.items() if k in keep})
+                self.live["rows"].append({k: None if isinstance(v, float) and not math.isfinite(v) else v
+                                          for k, v in row.items() if k in keep})   # JSON has no NaN
                 for m in self.live["measures"]:
                     if m["kind"] == "trace" and isinstance(row.get(m["key"]), list):
                         ys = row[m["key"]]
-                        step = max(1, -(-len(ys) // 400))
+                        xs, ys = plot_points(trace_x(row, m["key"], len(ys)), ys, 400)
                         self.live["trace"] = {"key": m["key"], "unit": m["unit"], "x_unit": m.get("x_unit", ""),
-                                              "x": trace_x(row, m["key"], len(ys))[::step], "y": ys[::step]}
+                                              "x": xs, "y": ys}
                 self.live["done"], self.live["eta_s"], self.live["phase"] = event["done"], event["eta_s"], "measuring"
             elif event["event"] == "phase":  # after the last point: final values, or the stop/abort steps
                 self.live["phase"], self.live["eta_s"] = event["phase"], event.get("eta_s")
@@ -233,13 +332,17 @@ class LabRuntime:
             if self.queue.state in ("running", "pausing"):   # a queued scan may take hours: answer instead of waiting
                 return ("Kelvin is running the queue (%s). Ask again when this item is done, or pause or stop the "
                         "queue." % (self.busy or "a scan"))
-            self.lock.acquire()
+            if not self.lock.acquire(timeout=BUSY_WAIT_S):   # never a chat stuck behind an instrument that hangs
+                return ("Kelvin is still busy with %s: an instrument has not answered yet (a stop takes effect as "
+                        "soon as it does). Ask again in a moment; if this keeps happening, check that instrument's "
+                        "cable, power and address." % (self.busy or "an earlier request"))
         try:
             self.busy = what
             try:
                 return fn()
             finally:
                 self.busy = None
+                self._caps_if_waiting()
                 self._refresh()
         finally:
             self.lock.release()
@@ -272,16 +375,57 @@ class LabRuntime:
                              "without asking; the rest still wait for a human")
             lines += ["ALARM: %s%s" % (a.text, " (%s)" % "; ".join(a.actions) if a.actions else "")
                       for a in self.monitor.active()]
+            if self.hands:
+                lines.append("HANDS ON THE SAMPLE: %s is handling it (since %s); every drive stays at safe until a "
+                             "person unlocks it in the Lab panel" % (self.hands.get("by"), self.hands.get("since")))
+            lines += self._protection_lines()
+            unsure = [n for n, i in self.lab.instruments.items() if i.enabled and self.gate.unsure(i)]
+            if unsure:
+                lines.append("not reviewed by a person yet (Kelvin added it or drafted its card): %s. Every output "
+                             "change on %s asks the person, auto mode included" % (", ".join(unsure),
+                                                                                  "it" if len(unsure) == 1 else "them"))
             lines += self._status_lines()
+            lines += self._programs_here()
+            lines.append("data folder: %s (runs/<run id>/run.h5, catalog.sqlite, reports/, events.jsonl)"
+                         % self.data_dir)
             lines.append("* = drive away from its safe value")
             return "\n".join(lines)
         return self._do("reading status", run)
 
+    def _programs_here(self) -> List[str]:
+        """Makers' programs on this computer that Kelvin drives as instruments, not yet in the lab."""
+        from .. import lightfield
+        try:
+            folder = lightfield.root() if sys.platform == "win32" else None
+        except Exception:
+            folder = None
+        if folder is None or any(ic.address.startswith("lightfield://")
+                                 for ic in self.lab.config.instruments.values()):
+            return []
+        return ["LightField is installed here (%s): Kelvin drives its camera and spectrograph as an instrument, not "
+                "through its window: add_instrument with address lightfield:// (or lightfield://<experiment>) and "
+                "card princeton/lightfield" % folder]
+
+    def _protection_lines(self) -> List[str]:
+        m = self.mounted or {}
+        prot = m.get("protection") or {}
+        if not prot:
+            return []
+        out = ["mounted device %s is protected (a person set this; it can't be changed or passed): %s" % (
+            m.get("device_name"), "; ".join(protection.summary(prot, self.lab)))]
+        if self.protection_missing:
+            out.append("this lab lacks %s, named in %s's protection" % (", ".join(self.protection_missing),
+                                                                       m.get("device_name")))
+        return out
+
     def _status_lines(self) -> List[str]:
         lines = []
         for name in self.lab.switched_off:
-            lines.append("%s: switched off in the Lab panel; Kelvin sends it nothing (only a person switches it on)"
+            lines.append("%s: switched off in the Lab panel; Kelvin sends it nothing (ask_to_switch_on asks the person)"
                          % name)
+        for name, why in self.lab.unavailable.items():
+            lines.append("%s: not connected (%s); Kelvin sends it nothing until it connects: fix that "
+                         "(install_for_instrument for a missing package), then reconnect_instrument" % (name, why))
         for name, values in self._status.items():
             if name not in self.lab.instruments or not self.lab.instruments[name].enabled:
                 continue
@@ -321,32 +465,34 @@ class LabRuntime:
 
     DATA = ("runs", "reports", "events.jsonl")   # what a data folder holds; chats and settings stay with Kelvin
 
+    @property
+    def runs(self) -> RunFolders:
+        """Every folder this person's runs are in: the data folder's runs/ and the chats' own folders."""
+        return RunFolders(self.data_dir)
+
+    def _store(self) -> RunStore:
+        return RunStore(self.data_dir / "runs", RunFolders(self.data_dir))
+
     def data_summary(self) -> Dict[str, Any]:
         runs = self.data_dir / "runs"
         return {"path": str(self.data_dir), "runs": sum(1 for d in runs.iterdir() if d.is_dir()) if runs.exists() else 0,
                 "reports": sum(1 for f in (self.data_dir / "reports").glob("*") if f.is_file())
-                if (self.data_dir / "reports").exists() else 0}
+                if (self.data_dir / "reports").exists() else 0,
+                "elsewhere": sum(1 for d in self.runs.iterdir() if d.parent != runs)}   # in chats' own folders
 
     def set_data_dir(self, path: Any, move: bool = False, by: str = "human") -> Dict[str, Any]:
         """Keep runs, the lab record (events.jsonl) and reports in another folder: a person's choice, from Settings.
         Refused while Kelvin is busy. With move, what is saved now goes along, but nothing there is overwritten:
         a run or report whose name is taken, or a record the new folder already has, stays where it was."""
         import shutil
-        new = Path(str(path)).expanduser()
-        if not new.is_absolute():
+        if not Path(str(path or "").strip()).expanduser().is_absolute():
             raise ValueError("give the folder's full path, such as D:\\Data\\Kelvin or /Users/me/Data/Kelvin")
         if not self.lock.acquire(blocking=False):
             raise RuntimeError("Kelvin is busy (%s); try again when it is idle" % (self.busy or "working"))
         try:
             if self.live and self.live.get("status") == "running":
                 raise RuntimeError("a plan is running; change the data folder after it finishes")
-            try:
-                new.mkdir(parents=True, exist_ok=True)
-                probe = new / ".kelvin-write-test"
-                probe.write_text("ok", encoding="utf-8")
-                probe.unlink()
-            except OSError as e:
-                raise ValueError("Kelvin cannot write to %s: %s" % (new, e.strerror or e))
+            new = writable_folder(path)
             old = self.data_dir
             if new.resolve() == old.resolve():
                 return dict(self.data_summary(), moved=0, kept=[])
@@ -370,6 +516,9 @@ class LabRuntime:
                     else:
                         shutil.move(str(old / "events.jsonl"), str(new / "events.jsonl"))
                         moved += 1
+                for f in RunFolders(old).chat_folders():   # the chats' folders keep their runs; Kelvin still finds them
+                    RunFolders(new).remember(f)
+                (old / RunFolders.INDEX).unlink(missing_ok=True)
             if not move or kept:
                 self.gate.log.write("data_folder", by=by, moved_to=str(new),
                                     note="what stays here was not moved" if move else "earlier data stay here")
@@ -378,8 +527,9 @@ class LabRuntime:
             self.queue.move_to(new / "queue.json")
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
-            self.engine.store = RunStore(new / "runs")
+            self.engine.store = self._store()
             self.gate.log.write("data_folder", by=by, previous=str(old), moved=moved, kept=len(kept))
+            self.tidy_later()
             return dict(self.data_summary(), moved=moved, kept=kept, previous=str(old))
         finally:
             self.lock.release()
@@ -394,8 +544,12 @@ class LabRuntime:
         asking: one person's yes is not another's."""
         new = Path(data_dir)
         new.mkdir(parents=True, exist_ok=True)
-        if not self.lock.acquire(blocking=False):
+        held = self.lock.acquire(timeout=1.0)
+        if not held and not self.setting_up:
             raise RuntimeError("Kelvin is busy (%s); try again when it is idle" % (self.busy or "working"))
+        # held by the instrument setup (connecting, scanning, reading settings: minutes, at start): nobody's work is
+        # running, so the person comes in at once; their sample's caps are written to the instruments once Kelvin is
+        # idle, as after any switch (recheck below)
         try:
             if self.live and self.live.get("status") == "running":
                 raise RuntimeError("A plan is running; wait for it to finish or stop it first.")
@@ -415,17 +569,25 @@ class LabRuntime:
             frames.FOLDER = new / "frames"
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
-            self.engine.store = RunStore(new / "runs")
+            self.engine.store = self._store()
             self.queue = ScanQueue(new / "queue.json")
             self.mounted = self._load_mounted()
+            self._apply_protection(recheck=True)
             self.attribution = {}
             self.data_problem = problem
             with self._live_lock:
                 self.live = None
             if user:
                 self.gate.log.write("signed_in", user=user, data=str(new))
+            self.tidy_later()
         finally:
-            self.lock.release()
+            if held:
+                self.lock.release()
+
+    @property
+    def setting_up(self) -> bool:
+        """The instrument setup is at work (autosetup.py: connecting, scanning, writing cards, reading settings)."""
+        return self.setup_status.get("state") in SETUP_STEPS
 
     # ------------------------------------------------------------------ a person's terminal (people only)
 
@@ -480,12 +642,16 @@ class LabRuntime:
     def health(self, instruments: Optional[List[str]] = None) -> str:
         return self._do("health check", lambda: "\n".join(
             [str(r) for r in self.engine.preflight(instruments, fresh=True)]   # asked for: always checks again
-            + ([] if instruments else ["%s switched off (not checked)" % n for n in self.lab.switched_off])))
+            + ([] if instruments else ["%s switched off (not checked)" % n for n in self.lab.switched_off]
+               + ["%s not connected: %s" % kv for kv in self.lab.unavailable.items()])))
 
     def wait(self, seconds: float) -> str:
         seconds = max(0.0, min(float(seconds), MAX_WAIT_S))
         def run() -> str:
-            self.lab.clock.sleep(seconds)
+            stops, t0 = self.lab.stops.count, self.lab.clock.now()
+            if not self.lab.stops.sleep(self.lab.clock, seconds, stops):   # a person's stop ends the wait
+                return "stopped after %s of %s: a person pressed stop" % (_dur(self.lab.clock.now() - t0),
+                                                                          _dur(seconds))
             return "waited %s" % _dur(seconds)
         return self._do("waiting", run)
 
@@ -519,33 +685,128 @@ class LabRuntime:
         return self._do("dry run", run)
 
     def run(self, plan_text: str, dry_run: bool = False) -> str:
+        return self._do("running plan", lambda: self._run_once(plan_text, dry_run)[0])
+
+    def _run_once(self, plan_text: str, dry_run: bool = False) -> Tuple[str, Optional[RunReport]]:
+        """One plan, run (the caller holds the lock): run_plan's answer, and the run's report (None: not run)."""
+        try:
+            plan = self._plan(plan_text)
+        except PlanError as e:
+            return "invalid plan: %s" % e, None
+        meta = self._attribute(plan)
+        with self._device_protection(meta) as held:
+            report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"))
+        made = self._auto_report(report.run_id)
+        if report.run_id:
+            summary = (report.analysis or {}).get("assessment") or report.message
+            self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
+                          summary[:300])
+        lines = list(held)
+        if report.dry_run is not None and report.status in ("done", "aborted"):
+            lines.append(report.dry_run.message)
+        lines.append(report.message)
+        if report.analysis:
+            lines += self._analysis_lines(report.analysis)
+        else:
+            lines += self._preview(plan, report.rows)
+        lines += ["warning: " + w for w in report.warnings]
+        if report.path:
+            lines.append("saved in %s: run.h5 (every point, trace, setting and fit)%s" % (report.path, (
+                " and %s (made automatically; use make_report only for another selection or wording)"
+                % " and ".join(made)) if made else ""))
+        if report.run_id and report.rows:
+            lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
+        return "\n".join(lines), report
+
+    # ------------------------------------------------------------------ recipes (recipes.py)
+
+    def run_recipe(self, text: str, values: Optional[Dict[str, Any]] = None) -> str:
+        """A recipe's stages in order, each run through the gate like run_plan, then checked on its data; values
+        kept for later stages; retried with changed values when the recipe says so. Ends at a stage that does not
+        pass, or a run that stops."""
+        from .. import recipes
+        try:
+            recipe = recipes.parse(text)
+            vals = recipes.start_values(recipe, values)
+        except recipes.RecipeError as e:
+            return "recipe not run: %s" % e
+
         def run() -> str:
-            try:
-                plan = self._plan(plan_text)
-            except PlanError as e:
-                return "invalid plan: %s" % e
-            report = self.engine.run(plan, dry_run=dry_run, meta=self._attribute(plan))
-            made = self._auto_report(report.run_id)
-            if report.run_id:
-                summary = (report.analysis or {}).get("assessment") or report.message
-                self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
-                              summary[:300])
-            lines = []
-            if report.dry_run is not None and report.status in ("done", "aborted"):
-                lines.append(report.dry_run.message)
-            lines.append(report.message)
-            if report.analysis:
-                lines += self._analysis_lines(report.analysis)
-            else:
-                lines += self._preview(plan, report.rows)
-            lines += ["warning: " + w for w in report.warnings]
-            if made:
-                lines.append("saved in the run folder: data.csv, conditions.csv, %s (made automatically; use "
-                             "make_report only for another selection or wording)" % " and ".join(made))
-            if report.run_id and report.rows:
-                lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
+            lines = ["recipe %s (%d stages), values: %s" % (recipe.name, len(recipe.stages), recipes.shown(vals))]
+            for k, stage in enumerate(recipe.stages, 1):
+                for attempt in range(stage.retries + 1):
+                    try:
+                        if attempt:
+                            vals.update({name: recipes.calc(e, vals) for name, e in stage.retry.items()})
+                        plan_text = recipes.render(stage.plan, vals)
+                    except recipes.RecipeError as e:
+                        lines.append("stopped at stage %s: %s" % (stage.name, e))
+                        return "\n".join(lines)
+                    self.busy = "recipe %s, stage %d of %d: %s%s" % (recipe.name, k, len(recipe.stages), stage.name,
+                                                                     " (try %d)" % (attempt + 1) if attempt else "")
+                    answer, report = self._run_once(plan_text)
+                    if report is None or not report.run_id or report.status != "done":
+                        why = answer.splitlines()[0] if answer else "not run"
+                        lines.append("stopped at stage %s: %s" % (stage.name, why))
+                        return "\n".join(lines)
+                    try:
+                        passed = bool(self.value_of(report.run_id, recipes.render(stage.passes, vals))) \
+                            if stage.passes else True
+                        if passed:
+                            vals.update({name: self.value_of(report.run_id, recipes.render(e, vals))
+                                         for name, e in stage.keep.items()})
+                    except (ValueError, KeyError) as e:
+                        lines.append("stopped at stage %s: run %s could not be checked: %s" % (
+                            stage.name, report.run_id, e.args[0] if e.args else e))
+                        return "\n".join(lines)
+                    if passed:
+                        lines.append("stage %s: run %s passed%s%s" % (
+                            stage.name, report.run_id, " (%s)" % stage.passes if stage.passes else "",
+                            "; kept " + recipes.shown({n: vals[n] for n in stage.keep}) if stage.keep else ""))
+                        break
+                    lines.append("stage %s: run %s did not pass %s (try %d of %d)" % (
+                        stage.name, report.run_id, stage.passes, attempt + 1, stage.retries + 1))
+                else:
+                    lines.append("stopped: stage %s did not pass after %d %s; values: %s" % (
+                        stage.name, stage.retries + 1, "try" if not stage.retries else "tries", recipes.shown(vals)))
+                    return "\n".join(lines)
+            lines.append("done; values: %s" % recipes.shown(vals))
             return "\n".join(lines)
-        return self._do("running plan", run)
+        return self._do("running recipe %s" % recipe.name, run)
+
+    def check_recipe(self, text: str) -> Tuple[Optional[Any], str]:
+        """(the recipe, "") when it is well formed and every instrument parameter its plans use is in this lab; else
+        (None, what is wrong)."""
+        from .. import recipes
+        try:
+            recipe = recipes.parse(text)
+        except recipes.RecipeError as e:
+            return None, str(e)
+        known = dict(recipe.values)
+        for s in recipe.stages:
+            try:
+                plan = self._plan(recipes.render(s.plan, dict(known, **{k: 1.0 for k in s.keep})))
+            except (PlanError, recipes.RecipeError) as e:
+                return None, "stage %s: %s" % (s.name, e)
+            keys = [st.key for st in plan.setup] + [a.key for a in plan.axes if a.kind == "instrument"] + \
+                ["%s.%s" % m for m in plan.measure]
+            for key in keys:
+                if self._spec(key) is None:
+                    return None, "stage %s: this lab has no %s" % (s.name, key)
+            known.update({k: 1.0 for k in s.keep})
+        return recipe, ""
+
+    def value_of(self, run_id: str, expression: str) -> float:
+        """One number from a run's columns (a recipe's checks and kept values). ValueError: not one number."""
+        import numpy as np
+        from .. import expr
+        table = rundata.columns(self._run_dir(run_id))
+        if not table.n:
+            raise ValueError("run %s has no data" % run_id)
+        value = np.asarray(expr.evaluate(expression, lambda key: table.number(key), np), dtype=float)
+        if value.ndim:
+            raise ValueError("%s is not one number (it gives %d values)" % (expression, value.size))
+        return float(value)
 
     @staticmethod
     def _analysis_lines(a: Dict[str, Any]) -> List[str]:
@@ -562,12 +823,11 @@ class LabRuntime:
         if model and model not in MODELS and model != "linear":
             return "unknown model %r (choose: linear, %s)" % (model, ", ".join(MODELS))
         try:
-            rows = self._rows(run_id)
-            meta = json.loads((self._run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
-            plan = self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8"))
+            rec = rundata.load(self._run_dir(run_id))
+            rows, meta = rec.rows, rec.meta
+            cols = self._columns(rec)
         except (KeyError, OSError, ValueError, PlanError) as e:
             return "cannot analyse %s: %s" % (run_id, e)
-        cols = self.engine.columns(plan)
         if column and column not in [m["key"] for m in cols["measures"]]:
             return "unknown column %r (have: %s)" % (column, ", ".join(m["key"] for m in cols["measures"]))
         a = analyze_run(rows, cols["axes"], cols["measures"], meta, force=model, only=column)
@@ -595,33 +855,41 @@ class LabRuntime:
     # ------------------------------------------------------------------ data
 
     def _run_dir(self, run_id: str) -> Path:
-        d = (self.data_dir / "runs" / run_id).resolve()
-        if d.parent != (self.data_dir / "runs").resolve() or not d.is_dir():
+        d = self.runs.find(run_id)
+        if d is None:
             raise KeyError("no run %r (see list_runs)" % run_id)
-        return d
+        return d.resolve()
 
     def _rows(self, run_id: str) -> List[Dict[str, Any]]:
-        path = self._run_dir(run_id) / "data.jsonl"
-        if not path.exists():
+        try:
+            return rundata.load(self._run_dir(run_id)).rows
+        except KeyError:
             return []
-        with open(path, encoding="utf-8") as f:
-            return [json.loads(line) for line in f if line.strip()]
+
+    def _columns(self, rec: rundata.Recorded) -> Dict[str, List[Dict[str, str]]]:
+        """A run's axes and readings with units: as it recorded them, else from its plan and this lab."""
+        cols = rec.columns or {}
+        if cols.get("axes") or cols.get("measures"):
+            if all(c.get("unit") is not None for c in cols.get("axes", []) + cols.get("measures", [])):
+                return cols
+        return self.engine.columns(self._plan(rec.plan_text))
 
     def runs_index(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Most recent runs first: run_id, plan, status, points, planned_points, reason."""
-        root = self.data_dir / "runs"
-        dirs = sorted((d for d in root.iterdir() if d.is_dir()), reverse=True)[:limit] if root.exists() else []
+        dirs = sorted(self.runs.iterdir(), key=lambda d: d.name, reverse=True)[:limit]
         out = []
         for d in dirs:
             entry: Dict[str, Any] = {"run_id": d.name, "plan": d.name.split("-", 2)[-1], "status": "unfinished"}
-            try:
-                meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-                entry.update(status=meta.get("status"), points=meta.get("points"),
-                             planned_points=meta.get("planned_points"), reason=meta.get("reason"))
-            except (OSError, ValueError):
-                live = self.live_view(10 ** 9)
-                if live and live["run_id"] == d.name and live["status"] == "running":
-                    entry.update(status="running", points=live["done"], planned_points=live["total"])
+            live = self.live_view(10 ** 9)
+            if live and live["run_id"] == d.name and live["status"] == "running":
+                entry.update(status="running", points=live["done"], planned_points=live["total"])
+            else:
+                try:
+                    meta = rundata.meta(d)
+                    entry.update(status=meta.get("status") or "unfinished", points=meta.get("points"),
+                                 planned_points=meta.get("planned_points"), reason=meta.get("reason"))
+                except (KeyError, OSError, ValueError):
+                    pass
             out.append(entry)
         return out
 
@@ -634,6 +902,211 @@ class LabRuntime:
                 lines.append("%s: %s, %s/%s points%s" % (r["run_id"], r["status"], r["points"], r["planned_points"],
                                                          " (%s)" % r["reason"] if r.get("reason") else ""))
         return "\n".join(lines) or "no runs yet"
+
+    # ------------------------------------------------------------------ every run: kept as run.h5, in the catalog
+
+    @property
+    def catalog(self) -> "Catalog":
+        """The catalog of the runs in the data folder in use (it follows a change of folder or person)."""
+        from ..catalog import FILE, Catalog   # SQLite, only when a catalog is used
+        path = self.data_dir / FILE
+        if self._catalog is None or self._catalog.path != path:
+            self._catalog = Catalog(path)
+        return self._catalog
+
+    def _running_id(self) -> Optional[str]:
+        live = self.live_view(10 ** 9)
+        return live["run_id"] if live and live["status"] == "running" else None
+
+    def tidy_runs(self) -> Dict[str, int]:
+        """Keep every run in the data folder as run.h5 and in the catalog: runs a crash or a power cut ended
+        (status interrupted, with every point up to then) and runs from before run.h5 (their files move to legacy/
+        in the run folder). Kelvin does this when it starts and when the data folder or the person changes, in the
+        background. A run being recorded, by this Kelvin or another, is left alone."""
+        with self._tidy_lock:
+            root = self.runs
+            done = {"interrupted": 0, "upgraded": 0, "failed": 0}
+            for d in root.iterdir():
+                try:
+                    if (d / rundata.RECORD).exists():
+                        if rundata.being_recorded(d) or (rundata.closed(d) and not rundata.have_h5()):
+                            continue
+                        crashed = not rundata.closed(d)
+                        rundata.finish(d)
+                        done["interrupted"] += crashed
+                    elif rundata.have_h5() and (d / "data.jsonl").exists() and not (d / rundata.RUN_FILE).exists():
+                        if rundata.upgrade(d, self._legacy_columns(d)):
+                            done["upgraded"] += 1
+                except Exception as e:   # that run stays as it is; the next start tries again
+                    done["failed"] += 1
+                    self.gate.log.write("run_not_kept", by="kelvin", run=d.name, error=str(e)[:300])
+            running = self._running_id()
+            self.catalog.sync(root, skip=[running] if running else ())
+            if done["interrupted"] or done["upgraded"]:
+                self.gate.log.write("runs_kept", by="kelvin", **done)
+            return done
+
+    def tidy_later(self) -> None:
+        """tidy_runs in the background."""
+        def tidy() -> None:
+            try:
+                self.tidy_runs()
+            except Exception:
+                pass
+        threading.Thread(target=tidy, name="kelvin-tidy-runs", daemon=True).start()
+
+    def _legacy_columns(self, folder: Path) -> Optional[Dict[str, Any]]:
+        """An older run's axes and readings with units, from its plan and this lab (None if they don't fit)."""
+        try:
+            return self.engine.columns(self._plan((folder / "plan.yaml").read_text(encoding="utf-8")))
+        except Exception:
+            return None
+
+    def _fresh_catalog(self) -> "Catalog":
+        """The catalog, after a look at the run folders if the last was over 30 s ago (cheap: unchanged runs are
+        not read again)."""
+        cat = self.catalog
+        cat.ready()
+        if time.monotonic() - cat.synced > 30 or not cat.synced:
+            running = self._running_id()
+            cat.sync(self.runs, skip=[running] if running else ())
+        return cat
+
+    def find_runs(self, text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
+                  since: str = "", until: str = "", quantity: str = "", limit: int = 20) -> str:
+        cat = self._fresh_catalog()
+        rows = cat.find(text, device, project, plan, status, since, until, quantity, limit)
+        total = cat.count()
+        lines = ["%d run%s, newest first (of %d in the data folder):" % (len(rows), "" if len(rows) == 1 else "s",
+                                                                          total) if rows else
+                 "no run matches (%d in the data folder)" % total]
+        for r in rows:
+            lines += self._run_lines(r)
+        running = self._running_id()
+        if running:
+            lines.append("running now: %s (in the catalog once it ends)" % running)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _run_lines(r: Dict[str, Any]) -> List[str]:
+        card = r.get("card") or {}
+        g = lambda v: "%g" % v if isinstance(v, (int, float)) and not isinstance(v, bool) else str(v)  # noqa: E731
+        about = [(r.get("started") or "")[:16].replace("T", " ")]
+        about += ["device " + r["device_name"]] if r.get("device_name") else []
+        about += ["project " + r["project_name"]] if r.get("project_name") else []
+        about += ["simulated"] if r.get("simulated") else []
+        lines = ["%s: %s, %s, %s points (%s)" % (r["run_id"], r.get("plan"), r.get("status"),
+                                                 card.get("points", r.get("points")), ", ".join(a for a in about if a))]
+        swept = ["%s %s→%s %s" % (a["key"], g(a.get("from", "?")), g(a.get("to", "?")), a.get("unit", ""))
+                 for a in card.get("swept") or []]
+        measured = ["%s [%s%s]" % (m["key"], m.get("unit") or "-", ", trace" if m.get("kind") == "trace" else
+                                   ", image" if m.get("kind") == "image" else "") for m in card.get("measured") or []]
+        if swept or measured:
+            lines.append("  swept %s; measured %s" % (", ".join(swept) or "nothing (a time series)",
+                                                     ", ".join(measured) or "-"))
+        held = card.get("held") or {}
+        if held:
+            lines.append("  held: " + ", ".join("%s %s" % kv for kv in list(held.items())[:6]))
+        if r.get("assessment"):
+            lines.append("  assessment: " + str(r["assessment"])[:240])
+        if r.get("reason") and r.get("status") != "done":
+            lines.append("  stopped: " + str(r["reason"])[:200])
+        return lines
+
+    def query_runs(self, sql: str) -> str:
+        cat = self._fresh_catalog()
+        try:
+            names, rows, more = cat.query(sql)
+        except ValueError as e:   # catalog.QueryError
+            return "query not run: %s" % e
+        out = io.StringIO()
+        w = csv.writer(out, lineterminator="\n")
+        w.writerow(names)
+        for row in rows:
+            w.writerow(["" if v is None else "%.6g" % v if isinstance(v, float) else v for v in row])
+        text = out.getvalue()
+        if not rows:
+            text += "(no rows)"
+        elif more:
+            text += "(the first %d rows only: narrow the query or use LIMIT/OFFSET)" % len(rows)
+        return text.rstrip("\n")
+
+    def describe_run(self, run_id: str) -> str:
+        """A run's card (what it swept and measured, with units and ranges, the conditions held, the fits, the
+        assessment and issues), the plan as it ran and its files."""
+        try:
+            d = self._run_dir(run_id)
+            card = rundata.card(d)
+            plan_text = rundata.load(d, with_rows=False).plan_text
+        except (KeyError, OSError, ValueError) as e:
+            return "cannot read %s: %s" % (run_id, e.args[0] if e.args else e)
+        lines = [yaml.safe_dump(card, sort_keys=False, allow_unicode=True, width=110).rstrip()]
+        if plan_text.strip():
+            lines += ["plan as run:", "  " + plan_text.strip().replace("\n", "\n  ")]
+        lines.append("files: %s, in %s" % (", ".join(f["name"] for f in self.run_files(run_id)) or "none yet", d))
+        lines.append("numbers: get_run_data (columns, where), compute (expressions), get_trace (one trace)")
+        return "\n".join(lines)
+
+    def import_data(self, paths: Any, name: str = "") -> str:
+        """Files Kelvin didn't measure, as a run (imports.py): another program's tables (CSV, TSV, text) and
+        LightField's .spe spectra; several with the same x values side by side in one run, to compare or subtract.
+        The run goes with this chat's runs, gets the automatic fits, and Kelvin's run tools read it."""
+        from types import SimpleNamespace
+        from .. import imports
+        from ..analysis import analyze_run
+        given = paths if isinstance(paths, (list, tuple)) else str(paths or "").split(";")
+        files = [str(p).strip().strip('"') for p in given if str(p).strip()]
+        if not files:
+            return "name the files to import: their full paths (';' between several)"
+        if len(files) > 20:
+            return "at most 20 files at once"
+        try:
+            table = imports.merge([imports.read(p) for p in files])
+        except imports.DataError as e:
+            return "not imported: %s" % e
+        except OSError as e:
+            return "not imported: %s" % (e.strerror or e)
+        plan_name = re.sub(r"[^\w.-]+", "_", (name or "").strip() or "imported_" + table.name)[:48]
+
+        def run() -> str:
+            rec = self.engine.store.create(plan_name, {"plan": plan_name, "imported": files}, "import",
+                                           self.attribution.get("folder"))
+            rec.meta.update(self._attribute(SimpleNamespace(device=None)))
+            rec.meta.update(lab="imported", simulated=False, imported=files)
+            axes = [{"key": table.x_key, "unit": table.x_unit, "kind": "imported"}]
+            measures = [{"key": k, "unit": u, "kind": "scalar"} for k, (u, _) in table.columns.items()]
+            rec.set_columns({"axes": axes, "measures": measures})
+            rows = []
+            for i, x in enumerate(table.x):
+                row = {"i": i, "t": 0.0, table.x_key: x}
+                row.update({k: values[i] for k, (_, values) in table.columns.items()})
+                rec.add(row)
+                rows.append(row)
+            meta = dict(status="done", reason=None, points=len(rows), planned_points=len(rows), duration_s=0.0,
+                        warnings=list(table.notes))
+            analysis = None
+            try:
+                analysis = analyze_run(rows, axes, measures, meta)
+                rec.set_analysis(analysis)
+            except Exception:
+                analysis = None   # the fits are a convenience; the numbers are kept
+            rec.finish(**meta)
+            self.gate.log.write("run_imported", by=self.gate.operator, run=rec.run_id, files=len(files))
+            try:
+                self.catalog.add(rec.path)
+            except Exception:
+                pass   # the catalog finds it at its next look
+            first = next(iter(table.columns))
+            lines = ["imported %s as run %s: %d points of %s (%s), columns %s" % (
+                         ", ".join(Path(f).name for f in files), rec.run_id, len(rows), table.x_key,
+                         table.x_unit or "no unit", ", ".join(table.columns)),
+                     "saved in %s" % rec.path] + ["note: " + n for n in table.notes]
+            if analysis:
+                lines += self._analysis_lines(analysis)
+            lines.append("numbers: get_run_data, compute (e.g. %s / max(%s)), look_at; describe_run for its card"
+                         % (first, first))
+            return "\n".join(lines)
+        return self._do("importing data", run)
 
     def stop_run(self) -> bool:
         """Stop the plan that is running (its on_abort steps then run). False if none is running."""
@@ -655,24 +1128,170 @@ class LabRuntime:
             return {}
 
     def mount(self, project: Optional[str], device: Dict[str, Any], by: str = "human") -> Dict[str, Any]:
-        """Record which sample is in the setup now. Every run from here on belongs to it (and to its project)."""
+        """Record which sample is in the setup now. Every run from here on belongs to it (and to its project), and
+        its protection holds (protection.py): its limits, its gates' leakage guards, and the caps written into the
+        instruments ("caps" in the answer says what was written)."""
         info = self.project_info(project)
         self.mounted = {"project": project or None, "project_name": info.get("name") or "General",
                         "device": device.get("id"), "device_name": device.get("name"),
-                        "since": datetime.now().isoformat(timespec="seconds"), "by": by}
+                        "since": datetime.now().isoformat(timespec="seconds"), "by": by,
+                        "protection": device.get("protection") or {}}
         (self.data_dir / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
-        self.gate.log.write("mount", by=by, device=self.mounted["device_name"], project=self.mounted["project_name"])
-        return self.mounted
+        self.gate.log.write("mount", by=by, device=self.mounted["device_name"], project=self.mounted["project_name"],
+                            protection=protection.summary(self.mounted["protection"]) or None)
+        self._apply_protection()
+        caps = self._write_caps(by)
+        return dict(self.mounted, caps=caps)
+
+    def protect(self, device: Dict[str, Any], by: str = "human") -> List[str]:
+        """A person changed a device's protection: if it is the mounted one, it holds from now on. Returns the caps
+        written into the instruments."""
+        if not self.mounted or self.mounted.get("device") != device.get("id"):
+            return []
+        self.mounted["protection"] = device.get("protection") or {}
+        (self.data_dir / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
+        self.gate.log.write("protection", by=by, device=self.mounted.get("device_name"),
+                            protection=protection.summary(self.mounted["protection"]) or None)
+        self._apply_protection()
+        return self._write_caps(by)
 
     def unmount(self, by: str = "human") -> None:
         if self.mounted:
             self.gate.log.write("unmount", by=by, device=self.mounted.get("device_name"),
                                 project=self.mounted.get("project_name"))
         self.mounted = {}
+        self._apply_protection()
         try:
             (self.data_dir / "mounted.json").unlink()
         except OSError:
             pass
+
+    def _apply_protection(self, recheck: bool = False) -> None:
+        """Hold this lab's instruments to the mounted device's protection, and to a person's hands-on lock.
+        recheck: other instruments (Kelvin started, another lab, another person's sample), so the caps are checked
+        and written again when Kelvin is next idle, in case an instrument was reset meanwhile."""
+        prot = (self.mounted or {}).get("protection") or {}
+        self.protection_missing = protection.apply(self.lab, prot, (self.mounted or {}).get("device_name") or "")
+        self.lab.hands_on = self.hands
+        if recheck:
+            self.caps_waiting = bool(prot)
+
+    def _write_caps(self, by: str) -> List[str]:
+        """Write the mounted device's caps into the instruments. What can't be written yet (a plan holds the
+        instruments, a source isn't at 0, an instrument is switched off) waits: Kelvin writes it when it is next
+        idle (_caps_if_waiting)."""
+        prot = (self.mounted or {}).get("protection") or {}
+        self.caps_waiting = False
+        if not prot:
+            return []
+        if not self.lock.acquire(blocking=False):
+            self.caps_waiting = True
+            return ["the instruments' own caps are written when Kelvin is idle (now %s)" % (self.busy or "busy")]
+        try:
+            with self.gate.acting_as(by):
+                lines, done = protection.write_caps(self.gate, self.lab, prot)
+            self.caps_waiting = not done
+            return lines + protection.outside(self.lab, prot)
+        except Exception as e:
+            self.caps_waiting = True
+            return ["the instruments' own caps were not written: %s" % e]
+        finally:
+            self._refresh()
+            self.lock.release()
+
+    def _caps_if_waiting(self) -> None:
+        if self.caps_waiting and self.mounted:
+            self._write_caps("sample protection")
+
+    @contextlib.contextmanager
+    def _device_protection(self, meta: Dict[str, Any]) -> Iterator[List[str]]:
+        """A plan that names another device (device: D5, on the mounted chip) is held to that device's protection
+        too, for that run: the tighter of the two holds. Yields lines saying so (none when nothing changes)."""
+        self.running_meta = meta   # whose the running plan is: phones through the hub leave unshared runs out
+        m = self.mounted or {}
+        dev: Dict[str, Any] = {}
+        if meta.get("device") and meta.get("device") != m.get("device"):
+            dev = next((d for d in self.project_info(meta.get("project")).get("devices") or []
+                        if d.get("id") == meta.get("device")), {})
+        extra = dev.get("protection") or {}
+        if not extra:
+            try:
+                yield []
+            finally:
+                self.running_meta = {}
+            return
+        both = protection.combine(m.get("protection") or {}, extra)
+        names = [n for n in (m.get("device_name") if m.get("protection") else None, dev.get("name")) if n]
+        ranges: Dict[Tuple[str, str], Any] = {}   # the sources' ranges as they were: put back after the run
+        for inst, param, _, _ in protection.caps(self.lab, both):
+            if inst.enabled and inst.card.range_owner(param) is not None:
+                try:
+                    ranges[(inst.name, param)] = inst.read(param)
+                except Exception:
+                    pass
+        protection.apply(self.lab, both, " and ".join(names))
+        try:
+            lines, _ = protection.write_caps(self.gate, self.lab, both)
+            yield ["held to %s's protection for this run: %s" % (dev.get("name"), "; ".join(
+                protection.summary(extra, self.lab)))] + lines
+        finally:
+            self.running_meta = {}
+            self._apply_protection()
+            for (name, param), value in ranges.items():   # only while the source is at safe (the gate's rule)
+                try:
+                    if value is not None and self.lab.instruments[name].read(param) != value:
+                        self.gate.set(name, param, value)
+                except Exception:
+                    pass
+
+    def mounted_view(self) -> Optional[Dict[str, Any]]:
+        """The mounted sample with its protection in words (the Lab panel and the phone)."""
+        if not self.mounted:
+            return None
+        return dict(self.mounted, protection_lines=protection.summary(self.mounted.get("protection") or {}, self.lab),
+                    protection_missing=self.protection_missing)
+
+    def keep_hands(self, hands: Optional[Dict[str, Any]]) -> None:
+        """At start: a hands-on lock that was on when Kelvin closed is on again."""
+        self.hands = hands or None
+        self.lab.hands_on = self.hands
+
+    # ------------------------------------------------------------------ hands on the sample
+
+    def hands_on(self, by: str) -> List[str]:
+        """A person is about to touch the sample (connect it, rewire, flip a breakout box): stop what runs, bring
+        everything that applies something to the sample (sources, excitations, light, RF) to safe with its outputs
+        off, and hold every drive where it is until a person unlocks (hands_off). Temperature, field and positions
+        stay as they are. Measuring still works. Waits for a stopped plan to finish its own safe-stop steps."""
+        self.hands = {"by": by, "since": datetime.now().isoformat(timespec="seconds")}
+        self.lab.hands_on = self.hands   # at once: nothing moves away from safe from here on, even before the stop lands
+        self.stop(by)
+        with self.lock:
+            lines: List[str] = []
+            kept: List[str] = []
+            with self.gate.acting_as(by):
+                for name, inst in self.lab.instruments.items():
+                    if not inst.enabled:
+                        continue
+                    if protection.applies_to_sample(inst.card):
+                        lines += [r.message for r in self.gate.to_safe(name)]
+                    else:
+                        kept.append(name)
+            lines = lines or ["everything that reaches the sample was already at safe"]
+            if kept:
+                lines.append("kept as they are (they don't touch the sample): %s" % ", ".join(kept))
+            self.gate.log.write("hands_on", by=by, steps=lines)
+            self._refresh()
+        return lines
+
+    def hands_off(self, by: str) -> List[str]:
+        """The person is done with the sample: drives may move again (each still within limits and approvals).
+        The mounted device's caps are written into the instruments again, in case one was replaced or reset."""
+        with self.lock:
+            self.hands = None
+            self.lab.hands_on = None
+            self.gate.log.write("hands_off", by=by)
+        return self._write_caps(by)
 
     def _attribute(self, plan: Plan, project: Optional[str] = None, incognito: Optional[bool] = None,
                    unshared: Optional[bool] = None, legacy: bool = False) -> Dict[str, Any]:
@@ -743,7 +1362,7 @@ class LabRuntime:
             return "not added: " + "; ".join(problems[:5])
         item = self.queue.add(text, position, note, by, project=self.attribution.get("project"),
                               incognito=bool(self.attribution.get("incognito")),
-                              unshared=bool(self.attribution.get("unshared")))
+                              unshared=bool(self.attribution.get("unshared")), folder=self.attribution.get("folder"))
         pos = self.queue.items.index(item) + 1
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name, position=pos)
         return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self.queue.text())
@@ -884,7 +1503,19 @@ class LabRuntime:
             if lines:
                 request = ApprovalRequest(title, lines + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
-                if not self.gate.ask(request):
+                covered = False
+                if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
+                    failed = []
+                    if not dry_run:
+                        duration, failed = self._rehearse(items)
+                    rehearsal = type("Rehearsal", (), {"ok": not failed})()
+                    covered, why = self.gate.auto_plan(grants, rehearsal)
+                    if covered:
+                        self.gate.auto_approve(request, why)
+                    else:
+                        request.items.append("Auto mode does not cover this: " + "; ".join(
+                            why + ["the dry run: %s" % f for f in failed[:2]]))
+                if not covered and not self.gate.ask(request):
                     note = " (%s)" % request.note if request.note else ""
                     self.gate.log.write("queue_declined", by=by)
                     return "declined: the queue did not start%s" % note
@@ -953,8 +1584,9 @@ class LabRuntime:
                     if item.kind == "plan":
                         plan = self._plan(item.text)
                         meta = self._attribute(plan, item.project, item.incognito, item.unshared, item.legacy)
-                        report = self.engine.run(plan, meta=dict(meta, queue={
-                            "item": item.id, "position": position, "note": item.note}))
+                        with self._device_protection(meta):
+                            report = self.engine.run(plan, meta=dict(meta, queue={
+                                "item": item.id, "position": position, "note": item.note}), folder=item.folder)
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
@@ -967,6 +1599,7 @@ class LabRuntime:
                 return False, str(e)
             finally:
                 self.busy = None
+                self._caps_if_waiting()
                 self._refresh()
 
     def _queue_step(self, item: Item) -> Tuple[bool, str]:
@@ -993,62 +1626,240 @@ class LabRuntime:
         q.mark(item, "done", "; ".join(warnings))
         return True, ""
 
-    def run_data(self, run_id: str, columns: Optional[List[str]] = None, max_rows: int = 50) -> str:
+    def run_data(self, run_id: str, columns: Optional[List[str]] = None, max_rows: int = 50, where: str = "") -> str:
+        """A run's points as CSV, evenly thinned to max_rows; where: only the points meeting a condition (expr.py).
+        Traces show as trace[n] and are not read (get_trace reads one)."""
         try:
-            rows = self._rows(run_id)
-        except KeyError as e:
-            return e.args[0]
-        if not rows:
+            table = rundata.columns(self._run_dir(run_id))
+        except (KeyError, OSError, ValueError) as e:
+            return e.args[0] if e.args else str(e)
+        if not table.n:
             return "run %s has no data" % run_id
-        cols = columns or [k for k in rows[0] if not k.endswith(".axis") and not k.endswith(".x")]
-        missing = [c for c in cols if c not in rows[0]]
+        cols = columns or table.order
+        missing = [c for c in cols if c not in table.order]
         if missing:
-            return "unknown columns %s (have: %s)" % (", ".join(missing), ", ".join(rows[0]))
-        max_rows = max(1, int(max_rows))
-        step = max(1, -(-len(rows) // max_rows))
-        picked = rows[::step]
-        if picked[-1] is not rows[-1]:
-            picked.append(rows[-1])
+            return "unknown columns %s (have: %s)" % (", ".join(missing), ", ".join(table.order))
+        picked = list(range(table.n))
+        if where:
+            try:
+                picked = self._where(table, where)
+            except ValueError as e:
+                return "where not applied: %s" % e
+            if not picked:
+                return "no points of %s meet %s (of %d)" % (run_id, where, table.n)
+        step = max(1, -(-len(picked) // max(1, int(max_rows))))
+        shown = picked[::step]
+        if shown[-1] != picked[-1]:
+            shown.append(picked[-1])
+        head = "%s: %d rows%s%s" % (run_id, table.n, "; %d where %s" % (len(picked), where) if where else "",
+                                    "" if step == 1 else ", every %dth shown" % step)
+        return "\n".join([head, ",".join(cols)] + [",".join(table.cell(c, i) for c in cols) for i in shown])
 
-        def cell(v: Any) -> str:
-            if isinstance(v, list):
-                return "trace[%d]" % len(v)
-            if isinstance(v, float):
-                return "%.6g" % v
-            return str(v)
+    @staticmethod
+    def _where(table: rundata.Columns, where: str) -> List[int]:
+        """The points (indices) of a run meeting a condition such as "smu.V > 1 and tc.T < 5"."""
+        import numpy as np
+        from .. import expr
+        mask = np.asarray(expr.evaluate(where, table.number, np))
+        if mask.dtype != bool:
+            raise expr.ExprError("where needs a condition, e.g. smu.V > 1")
+        return [int(i) for i in np.flatnonzero(np.broadcast_to(mask, (table.n,)))]
 
-        head = "%s: %d rows%s" % (run_id, len(rows), "" if step == 1 else ", every %dth shown" % step)
-        return "\n".join([head, ",".join(cols)] + [",".join(cell(r.get(c)) for c in cols) for r in picked])
+    def compute(self, run_id: str, expression: str, where: str = "", max_rows: int = 50) -> str:
+        """An expression over a run's columns (expr.py): one number, or a value at each point shown against the
+        swept axes, with its minimum and maximum and where they are."""
+        import numpy as np
+        from .. import expr
+        try:
+            d = self._run_dir(run_id)
+            table = rundata.columns(d)
+            axes = [a["key"] for a in rundata.load(d, with_rows=False).columns.get("axes") or []]
+        except (KeyError, OSError, ValueError) as e:
+            return e.args[0] if e.args else str(e)
+        if not table.n:
+            return "run %s has no data" % run_id
+        picked = np.arange(table.n)
+        try:
+            if where:
+                picked = np.asarray(self._where(table, where), dtype=int)
+                if not picked.size:
+                    return "no points of %s meet %s (of %d)" % (run_id, where, table.n)
+            value = expr.evaluate(expression, lambda key: table.number(key)[picked], np)
+        except ValueError as e:
+            return "not computed: %s" % e
+        value = np.asarray(value, dtype=float)
+        scope = "%d points%s" % (picked.size, " where " + where if where else "")
+        if value.ndim == 0:
+            return "%s = %.6g (over %s)" % (expression, float(value), scope)
+        if value.ndim > 1:
+            return "not computed: the result has %d dimensions" % value.ndim
+        n = value.size
+        per_point = n == picked.size
+        axes = [a for a in axes if a in table.numbers]
+
+        def at(k: int) -> str:
+            if not per_point:
+                return "index %d" % k
+            p = int(picked[k])
+            return ", ".join("%s=%s" % (a, table.cell(a, p)) for a in axes) or "point %d" % p
+
+        lines = ["%s over %s: %d values" % (expression, scope, n)]
+        if np.isfinite(value).any():
+            lo, hi = int(np.nanargmin(value)), int(np.nanargmax(value))
+            lines.append("min %.6g at %s; max %.6g at %s; mean %.6g" % (value[lo], at(lo), value[hi], at(hi),
+                                                                          float(np.nanmean(value))))
+        else:
+            lines.append("no finite values")
+        step = max(1, -(-n // max(1, int(max_rows))))
+        shown = list(range(0, n, step))
+        if shown and shown[-1] != n - 1:
+            shown.append(n - 1)
+        if step > 1:
+            lines.append("every %dth value shown" % step)
+        if per_point:
+            lines.append(",".join(["i"] + axes + ["value"]))
+            lines += [",".join([table.cell("i", int(picked[k]))] + [table.cell(a, int(picked[k])) for a in axes] +
+                               ["%.6g" % value[k]]) for k in shown]
+        else:
+            lines.append("index,value")
+            lines += ["%d,%.6g" % (k, value[k]) for k in shown]
+        return "\n".join(lines)
 
     def trace(self, run_id: str, row: int, column: str, max_points: int = 200) -> str:
         try:
-            rows = self._rows(run_id)
+            one = rundata.trace_row(self._run_dir(run_id), column, int(row))   # that trace alone, from run.h5
         except KeyError as e:
-            return e.args[0]
-        if not 0 <= row < len(rows):
-            return "row must be 0…%d" % (len(rows) - 1)
+            return e.args[0] if e.args and str(e.args[0]).startswith("no run") else "%s is not a trace column" % column
+        except IndexError as e:
+            return "row must be 0…%d" % (e.args[0] - 1)
+        if one is None:   # a run not kept as run.h5 (being measured, or Kelvin's core alone)
+            rows = self._rows(run_id)
+            if not 0 <= row < len(rows):
+                return "row must be 0…%d" % (len(rows) - 1)
+            one = rows[row]
+        rows = {row: one}
         values = rows[row].get(column)
         if not isinstance(values, list):
             return "%s is not a trace column" % column
         n = len(values)
-        step = max(1, -(-n // max(2, int(max_points))))
+        keep = thin(values, max(4, int(max_points)))   # a narrow dip or peak stays in, however few are shown
         axis = rows[row].get(column + ".axis") or rows[row].get(column + ".x")
         spec = self._spec(column)
         lines = ["%s row %d: %s%s" % (run_id, row, trace_summary(spec, values) if spec else "%d points" % n,
-                                      "" if step == 1 else "; every %dth point shown" % step)]
+                                      "" if len(keep) == n else "; %d of them shown: the first, the last and each "
+                                      "stretch's lowest and highest" % len(keep))]
+
+        def y(i: int) -> str:
+            return "nan" if values[i] is None else "%.6g" % values[i]
         if axis:
             xs = trace_x(rows[row], column, n)
             lines.append("x,y")
-            lines += ["%.12g,%.6g" % (xs[i], values[i]) for i in range(0, n, step)]
+            lines += ["%.12g,%s" % (xs[i], y(i)) for i in keep]
         else:
             lines.append("index,y")
-            lines += ["%d,%.6g" % (i, values[i]) for i in range(0, n, step)]
+            lines += ["%d,%s" % (i, y(i)) for i in keep]
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------ pictures (look_at)
+
+    def look(self, run_id: str = "", column: str = "", frame: str = "", camera: str = "") -> Tuple[Optional[bytes], str]:
+        """look_at: (a PNG, its caption), or (None, why not). A run's plots as its report draws them (one column's
+        alone; a 2-D scan with many rows as a map; a camera column as its last frame), a saved frame, or a frame
+        read now from a camera."""
+        from .. import pictures
+        try:
+            if camera:
+                return self._look_camera(camera.strip())
+            if frame and not run_id:
+                return self._look_file(Path(frame))
+            if not run_id:
+                return None, ("say what to look at: run_id (a run's plots; 'last' for the latest), frame (a saved "
+                              "frame's file) or camera (instrument.parameter, a frame read now)")
+            if run_id == "last":
+                ids = self.pick_runs(last=1)
+                if not ids:
+                    return None, "no runs yet"
+                run_id = ids[-1]
+            d = self._run_dir(run_id)
+            if frame:   # one of this run's frames, by the reference its data keep
+                return self._look_array(rundata.frame(d, frame), "%s, frame %s" % (run_id, frame))
+            rec = rundata.load(d)
+            cols = self._columns(rec)
+            part = self._collector().run(run_id, [])
+            head = "Run %s (%s, %s, %s points)" % (run_id, part.plan, part.status, part.points)
+            measures = cols.get("measures") or []
+            names = [m["key"] for m in measures]
+            if column and column not in names:
+                return None, "%s measured %s, not %s" % (run_id, ", ".join(names) or "nothing", column)
+            images = [m for m in measures if m.get("kind") == "image" and (not column or m["key"] == column)]
+            if images and (column or len(images) == len(measures)):   # a camera column: its last frame
+                key = images[0]["key"]
+                last = next((r for r in reversed(rec.rows) if r.get(key)), None)
+                if last is None:
+                    return None, "%s has no frame of %s yet" % (run_id, key)
+                return self._look_array(rundata.frame(d, str(last[key])), "%s: the last frame of %s (point %d of "
+                                        "%d)" % (head, key, rec.rows.index(last) + 1, len(rec.rows)))
+            axes = [a for a in cols.get("axes") or [] if a.get("kind") != "repeat"]
+            scalars = [m for m in measures if m.get("kind") not in ("trace", "image")]
+            if len(axes) >= 2 and scalars:   # many rows of a 2-D scan read best as a map
+                m = next((m for m in scalars if m["key"] == column), None if column else scalars[0])
+                grid = pictures.grid_of(rec.rows, axes[0]["key"], axes[-1]["key"], m["key"]) if m else None
+                if grid and len(grid[0]) > 8:
+                    outs, ins, z = grid
+                    args = (m["key"], outs, ins, z, axes[-1]["key"], axes[-1].get("unit", ""), axes[0]["key"],
+                            axes[0].get("unit", ""), m.get("unit", ""))
+                    others = [s["key"] for s in scalars if s is not m]
+                    return pictures.map_png(*args), "%s. %s%s" % (head, pictures.map_caption(*args), (
+                        " Also measured: %s (look_at with column)." % ", ".join(others)) if others else "")
+            charts = [c for c in part.charts if not column or c.title.split(" (")[0] == column]
+            if not charts:
+                return None, "%s has nothing to plot%s yet" % (run_id, " of " + column if column else "")
+            return pictures.charts_png(charts), "%s.\n%s" % (head, pictures.charts_caption(charts))
+        except (KeyError, ValueError, OSError, RuntimeError) as e:
+            return None, "nothing to show: %s" % (e.args[0] if e.args else e)
+        except ImportError:
+            return None, "pictures need NumPy, which this Kelvin does not have"
+
+    def _look_camera(self, key: str) -> Tuple[Optional[bytes], str]:
+        spec = self._spec(key)
+        if spec is None:
+            return None, "no reading %r (instrument.parameter)" % key
+        if spec.type != "image":
+            return None, "%s is not a camera frame; look_at shows frames, and runs as plots" % key
+        instr, _, param = key.partition(".")
+        r = self._do("reading %s" % key, lambda: self.gate.get(instr, param))
+        if isinstance(r, str):   # busy with the queue
+            return None, r
+        if not r.ok:
+            return None, r.message
+        return self._look_file(Path(str(r.value)), "%s, read now" % key)
+
+    def _look_file(self, path: Path, head: str = "") -> Tuple[Optional[bytes], str]:
+        """A frame read outside a run: only Kelvin's own (its frames folder), never any file on the computer."""
+        from .. import pictures
+        p, folder = path.resolve(), frames.folder().resolve()
+        if p.suffix.lower() != ".npy" or folder not in p.parents:
+            return None, "look_at shows Kelvin's own frames: a run's (give run_id), or one read outside a run"
+        if not p.is_file():
+            return None, "no frame %s" % path
+        return self._look_array(pictures.load_frame(p), head or p.name)
+
+    @staticmethod
+    def _look_array(frame: Any, head: str) -> Tuple[Optional[bytes], str]:
+        from .. import pictures
+        data, caption = pictures.frame_png(frame)
+        return data, "%s. %s" % (head, caption)
 
     def events(self, n: int = 20) -> str:
         return "\n".join(event_line(e) for e in tail_events(self.events_path, max(1, min(int(n), 200)))) or "no events yet"
 
     # ------------------------------------------------------------------ for the approval page
+
+    def _unavailable_view(self) -> List[Dict[str, Any]]:
+        """The lab's instruments that could not be connected: why, in words, and the install that would fix it."""
+        from .. import envs
+        return [{"name": n, "why": envs.for_people(why), "install": envs.needed(why)}
+                for n, why in self.lab.unavailable.items()]
 
     def instruments(self) -> List[Dict[str, Any]]:
         """Each instrument for the lab panel: its readings, outputs (drives) and settings, and a state."""
@@ -1056,6 +1867,13 @@ class LabRuntime:
         status = dict(self._status)
         for name, inst in self.lab.instruments.items():
             card = inst.card
+            if inst.unavailable:   # it could not be connected: why, and the install that would fix it
+                from .. import envs
+                out.append({"name": name, "model": card.model, "kind": card.kind, "state": "unavailable",
+                            "enabled": False, "why": envs.for_people(inst.unavailable),
+                            "install": envs.needed(inst.unavailable), "active": 0, "headline": None, "readings": [],
+                            "drives": [], "settings": []})
+                continue
             if not inst.enabled:
                 out.append({"name": name, "model": card.model, "kind": card.kind, "state": "off", "enabled": False,
                             "active": 0, "headline": None, "readings": [], "drives": [], "settings": []})
@@ -1064,7 +1882,9 @@ class LabRuntime:
             readings, drives, settings = [], [], []
             errors = away = 0
             for pname, value in values.items():
-                spec = card.params[pname]
+                spec = card.params.get(pname)
+                if spec is None:   # read before the lab was loaded again with another card for it
+                    continue
                 bad = isinstance(value, str) and value.startswith("ERROR")
                 errors += bad
                 item = {"name": pname, "label": spec.title, "value": "no response" if bad else spec.show(value),
@@ -1103,19 +1923,60 @@ class LabRuntime:
             if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
                 raise RuntimeError("A plan or the queue is running; stop it first, then switch %s %s."
                                    % (name, "on" if on else "off"))
-            if self.lab.instruments[name].enabled == on:
+            inst = self.lab.instruments[name]
+            if inst.enabled == on and not inst.unavailable:
                 return
             self.lab.switch(name, on)
             self.gate.log.write("instrument_switched", by=by, instrument=name, on=on)
+            if on:
+                self._caps_if_waiting()
             self._refresh()
 
+    def ask_to_switch_on(self, name: str, why: str) -> str:
+        """Kelvin needs an instrument a person switched off: it asks them, and switches it on if they say yes.
+        Switching off stays a person's: it says the instrument is not part of the experiment."""
+        from ..adapters import AdapterError
+
+        def run() -> str:
+            inst = self.lab.instruments.get(name)
+            if inst is None:
+                return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
+            if inst.enabled:
+                return "%s is on" % name
+            if inst.unavailable:
+                return ("not asked: nobody switched %s off; it is not connected (%s). Fix that, then "
+                        "reconnect_instrument" % (name, inst.unavailable))
+            live = self.live or {}
+            if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
+                return "not asked: a plan or the queue is running; ask when it has finished"
+            request = ApprovalRequest("Switch %s on?" % name, [
+                "Kelvin needs it: %s" % (why.strip() or "(no reason given)"),
+                "You switched it off in the Lab panel. On, Kelvin connects to it again and reads it; output changes "
+                "still ask you as usual."])
+            if not self.gate.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                return "declined: %s stays off%s" % (name, note)
+            try:
+                self.switch_instrument(name, True, "human (approved Kelvin's request)")
+            except (AdapterError, OSError, ValueError, RuntimeError) as e:
+                return "%s could not be connected: %s" % (name, str(e).splitlines()[0] if str(e) else e)
+            self.lab_changed("switched")
+            return "%s is on again (the person approved)" % name
+        return self._do("asking to switch %s on" % name, run)
+
     # ------------------------------------------------------------------ instruments on this computer
+
+    def _remember_scan(self, found: List[Any], looked: Any) -> None:
+        from ..adapters import resource_name
+        from ..survey import reason
+        self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
+        self.last_found = [f.address for f in found]
+        self.found_info = {resource_name(f.address): dict(vars(f)) for f in found}
 
     def scan_found(self) -> List[Dict[str, Any]]:
         """Connected instruments as data, each with a suggested name. Raises AdapterError without VISA.
         What the scan looked through, and why it found what it did, goes to last_survey."""
         from ..discovery import scan_survey
-        from ..survey import reason
         in_lab = {ic.address: name for name, ic in self.lab.config.instruments.items()
                   if not ic.address.startswith("sim://")}
         with self.lock:
@@ -1124,8 +1985,7 @@ class LabRuntime:
                 found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network)
             finally:
                 self.busy = None
-        self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
-        self.last_found = [f.address for f in found]
+        self._remember_scan(found, looked)
         taken = [n for n in self.lab.config.instruments if not self.lab.config.instruments[n].address.startswith("sim://")]
         out = []
         for f in found:
@@ -1182,6 +2042,58 @@ class LabRuntime:
             vals = ", ".join("%s = %s" % (k, v.get("shown", v.get("value"))) for k, v in st["settings"].items())
             lines.append("settings read at %s (get_value for the current value): %s" % (when, vals))
         return "\n".join(lines)
+
+    def lab_config(self, instrument: str = "") -> str:
+        """The lab config file Kelvin loaded (lab.yaml) as the lab wrote it, or one instrument's entry; and where the
+        file now differs from what Kelvin uses."""
+        from ..discovery import instrument_text
+        path = Path(self.lab.config.source or ".")
+        if path.suffix.lower() not in (".yaml", ".yml") or not path.is_file():
+            return ("%s was not loaded from a lab config file; describe_instrument shows each instrument's limits and "
+                    "where they come from" % self.lab.config.name)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            return "could not read the lab config %s: %s" % (path, e)
+        if instrument:
+            try:
+                text = instrument_text(text, instrument)
+            except KeyError:
+                return "the lab config %s has no instrument %r (it has: %s)" % (
+                    path, instrument, ", ".join(self.lab.config.instruments) or "none")
+        cut = len(text) > MAX_CONFIG_CHARS
+        lines = ["lab config %s%s, as written:" % (path, ", %s's entry" % instrument if instrument else ""),
+                 "```yaml", text[:MAX_CONFIG_CHARS].rstrip(), "```"]
+        if cut:
+            lines.append("(the rest of the file is not shown: name an instrument for its whole entry)")
+        lines += self._config_drift(path)
+        lines.append("A parameter with no limits: here keeps its card's range (the instrument's own); limits: here only "
+                     "narrow it. describe_instrument shows the limits in use and where each comes from.")
+        return "\n".join(lines)
+
+    def _config_drift(self, path: Path) -> List[str]:
+        """Where the lab config file now differs from the one Kelvin loaded: its instruments and their limits."""
+        try:
+            now = load_lab_config(path, self.lab.registry)
+        except ConfigError as e:
+            return ["The file has errors now (%s), so Kelvin keeps using what it loaded before; a person fixes them in "
+                    "Lab → Set up…" % "; ".join(e.errors[:3])]
+        except Exception as e:
+            return ["Kelvin can't read the file as a lab config now (%s), so it keeps using what it loaded before" % e]
+        loaded, out = self.lab.config.instruments, []
+        for name in sorted(set(loaded) | set(now.instruments)):
+            was, new = loaded.get(name), now.instruments.get(name)
+            if was is None:
+                out.append("- %s is in the file but not in the lab Kelvin loaded" % name)
+            elif new is None:
+                out.append("- %s is in the lab Kelvin loaded but no longer in the file" % name)
+            elif dict(was.limits) != dict(new.limits):
+                out.append("- %s's limits: %s in the file, %s in use" % (name, _limits_text(new.limits),
+                                                                        _limits_text(was.limits)))
+        if out:
+            out.insert(0, "The file differs from what Kelvin uses until the lab is loaded again (Save and connect, "
+                          "in Lab → Set up…):")
+        return out
 
     def search_manual(self, instrument: str, query: str, max_passages: int = 4) -> str:
         from .. import profiles
@@ -1244,18 +2156,142 @@ class LabRuntime:
         except (OSError, ValueError) as e:
             return "not read: %s" % e
 
+    def script_cards(self) -> Any:
+        """Every card Kelvin can use here, to match the lab's scripts against: Kelvin's own and the lab's. Kept
+        while the lab's cards folder stays as it was, as reading every card takes a second. Only read from."""
+        from ..virtual_lab import lab_registry
+        if self.home is None:
+            return self.lab.registry
+        folder = Path(self.home) / "cards"
+        try:
+            files = sorted(folder.iterdir()) if folder.is_dir() else []
+            stamp = tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in files)
+        except OSError:
+            stamp = None
+        if stamp is None or self._script_cards is None or self._script_cards[0] != stamp:
+            self._script_cards = (stamp, lab_registry(self.home))
+        return self._script_cards[1]
+
+    def survey_scripts(self, path: str) -> str:
+        """The lab's own scripts, read for how the lab works now (scripts.py): each instrument's address, settings,
+        commands and the values used, the card that fits, and each script's outline. Nothing in them is run."""
+        from .. import scripts as lab_scripts
+        from ..adapters import resource_name
+        try:
+            found = lab_scripts.survey(path, self.script_cards())
+        except (OSError, ValueError) as e:
+            return "not read: %s" % e
+        in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
+        here = ["%s (%s)" % (i.address, in_lab[resource_name(i.address)]) for i in found.instruments
+                if i.address and resource_name(i.address) in in_lab]
+        return found.text() + ("\n\nAlready in this lab: " + ", ".join(here) if here else "") + "\n\n" + SCRIPTS_NEXT
+
+    def scripts_found(self, folder: str) -> Dict[str, Any]:
+        """The lab's scripts read for the Set up panel (a person chose the folder): each instrument with its likely
+        card, the limits from the values the scripts use, and who answers at its address now, asked as a scan asks
+        (*IDN? only; a serial port isn't tried, as its framing takes long to find). An identity reply decides the
+        card. Raises OSError for a folder that isn't there."""
+        from .. import scripts as lab_scripts
+        from ..adapters import resource_name
+        from ..discovery import SHORT_NAMES, identify
+        registry = self.script_cards()
+        found = lab_scripts.survey(folder, registry)
+        view = found.view()
+        in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
+        taken = [n for n, ic in self.lab.config.instruments.items() if not ic.address.startswith("sim://")]
+        with self.lock:
+            self.busy = "asking the scripts' instruments who they are"
+            try:
+                for item, inst in zip(view["instruments"], found.instruments):
+                    item["in_lab"] = in_lab.get(resource_name(inst.address)) if inst.address else None
+                    item["idn"] = ""
+                    if item["in_lab"] in self.lab.instruments:   # its card here: the limits the scripts' values give
+                        card = self.lab.instruments[item["in_lab"]].card
+                        item["card"] = {"id": card.id, "model": card.model, "kind": card.kind, "sure": True,
+                                        "why": "in this lab as %s" % item["in_lab"],
+                                        "mapped": lab_scripts.mapping(card, inst.commands),
+                                        "limits": lab_scripts.limits(card, inst.commands)}
+                    if not inst.address or item["in_lab"]:
+                        continue
+                    if inst.address.startswith("serial://"):
+                        item["asked"] = "not asked: a serial port (Scan tries each card's framing on it)"
+                        continue
+                    queries = ["*IDN?"]   # and the likely card's own identity query
+                    likely = registry.get(item["card"]["id"]) if item["card"] else None
+                    if likely is not None and likely.idn_query not in queries:
+                        queries.append(likely.idn_query)
+                    try:
+                        answer = identify(inst.address, registry, timeout_ms=800, queries=queries)
+                    except Exception as e:   # no VISA on this computer
+                        why = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
+                        item["asked"] = "not asked: %s" % why
+                        continue
+                    item["idn"] = answer.idn
+                    if not answer.idn:
+                        item["asked"] = "no answer at its address now"
+                    if answer.card_id and (not item["card"] or item["card"]["id"] != answer.card_id):
+                        card = registry.get(answer.card_id)
+                        item["card"] = {"id": card.id, "model": card.model, "kind": card.kind, "sure": True,
+                                        "why": "it answered %s" % answer.idn[:60],
+                                        "mapped": lab_scripts.mapping(card, inst.commands),
+                                        "limits": lab_scripts.limits(card, inst.commands)}
+                    elif answer.card_id:
+                        item["card"]["why"] += "; it answered %s" % answer.idn[:60]
+                        item["card"]["sure"] = True
+            finally:
+                self.busy = None
+        for item in view["instruments"]:   # a name for each, from the scripts or the kind of instrument
+            if item["in_lab"]:
+                continue
+            kind = (item["card"] or {}).get("kind", "")
+            base = item["name"] or SHORT_NAMES.get(kind, re.sub(r"[^a-z0-9]+", "", kind.lower()) or "instr")
+            name, i = base, 2
+            while name in taken:
+                name, i = "%s%d" % (base, i), i + 1
+            taken.append(name)
+            item["name"] = name
+        return view
+
+    def _saved_card(self, ref: str) -> Any:
+        """A card Kelvin has, by its id (Kelvin's own, or one in ~/Kelvin/cards); None if there is none."""
+        from ..virtual_lab import lab_registry
+        for registry in [self.lab.registry] + ([lab_registry(self.home)] if self.home is not None else []):
+            try:
+                return registry.get(ref)
+            except KeyError:
+                continue
+        return None
+
     def try_card(self, text: str, instrument: str) -> str:
-        """Kelvin's own try: only on an instrument a person put in the lab, or one the last scan found."""
+        """Kelvin's own try: on an instrument in the lab or one the last scan found; anywhere else a person says
+        yes first. `text` is the card's YAML, or the id of a card Kelvin has (one draft_card wrote)."""
         from .. import cardtry
         from ..adapters import AdapterError
-        card, problems, _ = carddraft.check(text)
+        ref = text.strip()
+        card = self._saved_card(ref) if ref and "\n" not in ref and len(ref) < 120 else None
         if card is None:
-            return "not valid:\n" + "\n".join("- " + p for p in problems)
+            card, problems, _ = carddraft.check(text)
+            if card is None:
+                return "not valid:\n" + "\n".join("- " + p for p in problems)
         targets = cardtry.addresses_for_agent(self.lab, self.last_found)
         address = targets.get(instrument)
+        if address is None and _runs_a_program(instrument):
+            return ("Kelvin tries a card only on an instrument in the lab or an address the scan found: a lib:// "
+                    "address with python= or path= names a program for Kelvin to run, so a person tries it in Lab, "
+                    "Cards; or install the maker's library with install_for_instrument and use "
+                    "lib://<address>?env=<environment>")
+        if address is None and ("::" in instrument or "://" in instrument):
+            request = ApprovalRequest("Try a card on %s?" % instrument, [
+                "Kelvin's last scan did not find an instrument at %s. Trying the %s card asks it who it is and reads "
+                "its readings; it sets nothing." % (instrument, card.model)])
+            if not self.gate.auto_simple(request, "trying a card only asks the instrument who it is and reads it") \
+                    and not self.gate.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                return "declined: the person did not want Kelvin to try %s%s" % (instrument, note)
+            address = instrument
         if address is None:
-            return ("Kelvin tries a card only on an instrument in the lab or one the last scan found (%s). A person can "
-                    "try it on any address in Lab, Cards." % (", ".join(sorted(targets)) or "none yet: scan first"))
+            return ("Kelvin tries a card on an instrument in the lab or an address (the last scan found: %s)"
+                    % (", ".join(sorted(targets)) or "nothing yet: scan first"))
 
         def run() -> str:
             try:
@@ -1272,14 +2308,810 @@ class LabRuntime:
             return "not saved: this Kelvin has no folder for your cards"
         from ..virtual_lab import builtin_ids
         try:
-            card, path, warnings = carddraft.save(self.cards_dir, text, builtin_ids(), by)
+            card, path, warnings = carddraft.save(self.cards_dir, text, builtin_ids(), by, version=True)
         except ValueError as e:
             return "not saved: %s" % e
         self.lab.registry.put(card)
         self.gate.log.write("card", by=by, card=card.id, status=card.status, file=path.name)
-        return "\n".join(["saved %s card %s as %s. A person adds it to the lab (Lab, Set up) and tries its readings; "
-                          "its drives stay simulation-only on real hardware until they mark it reviewed (Lab, Cards)."
-                          % (card.status, card.id, path)] + ["warning: " + w for w in warnings])
+        users = sorted(n for n, i in self.lab.instruments.items() if i.card.id == card.id)
+        return "\n".join(["saved %s card %s as %s%s. try_card it on the instrument, then add_instrument%s. Until a "
+                          "person marks it reviewed (Lab, Cards…), every setting and output change on it asks them."
+                          % (card.status, card.id, path, ", this lab's version of Kelvin's card" if card.id in
+                             builtin_ids() else "", " (or reconnect_instrument %s)" % ", ".join(users) if users else "")]
+                         + ["warning: " + w for w in warnings])
+
+    def draft_card(self, address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:
+        """A card for an instrument Kelvin has none for: Kelvin finds the maker's manual online (or reads the one the
+        person gave: `manual`, a file on this computer or its web address), writes the card from its command reference
+        with the app's model, checks it and keeps it as a draft (autocard.py). Where the manual leaves some ranges to
+        another document, Kelvin looks for it too (or reads `specs`, which the person gave). The maker and model come
+        from the instrument's identity reply (the last scan), else from what the person said. Only they leave the
+        computer, never a serial number. Sends the instrument nothing."""
+        from ..adapters import resource_name
+        if self.card_writer is None:
+            return ("Kelvin writes cards from manuals in the Kelvin app. Here, write it yourself: the person gives the "
+                    "manual's text, then card_guide, check_card, try_card and save_card")
+        address = (address or "").strip()
+        found = self.found_info.get(resource_name(address), {}) if address else {}
+        idn = str(found.get("idn") or "")
+        if found.get("card_id"):
+            return "%s already matches card %s (%s): add_instrument" % (address, found["card_id"], found.get("model"))
+        if not idn and not (maker.strip() and model.strip()):
+            return ("%s did not answer who it is%s: give the maker and the model the person named"
+                    % (address or "the instrument", "" if found else " (or the last scan did not find it)"))
+        try:
+            r = self.card_writer({"address": address, "idn": idn, "maker": maker.strip(), "model": model.strip(),
+                                  "manual": (manual or "").strip(), "specs": (specs or "").strip(),
+                                  "serial": found.get("serial") or {}})
+        except Exception as e:   # the model or the maker's site failed in a way autocard did not catch
+            r = {"error": str(e).splitlines()[0] if str(e) else type(e).__name__}
+        if r.get("error"):
+            hint = "" if manual or "manual" not in r["error"] else (
+                " (ask the person for the manual's PDF or web address, then draft_card with manual)")
+            return "no card yet: %s%s" % (r["error"], hint)
+        if r.get("manual") and address:
+            self.manuals_found[resource_name(address)] = r["manual"]
+        self.gate.log.write("card", by="agent", card=r["card_id"], status="draft", manual=(r.get("manual") or {}).get("url"))
+        lines = ["drafted card %s (%s, %s) from %s%s%s." % (
+            r["card_id"], r["model"], r["kind"], (r.get("manual") or {}).get("url") or "its manual",
+            " with ranges from %s" % r["specs"] if r.get("specs") else "",
+            "; " + "; ".join(r["changed"]) if r.get("changed") else "")]
+        if r.get("parameters"):
+            lines.append("parameters: " + r["parameters"])
+        if r.get("notes"):   # what the model left out or is unsure of: the person should hear it
+            lines.append("the model's notes: " + " | ".join(r["notes"]))
+        if r.get("ranges_in"):
+            lines.append("Some outputs stay readings: their ranges are in %r, which Kelvin could not get. Ask the person "
+                         "for its PDF or web address, then draft_card again with specs." % r["ranges_in"])
+        lines.append("Next: try_card %s on %s and compare the readings with what the person sees; then "
+                     "add_instrument." % (r["card_id"], address or "the instrument"))
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ the web: pages and manuals
+
+    def _get(self, url: str) -> bytes:
+        from .. import profiles
+        return (self.fetch_url or profiles.http_get)(url)
+
+    def read_web_page(self, url: str, start: int = 0, max_chars: int = 12000) -> str:
+        """A web page or a document on the web as text, for reading a maker's pages, a manual or documentation: from
+        `start`, up to `max_chars` characters, and for a page the links on it, documents first. Nothing is kept."""
+        from .. import profiles
+        from ..autocard import page_links
+        from ..literature import html_to_text
+        url = (url or "").strip()
+        if not self.literature.enabled:
+            return "searching outside the lab (literature and web) is switched off in Settings"
+        if not re.match(r"^https?://", url):
+            return "give a web address (http:// or https://)"
+        try:
+            data = self._get(url)
+        except Exception as e:
+            return "could not read %s: %s" % (url, profiles._first_line(e))
+        links: List[Tuple[str, str]] = []
+        if data[:5] == b"%PDF-":
+            try:
+                pages = profiles.pdf_pages(data)
+            except Exception as e:
+                return "%s is a PDF Kelvin could not read: %s" % (url, profiles._first_line(e))
+            text, kind = "\n\n".join("[page %d]\n%s" % (i + 1, p.strip()) for i, p in enumerate(pages)), \
+                "a PDF of %d pages" % len(pages)
+        else:
+            page = data.decode("utf-8", errors="replace")
+            text, kind, links = html_to_text(page), "a web page", page_links(page, url)
+        try:
+            start, max_chars = max(0, int(start)), max(1000, min(40000, int(max_chars)))
+        except (TypeError, ValueError):
+            start, max_chars = 0, 12000
+        lines = ["%s: %s, %d characters%s" % (url, kind, len(text), ", from character %d" % start if start else ""),
+                 text[start:start + max_chars].strip() or "(no text)"]
+        if start + max_chars < len(text):
+            lines.append("[more: read_web_page with start=%d]" % (start + max_chars))
+        if links:
+            lines.append("Links (documents first):\n" + "\n".join("- %s: %s" % (label or "(link)", u)
+                                                                  for label, u in links[:40]))
+        return "\n".join(lines)
+
+    def save_manual(self, source: str, maker: str = "", model: str = "", address: str = "",
+                    instrument: str = "") -> str:
+        """Keep an instrument's manual: download it from its web address (or take a file on this computer), check that
+        it names the model, and keep it in ~/Kelvin/manuals. For an instrument in the lab it goes into its folder
+        (search_manual reads it); for one not added yet (its address), add_instrument puts it there, and draft_card
+        writes the card from it (manual=<the kept file>)."""
+        from .. import autocard, profiles
+        from ..adapters import resource_name
+        source = (source or "").strip().strip('"')
+        if not source:
+            return "give the manual's web address, or a file on this computer"
+        if not re.match(r"^https?://", source) and Path(source).expanduser().is_dir():   # a folder: its manual
+            folder = Path(source).expanduser()
+            pdfs = sorted(folder.glob("*.pdf")) or sorted(folder.rglob("*.pdf"))[:40]
+            if not pdfs:
+                return "there is no PDF in %s: give the manual's file, or its web address" % folder
+            if len(pdfs) > 1:
+                return "%d PDFs in %s; name the manual's file: %s" % (len(pdfs), folder,
+                                                                         ", ".join(p.name for p in pdfs[:20]))
+            source = str(pdfs[0])
+        if re.match(r"^https?://", source) and not self.literature.enabled:
+            return "searching outside the lab (literature and web) is switched off in Settings"
+        if instrument and instrument not in self.lab.instruments:
+            return "no instrument %r in this lab" % instrument
+        try:
+            m = autocard.manual_from(source, self._get)
+        except Exception as e:
+            return "could not get %s: %s" % (source, profiles._first_line(e))
+        if m["kind"] not in ("pdf", "html"):
+            return "%s is neither a PDF nor a web page" % source
+        text = "\n".join(m["pages"])
+        name = re.sub(r"[^A-Za-z0-9]+", "-", "%s %s" % (maker, model)).strip("-") or \
+            re.sub(r"[^A-Za-z0-9]+", "-", Path(source.split("?")[0]).stem).strip("-") or "manual"
+        folder = Path(self.home) / "manuals"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / (name + (".pdf" if m["kind"] == "pdf" else ".html"))
+        path.write_bytes(m["data"])
+        what = "a PDF of %d pages" % len(m["pages"]) if m["kind"] == "pdf" else "a web page"
+        lines = ["kept %s (%s) as %s" % (m["url"], what, path)]
+        if model and not autocard.names_model(text, model):
+            lines.append("It does not name the %s: check it is the right manual." % model)
+        lines.append("It has a command reference (%d command lines)." % m["score"] if m["score"] >= 15 else
+                     "It has little command syntax (%d lines): for a card, look for the programming or remote-control "
+                     "manual too." % m["score"])
+        url = m["url"] if re.match(r"^https?://", m["url"] or "") else ""
+        if instrument:
+            profiles.store_manual(self.home, instrument, self.lab.instruments[instrument].card, m["data"], url)
+            lines.append("It is now %s's manual (search_manual reads it)." % instrument)
+        elif address:
+            self.manuals_found[resource_name(address)] = {"url": url, "data": m["data"], "kind": m["kind"]}
+            lines.append("It goes into the instrument's folder when add_instrument adds %s." % address)
+        if not instrument:
+            lines.append("Next: draft_card %s with manual=%s, then try_card and add_instrument."
+                         % (address or "<the instrument's address>", path))
+        self.gate.log.write("manual_kept", by="agent", source=source, file=str(path), instrument=instrument or None,
+                            address=address or None)
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ what an instrument is (probe.py)
+
+    def inspect_address(self, address: str) -> str:
+        """What a network address answers: the ports instruments use, what each says (its *IDN? reply where it
+        speaks SCPI, a web page's title, a greeting), the matching card and the address to use. Local networks only;
+        an instrument already in the lab keeps its connection (only its web page is looked at)."""
+        from .. import probe
+        from ..discovery import identify, match_card
+        try:
+            host, _ = probe.host_of(address)
+            ip = probe.local_ip(host)
+        except ValueError as e:
+            return str(e)
+        in_lab = {name: ic.address for name, ic in self.lab.config.instruments.items()
+                  if probe.host_of(ic.address)[0] in (host, ip)}
+        ports = [p for p in probe.PORTS if p[1] in ("http", "https")] if in_lab else None
+        res = probe.inspect(address, ports)
+        lines = ["%s%s: %s" % (host, " (%s)" % ip if ip != host else "",
+                               "%d of the ports instruments use answer" % len(res["found"]) if res["found"] else
+                               "nothing answers on the ports instruments use")]
+        if in_lab:
+            lines.append("In this lab already: %s; Kelvin left its connection alone and looked only at its web page."
+                         % ", ".join("%s (%s)" % kv for kv in in_lab.items()))
+        found_here = []
+        for f in res["found"]:
+            line = "- " + probe.what_answers(f)
+            resource = None
+            if f.get("idn"):
+                resource = "TCPIP0::%s::%d::SOCKET" % (ip, f["port"])
+                card = match_card(f["idn"], self.lab.registry)
+                line += (" → card %s (%s): add_instrument %s" % (card.id, card.model, resource) if card else
+                         " → no card matches it yet: draft_card %s" % resource)
+            elif f["port"] in (111, 4880) and not in_lab:   # VXI-11 and HiSLIP speak through VISA
+                candidate = "TCPIP0::%s::%s::INSTR" % (ip, "inst0" if f["port"] == 111 else "hislip0")
+                try:
+                    got = identify(candidate, self.lab.registry, timeout_ms=1500)
+                except Exception:
+                    got = None
+                if got is not None and got.idn:
+                    resource = candidate
+                    line += "; answers %r there%s" % (got.idn[:100], " → card %s: add_instrument %s" % (
+                        got.card_id, candidate) if got.card_id else " → no card matches it yet: draft_card %s"
+                        % candidate)
+            if resource:
+                found_here.append(resource)
+            lines.append(line)
+        if res["lxi"]:
+            lines.append("Its LXI identification: " + ", ".join("%s %s" % kv for kv in res["lxi"].items()))
+        quiet = [str(p) for p in res["looked"] if p not in {f["port"] for f in res["found"]}]
+        if quiet:
+            lines.append("Closed or silent: " + ", ".join(quiet))
+        if not res["found"]:
+            lines.append("Check the address (the instrument's front panel or its maker's program shows it), that it "
+                         "is switched on, and that this computer is on its network (connected_devices lists this "
+                         "computer's networks). An instrument on a port of its own: inspect_address <address>:<port>.")
+        for resource in found_here:
+            if resource not in self.last_found:
+                self.last_found.append(resource)   # found here: try_card and add_instrument may use it
+        return "\n".join(lines)
+
+    def inspect_serial(self, port: str, query: str = "*IDN?", baud: int = 0) -> str:
+        """What an instrument on a serial port is: what it sends by itself (some stream readings), then its answer
+        to an identity query at the speeds and framings instruments use (or the one the manual gives). Only listens
+        and asks that query; a port an instrument of the lab uses is left alone."""
+        from .. import probe
+        from ..adapters import resource_name
+        from ..discovery import match_card
+        m = re.match(r"^(?:serial://)?(COM\d+|/dev/\S+)$", port.strip(), re.I) or \
+            re.match(r"^ASRL(\d+)::INSTR$", port.strip(), re.I)
+        if not m:
+            return "%r is not a serial port (COM5, /dev/ttyUSB0)" % port
+        name = m.group(1) if not m.group(1).isdigit() else "COM" + m.group(1)
+        address = "serial://" + name
+        for inst, ic in self.lab.config.instruments.items():
+            if resource_name(ic.address) == resource_name(address):
+                return "%s is %s's, in the lab: Kelvin leaves its connection alone" % (name, inst)
+        query = (query or "*IDN?").strip()
+        if "?" not in query or len(query) > 40:
+            return "only an identity query (with a ?, as the manual gives it) is sent to an instrument Kelvin doesn't know"
+        with self.lock:   # one thing at a time on the ports
+            res = probe.inspect_serial(name, query, [baud] if baud else None)
+        if res.get("error"):
+            return "could not open %s: %s (another program may have it open)" % (name, res["error"])
+        lines = []
+        for speed, text in res["streams"]:
+            lines.append("%s sends by itself at %d baud, 8N1: %r (an instrument that streams its readings)"
+                         % (name, speed, text))
+        a = res["answer"]
+        if a is None:
+            lines.append("nothing answered %s at %s, 8N1, 7O1 or 7E1 (%d tries). Check its cable (a null-modem one?) "
+                         "and that it is switched on; its manual gives its speed and its identity query (query=)"
+                         % (query, "%d baud" % baud if baud else "1200 to 115200 baud", res["tried"]))
+            return "\n".join(lines)
+        settings = {"baud_rate": a["baud"], "data_bits": a["data_bits"], "parity": a["parity"], "stop_bits": 1,
+                    "read_termination": a["ending"], "write_termination": "\r\n"}
+        if a["echo"]:
+            settings["echo"] = True
+        card = match_card(a["reply"], self.lab.registry)
+        framing = "%d%s1" % (a["data_bits"], a["parity"][0].upper())
+        lines.append("%s answers %s at %d baud, %s%s: %r → %s" % (
+            name, query, a["baud"], framing, " (it echoes each command)" if a["echo"] else "", a["reply"],
+            "card %s (%s): add_instrument %s" % (card.id, card.model, address) if card else
+            "no card matches it yet: draft_card %s, then add_instrument with connection %s" % (address, settings)))
+        if address not in self.last_found:
+            self.last_found.append(address)   # found here: try_card and add_instrument may use it
+        self.found_info[resource_name(address)] = {"address": address, "idn": a["reply"], "serial": settings,
+                                                   "card_id": card.id if card else None,
+                                                   "model": card.model if card else "", "kind": card.kind if card else ""}
+        return "\n".join(lines)
+
+    def connected_devices(self) -> str:
+        """Everything plugged into this computer: USB devices (with what each calls itself and its driver, also
+        those no driver claims), serial ports, and the networks this computer is on."""
+        from .. import probe
+        ports, devices = probe.serial_ports(), probe.usb_devices()
+        lines = ["USB devices:" if devices else "No USB devices (or this computer doesn't say)."]
+        plain = [d for d in devices if probe.ordinary(d)]
+        lines += ["- " + probe.usb_line(d, ports) for d in devices if d not in plain]
+        if plain:
+            lines.append("- also: " + ", ".join((d["names"] or ["?"])[0] for d in plain))
+        usb_ports = {p["port"] for p in ports if p.get("vid") is not None}
+        other = [p for p in ports if p["port"] not in usb_ports]
+        if other:
+            lines.append("Serial ports (not USB): " + ", ".join("%s (%s)" % (p["port"], p["description"])
+                                                                if p["description"] else p["port"] for p in other))
+        nets = probe.network_adapters()
+        if nets:
+            lines.append("Networks this computer is on: " + "; ".join(
+                "%s %s (this computer %s)%s" % (n["name"], n["network"], n["address"],
+                                                ", link-local: instruments that fall back to 169.254.x.x" if
+                                                n["link_local"] else "") for n in nets))
+        lines.append("An instrument here that scan_instruments doesn't find: its maker (installed_software, or "
+                     "web_search for its USB ID), then what it needs (install_for_instrument) and its card "
+                     "(draft_card). On a network: inspect_address.")
+        return "\n".join(lines)
+
+    def installed_software(self, query: str = "") -> str:
+        """Programs and drivers installed on this computer: those whose name or maker holds the query, or with no
+        query the ones that look like instrument makers' software, drivers and Pythons."""
+        from .. import probe
+        found = probe.programs(query)
+        if not found:
+            return ("nothing installed matches %r" % query if query else
+                    "no instrument makers' software found among the installed programs")
+        lines = ["%s%s%s%s" % (p["name"], " " + p["version"] if p["version"] and p["version"] not in p["name"] else "",
+                               " (%s)" % p["publisher"] if p["publisher"] else "",
+                               " in " + p["location"] if p["location"] else "") for p in found[:60]]
+        if len(found) > 60:
+            lines.append("... and %d more: name a maker or program" % (len(found) - 60))
+        lines.append("find_maker_files finds a program's examples, SDK folders and libraries.")
+        return "\n".join(lines)
+
+    def find_maker_files(self, query: str) -> str:
+        """Files and folders named like the query in the makers' install folders (Program Files, ProgramData, Public
+        Documents; /Applications, /Library, /opt): a maker's examples, its SDK's Python package, its DLL."""
+        from .. import probe
+        hits = probe.find_files(query)
+        if not hits:
+            return "nothing named like %r in %s" % (query, ", ".join(str(r) for r in probe.search_roots()))
+        lines = ["%s (%s)" % h for h in hits]
+        lines.append("read_examples reads a folder of examples; install_for_instrument with files installs an SDK's "
+                     "Python package or keeps a DLL in an environment.")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ what an instrument needs on this computer
+
+    def environments(self) -> str:
+        """Kelvin's instrument environments on this computer (envs.py): their Python, packages and files."""
+        from .. import envs
+        found = envs.listing(self.home)
+        if not found:
+            return ("no instrument environments yet: install_for_instrument makes one when an instrument needs its "
+                    "maker's Python package or files")
+        lines = []
+        for rec in found:
+            pkgs = ", ".join("%s %s" % kv for kv in sorted(rec.get("packages", {}).items())) or "no packages"
+            lines.append("%s: Python %s (%d-bit); %s%s%s" % (
+                rec["name"], rec.get("python"), rec.get("bits", 64), pkgs,
+                "; files: " + ", ".join(rec["files"]) if rec.get("files") else "",
+                "; for " + ", ".join(rec["for"]) if rec.get("for") else ""))
+        uv = envs.uv_path(self.home)
+        lines.append("(uv: %s) A library card uses one with lib://<address>?env=<name>; Kelvin's built-in drivers use "
+                     "%r." % (uv or "not here yet", envs.DRIVERS))
+        return "\n".join(lines)
+
+    def install_for_instrument(self, env: str, packages: Optional[List[str]] = None, python: str = "", bits: int = 64,
+                               files: str = "", why: str = "", by: str = "agent") -> str:
+        """Install what an instrument needs on this computer, in one of Kelvin's environments (envs.py): its maker's
+        Python packages from PyPI, at the version the instrument needs, and its own files (a folder or a download).
+        A person approves first, seeing what, which version and from where."""
+        from .. import envs, profiles
+        from ..gate import ApprovalRequest
+        packages = [p.strip() for p in (packages or []) if str(p).strip()]
+        try:
+            envs.env_dir(env, self.home)
+        except ValueError as e:
+            return str(e)
+        if not packages and not files:
+            return "say which packages (pip names, with a version if it must match) or which files to install"
+        if bits not in (32, 64):
+            return "bits is 32 or 64"
+        bad = [p for p in packages if not envs.PACKAGE.match(p)]
+        if bad or len(packages) > 12:
+            return "not package names: %s" % ", ".join(bad) if bad else "at most 12 packages at a time"
+        if not self.literature.enabled and (packages or re.match(r"^https?://", files or "")):
+            return "searching outside the lab (literature and web) is switched off in Settings, so Kelvin downloads nothing"
+        rec = envs.info(env, self.home)
+        app_version, app_bits = envs.app_python()
+        if rec is not None and ((python and python != rec.get("python")) or bits != rec.get("bits", 64)):
+            return ("environment %s has Python %s (%d-bit): name another environment for Python %s (%d-bit)"
+                    % (env, rec.get("python"), rec.get("bits", 64), python or app_version, bits))
+        if env == envs.DRIVERS and (python and python != app_version or bits != app_bits):
+            return ("%s is for Kelvin's built-in drivers and has Kelvin's own Python (%s, %d-bit); a library that needs "
+                    "another goes in an environment of its own" % (envs.DRIVERS, app_version, app_bits))
+        items = []
+        if envs.uv_path(self.home) is None:
+            items.append("uv, Astral's Python installer (about 20 MB), from its GitHub release (github.com/astral-sh/uv), "
+                         "checked against its published SHA-256; once, kept in %s" % (Path(self.home) / "tools"))
+        if rec is None:
+            items.append("a new environment %s in %s, with its own Python %s (%d-bit), which uv downloads if this "
+                         "computer has none (30 to 40 MB)" % (env, envs.env_dir(env, self.home), python or app_version, bits))
+        for spec in packages:
+            try:
+                meta = envs.pypi(spec, self._get)
+            except LookupError as e:
+                return "%s: check the package's name in the maker's instructions" % e
+            except Exception as e:
+                return "could not look up %s on PyPI: %s" % (spec, profiles._first_line(e))
+            items.append("%s from PyPI (%s; latest %s)%s%s" % (spec, meta["name"], meta["version"],
+                                                               ": " + meta["summary"] if meta["summary"] else "",
+                                                               " — " + meta["home"] if meta["home"] else ""))
+        if files and not re.match(r"^https?://", files) and not Path(files).expanduser().exists():
+            return "there is no file or folder %s on this computer" % files
+        if files:
+            items.append("the maker's files from %s, kept in the environment (a Python package among them is "
+                         "installed)" % files)
+        request = ApprovalRequest("Install on this computer%s?" % (" for " + why if why else ""), items)
+        if not self.gate.auto_simple(request, "installing into one of Kelvin's own environments drives nothing; the "
+                                              "instrument's commands still go through Kelvin's checks") \
+                and not self.gate.ask(request):
+            note = " (%s)" % request.note if request.note else ""
+            return "declined: nothing installed%s" % note
+        try:
+            if envs.uv_path(self.home) is None:
+                envs.fetch_uv(self.home, self._get)
+            if rec is None:
+                rec = envs.create(env, python, bits, self.home, why=why)
+            elif why and why not in rec.get("for", []):
+                rec.setdefault("for", []).append(why)
+                envs._save(rec, self.home)
+            if packages:
+                rec = envs.install(env, packages, self.home)
+            if files:
+                rec = envs.info(env, self.home) or rec
+                kept = self._fetch_files(env, files)
+                rec = envs.info(env, self.home) or rec
+        except Exception as e:
+            self.gate.log.write("install_failed", by=by, env=env, packages=packages, files=files or None,
+                                error=profiles._first_line(e))
+            return "could not install: %s" % profiles._first_line(e)
+        if env == envs.DRIVERS:
+            envs.attach(env, self.home)
+        self.gate.log.write("installed", by=by, env=env, packages=packages, files=files or None, why=why or None)
+        got = ", ".join("%s %s" % (base, rec["packages"].get(envs.base_name(base), "?"))
+                        for base in [envs.base_name(p) for p in packages])
+        names = {envs.base_name(p).lower() for p in packages}
+        waiting = [n for n, why in self.lab.unavailable.items()   # the instruments it was missing for
+                   if (envs.needed(why) or {}).get("env") == env and names >= {envs.base_name(p).lower() for p in
+                                                                             envs.needed(why)["packages"]}]
+        connected = [self.reconnect_instrument(n, by) for n in waiting]
+        return ("installed in environment %s (Python %s, %d-bit)%s%s. %s%s"
+                % (env, rec.get("python"), rec.get("bits", 64), ": " + got if got else "",
+                   "; files in %s" % kept if files else "",
+                   "Kelvin's built-in drivers use it now." if env == envs.DRIVERS else
+                   "A library card uses it with lib://<address>?env=%s." % env,
+                   "".join(" " + c for c in connected)))
+
+    def do_action(self, instrument: str, action: str) -> str:
+        """One of an instrument's named actions (its card's actions: trigger, arm, fire a burst). One that drives the
+        sample asks the person first."""
+        def run() -> str:
+            return self.gate.act(instrument, action).message
+        return self._do("%s.%s" % (instrument, action), run)
+
+    def connect_pending(self, progress: Optional[Callable[[str, int, int], None]] = None) -> Dict[str, Any]:
+        """Connect the instruments of a lab Kelvin opened before connecting them (open_home_lab connect=False), one
+        at a time, holding the lab for each only: a request for one already connected doesn't wait for the rest. One
+        that can't be connected is set aside with why, as at any start. progress(name, i, n) before each."""
+        lab = self.lab
+        names = lab.connecting
+        done: List[str] = []
+        for i, name in enumerate(names):
+            if self.lab is not lab:   # a person switched labs meanwhile
+                break
+            if name not in lab.connecting:   # a person switched it off meanwhile (or it connected another way)
+                continue
+            if progress is not None:
+                progress(name, i, len(names))
+            with self.lock:
+                self.busy = "connecting %s" % name
+                try:
+                    lab.reconnect(name)
+                    done.append(name)
+                except Exception:
+                    pass   # set aside with why: the Lab panel says it (and offers the install a missing package needs)
+                finally:
+                    self.busy = None
+        with self.lock:
+            self._apply_protection(recheck=True)   # the mounted device's caps, written now that they can be
+            self._caps_if_waiting()
+            self._refresh()
+        missing = {n: why for n, why in lab.unavailable.items() if n in names}
+        self.gate.log.write("lab_connected", lab=lab.config.name, instruments=done, not_connected=missing or None)
+        return {"connected": done, "not_connected": missing}
+
+    def reconnect_instrument(self, name: str, by: str = "agent") -> str:
+        """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package
+        installed, the instrument switched on or plugged in). Connecting changes nothing on it."""
+        inst = self.lab.instruments.get(name)
+        if inst is None:
+            return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
+        if inst.enabled:
+            return "%s is connected" % name
+        if not inst.unavailable:
+            return "%s is switched off in the Lab panel: ask_to_switch_on asks the person" % name
+        with self.lock:
+            try:
+                self.lab.reconnect(name)
+            except Exception as e:
+                self.gate.log.write("reconnect_failed", by=by, instrument=name, error=inst.unavailable)
+                return "%s is still not connected: %s" % (name, inst.unavailable or e)
+            self.gate.log.write("instrument_connected", by=by, instrument=name)
+            self._caps_if_waiting()
+            self._refresh()
+        health = self.lab.health_check([name])[0]
+        return "%s is connected now%s" % (name, ": " + "; ".join(health.problems) if health.problems else
+                                          " and answers as its card expects")
+
+    def _fetch_files(self, env: str, source: str) -> str:
+        """A maker's files into an environment: a folder or file on this computer, or a web address. A Python package
+        (a wheel, a source archive, a folder with its setup, as SDKs bring them) is installed; anything else (a
+        DLL, a .py, a folder of them, a .zip's contents) is kept in the environment's files folder."""
+        import tempfile
+        import zipfile
+        from .. import envs
+        with tempfile.TemporaryDirectory() as tmp:
+            if re.match(r"^https?://", source):
+                path = Path(tmp) / (re.sub(r"[^A-Za-z0-9._-]+", "_", Path(source.split("?")[0]).name) or "download")
+                path.write_bytes(self._get(source))
+            else:
+                path = Path(source).expanduser()
+                if not path.exists():
+                    raise FileNotFoundError("no file or folder %s" % source)
+            if path.is_file() and path.name.lower().endswith(".zip"):
+                folder = Path(tmp) / "unzipped" / path.stem   # kept under the archive's name
+                with zipfile.ZipFile(path) as z:
+                    z.extractall(folder)   # names with .. or a drive are made safe by zipfile
+                inner = list(folder.iterdir())
+                path = inner[0] if len(inner) == 1 and inner[0].is_dir() else folder
+            if envs.installable(path):
+                envs.install_path(env, path, self.home)
+                return "%s (installed as a Python package)" % envs.site_packages(env, self.home)
+            return str(envs.add_files(env, path, self.home))
+
+    def _run_over_ssh(self, address: str, command: str, notebook: str, password: str, wait: float) -> str:
+        """A shell command on a board or lab computer over SSH, once a person approves it."""
+        from .. import boards, envs, probe
+        try:
+            user, host, port = boards.ssh_target(address)
+            probe.local_ip(host)
+        except (ValueError, boards.JupyterError) as e:
+            return str(e)
+        if notebook or not (command or "").strip():
+            return "over SSH, give the shell command to run (code); notebooks run through a board's Jupyter"
+        wait = max(1.0, min(float(wait or 30), 300.0))
+        request = ApprovalRequest("Run a command on %s over SSH?" % host, [
+            "As %s on %s:%d:\n%s" % (user, host, port, command.strip()[:3000]),
+            "Signed in with %s. A command still running after %g s is stopped when Kelvin disconnects: a server is "
+            "started in the background (nohup ... &)." % ("the password given" if password else
+                                                         "this computer's SSH key", wait)])
+        if not self.gate.ask(request):
+            note = " (%s)" % request.note if request.note else ""
+            return "declined: nothing was run on %s%s" % (host, note)
+        try:
+            done, said = boards.ssh_run(address, command, password, wait, envs.root(self.home) / "tools" / "known_hosts")
+        except boards.JupyterError as e:
+            return "could not run it: %s" % e
+        self.gate.log.write("board_run", by="agent", board="ssh://%s@%s:%d" % (user, host, port), finished=[done])
+        said = said.strip()
+        return "%s%s" % ("done" if done else "still running after %g s, stopped when Kelvin disconnected" % wait,
+                         ": " + said[-2000:] if said else "")
+
+    def run_on_board(self, address: str, code: str = "", notebook: str = "", password: str = "",
+                     wait: float = 30) -> str:
+        """Run code on a lab board through its Jupyter server (a PYNQ board for QICK, a Red Pitaya), as a notebook
+        cell runs there: the code given, or one of the board's own notebooks, in a new kernel. Kelvin signs in first,
+        then a person approves the code. A cell still running after `wait` seconds (a server) is left running.
+        An ssh://user@host address runs code as a shell command over SSH instead (a Red Pitaya, a Raspberry Pi)."""
+        import urllib.parse
+        from .. import boards, probe
+        if address.strip().lower().startswith("ssh://"):
+            return self._run_over_ssh(address, code, notebook, password, wait)
+        try:
+            url = boards.board_url(address)
+            probe.local_ip(urllib.parse.urlparse(url).hostname or "")
+        except (ValueError, boards.JupyterError) as e:
+            return str(e)
+        if bool((code or "").strip()) == bool((notebook or "").strip()):
+            return "give the code to run, or the path of a notebook on the board: one of them"
+        wait = max(1.0, min(float(wait or 30), 300.0))
+        jupyter = boards.Jupyter(url, password)
+        try:
+            jupyter.login()
+            cells = jupyter.notebook(notebook) if notebook else [code]
+        except boards.JupyterError as e:
+            return "could not run it: %s" % e
+        if not cells:
+            return "the notebook %s has no code" % notebook
+        shown = "\n\n".join(cells)
+        host = urllib.parse.urlparse(url).hostname
+        request = ApprovalRequest("Run code on the board at %s?" % host, [
+            "%s:\n%s" % ("Its notebook %s, cell by cell" % notebook if notebook else "This code",
+                          shown[:3000] + (" ..." if len(shown) > 3000 else "")),
+            "In a new Python kernel on the board's Jupyter (%s)%s. A cell still running after %g s (a server) "
+            "keeps running there." % (url, ", signed in with the password given" if password else "", wait)])
+        if not self.gate.ask(request):
+            note = " (%s)" % request.note if request.note else ""
+            return "declined: nothing was run on the board%s" % note
+        try:
+            results = boards.run(url, cells, seconds=wait, jupyter=jupyter)
+        except boards.JupyterError as e:
+            return "could not run it: %s" % e
+        self.gate.log.write("board_run", by="agent", board=url, notebook=notebook or None, cells=len(cells),
+                            finished=[done for done, _ in results])
+        lines = []
+        for i, (done, said) in enumerate(results, 1):
+            said = said.strip()
+            lines.append("cell %d: %s%s" % (i, "done" if done else "still running (a server, left running on the "
+                                            "board)", ": " + said[-1500:] if said else ""))
+        if len(results) < len(cells):
+            lines.append("cells %d-%d not run" % (len(results) + 1, len(cells)))
+        return "\n".join(lines)
+
+    def library_api(self, module: str, env: str = "") -> str:
+        """A maker's Python package as its programmer sees it, for writing its library card when the maker gives
+        no example scripts: its classes and functions with their arguments and documentation's first line. Read in
+        Kelvin's helper process, from one of Kelvin's environments; nothing in the package is called."""
+        from .. import library
+        from ..adapters import AdapterError
+        try:
+            said = library.describe(module.strip(), env.strip(), self.home)
+        except (AdapterError, ValueError) as e:
+            return "could not read %s: %s" % (module, e)
+        return (said or "%s has no public classes or functions of its own" % module) + (
+            "\nA library card names its module and object (card_guide), and calls these by name; the helper "
+            "calls nothing else.")
+
+    def remove_environment(self, env: str) -> str:
+        """Remove one of Kelvin's instrument environments, after a person approves; instruments using it stop
+        connecting until it is installed again."""
+        from .. import envs
+        from ..gate import ApprovalRequest
+        try:
+            rec = envs.info(env, self.home)
+        except ValueError as e:
+            return str(e)
+        if rec is None:
+            return "no environment %s" % env
+        using = [n for n, i in self.lab.instruments.items() if "env=%s" % env in (i.config.address or "")
+                 or (env == envs.DRIVERS and i.card.requires)]
+        request = ApprovalRequest("Remove an instrument environment?", [
+            "%s (Python %s, %d-bit: %s)%s" % (env, rec.get("python"), rec.get("bits", 64),
+                                             ", ".join(rec.get("packages", {})) or "no packages",
+                                             "; used by " + ", ".join(using) if using else "")])
+        mine = not using and self.gate.auto_simple(request, "removing an environment no instrument uses drives "
+                                                            "nothing; it can be installed again")
+        if not mine and not self.gate.ask(request):   # one in use: Kelvin would lose that instrument, so a person says
+            return "declined: %s stays" % env
+        whole = envs.remove(env, self.home)
+        self.gate.log.write("environment_removed", by="agent", env=env)
+        return "removed environment %s%s" % (env, "" if whole else ": some of its files are in use, and go when Kelvin "
+                                             "next starts")
+
+    # ------------------------------------------------------------------ adding instruments to the lab
+
+    def add_instrument(self, address: str, card: str = "", name: str = "", connection: Optional[Dict[str, Any]] = None,
+                       card_vars: Optional[Dict[str, str]] = None, by: str = "agent") -> str:
+        """Kelvin adds an instrument connected to this computer to the lab (lab.yaml), marked added_by: kelvin, and
+        connects it; the others stay connected as they are. It reads and configures at once; until a person reviews
+        its limits, every output change on it asks them. An address the last scan did not find asks first; moving
+        Kelvin off a virtual lab the person chose asks too."""
+        from ..adapters import AdapterError, resource_name
+        from ..cards import CONNECTION_KEYS
+        from ..discovery import Found, add_to_config
+        from ..labconfig import ConfigError, load_lab_config
+        from ..virtual_lab import build_lab, lab_registry
+        if self.home is None:
+            return "not added: this Kelvin keeps no lab config (the Kelvin app does)"
+        address = (address or "").strip()
+        if not address or address.startswith("sim://"):
+            return "not added: give the address of an instrument connected to this computer (scan_instruments)"
+        lab_file = self.home / "lab.yaml"
+        registry = lab_registry(self.home)
+        found = self.found_info.get(resource_name(address), {})
+        card_id = (card or "").strip() or found.get("card_id") or ""
+        if not card_id:
+            return "not added: Kelvin has no card for %s yet%s; draft_card writes one from its manual" % (
+                address, " (it answered %r)" % found["idn"][:60] if found.get("idn") else "")
+        try:
+            the_card = registry.get(card_id)
+        except KeyError:
+            return "not added: there is no card %r (draft_card or save_card makes one)" % card_id
+
+        def run() -> str:
+            live = self.live or {}
+            if live.get("status") == "running" or self.queue.state in ("running", "pausing"):
+                return "not added: a plan or the queue is running; add it when it has finished"
+            text = lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""
+            on_file = self.lab_info.get("kind") == "file"
+            if on_file and not text.strip():
+                return "not added: your lab config (lab.yaml) is gone; open Lab setup to make it again"
+            try:
+                current = self.lab.config if on_file else (load_lab_config(text, registry) if text.strip() else None)
+            except ConfigError as e:
+                return "not added: your lab config has problems (fix them in Lab setup): " + "; ".join(e.errors[:4])
+            except (ValueError, yaml.YAMLError) as e:
+                return "not added: your lab config can't be read (fix it in Lab setup): %s" % str(e).splitlines()[0]
+            taken = dict(current.instruments) if current is not None else {}
+            for n, ic in taken.items():
+                if resource_name(ic.address) == resource_name(address):
+                    off = on_file and n in self.lab.switched_off
+                    return "%s is in the lab already, as %s (card %s)%s" % (
+                        address, n, ic.card, "; it is switched off: ask_to_switch_on" if off else "")
+            try:   # names in the file too, should it have changed since Kelvin connected
+                listed = list(((load_yaml(text) or {}).get("instruments") or {}) if text.strip() else [])
+            except Exception:
+                listed = []
+            names = sorted(set(taken) | {str(n) for n in listed})
+            new = (name or "").strip() or Found(address, kind=the_card.kind).suggest_name(names)
+            if not new.isidentifier():
+                return "not added: %r can't be a name (letters, digits and _)" % new
+            if new in names:
+                return "not added: the lab has a %s already (%s); choose another name" % (new, ", ".join(names))
+            conn = dict(connection or {})
+            if not conn and found.get("serial") and "baud_rate" not in the_card.connection:   # how the scan reached it
+                conn = {k: v for k, v in found["serial"].items() if k in CONNECTION_KEYS}
+            item = {"name": new, "card": the_card.id, "address": address, "added_by": "kelvin",
+                    "note": str(found.get("idn") or the_card.model)[:60],
+                    "connection": conn, "vars": {str(k): str(v) for k, v in (card_vars or {}).items()}}
+            try:
+                new_text = add_to_config(text, [item], registry)
+                cfg = load_lab_config(new_text, registry)
+            except ConfigError as e:
+                return "not added: " + "; ".join(x for x in e.errors[:4])
+            except (ValueError, StopIteration, yaml.YAMLError) as e:
+                why = str(e).splitlines()[0] if str(e) else type(e).__name__
+                return "not added: Kelvin couldn't fit its entry into your lab config (%s); add it in Lab setup" % why
+            ic = cfg.instruments.get(new)
+            if ic is None or ic.address != address or ic.card != the_card.id:
+                return "not added: the lab config changed while Kelvin was adding it; try again"
+            asks = []
+            if resource_name(address) not in {resource_name(a) for a in self.last_found}:
+                if _runs_a_program(address):
+                    return ("not added: a lib:// address with python= or path= names a program for Kelvin to run, "
+                            "so a person adds it in Lab setup (the card is ready for them); or install the maker's "
+                            "library with install_for_instrument and use lib://<address>?env=<environment>")
+                asks.append("Kelvin's last scan did not find an instrument at %s. Kelvin would connect to it as %s "
+                            "(%s) and read it." % (address, new, the_card.model))
+            if not on_file and lab_file.exists() and not self.lab_info.get("error"):
+                asks.append("Kelvin is on the virtual lab, as you chose; adding %s moves it to your instruments "
+                            "(%s)." % (new, ", ".join(sorted(cfg.instruments))))
+            if asks:
+                request = ApprovalRequest("Add %s to the lab?" % new, asks + [
+                    "Every output change on it still asks you until you review its limits."])
+                simple = len(asks) == 1 and on_file   # only an address the scan missed: it connects and reads
+                if not (simple and self.gate.auto_simple(request, "adding an instrument connects it and reads it; "
+                                                                  "every output change on it still asks")) \
+                        and not self.gate.ask(request):
+                    note = " (%s)" % request.note if request.note else ""
+                    return "declined: the person did not want %s added%s" % (new, note)
+            try:   # on the person's lab: connect just this one; from the virtual lab: their whole lab, with it
+                lab = self.lab if on_file else build_lab(new_text, None, 0, registry, self.switched_off_for)
+                if on_file:
+                    lab.add(ic, the_card)
+            except (AdapterError, OSError, ValueError, RuntimeError) as e:
+                why = str(e).splitlines()[0] if str(e) else type(e).__name__
+                return "not added: Kelvin could not connect %s: %s" % (address if on_file else "your lab with it", why)
+
+            def undo() -> None:
+                if on_file:
+                    lab.remove(new)
+                else:
+                    lab.close()
+
+            health = lab.health_check([new])[0]
+            if any("does not match card" in p for p in health.problems):   # a wrong address: another instrument
+                undo()
+                return "not added: %s" % "; ".join(health.problems)
+            try:
+                lab_file.parent.mkdir(parents=True, exist_ok=True)
+                fresh = lab_file.read_text(encoding="utf-8") if lab_file.exists() else ""
+                if fresh != text:   # a person changed it meanwhile (an instrument's limits in Set up): add to theirs
+                    new_text = add_to_config(fresh, [item], registry)
+                    load_lab_config(new_text, registry)
+                tmp = lab_file.with_suffix(".tmp")
+                tmp.write_text(new_text, encoding="utf-8")
+                tmp.replace(lab_file)
+            except OSError as e:
+                undo()
+                return "not added: Kelvin could not save the lab config: %s" % e
+            except (ConfigError, ValueError, StopIteration, yaml.YAMLError):
+                undo()
+                return "not added: the lab config changed while Kelvin was adding it; try again"
+            if not on_file:
+                info = {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
+                try:
+                    self.switch_lab(lab, None, info, "Kelvin (%s)" % by)
+                except RuntimeError as e:
+                    lab.close()
+                    return "added %s to your lab config, but Kelvin could not switch to it: %s" % (new, e)
+            self._apply_protection(recheck=True)
+            manual = self.manuals_found.pop(resource_name(address), None)
+            if manual:
+                from .. import profiles
+                try:
+                    profiles.store_manual(self.home, new, self.lab.instruments[new].card, manual["data"], manual["url"])
+                except Exception:
+                    pass   # the app's setup fetches it again
+            self.gate.log.write("instrument_added", by=by, instrument=new, card=the_card.id, address=address,
+                                lab=self.lab.config.name)
+            self.notifier("setup", "Kelvin added %s to the lab" % new,
+                          "%s at %s. Readings and settings work now; Kelvin asks you before each output change on it "
+                          "until you review its limits in Lab setup." % (the_card.model, address))
+            self.lab_changed("added")
+            lim = ", ".join("%s [%s, %s]%s" % (p.name, num(p.limits[0]), num(p.limits[1]), " " + p.unit if p.unit else "")
+                            for p in self.lab.instruments[new].card.drives if p.numeric and p.limits)
+            return ("added %s (%s, card %s%s) at %s to %s; health: %s. Its outputs keep the maker's limits%s until a "
+                    "person reviews them, and every output change on it asks them (auto mode doesn't cover it)."
+                    % (new, the_card.model, the_card.id, ", a draft" if the_card.status == "draft" else "", address,
+                       self.lab.config.name, "ok" if health.ok else "; ".join(health.problems),
+                       " (" + lim + ")" if lim else ""))
+        return self._do("adding an instrument", run)
 
     # ------------------------------------------------------------------ literature
 
@@ -1313,7 +3145,7 @@ class LabRuntime:
         return self.data_dir / "reports"
 
     def pick_runs(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0) -> List[str]:
-        return pick_runs(self.data_dir / "runs", runs, day, last)
+        return pick_runs(self.runs, runs, day, last)
 
     def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
                notes: Any = (), by: str = "human", references: Any = (), folder: Optional[Path] = None,
@@ -1328,7 +3160,7 @@ class LabRuntime:
 
         def columns(run_id: str) -> Optional[Dict[str, List[Dict[str, str]]]]:
             try:
-                return self.engine.columns(self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8")))
+                return self._columns(rundata.load(self._run_dir(run_id), with_rows=False))
             except Exception:   # the run's instruments are not in this lab any more
                 return None
 
@@ -1337,7 +3169,7 @@ class LabRuntime:
         lab_name = ", ".join(labs) if labs else self.lab.config.name
         simulated = all(m.get("simulated", True) for m in metas) if labs else \
             all(i.simulated for i in self.lab.instruments.values())
-        report = Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line).report(
+        report = Collector(self.runs, self.lab, columns, self.gate.log.events, event_line).report(
             run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated, references)
         target = folder or self.reports_dir / "custom"
         target.mkdir(parents=True, exist_ok=True)
@@ -1358,9 +3190,14 @@ class LabRuntime:
         return out
 
     def _auto_report(self, run_id: Optional[str]) -> List[str]:
-        """Every finished or stopped run gets its scan report in its own folder (report.pdf, report.pptx), and its
-        device and project reports are rewritten a little later, unless the person switched automatic reports off.
-        A report that cannot be written never fails the run."""
+        """Every finished or stopped run goes into the catalog and gets its scan report in its own folder
+        (report.pdf, report.pptx), and its device and project reports are rewritten a little later, unless the
+        person switched automatic reports off. A report that cannot be written never fails the run."""
+        if run_id:
+            try:
+                self.catalog.add(self._run_dir(run_id))
+            except Exception:
+                pass   # the catalog catches up at its next look at the run folders
         if not run_id or self.auto_report == "off":
             return []
         out: List[str] = []
@@ -1379,10 +3216,10 @@ class LabRuntime:
     def _collector(self) -> Collector:
         def columns(run_id: str) -> Optional[Dict[str, List[Dict[str, str]]]]:
             try:
-                return self.engine.columns(self._plan((self._run_dir(run_id) / "plan.yaml").read_text(encoding="utf-8")))
+                return self._columns(rundata.load(self._run_dir(run_id), with_rows=False))
             except Exception:   # the run's instruments are not in this lab any more
                 return None
-        return Collector(self.data_dir / "runs", self.lab, columns, self.gate.log.events, event_line)
+        return Collector(self.runs, self.lab, columns, self.gate.log.events, event_line)
 
     def _write_doc(self, doc: Any, base: Path, fmt: Optional[str] = None) -> List[str]:
         base.parent.mkdir(parents=True, exist_ok=True)
@@ -1400,8 +3237,7 @@ class LabRuntime:
         if dg is None:
             raise KeyError("run %s has not finished" % run_id)
         part = self._collector().run(run_id, self.gate.log.events())
-        files = {p.name for p in d.iterdir() if p.is_file() or p.name == "frames"} | \
-            {"report." + f for f in self._formats(fmt)}
+        files = {p.name for p in d.iterdir() if p.is_file()} | {"report." + f for f in self._formats(fmt)}
         doc = report_kinds.scan_document(part, dg, files, dg.lab or self.lab.config.name, dg.simulated)
         return self._write_doc(doc, d / "report", fmt)
 
@@ -1434,14 +3270,12 @@ class LabRuntime:
             return {}
 
     def _digests(self) -> List[report_kinds.Digest]:
-        root = self.data_dir / "runs"
         out = []
-        for d in sorted(root.iterdir()) if root.exists() else []:
-            if d.is_dir():
-                dg = report_kinds.digest(d)
-                if dg is not None:
-                    out.append(dg)
-        return out
+        for d in self.runs.iterdir():
+            dg = report_kinds.digest(d)
+            if dg is not None:
+                out.append(dg)
+        return sorted(out, key=lambda dg: dg.run_id)
 
     def _run_owners(self, digests: Optional[List[report_kinds.Digest]] = None) -> Dict[str, Optional[str]]:
         """run id -> project id (None: General). A run records its project; older runs belong to the project of
@@ -1552,8 +3386,8 @@ class LabRuntime:
                 "custom": [rel(p) for p in files(root / "custom") + files(root)][:40]}
 
     def run_file(self, run_id: str, name: str) -> Path:
-        """A file a person may open from a run's folder: its reports and its CSV data. KeyError otherwise."""
-        if not re.fullmatch(r"[\w.-]+\.(pdf|pptx|csv)", name or "") or ".." in name:
+        """A file a person may open from a run's folder: its reports and its data (run.h5). KeyError otherwise."""
+        if not re.fullmatch(r"[\w.-]+\.(pdf|pptx|h5)", name or "") or ".." in name:
             raise KeyError("no file %r in run %s" % (name, run_id))
         path = self._run_dir(run_id) / name
         if not path.is_file():
@@ -1562,13 +3396,13 @@ class LabRuntime:
 
     def run_files(self, run_id: str) -> List[Dict[str, Any]]:
         d = self._run_dir(run_id)
-        order = {"report.pdf": 0, "report.pptx": 1, "data.csv": 2, "conditions.csv": 3}
-        files = [p for p in d.iterdir() if p.is_file() and p.suffix in (".pdf", ".pptx", ".csv")]
+        order = {"report.pdf": 0, "report.pptx": 1, rundata.RUN_FILE: 2}
+        files = [p for p in d.iterdir() if p.is_file() and p.suffix in (".pdf", ".pptx", ".h5")]
         return [{"name": p.name, "size": p.stat().st_size} for p in sorted(files, key=lambda p: (order.get(p.name, 3), p.name))]
 
     def _run_meta(self, run_id: str) -> Dict[str, Any]:
         try:
-            return json.loads((self._run_dir(run_id) / "meta.json").read_text(encoding="utf-8"))
+            return rundata.meta(self._run_dir(run_id))
         except (KeyError, OSError, ValueError):
             return {}
 
@@ -1683,6 +3517,18 @@ class LabRuntime:
             lines.append("active alarm %s: %s" % (a.id, a.text))
         return "\n".join(lines) or "nothing is watched"
 
+    def mark_reviewed(self, by: str = "human") -> List[str]:
+        """A person reviewed the limits of the instruments Kelvin added (their lab config has no marks now, and
+        nothing else changed): from now on they count as the person's, with nothing to reconnect. Only the portal
+        calls this; no agent tool can."""
+        with self.lock:
+            names = self.lab.config.unreviewed()
+            for ic in self.lab.config.instruments.values():
+                ic.added_by = ""
+            self.lab.config.observe_only = False
+            self.gate.log.write("lab_reviewed", by=by, instruments=names)
+            return names
+
     def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human") -> List[str]:
         """Control another lab (the user's instruments, or the virtual lab). Refused while a plan runs. The approval
         mode goes back to asking, and the new lab is health-checked right away."""
@@ -1692,8 +3538,9 @@ class LabRuntime:
             old = self.lab
             self.lab = lab
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
-            self.engine = RunEngine(self.gate, RunStore(self.data_dir / "runs"))
+            self.engine = RunEngine(self.gate, self._store())
             self.engine.progress = self._on_progress
+            self._apply_protection(recheck=True)
             self.lab_info = dict(info)
             running = self.monitor._thread is not None
             self.monitor.stop()
@@ -1721,12 +3568,11 @@ class LabRuntime:
                 found, looked = scan_survey(self.lab.registry, in_lab=in_lab, network=self.scan_network)
             except AdapterError as e:
                 return str(e)
-            self.last_survey = dict(looked.as_dict(), reason=reason(found, looked), at=time.time())
-            self.last_found = [f.address for f in found]
+            self._remember_scan(found, looked)
             if not found:
                 return "\n".join([reason(found, looked)] + looked.lines())
             lines = [f.line() for f in found]
-            lines.append("Only a person can add an instrument to the lab (lab config); suggest it, do not assume it.")
+            lines.append("To use one the person asked for: add_instrument (one with no card: draft_card first).")
             return "\n".join(lines)
         return self._do("scanning for instruments", run)
 
@@ -1744,9 +3590,12 @@ class LabRuntime:
                     never.append(key)
                 elif isinstance(rule, Allowed):
                     ranges.append("%s %s" % (key, rule.show(card.params[param])))
-        rule = ("drive changes and runs go ahead without asking when every drive stays within %.0f%% of the way from "
-                "its safe value to its lab limit and switches move at most one step from safe; runs also need a clean "
-                "dry run" % (100 * cfg.auto_fraction))
+        rule = ("drive changes, runs and queues go ahead without asking when every drive stays within %.0f%% of the way "
+                "from its safe value to its lab limit and switches move at most one step from safe; runs and queues "
+                "also need a clean dry run. Instruments Kelvin isn't sure about, code on boards, switching an "
+                "instrument on and leaving a virtual lab you chose still ask (what drives nothing, such as installs, "
+                "skills and saved files, never waits for you in either mode)"
+                % (100 * cfg.auto_fraction))
         if ranges:
             rule += ". Own auto ranges: " + ", ".join(ranges)
         if never:
@@ -1771,10 +3620,14 @@ class LabRuntime:
                 self.lock.release()
         status = {}
         for name, values in dict(self._status).items():
-            card = self.lab.instruments[name].card
+            inst = self.lab.instruments.get(name)
+            if inst is None:   # the lab was loaded again with it renamed or taken out: its last readings go
+                continue
             row = []
             for pname, v in values.items():
-                spec = card.params[pname]
+                spec = inst.card.params.get(pname)
+                if spec is None:
+                    continue
                 bad = isinstance(v, str) and v.startswith("ERROR")
                 row.append({"name": pname, "value": "ERROR" if bad else spec.show(v),
                             "away": (not bad) and spec.is_drive and spec.distance(v) > 0})
@@ -1784,10 +3637,14 @@ class LabRuntime:
         return {"lab": self.lab.config.name,
                 "simulated": all(i.simulated for i in self.lab.instruments.values()),
                 "busy": self.busy, "pending": pending, "history": history, "status": status, "queue": self.queue_view(),
-                "mounted": self.mounted or None,
+                "mounted": self.mounted_view(),
+                "hands_on": self.hands,
                 "approval_mode": "auto" if self.gate.auto else "ask", "approval_rule": self.approval_mode()["rule"],
                 "lab_info": self.lab_info,
-                "observe_only": self.lab.config.observe_only, "setup": self.setup_status, "survey": self.last_survey,
+                "unavailable": self._unavailable_view(),
+                "unreviewed": self.lab.config.unreviewed(), "setup": self.setup_status, "survey": self.last_survey,
+                "drafts": sorted(n for n, i in self.lab.instruments.items()
+                                 if not i.simulated and i.card.status == "draft"),
                 "watches": self.monitor.list(),
                 "alarms": [a.view() for a in self.monitor.alarms[:10]],
                 "notices": list(self.notifier.notices)[-20:],

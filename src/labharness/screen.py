@@ -4,15 +4,17 @@ for Claude Code's operate_computer tasks.
     python -m labharness.screen      # an MCP server on stdio (Kelvin.exe --screen-mcp in the private build)
 
 Coordinates are in the screenshot Claude was shown (scaled down to at most 1366 px wide); Kelvin converts them to
-the screen's own pixels. Windows uses the system's own input calls; macOS needs pyobjc's Quartz for the mouse and
-keyboard (screenshots work without it)."""
+the screen's own pixels. Screenshots use the system's own calls (Windows: GDI, scaled by Windows; macOS:
+screencapture and sips) and Kelvin's own PNG writer, so they need no image library. Windows uses the system's own
+input calls; macOS needs pyobjc's Quartz for the mouse and keyboard (screenshots work without it)."""
 from __future__ import annotations
 
-import io
+import struct
 import subprocess
 import sys
 import tempfile
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -72,26 +74,101 @@ def _dpi_aware() -> None:
                 pass
 
 
-def grab() -> Any:
-    """A picture of the main screen (PIL image)."""
-    from PIL import Image, ImageGrab
-    if sys.platform == "darwin":
-        path = Path(tempfile.mkdtemp()) / "screen.png"
-        subprocess.run(["screencapture", "-x", str(path)], check=True)
-        return Image.open(path)
-    return ImageGrab.grab()
+def png(rgb: bytes, width: int, height: int) -> bytes:
+    """A PNG of 8-bit RGB pixels, row after row."""
+    stride = width * 3
+    raw = b"".join(b"\x00" + rgb[y * stride:(y + 1) * stride] for y in range(height))   # filter type 0 per row
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def png_size(data: bytes) -> Tuple[int, int]:
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise RuntimeError("the screenshot is not a PNG")
+    return struct.unpack(">II", data[16:24])
+
+
+def _win_grab(max_width: int) -> Tuple[bytes, Tuple[int, int], Tuple[int, int]]:
+    """The main screen as a PNG, scaled by Windows (halftone) to at most max_width: (png, screen size, shown size)."""
+    import ctypes
+    from ctypes import wintypes
+    user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
+    w, h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)   # the main screen, in pixels (DPI-aware)
+    if w <= 0 or h <= 0:
+        raise RuntimeError("Windows reports no screen on this session (Kelvin may be running without a desktop)")
+    (tw, th), _ = fit((w, h), max_width)
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+    for f in (user32.GetDC, gdi32.CreateCompatibleDC, gdi32.CreateCompatibleBitmap, gdi32.SelectObject):
+        f.restype = ctypes.c_void_p
+    gdi32.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+    gdi32.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    gdi32.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi32.SetStretchBltMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    gdi32.StretchBlt.argtypes = [ctypes.c_void_p] + [ctypes.c_int] * 4 + [ctypes.c_void_p] + [ctypes.c_int] * 4 + \
+        [wintypes.DWORD]
+    gdi32.GetDIBits.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT, wintypes.UINT, ctypes.c_void_p,
+                                ctypes.c_void_p, wintypes.UINT]
+    gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
+    gdi32.DeleteDC.argtypes = [ctypes.c_void_p]
+    user32.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    screen = user32.GetDC(None)
+    if not screen:
+        raise RuntimeError("Windows gave Kelvin no screen to copy (the session may be locked or have no desktop)")
+    mem = gdi32.CreateCompatibleDC(screen)
+    bmp = gdi32.CreateCompatibleBitmap(screen, tw, th)
+    try:
+        old = gdi32.SelectObject(mem, bmp)
+        gdi32.SetStretchBltMode(mem, 4)   # HALFTONE: a readable picture when scaled down
+        copied = gdi32.StretchBlt(mem, 0, 0, tw, th, screen, 0, 0, w, h, 0x00CC0020 | 0x40000000)   # SRCCOPY|CAPTUREBLT
+        gdi32.SelectObject(mem, old)
+        if not copied:
+            raise RuntimeError("Windows could not copy the screen (error %d): the PC may be locked, asleep or on the "
+                               "sign-in screen" % ctypes.GetLastError())
+        info = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), tw, -th, 1, 32, 0, 0, 0, 0, 0, 0)   # top-down
+        pixels = ctypes.create_string_buffer(tw * th * 4)
+        if gdi32.GetDIBits(mem, bmp, 0, th, pixels, ctypes.byref(info), 0) != th:
+            raise RuntimeError("Windows could not hand over the screen's pixels")
+    finally:
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mem)
+        user32.ReleaseDC(None, screen)
+    bgra = pixels.raw
+    rgb = bytearray(tw * th * 3)
+    rgb[0::3], rgb[1::3], rgb[2::3] = bgra[2::4], bgra[1::4], bgra[0::4]
+    if not any(rgb[::997]):
+        raise RuntimeError("the screen is black: the PC may be locked, asleep or on the sign-in screen")
+    return png(bytes(rgb), tw, th), (w, h), (tw, th)
+
+
+def _mac_grab(max_width: int) -> Tuple[bytes, Tuple[int, int], Tuple[int, int]]:
+    path = Path(tempfile.mkdtemp()) / "screen.png"
+    subprocess.run(["screencapture", "-x", str(path)], check=True)
+    size = png_size(path.read_bytes())
+    shown, _ = fit(size, max_width)
+    if shown != size:
+        subprocess.run(["sips", "--resampleWidth", str(shown[0]), str(path)], check=True, capture_output=True)
+    data = path.read_bytes()
+    return data, size, png_size(data)
 
 
 def screenshot_png() -> Tuple[bytes, str]:
-    image = grab()
-    shown, f = fit(image.size)
-    _scale["f"] = f
-    if f != 1.0:
-        image = image.resize(shown)
-    buf = io.BytesIO()
-    image.convert("RGB").save(buf, "PNG", optimize=True)
-    return buf.getvalue(), "Screen %dx%d, shown at %dx%d; give coordinates in this picture." % (
-        int(shown[0] * f), int(shown[1] * f), shown[0], shown[1])
+    if WIN:
+        data, size, shown = _win_grab(MAX_WIDTH)
+    elif sys.platform == "darwin":
+        data, size, shown = _mac_grab(MAX_WIDTH)
+    else:
+        raise RuntimeError("screenshots work on Windows and macOS")
+    _scale["f"] = size[0] / float(shown[0])
+    return data, "Screen %dx%d, shown at %dx%d; give coordinates in this picture." % (size + shown)
 
 
 def _win_mouse(flags: int, data: int = 0) -> None:

@@ -1,7 +1,10 @@
 """Lab configuration (set by the instrument owner) and project envelopes.
 
 Limits nest: vendor limits (card) ⊇ lab limits (this file) ⊇ project
-envelope. The model can read all of them and change none of them.
+envelope. The model can read all of them and change none of them. It can add
+an instrument connected to the computer, with its card's own limits and marked
+`added_by: kelvin`: until a person reviews the limits and removes the mark,
+every output change on it asks them.
 
 Auto mode (switched on by a person, never by the agent) approves drive changes
 that stay within `auto_fraction` of the way from safe to the lab limit. The
@@ -10,6 +13,7 @@ parameter its own auto range.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
@@ -91,6 +95,7 @@ class InstrumentConfig:
     auto: Dict[str, Any] = field(default_factory=dict)  # "*" or param -> "never" | Allowed (its own auto range)
     connection: Dict[str, Any] = field(default_factory=dict)  # overrides the card's (e.g. RS-232 terminators)
     vars: Dict[str, str] = field(default_factory=dict)        # the card's per-installation names (sensor, channel)
+    added_by: str = ""   # "kelvin": Kelvin added it and no person has reviewed its limits yet (gate.py asks)
 
 
 @dataclass
@@ -108,8 +113,12 @@ class LabConfig:
     source: str = ""
     auto_fraction: float = AUTO_FRACTION
     watches: List[Dict[str, Any]] = field(default_factory=list)  # watches written in the lab config (see monitor.py)
-    observe_only: bool = False   # written by auto-setup: read and configure, but no drive leaves safe until a person
-                                 # has reviewed the limits and removed the line
+    observe_only: bool = False   # older auto-setup labs: every instrument counts as added by Kelvin (see added_by)
+
+    def unreviewed(self) -> List[str]:
+        """Real instruments whose limits no person has reviewed: Kelvin added them (or set up the whole lab)."""
+        return [n for n, ic in self.instruments.items()
+                if (self.observe_only or ic.added_by) and not ic.address.startswith("sim://")]
 
 
 def _pair(x: Any) -> bool:
@@ -165,8 +174,9 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
             elif not _pair(lim):
                 err(path + ".limits." + str(p), "must be [low, high]")
             elif spec.limits and (lim[0] < spec.limits[0] or lim[1] > spec.limits[1]):
-                err(path + ".limits." + str(p), "[%s, %s] exceeds vendor limits [%s, %s]"
-                    % (num(lim[0]), num(lim[1]), num(spec.limits[0]), num(spec.limits[1])))
+                err(path + ".limits." + str(p), "[%s, %s] exceeds vendor limits [%s, %s]; for a wider range, make "
+                    "this lab's version of the card %s with the instrument's own limits (Lab, Cards…, Make your "
+                    "version)" % (num(lim[0]), num(lim[1]), num(spec.limits[0]), num(spec.limits[1]), card.id))
             else:
                 limits[p] = (float(lim[0]), float(lim[1]))
         rates: Dict[str, float] = {}
@@ -229,9 +239,15 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
             except CardError as e:
                 for problem in e.errors:
                     err(path + "." + problem.split(":", 1)[0], problem.split(":", 1)[-1].strip())
+        added_by = d.get("added_by") or ""
+        if added_by not in ("", "kelvin"):
+            err(path + ".added_by", "only Kelvin writes this (added_by: kelvin); delete the line once you have "
+                                    "reviewed the limits")
+            added_by = "kelvin"
         instruments[name] = InstrumentConfig(
             name=name, card=card.id, address=str(d.get("address", "sim://" + name)),
-            trust=trust, limits=limits, rates=rates, auto=auto, connection=connection, vars=card_vars)
+            trust=trust, limits=limits, rates=rates, auto=auto, connection=connection, vars=card_vars,
+            added_by=added_by)
 
     def readable(key: str, path: str) -> bool:
         spec = _lookup(cards, key)
@@ -339,6 +355,24 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
         raise ConfigError(src, errors)
     return LabConfig(str(data.get("lab", "Lab")), instruments, interlocks, safe_actions, src, float(fraction), watches,
                      observe)
+
+
+def same_setup(a: LabConfig, b: LabConfig) -> bool:
+    """Do two lab configs set up the same instruments with the same limits and rules, Kelvin's added_by marks (and
+    observe_only) aside? Then marking them reviewed changes nothing to reconnect."""
+    def allowed(rule: Any) -> Any:
+        if isinstance(rule, Allowed):
+            return rule.lo, rule.hi, sorted(map(str, rule.values)) if rule.values is not None else None
+        return rule
+
+    def signature(cfg: LabConfig) -> Any:
+        instruments = [(n, ic.card, ic.address, ic.trust, sorted(ic.limits.items()), sorted(ic.rates.items()),
+                        sorted((p, [(g.instr, g.param, g.max_abs, g.on_trip) for g in gs]) for p, gs in ic.guards.items()),
+                        sorted((p, allowed(r)) for p, r in ic.auto.items()), sorted(ic.connection.items()),
+                        sorted(ic.vars.items())) for n, ic in sorted(cfg.instruments.items())]
+        return (cfg.name, instruments, [(lk.drive, lk.require.text) for lk in cfg.interlocks],
+                sorted(cfg.safe_actions.items()), cfg.auto_fraction, json.dumps(cfg.watches, sort_keys=True, default=str))
+    return signature(a) == signature(b)
 
 
 @dataclass

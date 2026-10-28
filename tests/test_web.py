@@ -238,6 +238,146 @@ def test_stop_button_ends_a_running_turn(parts):
     assert active is None
 
 
+def test_stop_ends_a_turn_whose_tool_an_instrument_holds_up(parts, monkeypatch):
+    """An instrument that stops answering holds a tool call in its thread: the stop button still ends the turn at
+    once, and a later request answers that Kelvin is busy instead of hanging the chat."""
+    from labharness.agent import runtime as runtime_module
+    runtime, _, store = parts
+    monkeypatch.setattr(runtime_module, "BUSY_WAIT_S", 0.5)
+    release = threading.Event()
+    backend = runtime.lab.instruments["smu"].backend
+    query = backend.query
+
+    def hung(cmd, *a, **k):   # the instrument has stopped answering (released at the end of the test)
+        release.wait(20)
+        return query(cmd, *a, **k)
+    monkeypatch.setattr(backend, "query", hung)
+    status = [{"type": "tool_call", "id": "c1", "name": "lab_status", "input": {}}]
+
+    async def main():
+        agent = ChatAgent(runtime, store, build_server(runtime), {"s": Scripted([status, DONE])})
+        await agent.start()
+        try:
+            chat = store.create("s:m1")
+            provider = agent.claim(chat["id"], "s:m1")
+            events = []
+
+            async def emit(e):
+                events.append(e)
+
+            task = asyncio.ensure_future(agent.run_turn(chat["id"], "how is the lab?", "s:m1", provider, emit))
+            await asyncio.sleep(0.5)
+            assert agent.stop()
+            t0 = time.time()
+            await asyncio.wait_for(task, 3)
+            stopped_in = time.time() - t0
+            busy = await asyncio.to_thread(runtime.lab_status)   # the hung call still holds the lab
+            return events, stopped_in, busy, agent.active
+        finally:
+            release.set()
+            await agent.close()
+
+    events, stopped_in, busy, active = anyio.run(main)
+    assert stopped_in < 2 and events[-1] == {"type": "turn_end", "reason": "stopped"} and active is None
+    end = next(e for e in events if e["type"] == "tool_end")
+    assert end["is_error"] and end["content"].startswith("stopped: the person pressed stop")
+    assert busy.startswith("Kelvin is still busy with reading status")
+
+
+LOOK_PLAN = "plan: look\nrepeat: 3\nmeasure: [lockin.X]\n"
+
+
+def emitter(events, chat_id):
+    async def emit(e):
+        events.setdefault(chat_id, []).append(e)
+    return emit
+
+
+def test_two_chats_answer_at_once_and_each_run_is_filed_under_its_own(parts, tmp_path):
+    runtime, _, store = parts
+    plan = [{"type": "tool_call", "id": "r1", "name": "run_plan", "input": {"plan": LOOK_PLAN}}]
+    providers = {"a": Scripted([plan, DONE], delay=0.2), "b": Scripted([plan, DONE], delay=0.2)}
+
+    async def main():
+        agent = ChatAgent(runtime, store, build_server(runtime), providers)
+        await agent.start()
+        try:
+            chats, events, tasks = [], {}, []
+            for key in "ab":
+                chat = store.create(key + ":m1")
+                (tmp_path / key).mkdir()
+                chat["folder"] = str(tmp_path / key)   # where this chat's runs go
+                store.save(chat)
+                chats.append(chat)
+                provider = agent.claim(chat["id"], key + ":m1")
+                tasks.append(asyncio.ensure_future(
+                    agent.run_turn(chat["id"], "measure", key + ":m1", provider, emitter(events, chat["id"]))))
+            await asyncio.sleep(0.1)
+            both = len(agent.answering())
+            await asyncio.wait_for(asyncio.gather(*tasks), 30)
+            return chats, events, both, agent.answering()
+        finally:
+            await agent.close()
+
+    chats, events, both, after = anyio.run(main)
+    assert both == 2 and after == []   # side by side, then neither
+    for chat, key in zip(chats, "ab"):
+        end = next(e for e in events[chat["id"]] if e["type"] == "tool_end")
+        assert "saved in " + str(tmp_path / key) in end["content"], end["content"]
+        assert events[chat["id"]][-1] == {"type": "turn_end", "reason": "end"}
+
+
+def test_a_chat_waits_for_another_chats_lab_call_then_says_so(parts, monkeypatch):
+    from labharness.web import agent as agent_module
+    from labharness.web.agent import Busy
+    runtime, _, store = parts
+    monkeypatch.setattr(agent_module, "LAB_WAIT_S", 0.5)
+    release = threading.Event()
+    backend = runtime.lab.instruments["smu"].backend
+    query = backend.query
+
+    def hung(cmd, *a, **k):   # chat A's lab call is held up by an instrument (released at the end)
+        release.wait(20)
+        return query(cmd, *a, **k)
+    monkeypatch.setattr(backend, "query", hung)
+    status = [{"type": "tool_call", "id": "s1", "name": "lab_status", "input": {}}]
+    talk = [{"type": "text", "text": "Just talking."}]
+    providers = {"a": Scripted([status, DONE]), "b": Scripted([status, DONE]), "c": Scripted([talk])}
+
+    async def main():
+        agent = ChatAgent(runtime, store, build_server(runtime), providers)
+        await agent.start()
+        try:
+            events, ids = {}, {}
+            for key in "abc":
+                ids[key] = store.create(key + ":m1")["id"]
+
+            def start(key, text):
+                provider = agent.claim(ids[key], key + ":m1")
+                return asyncio.ensure_future(agent.run_turn(ids[key], text, key + ":m1", provider,
+                                                            emitter(events, ids[key])))
+            ta = start("a", "how is the lab?")
+            await asyncio.sleep(0.5)   # A's call works the lab now
+            with pytest.raises(Busy):
+                agent.claim(ids["a"], "a:m1")   # one answer at a time in a chat
+            tb, tc = start("b", "and the source?"), start("c", "hello")
+            await asyncio.wait_for(asyncio.gather(tb, tc), 10)
+            waiting = agent.answering(ids["a"])
+            stopped_b, stopped_a = agent.stop(ids["b"]), agent.stop(ids["a"])
+            await asyncio.wait_for(ta, 5)
+            return events, ids, waiting, stopped_b, stopped_a
+        finally:
+            release.set()
+            await agent.close()
+
+    events, ids, waiting, stopped_b, stopped_a = anyio.run(main)
+    b_end = next(e for e in events[ids["b"]] if e["type"] == "tool_end")
+    assert b_end["content"].startswith("not run: another conversation (“how is the lab?”) is working the lab")
+    assert events[ids["c"]][-1] == {"type": "turn_end", "reason": "end"}   # talking needs no lab
+    assert waiting and not stopped_b and stopped_a   # B had finished; A's stop ends A
+    assert events[ids["a"]][-1] == {"type": "turn_end", "reason": "stopped"}
+
+
 def test_run_progress_and_the_runs_pane_api(tmp_path):
     lab = build_virtual_lab(clock=ScaledClock(60), seed=1)   # the 48 s demo sweep takes ~0.8 s
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
@@ -471,6 +611,7 @@ def test_incognito_is_offered_in_every_chat():
 def test_incognito_uses_and_keeps_no_memory(parts):
     _, settings, store = parts
     from labharness.web.agent import INCOGNITO, SYSTEM
+    from labharness.web.brevity import RULE
     p = store.create_project("Alpha")
     store.add_note(p["id"], "ALPHA-NOTE: sample is fragile", "quirk")
     store.remember("global", "Give fields in tesla", "preference")
@@ -483,7 +624,9 @@ def test_incognito_uses_and_keeps_no_memory(parts):
         chat = client.post("/api/chats", json={"model": "scripted:m1", "incognito": True}, headers=headers).json()
         assert chat["incognito"] is True and chat["title"] == "Incognito chat"
         events = stream_turn(client, headers, chat["id"], "what is a lock-in amplifier?", "scripted:m1")
-        assert bot.systems[-1] == SYSTEM + "\n\n" + INCOGNITO      # no instructions, no notes
+        head = "\n\n".join([SYSTEM, RULE.format(words=200), INCOGNITO])   # no instructions, no notes
+        assert bot.systems[-1].startswith(head + "\n\nSkills are procedures") and "save_skill" not in bot.systems[-1]
+        assert "(Kelvin's)" in bot.systems[-1] and "(yours)" not in bot.systems[-1]   # Kelvin's own skills only
         assert "remember" not in bot.tool_names[-1] and "set_value" in bot.tool_names[-1]
         assert not any(e["type"] == "memory" for e in events) and "<memory>" not in bot.prompts[-1][-1]
         events = stream_turn(client, headers, chat["id"], "remember that I like tesla", "scripted:m1")

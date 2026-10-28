@@ -1,0 +1,260 @@
+import KelvinKit
+import SwiftUI
+import UserNotifications
+
+@main
+struct KelvinApp: App {
+    @StateObject var app = AppModel()
+
+    init() {
+        UNUserNotificationCenter.current().delegate = Notifier.shared
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            RootView()
+                .environmentObject(app)
+        }
+    }
+}
+
+struct RootView: View {
+    @EnvironmentObject var app: AppModel
+
+    var body: some View {
+        Group {
+            if let c = app.current {
+                LabTabs(session: app.session(for: c))
+                    .id(c.id)
+            } else {
+                WelcomeView()
+            }
+        }
+        .sheet(isPresented: $app.pairing) {
+            PairView()
+                .environmentObject(app)
+        }
+        .sheet(isPresented: $app.signingIn) {
+            AccountView()
+                .environmentObject(app)
+        }
+        .onAppear {
+            if Launch.demo && app.current == nil { app.startDemo() }
+        }
+    }
+}
+
+/// Launch arguments, for screenshots: -KelvinDemo YES -KelvinTab runs -KelvinOpen <a run or chat id>.
+enum Launch {
+    static var demo: Bool { UserDefaults.standard.bool(forKey: "KelvinDemo") }
+    static var tab: String { UserDefaults.standard.string(forKey: "KelvinTab") ?? "lab" }
+    private static var opened = false
+
+    /// True once, for the run or chat named in the launch arguments.
+    static func open(_ id: String) -> Bool {   // a chat id, or a run's id or plan name (field-sweep-D3)
+        guard !opened, let want = UserDefaults.standard.string(forKey: "KelvinOpen"), !want.isEmpty,
+              id == want || id.hasSuffix("-" + want) else { return false }
+        opened = true
+        return true
+    }
+}
+
+/// One computer's tabs. The lab is polled while the app is in front.
+struct LabTabs: View {
+    @ObservedObject var session: LabSession
+    @Environment(\.scenePhase) var phase
+    @State var tab = Launch.tab
+
+    var body: some View {
+        TabView(selection: $tab) {
+            NavigationStack { LabView(session: session) }
+                .tabItem { Label("Lab", systemImage: "gauge.with.dots.needle.33percent") }
+                .badge(session.state?.waiting ?? 0)
+                .tag("lab")
+            if session.role.canChat {
+                NavigationStack { ChatListView(session: session) }
+                    .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
+                    .tag("chat")
+            }
+            NavigationStack { RunsView(session: session) }
+                .tabItem { Label("Runs", systemImage: "chart.xyaxis.line") }
+                .tag("runs")
+            NavigationStack { ComputersView(session: session) }
+                .tabItem { Label("Computers", systemImage: "desktopcomputer") }
+                .tag("computers")
+        }
+        .onAppear { session.resume() }
+        .onDisappear { session.pause() }
+        .onChange(of: phase) { now in
+            if now == .active { session.resume() } else { session.pause() }
+        }
+    }
+}
+
+struct WelcomeView: View {
+    @EnvironmentObject var app: AppModel
+    @State var failure: String?
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Spacer()
+            Image("Mark")
+                .resizable()
+                .frame(width: 96, height: 96)
+                .accessibilityHidden(true)
+            Text("Kelvin")
+                .font(.largeTitle.bold())
+            if let a = app.account {
+                Text("Signed in as \(a.email). Sign in to Kelvin on your lab computer with this account, and it "
+                     + "appears here.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Button {
+                    attempt($failure) { try await app.lookForKelvins() }
+                } label: {
+                    Label("Look for my Kelvins", systemImage: "arrow.clockwise")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                Button("Sign out", role: .destructive) { Task { await app.signOut() } }
+                    .buttonStyle(.bordered)
+            } else {
+                Text("Watch your lab, answer Kelvin's requests and stop a run from your phone. Sign in with your "
+                     + "Kelvin account to reach your lab computer from anywhere, or pair with it directly.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                Button {
+                    app.signingIn = true
+                } label: {
+                    Label("Sign in with your Kelvin account", systemImage: "person.crop.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                Button {
+                    app.pairing = true
+                } label: {
+                    Label("Pair with a code", systemImage: "qrcode.viewfinder")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            }
+            Button("Try a demo lab") { app.startDemo() }
+                .buttonStyle(.borderless)
+            Spacer()
+            Text("Pairing works without an account: on the Kelvin computer, open Settings → Phone, switch on Phone "
+                 + "access, and press Pair a phone.")
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .failure($failure)
+    }
+}
+
+// ------------------------------------------------------------------ small shared pieces
+
+/// Runs an action and shows what went wrong, if anything.
+struct Failure: ViewModifier {
+    @Binding var message: String?
+
+    func body(content: Content) -> some View {
+        content.alert("Kelvin", isPresented: Binding(get: { message != nil }, set: { if !$0 { message = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(message ?? "")
+        }
+    }
+}
+
+extension View {
+    func failure(_ message: Binding<String?>) -> some View { modifier(Failure(message: message)) }
+}
+
+func attempt(_ failure: Binding<String?>, _ work: @escaping @MainActor () async throws -> Void) {
+    Task { @MainActor in
+        do {
+            try await work()
+        } catch {
+            failure.wrappedValue = error.localizedDescription
+        }
+    }
+}
+
+enum Format {
+    static func duration(_ seconds: Double) -> String {
+        if seconds < 90 { return "\(Int(seconds.rounded())) s" }
+        if seconds < 90 * 60 { return "\(Int((seconds / 60).rounded())) min" }
+        return String(format: "%.1f h", seconds / 3600)
+    }
+
+    static func time(_ epoch: Double) -> String {
+        Date(timeIntervalSince1970: epoch).formatted(date: .omitted, time: .shortened)
+    }
+
+    static func progress(_ run: RunProgress) -> String {
+        var s = "\(run.done) of \(run.total) points"
+        if let eta = run.etaSeconds, eta > 0 { s += " · about \(duration(eta)) left" }
+        return s
+    }
+}
+
+/// A small coloured tag, such as Simulated.
+struct Tag: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.14), in: Capsule())
+    }
+}
+
+/// How a run ended, as an icon: done, still running, stopped, or failed.
+struct RunStatusIcon: View {
+    let status: String
+
+    var body: some View {
+        let look = RunStatusIcon.look(status)
+        Image(systemName: look.0).foregroundStyle(look.1).accessibilityLabel(RunStatusIcon.word(status))
+    }
+
+    static func look(_ status: String) -> (String, Color) {
+        switch status {
+        case "completed": return ("checkmark.circle.fill", .green)
+        case "running": return ("play.circle.fill", .accentColor)
+        case "stopped": return ("stop.circle.fill", .orange)
+        case "aborted", "failed", "error": return ("xmark.octagon.fill", .red)
+        default: return ("questionmark.circle", .secondary)
+        }
+    }
+
+    static func word(_ status: String) -> String { status.isEmpty ? "Unknown" : status.prefix(1).uppercased() + status.dropFirst() }
+}
+
+/// Where the connection goes, as a small label: green on Tailscale, orange on a plain network.
+struct RouteLabel: View {
+    let url: URL?
+    var kinds: [String: String]? = nil
+
+    var body: some View {
+        if url == DemoTransport.address {
+            Label("Inside this app", systemImage: "iphone")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let url {
+            let route = Route(url, kinds: kinds)
+            Label("\(route.rawValue) · \(url.host ?? "")",
+                  systemImage: route == .hub ? "person.crop.circle" : route.encrypted ? "lock.fill" : "wifi")
+                .font(.caption)
+                .foregroundStyle(route.encrypted ? Color.green : Color.secondary)
+        }
+    }
+}

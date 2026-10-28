@@ -36,6 +36,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from .._version import __version__
+from .. import rundata
+from ..eventlog import RunFolders
 from ..hub.client import PENDING_TTL, HubClient, HubClientError, Http, _http, check_url, collect
 from ..hub.db import INSTALLATION_ID, LOCAL_ID, MAX_BATCH, MAX_MESSAGES, MAX_META, HubError, file_parts
 from .store import GENERAL, ChatStore
@@ -118,7 +120,7 @@ def started(meta: Dict[str, Any], folder: Path) -> float:
             return time.time()
 
 
-def run_items(runs: Path, shared: Set[str], person: Optional[str] = None,
+def run_items(runs: Any, shared: Set[str], person: Optional[str] = None,
               old_runs: bool = False) -> Tuple[List[Tuple[Dict[str, Any], Path]], int]:
     """The finished runs (those with a meta.json) that may be shared, oldest first, and how many older ones stay
     here. A run is shared if this person made it (meta "user"; None without accounts), in a shared project or in
@@ -127,7 +129,7 @@ def run_items(runs: Path, shared: Set[str], person: Optional[str] = None,
     there are) are shared only with old_runs: one may have come from an incognito chat, or from someone else using
     the same data folder."""
     try:
-        folders = sorted(d for d in runs.iterdir() if d.is_dir())
+        folders = sorted((d for d in runs.iterdir() if d.is_dir()), key=lambda d: d.name)   # runs: RunFolders
     except OSError:
         return [], 0
     out, held = [], 0
@@ -135,8 +137,10 @@ def run_items(runs: Path, shared: Set[str], person: Optional[str] = None,
         if not LOCAL_ID.match(d.name):
             continue
         try:
-            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            meta = rundata.meta(d)
+        except (KeyError, OSError, ValueError):
+            continue
+        if meta.get("status") in (None, "running"):
             continue   # still running, or never finished
         if not isinstance(meta, dict) or meta.get("incognito") or meta.get("unshared"):
             continue   # from an incognito chat, or one that keeps unshared work's marks
@@ -377,7 +381,7 @@ class HubLink:
                 if not (self.folder is not None and self.url and self.token):
                     return None
                 snap = {"gen": self.gen, "folder": self.folder, "url": self.url, "token": self.token,
-                        "chats": self.store.root, "runs": Path(self.data_dir()) / "runs", "person": self.person,
+                        "chats": self.store.root, "runs": RunFolders(self.data_dir()), "person": self.person,
                         "old_runs": self.settings.get("hub_old_runs") == "on"}
             self.syncing = True
             try:

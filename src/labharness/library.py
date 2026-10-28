@@ -4,7 +4,9 @@ Address: lib://<what the library connects to>?python=<python.exe>&path=<folder w
     lib://COM4?python=C:/Python38-32/python.exe&path=C:/attocube/attoDRYLib
 The part after lib:// is {address} in the card's open calls (a COM port, an IP address, a serial number). python is
 the interpreter that can load the library (a 32-bit one for a 32-bit DLL; by default Kelvin's own), and path is the
-folder holding the maker's module or DLL.
+folder holding the maker's module or DLL. Or env=<name>: one of the environments Kelvin installs a maker's package
+or files into, once a person approves (envs.py), with the Python the library needs:
+    lib://192.168.1.20?env=attodry
 
 The card says what to load and how to call it, under library:
     library:
@@ -19,8 +21,23 @@ The card says what to load and how to call it, under library:
       toggles:                             # a switch the library only toggles: Kelvin reads its state first
         setTemperatureControl: { toggle: toggleFullTemperatureControl, state: isControllingTemperature }
 Card commands call one function each: "GET getSampleTemperature", "SET setUserTemperature {value}" (more fixed
-arguments may follow the name). The library runs in a helper process (data/bridge/kelvin_bridge.py), so a crash or
-a 32-bit DLL never takes Kelvin down, and only functions the card names can be called."""
+arguments may follow the name). A library whose functions sit on sub-objects of the object it creates, as attocube's
+network instruments do (device = Device(ip); device.connect(); device.sample.getTemperature()), is written
+    library: { module: atto_device.CRYO2100, object: Device, create: true, create_args: ["{address}"],
+               open: [connect], close: [close] }
+with commands such as "GET sample.getTemperature". A .NET library (Thorlabs Kinesis) names its assemblies and type,
+the static calls its examples make first, and the factory that makes the object:
+    library: { assembly: [Thorlabs.MotionControl.DeviceManagerCLI.dll, Thorlabs.MotionControl.KCube.DCServoCLI.dll],
+               type: Thorlabs.MotionControl.KCube.DCServoCLI.KCubeDCServo,
+               setup: [Thorlabs.MotionControl.DeviceManagerCLI.DeviceManagerCLI.BuildDeviceList],
+               create: CreateKCubeDCServo, create_args: ["{address}"], properties: [Position],
+               open: ["Connect {address}", "WaitForSettingsInitialized 10000", "StartPolling 250", "EnableDevice"],
+               close: [StopPolling, Disconnect] }
+with "GET Position" (a property, read without calling) and "SET MoveTo {value} 60000" (Kelvin passes the value as
+the Decimal the method takes). A COM object (an older maker's program's automation) is library: {com: <ProgID>},
+and a property it sets is "SET Exposure= {value}". The library runs in a helper process (data/bridge/
+kelvin_bridge.py), so a crash or a 32-bit DLL never takes Kelvin down, only functions the card names can be called,
+and only on objects the maker's own package made."""
 from __future__ import annotations
 
 import collections
@@ -40,7 +57,29 @@ from .cards import Card
 from .drivers import DriverBackend
 
 BRIDGE = Path(__file__).parent / "data" / "bridge" / "kelvin_bridge.py"
-_CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*)(.*)$", re.I | re.S)
+_CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*)(.*)$", re.I | re.S)
+
+
+def code_folders(addresses: Dict[str, str], home: Any = None) -> List[Tuple[str, Path]]:
+    """(instrument, folder): where each lib:// instrument loads its maker's code from: the address's path=, its
+    environment's files, and the folder of the Python it runs in. Code saved there runs on the instrument when it
+    connects, which no card command checks."""
+    out: List[Tuple[str, Path]] = []
+    for name, address in addresses.items():
+        if not str(address).startswith("lib://"):
+            continue
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(str(address)).query))
+        if q.get("path"):
+            out.append((name, Path(q["path"])))
+        if q.get("python"):
+            out.append((name, Path(q["python"]).parent))
+        if q.get("env"):
+            from . import envs
+            try:
+                out.append((name, envs.env_dir(q["env"], home)))
+            except ValueError:   # not an environment's name: it can't connect either
+                pass
+    return out
 
 
 def bridge_command(python: Optional[str] = None) -> List[str]:
@@ -81,8 +120,9 @@ class Bridge:
         self.name = name
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
+            from .envs import clean_environ   # the maker's code never sees Kelvin's API keys or sign-ins
             self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                         stderr=subprocess.PIPE, creationflags=flags)
+                                         stderr=subprocess.PIPE, creationflags=flags, env=clean_environ())
         except OSError as e:
             raise AdapterError("%s: could not start %s (%s). Check python= in the address." % (name, command[0], e))
         self.lines: "queue.Queue[Optional[bytes]]" = queue.Queue()
@@ -154,21 +194,41 @@ class LibraryInstrument(DriverBackend):
         self.timeout = float(card.connection.get("timeout_ms", 10000)) / 1000.0
         self.sets, self.gets = card_calls(card)
         self.toggles: Dict[str, Dict[str, str]] = dict(lib.get("toggles") or {})
+        self.properties = set(lib.get("properties") or [])   # read and set without calling (.NET, COM)
+        python = q.get("python")
+        if q.get("env"):   # one of Kelvin's instrument environments (envs.py): its Python, and the maker's files
+            from . import envs
+            try:
+                python = str(envs.python_of(q["env"]))
+            except ValueError as e:
+                raise AdapterError("%s: %s" % (name, e)) from e
+            if not Path(python).is_file():
+                raise AdapterError("%s: there is no instrument environment %r on this computer yet: Kelvin makes it "
+                                   "with install_for_instrument" % (name, q["env"]))
+            if not q.get("path") and (envs.env_dir(q["env"]) / "files").is_dir():
+                q["path"] = str(envs.env_dir(q["env"]) / "files")
         start = module or Bridge   # tests may pass their own
-        self.bridge = start(name, bridge_command(q.get("python")))
+        self.bridge = start(name, bridge_command(python))
         self.python: Any = None
         try:
             self.python = self.bridge.request("ping", 30)
             load = {k: lib[k] for k in ("module", "object", "create", "create_args", "dll", "prefix", "convention",
-                                         "returns", "functions") if k in lib}
+                                         "returns", "functions", "assembly", "type", "com", "setup") if k in lib}
+            for key in ("create_args", "setup"):   # Device(ip): the address as the examples pass it
+                if load.get(key):
+                    load[key] = [a.replace("{address}", self.target) if isinstance(a, str) else a for a in load[key]]
             self.loaded = self.bridge.request("load", 60, path=q.get("path", ""), **load)
             for step in lib.get("open") or []:
                 self._step(step)
         except AdapterError as e:
             self.bridge.stop()
             bits = self.python.get("bits") if isinstance(self.python, dict) else None
-            hint = (" A 32-bit DLL needs a 32-bit Python: set python= in the address." if bits == 64 and lib.get("dll")
-                    and "WinError 193" in str(e) else "")
+            hint = (" A 32-bit DLL needs a 32-bit Python: set python= in the address, or use an environment made with "
+                    "bits 32." if bits == 64 and lib.get("dll") and "WinError 193" in str(e) else "")
+            if "No module named" in str(e) and q.get("env"):
+                hint = (" Kelvin installs the maker's package into environment %s once a person approves "
+                        "(install_for_instrument with env %s and packages %s, or files for the maker's own folder)"
+                        % (q["env"], q["env"], json.dumps(card.requires) if card.requires else "<its pip name>"))
             raise AdapterError(str(e) + hint) from e
 
     def _step(self, text: str) -> Any:
@@ -182,9 +242,14 @@ class LibraryInstrument(DriverBackend):
         m = _CALL.match(command or "")
         if not m or m.group(1).upper() != "SET":
             raise AdapterError("%s: %r is not SET <function> [arguments]" % (self.name, command))
-        fn, args = m.group(2), split_call("x " + m.group(3))[1]
+        fn, rest = m.group(2), m.group(3).strip()
         if fn not in self.sets:
             raise AdapterError("%s: %s is not on the card, so Kelvin does not call it" % (self.name, fn))
+        if rest.startswith("="):   # a property: Exposure= 0.1
+            with self.lock:
+                self.bridge.request("assign", self.timeout, name=fn, value=rest[1:].strip())
+            return
+        args = split_call("x " + rest)[1]
         with self.lock:
             if fn in self.toggles:
                 want = bool(float(args[-1])) if args and re.match(r"^[+-]?[0-9.]+$", args[-1]) else \
@@ -205,6 +270,8 @@ class LibraryInstrument(DriverBackend):
         if fn not in self.gets:
             raise AdapterError("%s: %s is not a reading on the card, so Kelvin does not call it" % (self.name, fn))
         with self.lock:
+            if fn in self.properties:
+                return _text(self.bridge.request("read", self.timeout, name=fn))
             return _text(self.bridge.request("call", self.timeout, name=fn, args=args))
 
     def identity(self) -> str:
@@ -234,6 +301,42 @@ def _text(value: Any) -> str:
     if isinstance(value, (int, str)):
         return str(value)
     return json.dumps(value)
+
+
+def describe(module: str, env: str = "", home: Any = None, start: Any = None) -> str:
+    """A maker's library as its programmer sees it, read in the helper process; nothing in it is called.
+    module: a Python package, in one of Kelvin's environments (envs.py: the drivers environment's packages with
+    Kelvin's own Python, any other environment with its own); a .NET assembly (.dll), by its full path in the maker's
+    folder or in an environment's files (its types, methods and properties); or com:<ProgID>, a COM object of a
+    maker's program (its methods and properties; making it starts the program)."""
+    from . import envs
+    fields: Dict[str, Any] = {}
+    if module.lower().startswith("com:"):
+        fields["com"] = module[4:].strip()
+    elif module.lower().endswith(".dll"):
+        fields["assembly"] = Path(module).name
+    else:
+        fields["module"] = module
+    full = Path(module) if "assembly" in fields and Path(module).is_absolute() else None
+    if full is not None and not env:   # the maker's own folder, with Kelvin's own Python (and its pythonnet)
+        python, path = None, str(full.parent)
+    else:
+        env = env or envs.DRIVERS
+        if envs.info(env, home) is None:
+            raise AdapterError("there is no environment %s: install_for_instrument makes it" % env)
+        if env == envs.DRIVERS:
+            python, path = None, str(envs.site_packages(env, home) or "")
+            if "assembly" in fields:
+                path = str(envs.env_dir(env, home) / "files")
+        else:
+            python, files = str(envs.python_of(env, home)), envs.env_dir(env, home) / "files"
+            path = str(files) if files.is_dir() else ""
+    bridge = (start or Bridge)("library " + module, bridge_command(python))
+    try:
+        bridge.request("ping", 30)
+        return str(bridge.request("describe", 120, path=path, **fields))
+    finally:
+        bridge.stop()
 
 
 def self_test() -> bool:

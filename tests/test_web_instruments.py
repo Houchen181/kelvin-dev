@@ -170,7 +170,8 @@ instruments:
     gate = gate_for(lab, tmp_path, [True, True])
     assert gate.set("fs", "output", True).ok and fake.requests[-1][:2] == ("POST", "/Basic/EnableOutput")
     assert gate.set("fs", "attenuator", 50).action == "refused"            # the lab's 25 %
-    assert gate.set("fs", "attenuator", 20).ok and fake.requests[-1][2] == b"20"
+    assert gate.set("fs", "attenuator", 20).ok and fake.requests[-2][2] == b"20"   # then read back
+    assert fake.requests[-1][0] == "GET"
     assert lab.read("fs", "power") == pytest.approx(4.0)
     r = gate.raw("fs", "POST /Basic/TurnOn")                               # starting the laser stays with people
     assert r.action == "refused" and fake.requests[-1][1] != "/Basic/TurnOn"
@@ -219,7 +220,7 @@ class FakeDlcPro:
         pass
 
 
-def test_a_dlc_pro_reads_its_state_and_its_draft_card_keeps_drives_simulated(tmp_path):
+def test_a_dlc_pro_reads_its_state_and_its_draft_card_asks_before_drives(tmp_path):
     fake = MODULES["toptica"] = FakeDlcPro()
     lab = build_lab("""
 lab: Cooling lasers
@@ -230,9 +231,9 @@ instruments:
     assert inst.backend.query("*IDN?").startswith("TOPTICA,") and "DLC-001" in inst.backend.query("*IDN?")
     assert lab.read("dl", "emission") is False and lab.read("dl", "temperature") == pytest.approx(20.01)
     assert lab.read("dl", "health_text") == "ok"                            # DeCoP strings come quoted
-    gate = gate_for(lab, tmp_path, [True, True])
+    gate = gate_for(lab, tmp_path, [False])
     r = gate.set("dl", "current_enabled", True)
-    assert not r.ok and "draft" in r.message                                # unreviewed card: no real drive moves
+    assert r.action == "declined" and "draft" in str(gate.approver.requests[0])   # unreviewed card: a person decides
     assert fake.params["laser1:dl:cc:enabled"] == "#f"
     assert gate.raw("dl", "SET laser1:dl:cc:current-clip 400").action == "refused"
     inst.backend.write("SET laser1:dl:cc:current-set 85.5")                 # what the driver sends, once reviewed
@@ -272,8 +273,33 @@ def fake_qick(soc, soccfg):
             amp = 1000 * self.cfg["gain"]
             return [[[amp * math.cos(0.5), amp * math.sin(0.5)]]]
 
+    class AveragerProgram:   # tProc v1: the config in one dict, initialize() and body(), I and Q apart
+        def __init__(self, soccfg_, cfg):
+            self.cfg, self.calls = cfg, []
+            self.initialize()
+            self.body()
+
+        def us2cycles(self, us, gen_ch=None, ro_ch=None):
+            return int(round(us * (100 if gen_ch is not None else 50 if ro_ch is not None else 400)))
+
+        def freq2reg(self, f, gen_ch=0, ro_ch=None):
+            return int(f * 1000)
+
+        def deg2reg(self, deg, gen_ch=0, ro_ch=None):
+            return int(deg)
+
+        def __getattr__(self, name):   # declare_gen, set_pulse_registers, measure...: recorded
+            if name.startswith("_"):
+                raise AttributeError(name)
+            return lambda *a, **kw: self.calls.append((name, kw if kw else a))
+
+        def acquire(self, soc_, load_pulses=True, progress=True):
+            soc_.programs.append(self)
+            amp = 1000 * self.cfg["gain_dac"] / 32766
+            return [[amp * math.cos(0.5)]], [[amp * math.sin(0.5)]]
+
     return types.SimpleNamespace(make_proxy=lambda ns_host, ns_port, proxy_name: (soc, soccfg),
-                                 AveragerProgramV2=AveragerProgramV2)
+                                 AveragerProgramV2=AveragerProgramV2, AveragerProgram=AveragerProgram)
 
 
 SOCCFG = {"tprocs": [{"type": "qick_processor"}], "board": "ZCU216",
@@ -290,7 +316,7 @@ def test_a_qick_board_plays_a_tone_reads_iq_and_stops_dark(tmp_path):
     soc = FakeSoc()
     MODULES["qick"] = fake_qick(soc, SOCCFG)
     lab = build_lab(QICK_LAB)
-    assert lab.instruments["rf"].backend.query("*IDN?") == "QICK,ZCU216,10.0.0.50:8888/myqick"
+    assert lab.instruments["rf"].backend.query("*IDN?") == "QICK,ZCU216,10.0.0.50:8888/myqick,tProc v2"
     gate = gate_for(lab, tmp_path, [True, True])
     assert gate.set("rf", "frequency", 512.5).ok and not soc.programs       # nothing plays while the output is off
     assert gate.set("rf", "output", True).ok
@@ -314,8 +340,6 @@ def test_qick_refuses_what_it_cannot_play():
     from labharness.rfsoc import Qick
     card = builtin_registry().get("qick/rfsoc")
     soc = FakeSoc()
-    with pytest.raises(AdapterError, match="tProc v2"):
-        Qick("rf", card, "qick://h:8888/q", fake_qick(soc, dict(SOCCFG, tprocs=[{"type": "axis_tproc64x32_x8"}])))
     with pytest.raises(AdapterError, match="proxy name"):
         Qick("rf", card, "qick://h:8888", fake_qick(soc, SOCCFG))
     board = Qick("rf", card, "qick://h:8888/q", fake_qick(soc, SOCCFG))
@@ -329,3 +353,63 @@ def test_qick_refuses_what_it_cannot_play():
     assert ("declare_readout", {"ch": 1, "length": 1.0, "freq": 100.0, "gen_ch": 1}) in soc.programs[-1].calls
     board.close()
     assert soc.resets == 1                                                  # disconnecting stops the tone
+
+
+def test_a_board_with_tproc_v1_firmware_runs_v1_programs():
+    """An RFSoC 4x2 with older firmware (tProc v1): Kelvin reads that from the board and runs v1 programs, with the
+    gain in DAC units and durations in clock cycles; firmware it doesn't know waits for the tproc var."""
+    from labharness import builtin_registry
+    from labharness.rfsoc import Qick
+    card = builtin_registry().get("qick/rfsoc")
+    soc = FakeSoc()
+    v1 = dict(SOCCFG, board="RFSoC4x2", tprocs=[{"type": "axis_tproc64x32_x8"}],
+              gens=[{"has_mixer": False, "maxv": 32766}], readouts=[{}])
+    board = Qick("rf", card, "qick://192.168.3.1:8888/myqick", fake_qick(soc, v1))
+    assert board.tproc == 1 and board.identity() == "QICK,RFSoC4x2,192.168.3.1:8888/myqick,tProc v1"
+    board.write("SET gain 0.5")
+    board.write("SET frequency 1000")
+    board.write("SET output 1")                                             # a tone: v1's periodic pulse
+    tone = soc.programs[-1]
+    regs = [kw for name, kw in tone.calls if name == "set_pulse_registers"][0]
+    assert regs == {"ch": 0, "style": "const", "freq": 1000000, "phase": 0, "gain": 16383, "length": 100,
+                    "mode": "periodic"}
+    assert ("declare_readout", {"ch": 0, "length": 50, "freq": 1000.0, "gen_ch": 0}) in tone.calls
+    assert ("pulse", {"ch": 0, "t": 0}) in tone.calls
+    assert ("trigger", {"adcs": [0], "pins": [0], "adc_trig_offset": 80}) in tone.calls
+    assert float(board.query("GET magnitude")) == pytest.approx(500, rel=1e-3)   # half of full scale
+    board.write("SET mode pulsed")
+    float(board.query("GET i"))
+    probe = soc.programs[-1]
+    assert [kw for name, kw in probe.calls if name == "set_pulse_registers"][0]["mode"] == "oneshot"
+    assert ("measure", {"pulse_ch": 0, "adcs": [0], "pins": [0], "adc_trig_offset": 80, "wait": True,
+                        "syncdelay": 400}) in probe.calls
+
+    odd = Qick("rf", card, "qick://h:8888/q", fake_qick(FakeSoc(), dict(SOCCFG, tprocs=[{"type": "tproc_v9"}])))
+    with pytest.raises(AdapterError, match=r"set the instrument's tproc to 1 or 2 in the lab config"):
+        odd.write("SET output 1")                                           # connected; it says what to set
+    odd.write("SET tproc 1")                                                # the lab config's vars: {tproc: "1"}
+    assert odd.tproc == 1
+    with pytest.raises(AdapterError, match="tproc is auto, 1 or 2"):
+        odd.write("SET tproc 3")
+
+
+def test_qick_says_which_versions_meet():
+    """Pyro hands objects over as they are, so the board's QICK and Kelvin's should match: the identity shows both,
+    and how to reach a board whose server isn't running."""
+    from labharness import builtin_registry
+    from labharness.rfsoc import Qick
+    card = builtin_registry().get("qick/rfsoc")
+    module = fake_qick(FakeSoc(), dict(SOCCFG, board="RFSoC4x2", sw_version="0.2.360"))
+    module.version = "0.2.436"
+    board = Qick("rf", card, "qick://192.168.3.1:8888/myqick", module)
+    assert board.identity() == ("QICK,RFSoC4x2,192.168.3.1:8888/myqick,tProc v2,board's qick 0.2.360, "
+                                "Kelvin's qick 0.2.436 "
+                                "(they differ: make them the same version)")
+    module.version = "0.2.360"
+    assert Qick("rf", card, "qick://192.168.3.1:8888/myqick", module).identity().endswith("Kelvin's qick 0.2.360")
+
+    def unreachable(ns_host, ns_port, proxy_name):
+        raise OSError("Failed to locate the nameserver")
+    module.make_proxy = unreachable
+    with pytest.raises(AdapterError, match=r"http://192\.168\.3\.1:9090.*00_nameserver\.ipynb, then 01_server"):
+        Qick("rf", card, "qick://192.168.3.1:8888/myqick", module)

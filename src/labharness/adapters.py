@@ -19,16 +19,22 @@ from __future__ import annotations
 import os
 import re
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .cards import Card
 
 _rm: Any = None
 _rm_lock = threading.Lock()
+WAIT_SLICE_MS = 1000   # a long wait on an instrument is read a second at a time, so a stop ends it within one
 
 
 class AdapterError(RuntimeError):
     pass
+
+
+def timed_out(e: BaseException) -> bool:
+    """A read that ran out of time (PyVISA's VI_ERROR_TMO), not a broken connection."""
+    return isinstance(e, TimeoutError) or getattr(e, "error_code", None) == -1073807339 or "VI_ERROR_TMO" in str(e)
 
 
 def resource_manager() -> Any:
@@ -77,6 +83,13 @@ def is_serial(name: str) -> bool:
     return name.upper().startswith("ASRL")
 
 
+def marks_message_end(name: str) -> bool:
+    """A bus that marks where each reply ends (EOI on GPIB, the end of a USB-TMC or VXI-11/HiSLIP message), unlike a
+    plain socket or a serial line, where only a line end does."""
+    name = name.upper()
+    return name.endswith("::INSTR") and not is_serial(name)
+
+
 def apply_serial_settings(res: Any, settings: Dict[str, Any]) -> None:
     """Baud rate and framing on a serial resource, from a card's connection block."""
     try:
@@ -107,27 +120,32 @@ class VisaBackend:
         self.resource = resource_name(address)
         conn = dict(card.connection, **(overrides or {}))
         self.ack = conn.get("ack")
+        self.enq = bool(conn.get("enq"))
         self.echo = bool(conn.get("echo"))
         self.set_reply = re.compile(conn["set_reply"]) if conn.get("set_reply") else None
         self.write_only = bool(conn.get("write_only"))
         self.query_delay = float(conn.get("query_delay", 0.0))
         self.lock = threading.RLock()
+        self._rm, self._conn, self._on_connect = rm, conn, list(card.on_connect)
+        self._open()
+
+    def _open(self) -> None:
         try:
-            self.res = (rm or resource_manager()).open_resource(self.resource)
+            self.res = (self._rm or resource_manager()).open_resource(self.resource)
         except AdapterError:
             raise
         except Exception as e:
             if "LIBRARY_NFOUND" in str(e):
                 raise AdapterError("%s: this computer's VISA cannot reach %s: its interface driver is missing (for GPIB, "
-                                   "install NI-488.2 or your GPIB adapter's driver)." % (name, self.resource)) from e
+                                   "install NI-488.2 or your GPIB adapter's driver)." % (self.name, self.resource)) from e
             raise AdapterError("%s: cannot open %s (%s). Check the cable, the address and that no other program "
-                               "holds the instrument." % (name, self.resource, e)) from e
-        self.res.timeout = int(conn.get("timeout_ms", 3000))
-        self.res.read_termination = conn.get("read_termination", "\n")
-        self.res.write_termination = conn.get("write_termination", "\n")
+                               "holds the instrument." % (self.name, self.resource, e)) from e
+        self.res.timeout = int(self._conn.get("timeout_ms", 3000))
+        self.res.read_termination = self._conn.get("read_termination", "\n")
+        self.res.write_termination = self._conn.get("write_termination", "\n")
         if is_serial(self.resource):
-            apply_serial_settings(self.res, conn)
-        for command in card.on_connect:   # configuration only; parse_card refuses drive commands here
+            apply_serial_settings(self.res, self._conn)
+        for command in self._on_connect:   # configuration only; parse_card refuses drive commands here
             self.write(command)
 
     def _check_ack(self, command: str) -> None:
@@ -135,8 +153,22 @@ class VisaBackend:
         if reply != self.ack:
             raise AdapterError("%s: %r answered %r instead of %r" % (self.name, command, reply, self.ack))
 
+    def _enq_ack(self, command: str) -> None:
+        """Pfeiffer's protocol: the command, then <ACK> (or <NAK>) on a line of its own. Measured values the
+        instrument was sending by itself until then (it does from power-up) are passed over."""
+        self.res.write(command)
+        for _ in range(20):
+            reply = str(self.res.read()).strip()
+            if reply == "\x06":
+                return
+            if reply == "\x15":
+                raise AdapterError("%s refused %r (it answered NAK)" % (self.name, command))
+        raise AdapterError("%s did not acknowledge %r" % (self.name, command))
+
     def write(self, command: str) -> None:
         with self.lock:
+            if self.enq:
+                return self._enq_ack(command)
             self.res.write(command)
             if self.echo:
                 self.res.read()   # the command, echoed
@@ -151,20 +183,127 @@ class VisaBackend:
         if self.write_only:
             raise AdapterError("%s does not answer queries (write-only); Kelvin uses the last value it set" % self.name)
         with self.lock:
-            if self.echo:
-                self.res.write(command)
-                self.res.read()   # the command, echoed
-                if self.query_delay:
-                    import time
-                    time.sleep(self.query_delay)
-                reply = str(self.res.read())
-            elif self.query_delay:
-                reply = str(self.res.query(command, delay=self.query_delay))
-            else:
-                reply = str(self.res.query(command))
-            if self.ack:
-                self._check_ack(command)
-            return reply
+            try:
+                return self._query(command)
+            except UnicodeDecodeError as e:   # bytes, not text: a binary block where the card expects text
+                self.drain()
+                from .cards import BINARY_REPLY
+                raise AdapterError("%s (%s): %s" % (self.name, command, BINARY_REPLY)) from e
+
+    def query_trace(self, command: str) -> str:
+        """A trace's reply, read to the end of its message where the bus marks one, not to the first line end: some
+        instruments send a line per point (HP's network analyzers). On a plain socket or a serial line, where only a
+        line end marks it, the reply ends there as usual."""
+        if not marks_message_end(self.resource) or self.write_only or self.enq or self.echo or self.ack:
+            return self.query(command)
+        with self.lock:
+            before = self.res.read_termination
+            self.res.read_termination = ""   # read to EOI (GPIB) or the message's end (USB, LAN)
+            try:
+                return self.query(command)
+            finally:
+                self.res.read_termination = before
+
+    def query_waiting(self, command: str, seconds: float, stopped: Callable[[], bool]) -> str:
+        """A query the instrument answers only once it has finished something long (*OPC? after a sweep): asked once,
+        then its answer awaited a moment at a time, so a person's stop ends the wait at once (Stopped) instead of
+        when the sweep would have."""
+        if self.write_only or self.enq or self.echo or self.ack or self.query_delay:
+            return self.query(command)
+        import time
+        from .instrument import Stopped
+        with self.lock:
+            res = self.res
+            before, end = res.timeout, time.monotonic() + seconds
+            res.write(command)
+            try:
+                res.timeout = WAIT_SLICE_MS
+                while True:
+                    try:
+                        return str(res.read())
+                    except Exception as e:
+                        if not timed_out(e):
+                            raise
+                    if stopped():
+                        self._abandon()
+                        raise Stopped("%s: stopped by a person while it was still working on %s" % (self.name, command))
+                    if time.monotonic() >= end:
+                        raise AdapterError("%s did not answer %s within %.0f s" % (self.name, command, seconds))
+            finally:
+                if self.res is res:   # a connection made again after a stop keeps its own timeout
+                    res.timeout = before
+
+    def _abandon(self) -> None:
+        """After a stop cut a wait short, the answer the instrument still owes must never be taken for a later
+        command's: a bus that marks message ends gets a device clear (which also ends the wait on the instrument);
+        a plain socket is connected again, which drops it; a serial line can only be emptied."""
+        if marks_message_end(self.resource) or is_serial(self.resource):
+            self.drain()
+            return
+        try:
+            self.res.close()
+        except Exception:
+            pass
+        try:
+            self._open()
+        except Exception:
+            pass   # the next command says the instrument can't be reached
+
+    def drain(self) -> None:
+        """Drop the rest of a reply Kelvin could not read (a binary block cut at a line-end byte), so the next reply
+        is the next command's: a device clear, or on a plain socket, reading until nothing more comes."""
+        import time
+        with self.lock:
+            try:
+                self.res.clear()
+                return
+            except Exception:
+                pass
+            before, end = self.res.timeout, time.monotonic() + 5.0
+            try:
+                self.res.timeout = 300
+                while time.monotonic() < end:
+                    self.res.read_raw()
+            except Exception:
+                pass   # nothing more within 0.3 s: drained
+            finally:
+                self.res.timeout = before
+
+    def _query(self, command: str) -> str:
+        if self.enq:   # acknowledged, then the reply on <ENQ>
+            self._enq_ack(command)
+            self.res.write_raw(b"\x05")
+            return str(self.res.read())
+        if self.echo:
+            self.res.write(command)
+            self.res.read()   # the command, echoed
+            if self.query_delay:
+                import time
+                time.sleep(self.query_delay)
+            reply = str(self.res.read())
+        elif self.query_delay:
+            reply = str(self.res.query(command, delay=self.query_delay))
+        else:
+            reply = str(self.res.query(command))
+        if self.ack:
+            self._check_ack(command)
+        return reply
+
+    def query_binary(self, command: str, binary: str) -> List[float]:
+        """A trace the instrument sends as an IEEE 488.2 block of binary numbers (an oscilloscope's waveform in BYTE
+        or WORD format): binary is the card's "int16", or "int16 little" when the lowest byte comes first."""
+        from .cards import BINARY
+        if self.write_only or self.enq or self.echo:
+            raise AdapterError("%s: binary traces need an instrument that answers queries plainly" % self.name)
+        number, _, order = binary.partition(" ")
+        with self.lock:
+            try:
+                values = self.res.query_binary_values(command, datatype=BINARY[number],
+                                                      is_big_endian=order.strip() != "little", container=list)
+            except (ValueError, TypeError) as e:
+                raise AdapterError("%s: %r did not answer with a block of %s numbers (%s)" % (self.name, command,
+                                                                                            number, e)) from e
+        return [float(v) for v in values]
 
     def close(self) -> None:
         with self.lock:

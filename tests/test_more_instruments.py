@@ -383,9 +383,10 @@ def test_a_spectrometer_run_keeps_its_wavelengths(tmp_path):
     out = rt.run("plan: spectra\nsweep: {spec.averages: {values: [1, 2]}}\nmeasure: [spec.spectrum]")
     assert "done" in out, out
     run = rt._run_dir(rt.runs_index(1)[0]["run_id"])
-    rows = list(csv.reader(open(run / "spec.spectrum.csv", encoding="utf-8")))
+    from labharness import rundata
     wl = MODULES["seabreeze"].Spectrometer().wavelengths()
-    assert rows[0] == ["i", "x", "spec.spectrum"] and float(rows[40][1]) == pytest.approx(wl[39])   # not linear
+    xs = rundata.load(run).rows[0]["spec.spectrum.x"]               # each spectrum keeps its wavelengths
+    assert xs[39] == pytest.approx(wl[39]) and xs[1] - xs[0] != pytest.approx(xs[-1] - xs[-2])   # not linear
     assert (run / "report.pdf").exists()
 
 
@@ -409,11 +410,12 @@ def test_a_camera_run_keeps_each_frame_as_a_file(tmp_path):
     out = rt.run("plan: images\nsweep: {cam.exposure: {values: [0.001, 0.002]}}\nmeasure: [cam.frame, cam.mean]")
     assert "done" in out, out
     run = rt._run_dir(rt.runs_index(1)[0]["run_id"])
-    rows = list(csv.DictReader(open(run / "data.csv", encoding="utf-8")))
-    assert [r["cam.frame"] for r in rows] == ["frames/00000_cam.frame.npy", "frames/00001_cam.frame.npy"]
-    for r in rows:
-        frame = frames.load_rows(run / r["cam.frame"])
-        assert float(r["cam.mean"]) == pytest.approx(frames.stats(frame)["mean"])   # the mean of that very frame
+    h5py = pytest.importorskip("h5py")
+    with h5py.File(run / "run.h5", "r") as f:                           # the frames, packed into run.h5
+        stack, means = f["frames/cam.frame"][()], f["points/cam.mean"][()]
+    assert stack.shape[0] == 2 and not (run / "frames").exists()
+    for k in range(2):
+        assert means[k] == pytest.approx(float(stack[k].mean()))         # the mean of that very frame
     loose = tmp_path / "data" / "frames"                                 # frames read outside a run go here
     assert not list(loose.glob("*.npy"))                                 # moved into the run, none left behind
     assert "image" in rt.get("cam", "frame") and len(list(loose.glob("*.npy"))) == 1

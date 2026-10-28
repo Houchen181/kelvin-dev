@@ -26,14 +26,39 @@ ENV = {
 }
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
 # secrets Kelvin keeps itself, never shown or set from the browser: the Kelvin hub's token (hubsync.py)
-SEALED = SECRET | {"hub_token"}
+SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
+                     "answer_words", "phone_relay", "ask_folder", "text_size",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
-       "hub_installation", "instruments_off"}
+       "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts"}
+
+ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
+MAX_RECENT_FOLDERS = 8   # chats' folders the folder menu offers again
+TEXT_SIZES = (0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)   # the desktop window's zoom, each person's own
+
+
+def _text_size(value: str) -> str:
+    """What is stored for the text size: the nearest of TEXT_SIZES as a factor ("" for 100%)."""
+    try:
+        size = min(TEXT_SIZES, key=lambda s: abs(s - float(value)))
+    except ValueError:
+        return ""
+    return "" if size == 1.0 else "%g" % size
+
+
+def _answer_words(value: str) -> str:
+    """What is stored for the answer length: "off", or a number of words from 50 to 2000 ("" for the default)."""
+    if value.lower() in ("off", "0", "no", "false", "any"):
+        return "off"
+    try:
+        n = max(50, min(2000, int(float(value))))
+    except ValueError:
+        return ""
+    return "" if n == ANSWER_WORDS else str(n)
 
 
 def _load(path: Optional[Path]) -> Dict[str, Any]:
@@ -42,6 +67,63 @@ def _load(path: Optional[Path]) -> Dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def reseal(folder: Any, old: Any, new: Any) -> int:
+    """Re-encrypt a person's keys (settings.json) and ChatGPT sign-in (chatgpt.json) from one password's cipher to
+    another's (None: not encrypted): after a password change, or when a local account is linked to a central one.
+    Keys sealed for neither stay as they are. Returns how many were re-encrypted."""
+    folder = Path(folder)
+    turned = [0]
+
+    def turn(value: Any) -> Any:
+        if not value:
+            return value
+        if _sealed(value):
+            plain = old.decrypt(value) if old is not None else None
+            if plain is None or _sealed(plain):
+                return value   # sealed for another password: kept as it is
+        else:
+            plain = value
+        turned[0] += 1
+        return new.encrypt(str(plain)) if new is not None else plain
+
+    path = folder / "settings.json"
+    data = _load(path)
+    if data:
+        for name in SEALED:
+            if data.get(name):
+                data[name] = turn(data[name])
+        for s in data.get("services") or []:
+            if isinstance(s, dict) and s.get("api_key"):
+                s["api_key"] = turn(s["api_key"])
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    path = folder / "chatgpt.json"
+    signin = _load(path)
+    if signin:
+        if "sealed" in signin:
+            inner = old.decrypt(signin["sealed"]) if old is not None else None
+            signin = json.loads(inner) if inner and not _sealed(inner) else None
+        if signin is not None:
+            turned[0] += 1
+            out = {"sealed": new.encrypt(json.dumps(signin))} if new is not None else signin
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(out, indent=1), encoding="utf-8")
+            os.replace(tmp, path)
+    return turned[0]
+
+
+def unreadable(folder: Any, cipher: Any) -> int:
+    """How many of a person's keys (and their ChatGPT sign-in) this cipher can't open: sealed with another password."""
+    folder = Path(folder)
+    shut = lambda v: _sealed(v) and (cipher is None or cipher.decrypt(v) is None)   # noqa: E731
+    data = _load(folder / "settings.json")
+    n = sum(1 for name in SECRET | {"account_token", "hub_token"} if shut(data.get(name)))
+    n += sum(1 for s in data.get("services") or [] if isinstance(s, dict) and shut(s.get("api_key")))
+    signin = _load(folder / "chatgpt.json")
+    return n + (1 if "sealed" in signin and shut(signin["sealed"]) else 0)
 
 
 def _sealed(value: Any) -> bool:
@@ -129,8 +211,16 @@ class Settings:
                 value = value if value in ("ask", "off") else ""
             if name == "claude_code":  # Claude Code bridge (temporary): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
+            if name == "phone_relay":  # phones through the Kelvin hub (relay.py): on unless off
+                value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "hub_old_runs":  # also share runs from before Kelvin noted who made them: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
+            if name == "answer_words":  # how long answers may be before Kelvin condenses them (brevity.py)
+                value = _answer_words(value)
+            if name == "text_size":  # the desktop window's zoom (desktop.py), as a factor
+                value = _text_size(value)
+            if name == "ask_folder":  # the folder picker opens for each new chat (desktop app): on unless off
+                value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "auto_report":  # a report after each run and queue: both (the default), pdf, pptx or off
@@ -158,6 +248,22 @@ class Settings:
         else:
             self._user.pop("data_dir", None)
         self._save()
+
+    def remember_folder(self, path: Optional[str]) -> None:
+        """A folder this person chose for a chat (checked by the portal first): a new chat starts there, and it heads
+        their recent folders. None: new chats start in the data folder again."""
+        if path:
+            self._user["last_folder"] = str(path)
+            recent = [p for p in self.recent_folders if p.lower() != str(path).lower()]
+            self._user["recent_folders"] = [str(path)] + recent[:MAX_RECENT_FOLDERS - 1]
+        else:
+            self._user.pop("last_folder", None)
+        self._save()
+
+    @property
+    def recent_folders(self) -> List[str]:
+        kept = self._user.get("recent_folders")
+        return [str(p) for p in kept if p] if isinstance(kept, list) else []
 
     # ------------------------------------------------------------------ the Kelvin hub (hubsync.py)
 
@@ -196,6 +302,7 @@ class Settings:
             "learn": self.learning,
             "notify_kinds": self.notify_kinds,
             "reviewer": self._user.get("reviewer", ""),
+            "answer_words": self.answer_words,
             "literature": self._user.get("literature") != "off",
             "auto_setup": self._lab.get("auto_setup") != "off",
             "manuals": self._lab.get("manuals") != "off",
@@ -203,11 +310,41 @@ class Settings:
             "auto_cards": self._lab.get("auto_cards") != "off",
             "auto_report": self._user.get("auto_report") or "both",
             "report_kinds": self.report_kinds,
+            "ask_folder": self._user.get("ask_folder") != "off",
+            "text_size": float(_text_size(str(self._user.get("text_size") or 1)) or 1),
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "claude_code_path": self._user.get("claude_code_path", ""),
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
         }
+
+    @property
+    def account_hub(self) -> str:
+        """The Kelvin hub this computer's people sign in to (central accounts), if one is set here."""
+        return str(self._lab.get("account_hub") or "")
+
+    def set_account_hub(self, url: str) -> None:
+        if url:
+            self._lab["account_hub"] = url
+        else:
+            self._lab.pop("account_hub", None)
+        self._save()
+
+    def put_secret(self, name: str, value: Optional[str]) -> None:
+        """A credential of the person's that the browser never sets (the hub's token for them)."""
+        if value:
+            self._user[name] = value
+        else:
+            self._user.pop(name, None)
+        self._save()
+
+    @property
+    def answer_words(self) -> int:
+        """How many words an answer may have before Kelvin condenses it (brevity.py); 0: any length."""
+        value = self._user.get("answer_words")
+        if value == "off":
+            return 0
+        return int(value) if value and value.isdigit() else ANSWER_WORDS
 
     @property
     def updates(self) -> str:
@@ -271,12 +408,27 @@ class Settings:
     def device_views(self) -> List[Dict[str, Any]]:
         return [{k: d.get(k) for k in ("id", "name", "role", "created", "last_seen")} for d in self.devices]
 
-    def add_device(self, name: str, role: str, token_hash: str) -> Dict[str, Any]:
+    def add_device(self, name: str, role: str, token_hash: str, phone: Optional[str] = None) -> Dict[str, Any]:
+        """phone: the id of a phone signed in to its person's Kelvin account, which got this token through the hub;
+        it replaces that phone's token from before."""
         device = {"id": "d" + secrets.token_hex(4), "name": name, "role": role, "hash": token_hash,
                   "created": time.time(), "last_seen": None}
-        self._user["devices"] = self.devices + [device]
+        kept = self.devices
+        if phone:
+            device["phone"] = phone
+            kept = [d for d in kept if d.get("phone") != phone]
+        self._user["devices"] = kept + [device]
         self._save()
         return device
+
+    def remove_phone(self, phone: str) -> bool:
+        """Forget the token a phone got through the hub (it signed out of the Kelvin account)."""
+        kept = [d for d in self.devices if d.get("phone") != phone]
+        if len(kept) == len(self.devices) or not phone:
+            return False
+        self._user["devices"] = kept
+        self._save()
+        return True
 
     def remove_device(self, device_id: str) -> None:
         kept = [d for d in self.devices if d["id"] != device_id]
@@ -314,6 +466,29 @@ class Settings:
             self._lab["instruments_off"] = off
         else:
             self._lab.pop("instruments_off", None)
+        self._save()
+
+    def hands_on(self) -> Optional[Dict[str, Any]]:
+        """A person's hands-on-the-sample lock (who, since), kept across restarts: the setup's, not a person's."""
+        h = self._lab.get("hands_on")
+        return h if isinstance(h, dict) and h.get("since") else None
+
+    def set_hands_on(self, hands: Optional[Dict[str, Any]]) -> None:
+        if hands:
+            self._lab["hands_on"] = {"by": str(hands.get("by") or ""), "since": str(hands.get("since") or "")}
+        else:
+            self._lab.pop("hands_on", None)
+        self._save()
+
+    @property
+    def lab_scripts(self) -> Optional[str]:
+        """The folder of the scripts the lab runs its instruments with, which Kelvin reads to set them up (scripts.py):
+        "" once a person said there are none, None while nobody has been asked."""
+        value = self._lab.get("lab_scripts")
+        return None if value is None else str(value)
+
+    def set_lab_scripts(self, folder: str) -> None:
+        self._lab["lab_scripts"] = str(folder or "")
         self._save()
 
     def set_phone(self, on: bool, port: int) -> None:

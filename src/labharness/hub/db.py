@@ -65,6 +65,7 @@ DEFAULTS: Dict[str, Any] = {
     "base_url": "http://127.0.0.1:8780",
     "consent_version": CONSENT_VERSION,
     "require_confirmed_email": False,   # True once mail works: unconfirmed people can sign in but not connect a Kelvin
+    "sharing": False,                   # labs, connected Kelvins and shared work; off: Kelvin accounts only
     "max_file_mb": 200,
     "quota_gb_per_user": 5,
     "backups_kept": 30,
@@ -648,8 +649,8 @@ class Hub:
         """Send through the SMTP server in hub.json (password from KELVIN_HUB_SMTP_PASSWORD), or, with none set,
         drop the message in outbox/ for the operator. Never raises: a failed mail is logged."""
         m = self.config.get("mail") or {}
-        try:
-            if m.get("smtp_host"):
+        if m.get("smtp_host"):
+            try:
                 import smtplib
                 from email.message import EmailMessage
                 msg = EmailMessage()
@@ -661,12 +662,15 @@ class Hub:
                     if m.get("username"):
                         s.login(m["username"], os.environ.get("KELVIN_HUB_SMTP_PASSWORD", ""))
                     s.send_message(msg)
-            else:
-                path = self.home / "outbox" / ("%s-%019d-%s.txt" % (time.strftime("%Y%m%d-%H%M%S"), time.time_ns(),
-                                                                     secrets.token_hex(3)))   # in the order sent
-                path.write_text("To: %s\nSubject: %s\n\n%s\n" % (to, subject, body), encoding="utf-8")
-        except Exception as e:   # the address stays out of the log; SMTP errors can quote it
-            log.error("could not send a mail (%s)", type(e).__name__)
+                return
+            except Exception as e:   # the address stays out of the log; SMTP errors can quote it
+                log.error("could not send a mail (%s); it is in outbox/ for the operator", type(e).__name__)
+        try:   # no mail server, or it failed: the operator passes it on
+            path = self.home / "outbox" / ("%s-%019d-%s.txt" % (time.strftime("%Y%m%d-%H%M%S"), time.time_ns(),
+                                                                 secrets.token_hex(3)))   # in the order sent
+            path.write_text("To: %s\nSubject: %s\n\n%s\n" % (to, subject, body), encoding="utf-8")
+        except OSError as e:
+            log.error("could not keep a mail in outbox/ (%s)", type(e).__name__)
 
     def send_confirmation(self, user: Dict[str, Any]) -> None:
         code = self.new_code("confirm", user["id"])
@@ -744,6 +748,31 @@ class Hub:
             con.execute("DELETE FROM tokens WHERE token_hash = ? AND kind = 'web'", (sha(str(token or "")),))
 
     # ------------------------------------------------------------------ connected Kelvins
+
+    def sign_in_app(self, email: Any, password: Any, inst: Dict[str, str], ip: Optional[str] = None) -> Dict[str, Any]:
+        """Kelvin's own sign-in with a central Kelvin account: the password is checked here, and this Kelvin gets a
+        token for the person (one per person and Kelvin: signing in again replaces it). Kelvin sees the password, so
+        it can sign the person in offline later and keep their API keys encrypted with it. Shares nothing."""
+        user = self.authenticate(email, password, ip)
+        if self.config.get("require_confirmed_email") and not user.get("email_confirmed_at"):
+            raise HubError("Confirm your email address first (see the message we sent you).")
+        token, now = "khub_" + secrets.token_urlsafe(32), time.time()
+        with self._person(user["id"]), self.connect() as con:
+            con.execute("INSERT INTO installations (id, name, platform, version, created_at, last_seen)"
+                        " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET name = excluded.name,"
+                        " platform = excluded.platform, version = excluded.version, last_seen = excluded.last_seen",
+                        (inst["id"], inst["name"], inst["platform"], inst["version"], now, now))
+            con.execute("DELETE FROM tokens WHERE kind = 'app' AND user_id = ? AND installation_id = ?",
+                        (user["id"], inst["id"]))
+            con.execute("INSERT INTO tokens (user_id, kind, token_hash, installation_id, created_at, last_used)"
+                        " VALUES (?, 'app', ?, ?, ?, ?)", (user["id"], sha(token), inst["id"], now, now))
+            con.execute("UPDATE users SET last_seen = ? WHERE id = ?", (now, user["id"]))
+            self.audit(con, "app", "signed in from Kelvin", user["id"], {"installation": inst["id"],
+                                                                          "name": inst["name"]}, ip)
+        return {"access_token": token, "token_type": "Bearer",
+                "user": {"name": user["name"], "email": user["email"],
+                         "email_confirmed": bool(user.get("email_confirmed_at"))},
+                "needs_consent": self.needs_consent(user), "account_url": self.base_url + "/account"}
 
     def connect_code(self, user: Dict[str, Any], redirect_uri: str, challenge: str, installation: Dict[str, Any],
                      lab_id: Optional[int], previous: Optional[List[str]] = None) -> str:
@@ -847,8 +876,10 @@ class Hub:
         if not token:
             return None
         with self.connect() as con:
-            row = con.execute("SELECT t.id AS token_id, t.installation_id, t.lab_id AS token_lab, t.last_used, u.*"
+            row = con.execute("SELECT t.id AS token_id, t.installation_id, t.lab_id AS token_lab, t.last_used,"
+                              " i.name AS installation_name, i.platform AS installation_platform, u.*"
                               " FROM tokens t JOIN users u ON u.id = t.user_id"
+                              " LEFT JOIN installations i ON i.id = t.installation_id"
                               " WHERE t.token_hash = ? AND t.kind = 'app'", (sha(str(token)),)).fetchone()
             if row is None or row["disabled_at"]:
                 return None
@@ -858,7 +889,27 @@ class Hub:
                 con.execute("UPDATE installations SET last_seen = ? WHERE id = ?", (now, row["installation_id"]))
                 con.execute("UPDATE users SET last_seen = ? WHERE id = ?", (now, row["id"]))
         return {"user": _public(row), "token_id": row["token_id"], "installation_id": row["installation_id"],
+                "installation": {"name": row["installation_name"] or "", "platform": row["installation_platform"] or ""},
                 "lab_id": row["token_lab"]}
+
+    def kelvins_of(self, user_id: int) -> List[Dict[str, Any]]:
+        """The Kelvins (not phones) this person is signed in to, the most recently seen first."""
+        with self.connect() as con:
+            rows = con.execute("SELECT i.id, i.name, i.platform, i.version, i.last_seen FROM tokens t"
+                               " JOIN installations i ON i.id = t.installation_id"
+                               " WHERE t.user_id = ? AND t.kind = 'app' AND i.platform NOT IN ('ios', 'android')"
+                               " ORDER BY i.last_seen DESC", (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def sign_out_app(self, token: Any, ip: Optional[str] = None) -> bool:
+        """A Kelvin or a phone signs out: its token stops working at once."""
+        app = self.app(token)
+        if app is None:
+            return False
+        with self.connect() as con:
+            con.execute("DELETE FROM tokens WHERE id = ?", (app["token_id"],))
+            self.audit(con, "app", "signed out", app["user"]["id"], {"installation": app["installation_id"]}, ip)
+        return True
 
     @staticmethod
     def _refile(con: sqlite3.Connection, user_id: int, installation_id: str, lab_id: Optional[int]) -> None:
@@ -1377,13 +1428,38 @@ class Hub:
         stats["last_backup"] = backups[-1].name if backups else None
         return stats
 
+    @property
+    def sharing(self) -> bool:
+        """Do people's Kelvins share work into labs here? Off (the default), the hub keeps Kelvin accounts only."""
+        return bool(self.config.get("sharing"))
+
+    @staticmethod
+    def _like(query: Any) -> str:
+        return "%%%s%%" % str(query or "").strip().replace("%", "").replace("_", "")
+
     def find_users(self, query: Any = "", limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-        like = "%%%s%%" % str(query or "").strip().replace("%", "").replace("_", "")
+        """People for the operator, newest first, each with their labs, the computers they are signed in on and the
+        Kelvin version they used last."""
+        like = self._like(query)
         with self.connect() as con:
-            rows = con.execute("SELECT u.*, (SELECT COUNT(*) FROM lab_members m WHERE m.user_id = u.id) AS labs"
+            rows = con.execute("SELECT u.*, (SELECT COUNT(*) FROM lab_members m WHERE m.user_id = u.id) AS labs,"
+                               " (SELECT COUNT(*) FROM tokens t WHERE t.user_id = u.id AND t.kind = 'app') AS computers,"
+                               " (SELECT i.version FROM tokens t JOIN installations i ON i.id = t.installation_id"
+                               "  WHERE t.user_id = u.id AND t.kind = 'app' ORDER BY t.last_used DESC LIMIT 1) AS kelvin"
                                " FROM users u WHERE u.email LIKE ? OR u.name LIKE ? ORDER BY u.created_at DESC"
                                " LIMIT ? OFFSET ?", (like, like, limit, offset)).fetchall()
-        return [dict(_public(r), labs=r["labs"]) for r in rows]
+        return [dict(_public(r), labs=r["labs"], computers=r["computers"], kelvin=r["kelvin"] or "") for r in rows]
+
+    def count_users(self, query: Any = "") -> int:
+        like = self._like(query)
+        with self.connect() as con:
+            return con.execute("SELECT COUNT(*) FROM users WHERE email LIKE ? OR name LIKE ?", (like, like)).fetchone()[0]
+
+    def activity_of(self, user_id: int, n: int = 200) -> List[Dict[str, Any]]:
+        """The hub's record of one account, newest first."""
+        with self.connect() as con:
+            return [dict(r) for r in con.execute("SELECT * FROM audit WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                                                 (user_id, n))]
 
     def set_disabled(self, user_id: int, disabled: bool, ip: Optional[str] = None) -> None:
         with self.connect() as con:

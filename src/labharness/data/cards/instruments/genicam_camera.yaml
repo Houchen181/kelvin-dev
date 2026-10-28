@@ -1,0 +1,66 @@
+card: 1
+id: generic/genicam-camera
+model: GenICam camera (Teledyne FLIR, Allied Vision, IDS, The Imaging Source, Lucid and other industrial cameras)
+vendor: Any maker (GenICam)
+kind: camera
+status: community
+manual: "GenICam SFNC (ExposureTime in us, Gain in dB, Width, Height) through Harvesters and the maker's GenTL producer"
+notes:
+  - "Address genicam://<serial> (genicam:// for the first camera), with ?cti=<the .cti file> when the maker's SDK doesn't list its GenTL producer in GENICAM_GENTL64_PATH. Needs harvesters, which Kelvin installs on this computer once a person approves, and the camera maker's SDK (its installer, run by a person), which brings the .cti file. Close the maker's viewer first."
+  - "Connecting changes nothing: exposure, gain, pixel format and region stay as they are."
+  - "A frame is kept as a .npy file: a run puts each in its run.h5. Mean, max, min and sum are readings of a frame."
+requires: [harvesters]
+
+parameters:
+  frame:
+    label: Frame
+    kind: measure
+    type: image
+    get: "GET frame"
+  mean:
+    label: Mean
+    kind: measure
+    unit: counts
+    get: "GET mean"
+    acquires: true
+  max:
+    label: Max
+    kind: measure
+    unit: counts
+    get: "GET max"
+    acquires: true
+  min:
+    label: Min
+    kind: measure
+    unit: counts
+    get: "GET min"
+    acquires: true
+  sum:
+    label: Sum
+    kind: measure
+    unit: counts
+    get: "GET sum"
+    acquires: true
+  exposure:
+    label: Exposure
+    kind: measure
+    unit: s
+    set: "SET exposure {value}"
+    get: "GET exposure"
+    limits: [0.000001, 30]
+  gain:
+    label: Gain
+    kind: measure
+    unit: dB
+    set: "SET gain {value}"
+    get: "GET gain"
+  width:
+    label: Width
+    kind: measure
+    unit: px
+    get: "GET width"
+  height:
+    label: Height
+    kind: measure
+    unit: px
+    get: "GET height"

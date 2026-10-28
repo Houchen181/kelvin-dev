@@ -51,7 +51,9 @@ Every command goes through one gate, whether it comes from Kelvin, another AI ag
 | Drive away from safe | Checked against your limits, approved by a person, ramped and watched |
 | Beyond the limits, or blocked | Refused |
 
-Only people can change the lab config, the approval mode or which lab Kelvin controls.
+Each sample can have its own limits too: give a gate's dielectric and thickness and Kelvin keeps it well below breakdown, stops a ramp when the leakage rises, and writes the caps into the source itself. Press **Hands on the sample** before you rewire, and everything that reaches it stays at safe until you unlock.
+
+Only people can change the lab config, the approval mode, a sample's limits or which lab Kelvin controls.
 
 ## Get started
 
@@ -60,7 +62,7 @@ Only people can change the lab config, the approval mode or which lab Kelvin con
 
 Kelvin opens on a simulated lab with a demo model, so you can try it right away. Add an API key in Settings, or sign in with ChatGPT, to use a real model. It keeps itself up to date, replacing the installed copy, so there is only ever one Kelvin on a computer.
 
-Also included: sign-in for everyone in the lab, each with their own chats, keys, data and record, and a shared instrument log; a queue that runs scans overnight after one approval; reports that keep themselves up to date for every scan, every sample and every project (PDF and PowerPoint), with CSV data; project memory and incognito chats, literature search with citations, a terminal, alarms and approvals from your phone, and MCP access for Claude Code, Codex or Gemini CLI.
+Also included: sign-in for everyone in the lab, each with their own chats, keys, data and record, and a shared instrument log; a queue that runs scans overnight after one approval; reports that keep themselves up to date for every scan, every sample and every project (PDF and PowerPoint), with each run's data saved point by point as it is measured and kept in one HDF5 file, and a catalog of every run that the AI can search; project memory with skills and recipes (procedures and staged measurements that worked), incognito chats, models that look at plots, camera frames and the photos or PDFs you attach, second opinions that check the evidence, chats Kelvin continues by itself after a long wait, literature search with citations, a terminal, alarms and approvals from your phone, and MCP access for Claude Code, Codex or Gemini CLI.
 
 ## Documentation
 
@@ -70,6 +72,7 @@ Also included: sign-in for everyone in the lab, each with their own chats, keys,
 - [Safety](docs/safety.md): the rules in full, auto mode, watches
 - [Other AI agents](docs/agents.md): Claude Code, Codex or Gemini CLI over MCP
 - [Development](docs/development.md): running from source, tests, releases
+- [Kelvin for iPhone](docs/ios.md): building the iPhone app
 - [Vision](VISION.md) and [architecture](ARCHITECTURE.md): the goals and the design
 
 To run from source (Python 3.10 or later):

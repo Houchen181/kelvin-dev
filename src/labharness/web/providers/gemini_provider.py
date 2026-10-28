@@ -15,8 +15,13 @@ _OWN_ID = "lh_call_"
 def to_contents(history: List[Dict[str, Any]]) -> List[types.Content]:
     out: List[types.Content] = []
     for m in history:
-        if m["role"] == "user":
-            out.append(types.Content(role="user", parts=[types.Part(text=user_text(m))]))
+        if m["role"] == "user":   # PDFs and pictures (both inline data), then the words about them
+            parts = [_picture(i) for i in (m.get("documents") or []) + (m.get("images") or [])] + \
+                [types.Part(text=user_text(m))]
+            if out and out[-1].role == "user":   # written while Kelvin worked: after the tool results, one turn
+                out[-1] = types.Content(role="user", parts=list(out[-1].parts or []) + parts)
+            else:
+                out.append(types.Content(role="user", parts=parts))
         elif m["role"] == "assistant":
             if m.get("provider") == "gemini" and m.get("raw"):
                 out.append(types.Content.model_validate(m["raw"]))  # keeps thought signatures
@@ -37,17 +42,43 @@ def to_contents(history: List[Dict[str, Any]]) -> List[types.Content]:
                 call_id = None if str(r["id"]).startswith(_OWN_ID) else r["id"]
                 parts.append(types.Part(function_response=types.FunctionResponse(
                     id=call_id, name=r["name"], response={key: r["content"]})))
+            parts += [_picture(i) for r in m["results"] for i in r.get("images") or []]   # after the responses
+            parts += [_picture(d) for r in m["results"] for d in r.get("documents") or []]
             out.append(types.Content(role="user", parts=parts))
     return out
+
+
+def _picture(image: Dict[str, str]) -> Any:   # a picture or a PDF: Gemini reads both as inline data
+    import base64
+    return types.Part(inline_data=types.Blob(mime_type=image["mime"], data=base64.b64decode(image["data"])))
 
 
 class GeminiProvider(Provider):
     name = "gemini"
     label = "Gemini"
+    can_search = True
+    sees_images = True
+    sees_pdfs = True
 
     def __init__(self, api_key: Optional[str]):
         self.client = genai.Client(api_key=api_key) if api_key else None
         self._cache: Optional[List[ModelInfo]] = None
+
+    async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
+        """Gemini with Google Search: the pages its answer is grounded on (addresses through Google's redirect,
+        which read_web_page follows), then those it named."""
+        from ..websearch import PROMPT, merge, results_in
+        response = await self.client.aio.models.generate_content(
+            model=model, contents=PROMPT.format(query=query, limit=limit),
+            config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())]))
+        hits: List[Dict[str, str]] = []
+        for candidate in response.candidates or []:
+            meta = candidate.grounding_metadata
+            for chunk in (meta.grounding_chunks or []) if meta is not None else []:
+                web = chunk.web
+                if web is not None and web.uri:
+                    hits.append({"title": web.title or web.domain or "", "url": web.uri, "snippet": ""})
+        return merge(hits, results_in(response.text or ""), limit)
 
     def available(self) -> bool:
         return self.client is not None

@@ -3,8 +3,8 @@ have plain cards instead).
 
     anc300://COM5            attocube ANC300 on its USB or RS-232 serial port: its command line, spoken directly
     anc300://192.168.1.10    attocube ANC300 over the network (TCP 7230; ?pwd=<its password>, 123456 by default)
-    anc350://0               attocube ANC350 closed-loop controller (USB, index), through pylablib (pip install
-                             pylablib; not in the app: run Kelvin from source for it)
+    anc350://0               attocube ANC350 closed-loop controller (USB, index), through pylablib (not in the
+                             app: Kelvin installs it once a person approves)
 
 The axis is the card's `axis` variable (ANC300: 1-7; ANC350: 0-2), so one lab-config entry per axis, as a stage.
 Connecting changes no axis setting: Kelvin only switches the ANC300's command echo off, which is its link, not an
@@ -18,6 +18,7 @@ import time
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import envs
 from .adapters import AdapterError
 from .cards import Card
 from .drivers import DriverBackend
@@ -35,8 +36,8 @@ def _attocube(module: Any, name: str) -> Any:
         from pylablib.devices import Attocube   # type: ignore
         return Attocube
     except ImportError as e:
-        raise AdapterError("%s needs pylablib: pip install pylablib (the ANC350 also needs attocube's USB driver)"
-                           % name) from e
+        raise AdapterError("%s needs pylablib (the ANC350 also needs attocube's USB driver): %s"
+                           % (name, envs.missing("pylablib-lightweight"))) from e
 
 
 class _Controller(DriverBackend):

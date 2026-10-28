@@ -75,10 +75,11 @@ def test_switching_waits_for_kelvin_to_be_idle(bench):
     (runtime, settings, store), bus, home = bench
     client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
     with client:
-        client.app.app.state.agent.active = {"chat_id": "x", "model": "m"}
+        from labharness.web.agent import _Turn
+        client.app.app.state.agent.turns["x"] = _Turn({"chat_id": "x", "model": "m"})   # Kelvin answering a chat
         assert client.post("/api/lab", json={"use": "virtual"}, headers=headers).status_code == 409
         assert client.post("/api/instruments/scan", json={}, headers=headers).status_code == 409
-        client.app.app.state.agent.active = None
+        del client.app.app.state.agent.turns["x"]
 
 
 def test_health_check_catches_the_wrong_instrument_at_an_address(bench):
@@ -86,6 +87,7 @@ def test_health_check_catches_the_wrong_instrument_at_an_address(bench):
     lab = build_lab("lab: x\ninstruments:\n  smu: {card: keithley/2400, address: 'GPIB0::8::INSTR'}\n")
     (result,) = lab.health_check()
     assert not result.ok and "does not match card keithley/2400" in str(result)
+    assert "Make your version" in str(result)                                   # or a variant: the lab's own card
     assert all("?" in c for c in bus.devices["GPIB0::8::INSTR"].sent)          # it only asked
 
 
@@ -111,7 +113,36 @@ def test_no_agent_tool_changes_the_lab():
 
     async def main():
         async with Client(build_server(rt)) as client:
-            return [t.name for t in (await client.list_tools()).tools]
-    names = anyio.run(main)
-    assert "scan_instruments" in names and not [n for n in names if "lab" in n and n != "lab_status"]
+            return (await client.list_tools()).tools
+    tools = anyio.run(main)
+    assert "scan_instruments" in [t.name for t in tools]
+    assert {t.name for t in tools if "lab" in t.name} == {"lab_status", "lab_config"}
+    assert all(t.annotations.read_only_hint for t in tools if "lab" in t.name)   # they read the lab, never change it
     assert builtin_registry().get("keithley/2400")
+
+
+def test_kelvin_opens_before_connecting_the_persons_lab(bench):
+    import time
+    (_, settings, store), bus, home = bench
+    (home / "lab.yaml").write_text("lab: Bench\ninstruments:\n"
+                                   "  smu: {card: keithley/2400, address: 'GPIB0::24::INSTR'}\n"
+                                   "  lockin: {card: srs/sr830, address: 'GPIB0::8::INSTR'}\n"
+                                   "  gone: {card: srs/sr830, address: 'GPIB0::30::INSTR'}\n", encoding="utf-8")
+    lab, envelope, info = open_home_lab(home, connect=False)
+    assert info["kind"] == "file" and lab.connecting == ["smu", "lockin", "gone"]
+    assert all(d.sent == [] for d in bus.devices.values())                # nothing asked yet: Kelvin opens at once
+    assert "connecting" in lab.away("smu")
+    runtime = LabRuntime(lab, WebApprover(timeout=5), home / "data")
+    runtime.lab_info = info
+    client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
+    with client:   # the portal is up; the instrument setup connects them, one after another
+        for _ in range(100):
+            if runtime.setup_status.get("state") == "done":
+                break
+            time.sleep(0.05)
+        status = runtime.setup_status
+        assert status["state"] == "done" and status["message"].startswith("Connected smu, lockin"), status
+        assert "not connected: gone" in status["message"] and not lab.connecting
+        assert lab.instruments["smu"].enabled and "gone" in lab.unavailable and runtime.lab is lab   # no virtual lab
+        state = client.get("/api/state", headers=headers).json()
+        assert state["simulated"] is False and set(state["status"]) >= {"smu", "lockin"}

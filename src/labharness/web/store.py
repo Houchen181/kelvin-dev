@@ -8,6 +8,9 @@ facts). A chat sees only the memory of the project it is filed under, and deleti
 Global notes (the user's preferences and conventions) live there too. See memory.py for how notes are recalled.
 
 Incognito chats live only in this process: never written to disk, never listed, never filed under a project.
+
+Pictures and files that go with a chat (a plot look_at drew, a photo or PDF the person attached) are kept beside it in
+media/<chat id>/, named by their content; an incognito chat keeps them in memory.
 """
 from __future__ import annotations
 
@@ -25,6 +28,9 @@ from .rules import merge, normalize, restrictive
 
 _ID = re.compile(r"^[0-9a-f]{12}$")
 _PROJECT_ID = re.compile(r"^p[0-9a-f]{8}$")
+_MEDIA = re.compile(r"^[0-9a-f]{24}\.(png|jpg|gif|webp|pdf|txt)$")
+MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp",
+               "pdf": "application/pdf", "txt": "text/plain"}
 MAX_NAME = 60
 MAX_INSTRUCTIONS = 4000  # characters, for a project's instructions and for the global ones
 MAX_NOTE = 300
@@ -68,6 +74,7 @@ class ChatStore:
                 self.root.mkdir(parents=True, exist_ok=True)
             self._index_path = self.root / "_projects.json"
             self._temp: Dict[str, Dict[str, Any]] = {}  # incognito chats: this process only
+            self._temp_media: Dict[str, Dict[str, bytes]] = {}   # and their pictures and files
             self._kept_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
 
     def _path(self, chat_id: str) -> Path:
@@ -138,16 +145,55 @@ class ChatStore:
         os.replace(tmp, path)
 
     def delete(self, chat_id: str) -> None:
+        self._temp_media.pop(chat_id, None)
         if self._temp.pop(chat_id, None) is not None:
             return
         path = self._path(chat_id)
         if path.exists():
             path.unlink()
+        import shutil
+        shutil.rmtree(self.root / "media" / chat_id, ignore_errors=True)
         with self._lock:
             index = self._read_index()
             kept = [index[k].pop(chat_id, None) for k in ("assign", "marks", "stamped")]
             if any(k is not None for k in kept):
                 self._write_index(index)
+
+    # ------------------------------------------------------------------ pictures and files kept with a chat
+
+    def put_media(self, chat_id: str, data: bytes, ext: str) -> str:
+        """Keep bytes with the chat; returns their name (from their content, so the same picture is kept once)."""
+        import hashlib
+        self._path(chat_id)   # validates the id
+        ext = ext.lower().lstrip(".")
+        if ext not in MEDIA_TYPES:
+            raise ValueError("Kelvin keeps pictures (PNG, JPEG, GIF, WebP) and PDFs, not .%s" % ext)
+        name = "%s.%s" % (hashlib.sha256(data).hexdigest()[:24], ext)
+        if chat_id in self._temp:
+            self._temp_media.setdefault(chat_id, {})[name] = bytes(data)
+            return name
+        folder = self.root / "media" / chat_id
+        folder.mkdir(parents=True, exist_ok=True)
+        if not (folder / name).exists():
+            tmp = folder / (name + ".tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, folder / name)
+        return name
+
+    def media(self, chat_id: str, name: str) -> bytes:
+        """KeyError: no such picture or file with this chat."""
+        if not _MEDIA.match(name or ""):
+            raise KeyError("no file %r" % name)
+        self._path(chat_id)
+        if chat_id in self._temp:
+            try:
+                return self._temp_media[chat_id][name]
+            except KeyError:
+                raise KeyError("no file %r" % name)
+        path = self.root / "media" / chat_id / name
+        if not path.is_file():
+            raise KeyError("no file %r" % name)
+        return path.read_bytes()
 
     def list(self) -> List[Dict[str, Any]]:
         index = self._read_index()
@@ -240,6 +286,18 @@ class ChatStore:
             index = self._read_index()
             project = self._find(index, project_id)
             project["name"] = _name(name)
+            self._write_index(index)
+        return project
+
+    def set_folder(self, project_id: str, path: Optional[str]) -> Dict[str, Any]:
+        """The folder this project's chats last chose: its next new chat starts there."""
+        with self._lock:
+            index = self._read_index()
+            project = self._find(index, project_id)
+            if path:
+                project["folder"] = str(path)
+            else:
+                project.pop("folder", None)
             self._write_index(index)
         return project
 
@@ -403,6 +461,9 @@ class ChatStore:
             index["projects"] = [p for p in index["projects"] if p["id"] != project_id]
             index["assign"] = {c: p for c, p in index["assign"].items() if p != project_id}
             self._write_index(index)
+        import shutil
+        for folder in ("skills", "recipes"):   # its know-how (skills.py) goes with it
+            shutil.rmtree(self.root / folder / project_id, ignore_errors=True)
 
     def assign(self, chat_id: str, project_id: Optional[str]) -> None:
         """File a chat under a project, or take it out of its project (None)."""
@@ -482,6 +543,11 @@ class ChatStore:
                 device["description"] = str(fields["description"]).strip()[:MAX_INSTRUCTIONS]
             if fields.get("retired") is not None:
                 device["retired"] = bool(fields["retired"])
+            if fields.get("protection") is not None:   # checked by protection.normalize; {} lifts it
+                if fields["protection"]:
+                    device["protection"] = fields["protection"]
+                else:
+                    device.pop("protection", None)
             self._write_index(index)
             return device
 

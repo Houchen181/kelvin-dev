@@ -7,7 +7,8 @@ status: community
 manual: "LabOne User Manual MFLI, Node Doc: /DEV/OSCS, /DEV/DEMODS, /DEV/SIGOUTS"
 manual_url: "https://docs.zhinst.com/pdf/ziMFLI_UserManual.pdf"
 notes:
-  - "Controlled through LabOne's Python API (pip install zhinst-core); address zhinst://dev1234, or with ?host=...&port=8004&interface=1GbE when the data server runs elsewhere"
+  - "Controlled through LabOne's Python API, zhinst-core (which Kelvin installs on this computer once a person approves); address zhinst://dev1234, or with ?host=...&port=8004&interface=1GbE when the data server runs elsewhere"
+requires: [zhinst-core]
 identify:
   idn: "^Zurich Instruments,MF"
   example: "Zurich Instruments,MFLI,dev5678"

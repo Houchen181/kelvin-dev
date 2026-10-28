@@ -7,9 +7,10 @@ status: community
 manual: "SpinCore SpinAPI reference and the PulseBlasterESR-PRO owner's manual"
 notes:
   - "Address pulseblaster://<board, from 0>?clock=<core clock in MHz> (e.g. pulseblaster://0?clock=500); add &pro=1 for a PulseBlasterESR-PRO (its bits 21-23 must be set for ordinary pulses; on other models they are outputs)."
-  - "Needs SpinCore's SpinAPI installed, and the Python wrapper: pip install spinapi (written by labscript, not SpinCore)."
+  - "Needs SpinCore's SpinAPI (SpinCore's installer, run by a person), and the Python wrapper spinapi (written by labscript, not SpinCore), which Kelvin installs on this computer once a person approves."
   - "The shortest instruction is 5 clock cycles (10 ns at 500 MHz): two edges closer than that are refused. Stopping loads an all-off program, since pb_stop can leave outputs high."
   - "Manual: www.spincore.com, PulseBlasterESR-PRO owner's manual (PBESR-Pro_Manual.pdf)."
+requires: [spinapi]
 identify:
   idn: "^SpinCore,PulseBlaster"
   example: "SpinCore,PulseBlaster,board 0,20250210"

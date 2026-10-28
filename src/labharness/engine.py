@@ -16,6 +16,7 @@ from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
+from .instrument import Stopped
 from .plans import Plan, PlanError, Stabilize, Step, load_plan
 
 # An instrument that passed its health check is checked again only after this long (or after a run on it fails):
@@ -67,6 +68,44 @@ class RunEngine:
             except Exception:
                 pass  # a broken display must never stop an experiment
 
+    def held(self, plan: Plan, snapshot: Dict[str, Any]) -> Dict[str, str]:
+        """The conditions a run was taken in, with units: every drive away from its safe value that the plan
+        doesn't sweep, and the temperature and field readings (for the run's card and catalog)."""
+        swept = {a.key for a in plan.axes}
+        out: Dict[str, str] = {}
+        for name, values in (snapshot or {}).items():
+            inst = self.lab.instruments.get(name)
+            if inst is None or not isinstance(values, dict):
+                continue
+            for pname, v in values.items():
+                key = "%s.%s" % (name, pname)
+                if key in swept or isinstance(v, (list, dict)) or v is None:
+                    continue
+                try:
+                    spec = inst.spec(pname)
+                    if (spec.is_drive and spec.distance(v) > 0) or (not spec.is_drive and spec.unit in ("K", "T")):
+                        out[key] = spec.show(v)
+                except Exception:
+                    continue
+        return out
+
+    def units(self, snapshot: Dict[str, Any]) -> Dict[str, str]:
+        """The unit of every setting and reading in a snapshot (instrument.parameter: unit), so a run's conditions
+        read without the lab's cards."""
+        out: Dict[str, str] = {}
+        for name, values in (snapshot or {}).items():
+            inst = self.lab.instruments.get(name)
+            if inst is None or not isinstance(values, dict):
+                continue
+            for pname in values:
+                try:
+                    unit = inst.spec(pname).unit
+                except Exception:
+                    continue
+                if unit:
+                    out["%s.%s" % (name, pname)] = unit
+        return out
+
     def columns(self, plan: Plan) -> Dict[str, List[Dict[str, str]]]:
         """Axis and measured columns with units, as analysis and plots need them."""
         def unit(key: str) -> str:
@@ -82,8 +121,8 @@ class RunEngine:
             spec = self.lab.resolve(key)[1]
             m = {"key": key, "unit": spec.unit, "kind": "trace" if spec.type == "trace" else
                  "image" if spec.type == "image" else "scalar"}
-            if spec.axis or spec.x_values:
-                m["x_unit"] = unit("%s.%s" % (instr, spec.axis[0] if spec.axis else spec.x_values))
+            if spec.axis or spec.axis_step or spec.x_values:
+                m["x_unit"] = unit("%s.%s" % (instr, (spec.axis or spec.axis_step or (spec.x_values,))[0]))
             measures.append(m)
         return {"axes": axes, "measures": measures}
 
@@ -93,9 +132,16 @@ class RunEngine:
         """Static checks; also converts values to each parameter's type."""
         errors: List[str] = []
         lab = self.lab
+        for instr, name in plan.trigger:
+            if instr in lab.instruments and name not in lab.instruments[instr].card.actions:
+                errors.append("trigger: %s has no action %s (it has: %s)" % (
+                    instr, name, ", ".join(lab.instruments[instr].card.actions) or "none"))
         for name in plan.requires:
             if name not in lab.instruments:
                 errors.append("unknown instrument %r" % name)
+            elif lab.instruments[name].unavailable:
+                errors.append("%s is not connected (%s); reconnect_instrument once that is fixed"
+                              % (name, lab.instruments[name].unavailable))
             elif not lab.instruments[name].enabled:
                 errors.append("%s is switched off in the Lab panel; a person switches it on there to use it" % name)
 
@@ -185,10 +231,12 @@ class RunEngine:
         report.message = "dry run: " + report.message
         return report
 
-    def run(self, plan: Any, dry_run: bool = False, meta: Optional[Dict[str, Any]] = None) -> RunReport:
+    def run(self, plan: Any, dry_run: bool = False, meta: Optional[Dict[str, Any]] = None,
+            folder: Any = None) -> RunReport:
         """Validate, check the instruments, ask once for the drive ranges, run, log, analyse. No dry run unless asked
         (dry_run), or in auto mode for a run nobody approves: there the dry run stands in for the person's look.
-        Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal."""
+        Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal.
+        folder: where the run's folder goes (its chat's folder; else the data folder's runs/)."""
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan)
         except PlanError as e:
@@ -210,8 +258,14 @@ class RunEngine:
         items, grants, problems = self.gate.plan_approval(drives)
         if problems:
             return self._refuse(plan.name, "; ".join(problems))
+        firing = ["%s.%s (%s)" % (i, a, self.lab.instruments[i].card.actions[a].label) for i, a in plan.trigger
+                  if self.lab.instruments[i].card.actions[a].drives]
+        if firing:   # an action that drives the sample at every point: the person approves the run
+            items = list(items) + ["At every point, after settling: %s, which drive the sample" % ", ".join(firing)]
         sim = None
-        if dry_run or (items and self.gate.auto):
+        # auto mode needs a clean dry run, unless a drive is on an instrument Kelvin isn't sure about (a person asks)
+        could_auto = self.gate.auto and not any(self.gate.unsure(self.lab.resolve(k)[0]) for k in grants)
+        if dry_run or (items and could_auto):
             sim = self.simulate(plan)
             if sim.status == "refused":
                 return self._refuse(plan.name, "refused by %s" % sim.message, sim)
@@ -221,6 +275,8 @@ class RunEngine:
                 title += ", ~%s" % _dur(sim.duration_s) if sim.ok else "; %s" % sim.message
             request = ApprovalRequest(title, items)
             auto, why = self.gate.auto_plan(grants, sim)
+            if firing:
+                auto, why = False, list(why or []) + ["it fires %s" % ", ".join(firing)]
             if auto:
                 self.gate.auto_approve(request, why)
             elif why:
@@ -230,7 +286,7 @@ class RunEngine:
                 report = RunReport("declined", plan.name, "declined: plan %s not run%s" % (plan.name, why), dry_run=sim)
                 self.gate.log.write("run_declined", by=self.gate.operator, plan=plan.name)
                 return report
-        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta)
+        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta, folder)
         report.dry_run = sim
         if report.status != "done":   # something went wrong on them: check them again before the next run
             for name in plan.requires:
@@ -264,21 +320,24 @@ class RunEngine:
             clock.sleep(max(0.05, min(2.0, st.duration / 10)))
 
     def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
-                 meta: Optional[Dict[str, Any]] = None) -> RunReport:
+                 meta: Optional[Dict[str, Any]] = None, folder: Any = None) -> RunReport:
         """expected_s: the dry run's duration (lab time), for an honest time-left estimate that counts ramps."""
         gate, lab, clock = self.gate, self.lab, self.lab.clock
-        gen = gate.stop_generation
-        rec = self.store.create(plan.name, plan.source, gate.operator)
+        gen, stops = gate.stop_generation, lab.stops.count
+        rec = self.store.create(plan.name, plan.source, gate.operator, folder)
         rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
         rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
         rec.meta.update(meta or {})   # e.g. which queue item this run was
-        rec.snapshot("start", lab.snapshot())
+        start = lab.snapshot()
+        rec.snapshot("start", start)
         gate.log.write("run_start", by=gate.operator, run=rec.run_id, plan=plan.name, points=plan.points)
         cols = self.columns(plan)
+        rec.set_columns(cols)
+        rec.note(units=self.units(start), planned_points=plan.points)
         self._emit(event="start", run_id=rec.run_id, plan=plan.name, total=plan.points, **cols)
         t0, wall0 = clock.now(), time.time()
         status, reason, n = "done", None, 0
-        warnings: List[str] = []
+        warnings: List[str] = [rec.moved] if getattr(rec, "moved", None) else []
 
         def apply(instr: str, param: str, value: Any) -> None:
             r = gate._set(instr, param, value, True, "plan:" + plan.name)
@@ -295,6 +354,13 @@ class RunEngine:
             with gate.preapproved(grants):
                 for step in plan.setup:
                     apply(step.instr, step.param, step.value)
+                # the conditions it measured in: the settings at its start with the plan's setup applied
+                measuring = {name: dict(values) if isinstance(values, dict) else values for name, values in start.items()}
+                for step in plan.setup:
+                    if isinstance(measuring.get(step.instr), dict):
+                        measuring[step.instr][step.param] = step.value
+                rec.note(held=self.held(plan, measuring),
+                         setup={"%s.%s" % (s.instr, s.param): s.value for s in plan.setup})
                 prev: List[Any] = [None] * len(plan.axes)
                 for combo in itertools.product(*[a.values for a in plan.axes]):
                     for j, (axis, v) in enumerate(zip(plan.axes, combo)):
@@ -304,19 +370,31 @@ class RunEngine:
                             apply(axis.instr, axis.param, v)
                             if axis.stabilize:
                                 self._stabilize(axis.stabilize, gen, warnings)
-                            clock.sleep(axis.settle if axis.settle is not None else plan.settle)
+                            if not lab.stops.sleep(clock, axis.settle if axis.settle is not None else plan.settle,
+                                                   stops):
+                                raise _Abort("stop requested")   # a stop ends a settle at once
                         elif axis.kind == "time" and v:
-                            clock.sleep(axis.every)
+                            if not lab.stops.sleep(clock, axis.every, stops):
+                                raise _Abort("stop requested")
                     prev = list(combo)
                     row: Dict[str, Any] = {"i": n, "t": round(clock.now() - t0, 6)}
                     for axis, v in zip(plan.axes, combo):
                         row[axis.key] = v
+                    for instr, action in plan.trigger:   # the cards' actions: arm, trigger, fire
+                        if lab.instrument(instr).simulated:
+                            continue   # a twin has no trigger to fire
+                        done = gate.act(instr, action, in_plan=True)
+                        if not done.ok:
+                            raise _Abort("%s.%s: %s" % (instr, action, done.message))
                     for instr, param in plan.measure:
                         key = "%s.%s" % (instr, param)
                         row[key] = lab.read(instr, param)
                         mspec = lab.instrument(instr).spec(param)
                         if mspec.axis:  # record the trace's x-axis as it was when measured
                             row[key + ".axis"] = [lab.read(instr, mspec.axis[0]), lab.read(instr, mspec.axis[1])]
+                        elif mspec.axis_step and row[key]:   # an oscilloscope's: origin and the step between points
+                            x0, dx = lab.read(instr, mspec.axis_step[0]), lab.read(instr, mspec.axis_step[1])
+                            row[key + ".axis"] = [x0, x0 + dx * (len(row[key]) - 1)]
                         elif mspec.x_values:   # its x values (a spectrometer's wavelengths), as they were then
                             row[key + ".x"] = lab.read(instr, mspec.x_values)
                         if mspec.type == "image" and row[key] and rec.path is not None:   # the frame's file
@@ -332,6 +410,8 @@ class RunEngine:
                     apply(step.instr, step.param, step.value)
         except _Abort as e:
             status, reason = "aborted", str(e)
+        except Stopped:   # a stop that came while an instrument was still taking a reading
+            status, reason = "aborted", "stop requested"
         except Exception as e:
             status, reason = "aborted", "error: %s" % e
         cleanup: List[str] = []
@@ -349,7 +429,7 @@ class RunEngine:
         if self.analyze and rec.rows:
             try:
                 analysis = analyze_run(rec.rows, cols["axes"], cols["measures"], meta)
-                rec.save_json("analysis.json", analysis)
+                rec.set_analysis(analysis)
             except Exception as e:  # analysis is a convenience; the data are already safe on disk
                 warnings.append("automatic analysis failed: %s" % e)
         rec.finish(**meta)

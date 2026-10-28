@@ -16,12 +16,16 @@ like a SCPI instrument. The address names the driver:
     seabreeze://<serial>                  Ocean Insight spectrometers through python-seabreeze (spectra.py)
     shamrock://0                          Andor Shamrock / Kymera spectrographs through Andor's DLL (spectra.py)
     picam://<serial>                      Princeton Instruments cameras (PyLoN...) through PICam's DLL (princeton.py)
+    lightfield://<experiment>             Princeton Instruments cameras and spectrographs through LightField's
+                                          automation (lightfield.py)
     pylon://<serial>                      Basler cameras through pypylon (cameras.py)
     andor://0?sdk=3                       Andor cameras through Andor's pyAndorSDK3 / pyAndorSDK2 (cameras.py)
     anc300://COM5, anc350://0             attocube positioners: the ANC300's command line, the ANC350 through pylablib
+    modbus://192.168.1.50?unit=1          Modbus TCP or RTU (modbus://COM5?unit=1&baud=9600): registers (modbus.py)
+    uvc://0, genicam://<serial>           USB video cameras (OpenCV), GenICam cameras (Harvesters) (cameras.py)
 
-The vendor libraries are optional: `pip install zhinst-core` or `pip install MultiPyVu` on the computer that runs
-Kelvin. Without them Kelvin says what to install."""
+The makers' libraries are not in the app: Kelvin installs the one an instrument needs into its drivers environment
+(envs.py) once a person approves, and says so when one is missing. From source, pip install them."""
 from __future__ import annotations
 
 import math
@@ -30,11 +34,13 @@ import threading
 import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import envs
 from .adapters import AdapterError
 from .cards import Card
 
 SCHEMES = ("zhinst", "qd", "pulsestreamer", "pulseblaster", "timetagger", "http", "https", "m2", "toptica", "qick", "lib",
-           "nidaq", "seabreeze", "shamrock", "picam", "pylon", "andor", "anc300", "anc350")
+           "nidaq", "seabreeze", "shamrock", "picam", "lightfield", "pylon", "andor", "anc300", "anc350", "modbus",
+           "uvc", "genicam")
 _COMMAND = re.compile(r"^\s*(SET|GET)\s+(\S+)(?:\s+(\S+))?\s*$", re.I)
 
 
@@ -136,7 +142,7 @@ class Zhinst(DriverBackend):
             try:
                 import zhinst.core as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs the LabOne Python API: pip install zhinst-core" % name) from e
+                raise AdapterError("%s needs the LabOne Python API: %s" % (name, envs.missing("zhinst-core"))) from e
         try:
             self.daq = module.ziDAQServer(q.get("host", "localhost"), int(q.get("port", 8004)), 6)
             if q.get("interface", "1GbE"):
@@ -211,8 +217,8 @@ class MultiVu(DriverBackend):
             try:
                 import MultiPyVu as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs Quantum Design's MultiPyVu: pip install MultiPyVu (and its server "
-                                   "running next to MultiVu)" % name) from e
+                raise AdapterError("%s needs Quantum Design's MultiPyVu (and its server running next to MultiVu): %s"
+                                   % (name, envs.missing("MultiPyVu"))) from e
         try:
             self.client = module.Client(host=self.host, port=self.port)
             self.client.open()
@@ -420,7 +426,7 @@ class PulseStreamer(PulseGeneratorDriver):
             try:
                 import pulsestreamer as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs Swabian's client: pip install pulsestreamer" % name) from e
+                raise AdapterError("%s: %s" % (name, envs.missing("pulsestreamer"))) from e
         self.mod = module
         try:
             self.ps = module.PulseStreamer(host)
@@ -475,7 +481,8 @@ class PulseBlaster(PulseGeneratorDriver):
             try:
                 import spinapi as module   # type: ignore
             except ImportError as e:
-                raise AdapterError("%s needs SpinCore's SpinAPI and the Python wrapper: pip install spinapi" % name) from e
+                raise AdapterError("%s: %s; it also needs SpinCore's SpinAPI (SpinCore's installer)"
+                                   % (name, envs.missing("spinapi"))) from e
         self.sp = module
         try:
             if self.sp.pb_count_boards() <= self.board:
@@ -559,7 +566,7 @@ class TimeTagger(CounterDriver):
                 try:
                     import TimeTagger as module   # type: ignore  (the Windows installer's module)
                 except ImportError as e:
-                    raise AdapterError("%s needs Swabian's library: pip install Swabian-TimeTagger" % name) from e
+                    raise AdapterError("%s: %s" % (name, envs.missing("Swabian-TimeTagger"))) from e
         self.tt = module
         try:
             self.tagger = module.createTimeTagger(self.serial)
@@ -665,27 +672,53 @@ MODULES: Dict[str, Any] = {}   # tests put fake vendor libraries here
 LATER = {"m2": ("m2", "M2Laser"), "toptica": ("decop", "DeCoP"), "qick": ("rfsoc", "Qick"),
          "lib": ("library", "LibraryInstrument"), "nidaq": ("daq", "NIDAQ"),
          "seabreeze": ("spectra", "OceanSpectrometer"), "shamrock": ("spectra", "AndorSpectrograph"),
-         "picam": ("princeton", "PicamCamera"),
+         "picam": ("princeton", "PicamCamera"), "lightfield": ("lightfield", "LightFieldCamera"),
          "pylon": ("cameras", "BaslerCamera"), "andor": ("cameras", "AndorCamera"),
-         "anc300": ("positioners", "ANC300"), "anc350": ("positioners", "ANC350")}   # they import this module
+         "anc300": ("positioners", "ANC300"), "anc350": ("positioners", "ANC350"),
+         "modbus": ("modbus", "ModbusInstrument"), "uvc": ("cameras", "UsbCamera"),
+         "genicam": ("cameras", "GenicamCamera")}   # they import this module
 
 
-LIBRARIES = (("nidaqmx", "nidaqmx.system"), ("seabreeze", "seabreeze.spectrometers"), ("pypylon", "pypylon.pylon"),
-             ("pylablib", "pylablib.devices.Attocube"))
+def library_notes() -> List[str]:
+    """What the last scan saw through the makers' programs that say so, in words for its report: PICam (cameras
+    free, or open in another program) and LightField. Nothing on a computer without Teledyne Princeton software."""
+    from .lightfield import note as lightfield_note
+    from .princeton import LAST
+    lightfield = lightfield_note()
+    picam = LAST.get("picam") or ""
+    if picam.endswith("not installed here") and not lightfield:
+        picam = ""
+    return [n for n in (picam, lightfield) if n] + package_notes()
 
 
-def instrument_libraries(problems: Optional[Dict[str, str]] = None) -> List[str]:
-    """The makers' Python libraries this Kelvin can load (the private app build brings them); why the others don't
-    go to `problems`."""
-    import importlib
+# a maker's program or driver (words in its name and maker), the package Kelvin reaches its instruments through, and
+# what they are: with the program here and the package not, the scan says how Kelvin installs it
+PACKAGE_HINTS = ((("ni-daqmx",), "nidaqmx", "NI DAQ cards", "NI-DAQmx"),
+                 (("labone",), "zhinst-core", "Zurich Instruments' instruments", "LabOne"),
+                 (("oceanview",), "seabreeze", "Ocean spectrometers", "OceanView"),
+                 (("basler", "pylon"), "pypylon", "Basler cameras", "Basler's pylon"),
+                 (("time tagger",), "Swabian-TimeTagger", "Swabian Time Taggers", "Swabian's Time Tagger software"),
+                 (("multivu",), "MultiPyVu", "Quantum Design systems", "MultiVu"),
+                 (("spinapi",), "spinapi", "SpinCore PulseBlasters", "SpinAPI"),
+                 (("spinnaker",), "harvesters", "GenICam cameras (Teledyne FLIR)", "Spinnaker"),
+                 (("vimba",), "harvesters", "GenICam cameras (Allied Vision)", "Vimba"),
+                 (("ids", "peak"), "harvesters", "GenICam cameras (IDS)", "IDS peak"),
+                 (("kinesis",), "pythonnet", "Thorlabs motion controllers, through Kinesis' .NET library",
+                  "Thorlabs Kinesis"))
+
+
+def package_notes(programs: Optional[List[Dict[str, str]]] = None) -> List[str]:
+    """Makers' programs installed here whose instruments Kelvin reaches through a package it doesn't have yet."""
+    from . import probe
+    try:
+        found = probe.programs() if programs is None else programs
+    except Exception:
+        return []
+    text = [("%s %s" % (p.get("name", ""), p.get("publisher", ""))).lower() for p in found]
     out = []
-    for name, module in LIBRARIES:
-        try:
-            importlib.import_module(module)
-            out.append(name)
-        except Exception as e:
-            if problems is not None:
-                problems[name] = "%s: %s" % (type(e).__name__, str(e).splitlines()[0][:160] if str(e) else "")
+    for words, package, what, program in PACKAGE_HINTS:
+        if any(all(w in t for w in words) for t in text) and envs.have(package) is None:
+            out.append("%s is installed on this computer; for %s, %s" % (program, what, envs.missing(package)))
     return out
 
 

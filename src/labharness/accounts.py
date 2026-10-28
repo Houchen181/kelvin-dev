@@ -85,22 +85,34 @@ class Accounts:
         self.path = self.home / "accounts.json"
         self._lock = threading.Lock()
 
-    def _read(self) -> List[Dict[str, Any]]:
+    def _data(self) -> Dict[str, Any]:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            return [a for a in data.get("accounts") or [] if isinstance(a, dict) and a.get("name")]
+            return data if isinstance(data, dict) else {}
         except (OSError, ValueError):
-            return []
+            return {}
 
-    def _write(self, accounts: List[Dict[str, Any]]) -> None:
+    def _read(self) -> List[Dict[str, Any]]:
+        return [a for a in self._data().get("accounts") or [] if isinstance(a, dict) and a.get("name")]
+
+    def _write(self, accounts: List[Dict[str, Any]], **marks: Any) -> None:
+        """The accounts, keeping marks such as legacy_taken (what Kelvin kept before accounts is someone's)."""
         self.home.mkdir(parents=True, exist_ok=True)
+        data = self._data()
+        data.update(marks, accounts=accounts)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"accounts": accounts}, indent=1, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.path)
 
     def list(self) -> List[Dict[str, Any]]:
-        """For the sign-in screen: names, and whether each has a password; never the hashes."""
-        return [{"name": a["name"], "password": bool(a.get("hash")), "created": a.get("created")} for a in self._read()]
+        """For the sign-in screen: names (and the email and name of a central account), and whether each has a
+        password; never the hashes."""
+        return [{"name": a["name"], "password": bool(a.get("hash")), "created": a.get("created"),
+                 "email": a.get("email") or None, "display": a.get("display") or None} for a in self._read()]
+
+    def legacy_taken(self) -> bool:
+        """Has an account here taken over what Kelvin kept before accounts (even one removed since)?"""
+        return bool(self._data().get("legacy_taken")) or any(a.get("data") == "virtual-lab" for a in self._read())
 
     def find(self, name: str) -> Dict[str, Any]:
         for a in self._read():
@@ -123,12 +135,16 @@ class Accounts:
                 folder = "%s_%d" % (folder_name(name), n)
             account: Dict[str, Any] = {"name": name, "folder": folder, "created": time.time(),
                                        "key_salt": secrets.token_hex(16)}
-            if adopt_legacy and not accounts:   # what Kelvin kept before accounts: chats and runs in ~/Kelvin/virtual-lab
+            marks = {}
+            # what Kelvin kept before accounts (chats and runs in ~/Kelvin/virtual-lab) goes to the first account,
+            # once: never to someone who comes after that person was removed
+            if adopt_legacy and not accounts and not self._data().get("legacy_taken"):
                 account["chats"] = "virtual-lab/chats"
                 account["data"] = "virtual-lab"
+                marks["legacy_taken"] = True
             self._set_password(account, password)
             accounts.append(account)
-            self._write(accounts)
+            self._write(accounts, **marks)
         self.dir(account).mkdir(parents=True, exist_ok=True)
         return account
 
@@ -164,11 +180,68 @@ class Accounts:
             self._write(accounts)
         return account
 
-    def remove(self, name: str, password: str = "") -> None:
-        """Forget the account; its folder (chats, data, settings) stays on disk."""
+    def remove(self, name: str, password: str = "") -> Dict[str, Any]:
+        """Forget the account, if this is its password; its folder stays on disk."""
         self.verify(name, password)
+        return self.forget(name)
+
+    def forget(self, name: str) -> Dict[str, Any]:
+        """Take the account off this computer's list (whoever may do so has been checked); returns it. Its folder
+        stays: a new account never gets it, nor what Kelvin kept before accounts if this one had taken that."""
         with self._lock:
-            self._write([a for a in self._read() if a["name"].lower() != name.lower()])
+            accounts = self._read()
+            gone = next(a for a in accounts if a["name"].lower() == name.lower())
+            marks = {"legacy_taken": True} if gone.get("data") == "virtual-lab" else {}
+            self._write([a for a in accounts if a is not gone], **marks)
+        return gone
+
+    # ------------------------------------------------------------------ central Kelvin accounts (central.py)
+
+    def find_email(self, email: Any) -> Optional[Dict[str, Any]]:
+        """The account on this computer that this central Kelvin account signs in to, if there is one."""
+        e = str(email or "").strip().lower()
+        return next((a for a in self._read() if e and a.get("email") == e), None)
+
+    def unlinked(self) -> List[str]:
+        """Accounts from before central accounts: someone signing in centrally for the first time may take one over."""
+        return [a["name"] for a in self._read() if not a.get("email")]
+
+    def matches(self, name: str, password: str) -> bool:
+        """Is this the password this computer knows for the account? (Never true for one without a password.)"""
+        try:
+            return bool(self.verify(name, password).get("hash"))
+        except (ValueError, KeyError):
+            return False
+
+    def link(self, name: str, email: str, display: str = "") -> Dict[str, Any]:
+        """Tie an account on this computer to a central Kelvin account: its chats, data and keys stay."""
+        with self._lock:
+            accounts = self._read()
+            account = next(a for a in accounts if a["name"].lower() == name.lower())
+            account["email"] = str(email).strip().lower()
+            if display:
+                account["display"] = str(display)[:80]
+            self._write(accounts)
+        return account
+
+    def create_central(self, display: str, email: str, password: str, adopt_legacy: bool = False) -> Dict[str, Any]:
+        """This computer's account for a central Kelvin account signing in here for the first time."""
+        email = str(email).strip().lower()
+        taken = {a["name"].lower() for a in self._read()}
+        name = " ".join(str(display or "").split())[:40]
+        if not name or name.lower() in taken or not NAME.match(name):
+            name = email[:40] if email[:40].lower() not in taken else email[:34] + "-" + secrets.token_hex(2)
+        account = self.create(name, password, adopt_legacy)
+        return self.link(account["name"], email, display)
+
+    def set_verifier(self, name: str, password: str) -> Dict[str, Any]:
+        """Remember this password for the account (after the hub accepted it), so it also works here offline."""
+        with self._lock:
+            accounts = self._read()
+            account = next(a for a in accounts if a["name"].lower() == name.lower())
+            self._set_password(account, password)
+            self._write(accounts)
+        return account
 
     # ------------------------------------------------------------------ where each person's things are
 

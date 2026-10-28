@@ -1,0 +1,133 @@
+card: 1
+id: hp/8720
+model: HP/Agilent 8719, 8720 and 8722 network analyzers (D and ES series)
+vendor: Hewlett-Packard (later Agilent)
+kind: vna
+status: community
+manual: "HP 8719D/8720D/8722D Network Analyzer Programmer's Guide, chapter 1: HP-IB Programming and Command Reference (the ES series answers the same commands)"
+notes:
+  - "GPIB, e.g. GPIB0::16::INSTR. A trace comes as a line per point with two numbers on each (FORM4: the value, then one that means nothing in log magnitude or phase): Kelvin reads it to the end of the transfer (EOI) and keeps the first number of each point."
+  - "Each S-parameter reading selects that parameter and its format on the active channel, sets a linear frequency sweep, restarts averaging and takes one sweep (OPC?;SING), then reads the formatted trace. For less noise, narrow the IF bandwidth (down to 10 Hz) or repeat the scan and average."
+  - "Ranges: the 8719 sweeps 50 MHz to 13.5 GHz, the 8720 to 20 GHz, the 8722 to 40 GHz; the power range depends on the options (a step attenuator reaches lower). Set the lab limits to yours."
+  - "Points: 3, 11, 26, 51, 101, 201, 401, 801 or 1601. IF bandwidth: 10, 30, 100, 300, 1000, 3000 or 3700 Hz."
+  - "The calibration is never touched: readings use the active correction, and Kelvin blocks the commands that start, save or clear a calibration and those that overwrite or clear saved states."
+identify:
+  query: "IDN?"
+  idn: "(?i)^\\s*(hewlett[- ]packard|agilent|keysight)[^,]*,\\s*87(19|20|22)(d|es)\\b"
+  example: "HEWLETT PACKARD,8719ES,0,7.74"
+error_query: "OUTPERRO"
+
+parameters:
+  f_start:
+    label: Start frequency
+    kind: measure
+    unit: Hz
+    set: "STAR {value}"
+    get: "STAR?"
+    limits: [5.0e7, 4.005e10]
+  f_stop:
+    label: Stop frequency
+    kind: measure
+    unit: Hz
+    set: "STOP {value}"
+    get: "STOP?"
+    limits: [5.0e7, 4.005e10]
+  points:
+    label: Points
+    kind: measure
+    type: int
+    set: "POIN {value}"
+    get: "POIN?"
+    limits: [3, 1601]
+    description: "3, 11, 26, 51, 101, 201, 401, 801 or 1601"
+  ifbw:
+    label: IF bandwidth
+    kind: measure
+    unit: Hz
+    set: "IFBW {value}"
+    get: "IFBW?"
+    limits: [10, 6000]
+    description: "10, 30, 100, 300, 1000, 3000 or 3700 Hz"
+  rf:
+    label: RF output (source power)
+    kind: drive
+    type: bool
+    set: "SOUP{value}"
+    get: "SOUP?"
+    bool_text: ["ON", "OFF"]
+    safe: off
+    enables: [power]
+  power:
+    label: Port power
+    applies_when: rf
+    kind: drive
+    unit: dBm
+    set: "POWE {value}"
+    get: "POWE?"
+    limits: [-90, 20]
+    safe: -90
+    ramp: gate
+    max_rate: 10
+    ramp_step: 1
+    description: Source power at the test port (below the instrument's range it sets its lowest)
+  S21:
+    label: S21
+    kind: measure
+    type: trace
+    unit: dB
+    get: ["FORM4", "LINFREQ", "S21", "LOGM", "AVERREST", "OPC?;SING", "OUTPFORM"]
+    pairs: true
+    acquires: true
+    wait: 1200
+    axis: { start: f_start, stop: f_stop }
+    description: Transmission from port 1 to port 2, one sweep, in dB
+  S21_phase:
+    label: S21 phase
+    kind: measure
+    type: trace
+    unit: deg
+    get: ["FORM4", "LINFREQ", "S21", "PHAS", "AVERREST", "OPC?;SING", "OUTPFORM"]
+    pairs: true
+    acquires: true
+    wait: 1200
+    axis: { start: f_start, stop: f_stop }
+    description: Phase of the transmission from port 1 to port 2, one sweep, in degrees
+  S11:
+    label: S11
+    kind: measure
+    type: trace
+    unit: dB
+    get: ["FORM4", "LINFREQ", "S11", "LOGM", "AVERREST", "OPC?;SING", "OUTPFORM"]
+    pairs: true
+    acquires: true
+    wait: 1200
+    axis: { start: f_start, stop: f_stop }
+    description: Reflection at port 1, one sweep, in dB
+  S12:
+    label: S12
+    kind: measure
+    type: trace
+    unit: dB
+    get: ["FORM4", "LINFREQ", "S12", "LOGM", "AVERREST", "OPC?;SING", "OUTPFORM"]
+    pairs: true
+    acquires: true
+    wait: 1200
+    axis: { start: f_start, stop: f_stop }
+    description: Transmission from port 2 to port 1 (port 2 sends), one sweep, in dB
+  S22:
+    label: S22
+    kind: measure
+    type: trace
+    unit: dB
+    get: ["FORM4", "LINFREQ", "S22", "LOGM", "AVERREST", "OPC?;SING", "OUTPFORM"]
+    pairs: true
+    acquires: true
+    wait: 1200
+    axis: { start: f_start, stop: f_stop }
+    description: Reflection at port 2 (port 2 sends), one sweep, in dB
+
+safe_sequence: [rf, power]
+raw:
+  reset: ["PRES", "RST"]
+  blocked: ["CALIFUL2", "CALIONE2", "CALIRAI", "CALIRESP", "CALIS111", "CALIS221", "CALITRL2", "CALN", "SAVC",
+            "CLEA", "CLEAREG", "CLEARALL", "SAVE", "SAVEREG", "PURG"]

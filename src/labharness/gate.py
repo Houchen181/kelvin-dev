@@ -6,12 +6,19 @@
   signed envelope or an approved plan covers it, or auto mode is on and the
   change is low-risk → ramps while watching guard readings, and returns to
   safe if one trips.
+- A real instrument Kelvin isn't sure about (its card is a draft, or Kelvin added it to the lab itself and nobody
+  has reviewed its limits): every change away from safe asks a person and says why; no envelope or auto mode
+  covers it.
 - Beyond limits, or blocked commands: refused.
+- A mounted device's protection (protection.py) narrows the limits and rates and adds its gates' leakage guards;
+  a source's range changes only while its level is at safe; while a person has their hands on the sample
+  (lab.hands_on), nothing moves away from safe.
 """
 from __future__ import annotations
 
 import math
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -113,6 +120,9 @@ def _same(spec: ParamSpec, a: Any, b: Any) -> bool:
     return a == b
 
 
+OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
+
+
 class SafetyGate:
     def __init__(self, lab: Any, approver: Approver, log: Optional[EventLog] = None,
                  envelope: Optional[Envelope] = None, operator: str = "agent"):
@@ -124,6 +134,11 @@ class SafetyGate:
         self.envelope = envelope
         self.operator = operator
         self.auto = False  # auto mode: set by a person through the portal, never by the agent
+        # text from outside the lab the model has read (a web page, a manual, a board's output): it could try to
+        # steer the model, so auto mode asks a person instead. outside_chat: the portal's chat has read some.
+        self.outside: Optional[Tuple[float, str]] = None
+        self.outside_chat: Optional[str] = None
+        self.in_chat = False   # a portal chat's turn: the chat's own account of web text counts, not the clock's
         self._grants: Dict[str, Allowed] = {}
         self._standing: Dict[str, Allowed] = {}   # what a person approved for a whole queue of scans, while it runs
         self._undo: List[Tuple[str, str, Any]] = []
@@ -180,6 +195,39 @@ class SafetyGate:
         last = results[-1]
         return Result(last.ok, last.action, instr, value=last.value, message="; ".join(r.message for r in results))
 
+    def act(self, instr: str, name: str, in_plan: bool = False) -> Result:
+        """One of the card's named actions (trigger, arm, fire a burst), sent as the card writes it. One that drives the
+        sample (drives: true) asks a person first, like a drive change, unless it is part of a plan they approved;
+        the hands-on lock stops it. Blocked commands are never sent."""
+        target = "%s.%s" % (instr, name)
+        try:
+            inst = self.lab.instrument(instr)
+        except KeyError as e:
+            return self._done(Result(False, "refused", target, message="refused: %s" % e.args[0]), "action")
+        action = inst.card.actions.get(name)
+        if action is None:
+            return self._done(Result(False, "refused", target, message="refused: %s has no action %s (it has: %s)" % (
+                instr, name, ", ".join(inst.card.actions) or "none")), "action")
+        for c in action.send:
+            if any(b.match(c) is not None for b in inst.card.blocked):
+                return self._done(Result(False, "refused", target, message="refused: %r is blocked on %s" % (c, instr)),
+                                  "action")
+        if action.drives:
+            hands = self._hands_problem(target)
+            if hands:
+                return self._done(Result(False, "refused", target, message="refused: %s" % hands), "action")
+            if not in_plan:
+                request = ApprovalRequest("%s: %s?" % (instr, action.label), [
+                    "%s sends %s, which drives the sample" % (target, " then ".join(repr(c) for c in action.send))])
+                if not self.ask(request):
+                    note = " (%s)" % request.note if request.note else ""
+                    return self._done(Result(False, "declined", target, message="declined: %s not done%s"
+                                             % (target, note)), "action")
+        said = inst.act(name)
+        return self._done(Result(True, "sent", target, value=said[-1] if said else None,
+                                 message="%s: %s%s" % (instr, action.label, " → " + said[-1] if said else "")),
+                          "action", None, instrument=instr, name=name)
+
     def undo(self) -> Result:
         if not self._undo:
             return Result(False, "refused", "", message="nothing to undo")
@@ -192,13 +240,18 @@ class SafetyGate:
         inst = self.lab.instrument(instr)
         card = inst.card
         lines = ["%s: %s (%s, card %s, %s, trust %s)" % (inst.name, card.model, card.kind, card.id, card.status, inst.trust)]
+        unsure = self.unsure(inst)
+        if unsure:
+            lines.append("  not sure yet: %s; every output change asks a person" % unsure)
         for spec in card.params.values():
             bits = [spec.name, spec.kind]
             if spec.unit:
                 bits.append(spec.unit)
             lim = inst.limits(spec.name)
             if lim:
-                bits.append("[%s, %s]%s" % (num(lim[0]), num(lim[1]), " lab" if inst.limits_source(spec.name) == "lab" else ""))
+                src = inst.limits_source(spec.name)   # lab, vendor, or the mounted device's
+                bits.append("[%s, %s] %s" % (num(lim[0]), num(lim[1]),
+                                             {"vendor": "card", "lab": "lab config"}.get(src, src)))
             if spec.type == "enum":
                 bits.append("{%s}" % ", ".join(spec.values or {}))
             if spec.is_drive:
@@ -210,14 +263,57 @@ class SafetyGate:
                 bits.append(g)
             if spec.set_cmd is None:
                 bits.append("read-only")
+            if spec.get_before:
+                bits.append("runs an acquisition (%s), then reads" % "; ".join(spec.get_before))
             lines.append("  " + "  ".join(bits))
+        if card.actions:
+            lines.append("  actions (do_action, or a plan's trigger:): " + ", ".join(
+                "%s%s" % (n, " (drives the sample: asks first)" if a.drives else "") for n, a in card.actions.items()))
         return "\n".join(lines)
 
     def status(self) -> Dict[str, Dict[str, Any]]:
         return self.lab.snapshot()
 
+    def to_safe(self, instr: str) -> List[Result]:
+        """Bring an instrument's drives to safe in its card's order (ramped, or held where the lab says so)."""
+        by = self._who()
+        try:
+            inst = self.lab.instrument(instr)
+        except KeyError as e:
+            return [self._done(Result(False, "refused", instr, message="refused: %s" % e.args[0]), "safe", by)]
+        try:
+            results = self._to_safe(inst, wait=True)
+        except Exception as e:
+            results = [Result(False, "error", instr, message="%s: instrument error: %s" % (instr, e))]
+        return [self._done(r, "safe", by) for r in results]
+
+    def unsure(self, inst: Instrument) -> Optional[str]:
+        """Why Kelvin can't be sure what a person allows on this real instrument, if it can't: its card is a draft
+        nobody has checked, or Kelvin added it to the lab itself and nobody has reviewed its limits. Then every change
+        away from safe asks a person, saying this, and neither an envelope nor auto mode covers it."""
+        if inst.simulated:
+            return None
+        why = []
+        if inst.card.status == "draft":
+            why.append("its card is a draft that nobody has checked against the instrument")
+        if self.lab.config.observe_only or inst.config.added_by:
+            why.append("Kelvin added it to the lab itself, and its limits are the maker's: nobody has reviewed them "
+                       "for this setup")
+        return "; ".join(why) or None
+
     def request_abort(self) -> None:
         self._stop_gen += 1
+        stops = getattr(self.lab, "stops", None)
+        if stops is not None:
+            stops.pulse()   # every long wait ends now: a settle, a ramp's step, an instrument's sweep
+
+    def _pause(self, seconds: float, gen: int) -> None:
+        """The clock's sleep, cut short by a stop."""
+        stops = getattr(self.lab, "stops", None)
+        if stops is None or self._stop_gen != gen:
+            self.lab.clock.sleep(0 if self._stop_gen != gen else seconds)
+            return
+        stops.sleep(self.lab.clock, seconds, stops.count)
 
     @property
     def stop_generation(self) -> int:
@@ -253,15 +349,52 @@ class SafetyGate:
         return False, "%s goes %.0f%% of the way from safe to its limit (auto mode covers %.0f%%)" % (
             key, 100 * worst, 100 * fraction)
 
+    def note_outside(self, source: str) -> None:
+        """The model has read text from the web: until it has been a while, auto mode asks a person (a portal chat
+        keeps its own account instead, in_chat and outside_chat)."""
+        self.outside = (time.monotonic(), source)
+
+    def outside_reason(self, chat: Optional[str] = None) -> Optional[str]:
+        """Why auto mode asks a person now, because the model read text from outside the lab (the web; in a portal
+        chat, also a file in the chat's folder); None when it hasn't. In a portal chat, until the person writes again
+        in it; for other clients, for OUTSIDE_S. chat: what a portal chat has read ("" for nothing), for a request it
+        makes outside the lab's turn, which doesn't set outside_chat."""
+        read = self.outside_chat if chat is None else chat
+        if read:
+            return ("this chat has read text from outside the lab (%s) since the person last wrote, which could try "
+                    "to steer a model, so a person approves" % read)
+        if chat is None and not self.in_chat and self.outside is not None and \
+                time.monotonic() - self.outside[0] < OUTSIDE_S:
+            return ("Kelvin read text from the web (%s) in the last %d minutes, which could try to steer a model, "
+                    "so a person approves" % (self.outside[1], OUTSIDE_S // 60))
+        return None
+
+    def review_steps(self, inst: Instrument) -> str:
+        """Where a person ends Kelvin's uncertainty about an instrument (unsure), in the portal."""
+        steps = []
+        if inst.card.status == "draft":
+            steps.append("mark its card reviewed (Lab → Cards… → Mark reviewed)")
+        if self.lab.config.observe_only or inst.config.added_by:
+            steps.append("check its limits and mark them reviewed (Lab → Set up… → Limits reviewed…)")
+        return " and ".join(steps)
+
     def auto_plan(self, grants: Dict[str, Allowed], dry_run: Any) -> Tuple[bool, List[str]]:
         """Can auto mode approve a plan with these drive ranges? Needs a clean dry run and every drive low-risk."""
         if not self.auto:
             return False, []
+        outside = self.outside_reason()
+        if outside:
+            return False, [outside]
         if dry_run is None or not getattr(dry_run, "ok", False):
             return False, ["the dry run did not finish cleanly"]
         fine, blockers = [], []
         for key, allowed in grants.items():
             inst, spec = self.lab.resolve(key)
+            unsure = self.unsure(inst)
+            if unsure:
+                blockers.append("%s: %s, so a person approves it until they %s" % (key, unsure,
+                                                                                  self.review_steps(inst)))
+                continue
             values = sorted(allowed.values, key=str) if allowed.values is not None else [allowed.lo, allowed.hi]
             ok, why = self.auto_verdict(inst, spec, values)
             (fine if ok else blockers).append(why)
@@ -269,9 +402,22 @@ class SafetyGate:
             return False, blockers
         return True, fine + ["the dry run finished cleanly"]
 
-    def auto_approve(self, request: ApprovalRequest, reasons: List[str]) -> None:
+    def auto_simple(self, request: ApprovalRequest, why: str, chat: Optional[str] = None) -> bool:
+        """Kelvin's own yes to a request that drives nothing (trying a card, adding an instrument at an address,
+        keeping a skill or recipe, installing or removing a maker's package, saving code a library loads): approved
+        without asking, whatever the approval mode, and said so; only driving the sample waits for a person. False
+        when the model has read text from the web, which could be steering it (then the request says so, and a person
+        answers). chat: as for outside_reason."""
+        outside = self.outside_reason(chat)
+        if outside:
+            request.items.append("Not approved by Kelvin itself: " + outside)
+            return False
+        self.auto_approve(request, [why], "drives nothing")
+        return True
+
+    def auto_approve(self, request: ApprovalRequest, reasons: List[str], why: str = "auto mode") -> None:
         """Approve without asking, and say so: in the event log and to the human's screen."""
-        request.note = "auto mode: " + "; ".join(reasons)
+        request.note = "%s: %s" % (why, "; ".join(reasons))
         self.log.write("ask", by=self._who(), request=str(request), answer="auto-approved", note=request.note)
         try:
             self.approver.inform(request, reasons)
@@ -326,7 +472,9 @@ class SafetyGate:
             if problem:
                 problems.append(problem)
                 continue
-            if inst.trust == "envelope" and self.envelope and all(self.envelope.covers(key, v) for v in away):
+            unsure = self.unsure(inst)
+            if not unsure and inst.trust == "envelope" and self.envelope and all(self.envelope.covers(key, v)
+                                                                                  for v in away):
                 continue
             allowed = Allowed.of(spec, values)
             grants[key] = allowed
@@ -336,6 +484,8 @@ class SafetyGate:
             g = self._guard_text(inst, spec)
             if g:
                 bits.append(g)
+            if unsure:
+                bits.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
             items.append("; ".join(bits))
         return items, grants, problems
 
@@ -359,6 +509,12 @@ class SafetyGate:
             return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
         try:
             current = self._current(inst, spec)
+            owner = inst.card.range_owner(spec.name)
+            if owner is not None and not _same(spec, current, target):
+                problem = self._range_problem(inst, owner, spec, target)
+                if problem:
+                    return self._done(Result(False, "refused", key, value=target, message="refused: " + problem),
+                                      "set", by)
             if not spec.is_drive:
                 if inst.card.status == "draft" and not inst.simulated and not _same(spec, current, target):
                     # nobody has checked this card's measure/drive tags yet: a "setting" might reach the sample
@@ -384,11 +540,22 @@ class SafetyGate:
                 problem = self._away_problem(inst, spec)
                 if problem:
                     return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
-                how = self._covered(inst, spec, target)
+                unsure = self.unsure(inst)
+                how = self._covered(inst, spec, target, envelope=not unsure)
                 if how is None:
                     request = ApprovalRequest("Approve drive change on %s?" % inst.name,
                                               [self._describe_move(inst, spec, current, target)])
-                    ok, why = self.auto_verdict(inst, spec, [target]) if self.auto else (False, "")
+                    if unsure:
+                        request.items.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
+                    if not self.auto:
+                        ok, why = False, ""
+                    elif unsure:
+                        ok, why = False, "nothing on %s is automatic until a person reviews it: %s" % (
+                            inst.name, self.review_steps(inst))
+                    elif self.outside_reason():
+                        ok, why = False, self.outside_reason()
+                    else:
+                        ok, why = self.auto_verdict(inst, spec, [target])
                     if ok:
                         self.auto_approve(request, [why])
                         how = "auto-approved"
@@ -429,34 +596,60 @@ class SafetyGate:
         lim = inst.limits(spec.name)
         if lim is None or lim[0] <= target <= lim[1]:
             return None
-        return "%s.%s %s is outside %s limits [%s, %s]%s" % (
-            inst.name, spec.name, spec.show(target), inst.limits_source(spec.name),
-            num(lim[0]), num(lim[1]), " " + spec.unit if spec.unit else "")
+        src = inst.limits_source(spec.name)
+        why = {"vendor": "the instrument's own range, from its card %s; the lab config sets none tighter" % inst.card.id,
+               "lab": "a person changes them with Limits… in Lab → Set up…"}.get(
+                   src, "the protection a person set for the mounted device")
+        return "%s.%s %s is outside %s limits [%s, %s]%s (%s)" % (
+            inst.name, spec.name, spec.show(target), inst.limits_where(spec.name),
+            num(lim[0]), num(lim[1]), " " + spec.unit if spec.unit else "", why)
+
+    def _range_problem(self, inst: Instrument, owner: ParamSpec, spec: ParamSpec, target: Any) -> Optional[str]:
+        """A source's range (or its autorange) changes only while the source's level is at safe: a range change
+        with a level applied can glitch the output. While a device's protection holds the range, autorange stays off."""
+        level = self._current(inst, owner)
+        if level is None or owner.distance(level) > 0:
+            return ("%s.%s changes only while %s.%s is at %s (now %s): changing a source's range with a level "
+                    "applied can glitch the output" % (inst.name, spec.name, inst.name, owner.name,
+                                                       owner.show(owner.safe), owner.show(level)))
+        if spec.name == owner.autorange_param and target and owner.name in inst.device_limits:
+            return ("%s keeps %s's range fixed while it is mounted (sample protection), so autorange stays off"
+                    % ("device " + inst.device_name if inst.device_name else "the mounted device", inst.name))
+        return None
+
+    def _hands_problem(self, what: str) -> Optional[str]:
+        """While a person has their hands on the sample, nothing moves away from safe."""
+        hands = getattr(self.lab, "hands_on", None)
+        if not hands:
+            return None
+        return ("%s: %s has hands on the sample (since %s), so every drive stays at safe until a person unlocks it "
+                "in the Lab panel" % (what, hands.get("by") or "someone", hands.get("since") or "now"))
 
     def _away_problem(self, inst: Instrument, spec: ParamSpec) -> Optional[str]:
         key = "%s.%s" % (inst.name, spec.name)
-        if inst.card.status == "draft" and not inst.simulated:
-            return "%s: draft card; its drives stay simulation-only until a person reviews it" % key
-        if self.lab.config.observe_only and not inst.simulated:
-            return ("%s: Kelvin set this lab up on its own, so drives stay at safe until a person reviews the limits "
-                    "in Lab setup and unlocks them" % key)
-        off = set(self.lab.switched_off)
+        hands = self._hands_problem(key)
+        if hands:
+            return hands
         for g in inst.guards(spec.name):   # nothing would watch it: a switched-off instrument is never read
-            if g.instr in off:
-                return "%s: its guard %s is on %s, which is switched off in the Lab panel" % (key, g.key, g.instr)
+            away = self.lab.away(g.instr)
+            if away:
+                return "%s: its guard %s is on %s, which is %s" % (key, g.key, g.instr, away)
         for lock in self.lab.config.interlocks:
             if lock.drive != key:
                 continue
-            if lock.require.key.split(".")[0] in off:
-                return "interlock: %s needs %s, but %s is switched off in the Lab panel" % (
-                    key, lock.require.text, lock.require.key.split(".")[0])
+            away = self.lab.away(lock.require.key.split(".")[0])
+            if away:
+                return "interlock: %s needs %s, but %s is %s" % (key, lock.require.text,
+                                                                  lock.require.key.split(".")[0], away)
             ok, actual = lock.require.check(self.lab.read)
             if not ok:
                 _, cspec = self.lab.resolve(lock.require.key)
                 return "interlock: %s needs %s (now %s)" % (key, lock.require.text, cspec.show(actual))
         return None
 
-    def _covered(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
+    def _covered(self, inst: Instrument, spec: ParamSpec, target: Any, envelope: bool = True) -> Optional[str]:
+        """What already approves this change: a person's approval of the plan or queue, or (unless Kelvin isn't sure
+        about the instrument) the project envelope."""
         key = "%s.%s" % (inst.name, spec.name)
         grant = self._grants.get(key)
         if grant is not None and grant.covers(target):
@@ -464,7 +657,7 @@ class SafetyGate:
         standing = self._standing.get(key)
         if standing is not None and standing.covers(target):
             return "queue approval"
-        if inst.trust == "envelope" and self.envelope is not None and self.envelope.covers(key, target):
+        if envelope and inst.trust == "envelope" and self.envelope is not None and self.envelope.covers(key, target):
             return "envelope"
         return None
 
@@ -536,7 +729,7 @@ class SafetyGate:
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, target, trip)
-        err = inst.instrument_error()
+        err = inst.instrument_error() or self._shown(inst, spec, target)
         if err:
             return Result(False, "error", key, value=target, before=current,
                           message="%s: instrument reported %s" % (key, err))
@@ -549,6 +742,28 @@ class SafetyGate:
         if notes:
             msg += "; " + "; ".join(notes)
         return Result(True, "set", key, value=target, before=current, message=msg)
+
+    def _shown(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
+        """What a real instrument shows instead of the number Kelvin just set, when it reads back clearly different
+        for a while: it refused or clipped the value (a range can depend on its other settings, as a generator's
+        amplitude on its load setting), and its card has no error queue that would say so. None when it agrees or
+        can't be read back. Not for switches and modes, whose state may take seconds to follow (a laser enabling),
+        nor for an instrument that ramps itself (_wait follows it)."""
+        if inst.simulated or spec.get_cmd is None or spec.ramp == "instrument" or not spec.numeric:
+            return None
+        lim = inst.limits(spec.name)
+        close = max(0.01 * abs(target), 1e-3 * (lim[1] - lim[0]) if lim else 0.0, 1e-12)   # rounded, or measured
+        now = None
+        for attempt in range(3):
+            if attempt:
+                self.lab.clock.sleep(0.3)
+            try:
+                now = inst.read(spec.name)
+            except Exception:
+                return None
+            if now is None or abs(now - target) <= close:
+                return None
+        return "that it is at %s, not %s: it may have refused or clipped the value" % (spec.show(now), spec.show(target))
 
     def _ramp(self, inst: Instrument, spec: ParamSpec, current: float, target: float,
               watch: bool, gen: int) -> Optional[Result]:
@@ -566,7 +781,10 @@ class SafetyGate:
             if spec.type == "int":
                 v = int(round(v))
             inst.write(spec.name, v)
-            self.lab.clock.sleep(dwell)
+            if watch:
+                self._pause(dwell, gen)   # a stop ends the step's dwell; a ramp to safe never stops
+            else:
+                self.lab.clock.sleep(dwell)
             if watch:
                 trip = self._guard_trip(inst, spec)
                 if trip:
@@ -596,7 +814,10 @@ class SafetyGate:
             if clock.now() - t0 > timeout:
                 return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)" % (
                     key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
-            clock.sleep(poll)
+            if watch:
+                self._pause(poll, gen)
+            else:
+                clock.sleep(poll)
 
     def _guard_trip(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[Guard, float]]:
         for g in inst.guards(spec.name):
@@ -659,7 +880,7 @@ class SafetyGate:
                 if b.match(cmd) is not None:
                     return done(Result(False, "refused", target,
                                        message="refused: %r is blocked on %s (firmware/calibration class)" % (cmd, inst.name)))
-            if is_query(cmd):
+            if is_query(cmd, bool(card.connection.get("enq"))):
                 resp = inst.query_raw(cmd).strip()
                 shown = resp if len(resp) <= 80 else resp[:77] + "..."
                 return done(Result(True, "read", target, value=resp, message="%s %s → %s" % (inst.name, cmd, shown)))
@@ -684,6 +905,9 @@ class SafetyGate:
                     return done(Result(True, "sent", target, message="%s: drives brought to safe, then sent %r" % (inst.name, cmd)))
             for spec in card.drives:
                 if spec.set_cmd is not None and self._prefix(spec).match(cmd) is not None:
+                    hands = self._hands_problem("%s.%s" % (inst.name, spec.name))
+                    if hands:
+                        return done(Result(False, "refused", target, message="refused: %r not sent; %s" % (cmd, hands)))
                     item = ("%s: %r touches drive %s but is not a plain %s setting, so limits can't be checked"
                             % (inst.name, cmd, spec.name, spec.name))
                     request = ApprovalRequest("Send raw command?", [item])
@@ -692,6 +916,9 @@ class SafetyGate:
                         return done(Result(False, "declined", target, message="declined: %r not sent%s" % (cmd, note)))
                     return self._send(inst, cmd, target, done, "approved")
             if card.status == "draft" and not inst.simulated:
+                hands = self._hands_problem(inst.name)
+                if hands:
+                    return done(Result(False, "refused", target, message="refused: %r not sent; %s" % (cmd, hands)))
                 item = "%s: %r is not on the (draft) card, so it can't be classified" % (inst.name, cmd)
                 if not self.ask(ApprovalRequest("Send raw command?", [item])):
                     return done(Result(False, "declined", target, message="declined: %r not sent" % cmd))

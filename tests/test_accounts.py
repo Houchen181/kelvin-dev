@@ -132,7 +132,7 @@ def test_sign_in_gives_each_person_their_own_things(tmp_path):
     assert s["accounts_on"] and s["user"] is None and s["accounts"] == [] and s["legacy"]
 
     r = client.post("/api/accounts", headers=h, json={"name": "Ada", "password": "pw1234"})
-    assert r.status_code == 200 and r.json()["user"] == {"name": "Ada", "password": True}
+    assert r.status_code == 200 and r.json()["user"] == {"name": "Ada", "password": True, "email": None, "central": False}
     boot = client.get("/api/bootstrap", headers=h).json()
     assert [c["title"] for c in boot["chats"]] == ["Old chat"]     # the first account takes over the old chats
     assert boot["account"]["user"]["name"] == "Ada"
@@ -176,6 +176,35 @@ def test_one_person_without_a_password_goes_straight_in(tmp_path):
     client, h, runtime, _ = portal(tmp_path)
     assert client.get("/api/bootstrap", headers=h).status_code == 200
     assert runtime.user == "Ada" and runtime.data_dir == tmp_path / "users" / "Ada" / "data"
+
+
+def test_people_sign_in_while_the_instruments_are_set_up(tmp_path):
+    import threading
+    client, h, runtime, _ = portal(tmp_path)
+    held, done = threading.Event(), threading.Event()
+
+    def setup():   # the start-up setup holds the lab for minutes: connecting, scanning, reading every setting
+        with runtime.lock:
+            runtime.setup_status = {"state": "reading", "message": "Reading the settings of smu"}
+            held.set()
+            done.wait(10)
+    thread = threading.Thread(target=setup)
+    thread.start()
+    held.wait(5)
+    try:
+        shown = client.get("/api/session", headers=h).json()["setup"]          # the sign-in screen says so
+        assert shown == {"state": "reading", "message": "Reading the instruments' settings"}   # not which ones
+        r = client.post("/api/accounts", headers=h, json={"name": "Ada", "password": "pw1234"})
+        assert r.status_code == 200 and runtime.user == "Ada"                  # in at once, not "Kelvin is busy"
+        assert runtime.data_dir == tmp_path / "users" / "Ada" / "data"
+        runtime.setup_status = {"state": "done"}                               # something else holds the lab
+        r = client.post("/api/accounts", headers=h, json={"name": "Ben", "password": ""})
+        assert r.status_code == 409 and "busy" in r.json()["error"] and runtime.user == "Ada"
+    finally:
+        done.set()
+        thread.join(5)
+    assert client.post("/api/session", headers=h, json={"name": "Ben"}).status_code == 200
+    assert client.get("/api/session", headers=h).json()["setup"] is None
 
 
 def test_a_running_queue_keeps_its_person(tmp_path):

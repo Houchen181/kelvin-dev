@@ -7,6 +7,7 @@ import pytest
 from labharness import autocard, builtin_registry, profiles
 from labharness.adapters import set_resource_manager
 from labharness.carddraft import check
+from labharness.gate import ScriptedApprover
 from test_hardware import Bus, Device
 
 pytest.importorskip("pypdf")
@@ -99,6 +100,35 @@ def test_the_manual_is_found_through_the_makers_page(web):
     assert "SR999" in autocard.KNOWN[0][1].format(MODEL="SR999")
 
 
+def test_the_manual_is_found_two_pages_away_and_the_sites_own_pages_are_skipped():
+    """As on tek.com (the Keithley 6221): the product page links a page about the series' manuals, and that page the
+    PDF on the maker's download host, whose name has spaces. The site's "Datasheets and Manuals" page, another product
+    ("Programmable ...") and the manual page in French are not fetched."""
+    product = "https://www.maker.example/en/products/series-6200"
+    manuals = "https://www.maker.example/en/product-series/series-6200-manual/model-6220-model-6221"
+    pdf_url = "https://download.maker.example/manual/622x-900-01%20(C%20-%20Oct%202008)(User).pdf"
+    pages = {
+        product: b'<html><body><a href="/en/support/datasheets-manuals-software-downloads">Datasheets and Manuals</a>'
+                 b'<a href="/en/products/2220-series">Programmable DC power supplies</a>'
+                 b'<a href="/en/product-series/series-6200-manual/model-6220-model-6221">Manual</a></body></html>',
+        manuals: b'<html><body><h1>Series 6200 manual</h1><p>' + b"Model 6220 and Model 6221 user's manual. " * 30 +
+                 b'</p><a href="/fr/product-series/series-6200-manual/model-6220-model-6221">Francais</a>'
+                 b'<a href="https://download.maker.example/manual/622x-900-01 (C - Oct 2008)(User).pdf">Download</a>'
+                 b'</body></html>',
+        pdf_url: tiny_pdf([["Model 6220/6221 User's Manual"] + COMMANDS * 8]),
+    }
+    asked = []
+
+    def fetch(url):
+        asked.append(url)
+        if url not in pages:
+            raise OSError("HTTP Error 404: Not Found")
+        return pages[url]
+    m = autocard.find_manual("KEITHLEY INSTRUMENTS INC.", "MODEL 6221", lambda system, prompt: (product, "m"), fetch)
+    assert m is not None and m["url"] == pdf_url and m["kind"] == "pdf", asked
+    assert asked == [product, manuals, pdf_url]
+
+
 def test_the_command_pages_go_to_the_model():
     pages = ["intro " * 50, "VOLT? MEAS:CURR? *IDN? " * 10, "warranty", "SYST:ERR? OUTP? " * 5]
     excerpt = autocard.command_excerpt(pages)
@@ -135,6 +165,19 @@ def test_a_card_is_written_and_kept_as_a_draft(tmp_path, web):
     assert "could not find the ACME GIZMO 1 manual" in lost and "choose its PDF" in lost
 
 
+def test_a_card_for_an_instrument_the_person_named(tmp_path, web):
+    """It gave no identity reply (a serial instrument with its own protocol): the maker and model are the person's."""
+    prompts = []
+    r = autocard.make_card({"address": "ASRL5::INSTR", "maker": "ACME", "model": "WIDGET 9000"}, tmp_path / "cards",
+                           fake_model(prompts), web, builtin_ids=[c.id for c in builtin_registry()])
+    assert r["card_id"] == "acme/widget-9000" and "V (output, V)" in r["parameters"], r
+    assert any("kept the manual's identity check" in c for c in r["changed"])        # untested: try_card tests it
+    card, problems, _ = check((tmp_path / "cards" / "acme_widget-9000.yaml").read_text(encoding="utf-8"))
+    assert not problems and card.idn_pattern == "^NOT-THIS" and card.status == "draft"
+    assert "as the person named it" in prompts[1]
+    assert "needs the maker and the model" in autocard.make_card({"address": "ASRL5::INSTR"}, tmp_path, None, web)["error"]
+
+
 def test_first_start_writes_the_card_and_sets_the_instrument_up(tmp_path, web):
     from labharness.autosetup import AutoSetup
     widget = Device(idn=IDN)
@@ -149,14 +192,15 @@ def test_first_start_writes_the_card_and_sets_the_instrument_up(tmp_path, web):
         assert status["state"] == "done" and status["written"] == ["ACME Widget 9000 source"], status
         assert "wrote draft cards" in status["message"]
         lab = (tmp_path / "lab.yaml").read_text(encoding="utf-8")
-        assert "acme/widget-9000" in lab and "observe_only: true" in lab
+        assert "acme/widget-9000" in lab and "added_by: kelvin" in lab
         assert rt.lab.instruments["smu"].card.status == "draft"
         folder = tmp_path / "instruments" / "smu"
         assert (folder / "manual.pdf").exists() and (folder / "manual.txt").exists()   # kept, not fetched again
         assert web.asked.count("https://www.acme.example/docs/W9000-prog.pdf") == 1
         assert json.loads((folder / "instrument.json").read_text())["parsed"]["model"] == "WIDGET 9000"
         assert any(n["title"].startswith("Kelvin wrote a card") for n in rt.notifier.notices)
-        assert "refused" in rt.set("smu", "V", 1)                                       # outputs locked
+        rt.gate.approver = ScriptedApprover([False])                                 # every output change asks
+        assert rt.set("smu", "V", 1).startswith("declined") and "draft" in str(rt.gate.approver.requests[0])
 
         off = AutoSetup(runtime_for(tmp_path / "b"), FakeSettings(auto_cards="off"), tmp_path / "b",
                         make_card=lambda f: pytest.fail("switched off")).run()

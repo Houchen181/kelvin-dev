@@ -9,22 +9,29 @@ from __future__ import annotations
 
 import math
 import re
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from .envs import PACKAGE
+from .expr import CONSTANTS
 from .scpi import Template
 from .yamlio import load_yaml
 
 KINDS = ("measure", "drive")
 TYPES = ("float", "int", "bool", "enum", "str", "trace", "image")   # image: a camera frame, kept as a file
+# the numbers of a trace sent as an IEEE 488.2 block of binary numbers, and their struct codes
+BINARY = {"int8": "b", "uint8": "B", "int16": "h", "uint16": "H", "int32": "i", "uint32": "I", "float32": "f",
+          "float64": "d"}
 RAMPS = ("gate", "instrument", "none")
 STATUSES = ("community", "lab-verified", "draft")
 CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate": int, "data_bits": int,
                    "stop_bits": float, "parity": str, "timeout_ms": int, "query_delay": float, "write_only": bool,
                    "echo": bool,  # the instrument echoes each command as a line: read and dropped before the reply
                    "ack": str,   # ack: the line an instrument sends after every command (e.g. "OK"), read and checked
-                   "set_reply": str}   # a regex every set command's reply must match (e.g. ":VALID$"); read after each set
+                   "set_reply": str,   # a regex every set command's reply must match (e.g. ":VALID$"); read after each set
+                   "enq": bool}   # Pfeiffer's protocol: each command is acknowledged (ACK or NAK) and a reply is sent on ENQ
 VAR_NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 VAR_VALUE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")   # never spaces, separators or line ends: no command can hide in it
 _TRUE = {"1", "on", "true", "yes", "open"}
@@ -90,6 +97,10 @@ class ParamSpec:
     bool_text: Tuple[str, str] = ("1", "0")
     axis: Optional[Tuple[str, str]] = None         # trace x-axis: (start param, stop param)
     x_values: Optional[str] = None                 # or a trace of x values (a spectrometer's wavelengths)
+    axis_step: Optional[Tuple[str, str]] = None    # or point i at origin + i * step (an oscilloscope's time axis)
+    binary: Optional[str] = None                   # a trace sent as a block of binary numbers: "int16" ("... little")
+    pairs: bool = False                            # a trace sent as two numbers per point (re, im): y from re and im
+    y: Optional[str] = None                        # a trace's values from its raw numbers: "(raw - yref) * yinc"
     applies_when: Optional[str] = None             # drive that must be on for this one to reach the sample
     label: str = ""                                # human name, e.g. "Compliance"
     words: Optional[Tuple[str, str]] = None        # how a bool reads, e.g. ("open", "closed")
@@ -97,7 +108,14 @@ class ParamSpec:
     parse: Optional[str] = None                    # regex whose first group is the value in a verbose reply
     read_when: Optional[str] = None                # only query while this switch is on (some reads turn outputs on)
     acquires: bool = False                         # reading runs an acquisition (a frame, a count): only when asked
+    get_before: List[str] = dataclasses.field(default_factory=list)   # sent first: arm, trigger, *OPC?
+    wait_s: Optional[float] = None                 # how long such a reading may take (its queries' timeout)
     description: str = ""
+    # a source drive's own hardware settings, which protect the sample (protection.py):
+    range_param: Optional[str] = None              # its output range, fixed just above a device's limit
+    autorange_param: Optional[str] = None          # its autorange switch, kept off so the range can't grow
+    range_steps: Tuple[float, ...] = ()            # the ranges it has
+    current_limit: Optional[str] = None            # the source's own current limit (compliance)
 
     @property
     def title(self) -> str:
@@ -146,6 +164,10 @@ class ParamSpec:
             for name, code in (self.values or {}).items():
                 if s == name.lower() or s == str(code).lower():
                     return name
+            for name, code in (self.values or {}).items():   # an SCPI reply in short form: SIN for SINusoid
+                short = re.match(r"[A-Z]*", str(code)).group(0)
+                if short and short != str(code) and s == short.lower():
+                    return name
             raise ValueError("%s must be one of %s, got %r" % (self.name, ", ".join(self.values or {}), value))
         if t == "str":
             return str(value)
@@ -181,7 +203,7 @@ class ParamSpec:
             if len(parts) > self.field:
                 text = parts[self.field]
         if self.type == "trace":
-            return [float(x) for x in text.split(",") if x.strip()]
+            return trace_numbers(text)
         if self.type in ("str", "image"):
             return text
         return self.coerce(text)
@@ -219,6 +241,16 @@ class HealthCheck:
 
 
 @dataclass
+class Action:
+    """A named command with no value, as the manual gives it: trigger a measurement, arm an acquisition, fire a
+    burst. One that drives the sample (drives: true, a burst of the generator) asks a person, like a drive change."""
+    name: str
+    send: List[str]
+    label: str = ""
+    drives: bool = False
+
+
+@dataclass
 class Card:
     id: str
     model: str
@@ -247,6 +279,8 @@ class Card:
     bound: Dict[str, str] = field(default_factory=dict)             # the values this copy was made with
     data: Dict[str, Any] = field(default_factory=dict, repr=False)  # as written, to bind other values
     library: Dict[str, Any] = field(default_factory=dict)            # the maker's module or DLL (library.py)
+    requires: List[str] = field(default_factory=list)   # the maker's Python packages its driver imports (envs.py)
+    actions: Dict[str, "Action"] = field(default_factory=dict)   # named commands: trigger, arm, fire a burst
 
     def bind(self, values: Optional[Dict[str, Any]]) -> "Card":
         """This card with its variables set for one instrument (which sensor, channel or output it uses)."""
@@ -263,6 +297,13 @@ class Card:
     @property
     def drives(self) -> List[ParamSpec]:
         return [p for p in self.params.values() if p.is_drive]
+
+    def range_owner(self, name: str) -> Optional[ParamSpec]:
+        """The drive whose source range (or autorange switch) this parameter is, if any."""
+        for p in self.params.values():
+            if name in (p.range_param, p.autorange_param):
+                return p
+        return None
 
     @property
     def setters(self) -> List[ParamSpec]:
@@ -285,8 +326,71 @@ def trace_x(row: Dict[str, Any], key: str, n: int) -> List[float]:
     return [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(n)]
 
 
+def _finite(v: Any) -> bool:
+    return _is_number(v) and math.isfinite(v)
+
+
+def thin(ys: Sequence[Any], most: int) -> List[int]:
+    """Which of a trace's points to draw when it has more than `most`: the first and the last, and in each stretch the
+    lowest and the highest value, so a narrow dip or peak (a resonance) is never stepped over."""
+    n = len(ys)
+    if n <= most:
+        return list(range(n))
+    size = -(-n // max(1, (most - 2) // 2))
+    keep = {0, n - 1}
+    for start in range(0, n, size):
+        stretch = [i for i in range(start, min(n, start + size)) if _finite(ys[i])]
+        if stretch:
+            keep.update((min(stretch, key=ys.__getitem__), max(stretch, key=ys.__getitem__)))
+    return sorted(keep)
+
+
+def plot_points(xs: Sequence[Any], ys: Sequence[Any], most: int) -> Tuple[List[Any], List[Any]]:
+    """A trace as a plot draws it: thinned (thin), with None for a value that is not a number (NaN, inf)."""
+    keep = thin(ys, most)
+    return [xs[i] for i in keep], [ys[i] if _finite(ys[i]) else None for i in keep]
+
+
+BINARY_REPLY = ("the numbers came in binary, not as text: the instrument's data format was changed, perhaps by another "
+                "program (FORMat:DATA REAL,64 on many instruments). Send its text format first in the reading "
+                "(FORMat:DATA ASCii,0), or give the card binary: float64")
+
+
+def trace_numbers(text: str) -> List[float]:
+    """A trace's numbers from its reply: separated by commas, spaces or line ends (HP's analyzers send a line per
+    point), after the IEEE 488.2 block header an instrument may send first (#800012345 says 8 digits of length
+    follow; #0 has none)."""
+    text = text.strip()
+    m = re.match(r"^#([1-9])", text)
+    if m:
+        text = text[2 + int(m.group(1)):]
+    elif text.startswith("#0"):
+        text = text[2:]
+    parts = re.split(r"[,\s]+", text)
+    try:
+        return [float(x) for x in parts if x.strip()]
+    except ValueError:
+        if m or any(not (" " <= c <= "~" or c in "\t\r\n") for c in text[:256]):   # a block of bytes, not text
+            raise ValueError(BINARY_REPLY) from None
+        raise ValueError("the reply is not a list of numbers: %r" % text[:80]) from None
+
+
 def _is_number(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _y_names(y: Optional[str], problem: Callable[[str], None]) -> List[str]:
+    """The names a trace's y expression uses (not its functions'), or none when it doesn't parse."""
+    import ast
+    if not y:
+        return []
+    try:
+        tree = ast.parse(y, mode="eval")
+    except SyntaxError as e:
+        problem("not an expression: %s" % e.msg)
+        return []
+    called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    return sorted({n.id for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in called})
 
 
 def _template(text: Any, err: Callable[[str, str], None], path: str, prefix: bool = False) -> Any:
@@ -310,7 +414,15 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
     if typ not in TYPES:
         err(path + ".type", "must be one of %s" % ", ".join(TYPES))
         typ = "float"
-    get_cmd = _template(p["get"], err, path + ".get") if p.get("get") else None
+    get = p.get("get")
+    get_before: List[str] = []
+    if isinstance(get, list):   # an acquisition: arm, trigger, wait (*OPC?), then fetch
+        if not get or not all(isinstance(c, str) and c.strip() for c in get):
+            err(path + ".get", "a command, or a list of commands whose last one reads the value")
+            get = None
+        else:
+            get_before, get = [c.strip() for c in get[:-1]], get[-1]
+    get_cmd = _template(get, err, path + ".get") if get else None
     set_cmd = _template(p["set"], err, path + ".set") if p.get("set") else None
     if set_cmd is not None and not set_cmd.has_value:
         err(path + ".set", "needs {value}")
@@ -368,6 +480,14 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
             spec.field = p["field"]
     if p.get("read_when") is not None:
         spec.read_when = str(p["read_when"])
+    spec.get_before = get_before
+    if get_before and p.get("acquires") is not True:
+        err(path + ".get", "a reading that sends commands first (arm, trigger) runs an acquisition: add acquires: true")
+    if p.get("wait") is not None:
+        if not _is_number(p["wait"]) or not 0 < float(p["wait"]) <= 3600:
+            err(path + ".wait", "the seconds the acquisition may take (up to 3600)")
+        else:
+            spec.wait_s = float(p["wait"])
     if p.get("acquires") is not None:
         if not isinstance(p["acquires"], bool):
             err(path + ".acquires", "must be true or false")
@@ -379,6 +499,19 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
             spec.parse = str(p["parse"])
         except re.error as e:
             err(path + ".parse", "not a valid regex: %s" % e)
+    rng = p.get("source_range")
+    if rng is not None:
+        steps = rng.get("steps") if isinstance(rng, dict) else None
+        if (not isinstance(rng, dict) or not rng.get("param") or not isinstance(steps, list) or not steps
+                or not all(_is_number(x) and x > 0 for x in steps) or kind != "drive"):
+            err(path + ".source_range", "a drive's source range is {param: range parameter, auto: autorange switch "
+                                        "(optional), steps: [the ranges, ascending]}")
+        else:
+            spec.range_param = str(rng["param"])
+            spec.autorange_param = str(rng["auto"]) if rng.get("auto") else None
+            spec.range_steps = tuple(sorted(float(x) for x in steps))
+    if p.get("current_limit") is not None:
+        spec.current_limit = str(p["current_limit"])
     words = p.get("words")
     if words is not None:
         if typ != "bool" or not (isinstance(words, (list, tuple)) and len(words) == 2):
@@ -389,10 +522,31 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
     if axis is not None:
         if typ == "trace" and isinstance(axis, dict) and axis.get("values") and len(axis) == 1:
             spec.x_values = str(axis["values"])
+        elif typ == "trace" and isinstance(axis, dict) and axis.get("origin") and axis.get("step") and len(axis) == 2:
+            spec.axis_step = (str(axis["origin"]), str(axis["step"]))
         elif typ != "trace" or not isinstance(axis, dict) or not axis.get("start") or not axis.get("stop"):
-            err(path + ".axis", "only traces have an axis: {start: param, stop: param} or {values: param}")
+            err(path + ".axis", "only traces have an axis: {start: param, stop: param}, {origin: param, step: param} "
+                                "or {values: param}")
         else:
             spec.axis = (str(axis["start"]), str(axis["stop"]))
+    binary = p.get("binary")
+    if binary is not None:
+        number, _, order = str(binary).strip().partition(" ")
+        if typ != "trace" or number not in BINARY or order.strip() not in ("", "big", "little"):
+            err(path + ".binary", "a trace's binary numbers: one of %s, with little after it when the lowest byte "
+                                  "comes first" % ", ".join(BINARY))
+        else:
+            spec.binary = str(binary).strip()
+    if p.get("pairs") is not None:
+        if typ != "trace" or not isinstance(p["pairs"], bool):
+            err(path + ".pairs", "a trace sent as two numbers per point (real and imaginary): pairs: true")
+        else:
+            spec.pairs = p["pairs"]
+    if p.get("y") is not None:
+        if typ != "trace":
+            err(path + ".y", "only traces have y: their values from raw and the card's parameters")
+        else:
+            spec.y = str(p["y"]).strip()
     if spec.ramp not in RAMPS:
         err(path + ".ramp", "must be gate, instrument or none")
     if spec.rate_per not in ("s", "min"):
@@ -521,12 +675,28 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
             err(path + ".applies_when", "%r is not a readable drive on this card" % spec.applies_when)
         if spec.read_when is not None and (spec.read_when not in params or params[spec.read_when].type != "bool"):
             err(path + ".read_when", "%r is not an on/off parameter on this card" % spec.read_when)
-        for ax in spec.axis or ():
+        for ax in (spec.axis or ()) + (spec.axis_step or ()):
             if ax not in params or params[ax].get_cmd is None or not params[ax].numeric:
                 err(path + ".axis", "%r is not a readable numeric parameter" % ax)
+        own = ("re", "im") if spec.pairs else ("raw",)   # the reply's numbers: raw, or each point's pair
+        for name in _y_names(spec.y, lambda problem: err(path + ".y", problem)):
+            if name not in own and name not in CONSTANTS and (name not in params or params[name].get_cmd is None
+                                                              or not params[name].numeric):
+                err(path + ".y", "%r is not %s or a readable numeric parameter on this card" % (name, " or ".join(own)))
         if spec.x_values and (spec.x_values not in params or params[spec.x_values].type != "trace"
                               or params[spec.x_values].get_cmd is None):
             err(path + ".axis", "%r is not a readable trace on this card" % spec.x_values)
+        if spec.range_param is not None and (spec.range_param not in params or not params[spec.range_param].numeric
+                                             or params[spec.range_param].set_cmd is None):
+            err(path + ".source_range", "%r is not a settable numeric parameter on this card" % spec.range_param)
+        if spec.autorange_param is not None and (spec.autorange_param not in params
+                                                 or params[spec.autorange_param].type != "bool"
+                                                 or params[spec.autorange_param].set_cmd is None):
+            err(path + ".source_range", "%r is not a settable on/off parameter on this card" % spec.autorange_param)
+        if spec.current_limit is not None and (spec.current_limit not in params
+                                               or not params[spec.current_limit].is_drive
+                                               or not params[spec.current_limit].numeric):
+            err(path + ".current_limit", "%r is not a numeric drive on this card" % spec.current_limit)
 
     drives = [n for n, s in params.items() if s.is_drive]
     seq = [str(n) for n in (data.get("safe_sequence") or [])]
@@ -562,6 +732,10 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         except re.error as e:
             err("identify.idn", "not a valid regex: %s" % e)
     usb_ids = [str(u).lower() for u in identify.get("usb") or []]
+    requires = data.get("requires") or []
+    if not isinstance(requires, list) or not all(isinstance(r, str) and PACKAGE.match(r.strip()) for r in requires):
+        err("requires", "a list of the maker's Python packages, as pip names them (qick, Pyro4, zhinst-core)")
+        requires = []
     for u in usb_ids:
         if not re.match(r"^[0-9a-f]{4}:[0-9a-f]{4}$", u):
             err("identify.usb", "%r is not VID:PID in hex" % u)
@@ -589,6 +763,13 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     if headline is not None and (headline not in params or params[headline].get_cmd is None):
         err("display.headline", "%r is not a readable parameter" % headline)
     library = _library(data.get("library"), params, identify, err)
+    actions = _actions(data.get("actions"), params, err)
+    for spec in params.values():   # a reading's arming commands only start the acquisition, never set anything
+        for c in spec.get_before:
+            for other in params.values():
+                if other.set_cmd is not None and other.family().match(c) is not None:
+                    err("parameters.%s.get" % spec.name, "%r would set %s; a reading's commands only arm, trigger and "
+                                                          "wait" % (c, other.name))
     if library and on_connect:
         err("on_connect", "a card with a library connects with library.open")
 
@@ -602,14 +783,18 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
         source=source, connection=connection, idn_query=str(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
-        on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library,
+        on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library, actions=actions,
+        requires=[r.strip() for r in requires],
     )
 
 
 LIB_TYPES = ("int8", "uint8", "int16", "uint16", "int32", "int", "uint32", "int64", "uint64", "float", "double", "bool")
 LIB_DENY = ("os", "sys", "subprocess", "shutil", "builtins", "importlib", "runpy", "ctypes", "socket", "pathlib",
             "pickle", "marshal", "multiprocessing", "code", "codeop", "webbrowser", "urllib", "http", "asyncio")
-LIB_CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*)\b")
+# a function, or one on a sub-object of the library's object (attocube's network instruments: sample.getTemperature)
+NET_DENY = ("System", "Microsoft", "Windows", "Mono", "Python", "clr", "Internal", "MS", "Accessibility")
+LIB_PATH = r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*"
+LIB_CALL = re.compile(r"^\s*(SET|GET)\s+(" + LIB_PATH + r")(?![\w.])")
 LIB_READS = re.compile(r"^(get|is|has|query|read|measure|fetch|status|current|actual)", re.I)   # names that only read
 LIB_ACTS = re.compile(r"^(toggle|start|stop|go|sweep|move|set|apply|run|reset|calibrat|upload|download|delete|"
                       r"write|save|store|shutdown|home|zero|exchange|pump)", re.I)
@@ -625,15 +810,40 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
         err("library", "must be a mapping")
         return {}
     name = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+    path_name = re.compile("^" + LIB_PATH + "$")
     out = dict(lib)
-    if bool(lib.get("module")) == bool(lib.get("dll")):
-        err("library", "name either module (a Python module) or dll (a DLL file), not both")
+    if len([k for k in ("module", "dll", "assembly", "com") if lib.get(k)]) != 1:
+        err("library", "name one of module (a Python module), dll (a DLL file), assembly (a .NET assembly, with its "
+                       "type) or com (a COM object's ProgID)")
+    if lib.get("assembly"):
+        files = lib["assembly"] if isinstance(lib["assembly"], list) else [lib["assembly"]]
+        if not all(isinstance(f, str) and re.match(r"^[A-Za-z0-9_.+-]+\.dll$", f, re.I) for f in files):
+            err("library.assembly", "the .NET assembly's file name (or a list of them) in the folder the address names")
+        typ = str(lib.get("type") or "")
+        if not path_name.match(typ) or typ.count(".") < 1 or typ.split(".")[0] in NET_DENY:
+            err("library.type", "the full name of the maker's .NET class, e.g. "
+                                "Thorlabs.MotionControl.KCube.DCServoCLI.KCubeDCServo")
+    if lib.get("com") is not None and not re.match(r"^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+){1,3}$", str(lib["com"])):
+        err("library.com", "the COM object's ProgID, as the maker's documentation gives it (Vendor.Object)")
+    create = lib.get("create")
+    if create is not None and not isinstance(create, bool) and not name.match(str(create)):
+        err("library.create", "true to make the object, or the name of the factory method that makes it")
+    properties = lib.get("properties") or []
+    if not isinstance(properties, list) or not all(isinstance(p, str) and path_name.match(p) for p in properties):
+        err("library.properties", "a list of the properties the card reads or sets without calling (Position)")
+        properties = []
     if lib.get("module"):
         mod = str(lib["module"])
         if not all(name.match(p) for p in mod.split(".")) or mod.split(".")[0] in LIB_DENY:
             err("library.module", "%r is not a maker's module" % mod)
         if lib.get("object") is not None and not name.match(str(lib["object"])):
-            err("library.object", "must be a name")
+            err("library.object", "must be a name: the class or object the functions hang on (functions on its "
+                                  "sub-objects are called by their path, GET sample.getTemperature)")
+        create_args = lib.get("create_args")
+        if create_args is not None and (not isinstance(create_args, list) or not all(
+                isinstance(a, (str, int, float)) and not isinstance(a, bool) for a in create_args)):
+            err("library.create_args", "a list of the arguments the examples create the object with ({address} for "
+                                       "what the lab's address names)")
     functions: Dict[str, Any] = {}
     if lib.get("dll"):
         dll = str(lib["dll"])
@@ -668,14 +878,14 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
 
     def check_call(path: str, text: Any) -> None:
         parts = [p for p in re.split(r"[\s,]+", str(text).strip()) if p]
-        if not parts or not name.match(parts[0]):
+        if not parts or not path_name.match(parts[0]):
             err(path, "%r is not a function and its arguments" % text)
         elif parts[0] != "wait" and known is not None and parts[0] not in known:
             err(path, "%s is not under library.functions" % parts[0])
         elif parts[0] == "wait" and (len(parts) != 2 or not re.match(r"^[0-9.]+$", parts[1])):
             err(path, "wait takes seconds, e.g. wait 10")
 
-    for key in ("open", "close"):
+    for key in ("setup", "open", "close"):
         for i, step in enumerate(lib.get(key) or []):
             check_call("library.%s[%d]" % (key, i), step)
     toggles = lib.get("toggles") or {}
@@ -688,7 +898,7 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
             continue
         for key in ("toggle", "state"):
             check_call("library.toggles.%s.%s" % (t, key), spec[key])
-        if not LIB_READS.match(str(spec["state"])):
+        if not LIB_READS.match(str(spec["state"]).rsplit(".", 1)[-1]):
             err("library.toggles.%s.state" % t, "%s does not look like a function that only reads" % spec["state"])
     for p in params.values():
         for tmpl, verb in ((p.set_cmd, "SET"), (p.get_cmd, "GET")):
@@ -702,17 +912,56 @@ def _library(lib: Any, params: Dict[str, ParamSpec], identify: Dict[str, Any],
             fn = m.group(2)
             if fn in toggles:
                 continue
+            assigns = tmpl.text[m.end():].strip().startswith("=")
+            if fn in properties:   # read without calling; set as Name= {value}
+                if verb == "SET" and not assigns:
+                    err(path, "%s is a property: SET %s= {value}" % (fn, fn))
+                continue
+            if assigns:
+                err(path, "only a property under library.properties is set with =")
+                continue
             if known is not None and fn not in known:
                 err(path, "%s is not under library.functions" % fn)
-            if verb == "GET" and (not LIB_READS.match(fn) or LIB_ACTS.match(fn)):
+            last = fn.rsplit(".", 1)[-1]   # sample.getTemperature reads as getTemperature
+            if verb == "GET" and (not LIB_READS.match(last) or LIB_ACTS.match(last)):
                 err(path, "%s does not look like a function that only reads (get..., is..., query...); a reading must "
                     "never start anything" % fn)
     query = str(identify.get("query") or "")
     if query and query != "*IDN?":
         m = LIB_CALL.match(query)
-        if not m or m.group(1).upper() != "GET" or not LIB_READS.match(m.group(2)):
+        if not m or m.group(1).upper() != "GET" or not LIB_READS.match(m.group(2).rsplit(".", 1)[-1]):
             err("identify.query", "with a library, GET <a function that reads the model or serial number>")
     out["toggles"] = toggles
+    return out
+
+
+def _actions(raw: Any, params: Dict[str, ParamSpec], err: Callable[[str, str], None]) -> Dict[str, Action]:
+    """actions: {trigger: {send: "*TRG", label: ...}, fire: {send: ":BURS:FIRE", drives: true}}."""
+    out: Dict[str, Action] = {}
+    if raw is None:
+        return out
+    if not isinstance(raw, dict):
+        err("actions", "a mapping of name: {send, label, drives}")
+        return out
+    for name, spec in raw.items():
+        path = "actions.%s" % name
+        spec = {"send": spec} if isinstance(spec, (str, list)) else spec
+        if not re.match(r"^[a-z][a-z0-9_]{0,30}$", str(name)) or not isinstance(spec, dict):
+            err(path, "a lower-case name, with send: the command (or commands) as the manual gives them")
+            continue
+        send = spec.get("send")
+        send = [send] if isinstance(send, str) else send
+        if not send or not all(isinstance(c, str) and c.strip() and "{" not in c for c in send):
+            err(path + ".send", "the command, or a list of commands, with no {value}")
+            continue
+        for c in send:
+            for p in params.values():
+                if p.set_cmd is not None and p.family().match(c) is not None:
+                    err(path + ".send", "%r would set %s: set it as the parameter, with its limits" % (c, p.name))
+        if spec.get("drives") is not None and not isinstance(spec["drives"], bool):
+            err(path + ".drives", "true when it drives the sample (fires a burst, a pulse, a shutter)")
+        out[str(name)] = Action(str(name), [c.strip() for c in send], str(spec.get("label") or name),
+                                bool(spec.get("drives")))
     return out
 
 

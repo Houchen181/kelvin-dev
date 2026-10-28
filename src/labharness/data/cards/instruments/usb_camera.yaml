@@ -1,0 +1,72 @@
+card: 1
+id: generic/usb-camera
+model: USB video camera (webcam, microscope or inspection camera; UVC)
+vendor: Any maker (UVC)
+kind: camera
+status: community
+manual: "OpenCV VideoCapture: CAP_PROP_EXPOSURE, CAP_PROP_GAIN, CAP_PROP_BRIGHTNESS, CAP_PROP_FRAME_WIDTH / HEIGHT"
+notes:
+  - "Address uvc://<index> (uvc://0 for the first camera Windows or macOS lists). Needs opencv-python-headless, which Kelvin installs on this computer once a person approves. Close other programs using the camera first."
+  - "Exposure and gain are in the camera driver's own units (on Windows, exposure is often a power of two of seconds: -5 is 1/32 s); read them back after setting. Setting the exposure switches the camera's automatic exposure off."
+  - "A frame is grey (its colours averaged), 0-255, kept as a .npy file: a run puts each in its run.h5. Mean, max, min and sum are readings of a frame."
+  - "Connecting changes nothing on the camera."
+requires: [opencv-python-headless]
+identify:
+  idn: "^USB camera,UVC"
+  example: "USB camera,UVC,0"
+
+parameters:
+  frame:
+    label: Frame
+    kind: measure
+    type: image
+    get: "GET frame"
+  mean:
+    label: Mean
+    kind: measure
+    unit: counts
+    get: "GET mean"
+    acquires: true
+  max:
+    label: Max
+    kind: measure
+    unit: counts
+    get: "GET max"
+    acquires: true
+  min:
+    label: Min
+    kind: measure
+    unit: counts
+    get: "GET min"
+    acquires: true
+  sum:
+    label: Sum
+    kind: measure
+    unit: counts
+    get: "GET sum"
+    acquires: true
+  exposure:
+    label: Exposure (camera units)
+    kind: measure
+    set: "SET exposure {value}"
+    get: "GET exposure"
+  gain:
+    label: Gain (camera units)
+    kind: measure
+    set: "SET gain {value}"
+    get: "GET gain"
+  brightness:
+    label: Brightness (camera units)
+    kind: measure
+    set: "SET brightness {value}"
+    get: "GET brightness"
+  width:
+    label: Width
+    kind: measure
+    unit: px
+    get: "GET width"
+  height:
+    label: Height
+    kind: measure
+    unit: px
+    get: "GET height"

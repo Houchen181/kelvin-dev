@@ -2,12 +2,16 @@
 tried on the instrument, kept in ~/Kelvin/cards.
 
 A card Kelvin writes is always a draft. On real hardware a draft card's readings work, so it can be tried against
-the instrument, but its drives stay simulation-only until a person reviews the card and marks it lab-verified.
-Only a person can do that, and Kelvin never overwrites a card a person has reviewed."""
+the instrument, but every setting and output change on it asks a person, saying the card is a draft, until a person
+reviews the card and marks it lab-verified. Only a person can do that, and Kelvin never overwrites a card a person
+has reviewed."""
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -30,7 +34,9 @@ Top level:
   answer *IDN?.
 - error_query: the command that reads the error queue, if any (e.g. "SYSTem:ERRor?").
 - connection (only if the manual requires it): read_termination, write_termination, baud_rate, data_bits, parity,
-  stop_bits, timeout_ms, write_only (a listen-only instrument), ack (a reply every set returns).
+  stop_bits, timeout_ms, write_only (a listen-only instrument), ack (a reply every set returns), enq: true (each
+  command is answered ACK or NAK and the reply comes only on ENQ, as on Pfeiffer's gauge controllers; a get is then
+  the bare mnemonic, e.g. "PR1", and a set the mnemonic with its parameters, e.g. "SEN,{value},0").
 - parameters: one entry per quantity, keyed by a short name.
 - display: {headline: <parameter>} for the reading shown large; raw: {blocked: [...], reset: [...]}: command headers
   that must never be sent (calibration, firmware, sensor curves, protection limits) and reset commands.
@@ -39,6 +45,21 @@ Each parameter:
 - label; kind: measure (reading or a setting that does not drive the sample) or drive (anything that drives the
   sample harder: voltage, current, power, field, temperature, outputs); unit (SI: V, A, W, T, K, Hz, s ...).
 - type: float (default), int, bool, enum (with values: {label: code}) or trace.
+- A trace (an oscilloscope's waveform, a spectrum analyzer's sweep): its x-axis as axis: {start: <param>, stop:
+  <param>} (a sweep's start and stop frequency), {origin: <param>, step: <param>} (a scope's first time and the time
+  between points: XORigin, XINCrement) or {values: <trace param>}. Comma-separated replies, with or without the
+  #<n><length> header, need nothing more; for a waveform sent as binary numbers (BYTE or WORD format), binary: int8,
+  uint8, int16, uint16, int32, float32 or float64 (add "little" when the manual says the lowest byte comes first).
+  When the numbers are digitizer levels, y: their scaling from raw and the card's parameters that read it, as the
+  manual gives it, e.g. y: "(raw - yref) * yinc + yorig". The number of points is a setting of its own, never sent
+  by a get; the reply's format is best sent first in the reading's get list (WAVeform:FORMat WORD, FORMat:DATA
+  ASCii,0), so another program changing it cannot break the reading.
+- A network analyzer's S-parameter (S21, S11): a trace in dB of its formatted data (log magnitude: one number per
+  point), taken by one sweep in the reading: get: [the text format (FORMat:DATA ASCii,0), the commands that make the
+  measurement that S-parameter in log magnitude, a single sweep, *OPC?, the data query], acquires: true, wait: the
+  longest sweep in seconds, axis: {start: <start frequency>, stop: <stop frequency>}. A reply of two numbers per
+  point (complex data: real and imaginary; some analyzers' formatted data: the value and 0): pairs: true, and y from
+  re and im, e.g. y: "20*log10(hypot(re, im))" for dB (without y, the first of each pair).
 - set: command template with {value}; get: the query. SCPI short/long forms as in the manual, optional nodes in
   [brackets], e.g. "SOURce:VOLTage[:LEVel] {value}".
 - limits: [min, max] the instrument accepts (the vendor's, not the lab's).
@@ -50,6 +71,13 @@ Each parameter:
   read_when: <bool drive> for readings that would switch something on if read while it is off.
 - description: one line; default: the power-on value if the manual gives it.
 
+Instruments that speak Modbus (the manual gives a register map: compressors, temperature controllers, chillers,
+flow and vacuum controllers): the address is modbus://<ip>?unit=<n> (TCP) or modbus://COM5?unit=<n>&baud=9600&parity=N
+(RTU). get: "READ 30008 float32" (input register 30008 in the usual numbering: 0xxxx coils, 1xxxx discrete
+inputs, 3xxxx input and 4xxxx holding registers; or "READ HR 6" counted from 0); types uint16, int16, uint32, int32,
+float32, float64, then swapped when the low word comes first and *0.1 for a register in tenths. set: "WRITE 40001
+int16 *0.1 {value}" or "WRITE COIL 3 {value}". Modbus has no identity reply: leave identify out.
+
 Instruments with a web API (HTTP and JSON; the lab config's address is http(s)://host:port): commands are the
 method, the path and, for writes, a JSON body with {value} in it: get: "GET /v1/Basic/ActualOutputPower" (the JSON
 reply is the value; "GET /v1/Status#laser.state" takes one field), set: "PUT /v1/Basic/TargetAttenuatorPercentage
@@ -59,11 +87,22 @@ CloseOutput] and set: "POST /v1/Basic/{value}". identify: {query: "GET /v1/...",
 Instruments the maker controls through a library (its example scripts in Python, MATLAB or C call a module or a
 DLL instead of sending text): the card gets a library section, and each command calls one function.
 - library: module: <the Python module the examples import> (object: <the class or object the functions hang on>;
-  create: true if the examples make an instance first). Or dll: <its file name>, prefix: <the part of the exported
+  create: true if the examples make an instance first, create_args: [<its arguments>], {address} for what the lab's
+  address names). Functions on its sub-objects are called by their path: attocube's network instruments
+  (device = Device(ip); device.connect(); device.sample.getTemperature()) are module: <their module>, object: Device,
+  create: true, create_args: ["{address}"], open: [connect], close: [close], get: "GET sample.getTemperature". Or
+  dll: <its file name>, prefix: <the part of the exported
   names before the function name>, convention: cdecl or stdcall, returns: error when every function returns an error
   code (0 = fine), and functions: for each function the card calls, its C arguments (args: [float]) and the one value
   it writes back through a pointer (out: float; out: str for a char buffer followed by its length). Types: int8 uint8
   int16 uint16 int32 int uint32 int64 uint64 float double bool str. Take them from the header file; never guess.
+  Or a .NET library (Thorlabs Kinesis and many stages and cameras): assembly: [<its .dll files the examples
+  reference>], type: <the full name of the class>, setup: [<static calls the examples make first, by full name:
+  Thorlabs.MotionControl.DeviceManagerCLI.DeviceManagerCLI.BuildDeviceList>], create: <the factory method the
+  examples call (CreateKCubeDCServo), or true for a constructor>, create_args: ["{address}"], properties: [<the
+  properties the card reads or sets, such as Position>]. Kelvin passes values as each method's parameters want them
+  (a Decimal position, an enum by name). Or a COM object of an older maker's program: com: <its ProgID>, properties.
+  A property is read with get: "GET Position" and set with set: "SET Exposure= {value}".
 - library.open: the calls the examples make to connect, in order ({address} is what the lab's address names, such as
   a COM port or an IP address; add "wait 10" where the examples sleep before the instrument answers). library.close:
   the calls they end with.
@@ -75,9 +114,20 @@ DLL instead of sending text): the card gets a library section, and each command 
   Kelvin reads the state before it toggles.
 - Leave out what the maker's own program or touch screen should do (sample exchange, pumping, valves, calibration
   curves, firmware): Kelvin can call only the functions the card names.
-- Say in notes how to address it: lib://<port or IP>?python=<a Python that can load the library, 32-bit for a 32-bit
-  DLL>&path=<the folder with the maker's files>.
+- requires: [<the maker's Python packages the library imports, as pip names them>], when they come from PyPI.
+- Say in notes how to address it: lib://<port or IP>?env=<the environment install_for_instrument made for the
+  library: its Python, 32-bit for a 32-bit DLL, with the maker's package or files in it>; or, where a person set the
+  library up themselves, lib://<port or IP>?python=<that Python>&path=<the folder with the maker's files>. A .NET
+  library in the folder its maker's installer put it in: lib://<serial>?path=<that folder in Program Files>. A COM
+  object: lib://<a name>?env=<an environment with pywin32>.
 Example scripts that send text (inst.write("SOUR:VOLT 1"), inst.query("MEAS:VOLT?")) give ordinary command templates.
+
+Acquisitions and triggers (a multimeter's buffer, a scope's single shot, an analyzer's sweep): a reading whose
+commands arm, trigger and wait before the fetch is get: ["INIT", "*TRG", "*OPC?", "TRAC:DATA?"] with acquires: true
+and wait: <the seconds it may take>; *OPC? answers when the acquisition is done. Those commands only arm, trigger
+and wait: a setting (trigger source, sample count) is a parameter of its own. Named commands with no value go under
+actions: {trigger: {send: "*TRG", label: Trigger}, fire: {send: ":BURS:FIRE", label: Fire a burst, drives: true}}
+(drives: true when it drives the sample, which then asks a person); a plan does them at every point with trigger:.
 
 Instruments whose commands start with the value ("ON,1" / "OFF,1"): set: "{value},{ch}" with bool_text: ["ON", "OFF"]
 (quote the words: YAML reads a bare ON as true). Settings with no read-back: leave out get; Kelvin remembers what
@@ -104,6 +154,16 @@ def extract_yaml(text: str) -> str:
         return m.group(1).strip() + "\n"
     i = (text or "").find("card: 1")
     return (text[i:] if i >= 0 else text or "").strip() + "\n"
+
+
+def notes_in(text: str) -> List[str]:
+    """What the model wrote beside its card: what it left out or is unsure of (at most five lines)."""
+    m = re.search(r"```(?:ya?ml)?\s*\n.*?```", text or "", re.S)
+    if not m:
+        return []
+    rest = text[:m.start()] + "\n" + text[m.end():]
+    lines = [re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", line).strip() for line in rest.splitlines()]
+    return [line[:300] for line in lines if line][:5]
 
 
 def check(text: str, source: str = "draft") -> Tuple[Optional[Card], List[str], List[str]]:
@@ -135,7 +195,9 @@ def file_for(card_id: str) -> str:
 
 
 def user_cards(cards_dir: Optional[Path]) -> List[Dict[str, Any]]:
-    """The user's own cards, with any problems (a broken file is listed, not skipped silently)."""
+    """The user's own cards, with any problems (a broken file is listed, not skipped silently). "kelvins": the lab's
+    version of one of Kelvin's cards (under its id), which replaces Kelvin's in this lab."""
+    from .virtual_lab import builtin_ids
     out = []
     if not cards_dir or not Path(cards_dir).is_dir():
         return out
@@ -145,19 +207,22 @@ def user_cards(cards_dir: Optional[Path]) -> List[Dict[str, Any]]:
         out.append({"file": path.name, "id": card.id if card else None, "model": card.model if card else path.stem,
                     "kind": card.kind if card else "", "vendor": card.vendor if card else "",
                     "status": card.status if card else "broken", "problems": problems, "warnings": warnings,
-                    "yaml": text})
+                    "yaml": text, "kelvins": bool(card and card.id in builtin_ids())})
     return out
 
 
 def save(cards_dir: Path, text: str, builtin_ids: Iterable[str], by: str = "human",
-         replace: Optional[str] = None) -> Tuple[Card, Path, List[str]]:
-    """Check and keep a card. Kelvin's cards must be drafts and may not replace a card a person reviewed."""
+         replace: Optional[str] = None, version: bool = False) -> Tuple[Card, Path, List[str]]:
+    """Check and keep a card. Kelvin's cards must be drafts and may not replace a card a person reviewed. version:
+    the card may take the id of one of Kelvin's own, as this lab's version of it (another firmware, a wider range, a
+    different command): it replaces Kelvin's card in this lab, and Kelvin's stays for every other lab."""
     card, problems, warnings = check(text)
     if card is None:
         raise ValueError("the card has problems: " + "; ".join(problems[:8]))
-    if card.id in set(builtin_ids):
-        raise ValueError("Kelvin already has a card %s; give yours another id, e.g. %s" % (
-            card.id, "mylab/" + card.id.split("/")[-1]))
+    if card.id in set(builtin_ids) and not version:
+        raise ValueError("Kelvin already has a card %s; give yours another id (e.g. %s), or make it this lab's "
+                         "version of Kelvin's card (in the portal: Lab, Cards…, Make your version)" % (
+                             card.id, "mylab/" + card.id.split("/")[-1]))
     if by != "human" and card.status != "draft":
         raise ValueError("a card Kelvin writes must have status: draft; a person reviews it and marks it lab-verified")
     cards_dir = Path(cards_dir)
@@ -195,6 +260,51 @@ def set_status(cards_dir: Path, card_id: str, status: str) -> Card:
     return card
 
 
+REVIEWS = "_reviewed.json"   # in the person's cards folder: Kelvin's own draft cards they reviewed for their lab
+
+
+def card_sha(card: Card) -> str:
+    """The card's file as it is, so a review holds only for the card that was reviewed."""
+    try:
+        return hashlib.sha256(Path(card.source).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def builtin_reviews(cards_dir: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+    try:
+        data = json.loads((Path(cards_dir) / REVIEWS).read_text(encoding="utf-8")) if cards_dir else {}
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def review_builtin(cards_dir: Path, card: Card, status: str, by: str = "") -> None:
+    """A person marks one of Kelvin's own draft cards reviewed for their lab (lab-verified), or takes that back
+    (draft). Kept with the card's content: a later Kelvin whose card changed asks again until it is reviewed."""
+    if status not in ("lab-verified", "draft"):
+        raise ValueError("a card that comes with Kelvin is marked reviewed (lab-verified) or back to draft")
+    reviews = builtin_reviews(cards_dir)
+    if status == "draft":
+        reviews.pop(card.id, None)
+    else:
+        reviews[card.id] = {"status": status, "sha": card_sha(card), "by": by, "at": time.strftime("%Y-%m-%d")}
+    folder = Path(cards_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp = folder / (REVIEWS + ".tmp")
+    tmp.write_text(json.dumps(reviews, indent=1), encoding="utf-8")
+    os.replace(tmp, folder / REVIEWS)
+
+
+def apply_reviews(registry: Any, cards_dir: Optional[Path]) -> None:
+    """Kelvin's own draft cards a person reviewed for this lab count as reviewed, while the card is unchanged."""
+    for card_id, review in builtin_reviews(cards_dir).items():
+        if card_id in registry:
+            card = registry.get(card_id)
+            if isinstance(review, dict) and review.get("sha") and review["sha"] == card_sha(card):
+                card.status = str(review.get("status") or card.status)
+
+
 def delete(cards_dir: Path, card_id: str) -> None:
     path = Path(cards_dir) / file_for(card_id)
     if not path.exists():
@@ -205,23 +315,40 @@ def delete(cards_dir: Path, card_id: str) -> None:
 DRAFT_SYSTEM = GUIDE + """
 
 You write one card for the instrument the user names, from the manual text or example scripts they give you. Answer with the card in
-one ```yaml block, then at most five short lines on what you left out or are unsure of. Status: draft."""
+one ```yaml block, then at most five short lines on what you left out or are unsure of. If the manual leaves an output's
+ranges to another document (its specifications or a datasheet), keep that output as a reading only and add the line
+"Ranges in: <that document's title>; for: <those outputs, e.g. amplitude, offset>". Status: draft."""
 
 
-def draft_prompt(manual: str, name: str) -> str:
+def draft_prompt(manual: str, name: str, specs: str = "") -> str:
+    """specs: pages of the document the manual leaves some ranges to (its specifications), if Kelvin has it."""
     manual = manual.strip()
     clipped = manual[:MAX_MANUAL]
     note = "" if len(manual) <= MAX_MANUAL else "\n(The manual text was cut at %d characters.)" % MAX_MANUAL
-    return ("Instrument: %s\n\nAn example of a finished card, for the format:\n%s\n\nThe manual, its command "
-            "reference, or the maker's example scripts:\n%s%s" % (name or "(see the manual)", example(), clipped, note))
+    ranges = ("\n\nIts specifications (the document the manual leaves ranges to), for the limits:\n%s"
+              % specs.strip()[:MAX_MANUAL // 2]) if specs.strip() else ""
+    return ("Instrument: %s\n\nAn example of a finished card, for the format:\n%s%s\n\nThe manual, its command "
+            "reference, or the maker's example scripts:\n%s%s" % (name or "(see the manual)", example(), ranges,
+                                                                    clipped, note))
 
 
 SOURCE_TYPES = {".py", ".m", ".h", ".hpp", ".c", ".cpp", ".cs", ".vb", ".bas", ".jl", ".tcl", ".ipynb", ".txt", ".md",
-                ".rst", ".ini", ".json", ".yaml", ".yml", ".htm", ".html"}
+                ".rst", ".ini", ".json", ".yaml", ".yml", ".htm", ".html", ".pdf"}
+MAX_PDF_BYTES = 40_000_000   # a manual: read up to MAX_MANUAL characters of its text
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "venv", ".venv", "build", "dist"}
 
 
 def _source_text(path: Path) -> str:
+    if path.suffix.lower() == ".pdf":   # a manual: its pages' text
+        from .profiles import pdf_pages
+        try:
+            pages = pdf_pages(path)
+        except RuntimeError as e:   # no pypdf here
+            return "(%s: %s)" % (path.name, e)
+        except Exception as e:
+            return "(%s: Kelvin could not read this PDF: %s)" % (path.name, str(e).splitlines()[0] if str(e) else e)
+        text = "\n\n".join("[page %d]\n%s" % (i + 1, p.strip()) for i, p in enumerate(pages) if p.strip())
+        return text or "(%s: no text in this PDF, a scan? attach pictures of its pages)" % path.name
     text = path.read_text(encoding="utf-8", errors="replace")
     if path.suffix.lower() == ".ipynb":   # a notebook: its code and notes, not its outputs
         try:
@@ -249,10 +376,11 @@ def read_sources(path: str, limit: int = MAX_MANUAL) -> str:
                 break
             if any(part in SKIP_DIRS for part in p.relative_to(root).parts[:-1]):
                 continue
-            if p.is_file() and p.suffix.lower() in SOURCE_TYPES and p.stat().st_size < 2_000_000:
+            if p.is_file() and p.suffix.lower() in SOURCE_TYPES and p.stat().st_size < (
+                    MAX_PDF_BYTES if p.suffix.lower() == ".pdf" else 2_000_000):
                 files.append(p)
     if not files:
-        raise ValueError("no scripts, headers or text files in %s" % path)
+        raise ValueError("no scripts, headers, text files or PDFs in %s" % path)
 
     def rank(p: Path) -> Tuple[int, int]:
         name = p.name.lower()

@@ -3,7 +3,13 @@
   const token = decodeURIComponent(location.hash.slice(1));
   const $ = (id) => document.getElementById(id);
   const SVGNS = "http://www.w3.org/2000/svg";
-  const S = { compare: [], lastReply: null, chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, streaming: false, labOpen: false, settings: null, approvals: new Map() };
+  const S = { compare: [], lastReply: null, chats: [], projects: [], incognito: false, chatId: null, groups: [], labels: {}, labOpen: false, settings: null, approvals: new Map(),
+    // the chats answering in this window, by chat id: {reply, from, steers (what the person wrote meanwhile, until
+    // Kelvin reads it), title}; answering: every chat the portal says answers now (from any window, or Kelvin's own);
+    // unread: answers that came while another chat was open; asking: chats with an approval waiting
+    live: new Map(), answering: new Set(), unread: new Set(), asking: new Set() };
+  Object.defineProperty(S, "streaming", { get: () => !!S.chatId && S.live.has(S.chatId) });   // this chat is answering
+  const liveHere = () => S.live.get(S.chatId);
 
   // ------------------------------------------------------------------ helpers
   function h(tag, attrs, ...kids) {
@@ -31,9 +37,11 @@
     plus: '<path d="M12 5v14M5 12h14"/>',
     dots: '<circle cx="5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="19" cy="12" r="1.1"/>',
     folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
+    "folder-open": '<path d="M3 7.5V5.5A1.5 1.5 0 0 1 4.5 4H9l2 2h6.5A1.5 1.5 0 0 1 19 7.5V9"/><path d="M2.6 10.2A1 1 0 0 1 3.6 9h16.8a1 1 0 0 1 1 1.2l-1.5 7.5a2 2 0 0 1-2 1.6H6a2 2 0 0 1-2-1.6z"/>',
     pencil: '<path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
     sliders: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
     hand: '<path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/>',
+    copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/>',
     // instrument kinds
     "source-meter": '<path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/>',
     "lock-in": '<path d="M2 12c2-6 4-6 6 0s4 6 6 0 4-6 6 0"/><path d="M2 20h20"/>',
@@ -84,7 +92,9 @@
       let msg = "HTTP " + res.status, data = null;
       try { data = await res.json(); msg = data.error || msg; } catch (e) { /* not JSON */ }
       if (res.status === 401 && data && data.signin) setTimeout(() => location.reload(), 300);   // signed out elsewhere
-      throw new Error(msg);
+      const err = new Error(msg);
+      err.data = data;
+      throw err;
     }
     return res.json();
   }
@@ -92,19 +102,214 @@
   // ------------------------------------------------------------------ who is using Kelvin (accounts)
   const initials = (name) => String(name).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
 
+  function hubLink(session, text, edit) {   // which Kelvin hub people sign in to on this computer ("" = accounts here only)
+    $(text).textContent = session.central ? "Kelvin hub: " + String(session.hub).replace(/^https?:\/\//, "")
+      : "Accounts on this computer only.";
+    $(edit).textContent = session.central ? "change" : "Use a Kelvin hub";
+    $(edit).onclick = async () => {
+      const url = prompt("The Kelvin hub people sign in to on this computer (https://…). Leave it empty for accounts on this computer only.", session.hub || "");
+      if (url === null) return;
+      try { await api("/api/session/hub", { body: { url: url.trim() } }); location.reload(); } catch (e) { toast(e.message); }
+    };
+  }
+
+  function showCentral(session) {   // central Kelvin accounts: one account, every computer (central.py)
+    const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
+    const parts = ["signin-people", "signin-pass", "signin-new", "signin-add", "central-signin", "central-new", "central-link",
+      "central-rekey", "central-create", "signin-remove", "signin-remove-link"];
+    const view = (mode) => {   // signin | new | link | rekey | remove
+      const shown = { signin: ["signin-people", "central-signin", "central-create"].concat((session.accounts || []).length ? ["signin-remove-link"] : []),
+        new: ["central-new"], link: ["central-link"], rekey: ["central-rekey"], remove: ["signin-remove"] }[mode];
+      for (const id of parts) $(id).hidden = !shown.includes(id);
+      $("signin-title").textContent = { signin: "Sign in to Kelvin", new: "Create a Kelvin account", link: "Welcome to this computer",
+        rekey: "Keep your API keys?", remove: "Remove someone from this computer" }[mode];
+      $("signin-sub").textContent = mode === "signin" ? "Your Kelvin account works on every computer." : "";
+      if (mode === "signin") (($("c-email").value ? $("c-password") : $("c-email"))).focus();
+      if (mode === "new") $("cn-name").focus();
+      if (mode === "rekey") $("rekey-old").focus();
+    };
+    $("signin-foot").textContent = "After you've signed in on a computer once, your password works there offline too. Your chats, data and API keys stay on each computer.";
+    $("cn-terms").href = session.hub + "/terms";
+    $("cn-privacy").href = session.hub + "/privacy";
+    const known = (session.accounts || []).filter((a) => a.email);
+    $("signin-people").replaceChildren(...known.map((p) => {
+      const name = p.display || p.name;
+      const b = h("button", { class: "person", type: "button" }, h("span", { class: "avatar" }, initials(name)), h("span", {}, name));
+      b.addEventListener("click", () => { $("c-email").value = p.email; $("c-password").value = ""; $("c-password").focus(); });
+      return b;
+    }));
+    let pending = null;   // what was sent, to send again with the chosen account from before
+    const after = (r) => {
+      if (r.link) {   // made on the hub (or signed in there): which account here is theirs is all that's left
+        pending = { path: "/api/session", body: { email: pending.body.email, password: pending.body.password } };
+        showLink(r.link);
+        return;
+      }
+      if (r.registered) { say(r.message || "Check your email to confirm your address, then sign in.", false); view("signin"); return; }
+      if (r.keys_sealed) { view("rekey"); return; }
+      location.reload();
+    };
+    const send = async (extra) => {
+      say(pending.path === "/api/accounts" ? "Making your account…" : "Signing in…");
+      try { after(await api(pending.path, { body: Object.assign({}, pending.body, extra || {}) })); } catch (e) { say(e.message, true); }
+    };
+    const showLink = (names) => {
+      let chosen = null;
+      say("");
+      $("link-people").replaceChildren(...names.map((n) => {
+        const b = h("button", { class: "person", type: "button" }, h("span", { class: "avatar" }, initials(n)), h("span", {}, n));
+        b.addEventListener("click", () => {
+          chosen = n;
+          for (const x of $("link-people").children) x.classList.toggle("on", x === b);
+          const p = (session.accounts || []).find((a) => a.name === n);
+          $("link-pass-label").hidden = $("link-password").hidden = !(p && p.password);
+          $("link-go").hidden = false;
+          if (p && p.password) $("link-password").focus();
+        });
+        return b;
+      }));
+      $("link-go").onclick = () => chosen && send({ link: chosen, link_password: $("link-password").value });
+      $("link-none").onclick = () => send({ link: "" });
+      view("link");
+    };
+    $("central-signin").onsubmit = (e) => {
+      e.preventDefault();
+      pending = { path: "/api/session", body: { email: $("c-email").value, password: $("c-password").value } };
+      send();
+    };
+    $("central-new").onsubmit = (e) => {
+      e.preventDefault();
+      if (!$("cn-consent").checked) { say("Agree to the hub's terms to make an account.", true); return; }
+      pending = { path: "/api/accounts", body: { name: $("cn-name").value, email: $("cn-email").value, password: $("cn-password").value, consent: true } };
+      send();
+    };
+    $("central-create").onclick = () => { say(""); view("new"); };
+    $("cn-back").onclick = () => { say(""); view("signin"); };
+    $("c-forgot").onclick = async () => {
+      const email = $("c-email").value.trim();
+      if (!email) { say("Type your email first.", true); return; }
+      try { await api("/api/session/reset", { body: { email } }); say("If there's a Kelvin account for " + email + ", the hub sent it a link to choose a new password."); }
+      catch (e) { say(e.message, true); }
+    };
+    $("central-rekey").onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api("/api/account/rekey", { body: { old: $("rekey-old").value } });
+        if (r.rekeyed) location.reload(); else say("That isn't your old password, or there was nothing to keep.", true);
+      } catch (err) { say(err.message, true); }
+    };
+    $("rekey-skip").onclick = () => location.reload();
+    setupRemove(session, () => view("signin"), say);
+    $("signin-remove-link").onclick = () => { say(""); view("remove"); };
+    view("signin");
+  }
+
+  // before signing in: take someone off this computer, with their password (app.py removal); their measurements stay
+  function setupRemove(session, back, say) {
+    const people = session.accounts || [];
+    let chosen = null;
+    const pick = (p, b) => {
+      chosen = p;
+      for (const x of $("remove-people").children) x.classList.toggle("on", x === b);
+      const name = p.display || p.name;
+      const kelvinAccount = !!(p.email && session.central);
+      $("remove-what").hidden = false;
+      $("remove-what").textContent = "Takes " + name + " off this computer: their settings, API keys, ChatGPT sign-in, chats, " +
+        "projects and memory. Their measurements (runs, reports and record) stay on disk." +
+        (kelvinAccount ? " Their Kelvin account stays for their other computers, unless you also delete it." : "");
+      $("remove-everywhere-row").hidden = !kelvinAccount;
+      $("remove-everywhere").checked = false;
+      $("remove-pass-label").hidden = $("remove-password").hidden = !p.password && !kelvinAccount;
+      $("remove-pass-label").textContent = name + "'s password";
+      $("remove-password").value = "";
+      $("remove-go").disabled = false;
+      if (!$("remove-password").hidden) $("remove-password").focus();
+    };
+    $("remove-people").replaceChildren(...people.map((p) => {
+      const name = p.display || p.name;
+      const b = h("button", { class: "person", type: "button" }, h("span", { class: "avatar" }, initials(name)), h("span", {}, name),
+        h("span", { class: "person-note" }, p.email || (p.password ? "on this computer" : "on this computer, no password")));
+      b.addEventListener("click", () => pick(p, b));
+      return b;
+    }));
+    for (const id of ["remove-what", "remove-everywhere-row", "remove-pass-label", "remove-password"]) $(id).hidden = true;
+    $("remove-go").disabled = true;
+    $("remove-back").onclick = () => { say(""); back(); };
+    $("signin-remove").onsubmit = async (e) => {
+      e.preventDefault();
+      if (!chosen) return;
+      const everywhere = $("remove-everywhere").checked;
+      const name = chosen.display || chosen.name;
+      if (!confirm(everywhere ? "Delete " + name + "'s Kelvin account on every computer, and remove them from this one? This can't be undone."
+        : "Remove " + name + " from this computer? Their measurements stay.")) return;
+      say(everywhere ? "Deleting the Kelvin account…" : "Removing…");
+      try {
+        const r = await api("/api/accounts/remove", { body: { name: chosen.name, password: $("remove-password").value, everywhere } });
+        showSignIn(r);
+        say(removedText(r));
+      } catch (err) { say(err.message, true); }
+    };
+  }
+
+  function removedText(r) {
+    const folder = (r.kept || [])[0] ? String(r.kept[0]).replace(/[\\/][^\\/]+$/, "") : "";
+    return (r.everywhere ? "Deleted " + r.removed + "'s Kelvin account and removed them from this computer."
+      : "Removed " + r.removed + " from this computer.") + (folder ? " Their measurements stay in " + folder + "." : "") +
+      ((r.failed || []).length ? " Kelvin couldn't delete: " + r.failed.join(", ") + "." : "");
+  }
+
   function showSignIn(session) {
     $("signin").hidden = false;
     for (const slot of $("signin").querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
+    hubLink(session, "central-hub-text", "central-hub-edit");
+    // signed out, the hub can only change until someone has signed in here with a central account (app.py session_hub)
+    $("central-hub-edit").hidden = (session.accounts || []).some((a) => a.email);
+    if (session.central) {
+      showCentral(session);
+    } else {
+      showLocal(session);
+    }
+    const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
+    const busy = (s) => {
+      $("signin-busy").hidden = !s.busy;
+      $("signin-busy-text").textContent = s.busy ? (s.busy_user ? s.busy_user + "'s work: " : "") + s.busy : "";
+    };
+    busy(session);
+    const setupNote = (s) => {   // the instruments set up meanwhile: signing in doesn't wait for them
+      $("signin-setup").hidden = !s.setup;
+      if (s.setup) $("signin-setup-text").textContent = s.setup.message + "… You can sign in meanwhile.";
+      return !!s.setup;
+    };
+    if (setupNote(session)) {
+      const watch = setInterval(async () => {
+        if ($("signin").hidden) { clearInterval(watch); return; }
+        try { if (!setupNote(await api("/api/session"))) clearInterval(watch); } catch (e) { /* keep what is shown */ }
+      }, 3000);
+    }
+    let note = "";
+    try { note = sessionStorage.getItem("kelvin-signin-msg") || ""; sessionStorage.removeItem("kelvin-signin-msg"); } catch (e) { /* no storage */ }
+    if (note) say(note);
+    $("signin-stop").onclick = async () => {   // anyone may stop what runs: safety never waits for a password
+      try { await api("/api/runs/stop", { body: { queue: true } }); say("Stopping: the step in progress ends, then everything goes safe."); }
+      catch (e) { say(e.message, true); }
+      setTimeout(async () => { try { busy(await api("/api/session")); } catch (e) { /* keep what is shown */ } }, 4000);
+    };
+  }
+
+  function showLocal(session) {   // accounts on this computer only (no Kelvin hub set)
     const people = session.accounts || [];
     let chosen = null;
     const say = (text, bad) => { $("signin-msg").textContent = text || ""; $("signin-msg").classList.toggle("bad", !!bad); };
-    const view = (mode) => {   // people | password | new
+    const view = (mode) => {   // people | password | new | remove
       $("signin-people").hidden = mode !== "people";
       $("signin-pass").hidden = mode !== "password";
       $("signin-new").hidden = mode !== "new";
       $("signin-add").hidden = mode !== "people";
+      $("signin-remove").hidden = mode !== "remove";
+      $("signin-remove-link").hidden = mode !== "people" || !people.length;
       $("new-back").hidden = !people.length;
-      $("signin-title").textContent = mode === "new" ? (people.length ? "Add a person" : "Welcome to Kelvin") : "Who's using Kelvin?";
+      $("signin-title").textContent = mode === "new" ? (people.length ? "Add a person" : "Welcome to Kelvin")
+        : mode === "remove" ? "Remove someone from this computer" : "Who's using Kelvin?";
       $("signin-sub").textContent = mode !== "new" ? "" : people.length ? "Anyone can add themselves; nobody's account is above another's."
         : session.legacy ? "Make your account. Your chats, runs and API keys from before come with it." : "Make your account to start.";
       say("");
@@ -131,16 +336,8 @@
     $("signin-back").onclick = () => view("people");
     $("new-back").onclick = () => view("people");
     $("signin-add").onclick = () => view("new");
-    const busy = (s) => {
-      $("signin-busy").hidden = !s.busy;
-      $("signin-busy-text").textContent = s.busy ? (s.busy_user ? s.busy_user + "'s work: " : "") + s.busy : "";
-    };
-    busy(session);
-    $("signin-stop").onclick = async () => {   // anyone may stop what runs: safety never waits for a password
-      try { await api("/api/runs/stop", { body: { queue: true } }); say("Stopping: the step in progress ends, then everything goes safe."); }
-      catch (e) { say(e.message, true); }
-      setTimeout(async () => { try { busy(await api("/api/session")); } catch (e) { /* keep what is shown */ } }, 4000);
-    };
+    setupRemove(session, () => view("people"), say);
+    $("signin-remove-link").onclick = () => view("remove");
     view(people.length ? "people" : "new");
   }
 
@@ -154,13 +351,56 @@
     if (!on) return;
     $("account-avatar").textContent = initials(a.user.name);
     $("account-name").textContent = a.user.name;
-    $("account-status").textContent = a.user.name + (a.user.password ? " · password set" : " · no password");
-    $("pw-old").hidden = !a.user.password;
+    $("account-status").textContent = a.user.central ? a.user.email + " · Kelvin account"
+      : a.user.name + (a.user.password ? " · password set" : " · no password");
+    $("pw-old").hidden = !a.user.password && !a.user.central;
+    $("pw-new").placeholder = a.user.central ? "New password (8 characters or more)" : "New password (empty: none)";
+    $("account-hub-link").hidden = !(a.user.central && a.account_url);
+    if (a.account_url) $("account-hub-link").href = a.account_url;
+    hubLink(a, "account-hub-text", "account-hub-edit");
+    const relay = a.relay;
+    $("relay-field").hidden = !(a.user.central && relay);
+    if (relay) {
+      $("relay-on").checked = relay.on;
+      $("relay-status").textContent = !relay.on ? "off" : ({ online: "on: your phone can reach this Kelvin",
+        connecting: "connecting…", offline: "on, but the hub can't be reached now",
+        "signed out": "the hub signed this computer out: sign in again", off: "off" })[relay.state] || relay.state;
+      $("relay-status").title = relay.problem || "";
+    }
+    const kelvinAccount = !!a.user.central;
+    $("account-delete-everywhere-row").hidden = !kelvinAccount;
+    $("account-delete-everywhere").checked = false;
+    $("account-delete-password").hidden = !a.user.password && !kelvinAccount;
+    $("account-delete-what").textContent = "Takes you off this computer: your settings, API keys, ChatGPT sign-in, chats, projects " +
+      "and memory. Your measurements (runs, reports and record) stay on disk." +
+      (kelvinAccount ? " Your Kelvin account stays for your other computers, unless you also delete it." : "");
+    $("account-hint").textContent = a.user.central
+      ? "One Kelvin account, on the Kelvin hub, signs you in on every computer; after a first sign-in on a computer it works there offline too. Your settings, API keys, chats, projects, memory, data folder and record stay on each computer, and your API keys are encrypted with your password. The instruments, their cards, the lab switches below and the lab's instrument log are everyone's. Forgot your password? Sign out and choose \"Forgot your password?\"."
+      : "Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.";
+  }
+
+  async function setRelay() {
+    try {
+      await api("/api/settings", { body: { phone_relay: $("relay-on").checked ? "on" : "off" } });
+      setTimeout(async () => { try { S.account = await api("/api/session"); renderAccount(); } catch (e) { /* keep */ } }, 1500);
+    } catch (e) { toast(e.message); }
   }
 
   async function signOut() {
     try { await api("/api/session", { method: "DELETE" }); } catch (e) { /* the sign-in screen shows either way */ }
     location.reload();
+  }
+
+  async function deleteAccount() {
+    const everywhere = $("account-delete-everywhere").checked;
+    if (!confirm(everywhere ? "Delete your Kelvin account on every computer, and remove it from this one? This can't be undone."
+      : "Remove your account from this computer? Your measurements stay.")) return;
+    $("settings-msg").textContent = everywhere ? "Deleting your Kelvin account…" : "Removing…";
+    try {
+      const r = await api("/api/account", { method: "DELETE", body: { password: $("account-delete-password").value, everywhere } });
+      try { sessionStorage.setItem("kelvin-signin-msg", removedText(r)); } catch (e) { /* the sign-in screen shows either way */ }
+      location.reload();
+    } catch (e) { $("settings-msg").textContent = e.message; }
   }
 
   async function changePassword() {
@@ -176,13 +416,15 @@
   }
 
   let toastTimer = null;
-  function toast(text) {
+  function toast(text, onClick) {   // onClick: what a click on it does (open the chat it is about)
     let t = document.querySelector(".toast");
     if (!t) { t = h("div", { class: "toast", role: "status" }); document.body.append(t); }
     t.textContent = text;
+    t.classList.toggle("link", !!onClick);
+    t.onclick = onClick ? () => { t.classList.remove("show"); onClick(); } : null;
     t.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => t.classList.remove("show"), 4000);
+    toastTimer = setTimeout(() => t.classList.remove("show"), onClick ? 8000 : 4000);
   }
 
   // ------------------------------------------------------------------ markdown (safe subset)
@@ -428,9 +670,11 @@
       }
     }
     for (const tr of data.traces) {
+      const points = tr.x.map((x, i) => ({ x, y: tr.y[i] })).filter((p) => typeof p.x === "number" && typeof p.y === "number");
+      if (!points.length) continue;   // a point the instrument could not measure (NaN) is left out, not drawn at 0
       grid.append(lineChart({ title: tr.key + (data.rows.length > 1 ? " (latest)" : ""), xKey: tr.x_unit === "Hz" ? "frequency" : "x",
         xUnit: tr.x_unit, yUnit: tr.unit, fit: fitFor(data.analysis, tr.key, true),
-        series: [{ name: tr.key, points: tr.x.map((x, i) => ({ x, y: tr.y[i] })) }] }));
+        series: [{ name: tr.key, points }] }));
     }
     return grid;
   }
@@ -553,7 +797,7 @@
     $("runpane").hidden = !RUNS.open;
     $("toggle-runs").setAttribute("aria-pressed", String(RUNS.open));
     $("toggle-runs").classList.toggle("on", RUNS.open);
-    syncScrim();
+    fitLayout();
   }
   function openRun(runId, plan) {
     runTab(runId, plan);
@@ -664,6 +908,8 @@
     else if (!tab.final) v.count.textContent = tab.status === "missing" ? "This run's data could not be read." : "Finished · analysing…";
     else if (m.status === "done") v.count.textContent = "Finished · " + done + " points" + (m.duration_s != null ? " in " + durText(m.duration_s) : "");
     else if (m.status === "aborted") v.count.textContent = "Stopped after " + done + " of " + total + " points" + (m.reason ? ": " + m.reason : "");
+    else if (m.status === "interrupted") v.count.textContent = "Cut short after " + done + (m.planned_points ? " of " + m.planned_points : "") +
+      " points: Kelvin stopped while it measured (a crash or a power cut). Every point up to then is kept.";
     else v.count.textContent = "Not finished (" + done + " points recorded)";
     if (tab.final && !v.finalDrawn) {  // a finished run is drawn once
       v.finalDrawn = true;
@@ -710,9 +956,28 @@
     }) : [h("div", { class: "pane-menu-note" }, "No runs yet.")]));
   }
 
+  // The conversation keeps at least CHAT_MIN pixels. When the side panels need the room, the sidebar steps aside (the
+  // menu button brings it back over the page), and if that is not enough the lab panel floats over the runs pane.
+  // Below 1100 px both panels float anyway (app.css), below 820 px the sidebar too.
+  const CHAT_MIN = 520, SIDEBAR_W = 264, LAB_W = 380, RUNS_MIN = 340;
+  function fitLayout() {
+    const app = $("app"), w = window.innerWidth;
+    const floating = w <= 1100;
+    const runs = RUNS.open && !floating ? RUNS_MIN : 0;
+    const lab = S.labOpen && !floating ? LAB_W : 0;
+    const compact = w > 820 && SIDEBAR_W + CHAT_MIN + runs + lab > w;
+    app.classList.toggle("compact", compact);
+    app.classList.toggle("float-lab", lab > 0 && (compact ? 0 : SIDEBAR_W) + CHAT_MIN + runs + LAB_W > w);
+    if (!compact && w > 820) app.classList.remove("side-open");
+    if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width);
+    syncScrim();
+  }
   function setPaneWidth(w) {
-    const max = Math.max(360, window.innerWidth - 420);
-    const width = Math.round(Math.min(max, Math.max(340, w)));
+    const app = $("app"), vw = window.innerWidth;
+    const sidebar = vw <= 820 || app.classList.contains("compact") ? 0 : SIDEBAR_W;
+    const lab = S.labOpen && vw > 1100 && !app.classList.contains("float-lab") ? LAB_W : 0;
+    const max = Math.max(RUNS_MIN, vw - sidebar - lab - CHAT_MIN);
+    const width = Math.round(Math.min(max, Math.max(RUNS_MIN, w || 0)));
     $("runpane").style.width = width + "px";
     return width;
   }
@@ -750,7 +1015,7 @@
       }
     });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("runs-menu").hidden = true; });
-    window.addEventListener("resize", () => { if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width); });
+    window.addEventListener("resize", fitLayout);
   }
 
   // the compact card a run leaves in the conversation; its data live in the runs pane
@@ -802,8 +1067,7 @@
   }
 
   // the files Kelvin keeps in a run's folder: its report, slides and data, opened on this computer
-  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "data.csv": "Data (CSV)",
-    "conditions.csv": "Conditions (CSV)" };
+  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "run.h5": "Data (HDF5)" };
   function runFiles(tab, box) {
     const files = (tab.final && tab.final.files) || [];
     const base = "/api/runs/" + encodeURIComponent(tab.runId);
@@ -928,16 +1192,22 @@
       return g;
     });
     sel.replaceChildren(new Option(groups.length ? "Nothing mounted" : "No devices yet: add one with New device…", ""), ...groups);
+    MOUNT.key = null;   // new options: choose the mounted one again
     showMounted(r.mounted);
   }
   function showMounted(m) {
+    showProtection(m);
     const key = m ? JSON.stringify([m.project || null, m.device]) : "";
     $("mount-summary").textContent = m ? m.device_name + " · " + m.project_name : "nothing mounted";
     if (key === MOUNT.key) return;
-    MOUNT.key = key;
     const sel = $("mount-select");
     if ([...sel.options].some((o) => o.value === key)) sel.value = key;
-    else if (m) loadMount();
+    else if (m && !MOUNT.loading) {   // a device added elsewhere (a conversation, the phone): load the list once
+      MOUNT.loading = true;
+      loadMount().finally(() => { MOUNT.loading = false; });
+      return;
+    } else if (!m) sel.value = "";
+    MOUNT.key = key;
   }
   async function mountChosen() {
     const v = $("mount-select").value;
@@ -959,6 +1229,185 @@
       await loadMount();
       toast(d.name + " is mounted: scans from now on are filed under it.");
     } catch (e) { toast(e.message); }
+  }
+  // ------------------------------------------------------------------ protecting the sample
+  const PROT = { opts: null, mounted: null, hands: null, busy: null };
+  const numText = (v) => (v == null || v === "" || isNaN(+v) ? "" : String(+(+v).toPrecision(6)));
+  function showProtection(m) {
+    PROT.mounted = m || null;
+    const box = $("mount-protection");
+    box.hidden = !m;
+    if (!m) return;
+    const lines = m.protection_lines || [];
+    box.classList.toggle("on", lines.length > 0);
+    $("mp-state").replaceChildren(icon(lines.length ? "lock" : "warn"),
+      lines.length ? "Protected" : "Not protected: only the lab's limits hold");
+    $("mount-protect").textContent = lines.length ? "Change…" : "Protect this device…";
+    $("mp-lines").replaceChildren(...lines.map((l) => h("li", {}, l)),
+      ...(m.protection_missing || []).map((k) => h("li", { class: "bad" }, k + " is not in this lab")));
+  }
+  function showHands(hands) {
+    PROT.hands = hands || null;
+    $("hands-banner").hidden = !hands;
+    $("hands-locked").hidden = !hands;
+    $("hands-on").hidden = !!hands;
+    if (!hands) return;
+    const at = String(hands.since || "").slice(11, 16);
+    const who = String(hands.by || "").replace(/^human \((.*)\)$/, "$1");
+    $("hands-text").textContent = "Locked" + (at ? " at " + at : "") + (who && who !== "portal" ? " from " + who : "")
+      + ". Everything that reaches the sample stays at safe until you unlock; Kelvin can still read and measure.";
+  }
+  async function handsOn() {
+    if (PROT.busy && !confirm("Kelvin is " + PROT.busy + ". Stop it and bring everything that reaches the sample to safe?")) return;
+    $("hands-on").disabled = true;
+    try {
+      const r = await api("/api/hands", { body: { on: true } });
+      showHands(r.hands_on);
+      const said = r.lines.join("; ");
+      toast("Locked. " + said.charAt(0).toUpperCase() + said.slice(1));
+    } catch (e) { toast(e.message); }
+    finally { $("hands-on").disabled = false; }
+    pollState();
+  }
+  function openUnlock() {
+    const sel = $("hands-device");
+    sel.replaceChildren(...[...$("mount-select").children].map((n) => n.cloneNode(true)));
+    sel.value = $("mount-select").value;
+    for (const c of document.querySelectorAll(".hands-check")) c.checked = false;
+    $("hands-unlock").disabled = true;
+    $("hands-msg").textContent = "";
+    $("hands-dialog").showModal();
+  }
+  async function unlock() {
+    const v = $("hands-device").value, body = { on: false };
+    if (v !== $("mount-select").value) {
+      const [project, device] = v ? JSON.parse(v) : [null, ""];
+      Object.assign(body, { project, device: device || "" });
+    }
+    $("hands-unlock").disabled = true;
+    try {
+      const r = await api("/api/hands", { body });
+      $("hands-dialog").close();
+      showHands(r.hands_on);
+      MOUNT.key = "x";
+      showMounted(r.mounted);
+      toast("Unlocked." + (r.lines.length ? " " + r.lines.join("; ") : ""));
+    } catch (e) {
+      $("hands-msg").textContent = e.message;
+      $("hands-unlock").disabled = false;
+    }
+    pollState();
+  }
+  function pf(label, control) {
+    const name = h("span", {}, label);
+    return h("label", { class: "pf" }, name, control);
+  }
+  function driveSelect(value, keep) {
+    const s = h("select", { "data-k": "drive" });
+    for (const d of PROT.opts.drives.filter(keep)) s.append(new Option(d.label + (d.unit ? " (" + d.unit + ")" : ""), d.key));
+    if (value && ![...s.options].some((o) => o.value === value)) s.append(new Option(value + " (not in this lab)", value));
+    if (value) s.value = value;
+    return s;
+  }
+  const driveInfo = (key) => PROT.opts.drives.find((d) => d.key === key) || {};
+  function gateRow(g) {
+    const drive = driveSelect(g.drive, (d) => d.gate || d.key === g.drive);
+    const diel = h("select", { "data-k": "dielectric" }, ...PROT.opts.dielectrics.map((d) => new Option(d.name, d.name)),
+      new Option("Other", "other"));
+    diel.value = PROT.opts.dielectrics.some((d) => d.name === g.dielectric) ? g.dielectric : "other";
+    const thick = h("input", { type: "number", step: "any", min: "0", "data-k": "thickness_nm", value: numText(g.thickness_nm), placeholder: "nm" });
+    const limit = h("input", { type: "number", step: "any", min: "0", "data-k": "limit" });
+    const suggested = () => {
+      const f = (PROT.opts.dielectrics.find((d) => d.name === diel.value) || {}).field;
+      return f && +thick.value > 0 ? +(f * thick.value).toPrecision(6) : null;
+    };
+    if (g.limit != null && g.limit !== suggested()) limit.value = numText(g.limit);   // the person's own limit
+    const leak = h("select", { "data-k": "leak" }, new Option("No leakage reading", ""),
+      ...PROT.opts.readings.map((r) => new Option(r.key, r.key)));
+    leak.value = g.leak || "";
+    const leakMax = h("input", { type: "number", step: "any", min: "0", "data-k": "leak_nA", value: numText((g.leak_max || PROT.opts.leak_max) * 1e9) });
+    const rate = h("input", { type: "number", step: "any", min: "0", "data-k": "rate", value: numText(g.rate), placeholder: "the lab's" });
+    const note = h("span", { class: "pf-note" });
+    const limitLabel = pf("Limit ±", limit), rateLabel = pf("Ramp at most", rate);
+    const update = () => {
+      const s = suggested(), u = driveInfo(drive.value).unit || "V";
+      limit.placeholder = s != null ? String(s) : "needed";
+      limitLabel.firstChild.textContent = "Limit ± (" + u + ")";
+      rateLabel.firstChild.textContent = "Ramp at most (" + u + "/s)";
+      const mine = limit.value.trim();
+      note.classList.toggle("bad", s == null && !mine);
+      note.textContent = s != null ? "From " + numText(thick.value) + " nm " + diel.value + ": ±" + s + " " + u
+        + (mine ? "; yours holds: ±" + mine + " " + u : "")
+        : mine ? "" : "Give a limit, or a dielectric and its thickness";
+    };
+    for (const el of [diel, thick, limit]) el.addEventListener("input", update);
+    drive.addEventListener("change", () => { const d = driveInfo(drive.value); if (d.leak && !leak.value) leak.value = d.leak; update(); });
+    const row = h("div", { class: "prot-row gate" }, pf("Gate", drive), pf("Dielectric", diel), pf("Thickness (nm)", thick),
+      limitLabel, rowButton("x", "Remove this gate", () => row.remove()),
+      pf("Leakage reading", leak), pf("Stop above (nA)", leakMax), rateLabel, note);
+    update();
+    return row;
+  }
+  function limitRow(key, pair) {
+    const drive = driveSelect(key, () => true);
+    const lo = h("input", { type: "number", step: "any", "data-k": "lo", value: pair ? numText(pair[0]) : "" });
+    const hi = h("input", { type: "number", step: "any", "data-k": "hi", value: pair ? numText(pair[1]) : "" });
+    const loLabel = pf("From", lo), hiLabel = pf("To", hi);
+    const update = (fill) => {
+      const d = driveInfo(drive.value), u = d.unit ? " (" + d.unit + ")" : "";
+      loLabel.firstChild.textContent = "From" + u;
+      hiLabel.firstChild.textContent = "To" + u;
+      if (fill && d.limits) { lo.value = numText(d.limits[0]); hi.value = numText(d.limits[1]); }
+    };
+    drive.addEventListener("change", () => update(true));
+    const row = h("div", { class: "prot-row limit" }, pf("Drive", drive), loLabel, hiLabel,
+      rowButton("x", "Remove this limit", () => row.remove()));
+    update(!pair);
+    return row;
+  }
+  async function openProtection() {
+    const m = PROT.mounted;
+    if (!m) return;
+    try { PROT.opts = await api("/api/protection"); } catch (e) { toast(e.message); return; }
+    const p = m.protection || {};
+    $("protect-device").textContent = m.device_name;
+    $("protect-gates").replaceChildren(...(p.gates || []).map(gateRow));
+    $("protect-limits").replaceChildren(...Object.entries(p.limits || {}).map(([k, v]) => limitRow(k, v)));
+    const empty = !(p.gates || []).length && !Object.keys(p.limits || {}).length;
+    const first = PROT.opts.drives.find((d) => d.gate);
+    if (empty && first) $("protect-gates").append(gateRow({ drive: first.key, dielectric: "hBN", leak: first.leak }));
+    $("protect-clear").hidden = empty;
+    $("protect-msg").textContent = "";
+    $("protect-dialog").showModal();
+  }
+  function readProtection() {
+    const val = (row, k) => row.querySelector('[data-k="' + k + '"]').value.trim();
+    const gates = [...$("protect-gates").children].map((row) => {
+      const g = { drive: val(row, "drive"), dielectric: val(row, "dielectric") };
+      if (val(row, "thickness_nm")) g.thickness_nm = +val(row, "thickness_nm");
+      if (val(row, "limit")) g.limit = +val(row, "limit");
+      if (val(row, "leak")) g.leak = val(row, "leak");
+      if (val(row, "leak_nA")) g.leak_max = +val(row, "leak_nA") * 1e-9;
+      if (val(row, "rate")) g.rate = +val(row, "rate");
+      return g;
+    });
+    const limits = {};
+    for (const row of $("protect-limits").children) limits[val(row, "drive")] = [val(row, "lo"), val(row, "hi")];
+    return { gates, limits };
+  }
+  async function saveProtection(remove) {
+    const m = PROT.mounted;
+    if (remove && !confirm("Remove " + m.device_name + "'s protection? Only the lab's limits will hold.")) return;
+    $("protect-save").disabled = true;
+    try {
+      const r = await api("/api/projects/" + (m.project || "general") + "/devices/" + m.device,
+        { method: "PATCH", body: { protection: remove ? {} : readProtection() } });
+      $("protect-dialog").close();
+      toast(remove ? m.device_name + " is not protected any more."
+        : m.device_name + " is protected." + (r.caps.length ? " " + r.caps.join("; ") : ""));
+      pollState();
+    } catch (e) { $("protect-msg").textContent = e.message; }
+    finally { $("protect-save").disabled = false; }
   }
   async function makeReport() {
     const fmt = (document.querySelector('input[name="report-format"]:checked') || {}).value || "pdf";
@@ -993,6 +1442,7 @@
       case "lab_status": return v("Checking", "Checked") + " the lab status";
       case "describe_instrument": return v("Reading", "Read") + " the card of " + code(a.instrument);
       case "instrument_info": return v("Reading", "Read") + " the folder of " + code(a.instrument);
+      case "lab_config": return v("Reading", "Read") + " the lab config" + (a.instrument ? " for " + code(a.instrument) : "");
       case "search_manual": return v("Searching", "Searched") + " the " + esc(a.instrument || "") + " manual for " + code(a.query || "");
       case "show_sequence": return v("Drawing", "Drew") + " the " + code(a.protocol || "") + " pulse sequence";
       case "read_examples": return v("Reading", "Read") + " the maker's examples in " + code(a.path || "");
@@ -1008,6 +1458,10 @@
       case "run_plan": return v("Running", "Ran") + " plan " + code(planName(a));
       case "list_runs": return v("Listing", "Listed") + " recent runs";
       case "get_run_data": return v("Reading", "Read") + " the data of run " + code(a.run_id);
+      case "find_runs": return v("Searching", "Searched") + " the runs" + (a.text ? " for " + code(a.text) : "");
+      case "query_runs": return v("Querying", "Queried") + " the catalog of runs";
+      case "describe_run": return v("Reading", "Read") + " the card of run " + code(a.run_id);
+      case "compute": return v("Computing", "Computed") + " " + code(a.expression || "") + " from run " + code(a.run_id);
       case "get_trace": return v("Reading", "Read") + " a trace from run " + code(a.run_id);
       case "recent_events": return v("Reading", "Read") + " the event log";
       case "wait": return v("Waiting", "Waited") + " " + esc(String(a.seconds)) + " s";
@@ -1015,6 +1469,16 @@
       case "search_papers": return v("Searching", "Searched") + " the literature for " + code(a.query || "");
       case "read_paper": return v("Reading", "Read") + " " + code(a.paper || "") + (a.start ? " from character " + esc(String(a.start)) : "");
       case "save_paper": return v("Adding", "Added") + " " + code(a.paper || "") + " to the reading list";
+      case "web_search": return v("Searching", "Searched") + " the web for " + code(a.query || "");
+      case "read_web_page": return v("Reading", "Read") + " " + code(a.url || "") + (a.start ? " from character " + esc(String(a.start)) : "");
+      case "list_folder": return v("Looking", "Looked") + " in " + (a.path ? code(a.path) : "the chat's folder");
+      case "write_file": return v("Saving", "Saved") + " " + code(a.path || "a file") + " in the chat's folder";
+      case "read_file": return v("Reading", "Read") + " " + code(a.path || "") + (a.pages ? ", pages " + esc(String(a.pages)) : "") +
+        (a.start ? " from character " + esc(String(a.start)) : "") + (a.figures ? " (the pages as drawn)" : "");
+      case "import_data": return v("Importing", "Imported") + " " + code(String(a.paths || "").split(";").map((p) => p.trim().split(/[\\/]/).pop()).join(", ")) +
+        (a.name ? " as " + code(a.name) : "");
+      case "save_manual": return v("Keeping", "Kept") + " the manual " + code(a.source || "") +
+        (a.model ? " for the " + esc(String((a.maker ? a.maker + " " : "") + a.model)) : "");
       case "make_report": return v("Writing", "Wrote") + " a report" + (a.title ? ": " + esc(String(a.title)) : "");
       case "operate_computer": return v("Operating", "Operated") + " the computer: " + esc(String(a.task || ""));
       case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat" : " for this project") +
@@ -1022,8 +1486,8 @@
       default: return code(name);
     }
   }
-  function summaryOf(content) {
-    const lines = String(content || "").split("\n").filter((l) => l.trim());
+  function summaryOf(content) {   // the marks around text from outside the lab are for the model
+    const lines = String(content || "").split("\n").filter((l) => l.trim() && !/^<\/?outside_text\b/.test(l));
     return lines.find((l) => !/^dry run:/.test(l)) || lines[0] || "";
   }
   function outcome(content, isError) {
@@ -1064,13 +1528,27 @@
   }
 
   // ------------------------------------------------------------------ approvals
+  // a request's points; one of several lines (code to run or save) as it is written, scrolling when long
+  const approvalItem = (i) => h("li", {}, String(i).includes("\n") ? h("pre", { class: "approval-code" }, i) : i);
   // auto mode approved this without asking: show what ran and why, like an answered request
   function autoApproval(ev) {
-    return h("div", { class: "approval done auto", role: "group", "aria-label": ev.title },
-      h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title)),
-      h("ul", {}, ...ev.items.map((i) => h("li", {}, i))),
+    const title = h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title));
+    const el = h("div", { class: "approval done auto", role: "group", "aria-label": ev.title }, title,
+      h("ul", {}, ...ev.items.map(approvalItem)),
       h("div", { class: "approval-actions" }, h("span", { class: "verdict auto" }, "Auto-approved"),
         h("span", { class: "muted small" }, (ev.reasons || []).join("; "))));
+    foldable(el, title);
+    return el;
+  }
+  // a decided request shows one line; its title opens and closes the details
+  function foldable(el, title) {
+    title.setAttribute("role", "button");
+    title.setAttribute("tabindex", "0");
+    title.setAttribute("aria-expanded", "false");
+    title.title = "Show the details";
+    const flip = () => title.setAttribute("aria-expanded", String(el.classList.toggle("open")));
+    title.addEventListener("click", flip);
+    title.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
   }
 
   function makeApproval(ev) {
@@ -1079,9 +1557,9 @@
     const yes = h("button", { class: "btn primary", type: "button" }, "Approve");
     const no = h("button", { class: "btn", type: "button" }, "Decline");
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
-    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title },
-      h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title)),
-      h("ul", {}, ...ev.items.map((i) => h("li", {}, i))), actions);
+    const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title));
+    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title,
+      h("ul", {}, ...ev.items.map(approvalItem)), actions);
     let left = ev.seconds_left;
     const tick = () => { count.textContent = left > 0 ? "Declines itself in " + left + " s" : ""; left -= 1; };
     tick();
@@ -1092,6 +1570,7 @@
         clearInterval(timer);
         if (!card.decided) { verdict.textContent = text; verdict.className = "verdict " + (good ? "yes" : "no"); }
         actions.replaceChildren(verdict);
+        if (!el.classList.contains("done")) foldable(el, title);
         el.classList.add("done");
         card.decided = true;
         S.approvals.delete(ev.id);
@@ -1136,8 +1615,41 @@
     }
     resetText() { if (this.text) { this.text.remove(); this.text = null; this.buf = ""; } }
     endText() {
-      if (this.text) { cancelAnimationFrame(this.raf); this.raf = 0; this.text.innerHTML = md(this.buf); this.text.classList.remove("cursor"); }
+      if (this.text) {
+        cancelAnimationFrame(this.raf); this.raf = 0; this.text.innerHTML = md(this.buf); this.text.classList.remove("cursor");
+        this.text.dataset.src = this.buf;   // what Copy copies: the answer as written (Markdown)
+        this.last = { el: this.text, buf: this.buf };
+      }
       this.text = null;
+    }
+    condensing(words) {   // a long answer is being shortened (brevity.py)
+      this.endText();
+      if (this.pending) return;
+      this.pending = h("div", { class: "condense-note" }, h("span", { class: "spinner" }),
+        h("span", {}, "Condensing a long answer (" + words + " words)…"));
+      this.el.append(this.pending);
+    }
+    condensed(ev) {
+      this.endText();
+      if (this.pending) { this.pending.remove(); this.pending = null; }
+      if (ev.text && this.last) this.shorten(this.last, ev.text, this.last.buf, ev.full_words);
+      else if (ev.kept) this.keptWhole(ev.words, ev.kept);
+    }
+    shorten(last, short, full, fullWords) {
+      const shortHtml = md(short), fullHtml = md(full);
+      let open = false;
+      const label = () => (open ? "Show the short answer" : "Full answer (" + fullWords + " words)");
+      const toggle = h("button", { class: "link soft", type: "button" }, label());
+      toggle.addEventListener("click", () => {
+        open = !open; last.el.innerHTML = open ? fullHtml : shortHtml; last.el.dataset.src = open ? full : short; toggle.textContent = label();
+      });
+      last.el.innerHTML = shortHtml;
+      last.el.dataset.src = short;
+      last.el.after(h("div", { class: "condense-note" }, h("span", {}, "Condensed by Kelvin"), toggle));
+    }
+    keptWhole(words, why) {
+      this.el.append(h("div", { class: "condense-note" },
+        "A long answer (" + (words ? words + " words" : "kept whole") + ")" + (why ? ": " + why : "") + "."));
     }
     addThinking(delta) {
       if (!this.thinking) {
@@ -1156,11 +1668,16 @@
       this.steps.set(id, step);
       this.el.append(step.el);
     }
-    toolEnd(id, content, isError, runId) {
+    toolEnd(id, content, isError, runId, images) {
       const step = this.steps.get(id);
       if (!step) return;
       step.finish(content, isError);
       step.done = true;
+      if (images && images.length && !step.pics) {   // what look_at showed the model
+        step.pics = h("div", { class: "tool-pics" }, ...images.map((f) => mediaImg(f, "What Kelvin looked at")));
+        (step.last || step.el).after(step.pics);
+        step.last = step.pics;
+      }
       const files = reportNames(content);
       if (files.length && !step.files) {
         step.files = reportFiles(files);
@@ -1216,11 +1733,23 @@
         if (step && step.last === pending) step.last = card;
       } else this.place(ev.call_id, card);
     }
-    answerReview(r) { this.endText(); this.el.append(reviewCard(r)); }
+    answerReview(r) {
+      this.endText();
+      this.reviewEl = reviewCard(r);
+      this.reviewData = r;
+      this.el.append(this.reviewEl);
+    }
     error(text) { this.endText(); this.el.append(h("div", { class: "callout" }, text)); }
     finish() {
       this.endText(); this.endThinking();
       for (const step of this.steps.values()) if (!step.done && step.unknown) { step.unknown(); step.done = true; }
+      if (!this.tools && this.el.querySelector(":scope > .md")) {   // Copy: the answer's text, as shown
+        const btn = h("button", { class: "link soft", type: "button", title: "Copy this answer" }, icon("copy"), "Copy");
+        btn.addEventListener("click", () => copyText([...this.el.querySelectorAll(":scope > .md")]
+          .map((e) => e.dataset.src || e.innerText).join("\n\n"), btn));
+        this.tools = h("div", { class: "msg-tools" }, btn);
+        this.el.append(this.tools);
+      }
     }
   }
 
@@ -1230,7 +1759,58 @@
   const nearBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
   const toBottom = () => { scroller.scrollTop = scroller.scrollHeight; };
 
-  function userBubble(text) { return h("div", { class: "msg user" }, h("div", { class: "bubble" }, text)); }
+  function userBubble(text, attachments) {
+    const files = attachments && attachments.length ? h("div", { class: "user-files" }, ...attachments.map((a) =>
+      String(a.mime).startsWith("image/")
+        ? mediaImg(a.file, a.name)
+        : h("span", { class: "file-chip", title: a.name }, svgIcon("M7 3h7l5 5v13H7zM14 3v5h5"),
+            a.name + (a.pages ? " · " + a.pages + " pages" : "")))) : null;
+    const copy = h("button", { class: "link soft", type: "button", title: "Copy your message" }, icon("copy"), "Copy");
+    copy.addEventListener("click", () => copyText(text, copy));
+    return h("div", { class: "msg user" }, files, h("div", { class: "bubble" }, text), h("div", { class: "msg-tools user-tools" }, copy));
+  }
+  function svgIcon(d) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg"), path = document.createElementNS(ns, "path");
+    svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("aria-hidden", "true");
+    path.setAttribute("d", d); path.setAttribute("fill", "none"); path.setAttribute("stroke", "currentColor");
+    path.setAttribute("stroke-width", "1.8"); path.setAttribute("stroke-linejoin", "round");
+    svg.append(path);
+    return svg;
+  }
+  // pictures kept with a chat (a plot look_at drew, a photo the person attached), fetched once with the token
+  const MEDIA = new Map();
+  function mediaImg(file, alt) {
+    const img = h("img", { class: "media-img", alt: alt || "A picture", title: "Click to enlarge" });
+    const key = S.chatId + "/" + file;
+    if (!MEDIA.has(key)) {
+      MEDIA.set(key, fetch("/api/chats/" + S.chatId + "/media/" + encodeURIComponent(file), { headers: { "X-Kelvin-Token": token } })
+        .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.blob(); })
+        .then((b) => URL.createObjectURL(b)));
+    }
+    MEDIA.get(key).then((url) => { img.src = url; }).catch(() => { MEDIA.delete(key); img.alt = "(the picture is no longer there)"; });
+    img.addEventListener("click", () => img.classList.toggle("big"));
+    return img;
+  }
+  function wakeLine(m) {   // Kelvin continuing the chat itself (wake_me), not a message from the person
+    const why = typeof m.wake === "string" ? m.wake : String(m.text || "").replace(/^<wake>|<\/wake>$/g, "");
+    return h("div", { class: "msg wake note" }, "Kelvin continued this chat: " + why);
+  }
+
+  async function copyText(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (e) {   // no clipboard access here: copy through a hidden text box
+      const box = h("textarea", { class: "copy-box" });
+      box.value = text;
+      document.body.append(box);
+      box.select();
+      try { document.execCommand("copy"); } finally { box.remove(); }
+    }
+    const said = btn.lastChild;
+    said.textContent = "Copied";
+    setTimeout(() => { said.textContent = "Copy"; }, 1500);
+  }
   function showEmpty(show) { $("empty").hidden = !show; thread.hidden = show; }
 
   function replayMessage(reply, m) {
@@ -1240,12 +1820,14 @@
         else if (b.type === "thinking") { reply.addThinking(b.text); reply.endThinking(); }
         else if (b.type === "tool_call") reply.toolStart(b.id, b.name, b.input);
       }
+      if (m.full && reply.last) reply.shorten(reply.last, reply.last.buf, m.full, m.full_words);
+      else if (m.kept) reply.keptWhole(0, m.kept);
       if (m.review) reply.answerReview(m.review);
     } else if (m.role === "tool") {
       for (const r of m.results) {
         if (r.review) reply.review(Object.assign({ call_id: r.id }, r.review));
         const run = r.name === "run_plan" ? (String(r.content).match(/run_id='([^']+)'/) || [])[1] : null;
-        reply.toolEnd(r.id, r.content, r.is_error, run);
+        reply.toolEnd(r.id, r.content, r.is_error, run, (r.images || []).map((i) => i.file));
       }
     }
   }
@@ -1260,7 +1842,7 @@
         if (reply) reply.finish();
         reply = null;
         recalled = m.memory || null;
-        thread.append(userBubble(m.text));
+        thread.append(m.wake ? wakeLine(m) : userBubble(m.text, m.attachments));
         const comp = m.compare;
         if (comp && comp.lanes && comp.lanes.length) {   // several models answered this message side by side
           if (recalled) { thread.append(recallBox(recalled)); recalled = null; }
@@ -1288,6 +1870,7 @@
     });
     if (reply) reply.finish();
     offerReview(S.lastReply);
+    offerRecheck(S.lastReply);
     showEmpty(!chat.messages.length);
     requestAnimationFrame(toBottom);
   }
@@ -1362,7 +1945,12 @@
       return nameInput("chat:" + c.id, c.title || "New chat", "Conversation name", (t) => renameChat(c, t), () => { SIDE.renaming = null; renderChats(); });
     }
     const more = rowButton("dots", "Options for this conversation", (e) => chatMenu(e.currentTarget, c));
-    const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : ""), role: "button", tabindex: "0", draggable: "true" },
+    const answering = S.live.has(c.id) || S.answering.has(c.id);
+    const mark = S.asking.has(c.id) ? ["asking", "Kelvin asks for your approval here"]
+      : answering ? ["answering", "Kelvin is answering here"] : S.unread.has(c.id) ? ["unread", "A new answer"] : null;
+    const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : "") + (mark ? " " + mark[0] : ""),
+      role: "button", tabindex: "0", draggable: "true" },
+      mark ? h("span", { class: "chat-dot", title: mark[1], "aria-label": mark[1] }) : null,
       h("span", { class: "t" }, c.title || "New chat"), more);
     item.addEventListener("click", () => openChat(c.id));
     item.addEventListener("keydown", (e) => { if (e.key === "Enter") openChat(c.id); });
@@ -1385,7 +1973,7 @@
       head = h("div", { class: "proj-row" + (holdsActive && !S.chatId ? " active" : ""), role: "button", tabindex: "0", "aria-expanded": String(open), title: p.name },
         h("span", { class: "chev-s" + (open ? " open" : "") }, icon("chev")), icon("folder"),
         h("span", { class: "t" }, p.name), h("span", { class: "count" }, chats.length ? String(chats.length) : ""),
-        rowButton("plus", "New chat in " + p.name, () => newChat(p.id)),
+        rowButton("plus", "New chat in " + p.name, () => newChat(p.id, true)),
         rowButton("dots", "Options for " + p.name, (e) => projectMenu(e.currentTarget, p, chats)));
       const toggle = () => {
         if (SIDE.collapsed.has(p.id) || !open) SIDE.collapsed.delete(p.id); else SIDE.collapsed.add(p.id);
@@ -1455,7 +2043,9 @@
     });
     document.body.append(menu);
     const r = anchor.getBoundingClientRect();
-    const top = Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8);
+    const below = r.bottom + 4, above = r.top - menu.offsetHeight - 4;   // above when it doesn't fit below (the composer)
+    const top = below + menu.offsetHeight + 8 <= window.innerHeight ? below
+      : above >= 8 ? above : window.innerHeight - menu.offsetHeight - 8;
     menu.style.top = Math.max(8, top) + "px";
     menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + "px";
     openMenu = menu;
@@ -1478,7 +2068,7 @@
   }
   function projectMenu(anchor, p, chats) {
     popMenu(anchor, [
-      { label: "New chat in this project", icon: "plus", onClick: () => newChat(p.id) },
+      { label: "New chat in this project", icon: "plus", onClick: () => newChat(p.id, true) },
       { label: "Rename", icon: "pencil", onClick: () => { SIDE.renaming = p.id; renderChats(); } },
       { label: "Project settings", icon: "sliders", onClick: () => openProjectSettings(p) },
       { sep: true },
@@ -1510,6 +2100,7 @@
     $("project-msg").textContent = "";
     renderNotes(p);
     renderPapers(p);
+    loadKnow(p.id, $("project-know"), $("know-count"), $("project-msg"));
     $("project-summary").value = p.summary || "";
     renderDevices(p);
     $("project-dialog").showModal();
@@ -1776,7 +2367,6 @@
     $("input").placeholder = askHint();
   }
   function toggleIncognito() {
-    if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
     if (S.incognito) { newChat(); return; }   // leaving: forget it and start a normal chat
     if (S.chatId) newChat();
     S.incognito = true;
@@ -1787,23 +2377,33 @@
     $("input").focus();
   }
 
-  async function openChat(id) {
-    if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
+  async function openChat(id) {   // another chat may go on answering meanwhile: its answer waits for you there
     let chat;
     try { chat = await api("/api/chats/" + id); } catch (e) { toast(e.message); return; }
     leaveIncognito();
     S.chatId = id;
+    S.unread.delete(id);
     SIDE.newProject = null;
     S.chatRules = chat.rules || null;
-    renderChat(chat);
+    showChat(chat);
     setTitle(chat.title, chat.project);
+    showFolder(chat.folder, chat.own_folder);
     if (chat.model && S.labels[chat.model]) $("model").value = chat.model;
     applyRules();
     renderChats();
+    refreshComposer();
     closeSidebar();
   }
-  function newChat(projectId) {
-    if (S.streaming) { toast("Wait for the current answer, or press stop."); return; }
+  function showChat(chat) {   // a chat still answering in this window: what it said before, then its answer as it goes
+    const live = S.live.get(chat.id);
+    if (!live) { renderChat(chat); return; }
+    const upTo = live.from === null ? chat.messages.length : live.from + 1;   // up to the message it answers
+    renderChat(Object.assign({}, chat, { messages: chat.messages.slice(0, upTo) }));
+    thread.append(live.box);
+    requestAnimationFrame(toBottom);
+  }
+  const titleOf = (id) => (S.chats.find((c) => c.id === id) || {}).title || "a chat";
+  function newChat(projectId, ask) {   // ask: the person started it, so the folder picker opens (in the app)
     leaveIncognito();
     S.chatId = null;
     S.chatRules = null;
@@ -1813,27 +2413,224 @@
     showEmpty(true);
     setTitle("", SIDE.newProject);
     renderChats();
+    refreshComposer();
     closeSidebar();
     applyIncognito();
+    if (ask) askFolder(); else loadNewFolder();
     $("input").focus();
   }
 
+  // ------------------------------------------------------------------ the chat's folder: where its runs go
+  const FOLDER = { path: "", own: false };
+  function folderName(path) { const parts = path.split(/[\\/]+/).filter(Boolean); return parts[parts.length - 1] || path; }
+  function showFolder(path, own) {
+    FOLDER.path = path || "";
+    FOLDER.own = !!own;
+    $("folder-label").textContent = FOLDER.own ? folderName(FOLDER.path) : "Data folder";
+    $("folder-btn").title = "This chat saves its runs in " + (FOLDER.own ? "" : "the data folder, ") + FOLDER.path;
+    $("folder-btn").classList.toggle("own", FOLDER.own);
+    $("folder-btn").hidden = !FOLDER.path;
+  }
+  async function loadNewFolder() {   // where a new chat (in this project) saves its runs
+    let r;
+    try { r = await api("/api/folder" + (SIDE.newProject ? "?project=" + encodeURIComponent(SIDE.newProject) : "")); } catch (e) { return; }
+    if (!S.chatId) showFolder(r.folder, r.folder !== r.data);
+  }
+  function hasPicker() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_folder); }
+  async function pickFolder(start, question) {   // the computer's own folder picker in the Kelvin app; in a browser, the path typed
+    if (hasPicker()) {
+      try { return (await window.pywebview.api.pick_folder(start || "")) || ""; } catch (e) { return ""; }
+    }
+    const typed = window.prompt(question || "The folder's full path, where this chat saves its runs:", start || "");
+    return typed ? typed.trim() : "";
+  }
+  async function useFolder(path) {   // path null: the data folder
+    if (S.chatId) {
+      const chat = await api("/api/chats/" + S.chatId, { method: "PATCH", body: { folder: path } });
+      showFolder(chat.folder, chat.own_folder);
+    } else {   // kept until the chat's first message makes it
+      const r = await api("/api/folder", { body: { path, project: SIDE.newProject } });
+      showFolder(r.folder, !!path);
+    }
+  }
+  async function changeFolder() {
+    const path = await pickFolder(FOLDER.path);
+    if (!path) return;
+    try { await useFolder(path); toast("This chat saves its runs in " + FOLDER.path); } catch (e) { toast(e.message); }
+  }
+  async function askFolder() {   // a chat the person starts: they say where its runs go (Settings can turn it off)
+    await loadNewFolder();
+    if (!hasPicker() || (S.settings && S.settings.ask_folder === false)) return;
+    const path = await pickFolder(FOLDER.path);
+    if (path && !S.chatId) { try { await useFolder(path); } catch (e) { toast(e.message); } }
+  }
+  async function folderMenu() {   // like a code editor's folder menu: the whole path, recent folders, another one
+    let recent = [];
+    try { recent = (await api("/api/folder" + (SIDE.newProject ? "?project=" + encodeURIComponent(SIDE.newProject) : ""))).recent || []; } catch (e) { /* the rest still works */ }
+    const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+    const items = [{ heading: FOLDER.path }];
+    if (recent.length) {
+      items.push({ heading: "Recent folders" });
+      for (const p of recent) {
+        const twin = recent.some((q) => q !== p && same(folderName(q), folderName(p)));   // two "data" folders: say which
+        items.push({ label: twin ? p : folderName(p), icon: "folder", checked: FOLDER.own && same(p, FOLDER.path),
+          onClick: () => { if (!(FOLDER.own && same(p, FOLDER.path))) useFolder(p).catch((e) => toast(e.message)); } });
+      }
+      items.push({ sep: true });
+    }
+    items.push({ label: "Choose folder…", icon: "folder-open", onClick: changeFolder },
+      { label: "Open folder", icon: "doc", onClick: () => api("/api/folder", { body: { open: true, chat: S.chatId, project: SIDE.newProject } }).catch((e) => toast(e.message)) });
+    if (FOLDER.own) items.push({ label: "Use the data folder", icon: "x", onClick: () => useFolder(null).catch((e) => toast(e.message)) });
+    popMenu($("folder-btn"), items);
+  }
+
   // ------------------------------------------------------------------ sending
-  function setStreaming(on) {
-    S.streaming = on;
-    const send = $("send");
-    send.classList.toggle("stop", on);
-    send.setAttribute("aria-label", on ? "Stop" : "Send");
+  function refreshComposer() {   // this chat answering: what you write adds to what Kelvin is doing; else it asks
+    $("input").placeholder = S.streaming ? "Add to what Kelvin is doing: it reads this after the step it is on" : askHint();
     updateSend();
   }
-  function updateSend() {
+  function updateSend() {   // while Kelvin works: Stop, or Send once something is typed (Kelvin reads it next step)
     const send = $("send");
-    send.disabled = !S.streaming && (!$("input").value.trim() || !$("model").value);
+    const typed = !!$("input").value.trim();
+    const stop = S.streaming && !typed;
+    send.classList.toggle("stop", stop);
+    send.setAttribute("aria-label", stop ? "Stop" : "Send");
+    send.disabled = !S.streaming && ((!typed && !ATT.items.length) || !$("model").value);
+  }
+  // ------------------------------------------------------------------ /name: start a skill or a recipe
+  const SLASH = { items: null, shown: [], at: 0, for: null };
+  async function slashMenu() {
+    const m = /^\/([a-z0-9-]*)$/i.exec($("input").value);
+    if (!m) { closeSlash(); return; }
+    const project = currentProject() || "";
+    if (SLASH.items === null || SLASH.for !== project) {
+      SLASH.for = project;
+      try { SLASH.items = (await api("/api/know/menu?project=" + encodeURIComponent(project) + (S.incognito ? "&incognito=1" : ""))).items; }
+      catch (e) { SLASH.items = []; }
+    }
+    const typed = m[1].toLowerCase();
+    SLASH.shown = SLASH.items.filter((i) => i.name.startsWith(typed)).concat(
+      SLASH.items.filter((i) => !i.name.startsWith(typed) && i.name.includes(typed))).slice(0, 12);
+    SLASH.at = 0;
+    renderSlash();
+  }
+  function renderSlash() {
+    const menu = $("slash-menu");
+    if (!SLASH.shown.length) { menu.hidden = true; return; }
+    menu.replaceChildren(...SLASH.shown.map((it, k) => {
+      const b = h("button", { class: "slash-item" + (k === SLASH.at ? " on" : ""), type: "button", role: "option" },
+        h("b", {}, "/" + it.name), h("span", {}, (it.kind === "recipe" ? "recipe: " : "") + it.description));
+      b.addEventListener("mousedown", (e) => { e.preventDefault(); pickSlash(it); });
+      return b;
+    }));
+    menu.hidden = false;
+  }
+  function pickSlash(it) {
+    $("input").value = "/" + it.name + " ";
+    closeSlash(); autosize(); updateSend();
+    $("input").focus();
+  }
+  function closeSlash() { $("slash-menu").hidden = true; SLASH.shown = []; SLASH.items = null; }   // fresh next time
+  function slashKey(e) {   // the arrows, Enter, Tab and Esc work the menu while it is open
+    if ($("slash-menu").hidden || !SLASH.shown.length) return false;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      SLASH.at = (SLASH.at + (e.key === "ArrowDown" ? 1 : SLASH.shown.length - 1)) % SLASH.shown.length;
+      renderSlash();
+    } else if (e.key === "Enter" || e.key === "Tab") pickSlash(SLASH.shown[SLASH.at]);
+    else if (e.key === "Escape") closeSlash();
+    else return false;
+    e.preventDefault();
+    return true;
+  }
+  async function steerMessage(text) {   // written while Kelvin works: it reads it at its next step
+    const live = liveHere(), chatId = S.chatId;
+    if (!text || !live) return;
+    $("input").value = ""; autosize(); updateSend();
+    const el = userBubble(text, []);
+    el.classList.add("pending");
+    el.title = "Kelvin reads this after the step it is on";
+    live.box.append(el);
+    toBottom();
+    const one = { text, el };
+    live.steers.push(one);
+    try { await api("/api/chats/" + chatId + "/steer", { body: { text } }); } catch (e) { one.late = true; }   // sent after
+  }
+  function steered(live, texts, model) {   // Kelvin read them: they stand in the chat, and its answer goes on below
+    live.reply.finish();
+    for (const text of texts) {
+      const i = live.steers.findIndex((s) => s.text === text && !s.late);
+      if (i < 0) continue;
+      live.steers[i].el.classList.remove("pending");
+      live.steers[i].el.removeAttribute("title");
+      live.steers.splice(i, 1);
+    }
+    const next = new Reply(model);
+    const waiting = live.steers.find((s) => s.el.parentNode === live.box);
+    if (waiting) live.box.insertBefore(next.el, waiting.el); else live.box.append(next.el);
+    return next;
+  }
+
+  // ------------------------------------------------------------------ attached pictures and PDFs
+  const ATT = { items: [] };
+  function addFiles(list) {
+    for (const f of list) {
+      if (!/^image\//.test(f.type) && f.type !== "application/pdf") { toast((f.name || "That file") + ": Kelvin takes pictures and PDFs."); continue; }
+      if (ATT.items.length >= 10) { toast("Up to 10 files with one message."); break; }
+      ATT.items.push(f);
+    }
+    renderAttachments();
+  }
+  function renderAttachments() {
+    $("attach-list").replaceChildren(...ATT.items.map((f, i) => {
+      const x = h("button", { class: "attach-x", type: "button", "aria-label": "Remove " + (f.name || "the picture") }, "×");
+      x.addEventListener("click", () => { ATT.items.splice(i, 1); renderAttachments(); });
+      return h("span", { class: "attach-chip", title: f.name || "" }, h("span", { class: "attach-name" }, f.name || "Pasted picture"), x);
+    }));
+    $("attach-list").hidden = !ATT.items.length;
+    updateSend();
+  }
+  async function shrink(file) {   // a phone's photo is megabytes; models read about 1600 pixels across
+    if (file.type === "application/pdf" || file.type === "image/gif") return file;
+    let bmp;
+    try { bmp = await createImageBitmap(file); } catch (e) { throw new Error((file.name || "The picture") + ": Kelvin can't read this picture. Save it as JPEG or PNG."); }
+    const scale = Math.min(1, 1568 / Math.max(bmp.width, bmp.height));
+    if (scale === 1 && file.size <= 3.5e6 && /^image\/(png|jpeg|webp)$/.test(file.type)) { if (bmp.close) bmp.close(); return file; }
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(bmp.width * scale)); c.height = Math.max(1, Math.round(bmp.height * scale));
+    c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+    if (bmp.close) bmp.close();
+    return await new Promise((ok) => c.toBlob(ok, file.type === "image/png" ? "image/png" : "image/jpeg", 0.88));
+  }
+  async function uploadAttachments(items) {   // kept with the chat; the message names them
+    const out = [];
+    for (const f of items) {
+      const res = await fetch("/api/chats/" + S.chatId + "/attachments", {
+        method: "POST", body: await shrink(f),
+        headers: { "X-Kelvin-Token": token, "Content-Type": "application/octet-stream",
+                   "X-File-Name": encodeURIComponent(f.name || "pasted-picture.png") },
+      });
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* not JSON */ }
+      if (!res.ok) throw new Error((f.name ? f.name + ": " : "") + ((data && data.error) || "HTTP " + res.status));
+      out.push(data);
+    }
+    return out;
+  }
+  async function takeAttachments() {   // null when an upload failed (said in a toast; the files stay attached)
+    if (!ATT.items.length) return [];
+    try {
+      const done = await uploadAttachments(ATT.items);
+      ATT.items = [];
+      renderAttachments();
+      return done;
+    } catch (e) { toast(e.message); return null; }
   }
 
   async function sendMessage(text) {
     text = text.trim();
-    if (!text || S.streaming) return;
+    if (S.streaming) return steerMessage(text);   // attachments wait for the next message
+    if (!text && ATT.items.length) text = ATT.items.length > 1 ? "Look at the attached files." : "Look at the attached file.";
+    if (!text) return;
     const model = $("model").value;
     if (!model) { openSettings(); return; }
     const extra = S.compare.filter((k) => k !== model);
@@ -1841,28 +2638,38 @@
     store("lh.model", model);
     if (!S.chatId) {
       const rules = currentRules();
-      try { S.chatId = (await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
+      try {
+        const made = await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } });
+        S.chatId = made.id;
+        showFolder(made.folder, made.own_folder);
+      } catch (e) { toast(e.message); return; }
       S.chatRules = rules;
       applyIncognito();
     }
+    const attachments = await takeAttachments();
+    if (attachments === null) return;
     $("input").value = ""; autosize();
     $("input").placeholder = askHint();
     showEmpty(false);
-    thread.append(userBubble(text));
-    const reply = new Reply(model);
-    thread.append(reply.el);
+    thread.append(userBubble(text, attachments));
+    const chatId = S.chatId;
+    const live = { reply: new Reply(model), box: h("div", { class: "turn-live" }), from: null, steers: [] };
+    live.box.append(live.reply.el);   // this answer's own place: it goes on there while you are in another chat
+    thread.append(live.box);
+    S.live.set(chatId, live);
     toBottom();
-    setStreaming(true);
+    refreshComposer();
+    renderChats();
     try {
-      const res = await fetch("/api/chats/" + S.chatId + "/turn", {
+      const res = await fetch("/api/chats/" + chatId + "/turn", {
         method: "POST",
         headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
-        body: JSON.stringify({ text, model }),
+        body: JSON.stringify({ text, model, attachments }),
       });
       if (!res.ok) {
         let msg = "HTTP " + res.status;
         try { msg = (await res.json()).error || msg; } catch (e) { /* not JSON */ }
-        reply.error(msg);
+        live.reply.error(msg);
         return;
       }
       const reader = res.body.getReader();
@@ -1876,18 +2683,37 @@
         while ((nl = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, nl);
           buf = buf.slice(nl + 1);
-          if (line.trim()) handle(reply, JSON.parse(line));
+          if (!line.trim()) continue;
+          const ev = JSON.parse(line);
+          if (ev.type === "turn_start" && Number.isInteger(ev.from)) live.from = ev.from;
+          if (ev.type === "steered") live.reply = steered(live, ev.texts || [], model);
+          else handle(live.reply, ev, chatId);
         }
       }
     } catch (e) {
-      reply.error("Lost the connection to the portal (" + e.message + "). The lab keeps its own log.");
+      live.reply.error("Lost the connection to the portal (" + e.message + "). The lab keeps its own log.");
     } finally {
-      reply.finish();
-      setStreaming(false);
-      refreshChats();
-      pollState();
-      offerReview(reply);
+      live.reply.finish();
+      if (S.chatId === chatId) offerReview(live.reply);
+      finishLive(chatId, live);
     }
+  }
+  function finishLive(chatId, live) {   // a chat's answer ended: here, or in a chat you left (then it says so)
+    S.live.delete(chatId);
+    S.asking.delete(chatId);
+    const here = S.chatId === chatId;
+    if (!here) {
+      S.unread.add(chatId);
+      toast("Kelvin answered in “" + titleOf(chatId) + "”", () => openChat(chatId));
+    }
+    refreshComposer();
+    refreshChats();
+    pollState();
+    const left = live.steers.splice(0);   // written too late for this answer: the next message
+    for (const s of left) s.el.remove();
+    if (!left.length) return;
+    if (here) sendMessage(left.map((s) => s.text).join("\n\n"));
+    else toast("What you added in “" + titleOf(chatId) + "” came after its answer ended: send it there again.");
   }
 
   // ------------------------------------------------------------------ several models at once
@@ -1942,24 +2768,35 @@
   async function sendCompare(text, models) {
     if (!S.chatId) {
       const rules = currentRules();
-      try { S.chatId = (await api("/api/chats", { body: { model: models[0], project: SIDE.newProject, incognito: S.incognito } })).id; } catch (e) { toast(e.message); return; }
+      try {
+        const made = await api("/api/chats", { body: { model: models[0], project: SIDE.newProject, incognito: S.incognito } });
+        S.chatId = made.id;
+        showFolder(made.folder, made.own_folder);
+      } catch (e) { toast(e.message); return; }
       S.chatRules = rules;
       applyIncognito();
     }
+    const attachments = await takeAttachments();
+    if (attachments === null) return;
     $("input").value = ""; autosize();
     $("input").placeholder = askHint();
     showEmpty(false);
     for (const el of document.querySelectorAll(".msg-actions")) el.remove();
-    thread.append(userBubble(text));
+    thread.append(userBubble(text, attachments));
     const view = new CompareView(models);
-    thread.append(view.el);
+    const chatId = S.chatId;
+    const live = { reply: view.lanes[0].reply, box: h("div", { class: "turn-live" }), from: null, steers: [] };
+    live.box.append(view.el);
+    thread.append(live.box);
+    S.live.set(chatId, live);
     toBottom();
-    setStreaming(true);
+    refreshComposer();
+    renderChats();
     try {
-      const res = await fetch("/api/chats/" + S.chatId + "/compare", {
+      const res = await fetch("/api/chats/" + chatId + "/compare", {
         method: "POST",
         headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
-        body: JSON.stringify({ text, models }),
+        body: JSON.stringify({ text, models, attachments }),
       });
       if (!res.ok) {
         let msg = "HTTP " + res.status;
@@ -1968,14 +2805,19 @@
         return;
       }
       await readEvents(res, (ev) => {
-        const stick = nearBottom();
+        const here = S.chatId === chatId;
+        const stick = here && nearBottom();
         if (ev.lane !== undefined) {
           const lane = view.lanes[ev.lane];
           if (lane && ev.type === "lane_end") lane.reply.finish();
-          else if (lane) handle(lane.reply, ev);
-        } else if (ev.type === "compare_start") { setTitle(ev.title, currentProject()); refreshChats(); }
+          else if (lane) handle(lane.reply, ev, chatId);
+        } else if (ev.type === "compare_start") {
+          if (Number.isInteger(ev.from)) live.from = ev.from;
+          if (here) setTitle(ev.title, currentProject());
+          refreshChats();
+        }
         else if (ev.type === "memory") view.el.before(recallBox(ev.notes));
-        else if (ev.type === "compare_end") { view.setChosen(ev.chosen, true); S.lastReply = view.lanes[ev.chosen].reply; }
+        else if (ev.type === "compare_end") { view.setChosen(ev.chosen, true); if (here) S.lastReply = view.lanes[ev.chosen].reply; }
         else if (ev.type === "error") view.lanes[0].reply.error(ev.message);
         if (stick) toBottom();
       });
@@ -1983,10 +2825,8 @@
       view.lanes[0].reply.error("Lost the connection to the portal (" + e.message + ").");
     } finally {
       for (const l of view.lanes) l.reply.finish();
-      setStreaming(false);
-      refreshChats();
-      pollState();
-      offerReview(S.lastReply);
+      if (S.chatId === chatId) offerReview(S.lastReply);
+      finishLive(chatId, live);   // models being compared read nothing meanwhile: what you added is the next message
     }
   }
   function compareLabel() {
@@ -2214,6 +3054,10 @@
       : v.listening ? "Phones can reach Kelvin at " + (where.join(", ") || "this computer's address, port " + v.port) + "."
       : v.on ? "Starting…" : "Off: only this computer can use Kelvin.";
     $("pair-start").disabled = !v.listening;
+    $("firewall-row").hidden = !v.firewall;
+    $("firewall-status").textContent = v.firewall === "allowed" ? "Windows Firewall lets phones reach Kelvin."
+      : "Windows Firewall may stop phones from reaching Kelvin.";
+    $("firewall-allow").hidden = v.firewall === "allowed";
     $("device-list").replaceChildren(...v.devices.map((d) => h("li", { class: "memory-note" },
       h("span", { class: "memory-kind" }, d.role),
       h("div", { class: "memory-body" }, h("span", {}, d.name),
@@ -2227,6 +3071,13 @@
     $("phone-status").textContent = $("phone-on").checked ? "Starting…" : "Stopping…";
     try { renderPhone(await api("/api/phone", { body: { on: $("phone-on").checked, port: PHONE.view ? PHONE.view.port : undefined } })); }
     catch (e) { $("phone-status").textContent = e.message; }
+  }
+  async function allowFirewall() {
+    $("firewall-allow").disabled = true;
+    $("firewall-status").textContent = "Windows asks for permission now…";
+    try { renderPhone(await api("/api/phone/firewall", { body: {} })); toast("Phones can reach Kelvin through Windows Firewall now."); }
+    catch (e) { $("firewall-status").textContent = e.message; }
+    $("firewall-allow").disabled = false;
   }
   async function startPairing() {
     clearInterval(PHONE.pairTimer);
@@ -2253,13 +3104,65 @@
   // ------------------------------------------------------------------ second opinions
   const VERDICTS = { go: ["ok", "Go"], caution: ["warn", "Caution"], stop: ["bad", "Stop"],
     agree: ["ok", "Agrees"], partly: ["warn", "Partly agrees"], disagree: ["bad", "Disagrees"] };
+  const SURE = 0.7;   // as web/review.py: findings the reviewer is at least this sure of are passed on to Kelvin
   function reviewCard(r) {
     const [tone, word] = VERDICTS[r.verdict] || ["muted", "No verdict"];
     const who = S.labels[r.model] || r.label || r.model;
-    return h("div", { class: "review " + tone },
+    const card = h("div", { class: "review " + tone },
       h("div", { class: "review-head" }, h("span", { class: "verdict-chip" }, word),
-        h("span", { class: "review-who" }, "Second opinion" + (r.kind === "plan" ? " on the plan" : "") + " · " + who)),
-      h("div", { class: "md", html: md(r.text || "") }));
+        h("span", { class: "review-who" }, "Second opinion" + (r.kind === "plan" ? " on the plan" : "") + " · " + who +
+          (r.lookups ? " · looked up " + r.lookups + (r.lookups === 1 ? " record" : " records") : "") +
+          (r.rechecked ? " · re-checked by " + r.rechecked : ""))));
+    if (!r.findings) { card.append(h("div", { class: "md", html: md(r.text || "") })); return card; }   // words only
+    const sure = r.findings.filter((f) => f.confidence >= SURE && !f.refuted);
+    const unsure = r.findings.filter((f) => f.confidence < SURE || f.refuted);
+    card.append(sure.length ? h("ul", { class: "findings" }, ...sure.map(findingItem))
+      : h("div", { class: "review-checked" }, r.verdict === "go" || r.verdict === "agree" ? "No problems found." : "No problem it is sure of."));
+    if (r.checked && r.checked.length) card.append(h("div", { class: "review-checked" }, "Checked and right: " + r.checked.join("; ") + "."));
+    if (unsure.length) {
+      card.append(h("details", { class: "review-unsure" },
+        h("summary", {}, unsure.length + " less certain " + (unsure.length === 1 ? "note" : "notes") + ", not passed on to Kelvin"),
+        h("ul", { class: "findings" }, ...unsure.map(findingItem))));
+    }
+    return card;
+  }
+  function findingItem(f) {
+    const meta = Math.round(f.confidence * 100) + "% sure" + (f.recheck ? " · confirmed by " + f.recheck.label : "") +
+      (f.refuted ? " · not confirmed by " + f.refuted.label + (f.refuted.evidence ? ": " + f.refuted.evidence : "") : "");
+    return h("li", { class: "finding " + f.severity + (f.refuted ? " refuted" : "") }, h("span", { class: "sev" }, f.severity),
+      h("span", { class: "finding-body" }, h("span", { class: "finding-problem" }, f.problem),
+        f.evidence ? h("span", { class: "finding-evidence" }, f.evidence) : null, h("span", { class: "finding-meta" }, meta)));
+  }
+  function offerRecheck(reply) {   // the latest answer's second opinion: another model can check its findings
+    const r = reply && reply.reviewData, card = reply && reply.reviewEl;
+    if (!r || !card || r.kind !== "answer" || !(r.findings || []).length || r.rechecked || !card.isConnected) return;
+    const label = "Re-check the findings with another model";
+    const btn = h("button", { class: "link soft", type: "button", "aria-haspopup": "true" }, icon("check"), label);
+    const menu = h("div", { class: "pane-menu review-menu", hidden: true });
+    btn.addEventListener("click", () => {
+      if (!menu.hidden) { menu.hidden = true; return; }
+      const models = (S.groups || []).flatMap((g) => g.models.map((m) => ({ key: m.key, label: m.label, provider: g.label })))
+        .filter((m) => m.key !== r.model && modelAllowed(m.key, S.chatRules));
+      menu.replaceChildren(h("div", { class: "pane-menu-note" }, models.length ? "Which model should check these findings?"
+        : "Add another model in Settings to re-check."), ...models.map((m) => {
+        const item = h("button", { class: "pane-menu-item", type: "button" }, h("span", {}),
+          h("span", { class: "pm-name" }, m.label), h("span", { class: "pm-meta" }, m.provider));
+        item.addEventListener("click", async () => {
+          menu.hidden = true;
+          btn.disabled = true;
+          btn.lastChild.textContent = "Re-checking with " + m.label + "…";
+          try {
+            const checked = await api("/api/chats/" + S.chatId + "/review", { body: { model: m.key, recheck: true } });
+            const fresh = reviewCard(checked);
+            card.replaceWith(fresh);
+            reply.reviewEl = fresh; reply.reviewData = checked;
+          } catch (e) { toast(e.message); btn.disabled = false; btn.lastChild.textContent = label; }
+        });
+        return item;
+      }));
+      menu.hidden = false;
+    });
+    card.append(h("div", { class: "msg-actions pane-menu-wrap review-recheck" }, btn, menu));
   }
   function recallBox(notes) {
     return h("details", { class: "recall" },
@@ -2288,16 +3191,19 @@
         }));
       menu.hidden = false;
     });
-    reply.el.append(wrap);
+    (reply.tools || reply.el).append(wrap);
   }
   async function askReview(reply, wrap, model) {
     const pending = h("div", { class: "review pending" }, h("span", { class: "spinner" }),
       h("span", {}, "Asking " + (S.labels[model] || model) + " for a second opinion…"));
-    wrap.before(pending);
+    (reply.tools && reply.tools.contains(wrap) ? reply.tools : wrap).before(pending);   // above the answer's buttons
     wrap.hidden = true;
     try {
       const r = await api("/api/chats/" + S.chatId + "/review", { body: { model } });
-      pending.replaceWith(reviewCard(r));
+      const card = reviewCard(r);
+      pending.replaceWith(card);
+      reply.reviewEl = card; reply.reviewData = r;
+      offerRecheck(reply);
       $("input").placeholder = "Reply — Kelvin will see the second opinion";
     } catch (e) {
       pending.replaceWith(h("div", { class: "callout" }, e.message));
@@ -2305,24 +3211,35 @@
     }
   }
 
-  function handle(reply, ev) {
-    const stick = nearBottom();
+  function handle(reply, ev, chatId) {   // chatId: the chat answering (it may not be the one on screen)
+    const here = chatId === undefined || chatId === S.chatId;
+    const stick = here && nearBottom();
     switch (ev.type) {
-      case "turn_start": reply.setModel(ev.model); setTitle(ev.title, currentProject()); refreshChats(); break;
+      case "turn_start": reply.setModel(ev.model); if (here) setTitle(ev.title, currentProject()); refreshChats(); break;
       case "text": reply.addText(ev.delta); break;
       case "thinking": reply.addThinking(ev.delta); break;
       case "reset": reply.resetText(); break;
       case "tool_start": reply.toolStart(ev.id, ev.name, ev.input); break;
-      case "approval": reply.approval(ev); break;
+      case "approval":
+        reply.approval(ev);
+        if (!here) {   // asked in a chat you left: say where, and take you there
+          S.asking.add(chatId);
+          renderChats();
+          toast("Kelvin asks for your approval in “" + titleOf(chatId) + "”", () => openChat(chatId));
+        }
+        break;
       case "approval_closed": {
         const card = S.approvals.get(ev.id);
         if (card) card.close(card.choice === undefined ? "Closed" : card.choice ? "Approved" : "Declined", !!card.choice);
+        if (chatId !== undefined && S.asking.delete(chatId)) renderChats();
         break;
       }
-      case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id); pollState(); break;
+      case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images); pollState(); break;
       case "run_progress": reply.runProgress(ev); break;
       case "computer_step": reply.computerStep(ev); break;
       case "note": reply.note(ev.text); break;
+      case "condensing": reply.condensing(ev.words); break;
+      case "condensed": reply.condensed(ev); break;
       case "memory": reply.memory(ev.notes); break;
       case "review_start": reply.reviewStart(ev); break;
       case "review": reply.review(ev); break;
@@ -2352,11 +3269,12 @@
     const head = inst.readings.find((r) => r.name === inst.headline);
     const [hv, hu] = head ? splitValue(head.value) : ["", ""];
     const off = inst.enabled === false;
-    const stateText = off ? "switched off" : inst.state === "error" ? "not responding"
+    const missing = inst.state === "unavailable";   // could not be connected (its package, the instrument itself)
+    const stateText = missing ? "not connected" : off ? "switched off" : inst.state === "error" ? "not responding"
       : inst.state === "active" ? inst.active + " active" : "safe";
     const chev = icon("chev"); chev.classList.add("chev");
     const count = inst.state === "active" ? h("span", { class: "inst-count" }, String(inst.active))
-      : inst.state === "error" ? h("span", { class: "inst-count err" }, "!") : h("span", { class: "inst-count none" });
+      : inst.state === "error" || missing ? h("span", { class: "inst-count err" }, "!") : h("span", { class: "inst-count none" });
     const row = h("button", { class: "inst-row", type: "button", "aria-expanded": String(open),
       title: inst.model + " · " + stateText + (head ? " · " + head.label + " " + head.value : "") },
       h("span", { class: "inst-icon" }, icon(ICONS[inst.kind] ? inst.kind : "instrument")),
@@ -2370,7 +3288,8 @@
     });
     // on/off for this experiment: off, Kelvin sends it nothing at all until a person switches it on (lab.py)
     const sw = h("button", { class: "inst-switch", type: "button", role: "switch", "aria-checked": String(!off),
-      "aria-label": "Use " + inst.name, title: off ? "Switched off: Kelvin sends " + inst.name + " nothing. Switch it on to use it."
+      "aria-label": "Use " + inst.name, title: missing ? "Not connected: " + inst.why + " Switch it on to try again."
+        : off ? "Switched off: Kelvin sends " + inst.name + " nothing. Switch it on to use it."
         : "On: Kelvin may use " + inst.name + ". Switch it off to keep Kelvin from sending it anything." });
     sw.addEventListener("click", async () => {
       sw.disabled = true;
@@ -2382,13 +3301,16 @@
     });
     const item = h("div", { class: "inst " + inst.state + (open ? " open" : "") }, h("div", { class: "inst-head" }, row, sw));
     const on = inst.drives.filter((d) => d.away);
-    if (off) item.append(h("div", { class: "inst-sub" }, "Off: Kelvin sends it nothing"));
+    if (missing) item.append(h("div", { class: "inst-sub" }, "Not connected: " + inst.why, ...installOffer(inst.install, pollState)));
+    else if (off) item.append(h("div", { class: "inst-sub" }, "Off: Kelvin sends it nothing"));
     else if (inst.state === "error") item.append(h("div", { class: "inst-sub" }, "Not responding"));
     else if (on.length && !open) item.append(h("div", { class: "inst-sub" }, on.map((d) => d.label + " " + d.value).join(" · ")));
     if (!open) return item;
     const card = item;
     const body = h("div", { class: "inst-body" });
-    if (off) body.append(h("div", { class: "hint" }, "Kelvin sends it no command and reads nothing from it: no checks, "
+    if (missing) body.append(h("div", { class: "hint" }, "Kelvin could not connect to it, so it sends it nothing, and plans "
+      + "that use it are refused. Once that is fixed, switch it on to connect it; the rest of the lab works as usual."));
+    else if (off) body.append(h("div", { class: "hint" }, "Kelvin sends it no command and reads nothing from it: no checks, "
       + "no alarms, and plans that use it are refused. Switch it on to use it again."));
     const others = inst.readings.filter((r) => r.name !== inst.headline);
     if (others.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Readings"), ...others.map((r) => kv(r))));
@@ -2417,8 +3339,9 @@
     const active = all.filter((i) => i.state === "active").length;
     const errors = all.filter((i) => i.state === "error").length;
     const off = all.filter((i) => i.state === "off").length;
+    const unconnected = all.filter((i) => i.state === "unavailable").length;
     $("inst-summary").textContent = all.length + " · " + active + " active" + (errors ? " · " + errors + " not responding" : "")
-      + (off ? " · " + off + " off" : "");
+      + (unconnected ? " · " + unconnected + " not connected" : "") + (off ? " · " + off + " off" : "");
     $("seg-active").textContent = "Active" + (active + errors ? " (" + (active + errors) + ")" : "");
     for (const b of document.querySelectorAll("#inst-seg button")) {
       const on = (b.dataset.v === "active") === PANEL.activeOnly;
@@ -2429,6 +3352,37 @@
       : [h("div", { class: "inst-empty" }, PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.")]));
   }
 
+  // ------------------------------------------------------------------ chats Kelvin continues later (wake_me)
+  const WAKE = { done: undefined, count: -1 };
+  function inTime(s) { return s < 90 ? s + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h"; }
+  async function wakeState(s) {
+    const answering = s.answering || (s.active ? [s.active] : []), woke = s.woke || {};
+    const ids = new Set(answering.map((t) => t.chat_id));   // the chats answering now, from any window: marked
+    if (ids.size !== S.answering.size || [...ids].some((id) => !S.answering.has(id))) { S.answering = ids; renderChats(); }
+    const here = !!S.chatId && !S.streaming;
+    const running = answering.some((t) => t.wake && t.chat_id === S.chatId);
+    const mine = (s.wakes || []).find((w) => w.chat_id === S.chatId);
+    if (answering.some((t) => t.wake) && !s.busy) {
+      $("agent-state").textContent = "Kelvin is continuing “" + (woke.title || "a chat") + "”";
+      $("agent-state").classList.add("busy");
+    }
+    $("wake-text").textContent = running ? "Kelvin is continuing this chat: " + (woke.why || "")
+      : mine ? "Kelvin continues this chat when " + mine.text + " (at most " + inTime(mine.left_s) + " from now)." : "";
+    $("wake-stop").hidden = !running;
+    $("wake-cancel").hidden = running || !mine;
+    $("wake-bar").hidden = !(here && (running || mine));
+    const finished = woke.done && woke.done !== WAKE.done;
+    if (WAKE.done === undefined) WAKE.done = woke.done || 0;   // the page just opened: nothing new yet
+    else if (finished) { WAKE.done = woke.done; refreshChats(); }
+    if (here && (running || (finished && woke.chat_id === S.chatId))) {   // show what Kelvin does as it does it
+      const id = S.chatId;
+      let chat;
+      try { chat = await api("/api/chats/" + id); } catch (e) { return; }
+      if (S.chatId !== id || S.streaming || (running && chat.messages.length === WAKE.count)) return;
+      WAKE.count = chat.messages.length;
+      renderChat(chat);
+    }
+  }
   async function pollState() {
     let s;
     try { s = await api("/api/state"); } catch (e) { return; }
@@ -2443,6 +3397,7 @@
       const who = e.user ? e.user + ": " : "";
       return m ? h("li", {}, h("time", {}, m[1]), h("span", {}, who + m[2])) : h("li", {}, who + e.text);
     }));
+    wakeState(s);
     termState(s);   // the terminal first: an approval its own command needs is asked there
     // requests not already shown in a conversation (e.g. after a page reload)
     // requests no conversation shows (a queue started here, another agent's run): asked in the Lab panel, and kept
@@ -2471,18 +3426,40 @@
     $("lab-name").textContent = s.lab;
     $("sim-tag").hidden = !s.simulated;
     const problem = s.lab_info && s.lab_info.error;
-    $("lab-problem").hidden = !problem;
-    if (problem) $("lab-problem").textContent = problem + " Kelvin is using the virtual lab meanwhile.";
-    $("lab-observe").hidden = !s.observe_only;
+    const missing = problem ? [] : (s.unavailable || []);
+    $("lab-problem").hidden = !problem && !missing.length;
+    if (problem || missing.length) {
+      const text = problem ? problem + " Kelvin is using the virtual lab meanwhile."
+        : "Not connected: " + missing.map((m) => m.name + " (" + m.why + ")").join("; ") + " The rest of your lab is connected.";
+      if ($("lab-problem").dataset.text !== text) {   // the install button keeps its state between polls
+        $("lab-problem").dataset.text = text;
+        const offers = problem ? installOffer(s.lab_info.install)
+          : missing.filter((m) => m.install).flatMap((m) => installOffer(m.install, pollState));
+        $("lab-problem").replaceChildren(h("span", {}, text), ...offers);
+      }
+    } else delete $("lab-problem").dataset.text;
+    const unreviewed = s.unreviewed || [];
+    $("lab-observe").hidden = !unreviewed.length;
+    if (unreviewed.length) $("lab-observe-who").textContent = "Kelvin added " + andList(unreviewed) + " itself.";
+    const drafts = s.drafts || [];   // real instruments whose card nobody has checked yet
+    $("lab-drafts").hidden = !drafts.length;
+    if (drafts.length) {
+      $("lab-drafts-who").textContent = drafts.length === 1
+        ? drafts[0] + " runs on a draft card: Kelvin asks you before each setting or output change on it until you check the card against the instrument and mark it reviewed."
+        : andList(drafts) + " run on draft cards: Kelvin asks you before each setting or output change on them until you check their cards against the instruments and mark them reviewed.";
+    }
     showWhy(s);
     const busySetup = s.setup && SETUP_BUSY.has(s.setup.state);
     $("lab-setting-up").hidden = !busySetup;
     if (busySetup) $("lab-setting-up").textContent = "Setting up instruments: " + (s.setup.message || "") + "…";
     if (S.setupState && SETUP_BUSY.has(S.setupState) && s.setup && !busySetup && $("lab-dialog").open) refreshLabSetup();
     S.setupState = s.setup && s.setup.state;
+    setupWait(s);
     if (s.live && s.live.status === "running") noticeRun(s.live.run_id, s.live.plan);  // e.g. a run an external agent started
     queueFromState(s.queue);
     showMounted(s.mounted);
+    showHands(s.hands_on);
+    PROT.busy = s.busy;
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
   function renderAlerts(alarms) {
@@ -2552,7 +3529,7 @@
   const KIND_NAME = { "source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
     "laser": "laser", "laser-driver": "laser", "power-meter": "pm", "preamp": "preamp", "multimeter": "dmm",
     "nanovoltmeter": "nvm", "function-generator": "fg", "voltage-source": "vsrc", "vna": "vna" };
-  const LAB = { cards: [], found: [] };
+  const LAB = { cards: [], found: [], scripts: null, scriptsFolder: "" };
 
   function cardSelect(selected, placeholder) {
     const sel = h("select", { "aria-label": "Card" });
@@ -2571,7 +3548,7 @@
     $("lab-now").textContent = "Kelvin now controls " + (name || "the lab") + (mine ? "" : " (simulated)") + ".";
   }
   // ------------------------------------------------------------------ the user's own instrument cards
-  const CARDS = { editing: null };
+  const CARDS = { editing: null, version: false };   // version: the lab's version of one of Kelvin's cards
   async function openCards() {
     fillModels($("card-model"), S.groups, (S.settings && S.settings.default_model) || $("model").value);
     showCardEditor(null);
@@ -2588,20 +3565,53 @@
       flip.addEventListener("click", () => setCardStatus(c, reviewed ? "draft" : "lab-verified"));
       const edit = h("button", { class: "link soft", type: "button" }, "Edit");
       edit.addEventListener("click", () => showCardEditor(c.yaml, c.id, c.problems, c.warnings));
+      const remove = async () => {
+        if (!confirm(c.kelvins ? "Go back to Kelvin's own card " + c.id + "? Your lab's version is deleted."
+          : "Delete the card " + (c.id || c.file) + "?")) return;
+        let r = {};
+        try { r = await api("/api/cards/delete", { body: { id: c.id || c.file.replace(/\.yaml$/, "") } }); } catch (e) { $("cards-msg").textContent = e.message; }
+        if (r.reconnect && r.reconnect.length) $("cards-msg").textContent = andList(r.reconnect) + (r.reconnect.length === 1 ? " uses" : " use") + " Kelvin's card again once the lab reconnects (Set up…, Save and connect).";
+        loadCards();
+      };
+      const back = c.kelvins ? h("button", { class: "link soft", type: "button" }, "Back to Kelvin's card") : null;
+      if (back) back.addEventListener("click", remove);
       return h("li", { class: "memory-note" + (c.problems.length ? " broken" : "") },
-        h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, c.problems.length ? "broken" : reviewed ? "reviewed" : "draft"),
+        h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, c.problems.length ? "broken" : reviewed ? "reviewed"
+          : c.status === "draft" ? "draft" : c.status),
         h("div", { class: "memory-body" }, h("span", {}, c.model),
-          h("span", { class: "memory-meta" }, (c.id || c.file) + (c.problems.length ? " · " + c.problems[0] : ""))),
-        h("span", { class: "card-actions" }, edit, c.problems.length ? null : flip),
-        rowButton("trash", "Delete this card", async () => {
-          if (!confirm("Delete the card " + (c.id || c.file) + "?")) return;
-          try { await api("/api/cards/delete", { body: { id: c.id || c.file.replace(/\.yaml$/, "") } }); } catch (e) { $("cards-msg").textContent = e.message; }
-          loadCards();
-        }));
-    }) : [h("li", { class: "memory-empty" }, "No cards of your own yet.")]));
+          h("span", { class: "memory-meta" }, (c.id || c.file) + (c.kelvins ? " · your lab's version of Kelvin's card" : "") +
+            (c.problems.length ? " · " + c.problems[0] : ""))),
+        h("span", { class: "card-actions" }, edit, c.problems.length ? null : flip, back),
+        c.kelvins ? null : rowButton("trash", "Delete this card", remove));
+    }) : [h("li", { class: "memory-empty" }, "No cards of your own yet.")]), ...(r.kelvins || []).map(kelvinsCard));
+  }
+  function kelvinsCard(c) {   // one of Kelvin's own cards that came as a draft and that this lab uses
+    const reviewed = c.status === "lab-verified";
+    const flip = h("button", { class: "link soft", type: "button" }, reviewed ? "Back to draft" : "Mark reviewed");
+    flip.addEventListener("click", () => setCardStatus(c, reviewed ? "draft" : "lab-verified"));
+    const view = h("button", { class: "link soft", type: "button" }, "View");
+    view.addEventListener("click", () => {
+      const open = item.querySelector(".know-body");
+      if (open) { open.remove(); view.textContent = "View"; return; }
+      item.querySelector(".memory-body").append(h("pre", { class: "know-body" }, c.yaml));
+      view.textContent = "Hide";
+    });
+    const yours = h("button", { class: "link soft", type: "button", title: "Change it for your lab's instrument (another firmware, a wider range, a different command); Kelvin's card stays for other labs" }, "Make your version");
+    yours.addEventListener("click", () => {
+      showCardEditor(c.yaml, c.id, [], [], "Your lab's version of Kelvin's card " + c.id + ": keep its id, change what differs on your instrument, then Save card. It replaces Kelvin's card in this lab.");
+      CARDS.version = true;
+    });
+    const draft = c.status === "draft", kept = c.status === "lab-verified" && c.reviewable;
+    const item = h("li", { class: "memory-note" },
+      h("span", { class: "memory-kind" + (reviewed ? " ok" : "") }, draft ? "draft" : reviewed ? "reviewed" : "Kelvin's"),
+      h("div", { class: "memory-body" }, h("span", {}, c.model),
+        h("span", { class: "memory-meta" }, c.id + " · comes with Kelvin · used by " + c.instruments.join(", "))),
+      h("span", { class: "card-actions" }, view, yours, draft || kept ? flip : null));
+    return item;
   }
   function showCardEditor(text, editing, problems, warnings, notes) {
     CARDS.editing = editing || null;
+    CARDS.version = false;   // set after this when the card is the lab's version of one of Kelvin's
     $("card-edit").hidden = text == null;
     $("card-check").hidden = $("card-save").hidden = text == null;
     if (text == null) return;
@@ -2668,8 +3678,10 @@
   }
   async function saveCard() {
     try {
-      const r = await api("/api/cards", { body: { yaml: $("card-yaml").value, replace: CARDS.editing } });
-      $("cards-msg").textContent = "Saved " + r.id + " (" + r.status + "). Add it to the lab under Instruments.";
+      const r = await api("/api/cards", { body: { yaml: $("card-yaml").value, replace: CARDS.editing, version: CARDS.version } });
+      $("cards-msg").textContent = (r.kelvins ? "Saved your lab's version of " + r.id : "Saved " + r.id) + " (" + r.status + "). " +
+        (r.reconnect && r.reconnect.length ? andList(r.reconnect) + " use" + (r.reconnect.length === 1 ? "s" : "") +
+          " it once the lab reconnects (Set up…, Save and connect)." : "Add it to the lab under Instruments.");
       showCardEditor(null);
       await loadCards();
       if ($("lab-dialog").open) openLabSetup();
@@ -2875,17 +3887,81 @@
     $("lab-why-details").setAttribute("aria-expanded", String(!list.hidden));
   }
 
+  // ------------------------------------------------------------------ waiting while the instruments are set up
+  // shown when the portal opens during the setup (Kelvin starting), and for the first setup's question about the lab's
+  // scripts; closed, it stays closed (the Lab panel still says what the setup is doing). later: a scripts folder
+  // named too late to shape the first lab config, opened in Set up once the setup is done
+  const WAIT = { shown: false, closed: false, later: "", said: "" };
+  function setupWait(s) {
+    const setup = s.setup || {}, busy = SETUP_BUSY.has(setup.state), ask = !!s.ask_scripts, dlg = $("setup-wait");
+    if (!busy && WAIT.later) {
+      const folder = WAIT.later;
+      WAIT.later = "";
+      if (dlg.open) dlg.close();
+      openLabSetup().then(() => surveyScripts(folder));
+      return;
+    }
+    if (!dlg.open) {
+      if (WAIT.closed || WAIT.shown || !(ask || (busy && performance.now() < 20000))) return;
+      WAIT.shown = true;
+      dlg.showModal();
+    } else if (!busy && !ask && !WAIT.said) {   // done: say so, and get out of the way
+      dlg.close();
+      toast(setup.message || "Your instruments are ready.");
+      return;
+    }
+    $("setup-wait-title").textContent = busy ? "Setting up your instruments" : "Your instruments are set up";
+    $("setup-wait-spin").hidden = !busy;
+    $("setup-wait-step").textContent = (setup.message || "Starting") + (busy ? "…" : "");
+    $("setup-wait-bar").hidden = !(busy && setup.steps);
+    if (busy && setup.steps) $("setup-wait-fill").style.width = Math.round(100 * (setup.step - 1) / setup.steps) + "%";
+    $("setup-wait-hint").hidden = !busy;
+    $("setup-scripts").hidden = !ask;
+    $("setup-scripts-msg").hidden = !WAIT.said;
+    $("setup-scripts-msg").textContent = WAIT.said;
+    $("setup-wait-close").textContent = busy ? "Use Kelvin meanwhile" : "Done";
+  }
+  async function answerScripts(none) {   // the first setup's question: the folder of the lab's scripts, or none
+    let folder = "";
+    if (!none) {
+      folder = await pickFolder(LAB.scriptsFolder || "", "The folder with your lab's scripts (Python, notebooks, MATLAB):");
+      if (!folder) return;
+    }
+    const msg = $("setup-scripts-msg");
+    msg.hidden = false;
+    msg.textContent = none ? "" : "Reading the scripts in " + folder + " (never running them)…";
+    try {
+      const r = await api("/api/instruments/scripts-folder", { body: { folder } });
+      $("setup-scripts").hidden = true;
+      if (none) { msg.hidden = true; return; }
+      LAB.scriptsFolder = folder;
+      const n = r.instruments, k = r.scripts;
+      WAIT.said = !n ? "No instrument work in the scripts there. Set up… reads another folder any time."
+        : "Read " + k + " script" + (k === 1 ? "" : "s") + " using " + n + " instrument" + (n === 1 ? "" : "s") + ". " +
+          (r.now ? "Kelvin sets them up the way your scripts use them: names, settings, and limits from the values used, for you to check."
+            : "When the setup is done, Set up shows what they add: instruments to add, and limits from the values they use.");
+      msg.textContent = WAIT.said;
+      if (n && !r.now) WAIT.later = folder;
+    } catch (e) { msg.textContent = e.message; }
+  }
+
   // ------------------------------------------------------------------ setting up connected instruments
   const SETUP_BUSY = new Set(["scanning", "drafting", "connecting", "reading"]);
-  function showSetup(setup, observe) {
+  function andList(names) {
+    return names.length < 2 ? names.join("") : names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+  }
+  function showSetup(setup, unreviewed) {
     const busy = setup && SETUP_BUSY.has(setup.state);
-    const text = observe
-      ? "Kelvin set up this lab from what it found. Check each instrument's limits in the lab config below: outputs stay at safe until you unlock them."
+    const waiting = (unreviewed || []).length > 0;
+    const text = waiting
+      ? "Kelvin added " + andList(unreviewed) + " itself. Check " + (unreviewed.length === 1 ? "its" : "their") +
+        " limits with Limits… on " + (unreviewed.length === 1 ? "its row" : "each one's row") + " below: until you mark them reviewed, Kelvin asks you before each output change on " +
+        (unreviewed.length === 1 ? "it." : "them.")
       : (setup && setup.message ? setup.message + (busy ? "…" : "") : "");
     $("lab-setup-box").hidden = !text;
-    $("lab-setup-box").classList.toggle("locked", !!observe);
+    $("lab-setup-box").classList.toggle("locked", waiting);
     $("lab-setup-msg").textContent = text;
-    $("lab-unlock").hidden = !observe;
+    $("lab-unlock").hidden = !waiting;
     $("lab-setup-again").disabled = !!busy;
   }
   function renderFolders(folders) {
@@ -2898,15 +3974,75 @@
         ? h("span", { title: f.manual_from || "added by hand" }, "Manual, " + (f.manual_pages || "?") + " pages")
         : h("span", { class: "muted" }, f.manual_url ? "No manual yet" : "Its card names no manual address");
       const acts = [];
-      const act = (label, fn) => { const b = h("button", { class: "link soft", type: "button" }, label); b.addEventListener("click", fn); acts.push(b); };
+      const act = (label, fn) => { const b = h("button", { class: "link soft", type: "button" }, label); b.addEventListener("click", fn); acts.push(b); return b; };
       if (f.manual) act("Open", () => openInstrument(f.name, "manual"));
       else if (f.manual_url) act("Fetch from the maker", () => fetchManual(f.name));
       act(f.manual ? "Use another PDF…" : "Choose PDF…", () => choosePdf(f.name));
       act("Folder", () => openInstrument(f.name, "folder"));
-      return h("li", { class: "folder-row" },
+      const li = h("li", { class: "folder-row" },
         h("div", { class: "folder-who" }, h("b", {}, f.name), h("span", {}, f.model), who ? h("span", { class: "muted small" }, who) : null),
         h("div", { class: "folder-manual" }, manual, ...acts));
+      const limitsBtn = act("Limits…", () => editLimits(f.name, li, limitsBtn));
+      limitsBtn.classList.add("limits-btn");
+      li.querySelector(".folder-manual").append(limitsBtn);
+      return li;
     }));
+  }
+  // ------------------------------------------------------------------ an instrument's limits, set by a person
+  async function editLimits(name, li, btn) {
+    const open = li.querySelector(".limits-editor");
+    if (open) { open.remove(); btn.setAttribute("aria-expanded", "false"); return; }
+    let r;
+    try { r = await api("/api/instruments/" + encodeURIComponent(name) + "/limits"); } catch (e) { $("lab-msg").textContent = e.message; return; }
+    btn.setAttribute("aria-expanded", "true");
+    const box = h("div", { class: "limits-editor" });
+    const show = (v) => (v === null || v === undefined ? "" : String(Number(v.toPrecision ? v.toPrecision(8) : v)));
+    const rows = r.rows.map((row) => {
+      const lo = h("input", { class: "lim-in", type: "number", step: "any", value: row.lab ? show(row.lab[0]) : "",
+        placeholder: row.vendor ? show(row.vendor[0]) : "", "aria-label": row.label + ": lowest", disabled: !r.editable });
+      const hi = h("input", { class: "lim-in", type: "number", step: "any", value: row.lab ? show(row.lab[1]) : "",
+        placeholder: row.vendor ? show(row.vendor[1]) : "", "aria-label": row.label + ": highest", disabled: !r.editable });
+      row.ui = { lo, hi };
+      return h("div", { class: "lim-row" + (row.drive ? " drive" : "") },
+        h("span", { class: "lim-name", title: row.param }, row.label + (row.unit && !/\)$/.test(row.label) ? " (" + row.unit + ")" : "")),
+        lo, h("span", { class: "muted small" }, "to"), hi,
+        h("span", { class: "muted small lim-card" }, row.vendor ? "card: " + show(row.vendor[0]) + " to " + show(row.vendor[1]) : "no limit on its card"));
+    });
+    const msg = h("span", { class: "muted small" });
+    box.append(h("p", { class: "hint" }, r.rows.length
+      ? "What " + name + " may reach. Kelvin refuses anything beyond these and asks before driving harder. Empty: the card's limits." +
+        (r.editable ? "" : " The virtual lab's limits are fixed; your own lab's are set here.")
+      : name + " has no numeric setting to limit."), ...rows);
+    if (r.editable && r.rows.length) {
+      const reviewed = h("input", { type: "checkbox" });   // the person ticks it themselves
+      const save = h("button", { class: "btn small primary", type: "button" }, "Save limits");
+      save.addEventListener("click", async () => {
+        const limits = {};
+        for (const row of r.rows) {
+          const a = row.ui.lo.value.trim(), b = row.ui.hi.value.trim();
+          if (!a && !b) { if (row.lab) limits[row.param] = null; continue; }
+          if (!a || !b) { msg.textContent = row.label + ": give both the lowest and the highest."; return; }
+          limits[row.param] = [Number(a), Number(b)];
+        }
+        save.disabled = true;
+        try {
+          const saved = await api("/api/instruments/" + encodeURIComponent(name) + "/limits", { body: { limits, reviewed: !r.reviewed && reviewed.checked } });
+          const now = new Map(saved.rows.map((x) => [x.param, x.lab]));
+          for (const row of r.rows) row.lab = now.get(row.param) || null;
+          const checked = saved.reviewed && !r.reviewed;
+          if (checked) { r.reviewed = true; tick.remove(); }
+          msg.textContent = "Saved: Kelvin holds " + name + " to these from now on" + (checked ? ", and treats it like your other instruments." : ".");
+          refreshLabSetup(false);   // the lab config and the notices; this editor stays open
+        } catch (e) { msg.textContent = e.message; }
+        finally { save.disabled = false; }
+      });
+      const foot = h("div", { class: "lim-foot" });
+      const tick = h("label", { class: "lim-review" }, reviewed, " I checked these for my sample: Kelvin may treat " + name + " like my other instruments");
+      if (!r.reviewed) foot.append(tick);
+      foot.append(save, msg);
+      box.append(foot);
+    }
+    li.append(box);
   }
   async function openInstrument(name, what) {
     try { await api("/api/instruments/" + encodeURIComponent(name) + "/open", { body: { what } }); } catch (e) { $("lab-msg").textContent = e.message; }
@@ -2945,20 +4081,99 @@
     } catch (e) { $("lab-msg").textContent = e.message; }
   }
   async function unlockLab() {
-    if (!confirm("Unlock the outputs?\n\nYou have checked the limits in the lab config: what each output may reach " +
-        "(voltage, current, field, temperature, power) is what your sample and setup can take. Kelvin still asks " +
-        "before driving harder, unless auto mode is on.")) return;
-    await connectLab({ unlock: true });
+    if (!confirm("Mark the limits reviewed?\n\nYou have checked the limits in the lab config of the instruments " +
+        "Kelvin added: what each output may reach (voltage, current, field, temperature, power) is what your sample " +
+        "and setup can take. Kelvin then treats them like your other instruments: it still asks before driving " +
+        "harder, unless auto mode or the project envelope covers the change.")) return;
+    await connectLab({ reviewed: true });
     refreshLabSetup();
   }
-  // what setting up changed (status, lock, folders, the lab config Kelvin wrote), without touching the rest
-  async function refreshLabSetup() {
+  // what setting up changed (status, marks, folders, the lab config Kelvin wrote), without touching the rest
+  // ------------------------------------------------------------------ the lab config, instrument by instrument
+  const LABCFG = { view: store("lh.labView") === "file" ? "file" : "instruments", open: null, find: "" };
+  const ENTRY_NAME = /^\s+(["']?)([^"':#\s][^"':#]*?)\1\s*:/;
+  function labEntries(text) {   // each instrument's entry as written, by line: [{name, start, end}] (as discovery.py finds it)
+    const lines = text.split("\n"), entries = [];
+    const top = lines.findIndex((l) => /^instruments\s*:\s*(#.*)?$/.test(l));
+    let indent = null;
+    for (let i = top < 0 ? lines.length : top + 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (!l.trim() || /^\s*#/.test(l)) continue;
+      const depth = l.length - l.trimStart().length;
+      if (depth === 0) break;   // the lab config's next part (interlocks, watches)
+      if (indent === null) indent = depth;
+      const m = depth === indent && l.match(ENTRY_NAME);
+      if (!m) continue;
+      let end = i + 1;
+      while (end < lines.length && (!lines[end].trim() || lines[end].length - lines[end].trimStart().length > indent)) end++;
+      while (end > i + 1 && !lines[end - 1].trim()) end--;
+      entries.push({ name: m[2].trim(), start: i, end });
+      i = end - 1;
+    }
+    return { lines, entries };
+  }
+  function entryHead(name, text) {   // an entry's name, card and address, written as a block or on one line
+    const pick = (key) => {
+      const m = text.match(new RegExp("(?:^|[\\s{,])" + key + "\\s*:\\s*(\"[^\"]*\"|'[^']*'|[^,}\\n#]+)", "m"));
+      return m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
+    };
+    const card = pick("card"), address = pick("address");
+    return [h("b", {}, name), h("span", { class: "entry-card" }, card || "no card"),
+      address ? h("code", { class: "entry-addr", title: address }, address) : null];
+  }
+  function renderLabConfig() {
+    const { lines, entries } = labEntries($("lab-yaml").value);
+    const byInstrument = LABCFG.view === "instruments" && entries.length > 0;
+    for (const b of document.querySelectorAll("#lab-view button")) b.classList.toggle("on", b.dataset.view === (byInstrument ? "instruments" : "file"));
+    $("lab-view").hidden = !entries.length;
+    $("lab-yaml").hidden = byInstrument;
+    $("lab-find").hidden = $("lab-entries").hidden = $("lab-rest").hidden = !byInstrument;
+    if (!byInstrument) return;
+    const q = LABCFG.find.trim().toLowerCase(), rows = [];
+    for (const e of entries) {
+      const own = lines.slice(e.start, e.end).join("\n");
+      if (q && !(e.name + "\n" + own).toLowerCase().includes(q)) continue;
+      const open = LABCFG.open === e.name;
+      const head = h("button", { class: "entry-head", type: "button", "aria-expanded": String(open) }, ...entryHead(e.name, own));
+      head.addEventListener("click", () => { LABCFG.open = open ? null : e.name; renderLabConfig(); });
+      const row = h("div", { class: "lab-entry" + (open ? " open" : "") }, head);
+      if (open) {
+        const box = h("textarea", { class: "mono entry-text", spellcheck: "false", rows: String(Math.min(18, e.end - e.start + 1)),
+          "aria-label": e.name + " in the lab config" });
+        box.value = own;
+        const at = { start: e.start, count: e.end - e.start };   // where this entry is in the whole file while it is edited
+        box.addEventListener("input", () => {
+          const all = $("lab-yaml").value.split("\n"), mine = box.value.split("\n");
+          all.splice(at.start, at.count, ...mine);
+          at.count = mine.length;
+          $("lab-yaml").value = all.join("\n");
+          const m = mine[0].match(ENTRY_NAME);
+          if (m) LABCFG.open = m[2].trim();   // renamed: it stays open
+          head.replaceChildren(...entryHead(m ? m[2].trim() : e.name, box.value));
+        });
+        row.append(box);
+      }
+      rows.push(row);
+    }
+    $("lab-entries").replaceChildren(...(rows.length ? rows
+      : [h("div", { class: "muted small entry-none" }, "No instrument matches “" + LABCFG.find.trim() + "”.")]));
+  }
+
+  async function refreshLabSetup(folders = true) {
     let r;
     try { r = await api("/api/lab"); } catch (e) { return; }
     showLabState(r.info, r.name);
-    showSetup(r.setup, r.observe_only);
-    renderFolders(r.folders || []);
-    if (document.activeElement !== $("lab-yaml")) $("lab-yaml").value = r.yaml || "";
+    showSetup(r.setup, r.unreviewed);
+    if (folders) {
+      renderFolders(r.folders || []);
+      if (LAB.scripts) {
+        const at = new Map((r.folders || []).map((f) => [f.address, f.name]));
+        for (const it of LAB.scripts.instruments) it.in_lab = at.get(it.address) || null;
+        renderScripts();
+      }
+    }
+    const editing = document.activeElement && (document.activeElement === $("lab-yaml") || document.activeElement.classList.contains("entry-text"));
+    if (!editing) { $("lab-yaml").value = r.yaml || ""; renderLabConfig(); }
   }
 
   async function openLabSetup() {
@@ -2966,11 +4181,15 @@
     try { r = await api("/api/lab"); } catch (e) { toast(e.message); return; }
     LAB.cards = r.cards;
     showLabState(r.info, r.name);
-    showSetup(r.setup, r.observe_only);
+    showSetup(r.setup, r.unreviewed);
     renderFolders(r.folders || []);
     $("lab-card").replaceWith(Object.assign(cardSelect("", "Card…"), { id: "lab-card" }));
     $("lab-yaml").value = r.yaml || "";
+    LABCFG.open = null;
+    $("lab-find").value = LABCFG.find = "";
+    renderLabConfig();
     $("lab-found").hidden = $("lab-add-found").hidden = $("lab-survey").hidden = true;
+    renderScripts();   // what the lab's scripts showed, kept while the portal is open
     $("lab-health").hidden = true;
     $("lab-msg").textContent = r.info && r.info.error ? r.info.error : "";
     $("lab-dialog").showModal();
@@ -3030,8 +4249,8 @@
       Object.assign(f, { card_id: r.card_id, model: r.model, kind: r.kind, how: "card written by Kelvin" });
       if (!f.suggested) f.suggested = KIND_NAME[r.kind] || "instr";
       renderFound();
-      $("lab-msg").textContent = "Kelvin wrote " + r.card_id + " from " + r.manual_url + ". It is a draft: its outputs " +
-        "stay simulation-only and setting changes ask you until you review it under Your instrument cards.";
+      $("lab-msg").textContent = "Kelvin wrote " + r.card_id + " from " + r.manual_url + ". It is a draft: Kelvin " +
+        "asks you before each setting or output change on it until you review it under Your instrument cards.";
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "Find its manual and write its card";
@@ -3043,8 +4262,102 @@
     try {
       const r = await api("/api/instruments/draft", { body: { items, base: $("lab-yaml").value } });
       $("lab-yaml").value = r.yaml;
-      $("lab-msg").textContent = "Added " + items.map((i) => i.name).join(", ") + ". Review the limits, then save and connect.";
+      renderLabConfig();
+      const already = r.already || [], there = new Set(already.map((a) => a.item));
+      const added = items.filter((i, k) => !there.has(k)).map((i) => i.name);
+      $("lab-msg").textContent = [added.length ? "Added " + added.join(", ") + ". Review the limits, then save and connect." : "",
+        already.length ? already.map((a) => a.name + " (" + a.address + ")").join(", ") + (already.length === 1 ? " is" : " are") + " in the lab config already." : ""].filter(Boolean).join(" ");
     } catch (e) { $("lab-msg").textContent = e.message; }
+  }
+  // ------------------------------------------------------------------ setting up from the lab's own scripts
+  async function fromScripts() {
+    const folder = await pickFolder(LAB.scriptsFolder || "", "The folder with your lab's scripts (Python, notebooks, MATLAB):");
+    if (folder) await surveyScripts(folder);
+  }
+  async function surveyScripts(folder) {
+    LAB.scriptsFolder = folder;
+    const btn = $("lab-scripts");
+    btn.disabled = true; btn.textContent = "Reading your scripts…";
+    $("lab-msg").textContent = "Reading the scripts in " + folder + " (never running them), then asking each instrument who it is…";
+    try {
+      LAB.scripts = await api("/api/instruments/scripts", { body: { folder } });
+      renderScripts();
+      const n = LAB.scripts.instruments.length, s = LAB.scripts.scripts.length;
+      $("lab-msg").textContent = n ? "Found " + n + " instrument" + (n === 1 ? "" : "s") + " in " + s + " script" + (s === 1 ? "" : "s") +
+        ". Check the cards and limits, then add the ones you want." : "No instrument work in the scripts there.";
+    } catch (e) { $("lab-msg").textContent = e.message; }
+    finally { btn.disabled = false; btn.textContent = "From your scripts…"; }
+  }
+  function renderScripts() {
+    const r = LAB.scripts, box = $("lab-from-scripts");
+    box.hidden = !r || !r.instruments.length;
+    $("lab-scripts-actions").hidden = !r || (!r.instruments.length && !r.scripts.length);
+    $("lab-add-scripts").hidden = !r || !r.instruments.some((it) => !it.in_lab);
+    $("lab-recipes").hidden = !r || !r.scripts.length;
+    if (!r) return;
+    const span = (lim) => Object.entries(lim || {}).map(([p, v]) => p + " " + v[0] + " to " + v[1]).join(", ");
+    box.replaceChildren(h("p", { class: "hint" }, "In " + r.folder + ": " + r.scripts.length + " script" + (r.scripts.length === 1 ? "" : "s") + " read, none run."),
+      ...r.instruments.map((it) => {
+        if (it.in_lab) {
+          const row = h("div", { class: "found in-lab" }, h("span", { class: "found-name" }, it.in_lab),
+            h("span", { class: "found-model" }, "already in this lab"), h("code", { class: "found-addr" }, it.address));
+          const lim = it.card && Object.keys(it.card.limits || {}).length ? it.card.limits : null;
+          if (!lim) return row;
+          const use = h("button", { class: "link soft", type: "button" }, "Use these limits");
+          const note = h("div", { class: "found-write muted small" }, "Limits from the values your scripts use: " + span(lim) + " ", use);
+          use.addEventListener("click", async () => {   // a person's choice, like Save limits in Limits…
+            try {
+              await api("/api/instruments/" + encodeURIComponent(it.in_lab) + "/limits", { body: { limits: lim } });
+              note.textContent = "Kelvin holds " + it.in_lab + " to " + span(lim) + " from now on.";
+              refreshLabSetup(false);
+            } catch (e) { note.textContent = e.message; }
+          });
+          return h("div", { class: "found-wrap" }, row, note);
+        }
+        const card = it.card || null;
+        const was = it.ui && { check: it.ui.check.checked, name: it.ui.name.value, card: it.ui.model.value,
+          addr: it.address ? "" : it.ui.addr.value };   // what the person changed, kept when the list is drawn again
+        const check = h("input", { type: "checkbox", "aria-label": "Add " + (it.address || it.name) });
+        check.checked = was ? was.check : !!(card && card.id && it.address);
+        const name = h("input", { class: "found-input", value: was ? was.name : it.name || "", placeholder: "name", spellcheck: "false", "aria-label": "Name" });
+        const model = cardSelect(was ? was.card : card ? card.id : "", "Choose its card…");
+        model.addEventListener("change", () => { if (model.value && (it.address || it.ui.addr.value.trim())) check.checked = true; });
+        const addr = it.address ? h("code", { class: "found-addr", title: it.where.join(", ") }, it.address)
+          : h("input", { class: "found-input found-addr-in", placeholder: "its address", spellcheck: "false", "aria-label": "Address",
+            title: "The scripts set it as " + (it.expression || "?"), value: was ? was.addr : "" });
+        it.ui = { check, name, model, addr };
+        const why = [card ? card.why : "no card of Kelvin's fits: choose one, or make one under Cards",
+          it.idn && !(card && card.why.includes("answered")) ? "answered " + it.idn.slice(0, 60) : it.asked || "",
+          card && Object.keys(card.limits || {}).length ? "limits from the values used: " + span(card.limits) : "",
+          it.address ? "" : "address set at run time (" + (it.expression || "?") + "): type it",
+          "in " + it.where.slice(0, 2).join(", ")].filter(Boolean).join(" · ");
+        return h("div", { class: "found-wrap" }, h("label", { class: "found" }, check, name, model, addr),
+          h("div", { class: "found-write muted small" }, why));
+      }));
+  }
+  function addScripts() {
+    const items = [];
+    for (const it of (LAB.scripts || {}).instruments || []) {
+      if (!it.ui || !it.ui.check.checked) continue;
+      const address = it.address || it.ui.addr.value.trim(), card = it.ui.model.value;
+      if (!address || !card) { $("lab-msg").textContent = (it.ui.name.value || "An instrument") + " needs its address and its card."; return; }
+      items.push({ name: it.ui.name.value.trim() || "instr", card, address, connection: it.connection,
+        limits: it.card && it.card.id === card ? it.card.limits : null,
+        note: (it.idn || (it.card && it.card.why) || "from your scripts").slice(0, 60) });
+    }
+    addToConfig(items);
+  }
+  function recipesFromScripts() {   // in a new chat: Kelvin proposes a recipe per script, and keeps each one you agree to
+    const folder = LAB.scripts && LAB.scripts.folder;
+    if (!folder) return;
+    $("lab-dialog").close();
+    newChat();
+    $("input").value = "Turn the measurement scripts in " + folder + " into recipes: read them with survey_scripts, " +
+      "then propose a recipe for each measurement script, with this lab's instruments, and keep each with " +
+      "save_recipe once I agree. Say what a recipe can't carry over.";
+    autosize();
+    updateSend();
+    $("input").focus();
   }
   function addFound() {
     addToConfig(LAB.found.filter((f) => f.ui && f.ui.check.checked).map((f) => ({
@@ -3070,11 +4383,36 @@
         icon(/FAIL/.test(line) ? "warn" : "check"), h("span", {}, line))));
       $("lab-health").hidden = !r.health.length;
       $("lab-msg").textContent = bad.length ? bad.length + " instrument(s) need attention before use."
+        : body.reviewed && !r.health.length ? "Marked reviewed: Kelvin treats them like your other instruments now."
         : "Connected to " + r.name + ". Every instrument answered as expected.";
       pollState();
+      refreshLabSetup();   // each instrument's row (its Limits…), and the scripts' instruments now in the lab
     } catch (e) {
-      $("lab-msg").textContent = e.message;
+      $("lab-msg").replaceChildren(h("span", {}, e.message), ...installOffer(e.data && e.data.install));
     } finally { save.disabled = false; }
+  }
+
+  // A maker's package the lab's instruments need is missing (envs.py): install it, once the person approves what is
+  // downloaded (the request appears with the other approvals), then connect the lab again.
+  function installOffer(install, after) {
+    if (!install || !install.packages || !install.packages.length) return [];
+    const names = andList(install.packages);
+    const button = h("button", { class: "link", type: "button" }, "Install " + names);
+    const said = h("span", { class: "install-said" });
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      said.textContent = " Approve the download above to go on…";
+      try {
+        const r = await api("/api/lab/install", { body: install });
+        said.textContent = " " + r.message;
+        if (r.ok) await (after ? after() : connectLab({ use: "mine" }));   // Kelvin connects what it was for
+        else button.disabled = false;
+      } catch (e) {
+        said.textContent = " " + e.message;
+        button.disabled = false;
+      }
+    });
+    return [" ", button, said];
   }
 
   // ------------------------------------------------------------------ approval mode (a person's choice)
@@ -3107,7 +4445,7 @@
   function toggleLab(open) {
     S.labOpen = open === undefined ? !S.labOpen : open;
     $("labpanel").hidden = !S.labOpen;
-    syncScrim();
+    fitLayout();
     if (S.labOpen) pollState();
   }
 
@@ -3241,7 +4579,7 @@
     } else if (e.key === "Escape" || (e.ctrlKey && (e.key === "c" || e.key === "C") &&
                input.selectionStart === input.selectionEnd && !window.getSelection().toString())) {
       if (e.key !== "Escape") e.preventDefault();
-      if (TERM.busy && !TERM.ask) { api("/api/stop", { body: {} }).catch(() => {}); termLine("^C stopping Kelvin's answer", "dim"); }
+      if (TERM.busy && !TERM.ask) { api("/api/stop", { body: { chat_id: TERM.chatId } }).catch(() => {}); termLine("^C stopping Kelvin's answer", "dim"); }
       else if (e.key !== "Escape") { termLine(termPrompt() + " " + input.value + "^C", "cmd"); input.value = ""; }
     }
   }
@@ -3345,7 +4683,7 @@
       }
       case "/new": TERM.chatId = null; termLine("your next message starts a new conversation with Kelvin", "dim"); return;
       case "/stop":
-        try { await api("/api/stop", { body: {} }); await api("/api/runs/stop", { body: {} }); termLine("stopped", "dim"); }
+        try { await api("/api/stop", { body: { chat_id: TERM.chatId } }); await api("/api/runs/stop", { body: {} }); termLine("stopped", "dim"); }
         catch (e) { termLine(e.message, "err"); }
         return;
       default:
@@ -3496,7 +4834,8 @@
     DATA.now = r;
     $("data-path").value = r.path;
     showDataFolder(r.problem || (r.runs + " run" + (r.runs === 1 ? "" : "s") + " and " + r.reports + " report" +
-      (r.reports === 1 ? "" : "s") + " in this folder."), !!r.problem);
+      (r.reports === 1 ? "" : "s") + " in this folder" + (r.elsewhere ? "; " + r.elsewhere + " run" + (r.elsewhere === 1 ? "" : "s") +
+      " in chats' own folders (they stay there)." : ".")), !!r.problem);
     dataPathChanged();
   }
   function showDataFolder(text, bad) {
@@ -3563,10 +4902,32 @@
     for (const p of document.querySelectorAll(".set-page")) p.hidden = p.dataset.page !== tab.dataset.page;
     $("set-pages").scrollTop = 0;
     store("lh.settingsPage", tab.dataset.page);
+    if (tab.dataset.page === "instruments") loadEnvironments();
+  }
+
+  // what Kelvin installed for instruments (envs.py), each with Remove
+  async function loadEnvironments() {
+    const list = $("env-list");
+    let rows = [];
+    try { rows = (await api("/api/environments")).environments; } catch (e) { list.replaceChildren(h("li", { class: "muted small" }, e.message)); return; }
+    if (!rows.length) { list.replaceChildren(h("li", { class: "muted small" }, "Nothing yet.")); return; }
+    list.replaceChildren(...rows.map((r) => {
+      const pkgs = Object.entries(r.packages).map(([n, v]) => n + " " + v).concat(r.files).join(", ") || "no packages";
+      const remove = h("button", { class: "link", type: "button" }, "Remove");
+      remove.addEventListener("click", async () => {
+        if (!confirm("Remove " + r.name + " (" + pkgs + ")? Instruments that use it stop connecting until it is installed again.")) return;
+        remove.disabled = true;
+        try { toast((await api("/api/environments", { body: { remove: r.name } })).message); } catch (e) { toast(e.message); }
+        loadEnvironments();
+      });
+      return h("li", {}, h("span", { class: "env-what" }, h("b", {}, r.name), " · Python " + r.python + " (" + r.bits + "-bit) · " + pkgs,
+        h("div", { class: "muted" }, r.mb + " MB" + (r.for.length ? " · for " + r.for.join(", ") : ""))), remove);
+    }));
   }
 
   function openSettings() {
     settingsPage(store("lh.settingsPage") || "models");
+    showZoom();
     const keys = (S.settings && S.settings.keys) || {};
     for (const hint of document.querySelectorAll("[data-hint]")) {
       const src = keys[hint.dataset.hint];
@@ -3579,6 +4940,9 @@
     fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
+    const words = S.settings ? S.settings.answer_words : 200, length = $("answer-words"), chosen = words ? String(words) : "off";
+    if (![...length.options].some((o) => o.value === chosen)) length.append(h("option", { value: chosen }, "At most " + words + " words"));
+    length.value = chosen;
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
     $("hub-old-runs").checked = !!(S.settings && S.settings.hub_old_runs);
@@ -3588,6 +4952,8 @@
     $("auto-cards").checked = !S.settings || S.settings.auto_cards !== false;
     $("manuals").checked = !S.settings || S.settings.manuals !== false;
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
+    $("ask-folder").checked = !S.settings || S.settings.ask_folder !== false;
+    $("data-choose").hidden = !hasPicker();
     const reportKinds = (S.settings && S.settings.report_kinds) || ["scan", "device", "project"];
     for (const c of document.querySelectorAll("#report-kinds input")) c.checked = reportKinds.includes(c.value);
     $("pair-box").hidden = true;
@@ -3606,6 +4972,80 @@
     renderGlobalNotes(null);
     $("settings-dialog").showModal();
     api("/api/memory").then((m) => renderGlobalNotes(m.notes)).catch(() => renderGlobalNotes([]));
+    loadKnow("global", $("global-know"), $("global-know-count"), $("settings-msg"));
+  }
+  // skills and recipes (web/skills.py): Kelvin's own, the person's, a project's
+  async function loadKnow(scope, list, count, msg) {
+    list.replaceChildren(h("li", { class: "memory-empty" }, "Loading…"));
+    let items;
+    try { items = (await api("/api/know?scope=" + encodeURIComponent(scope))).items; } catch (e) { items = []; }
+    renderKnow(scope, items, list, count, msg);
+  }
+  function renderKnow(scope, items, list, count, msg) {
+    const kept = items.filter((i) => i.scope !== "kelvin").length;
+    count.textContent = kept ? kept + " kept" : "";
+    if (!items.length) {
+      list.replaceChildren(h("li", { class: "memory-empty" }, "Nothing yet. When a procedure or a staged measurement works, Kelvin offers to keep it here."));
+      return;
+    }
+    list.replaceChildren(...items.map((it) => {
+      const body = h("pre", { class: "know-body", hidden: true }, it.body);
+      const show = h("button", { class: "link soft", type: "button" }, "Show");
+      show.addEventListener("click", () => { body.hidden = !body.hidden; show.textContent = body.hidden ? "Show" : "Hide"; });
+      const when = (it.saved ? "kept " + new Date(it.saved * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : "comes with Kelvin") +
+        (it.files && it.files.length ? " · " + it.files.length + (it.files.length === 1 ? " file" : " files") : "");
+      const on = h("input", { type: "checkbox", "aria-label": "Kelvin uses this " + it.kind });
+      on.checked = it.enabled !== false;
+      on.addEventListener("change", async () => {
+        try { await api("/api/know/" + it.kind + "/" + it.scope + "/" + encodeURIComponent(it.name), { body: { enabled: on.checked } }); it.enabled = on.checked; }
+        catch (e) { on.checked = !on.checked; msg.textContent = e.message; }
+      });
+      const extra = [];
+      if (it.kind === "skill") {
+        const get = h("button", { class: "link soft", type: "button", title: "As a .zip for Claude or another Kelvin" }, "Download");
+        get.addEventListener("click", () => downloadSkill(it));
+        extra.push(get);
+      }
+      const row = h("li", { class: "memory-note" + (it.enabled === false ? " off" : "") }, h("span", { class: "memory-kind" }, it.kind),
+        h("div", { class: "memory-body" }, h("span", {}, h("b", {}, it.name), it.description ? " — " + it.description : ""),
+          h("span", { class: "memory-meta" }, when), show, ...extra, body),
+        h("label", { class: "know-on", title: "Kelvin sees it (off: kept, but not offered)" }, on, "On"));
+      if (it.scope !== "kelvin") {
+        row.append(rowButton("trash", "Delete this " + it.kind, async () => {
+          try { await api("/api/know/" + it.kind + "/" + it.scope + "/" + encodeURIComponent(it.name), { method: "DELETE" }); }
+          catch (e) { msg.textContent = e.message; return; }
+          renderKnow(scope, items.filter((x) => x !== it), list, count, msg);
+        }));
+      }
+      return row;
+    }));
+  }
+  async function downloadSkill(it) {
+    try {
+      const res = await fetch("/api/skills/export/" + it.scope + "/" + encodeURIComponent(it.name), { headers: { "X-Kelvin-Token": token } });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const url = URL.createObjectURL(await res.blob());
+      const a = h("a", { href: url, download: it.name + ".zip" });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+    } catch (e) { toast("Could not download the skill: " + e.message); }
+  }
+  async function addSkill(file, scope, after, msg, replace) {   // a skill packed for Claude: .zip, .skill or SKILL.md
+    if (!file) return;
+    msg.textContent = "Adding " + file.name + "…";
+    try {
+      const res = await fetch("/api/skills/import?scope=" + encodeURIComponent(scope) + (replace ? "&replace=1" : ""), {
+        method: "POST", body: file,
+        headers: { "X-Kelvin-Token": token, "X-File-Name": encodeURIComponent(file.name) } });
+      const r = await res.json().catch(() => ({}));
+      if (res.status === 409 && !replace) {
+        if (confirm(r.error + ". Replace it?")) return addSkill(file, scope, after, msg, true);
+        msg.textContent = ""; return;
+      }
+      if (!res.ok) throw new Error(r.error || "HTTP " + res.status);
+      msg.textContent = "Added the skill " + r.name + (r.files && r.files.length ? " with " + r.files.length + (r.files.length === 1 ? " file" : " files") : "") + ".";
+      after();
+    } catch (e) { msg.textContent = "Could not add the skill: " + e.message; }
   }
   function renderGlobalNotes(notes) {
     const list = $("global-notes");
@@ -3700,6 +5140,7 @@
     body.local_models = $("local-models").value.trim();
     body.default_model = $("default-model").value;
     body.reviewer = $("reviewer").value;
+    body.answer_words = $("answer-words").value;
     body.instructions = $("global-instructions").value;
     body.learn = $("learn").checked ? "on" : "off";
     body.hub_old_runs = $("hub-old-runs").checked ? "on" : "off";
@@ -3709,6 +5150,7 @@
     body.auto_cards = $("auto-cards").checked ? "on" : "off";
     body.manuals = $("manuals").checked ? "on" : "off";
     body.auto_report = $("auto-report").value;
+    body.ask_folder = $("ask-folder").checked ? "on" : "off";
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     if (S.claudeCode) { body.claude_code = $("cc-on").checked ? "on" : "off"; body.claude_code_path = $("cc-path").value.trim(); }
@@ -3723,6 +5165,56 @@
     } catch (e) {
       $("settings-msg").textContent = e.message;
     }
+  }
+
+  // ------------------------------------------------------------------ text size: the desktop window's zoom, each person's own
+  const ZOOMS = [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+  const ZOOM = { wheel: 0, saving: null };
+  function canZoom() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.set_zoom); }
+  function zoomNow() { const z = S.settings && Number(S.settings.text_size); return ZOOMS.includes(z) ? z : 1; }
+  function showZoom() {
+    const z = zoomNow(), can = canZoom();
+    $("zoom-now").textContent = Math.round(z * 100) + "%";
+    $("zoom-out").disabled = !can || z <= ZOOMS[0];
+    $("zoom-in").disabled = !can || z >= ZOOMS[ZOOMS.length - 1];
+    $("zoom-reset").hidden = !can || z === 1;
+    $("zoom-hint").hidden = !can;
+    $("zoom-browser").hidden = can;   // a browser has its own zoom
+  }
+  async function applyZoom() {
+    if (canZoom()) { try { await window.pywebview.api.set_zoom(zoomNow()); } catch (e) { /* stays as it was */ } }
+    showZoom();
+  }
+  function stepZoom(dir) {   // +1 bigger, -1 smaller, 0 back to 100%
+    if (!canZoom() || !S.settings) return;
+    const i = ZOOMS.indexOf(zoomNow());
+    const z = dir === 0 ? 1 : ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, i + dir))];
+    if (z === zoomNow()) return;
+    S.settings.text_size = z;
+    applyZoom();
+    clearTimeout(ZOOM.saving);   // kept with the person's settings once they stop changing it
+    ZOOM.saving = setTimeout(() => api("/api/settings", { body: { text_size: String(z) } }).catch(() => {}), 600);
+  }
+  function zoomKeys() {   // the desktop window's own Ctrl + and Ctrl − are off (pywebview): Kelvin's do the same
+    document.addEventListener("keydown", (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || !canZoom()) return;
+      const dir = e.key === "=" || e.key === "+" ? 1 : e.key === "-" || e.key === "_" ? -1 : e.key === "0" ? 0 : null;
+      if (dir === null) return;
+      e.preventDefault();
+      stepZoom(dir);
+    });
+    window.addEventListener("wheel", (e) => {
+      if (!e.ctrlKey || !canZoom()) return;
+      e.preventDefault();
+      ZOOM.wheel += e.deltaY;
+      if (Math.abs(ZOOM.wheel) < 80) return;   // a touchpad sends many small steps
+      stepZoom(ZOOM.wheel < 0 ? 1 : -1);
+      ZOOM.wheel = 0;
+    }, { passive: false });
+    window.addEventListener("pywebviewready", applyZoom);
+    $("zoom-in").addEventListener("click", () => stepZoom(1));
+    $("zoom-out").addEventListener("click", () => stepZoom(-1));
+    $("zoom-reset").addEventListener("click", () => stepZoom(0));
   }
 
   // ------------------------------------------------------------------ layout bits
@@ -3760,7 +5252,9 @@
     $("app").hidden = false;
     for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
     S.settings = boot.settings;
+    applyZoom();   // this person's text size (desktop window)
     S.claudeCode = !!boot.claude_code;   // Claude Code bridge (temporary)
+    $("hub-field").hidden = $("project-sharing-field").hidden = !boot.hub_sharing;   // off for now: the hub is for accounts
     showUpdate(boot.update);
     $("update-go").addEventListener("click", installUpdate);
     $("update-check").addEventListener("click", checkUpdate);
@@ -3769,6 +5263,7 @@
     renderAccount();
     $("sign-out").addEventListener("click", signOut);
     $("pw-change").addEventListener("click", changePassword);
+    $("account-delete-go").addEventListener("click", deleteAccount);
     $("activity-all").addEventListener("click", () => {   // the lab's instrument log: everyone's activity, by name
       PANEL.everyone = !PANEL.everyone;
       $("activity-all").setAttribute("aria-pressed", String(PANEL.everyone));
@@ -3792,19 +5287,23 @@
     }));
     applyModels(boot.models.groups, boot.default_model);
     initRunsPane();
+    fitLayout();
     initTerminal();
     renderChats();
     showEmpty(true);
+    loadNewFolder();
 
     $("composer").addEventListener("submit", (e) => {
       e.preventDefault();
-      if (S.streaming) api("/api/stop", { body: {} }).catch(() => {});
+      if (S.streaming && !$("input").value.trim()) api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {});
       else sendMessage($("input").value);
     });
-    $("input").addEventListener("input", autosize);
+    $("input").addEventListener("input", () => { autosize(); updateSend(); slashMenu(); });
     $("input").addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!S.streaming) sendMessage($("input").value); }
+      if (slashKey(e)) return;
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage($("input").value); }
     });
+    $("input").addEventListener("blur", () => setTimeout(closeSlash, 150));
     $("model").addEventListener("change", () => {
       store("lh.model", $("model").value); updateSend(); showPlanChip();
       S.compare = S.compare.filter((k) => k !== $("model").value); compareLabel();
@@ -3822,8 +5321,24 @@
     $("data-path").addEventListener("input", dataPathChanged);
     $("data-path").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (!$("data-use").disabled) useDataFolder(); } });
     $("data-use").addEventListener("click", useDataFolder);
+    $("global-know-add").addEventListener("click", () => $("global-know-file").click());
+    $("global-know-file").addEventListener("change", (e) => {
+      const f = e.target.files[0]; e.target.value = "";
+      addSkill(f, "global", () => loadKnow("global", $("global-know"), $("global-know-count"), $("settings-msg")), $("settings-msg"));
+    });
+    $("project-know-add").addEventListener("click", () => $("project-know-file").click());
+    $("project-know-file").addEventListener("change", (e) => {
+      const f = e.target.files[0]; e.target.value = "";
+      const p = editingProject;
+      if (p) addSkill(f, p.id, () => loadKnow(p.id, $("project-know"), $("know-count"), $("project-msg")), $("project-msg"));
+    });
+    $("data-choose").addEventListener("click", async () => {
+      const path = await pickFolder($("data-path").value.trim());
+      if (path) { $("data-path").value = path; dataPathChanged(); }
+    });
     $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));
     $("pair-start").addEventListener("click", startPairing);
+    $("firewall-allow").addEventListener("click", allowFirewall);
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }
       if (!e.target.closest(".msg-actions")) for (const m of document.querySelectorAll(".review-menu")) m.hidden = true;
@@ -3854,6 +5369,41 @@
     $("open-report").addEventListener("click", openReport);
     $("mount-select").addEventListener("change", mountChosen);
     $("mount-new").addEventListener("click", newDevice);
+    $("mount-protect").addEventListener("click", openProtection);
+    $("relay-on").addEventListener("change", setRelay);
+    $("protect-add-gate").addEventListener("click", () => $("protect-gates").append(gateRow({ dielectric: "hBN",
+      drive: (PROT.opts.drives.find((d) => d.gate) || {}).key, leak: (PROT.opts.drives.find((d) => d.gate) || {}).leak })));
+    $("protect-add-limit").addEventListener("click", () => $("protect-limits").append(limitRow((PROT.opts.drives[0] || {}).key)));
+    $("protect-save").addEventListener("click", () => saveProtection(false));
+    $("protect-clear").addEventListener("click", () => saveProtection(true));
+    $("hands-on").addEventListener("click", handsOn);
+    $("hands-done").addEventListener("click", openUnlock);
+    $("wake-cancel").addEventListener("click", async () => {
+      if (!S.chatId) return;
+      try { await api("/api/chats/" + S.chatId + "/wake", { method: "DELETE" }); } catch (e) { toast(e.message); return; }
+      $("wake-bar").hidden = true;
+      toast("Kelvin won't continue this chat on its own.");
+    });
+    $("wake-stop").addEventListener("click", () => api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {}));
+    $("attach-btn").addEventListener("click", () => $("attach-input").click());
+    $("attach-input").addEventListener("change", (e) => { addFiles([...e.target.files]); e.target.value = ""; });
+    $("input").addEventListener("paste", (e) => {   // a screenshot pasted into the message
+      const files = [...((e.clipboardData && e.clipboardData.files) || [])];
+      if (!files.length) return;
+      if (!e.clipboardData.getData("text/plain")) e.preventDefault();
+      addFiles(files);
+    });
+    $("composer").addEventListener("dragover", (e) => { if ([...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+    $("composer").addEventListener("drop", (e) => {
+      if (!e.dataTransfer.files.length) return;
+      e.preventDefault();
+      addFiles([...e.dataTransfer.files]);
+    });
+    $("hands-done-panel").addEventListener("click", openUnlock);
+    $("hands-unlock").addEventListener("click", unlock);
+    for (const c of document.querySelectorAll(".hands-check")) c.addEventListener("change", () => {
+      $("hands-unlock").disabled = ![...document.querySelectorAll(".hands-check")].every((x) => x.checked);
+    });
     $("device-add").addEventListener("click", addDevice);
     $("summary-write").addEventListener("click", writeSummary);
     $("master-update").addEventListener("click", () => updateMaster(false));
@@ -3877,11 +5427,25 @@
     });
     $("lab-scan").addEventListener("click", scanLab);
     $("lab-add-found").addEventListener("click", addFound);
+    $("lab-scripts").addEventListener("click", fromScripts);
+    $("setup-scripts-choose").addEventListener("click", () => answerScripts(false));
+    $("setup-scripts-none").addEventListener("click", () => answerScripts(true));
+    $("setup-wait").addEventListener("close", () => { WAIT.closed = true; });
+    $("lab-add-scripts").addEventListener("click", addScripts);
+    $("lab-recipes").addEventListener("click", recipesFromScripts);
     $("lab-add").addEventListener("click", addByAddress);
     $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value }));
+    for (const b of document.querySelectorAll("#lab-view button")) b.addEventListener("click", () => {
+      LABCFG.view = b.dataset.view;
+      store("lh.labView", LABCFG.view);
+      renderLabConfig();
+    });
+    $("lab-find").addEventListener("input", () => { LABCFG.find = $("lab-find").value; renderLabConfig(); });
     $("lab-unlock").addEventListener("click", unlockLab);
     $("lab-setup-again").addEventListener("click", setupAgain);
     $("lab-observe-review").addEventListener("click", openLabSetup);
+    $("lab-drafts-review").addEventListener("click", openCards);
+    $("open-cards-lab").addEventListener("click", openCards);
     $("lab-why-details").addEventListener("click", toggleWhyDetails);
     $("lab-why-setup").addEventListener("click", openLabSetup);
     document.querySelector(".lab-chip").addEventListener("click", () => toggleLab(true));
@@ -3892,7 +5456,8 @@
         connectLab({ use: b.dataset.use });
       });
     }
-    $("new-chat").addEventListener("click", () => newChat());
+    $("new-chat").addEventListener("click", () => newChat(null, true));
+    $("folder-btn").addEventListener("click", (e) => { e.stopPropagation(); folderMenu(); });
     $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });
     $("scrim").addEventListener("click", () => { closeSidebar(); if (S.labOpen) toggleLab(false); if (RUNS.open) toggleRuns(false); });
     $("toggle-lab").addEventListener("click", () => toggleLab());
@@ -3907,6 +5472,7 @@
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
     for (const b of document.querySelectorAll(".set-nav button")) b.addEventListener("click", () => settingsPage(b.dataset.page));
+    zoomKeys();
     $("save-settings").addEventListener("click", saveSettings);
     $("save-project").addEventListener("click", saveProjectSettings);
     $("quit-app").hidden = !boot.can_quit;
@@ -3922,7 +5488,7 @@
       });
     }
     window.addEventListener("resize", syncScrim);
-    setInterval(() => { if (S.labOpen || S.streaming || !$("lab-badge").hidden) pollState(); }, 1500);
+    setInterval(() => { if (S.labOpen || S.live.size || S.answering.size || !$("lab-badge").hidden) pollState(); }, 1500);
     setInterval(pollState, 4000);   // often enough that an alarm shows within seconds
     pollState();
     $("input").focus();
