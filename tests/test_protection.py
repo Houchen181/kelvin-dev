@@ -258,7 +258,8 @@ def test_a_yokogawa_gate_and_a_keithley_are_capped_too(tmp_path):
     assert rt.gate.set("gs", "range", 30).ok
     m = mount(rt, {"gates": [{"drive": "gs.level", "dielectric": "hBN", "thickness_nm": 20, "leak": "k.I"},
                              {"drive": "k.V", "dielectric": "SiO2", "thickness_nm": 285, "leak": "k.I"}]})
-    assert m["caps"] == ["gs.range 30 V → 10 V", "k.V_autorange on → off", "k.compliance_I 100 µA → 10 nA (toward safe)"]
+    assert m["caps"] == ["gs.range 30 V → 10 V", "k.V_autorange on → off", "k.V_range 20 V → 200 V",   # covers ±85.5 V
+                         "k.compliance_I 100 µA → 10 nA (toward safe)"]
     assert lab.instruments["k"].limits("V") == (-85.5, 85.5)
     assert rt.gate.set("gs", "output", True).ok and rt.gate.set("gs", "level", 3).ok
     assert "glitch" in rt.gate.set("gs", "range", 1).message

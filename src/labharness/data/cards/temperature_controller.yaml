@@ -40,6 +40,7 @@ parameters:
     unit: K
     get: "MEASure:TEMPerature?"
     default: 1.6
+    plausible: [0.01, 1000]     # an open thermometer reads 0 K: a fault, never a temperature
 
 safe_sequence: [heater_range, setpoint]
 display:

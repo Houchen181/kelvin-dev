@@ -36,6 +36,8 @@ parameters:
     kind: measure
     unit: K
     get: "KRDG? A"
+    status: "RDGST? A"          # the input's reading status: anything but 0 is a sensor fault (open, shorted, out of range)
+    plausible: [0.01, 1600]     # an open input reads 0 K: outside this it is a fault, never a temperature
   T_B:
     label: Temperature B
     kind: measure
@@ -58,5 +60,6 @@ raw:
   blocked: ["CRVHDR", "CRVPT", "CRVDEL", "INTYPE"]
 notes:
   - Written from the manual; verify on your unit before trusting it with a sample.
+  - "Input A is checked as it is read (RDGST? A): an open or shorted sensor is an error, never 0 K, so an interlock on it fails and a run measuring it stops. To check another input, add its status: \"RDGST? B\" and plausible: lines in this lab's version of the card (an input with no sensor on it would then fail the health check)."
   - Sensor curves and input types are blocked here; they change what every temperature reading means.
   - "Plans can wait for the temperature with stabilize: {read: tc.T_A, within: 0.02, for: 60}."

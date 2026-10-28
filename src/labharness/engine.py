@@ -156,6 +156,25 @@ class RunEngine:
                 return None, None
             return inst, spec
 
+        ranges: Dict[str, Optional[float]] = {}
+
+        def fixed_range(inst, spec):
+            """The range a source runs the plan in, while it is fixed: as the plan's setup sets it, else as it is."""
+            key = "%s.%s" % (inst.name, spec.name)
+            if key not in ranges:
+                planned = {s.param: s.value for s in plan.setup if s.instr == inst.name}
+                auto = planned.get(spec.autorange_param) if spec.autorange_param else None
+                try:
+                    if auto is not None and inst.spec(spec.autorange_param).coerce(auto):
+                        ranges[key] = None
+                    elif spec.range_param in planned:
+                        ranges[key] = float(planned[spec.range_param])
+                    else:
+                        ranges[key] = self.gate.fixed_range(inst, spec) if spec.range_param else None
+                except Exception:   # can't tell now: the gate checks each change as it comes
+                    ranges[key] = None
+            return ranges[key]
+
         def check_value(inst, spec, value, where):
             try:
                 v = spec.coerce(value)
@@ -163,6 +182,9 @@ class RunEngine:
                 errors.append("%s: %s" % (where, e))
                 return value
             problem = self.gate._limit_problem(inst, spec, v)
+            if not problem and spec.is_drive and spec.range_param:
+                rng = fixed_range(inst, spec)
+                problem = self.gate._fixed_range_problem(inst, spec, v, rng) if rng is not None else None
             if problem:
                 errors.append("%s: %s" % (where, problem))
             return v
@@ -188,6 +210,64 @@ class RunEngine:
             except KeyError as e:
                 errors.append(e.args[0])
         return errors
+
+    def ordered(self, steps: List[Step]) -> List[Step]:
+        """Steps in the order they can be applied: a switch that applies other drives to the sample (an output, an
+        RF or laser emission: its card's enables) is switched on before the levels it applies. Switching it on parks
+        those levels at safe first, so a level set before its switch would end up at safe, and the run measure dark.
+        Otherwise as written."""
+        where: Dict[str, int] = {}
+        for i, s in enumerate(steps):
+            where.setdefault(s.key, i)
+        ranked = []
+        for i, s in enumerate(steps):
+            rank: float = i
+            try:
+                spec = self.lab.resolve(s.key)[1]
+                on = bool(spec.enables) and spec.is_drive and spec.distance(spec.coerce(s.value)) > 0
+            except (KeyError, ValueError):
+                on = False
+            if on:
+                levels = [where[k] for k in ("%s.%s" % (s.instr, d) for d in spec.enables) if k in where]
+                if levels and min(levels) < i:
+                    rank = min(levels) - 0.5
+            ranked.append((rank, i, s))
+        return [s for _, _, s in sorted(ranked, key=lambda r: (r[0], r[1]))]
+
+    def readback_problems(self, steps: List[Step], skip: Any = ()) -> List[str]:
+        """The drives that don't read back what these steps set (a switch parked its level at safe, the instrument
+        clipped or refused it): one line each, saying which drive and what it reads. The run must not measure at a
+        level other than the one approved and shown. skip: keys the plan changes again (its sweep axes)."""
+        last: Dict[str, Step] = {}
+        for s in steps:
+            last[s.key] = s
+        out = []
+        for key, s in last.items():
+            if key in skip:
+                continue
+            try:
+                inst, spec = self.lab.resolve(key)
+                if not spec.is_drive:
+                    continue
+                want = spec.coerce(s.value)
+                now = inst.read(spec.name)
+            except Exception as e:
+                out.append("%s could not be read back: %s" % (key, str(e).splitlines()[0][:120] if str(e) else e))
+                continue
+            if now is None:   # read only while its switch is on, and that is off: nothing to compare
+                continue
+            if spec.numeric:   # a set point reads back as set, give or take its rounding: 2 pA is not 50 nA
+                lim = inst.limits(spec.name)
+                close = max(spec.tol, 0.01 * abs(want), 1e-9 * (lim[1] - lim[0]) if lim else 0.0, 1e-15)
+                same = isinstance(now, (int, float)) and abs(now - want) <= close
+            else:
+                try:
+                    same = spec.coerce(now) == want
+                except ValueError:
+                    same = False
+            if not same:
+                out.append("%s reads %s, not the %s the plan set" % (key, spec.show(now), spec.show(want)))
+        return out
 
     def drive_values(self, plan: Plan) -> Dict[str, List[Any]]:
         out: Dict[str, List[Any]] = {}
@@ -317,7 +397,7 @@ class RunEngine:
                 return
             if self.gate.stop_generation != gen:
                 raise _Abort("stop requested")
-            clock.sleep(max(0.05, min(2.0, st.duration / 10)))
+            self.gate._pause(max(0.05, min(2.0, st.duration / 10)), gen)   # a stop wakes it at once
 
     def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
                  meta: Optional[Dict[str, Any]] = None, folder: Any = None) -> RunReport:
@@ -340,7 +420,9 @@ class RunEngine:
         warnings: List[str] = [rec.moved] if getattr(rec, "moved", None) else []
 
         def apply(instr: str, param: str, value: Any) -> None:
-            r = gate._set(instr, param, value, True, "plan:" + plan.name)
+            if gate.stop_generation != gen:   # a stop that came between steps (or while the run was starting)
+                raise _Abort("stop requested")
+            r = gate._set(instr, param, value, True, "plan:" + plan.name, gen=gen)   # and one during it ends its waits
             if not r.ok:
                 raise _Abort(r.message)
 
@@ -350,10 +432,18 @@ class RunEngine:
                 return max(0.0, expected_s - lab_t) * wall / lab_t
             return wall / done * (plan.points - done) if done else 0.0
 
+        # what the sweep changes again: its axes, and the levels a swept switch parks and puts back
+        swept = {a.key for a in plan.instrument_axes}
+        for a in plan.instrument_axes:
+            swept.update("%s.%s" % (a.instr, d) for d in lab.resolve(a.key)[1].enables)
         try:
             with gate.preapproved(grants):
-                for step in plan.setup:
+                for step in self.ordered(plan.setup):
                     apply(step.instr, step.param, step.value)
+                wrong = self.readback_problems(plan.setup, swept)
+                if wrong:   # never measure at a level other than the one approved (and shown on the run's card)
+                    raise _Abort("before the first point, %s, so the run would not measure at what was approved"
+                                 % "; ".join(wrong))
                 # the conditions it measured in: the settings at its start with the plan's setup applied
                 measuring = {name: dict(values) if isinstance(values, dict) else values for name, values in start.items()}
                 for step in plan.setup:
@@ -404,6 +494,10 @@ class RunEngine:
                     self._emit(event="point", run_id=rec.run_id, done=n, total=plan.points, row=row, eta_s=time_left(n))
                     if gate.stop_generation != gen:
                         raise _Abort("stop requested")
+                late = self.readback_problems(plan.setup, swept)
+                if late:   # something reset a level during the sweep: the assessment must not say all was well
+                    warnings.append("at the end of the sweep %s: points may not have been measured at the approved "
+                                    "level" % "; ".join(late))
                 if plan.after:
                     self._emit(event="phase", run_id=rec.run_id, phase="after", eta_s=time_left(n))
                 for step in plan.after:
@@ -446,18 +540,19 @@ class RunEngine:
                          str(rec.path) if rec.path else None, analysis=analysis, warnings=warnings)
 
     def _on_abort(self, plan: Plan) -> List[str]:
-        steps = plan.on_abort
-        if steps is None:  # default: every drive the plan touched goes to safe, unless the lab says hold
-            seen: Dict[str, Step] = {}
-            for key in self.drive_values(plan):
-                _, spec = self.lab.resolve(key)
-                if self.lab.config.safe_actions.get(key) != "hold":
-                    instr, _, param = key.partition(".")
-                    seen[key] = Step(instr, param, spec.safe)
-            steps = list(seen.values())
-        out = []
-        for step in steps:
-            r = self.gate._set(step.instr, step.param, step.value, True, "abort:" + plan.name)
+        """After a stop or a failure, first every drive the plan touched goes to safe, in its card's safe order, or
+        holds where the lab config's safe_actions says hold. Then the plan's own on_abort steps, which add to that
+        and never replace it: a plan's on_abort that only zeroed a voltage once left the output on, and one ramped a
+        magnet the lab holds. A set point the instrument ramps to by itself is set and not waited for, so a stop never
+        hangs on a cool-down (gate.abort_to_safe)."""
+        by = "abort:" + plan.name
+        out = [r.message for r in self.gate.abort_to_safe(list(self.drive_values(plan)), by)]
+        for step in plan.on_abort or []:
+            if self.lab.config.safe_actions.get(step.key) == "hold":
+                out.append("%s stays held: the lab config holds it on a stop (on_abort asked for %s)"
+                           % (step.key, self.lab.resolve(step.key)[1].show(step.value)))
+                continue
+            r = self.gate._set(step.instr, step.param, step.value, False, by)
             if r.action != "no-change":
                 out.append(r.message)
         return out

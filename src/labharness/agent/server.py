@@ -224,7 +224,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     def send_raw(instrument: str, command: str) -> str:
         """Send a raw instrument command (e.g. SCPI). Same rules as set_value: queries and configuration
-        run; anything touching a drive goes through the gate; blocked commands are refused."""
+        run; anything touching a drive goes through the gate; blocked commands are refused. A command not on the
+        card asks a person first on an instrument with drives; source function, protection, units and calibration
+        commands the card doesn't list are refused."""
         return rt.raw(instrument, command)
 
     @server.tool(annotations=ACT, structured_output=False)

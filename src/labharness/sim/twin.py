@@ -187,6 +187,8 @@ class Twin:
                 v = ""
             else:
                 v = spec.limits[0] if spec.limits and spec.limits[0] > 0 else 0.0
+            if spec.plausible and _is_number(v):   # a healthy sensor's reading, not an open one's 0 K
+                v = min(max(v, spec.plausible[0]), spec.plausible[1])
             self.state[spec.name] = v
         for spec in self.ramps:   # at rest: a reading with no default of its own is where its setpoint is
             if self.card.params[spec.readback].default is None and _is_number(self.state[spec.name]):
@@ -370,6 +372,13 @@ class Twin:
             return ",".join(reply)
         if hits:
             return hits[0].to_wire(self.read(hits[0].name))
+        for s in self.card.params.values():   # a reading's or a move's status: a healthy sensor's, an arrived stage's
+            if s.status_cmd is not None and s.status_cmd.match(cmd) is not None:
+                return _reply_matching(s.status_ok) or "0"
+            if s.arrived_cmd is not None and s.arrived_cmd.match(cmd) is not None:
+                return _reply_matching(s.arrived_re) or "1"
+            if s.busy_cmd is not None and s.busy_cmd.match(cmd) is not None:
+                return next((r for r in ("0", "1", "33", "READY", "OK") if not re.search(s.busy_re, r)), "0")
         return None
 
 

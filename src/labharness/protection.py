@@ -11,7 +11,8 @@ While the device is mounted (apply):
 - its limits narrow the lab's (Instrument.limits: the tighter side holds, and no approval, envelope or auto mode
   passes them), and a gate ramps no faster than its rate;
 - each gate with a leakage reading gets a guard: a ramp stops and goes back to safe once the leakage passes leak_max;
-- the instrument itself is capped where its card allows: the source range just above the limit, autorange off, and
+- the instrument itself is capped where its card allows: the source range just above the limit (the smallest that
+  covers it, so a smaller range left from before can't clip a sweep the limits allow), autorange off, and
   the source's own current limit at CAP_FACTOR times leak_max. These caps are device limits too, so nothing raises
   them, and they are written into the instrument (write_caps), so even a crash of Kelvin or of the computer can't
   take the sample past them.
@@ -231,12 +232,13 @@ def write_caps(gate: Any, lab: Any, protection: Dict[str, Any]) -> Tuple[List[st
             now = inst.read(param)
         except Exception:
             now = None
+        owner = inst.card.range_owner(param)
         if isinstance(value, bool):
             if now is not None and bool(now) == value:
                 continue
-        elif isinstance(now, (int, float)) and not isinstance(now, bool) and now <= value:
-            continue   # already at or below its cap (a smaller range chosen for resolution stays)
-        owner = inst.card.range_owner(param)
+        elif isinstance(now, (int, float)) and not isinstance(now, bool) and (
+                math.isclose(now, value, rel_tol=1e-9) if owner is not None else now <= value):
+            continue   # a current limit at or below its cap stays; a range is the one that covers the limit
         if owner is not None:
             try:
                 level = inst.read(owner.name)

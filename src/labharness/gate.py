@@ -10,6 +10,9 @@
   has reviewed its limits): every change away from safe asks a person and says why; no envelope or auto mode
   covers it.
 - Beyond limits, or blocked commands: refused.
+- Raw commands: what the card lists is checked as such (a setting with its limits, an action, a reset); a source
+  function, protection, units or calibration command it doesn't list is refused; anything else unlisted on an
+  instrument with drives asks a person.
 - A mounted device's protection (protection.py) narrows the limits and rates and adds its gates' leakage guards;
   a source's range changes only while its level is at safe; while a person has their hands on the sample
   (lab.hands_on), nothing moves away from safe.
@@ -17,6 +20,7 @@
 from __future__ import annotations
 
 import math
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -120,7 +124,82 @@ def _same(spec: ParamSpec, a: Any, b: Any) -> bool:
     return a == b
 
 
+# Raw commands no card lists that change what the instrument is or means, refused unless its card has them as a
+# parameter (checked with limits) or an action: the source function (a 2400 put into current mode drove 10 µA into a
+# gate oxide), protection limits and compliance, the units its readings are in (an AMI 430 switched to kG), and
+# calibration (*CAL? calibrates).
+RESTRICTED = {"function": "the source function (what it applies to the sample)",
+              "protection": "a protection limit or compliance",
+              "units": "the units its values are in",
+              "calibration": "its calibration"}
+_RESTRICTED_WHY = ("%r changes %s on %s, which its card doesn't list, so Kelvin can't check it; to use it, add it to "
+                   "the card as a parameter (Lab → Cards…)")
+_HARMLESS = re.compile(r"^\s*\*(CLS|WAI|OPC|ESE|SRE)\b", re.I)   # IEEE 488.2 status housekeeping: never an output
+_NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def _restricted(cmd: str) -> Optional[str]:
+    """Which kind of RESTRICTED command this is, from the nodes of its SCPI header; None for anything else."""
+    text = cmd.strip()
+    if re.match(r"^\*CAL\b", text, re.I):
+        return "calibration"
+    header = re.split(r"[\s?]", text, maxsplit=1)[0]
+    if not re.match(r"^:?[A-Za-z][A-Za-z0-9]*(:[A-Za-z][A-Za-z0-9]*)*$", header):
+        return None   # not SCPI-shaped (a driver's SET path, a vendor's mnemonic): its card's families decide
+    nodes = [re.sub(r"\d+$", "", n).upper() for n in header.lstrip(":").split(":")]
+    if nodes[0] in ("CAL", "CALIBRATION"):
+        return "calibration"
+    if any(n in ("UNIT", "UNITS") for n in nodes):
+        return "units"
+    if any(n in ("PROT", "PROTECTION", "ILIM", "ILIMIT", "VLIM", "VLIMIT") for n in nodes) or any(
+            a in ("VOLT", "VOLTAGE", "CURR", "CURRENT", "POW", "POWER") and b in ("LIM", "LIMIT")
+            for a, b in zip(nodes, nodes[1:])):
+        return "protection"
+    if nodes[0] in ("FUNC", "FUNCTION") or (nodes[0] in ("SOUR", "SOURCE") and len(nodes) > 1
+                                             and nodes[1] in ("FUNC", "FUNCTION")):
+        return "function"
+    return None
+
+
+def _number_in(cmd: str) -> Optional[float]:
+    """The first number after a command's header (its value, as far as Kelvin can tell), or None."""
+    parts = re.split(r"[\s,]+", cmd.strip(), maxsplit=1)
+    m = _NUMBER.search(parts[1]) if len(parts) > 1 else None
+    try:
+        return float(m.group(0)) if m else None
+    except ValueError:
+        return None
+
+
+def interlock_problem(lab: Any, lock: Any) -> Optional[str]:
+    """Why an interlock's condition doesn't hold now, in words (" (now 25 K)"), or None when it holds. A condition that
+    can't be read, or reads what it can't be (an open sensor), fails: an interlock never passes on a reading Kelvin
+    can't vouch for."""
+    try:
+        ok, actual = lock.require.check(lab.read)
+    except Exception as e:
+        return ", but %s can't be read (%s)" % (lock.require.key, str(e).splitlines()[0][:160] if str(e) else
+                                                 type(e).__name__)
+    if isinstance(actual, float) and not math.isfinite(actual):
+        ok = False
+    if ok:
+        return None
+    try:
+        shown = lab.resolve(lock.require.key)[1].show(actual)
+    except Exception:
+        shown = str(actual)
+    return " (now %s)" % shown
+
+
+def _unreachable(spec: ParamSpec) -> bool:
+    """A set point the instrument ramps to by itself whose safe value no instrument reaches: absolute zero. After a
+    stop it holds where its reading is; waiting for 0 K hung a stopped run until the wait timed out."""
+    return (spec.ramp == "instrument" and bool(spec.readback) and spec.unit in ("K", "mK")
+            and isinstance(spec.safe, (int, float)) and spec.safe <= 0)
+
+
 OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
+ARRIVED_SETTLE = 5.0   # lab seconds a reading may take to settle once its stage's status says the move is over
 
 
 class SafetyGate:
@@ -141,6 +220,9 @@ class SafetyGate:
         self.in_chat = False   # a portal chat's turn: the chat's own account of web text counts, not the clock's
         self._grants: Dict[str, Allowed] = {}
         self._standing: Dict[str, Allowed] = {}   # what a person approved for a whole queue of scans, while it runs
+        # the drive levels the running plan or queue item set: switching their enable on parks them at safe (_move),
+        # then puts them back (_reapply), so a run measures at what was approved, not at safe. None: no plan running
+        self._asked: Optional[Dict[str, Any]] = None
         self._undo: List[Tuple[str, str, Any]] = []
         self._stop_gen = 0
         self._prefixes: Dict[int, Template] = {}
@@ -185,6 +267,9 @@ class SafetyGate:
         parts = split_compound(command)
         if not parts:
             return Result(False, "refused", instr, message="refused: empty command")
+        if len(parts) > 1 and any(";" in s.set_cmd.text and s.set_cmd.match(command) is not None
+                                  for s in inst.card.setters):
+            parts = [command]   # the card's own setting is a chain (an AMI 430's TARG {value};RAMP): checked as one
         results = []
         for part in parts:
             results.append(self._raw_one(inst, part))
@@ -369,6 +454,10 @@ class SafetyGate:
                     "so a person approves" % (self.outside[1], OUTSIDE_S // 60))
         return None
 
+    def _draft(self, inst: Instrument) -> bool:
+        """A real instrument on a card nobody has reviewed: even its safe values are unchecked."""
+        return inst.card.status == "draft" and not inst.simulated
+
     def review_steps(self, inst: Instrument) -> str:
         """Where a person ends Kelvin's uncertainty about an instrument (unsure), in the portal."""
         steps = []
@@ -437,18 +526,22 @@ class SafetyGate:
         """A queue's approval: every drive range its scans and steps use, approved once before it started. Scans
         inside it run without asking again; anything outside still asks."""
         old, self._standing = self._standing, dict(grants)
+        asked, self._asked = self._asked, {}
         try:
             yield
         finally:
             self._standing = old
+            self._asked = asked
 
     @contextmanager
     def preapproved(self, grants: Dict[str, Allowed]) -> Iterator[None]:
         old, self._grants = self._grants, dict(grants)
+        asked, self._asked = self._asked, {}
         try:
             yield
         finally:
             self._grants = old
+            self._asked = asked
 
     def plan_approval(self, drive_values: Dict[str, List[Any]]) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
         """For a plan's drive targets: lines to show the human, the ranges to grant, and refusals."""
@@ -463,9 +556,12 @@ class SafetyGate:
             else:
                 d0 = spec.distance(current)
                 away = [v for v in values if not _same(spec, v, current) and spec.distance(v) >= d0]
+            toward = not away and self._draft(inst)
+            if toward:   # on a draft card even a change toward safe asks: the plan's one approval covers it
+                away = [v for v in values if current is None or not _same(spec, v, current)]
             if not away:
                 continue
-            problem = self._away_problem(inst, spec)
+            problem = None if toward else self._away_problem(inst, spec)   # toward safe: no interlock stops it
             standing = self._standing.get(key)
             if not problem and standing is not None and all(standing.covers(v) for v in away):
                 continue   # inside what a person approved for the queue this scan is part of
@@ -491,7 +587,10 @@ class SafetyGate:
 
     # ------------------------------------------------------------------ internals
 
-    def _set(self, instr: str, param: str, value: Any, wait: bool, by: str, record_undo: bool = True) -> Result:
+    def _set(self, instr: str, param: str, value: Any, wait: bool, by: str, record_undo: bool = True,
+             gen: Optional[int] = None) -> Result:
+        """gen: the stop generation a plan or queue item started at; a stop since then ends this change's waits and
+        refuses a move away from safe (by default, only a stop during the change itself counts)."""
         key = "%s.%s" % (instr, param)
         try:
             inst = self.lab.instrument(instr)
@@ -508,6 +607,9 @@ class SafetyGate:
         if problem:
             return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
         try:
+            problem = self._breaks_interlock(inst, spec, target)
+            if problem:
+                return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
             current = self._current(inst, spec)
             owner = inst.card.range_owner(spec.name)
             if owner is not None and not _same(spec, current, target):
@@ -525,9 +627,9 @@ class SafetyGate:
                         note = " (%s)" % request.note if request.note else ""
                         return self._done(Result(False, "declined", key, value=target, message="declined: %s stays %s%s"
                                                  % (key, spec.show(current), note)), "set", by)
-                res = self._move(inst, spec, current, target, away=False, wait=wait, how=None)
+                res = self._move(inst, spec, current, target, away=False, wait=wait, how=None, gen=gen)
             elif current is None and spec.distance(target) == 0:   # unknown, to its safe value: always allowed
-                res = self._move(inst, spec, current, target, away=False, wait=wait, how="to safe")
+                res = self._move(inst, spec, current, target, away=False, wait=wait, how="to safe", gen=gen)
             elif current is None and spec.ramp == "gate" and spec.numeric:
                 return self._done(Result(False, "refused", key, value=target, message=(
                     "refused: Kelvin can't read %s back and hasn't set it since connecting, so it can't ramp from "
@@ -535,9 +637,24 @@ class SafetyGate:
             elif _same(spec, current, target):
                 res = Result(True, "no-change", key, value=target, message="%s already %s" % (key, spec.show(target)))
             elif current is not None and spec.distance(target) < spec.distance(current):
-                res = self._move(inst, spec, current, target, away=False, wait=wait, how="toward safe")
+                how = "toward safe"
+                if self._draft(inst) and self._covered(inst, spec, target, envelope=False) is None:
+                    # nobody has checked this card's safe value against the instrument: "toward safe" is a guess too
+                    request = ApprovalRequest("Approve drive change on %s?" % inst.name, [
+                        self._describe_move(inst, spec, current, target),
+                        "Kelvin isn't sure about %s: %s, so even a change toward its safe value (%s) asks" % (
+                            inst.name, self.unsure(inst), spec.show(spec.safe))])
+                    if not self.ask(request):
+                        note = " (%s)" % request.note if request.note else ""
+                        return self._done(Result(False, "declined", key, value=current, message="declined: %s stays %s%s"
+                                                 % (key, spec.show(current), note)), "set", by)
+                    how = "toward safe, approved"
+                res = self._move(inst, spec, current, target, away=False, wait=wait, how=how, gen=gen)
             else:
-                problem = self._away_problem(inst, spec)
+                if gen is not None and self._stop_gen != gen:   # stopped since the plan began: nothing goes up
+                    return self._done(Result(False, "stopped", key, value=current, message="%s stays %s (stop requested)"
+                                             % (key, spec.show(current))), "set", by)
+                problem = self._away_problem(inst, spec) or self._fixed_range_problem(inst, spec, target)
                 if problem:
                     return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
                 unsure = self.unsure(inst)
@@ -568,14 +685,35 @@ class SafetyGate:
                             msg += " (%s)" % request.note
                         return self._done(Result(False, "declined", key, value=current, message=msg), "set", by)
                     how = "approved"
-                res = self._move(inst, spec, current, target, away=True, wait=wait, how=how)
+                res = self._move(inst, spec, current, target, away=True, wait=wait, how=how, gen=gen)
+                if res.ok and spec.enables:
+                    res = self._reapply(inst, spec, res, wait, by, gen)
         except Exception as e:
             res = Result(False, "error", key, message="%s: instrument error: %s" % (key, e))
             current = None
         undoable = res.ok and record_undo and res.action != "no-change" and current is not None
         if undoable and getattr(self._acting, "by", None) is None:
             self._undo.append((instr, param, current))
+        if res.ok and spec.is_drive and self._asked is not None:
+            self._asked[key] = target
         return self._done(res, "set", by)
+
+    def _reapply(self, inst: Instrument, spec: ParamSpec, res: Result, wait: bool, by: str,
+                 gen: Optional[int] = None) -> Result:
+        """An enable has just switched on, its levels parked at safe first (_move). Put back each level the running
+        plan or queue item set, through every check again (limits, interlocks, its approval): a plan that sets the
+        level before the switch would otherwise measure at safe while its approval shows the level."""
+        for dep_name in spec.enables:
+            dep = inst.spec(dep_name)
+            level = (self._asked or {}).get("%s.%s" % (inst.name, dep_name))
+            if level is None or dep.distance(level) == 0:
+                continue
+            r = self._set(inst.name, dep_name, level, wait, by, record_undo=False, gen=gen)
+            if not r.ok:
+                return Result(False, r.action, res.target, value=res.value, before=res.before,
+                              message="%s; but %s could not be put back: %s" % (res.message, dep_name, r.message))
+            res.message += "; %s put back to %s" % (dep_name, dep.show(level))
+        return res
 
     def _done(self, res: Result, method: str, by: Optional[str] = None, **extra: Any) -> Result:
         self.log.write("command", by=by or self._who(), method=method, target=res.target, action=res.action,
@@ -617,6 +755,38 @@ class SafetyGate:
                     % ("device " + inst.device_name if inst.device_name else "the mounted device", inst.name))
         return None
 
+    def fixed_range(self, inst: Instrument, spec: ParamSpec) -> Optional[float]:
+        """A source's present range while it is fixed (its autorange off, or it has none), which its level can't pass;
+        None while it ranges itself, or for a drive with no range on its card."""
+        if not spec.range_param or not spec.numeric:
+            return None
+        if spec.autorange_param:
+            auto = inst.read(spec.autorange_param)
+            if auto is None or auto:
+                return None
+        rng = inst.read(spec.range_param)
+        return float(rng) if isinstance(rng, (int, float)) and not isinstance(rng, bool) and rng > 0 else None
+
+    def _fixed_range_problem(self, inst: Instrument, spec: ParamSpec, target: Any,
+                             rng: Optional[float] = None) -> Optional[str]:
+        """A level beyond the source's fixed range: the instrument would clip or refuse it partway through a sweep
+        (a 2400 held on its 21 V range under a ±60 V limit stopped at -21 V). rng: the range to check against."""
+        if not isinstance(target, (int, float)):
+            return None
+        if rng is None:
+            try:
+                rng = self.fixed_range(inst, spec)
+            except Exception:   # its range can't be read now: the change's own checks say what the instrument does
+                return None
+        if rng is None or abs(target) <= rng * (1 + 1e-9):
+            return None
+        bigger = next((r for r in spec.range_steps if r >= abs(target) * (1 - 1e-9)), None)
+        return "%s.%s %s is beyond its fixed range (%s)%s" % (
+            inst.name, spec.name, spec.show(target), spec.show(rng),
+            ": set %s.%s to %s first, while %s.%s is at %s" % (inst.name, spec.range_param, spec.show(bigger),
+                                                                inst.name, spec.name, spec.show(spec.safe))
+            if bigger is not None else "")
+
     def _hands_problem(self, what: str) -> Optional[str]:
         """While a person has their hands on the sample, nothing moves away from safe."""
         hands = getattr(self.lab, "hands_on", None)
@@ -641,10 +811,32 @@ class SafetyGate:
             if away:
                 return "interlock: %s needs %s, but %s is %s" % (key, lock.require.text,
                                                                   lock.require.key.split(".")[0], away)
-            ok, actual = lock.require.check(self.lab.read)
-            if not ok:
-                _, cspec = self.lab.resolve(lock.require.key)
-                return "interlock: %s needs %s (now %s)" % (key, lock.require.text, cspec.show(actual))
+            broken = interlock_problem(self.lab, lock)
+            if broken:
+                return "interlock: %s needs %s%s" % (key, lock.require.text, broken)
+        return None
+
+    def _breaks_interlock(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
+        """Setting the condition of an interlock (a switch, a set point it names) is checked against it too: refused
+        when the new value fails it while its drive is away from safe. A reading that drifts out of it is the
+        monitor's to catch (Monitor._check_interlocks)."""
+        key = "%s.%s" % (inst.name, spec.name)
+        for lock in self.lab.config.interlocks:
+            if lock.require.key != key:
+                continue
+            ok, _ = lock.require.check(lambda i, p: target)
+            if ok:
+                continue
+            try:
+                dinst, dspec = self.lab.resolve(lock.drive)
+                now = self._current(dinst, dspec) if dinst.enabled else None
+            except Exception:
+                now = None
+            if now is not None and dspec.distance(now) == 0:
+                continue   # its drive is at safe: nothing the interlock protects
+            return ("interlock: %s (now %s) needs %s; setting %s to %s would break it, so bring %s to safe first"
+                    % (lock.drive, dspec.show(now) if now is not None else "unknown", lock.require.text, key,
+                       spec.show(target), lock.drive))
         return None
 
     def _covered(self, inst: Instrument, spec: ParamSpec, target: Any, envelope: bool = True) -> Optional[str]:
@@ -692,11 +884,15 @@ class SafetyGate:
         return "; ".join(bits)
 
     def _move(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any,
-              away: bool, wait: bool, how: Optional[str]) -> Result:
+              away: bool, wait: bool, how: Optional[str], gen: Optional[int] = None) -> Result:
         key = "%s.%s" % (inst.name, spec.name)
         clock = self.lab.clock
         notes: List[str] = []
-        gen = self._stop_gen
+        gen = self._stop_gen if gen is None else gen
+        stale, standing = self._drain(inst)   # older errors are not this change's
+        if stale:
+            notes.append(("it shows a standing error from before: %s" if standing else
+                          "older errors in its queue, cleared first: %s") % "; ".join(sorted(set(stale))[:3]))
         for dep_name in spec.enables:  # a switch that applies other drives to the sample
             dep = inst.spec(dep_name)
             dep_now = self._current(inst, dep)
@@ -711,15 +907,27 @@ class SafetyGate:
                     return r
                 notes.append("%s ramped to %s first" % (dep.name, dep.show(dep.safe)))
         t0 = clock.now()
+        moving = spec.busy_cmd is not None or spec.arrived_cmd is not None   # it says when it is there
         if spec.ramp == "gate" and spec.numeric and current is not None:   # unknown: only ever straight to safe
             stop = self._ramp(inst, spec, current, target, watch=away, gen=gen)
             if stop is not None:
                 return stop
         else:
             inst.write(spec.name, target)
+            if wait and (moving or (spec.ramp == "instrument" and spec.readback)):
+                err = self._new_error(inst, stale, standing)   # a refused move (a stage not homed) says so now,
+                if err:                                          # not after the whole wait for it
+                    return Result(False, "error", key, value=target, before=current,
+                                  message="%s: instrument reported %s" % (key, err))
+            if moving and wait:   # its read-back means something only once it is there
+                stop = self._arrive(inst, spec, current, target, gen)
+                if stop is not None:
+                    return stop
+            elif moving:
+                notes.append("moving")
             if spec.ramp == "instrument" and spec.readback:
                 if wait:
-                    stop = self._wait(inst, spec, current, target, watch=away, gen=gen)
+                    stop = self._wait(inst, spec, current, target, watch=away, gen=gen, arrived=moving)
                     if stop is not None:
                         return stop
                 else:
@@ -729,7 +937,8 @@ class SafetyGate:
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, target, trip)
-        err = inst.instrument_error() or self._shown(inst, spec, target)
+        err = self._new_error(inst, stale, standing) or (self._shown(inst, spec, target) if wait or not moving
+                                                          else None)
         if err:
             return Result(False, "error", key, value=target, before=current,
                           message="%s: instrument reported %s" % (key, err))
@@ -742,6 +951,24 @@ class SafetyGate:
         if notes:
             msg += "; " + "; ".join(notes)
         return Result(True, "set", key, value=target, before=current, message=msg)
+
+    def _drain(self, inst: Instrument) -> Tuple[List[str], bool]:
+        """The errors already in an instrument's queue before a command, read out of the way and logged, so they are
+        never blamed on it (field tests: stale errors were reported as a later safe move's, and queues overflowed)."""
+        if inst.card.error_query is None:
+            return [], False
+        try:
+            stale, standing = inst.drain_errors()
+        except Exception:
+            return [], False   # the queue doesn't answer: the command's own check says so
+        if stale:
+            self.log.write("stale_errors", by=self._who(), instrument=inst.name, errors=stale, standing=standing or None)
+        return stale, standing
+
+    def _new_error(self, inst: Instrument, stale: List[str], standing: bool) -> Optional[str]:
+        """The command's own error: what the queue holds now, unless it is the standing status it showed before."""
+        err = inst.instrument_error()
+        return None if err is not None and standing and err == stale[-1] else err
 
     def _shown(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
         """What a real instrument shows instead of the number Kelvin just set, when it reads back clearly different
@@ -792,11 +1019,16 @@ class SafetyGate:
         return None
 
     def _wait(self, inst: Instrument, spec: ParamSpec, current: Any, target: float,
-              watch: bool, gen: int) -> Optional[Result]:
+              watch: bool, gen: int, arrived: bool = False) -> Optional[Result]:
+        """Follow a set point the instrument ramps to by itself until its reading arrives. A stop ends every such
+        wait, toward safe too (a PPMS cooling down held a stopped run for ten minutes): away from safe the set point is
+        held where the reading is; toward safe it goes on there by itself, and only the waiting ends. arrived: its
+        status already says the move is over, so the reading only settles: a stage that stopped short isn't waited for
+        until the move's whole timeout."""
         clock = self.lab.clock
         key = "%s.%s" % (inst.name, spec.name)
         eta = self._eta(inst, spec, current, target)
-        timeout = 1.5 * eta + 60 if eta else spec.timeout
+        timeout = ARRIVED_SETTLE if arrived else 1.5 * eta + 60 if eta else spec.timeout
         poll = max(0.1, min(5.0, (eta or 10.0) / 50))
         t0 = clock.now()
         while True:
@@ -807,60 +1039,198 @@ class SafetyGate:
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, val, trip)
-                if self._stop_gen != gen:
+            if self._stop_gen != gen:
+                if watch:
                     inst.write(spec.name, val)
                     return Result(False, "stopped", key, value=val,
                                   message="%s stopped at %s (stop requested)" % (key, spec.show(val)))
+                return Result(False, "stopped", key, value=val, message="%s: stopped waiting at %s (stop requested); "
+                              "it goes on to %s by itself" % (key, spec.show(val), spec.show(target)))
             if clock.now() - t0 > timeout:
+                if arrived:
+                    return Result(False, "error", key, value=val, message=(
+                        "%s: its status says the move is over, but %s is %s, not %s: it stopped short or refused the "
+                        "move" % (key, spec.readback, spec.show(val), spec.show(target))))
                 return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)" % (
                     key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
-            if watch:
-                self._pause(poll, gen)
-            else:
-                clock.sleep(poll)
+            self._pause(poll, gen)   # a stop wakes it at once
 
-    def _guard_trip(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[Guard, float]]:
+    def _arrive(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any, gen: int) -> Optional[Result]:
+        """Follow a move the instrument makes by itself (a stage, a piezo) until its card's status says it is there:
+        a delay line read back mid-move looked like a refused value, and every run stopped at its first point. A stop
+        ends the wait."""
+        clock = self.lab.clock
+        key = "%s.%s" % (inst.name, spec.name)
+        eta = self._eta(inst, spec, current, target)
+        timeout = 1.5 * eta + 60 if eta else spec.timeout
+        poll = max(0.05, min(1.0, (eta or 5.0) / 50))
+        t0 = clock.now()
+        while True:
+            if self._arrived(inst, spec):
+                return None
+            if self._stop_gen != gen:
+                return Result(False, "stopped", key, value=target, before=current, message=(
+                    "%s: stopped waiting for it to reach %s (stop requested)" % (key, spec.show(target))))
+            if clock.now() - t0 > timeout:
+                return Result(False, "timeout", key, value=target, before=current, message=(
+                    "%s: its status says it isn't at %s after %s" % (key, spec.show(target), _dur(timeout))))
+            self._pause(poll, gen)
+
+    def _arrived(self, inst: Instrument, spec: ParamSpec) -> bool:
+        if spec.busy_cmd is not None and re.search(spec.busy_re, inst.query_raw(spec.busy_cmd.render()).strip()):
+            return False
+        if spec.arrived_cmd is not None and not re.search(spec.arrived_re,
+                                                          inst.query_raw(spec.arrived_cmd.render()).strip()):
+            return False
+        return True
+
+    def _guard_trip(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[Guard, Any]]:
+        """The first guard reading past its limit. One that can't be read, or isn't a number (NaN), trips too: a ramp
+        nobody can watch doesn't go on (a NaN leakage once let a sweep run unguarded)."""
         for g in inst.guards(spec.name):
-            val = self.lab.read(g.instr, g.param)
+            try:
+                val = self.lab.read(g.instr, g.param)
+            except Exception as e:
+                return g, e
             if val is None:  # not readable now (its switch is off), so nothing flows to trip on
                 continue
-            if abs(val) > g.max_abs:
+            if not isinstance(val, (int, float)) or isinstance(val, bool) or not math.isfinite(val) \
+                    or abs(val) > g.max_abs:
                 return g, val
         return None
 
-    def _tripped(self, inst: Instrument, spec: ParamSpec, at: Any, trip: Tuple[Guard, float]) -> Result:
+    def _tripped(self, inst: Instrument, spec: ParamSpec, at: Any, trip: Tuple[Guard, Any]) -> Result:
         g, val = trip
         key = "%s.%s" % (inst.name, spec.name)
-        gspec = self.lab.instrument(g.instr).spec(g.param)
-        detail = "|%s| = %s > %s" % (g.key, gspec.show(abs(val)), gspec.show(g.max_abs))
+        gspec = self.lab.instruments[g.instr].spec(g.param)
+        if isinstance(val, Exception):
+            detail = "%s can't be read (%s)" % (g.key, str(val).splitlines()[0][:160] if str(val) else type(val).__name__)
+        elif not isinstance(val, (int, float)) or isinstance(val, bool) or not math.isfinite(val):
+            detail = "%s reads %r, not a number" % (g.key, val)
+        else:
+            detail = "|%s| = %s > %s" % (g.key, gspec.show(abs(val)), gspec.show(g.max_abs))
         if g.on_trip == "hold":
             if spec.ramp == "instrument" and spec.readback:
                 inst.write(spec.name, inst.read(spec.readback))
             end = "holding"
         else:
-            r = self._move(inst, spec, at, spec.safe, away=False, wait=False, how=None)
-            end = "back to %s" % spec.show(spec.safe) if r.ok else "could not return to safe: " + r.message
+            end = self._cut(inst, spec, at)[1]
         msg = "%s tripped at %s: %s; %s" % (key, spec.show(at), detail, end)
-        self.log.write("trip", by=self._who(), target=key, at=at, guard=g.key, reading=val, message=msg)
+        self.log.write("trip", by=self._who(), target=key, at=at, guard=g.key,
+                       reading=val if not isinstance(val, Exception) else str(val), message=msg)
         return Result(False, "tripped", key, value=at, message=msg)
+
+    def _switch_of(self, inst: Instrument, spec: ParamSpec) -> Optional[ParamSpec]:
+        """The switch that applies this drive to the sample (its applies_when, or an output whose enables name it)."""
+        names = ([spec.applies_when] if spec.applies_when else []) + [p.name for p in inst.card.drives
+                                                                      if spec.name in p.enables]
+        for name in names:
+            s = inst.card.params.get(name)
+            if s is not None and s.is_drive and s.type in ("bool", "enum") and s.set_cmd is not None:
+                return s
+        return None
+
+    def _cut(self, inst: Instrument, spec: ParamSpec, at: Any) -> Tuple[List[Result], str]:
+        """A drive back to safe, and the switch that applies it to the sample off: a leakage trip that only set V = 0
+        did nothing on a source someone had put in current mode. The moves' results, and what they did in words."""
+        results: List[Result] = []
+        words: List[str] = []
+        if at is None or spec.distance(at) > 0:
+            r = self._move(inst, spec, at, spec.safe, away=False, wait=False, how=None)
+            results.append(r)
+            words.append("back to %s" % spec.show(spec.safe) if r.ok else "could not return to safe: " + r.message)
+        switch = self._switch_of(inst, spec)
+        if switch is not None:
+            try:
+                now = self._current(inst, switch)
+                if now is None or switch.distance(now) > 0:
+                    r = self._move(inst, switch, now, switch.safe, away=False, wait=False, how=None)
+                    results.append(r)
+                    words.append("%s %s" % (switch.name, switch.show(switch.safe)) if r.ok else
+                                 "%s could not be switched %s: %s" % (switch.name, switch.show(switch.safe), r.message))
+            except Exception as e:
+                words.append("%s could not be switched %s: %s" % (switch.name, switch.show(switch.safe), e))
+        return results, "; ".join(words) or "already at %s" % spec.show(spec.safe)
+
+    def cut(self, instr: str, param: str, by: str) -> List[Result]:
+        """A watch's action (monitor.py): the drive to safe and the switch that applies it off, without asking (only
+        ever toward safe); a drive the lab config holds is held instead."""
+        key = "%s.%s" % (instr, param)
+        try:
+            inst = self.lab.instrument(instr)
+            spec = inst.spec(param)
+        except KeyError as e:
+            return [self._done(Result(False, "refused", key, message="refused: %s" % e.args[0]), "safe", by)]
+        try:
+            if self.lab.config.safe_actions.get(key) == "hold":
+                held = self._hold(inst, spec, " (the lab config holds it)")
+                results = [held] if held is not None else []
+            else:
+                results = self._cut(inst, spec, self._current(inst, spec))[0]
+        except Exception as e:
+            results = [Result(False, "error", key, message="%s: instrument error: %s" % (key, e))]
+        return [self._done(r, "safe", by) for r in results]
 
     def _to_safe(self, inst: Instrument, wait: bool) -> List[Result]:
         out = []
         for name in inst.card.safe_sequence:
-            spec = inst.spec(name)
-            key = "%s.%s" % (inst.name, name)
-            if self.lab.config.safe_actions.get(key) == "hold":
-                if spec.ramp == "instrument" and spec.readback:
-                    actual = inst.read(spec.readback)
-                    if abs(inst.read(name) - actual) > spec.tol:
-                        inst.write(name, actual)
-                        out.append(Result(True, "held", key, value=actual, message="%s held at %s" % (key, spec.show(actual))))
-                continue
-            current = self._current(inst, spec)
-            if spec.distance(current) == 0:
-                continue
-            out.append(self._move(inst, spec, current, spec.safe, away=False, wait=wait, how="safe state"))
+            r = self._safe_one(inst, inst.spec(name), wait)
+            if r is not None:
+                out.append(r)
         return out
+
+    def abort_to_safe(self, keys: List[str], by: str) -> List[Result]:
+        """After a stop or a failure: these drives go to safe, each instrument's in its card's safe order, or hold
+        where the lab config says hold. Nothing here waits for a set point the instrument ramps to by itself (a stop
+        must not hang on a cool-down: it is set and ramps there on its own), and one whose safe value no instrument
+        reaches (0 K) holds where its reading is instead. Never raises: each result says what happened."""
+        wanted: Dict[str, List[str]] = {}
+        for key in keys:
+            instr, _, param = key.partition(".")
+            wanted.setdefault(instr, []).append(param)
+        out: List[Result] = []
+        for instr, params in wanted.items():
+            inst = self.lab.instruments.get(instr)
+            if inst is None:
+                continue
+            if not inst.enabled:
+                out.append(self._done(Result(False, "error", instr, message="%s is %s, so Kelvin could not bring %s to "
+                                             "safe" % (instr, self.lab.away(instr), ", ".join(params))), "safe", by))
+                continue
+            seq = inst.card.safe_sequence
+            for param in [p for p in seq if p in params] + [p for p in params if p not in seq]:
+                try:
+                    r = self._safe_one(inst, inst.spec(param), wait=False)
+                except Exception as e:
+                    r = Result(False, "error", "%s.%s" % (instr, param),
+                               message="%s.%s: instrument error: %s" % (instr, param, e))
+                if r is not None:
+                    out.append(self._done(r, "safe", by))
+        return out
+
+    def _safe_one(self, inst: Instrument, spec: ParamSpec, wait: bool) -> Optional[Result]:
+        """One drive to safe (None: already there). Held instead where the lab config says hold, or, when not
+        waiting, where a set point's safe value can't be reached."""
+        key = "%s.%s" % (inst.name, spec.name)
+        if self.lab.config.safe_actions.get(key) == "hold":
+            return self._hold(inst, spec, "")
+        if not wait and _unreachable(spec):
+            return self._hold(inst, spec, " (its safe %s can't be reached)" % spec.show(spec.safe))
+        current = self._current(inst, spec)
+        if current is not None and spec.distance(current) == 0:
+            return None
+        return self._move(inst, spec, current, spec.safe, away=False, wait=wait, how="safe state")
+
+    def _hold(self, inst: Instrument, spec: ParamSpec, why: str) -> Optional[Result]:
+        """A set point the instrument ramps to by itself stays where its reading is: the ramp stops there."""
+        if spec.ramp != "instrument" or not spec.readback:
+            return None
+        key = "%s.%s" % (inst.name, spec.name)
+        actual = inst.read(spec.readback)
+        if abs(inst.read(spec.name) - actual) <= spec.tol:
+            return None
+        inst.write(spec.name, actual)
+        return Result(True, "held", key, value=actual, message="%s held at %s%s" % (key, spec.show(actual), why))
 
     def _prefix(self, spec: ParamSpec) -> Template:
         t = self._prefixes.get(id(spec))
@@ -875,11 +1245,22 @@ class SafetyGate:
         def done(res: Result, **extra: Any) -> Result:
             return self._done(res, "raw", None, command=cmd, instrument=inst.name, **extra)
 
+        def refused(why: str) -> Result:
+            return done(Result(False, "refused", target, message="refused: " + why))
+
+        def asked(item: str) -> Result:
+            request = ApprovalRequest("Send raw command?", [item])
+            if not self.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                return done(Result(False, "declined", target, message="declined: %r not sent%s" % (cmd, note)))
+            return self._send(inst, cmd, target, done, "approved")
+
         try:
             for b in card.blocked:
                 if b.match(cmd) is not None:
-                    return done(Result(False, "refused", target,
-                                       message="refused: %r is blocked on %s (firmware/calibration class)" % (cmd, inst.name)))
+                    return refused("%r is blocked on %s (firmware/calibration class)" % (cmd, inst.name))
+            if _restricted(cmd) == "calibration":   # *CAL? is a query that calibrates
+                return refused("%r is blocked on %s (firmware/calibration class)" % (cmd, inst.name))
             if is_query(cmd, bool(card.connection.get("enq"))):
                 resp = inst.query_raw(cmd).strip()
                 shown = resp if len(resp) <= 80 else resp[:77] + "..."
@@ -891,10 +1272,13 @@ class SafetyGate:
                 try:
                     value = spec.from_wire(text)
                 except ValueError as e:
-                    return done(Result(False, "refused", target, message="refused: %s" % e))
+                    return refused(str(e))
                 res = self._set(inst.name, spec.name, value, True, self._who())
                 res.message = "raw %r → %s" % (cmd, res.message)
                 return res
+            for name, action in card.actions.items():   # the card's own named command: as do_action sends it
+                if len(action.send) == 1 and action.send[0].strip().lower() == cmd.strip().lower():
+                    return self.act(inst.name, name)
             for r in card.reset:
                 if r.match(cmd) is not None:
                     prep = self._to_safe(inst, wait=True)
@@ -903,33 +1287,67 @@ class SafetyGate:
                         return done(Result(False, bad[0].action, target, message="not sent: " + bad[0].message))
                     inst.write_raw(cmd)
                     return done(Result(True, "sent", target, message="%s: drives brought to safe, then sent %r" % (inst.name, cmd)))
+            restricted = _restricted(cmd)
             for spec in card.drives:
                 if spec.set_cmd is not None and self._prefix(spec).match(cmd) is not None:
-                    hands = self._hands_problem("%s.%s" % (inst.name, spec.name))
+                    key = "%s.%s" % (inst.name, spec.name)
+                    hands = self._hands_problem(key)
                     if hands:
-                        return done(Result(False, "refused", target, message="refused: %r not sent; %s" % (cmd, hands)))
-                    item = ("%s: %r touches drive %s but is not a plain %s setting, so limits can't be checked"
-                            % (inst.name, cmd, spec.name, spec.name))
-                    request = ApprovalRequest("Send raw command?", [item])
-                    if not self.ask(request):
-                        note = " (%s)" % request.note if request.note else ""
-                        return done(Result(False, "declined", target, message="declined: %r not sent%s" % (cmd, note)))
-                    return self._send(inst, cmd, target, done, "approved")
+                        return refused("%r not sent; %s" % (cmd, hands))
+                    if restricted:
+                        return refused(_RESTRICTED_WHY % (cmd, RESTRICTED[restricted], inst.name))
+                    return self._raw_drive_family(inst, spec, cmd, refused, asked)
+            if restricted:
+                return refused(_RESTRICTED_WHY % (cmd, RESTRICTED[restricted], inst.name))
             if card.status == "draft" and not inst.simulated:
                 hands = self._hands_problem(inst.name)
                 if hands:
-                    return done(Result(False, "refused", target, message="refused: %r not sent; %s" % (cmd, hands)))
-                item = "%s: %r is not on the (draft) card, so it can't be classified" % (inst.name, cmd)
-                if not self.ask(ApprovalRequest("Send raw command?", [item])):
-                    return done(Result(False, "declined", target, message="declined: %r not sent" % cmd))
-                return self._send(inst, cmd, target, done, "approved")
+                    return refused("%r not sent; %s" % (cmd, hands))
+                return asked("%s: %r is not on the (draft) card, so it can't be classified" % (inst.name, cmd))
+            if card.drives and not _HARMLESS.match(cmd):   # it could reach the sample: a person decides
+                hands = self._hands_problem(inst.name)
+                if hands:
+                    return refused("%r not sent; %s" % (cmd, hands))
+                return asked("%s: %r is not on its card, so Kelvin can't tell what it does; %s has drives that reach "
+                             "the sample (%s)" % (inst.name, cmd, inst.name, ", ".join(s.name for s in card.drives)))
             return self._send(inst, cmd, target, done, None, unmatched=True)
         except Exception as e:
             return done(Result(False, "error", target, message="%s: instrument error: %s" % (inst.name, e)))
 
+    def _raw_drive_family(self, inst: Instrument, spec: ParamSpec, cmd: str, refused: Any, asked: Any) -> Result:
+        """A raw command in a drive's family that isn't its plain setting (a sweep's stop value, a mode): Kelvin can't
+        be sure what it applies. Refused on a drive with an interlock (the interlock can't be checked against it), or
+        when the number it carries is beyond the drive's limits; otherwise a person sees that number against the
+        limits, and decides."""
+        key = "%s.%s" % (inst.name, spec.name)
+        locks = [lk.require.text for lk in self.lab.config.interlocks if lk.drive == key]
+        if locks:
+            return refused("%r touches drive %s, which an interlock guards (%s): only its plain setting can be checked "
+                           "against it, so it isn't sent" % (cmd, key, "; ".join(locks)))
+        problem = self._away_problem(inst, spec)
+        if problem:
+            return refused("%r not sent; %s" % (cmd, problem))
+        bits = ["%s: %r touches drive %s but is not a plain %s setting" % (inst.name, cmd, spec.name, spec.name)]
+        lim = inst.limits(spec.name) if spec.numeric else None
+        number = _number_in(cmd)
+        unit = " " + spec.unit if spec.unit else ""
+        if lim is not None and number is not None:
+            if not lim[0] <= number <= lim[1]:
+                return refused("%r carries %s%s, beyond %s's limits [%s, %s]%s" % (
+                    cmd, num(number), unit, key, num(lim[0]), num(lim[1]), unit))
+            bits.append("it carries %s%s, within %s's limits [%s, %s]%s (now %s)" % (
+                num(number), unit, key, num(lim[0]), num(lim[1]), unit, spec.show(self._current(inst, spec))))
+        else:
+            bits.append("Kelvin finds no value in it to check against %s's limits" % key)
+        g = self._guard_text(inst, spec)
+        if g:
+            bits.append("guards are not watched for it (%s)" % g)
+        return asked("; ".join(bits))
+
     def _send(self, inst: Instrument, cmd: str, target: str, done: Any, how: Optional[str], **extra: Any) -> Result:
+        stale, standing = self._drain(inst)
         inst.write_raw(cmd)
-        err = inst.instrument_error()
+        err = self._new_error(inst, stale, standing)
         if err:
             return done(Result(False, "error", target, message="%s: sent %r, instrument reported %s" % (inst.name, cmd, err)), **extra)
         return done(Result(True, "sent", target, message="%s: sent %r%s" % (inst.name, cmd, " (%s)" % how if how else "")), **extra)
