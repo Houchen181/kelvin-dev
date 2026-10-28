@@ -17,6 +17,7 @@ instruments:
     model: keithley_6221
     address: GPIB0::12::INSTR
     connect: {out: bias, ref: ref}
+    nanovoltmeter: nvm   # on its RS-232 and trigger link, for Delta
   li_xx:
     model: srs_sr830
     address: GPIB0::8::INSTR

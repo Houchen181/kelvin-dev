@@ -76,6 +76,46 @@ def test_sr830_keeps_its_reference_trigger(labsim_offline):
     assert lockin.handle("RSLP?") == "0"
 
 
+def test_6221_delta_with_its_2182a(labsim_offline):
+    """Kelvin's 6221 card puts the Delta currents to 0 on go-to-safe and runs Delta with the 2182A; labsim knew no
+    Delta command, so go-to-safe got -113. The commands are the card's, as sent (brackets left out)."""
+    from labsim.instrument import CommandError
+    bench = labsim_offline("ppms")   # its PPMS holds the film at 300 K, so R stays put while Delta runs
+    src, nvm = bench.instruments["isrc"], bench.instruments["nvm"]
+    with pytest.raises(CommandError):   # no reading before a Delta run
+        src.handle(":SENSe:DATA?")
+    assert src.handle(":SOURce:DELTa:HIGH 0;:SOURce:DELTa:LOW 0") is None   # go-to-safe
+    assert src.handle(":SOURce:DELTa:HIGH?;:SOURce:DELTa:LOW?") == "+0.000000E+00;+0.000000E+00"
+    assert src.handle(":SOURce:DELTa:NVPResent?") == "1"
+    src.handle(":SOURce:DELTa:HIGH 1e-6;:SOURce:DELTa:LOW -1e-6;:SOURce:DELTa:DELay 0.002;:SOURce:DELTa:COUNt 5")
+    src.handle(":SOURce:DELTa:ARM")
+    src.handle(":INITiate")
+    assert src.handle(":SOURce:DELTa:ARM?") == "1" and src.handle(":OUTPut?") == "1"
+    advance(bench, 2)   # five readings of 2 x (2 ms + the 2182A's 5 PLC)
+    assert src.delta["n"] == 5 and src.handle(":SOURce:DELTa:ARM?") == "0"
+    volts = float(src.handle(":SENSe:DATA?").split(",")[0])
+    world = bench.world
+    rxx = world.sample.resistances(world.cryo.sample, world.magnet.B, world.gate())[0]
+    assert volts == pytest.approx(rxx * 1e-6, abs=2e-8)   # the thermal EMF cancels...
+    src.handle(":SOURce:CURRent 1e-6")
+    assert float(nvm.handle(":READ?")) - rxx * 1e-6 == pytest.approx(3e-7, abs=2e-8)   # ...which a DC reading has
+    src.handle(":UNIT OHMS;:SOURce:DELTa:COUNt INF;:SOURce:CURRent 0")
+    src.handle(":SOURce:DELTa:ARM;:INITiate")
+    advance(bench, 1)
+    assert float(src.handle(":SENSe:DATA?").split(",")[0]) == pytest.approx(rxx, rel=1e-3)
+    src.handle(":SOURce:SWEep:ABORt")   # the card's delta_stop: back to the DC level, 0 A
+    assert not src.delta["running"] and world.bias().get(0.0, 0) == 0
+    src.handle(":SOURce:DELTa:ARM;:INITiate")
+    nvm.power(False)   # the 2182A goes away mid-run: Delta stops
+    advance(bench, 0.5)
+    assert not src.delta["running"] and src.handle(":SOURce:DELTa:NVPResent?") == "0"
+    with pytest.raises(CommandError):   # and won't arm without it
+        src.handle(":SOURce:DELTa:ARM")
+    other = labsim_offline("no_cards").instruments["isrc"]   # a 6221 with no 2182A on its RS-232
+    assert other.handle(":SOURce:DELTa:NVPResent?") == "0"
+    assert other.handle(":SOURce:DELTa:HIGH 0;:SOURce:DELTa:LOW 0") is None
+
+
 LAB = """lab: labsim transport
 instruments:
   gate:

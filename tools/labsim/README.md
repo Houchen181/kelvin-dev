@@ -55,6 +55,7 @@ Requirements: Python 3.9+ with `pyvisa` (and `pyvisa-py` if the program also doe
 - **Physics shared between instruments:**
   - A lock-in finds a signal only at the frequency the sample is actually excited at.
   - The 2400's compliance limits a gate as the leakage rises.
+  - A 6221 in Delta mode with its 2182A cancels the sample's thermal EMF, which a DC reading includes.
   - A Lake Shore's heater range caps how hot it can go.
   - Ramping a magnet too fast quenches it.
   - Too much gate voltage breaks the dielectric, and too much current burns the device.
@@ -122,7 +123,8 @@ def test_gate_sweep(labsim_bench, tmp_path):
 - Models follow the manuals as far as written here, not every command. A command a model doesn't know gives -113,
   which can look like a card bug. Check `python -m labsim log NAME` and the manual before you blame the program.
 - Not modelled:
-  - Keithley 6221/2182A delta mode;
+  - Keithley 6221 Pulse Delta and differential conductance (Delta is modelled: a bench names the 6221's
+    `nanovoltmeter:`);
   - pulse sequencers (Pulse Streamer, PulseBlaster), PICam/LightField, Harvesters/GenICam, OpenCV cameras;
   - Modbus, M Squared, TOPTICA, QICK, web-API instruments;
   - LAN discovery by broadcast or mDNS (sockets aren't advertised).
