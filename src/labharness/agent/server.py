@@ -307,8 +307,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def try_card(card: str, instrument: str) -> str:
         """Try a card on the instrument before using it: card is its YAML text, or the id of a card Kelvin has (one
         draft_card wrote); instrument is its name in the lab or its address (one the last scan did not find asks the
-        person first). Asks who it is and reads every reading; it sets nothing and skips reads that could start
-        something. Compare the values with what the person sees, fix the card, and try again."""
+        person first). Asks who it is, reads every reading, and writes one setting with the value it already has to
+        check the card's set command; it changes nothing, and skips reads that could start something (said as not
+        tried, never as checked). Compare the values with what the person sees, fix the card, and try again."""
         return rt.try_card(card, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)

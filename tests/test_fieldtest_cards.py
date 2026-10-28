@@ -756,3 +756,92 @@ def test_first_start_takes_the_collections_card_before_drafting(tmp_path):
         assert "card: acme/widget" in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
     finally:
         set_resource_manager(None)
+
+
+# ------------------------------------------------------------------ 17: trying a card, and a draft card's sets
+
+
+class Source6221Short:
+    """A source that takes its commands in short or long SCPI form, but not the long form a draft invented
+    (SOURce:WAVeform: -113, Undefined header, and nothing changes)."""
+
+    def __init__(self):
+        self.function, self.errors, self.sent = "SIN", [], []
+
+    def answer(self, cmd):
+        self.sent.append(cmd)
+        if cmd == "*IDN?":
+            return "KEITHLEY INSTRUMENTS INC.,MODEL 6221,1,D04"
+        if cmd == "SYST:ERR?":
+            return self.errors.pop(0) if self.errors else "0,\"No error\""
+        if cmd == "SOUR:WAVE:FUNC?":
+            return self.function
+        if cmd.startswith("SOUR:WAVE:FUNC "):
+            self.function = cmd.split()[1][:3].upper()
+            return None
+        if "?" in cmd:
+            self.errors.append("-113,\"Undefined header\"")
+            raise TimeoutError("VI_ERROR_TMO")
+        self.errors.append("-113,\"Undefined header\"")
+        return None
+
+
+def card_6221(set_cmd, status="draft"):
+    return parse_card({"card": 1, "id": "lab/6221", "model": "6221 (lab draft)", "kind": "current-source",
+                       "status": status, "error_query": "SYST:ERR?",
+                       "identify": {"idn": "MODEL 6221"},
+                       "parameters": {
+                           "function": {"kind": "measure", "type": "enum", "values": {"sine": "SIN", "square": "SQU"},
+                                        "set": set_cmd, "get": "SOUR:WAVE:FUNC?"},
+                           "V": {"kind": "measure", "unit": "V", "get": "MEAS:VOLT?"}}})
+
+
+def test_trying_a_card_checks_its_set_command_and_never_shows_a_skip_as_a_check():
+    """l01: a draft card's long forms (SOURce:WAVeform:FUNCtion) got -113 from the 6221, and the first run reported
+    the change as made; try_card had shown only readings, its skipped reads as green checks. Trying writes one
+    setting with the value it has and reads the error queue, and a read it skips is listed as not tried."""
+    from labharness import cardtry
+    from labharness.adapters import set_resource_manager
+    source = Source6221Short()
+    set_resource_manager(OneLine(Line(source.answer)))
+    try:
+        bad = cardtry.try_card(card_6221("SOURce:WAVeform:FUNCtion {value}"), "GPIB0::12::INSTR")
+        assert bad["write_check"]["ok"] is False and "-113" in bad["write_check"]["error"]
+        said = cardtry.summary(bad)
+        assert "set command: function FAILED" in said and "V: NOT TRIED" in said and "1 not tried" in said
+        good = cardtry.try_card(card_6221("SOUR:WAVE:FUNC {value}"), "GPIB0::12::INSTR")
+        assert good["write_check"] == {"name": "function", "value": "sine", "unit": "", "ok": True,
+                                       "sent": "SOUR:WAVE:FUNC SIN"}
+        assert source.function == "SIN"                                       # nothing changed
+        assert not any(c.startswith("MEAS") for c in source.sent)             # a read that measures: not sent
+    finally:
+        set_resource_manager(None)
+
+
+def test_a_draft_cards_switch_or_mode_is_read_back_before_it_counts_as_set():
+    """On a draft card, a mode its instrument didn't take is reported, not claimed (the card has no error query
+    here, which was the case on l01's draft)."""
+    card = parse_card(dict(card_6221("SOURce:WAVeform:FUNCtion {value}").data, error_query=None))
+    reg = CardRegistry()
+    reg.add(card)
+    source = Source6221Short()
+
+    class Backend:
+        simulated = False
+
+        def write(self, cmd):
+            source.answer(cmd)
+
+        def query(self, cmd):
+            return source.answer(cmd)
+
+        def close(self):
+            pass
+    lab = lab_of(reg, {"cs": {"card": "lab/6221", "address": "GPIB0::12::INSTR"}}, {"cs": Backend()})
+    gate = SafetyGate(lab, ScriptedApprover([True]))
+    r = gate.set("cs", "function", "square")
+    assert not r.ok and "the draft card's command may not be one it takes" in r.message, r.message
+    good = parse_card(dict(card_6221("SOUR:WAVE:FUNC {value}").data, error_query=None))
+    reg.put(good)
+    lab = lab_of(reg, {"cs": {"card": "lab/6221", "address": "GPIB0::12::INSTR"}}, {"cs": Backend()})
+    assert SafetyGate(lab, ScriptedApprover([True])).set("cs", "function", "square").ok and source.function == "SQU"

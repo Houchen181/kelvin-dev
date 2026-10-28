@@ -2324,8 +2324,10 @@ class LabRuntime:
         if address is None and ("::" in instrument or "://" in instrument):
             request = ApprovalRequest("Try a card on %s?" % instrument, [
                 "Kelvin's last scan did not find an instrument at %s. Trying the %s card asks it who it is and reads "
-                "its readings; it sets nothing." % (instrument, card.model)])
-            if not self.gate.auto_simple(request, "trying a card only asks the instrument who it is and reads it") \
+                "its readings; it changes nothing (one setting is written with the value it already has, to check "
+                "the card's set command)." % (instrument, card.model)])
+            if not self.gate.auto_simple(request, "trying a card asks the instrument who it is and reads it, and "
+                                                  "changes nothing") \
                     and not self.gate.ask(request):
                 note = " (%s)" % request.note if request.note else ""
                 return "declined: the person did not want Kelvin to try %s%s" % (instrument, note)

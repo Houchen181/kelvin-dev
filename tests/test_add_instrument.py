@@ -194,7 +194,7 @@ def test_try_card_at_an_address_the_scan_did_not_find_reads_without_asking(tmp_p
     rt.gate.approver = ScriptedApprover([])                                             # trying only reads
     assert "matches the card" in rt.try_card("srs/sr830", "GPIB0::8::INSTR")           # no scan yet
     [tried] = events(tmp_path, "ask")
-    assert tried["answer"] == "auto-approved" and "Trying the" in tried["request"] and "it sets nothing" in tried["request"]
+    assert tried["answer"] == "auto-approved" and "Trying the" in tried["request"] and "it changes nothing" in tried["request"]
     assert rt.try_card("srs/sr830", "lockin").startswith("Kelvin tries a card on an instrument in the lab")
     assert "matches the card" in rt.try_card("keithley/2400", "smu")                     # in the lab: nothing to say
     assert len(events(tmp_path, "ask")) == 1
