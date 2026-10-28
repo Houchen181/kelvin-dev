@@ -375,12 +375,13 @@ class Twin:
 
 class GenericTwin(Twin):
     """The twin of a card without one of its own: it keeps what is set, and a set point's reading (its readback)
-    goes straight to the new value, so a dry run that waits for it finishes; there is no physics to wait for."""
+    goes straight to the new value, so a dry run that waits for it finishes; there is no physics to wait for. A set
+    point the instrument ramps to by itself follows at the card's rate instead (Twin.evolve)."""
 
     def apply(self, param: str, value: Any) -> None:
         super().apply(param, value)
         spec = self.card.params.get(param)
-        if spec is not None and spec.readback and spec.readback in self.state:
+        if spec is not None and spec.readback and spec.readback in self.state and spec not in self.ramps:
             self.state[spec.readback] = value
 
 
