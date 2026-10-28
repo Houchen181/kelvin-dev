@@ -92,11 +92,55 @@
       let msg = "HTTP " + res.status, data = null;
       try { data = await res.json(); msg = data.error || msg; } catch (e) { /* not JSON */ }
       if (res.status === 401 && data && data.signin) setTimeout(() => location.reload(), 300);   // signed out elsewhere
+      if (res.status === 403 && data && data.pin && opts.body && !opts.noPin) {   // the lab owner's PIN: ask, try again
+        const pin = await askPin(msg);
+        if (pin) return api(path, Object.assign({}, opts, { body: Object.assign({}, opts.body, { pin }) }));
+      }
       const err = new Error(msg);
       err.data = data;
       throw err;
     }
     return res.json();
+  }
+  // the lab owner's PIN (accounts.py OwnerPin), for what widens Kelvin's reach: limits, the lab config, auto mode,
+  // unlocking Hands on the sample. "" when the person cancels.
+  function askPin(why, label) {
+    return new Promise((resolve) => {
+      const input = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "12",
+                                 "aria-label": label || "Lab owner's PIN" });
+      const cancel = h("button", { class: "btn", type: "button" }, "Cancel");
+      const form = h("form", { class: "pin-form" }, h("p", {}, why), input,
+        h("div", { class: "pin-actions" }, cancel, h("button", { class: "btn primary", type: "submit" }, "OK")));
+      const dlg = h("dialog", { class: "pin-dialog" }, form);
+      document.body.append(dlg);
+      const done = (v) => { if (dlg.open) dlg.close(); dlg.remove(); resolve(v); };
+      form.addEventListener("submit", (e) => { e.preventDefault(); done(input.value.trim()); });
+      cancel.addEventListener("click", () => done(""));
+      dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(""); });
+      dlg.showModal();
+      input.focus();
+    });
+  }
+  async function ownerPinState() {
+    try {
+      const r = await api("/api/owner-pin");
+      $("owner-pin-state").textContent = r.set
+        ? "Set: changing limits or the lab config, turning on auto mode and unlocking Hands on the sample ask for it."
+        : "Not set: anyone at this computer can change limits, turn on auto mode and unlock Hands on the sample.";
+      $("owner-pin-set").textContent = r.set ? "Change…" : "Set a PIN…";
+      $("owner-pin-remove").hidden = !r.set;
+      return r.set;
+    } catch (e) { $("owner-pin-state").textContent = e.message; return false; }
+  }
+  async function ownerPinChange(remove) {
+    const isSet = await ownerPinState();
+    const old = isSet ? await askPin("The lab owner's PIN now:") : "";
+    if (isSet && !old) return;
+    const pin = remove ? "" : await askPin("A new PIN for the lab's owner, 4 to 12 digits:", "New PIN");
+    if (!remove && !pin) return;
+    try { await api("/api/owner-pin", { body: { pin, old }, noPin: true }); toast(remove ? "PIN removed." : "PIN set."); }
+    catch (e) { toast(e.message); }
+    ownerPinState();
   }
 
   // ------------------------------------------------------------------ who is using Kelvin (accounts)
@@ -4985,6 +5029,7 @@
     $("collection").checked = !S.settings || S.settings.collection !== false;
     loadCollection();
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
+    ownerPinState();
     const idle = S.settings && S.settings.idle_off !== undefined ? S.settings.idle_off : 60, idleSel = $("idle-off");
     const idleValue = idle ? String(idle) : "off";
     if (![...idleSel.options].some((o) => o.value === idleValue)) idleSel.append(h("option", { value: idleValue }, "After " + idle + " minutes"));
@@ -5347,6 +5392,8 @@
     showEmpty(true);
     loadNewFolder();
 
+    $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
+    $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));
     $("composer").addEventListener("submit", (e) => {
       e.preventDefault();
       if (S.streaming && !$("input").value.trim()) api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {});

@@ -741,6 +741,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     data_dir = args.data_dir or home / ("agents" if (home / "accounts.json").exists() else "virtual-lab")
     runtime = LabRuntime(lab, approver, data_dir, envelope)
     runtime.cards_dir = Path.home() / "Kelvin" / "cards"
+    from ..accounts import OwnerPin
+    runtime.owner = OwnerPin(home)   # the lab owner's PIN, when one is set in the app
     from .. import envs
     envs.cleanup()
     envs.attach(envs.DRIVERS)   # makers' packages Kelvin installed for its built-in drivers (envs.py)

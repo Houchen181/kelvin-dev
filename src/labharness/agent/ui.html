@@ -117,7 +117,15 @@ async function api(path, body) {
     headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(res.status);
+  if (!res.ok) {
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* not JSON */ }
+    if (res.status === 403 && data && data.pin && body) {   // the lab owner's PIN: ask, try again
+      const pin = prompt(data.error + "\n\nThe lab owner's PIN:");
+      if (pin) return api(path, Object.assign({}, body, { pin }));
+    }
+    throw new Error((data && data.error) || res.status);
+  }
   return res.json();
 }
 

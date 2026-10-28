@@ -1,7 +1,8 @@
 """People using Kelvin on this computer: each signs in and has their own settings, chats, data folder and record.
 
 Everyone is equal: there is no administrator. Anyone at the computer can create an account; each account protects
-itself with an optional password. What is shared is the physical setup: the instruments (lab.yaml, cards, instrument
+itself with an optional password. An optional lab-owner PIN (OwnerPin) guards what widens Kelvin's reach over the
+instruments: limits and the lab config, auto mode, unlocking Hands on the sample. What is shared is the physical setup: the instruments (lab.yaml, cards, instrument
 folders) and the instrument log, which records every command with the name of the person who sent it.
 
     ~/Kelvin/
@@ -257,3 +258,69 @@ class Accounts:
     def data_dir(self, account: Dict[str, Any]) -> Path:
         """Their default data folder (they can choose another in Settings)."""
         return self.home / account["data"] if account.get("data") else self.dir(account) / "data"
+
+
+class OwnerPin:
+    """The lab owner's PIN, optional, kept on this computer (~/Kelvin/owner.json, a salted hash). Once it is set, a
+    person gives it to widen what Kelvin may do with the instruments: change limits or the lab config (its interlocks
+    and watches), turn on auto mode, unlock Hands on the sample. Narrowing never needs it (lowering a limit through
+    the config still does, as the config can't tell). Not a sign-in: everyone is otherwise equal at the computer. The
+    full roles model (owner, operator, trainee) comes later."""
+    TRIES = 5            # wrong PINs before it locks for a while
+    LOCKED_S = 300.0
+
+    def __init__(self, home: Any):
+        self.path = Path(home) / "owner.json"
+        self._wrong: List[float] = []
+        self._lock = threading.Lock()
+
+    def _data(self) -> Dict[str, Any]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) and data.get("hash") and data.get("salt") else {}
+        except (OSError, ValueError):
+            return {}
+
+    @property
+    def is_set(self) -> bool:
+        return bool(self._data())
+
+    def check(self, pin: Any) -> Optional[str]:
+        """None when no PIN is set or this is it; otherwise why not, in words for the person."""
+        data = self._data()
+        if not data:
+            return None
+        with self._lock:
+            now = time.monotonic()
+            self._wrong = [t for t in self._wrong if now - t < self.LOCKED_S]
+            if len(self._wrong) >= self.TRIES:
+                return "too many wrong PINs: try again in %d minutes" % max(1, round((self.LOCKED_S - (now - self._wrong[0])) / 60))
+            if not pin:
+                return "this needs the lab owner's PIN"
+            given = _hash(str(pin), bytes.fromhex(data["salt"]), int(data.get("iterations") or ITERATIONS))
+            if hmac.compare_digest(given, data["hash"]):
+                self._wrong.clear()
+                return None
+            self._wrong.append(now)
+            return "that is not the lab owner's PIN"
+
+    def set(self, new: Any, old: Any = None) -> None:
+        """Set, change or (new empty) remove the PIN; once one is set, only with it. ValueError says why not."""
+        why = self.check(old)
+        if why:
+            raise ValueError(why)
+        new = str(new or "").strip()
+        if not new:
+            try:
+                self.path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        if not re.fullmatch(r"\d{4,12}", new):
+            raise ValueError("a PIN is 4 to 12 digits")
+        salt = secrets.token_bytes(16)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"salt": salt.hex(), "hash": _hash(new, salt), "iterations": ITERATIONS,
+                                   "set": time.strftime("%Y-%m-%dT%H:%M:%S")}), encoding="utf-8")
+        os.replace(tmp, self.path)

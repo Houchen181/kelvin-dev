@@ -265,7 +265,10 @@ class ApprovalServer:
                 if self.path == "/api/mode":
                     try:
                         return self._json(200, server.runtime.set_approval_mode(str(body.get("mode")),
-                                                                               "human (approval page)"))
+                                                                               "human (approval page)",
+                                                                               pin=body.get("pin")))
+                    except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
+                        return self._json(403, {"error": str(e), "pin": True})
                     except ValueError as e:
                         return self._json(400, {"error": str(e)})
                 if self.path == "/api/stop":

@@ -27,7 +27,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Route
 
 from .._version import __version__
-from ..accounts import Accounts, cipher_for, has_legacy
+from ..accounts import Accounts, OwnerPin, cipher_for, has_legacy
 from .. import central
 from ..agent.approval import WebApprover
 from ..agent.runtime import SETUP_STEPS, LabRuntime, writable_folder
@@ -265,6 +265,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     envs.cleanup()               # environments removed while their files were in use
     envs.attach(envs.DRIVERS)    # the built-in drivers import their makers' packages from there
     runtime.keep_hands(settings.hands_on())               # a hands-on lock stays on across restarts
+    runtime.owner = OwnerPin(home)                        # the lab owner's PIN, when one is set
     collection = Collection(home)                         # the instrument collection's copy: ~/Kelvin/collection
 
     def collection_on() -> Optional[Collection]:
@@ -406,6 +407,24 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     def error(status: int, message: str) -> JSONResponse:
         return JSONResponse({"error": message}, status_code=status)
+
+    def needs_owner(body: Any) -> Optional[JSONResponse]:
+        """403 (the portal then asks for it) unless no lab owner's PIN is set or the body has it ({pin})."""
+        why = runtime.owner.check(body.get("pin") if isinstance(body, dict) else None) if runtime.owner else None
+        return JSONResponse({"error": why, "pin": True}, status_code=403) if why else None
+
+    async def owner_pin(request: Request) -> Response:
+        """GET: whether the lab owner's PIN is set. POST {pin, old}: set it, change it, or remove it (pin empty);
+        once one is set, only with it (old). On this computer only (phones never reach this)."""
+        if request.method == "POST":
+            body = await request.json()
+            try:
+                runtime.owner.set(body.get("pin"), body.get("old"))
+            except ValueError as e:
+                return JSONResponse({"error": str(e), "pin": True}, status_code=403 if runtime.owner.is_set else 400)
+            runtime.gate.log.write("owner_pin", by=person(request), account=runtime.user,
+                                   change="set" if runtime.owner.is_set else "removed")
+        return JSONResponse({"set": runtime.owner.is_set})
 
     async def index(request: Request) -> Response:
         # version-stamp the assets so a browser never runs a stale copy after an update
@@ -1299,6 +1318,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         else:
             if role_of(request) == "watch":
                 return error(403, "This phone can lock, not unlock. Unlock on the Kelvin computer.")
+            refused = needs_owner(body)   # before anything changes: the sample mounted, the lock
+            if refused:
+                return refused
             if "device" in body and role_of(request) == "owner":
                 pid = body.get("project") or None
                 try:
@@ -1309,7 +1331,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                         await asyncio.to_thread(runtime.unmount, by)
                 except KeyError as e:
                     return error(404, e.args[0])
-            lines += await asyncio.to_thread(runtime.hands_off, by)
+            try:
+                lines += await asyncio.to_thread(runtime.hands_off, by, body.get("pin"))
+            except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
+                return JSONResponse({"error": str(e), "pin": True}, status_code=403)
         settings.set_hands_on(runtime.hands)
         return JSONResponse({"hands_on": runtime.hands, "lines": lines, "mounted": runtime.mounted_view()})
 
@@ -2032,6 +2057,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(409, problem)
         use = body.get("use")
         by = "human (portal)"
+        if use not in ("virtual", "mine"):   # a new lab config, or limits marked reviewed: the owner's, when set
+            refused = needs_owner(body)
+            if refused:
+                return refused
         if body.get("reviewed"):   # a person reviewed the limits of the instruments Kelvin added
             if not lab_file.exists():
                 return error(400, "There is no lab config to review.")
@@ -2393,6 +2422,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if runtime.lab_info.get("kind") != "file" or not lab_file.exists():
             return error(409, "Limits are set for your own lab (My instruments); the virtual lab's are fixed.")
         body = await request.json()   # any time, a run or a chat going on too: the gate checks each change against them
+        refused = needs_owner(body)
+        if refused:
+            return refused
         card = runtime.lab.instruments[name].card
         changes: Dict[str, Any] = {}
         for p, lim in (body.get("limits") or {}).items():
@@ -2670,8 +2702,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def approval_mode(request: Request) -> Response:
         """Ask before every drive increase, or auto-approve low-risk ones. People only: no agent tool reaches this."""
         if request.method == "POST":
+            body = await request.json()
             try:
-                return JSONResponse(runtime.set_approval_mode(str((await request.json()).get("mode")), "human (portal)"))
+                return JSONResponse(runtime.set_approval_mode(str(body.get("mode")), "human (portal)",
+                                                              pin=body.get("pin")))
+            except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
+                return JSONResponse({"error": str(e), "pin": True}, status_code=403)
             except ValueError as e:
                 return error(400, str(e))
         return JSONResponse(runtime.approval_mode())
@@ -2857,6 +2893,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/incident", incident, methods=["POST"]),
+        Route("/api/owner-pin", owner_pin, methods=["GET", "POST"]),
         Route("/api/state", state),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/lab", lab_view, methods=["GET", "POST"]),

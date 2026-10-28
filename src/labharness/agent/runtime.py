@@ -303,6 +303,7 @@ class LabRuntime:
         self.mounted: Dict[str, Any] = self._load_mounted()   # the sample in the setup now (project, device, since)
         # a person's hands on the sample (who, since): every drive held at safe; the app keeps it across restarts
         self.hands: Optional[Dict[str, Any]] = None
+        self.owner: Any = None   # the lab owner's PIN when one is set (accounts.OwnerPin); set by the app
         self.protection_missing: List[str] = []   # the mounted device's protection names what this lab lacks
         # the mounted device's caps that are not in the instruments yet: written when Kelvin is next idle
         self.caps_waiting = False
@@ -1436,9 +1437,17 @@ class LabRuntime:
             self._refresh()
         return lines
 
-    def hands_off(self, by: str) -> List[str]:
+    def owner_check(self, pin: Any) -> None:
+        """PermissionError (why, in words) unless no owner's PIN is set or this is it (accounts.OwnerPin)."""
+        why = self.owner.check(pin) if self.owner is not None else None
+        if why:
+            raise PermissionError(why)
+
+    def hands_off(self, by: str, pin: Any = None) -> List[str]:
         """The person is done with the sample: drives may move again (each still within limits and approvals).
-        The mounted device's caps are written into the instruments again, in case one was replaced or reset."""
+        The mounted device's caps are written into the instruments again, in case one was replaced or reset. With
+        an owner's PIN set, only with it (PermissionError)."""
+        self.owner_check(pin)
         with self.lock:
             self.hands = None
             self.lab.hands_on = None
@@ -4108,10 +4117,13 @@ class LabRuntime:
             rule += ". Never automatic: " + ", ".join(never)
         return {"mode": "auto" if self.gate.auto else "ask", "fraction": cfg.auto_fraction, "rule": rule + "."}
 
-    def set_approval_mode(self, mode: str, by: str = "human") -> Dict[str, Any]:
-        """Only the portal and the approval page call this; no agent tool can. It resets to ask on every start."""
+    def set_approval_mode(self, mode: str, by: str = "human", pin: Any = None) -> Dict[str, Any]:
+        """Only the portal and the approval page call this; no agent tool can. It resets to ask on every start.
+        Turning auto mode on needs the owner's PIN when one is set (PermissionError); back to asking never does."""
         if mode not in ("ask", "auto"):
             raise ValueError("mode must be ask or auto")
+        if mode == "auto" and not self.gate.auto:
+            self.owner_check(pin)
         if (mode == "auto") != self.gate.auto:
             self.gate.auto = mode == "auto"
             self.gate.log.write("approval_mode", by=by, mode=mode)
