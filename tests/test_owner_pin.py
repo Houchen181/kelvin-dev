@@ -78,3 +78,35 @@ def test_the_portal_asks_for_the_pin_before_anything_widens(tmp_path):
     assert "owner_pin" in events
     js = (__import__("labharness.web.app", fromlist=["STATIC"]).STATIC / "app.js").read_text(encoding="utf-8")
     assert "function askPin(why, label)" in js and "data.pin && opts.body" in js
+
+
+def test_marking_a_card_reviewed_and_lifting_a_protection_need_the_pin_too(tmp_path):
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+    from labharness.web.app import create_app
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    gate = {"gates": [{"drive": "smu.V", "dielectric": "hBN", "thickness_nm": 20, "leak": "smu.I"}]}
+    rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=5), tmp_path / "data")
+    home = tmp_path / "Kelvin"
+    settings = Settings(home / "settings.json")
+    client = TestClient(create_app(rt, settings, ChatStore(home / "chats"), hosts=["testserver"], providers={}))
+    h = {"X-Kelvin-Token": settings.access_key}
+    with client:
+        p = client.post("/api/projects", json={"name": "Graphene"}, headers=h).json()
+        d4 = client.post("/api/projects/%s/devices" % p["id"], json={"name": "D4"}, headers=h).json()["devices"][0]
+        url = "/api/projects/%s/devices/%s" % (p["id"], d4["id"])
+        assert client.patch(url, json={"protection": gate}, headers=h).status_code == 200   # protecting: no PIN
+        client.post("/api/owner-pin", json={"pin": "2468"}, headers=h)
+        r = client.patch(url, json={"protection": {}}, headers=h)                         # lifting it: the PIN
+        assert r.status_code == 403 and r.json()["pin"]
+        assert client.patch(url, json={"protection": {}, "pin": "2468"}, headers=h).status_code == 200
+        client.patch(url, json={"protection": gate, "pin": "2468"}, headers=h)
+        assert client.post("/api/mount", json={"project": p["id"], "device": "D4"}, headers=h).status_code == 200
+        r = client.post("/api/mount", json={}, headers=h)                                 # taking it out: the PIN
+        assert r.status_code == 403 and rt.mounted.get("device_name") == "D4"
+        assert client.post("/api/mount", json={"pin": "2468"}, headers=h).status_code == 200 and not rt.mounted
+        r = client.post("/api/cards/status", json={"id": "virtual/source-meter", "status": "lab-verified"}, headers=h)
+        assert r.status_code == 403 and r.json()["pin"]                                    # marking reviewed: the PIN
+        r = client.post("/api/cards/status", json={"id": "nobody/card", "status": "draft"}, headers=h)
+        assert r.status_code != 403                                                        # back to draft: never

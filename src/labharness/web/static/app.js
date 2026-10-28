@@ -5034,6 +5034,7 @@
     const idleValue = idle ? String(idle) : "off";
     if (![...idleSel.options].some((o) => o.value === idleValue)) idleSel.append(h("option", { value: idleValue }, "After " + idle + " minutes"));
     idleSel.value = idleValue;
+    $("idle-off-all").checked = !!(S.settings && S.settings.idle_off_all);
     $("ask-folder").checked = !S.settings || S.settings.ask_folder !== false;
     $("data-choose").hidden = !hasPicker();
     const reportKinds = (S.settings && S.settings.report_kinds) || ["scan", "device", "project"];
@@ -5249,6 +5250,7 @@
     body.collection = $("collection").checked ? "on" : "off";
     body.auto_report = $("auto-report").value;
     body.idle_off = $("idle-off").value;
+    body.idle_off_all = $("idle-off-all").checked ? "on" : "off";
     body.ask_folder = $("ask-folder").checked ? "on" : "off";
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";

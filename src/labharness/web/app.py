@@ -358,7 +358,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     tasks: List[asyncio.Task] = []
 
     def configure_literature() -> None:
-        runtime.idle_off_s = settings.idle_off_minutes * 60 or None     # outputs left on idle go to safe after this
+        runtime.idle_off_s = settings.idle_off_minutes * 60 or None     # light left on idle goes to safe after this
+        runtime.idle_off_all = settings.get("idle_off_all") == "on"     # and other outputs too, when chosen
         runtime.literature.enabled = settings.get("literature") != "off"
         runtime.literature.openalex_key = settings.get("openalex_api_key") or ""
         runtime.scan_network = settings.get("scan_network") != "off"   # scans also look on the local network
@@ -1288,6 +1289,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             fields = {k: body.get(k) for k in ("name", "material", "description", "retired")}
             if "protection" in body:
                 fields["protection"] = protection.normalize(body.get("protection"), runtime.lab)
+                was = next((d.get("protection") for d in store.devices(project_key(request))
+                            if d["id"] == request.path_params["device_id"]), None) or {}
+                if was and fields["protection"] != was:   # lifting or changing a protection: the owner's, when set
+                    refused = needs_owner(body)
+                    if refused:
+                        return refused
             d = store.update_device(project_key(request), request.path_params["device_id"], **fields)
             if "protection" not in body:
                 return JSONResponse(d)
@@ -1384,6 +1391,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if request.method == "POST":
             body = await request.json()
             pid = body.get("project") or None
+            if (runtime.mounted or {}).get("protection"):   # taking out a protected device lifts its protection
+                refused = needs_owner(body)
+                if refused:
+                    return refused
             try:
                 if body.get("device"):
                     caps = (await asyncio.to_thread(runtime.mount, pid, store.find_device(pid, body["device"]),
@@ -1710,6 +1721,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def card_status(request: Request) -> Response:
         body = await request.json()
         card_id, status = str(body.get("id") or ""), str(body.get("status") or "")
+        if status != "draft":   # marked reviewed: its outputs stop asking each time, the owner's call when set
+            refused = needs_owner(body)
+            if refused:
+                return refused
         try:
             if card_id in builtin_ids():   # one of Kelvin's own: reviewed for this lab, kept with its content
                 card = runtime.lab.registry.get(card_id)

@@ -548,14 +548,15 @@
           </div>
           <div class="field">
             <label for="idle-off">Switch off outputs left idle</label>
-            <select id="idle-off" name="idle_off">
+            <select id="idle-off" name="idle_off" aria-describedby="idle-off-hint">
               <option value="15">After 15 minutes with nothing happening</option>
               <option value="30">After 30 minutes</option>
               <option value="60">After an hour</option>
               <option value="240">After 4 hours</option>
               <option value="off">Never</option>
             </select>
-            <span class="hint">When no command, run or queue has touched the lab for that long, Kelvin brings what reaches the sample (sources, excitations, lasers, RF) to safe and tells you. Temperature, field and positions stay.</span>
+            <label class="check"><input id="idle-off-all" type="checkbox"> Other outputs too (sources, excitations, RF)</label>
+            <span id="idle-off-hint" class="hint">When no command, run or queue has touched the lab for that long, Kelvin brings lasers and light sources to safe and tells you. Other outputs it only tells you about, unless you tick them too. Temperature, field and positions stay.</span>
           </div>
         </section>
         <section class="set-page" data-page="phone" hidden>

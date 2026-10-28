@@ -227,3 +227,23 @@ def test_no_dialog_stands_between_a_person_and_stop():
     assert "if (TYPED_STOP.test(text)) return hardStop();" in js
     phone = (STATIC / "mobile.js").read_text(encoding="utf-8")
     assert 'confirm("Stop' not in phone and 'confirm("Hands on' not in phone
+
+
+def test_a_stop_during_a_queue_step_ends_it_there_and_pauses_the_queue(tmp_path):
+    rt = real_runtime(tmp_path)
+    rt.queue_set_on_error("continue")
+    rt.queue_add("step: warm and field\nset: { smu.V: 2, magnet.B: 0.5 }\nwait: 600")
+    rt.queue_add(WATCH)
+    out = {}
+    worker = threading.Thread(target=lambda: out.update(said=rt.queue_start()), daemon=True)
+    worker.start()
+    asked = rt.approver.wait_for_pending(timeout=5)                    # the queue's one approval
+    rt.answer(asked["id"], True, "human (portal)", "portal")
+    t0 = time.time()
+    while rt.lab.read("smu", "V") == 0 and time.time() - t0 < 5:      # ramping at 0.5 V/s
+        time.sleep(0.05)
+    rt.stop("human (portal)")
+    while rt.queue.state != "paused" and time.time() - t0 < 10:
+        time.sleep(0.05)
+    assert rt.queue.state == "paused" and [i.status for i in rt.queue.items] == ["stopped", "waiting"]
+    assert rt.lab.read("magnet", "B") == 0 and rt.lab.read("smu", "V") < 2   # nothing after the stop

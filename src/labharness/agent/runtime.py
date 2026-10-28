@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import inspect
 import io
 import json
 import math
@@ -44,7 +45,8 @@ if TYPE_CHECKING:
     from ..catalog import Catalog
 
 MAX_WAIT_S = 3600
-IDLE_OFF_S = 3600.0   # outputs left on this long with nothing happening go to safe (None or 0: never)
+IDLE_OFF_S = 3600.0   # light left on this long with nothing happening goes to safe (None or 0: never)
+LIGHT = ("laser", "laser-driver", "light-source", "led", "lamp")   # card kinds whose output is light on the sample
 BACKGROUND_S = 5.0    # how often Kelvin looks for that, and (once, after a start) for what a restart left
 BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
@@ -61,6 +63,11 @@ SCRIPTS_NEXT = ("Next, with the person (nothing above was sent to any instrument
                 "(an outer loop, the outer axis), its readings the measure list, its waits the settle times, its "
                 "setup and its end the setup and after steps; say what it can't carry over (the script's own "
                 "processing, plotting). Never run the scripts.")
+
+
+def _light(card: Any) -> bool:
+    """A light source on the sample (a laser, a laser driver, an LED or lamp source)."""
+    return card.kind in LIGHT or "laser" in card.kind
 
 
 def _write_json(path: Path, data: Any) -> None:
@@ -139,8 +146,11 @@ def event_line(e: Dict[str, Any]) -> str:
             "%s %s" % (k, ", ".join(map(str, v)) if isinstance(v, list) else v) for k, v in e.items()
             if k in ("outputs", "runs", "queue", "alarms", "safe"))
     elif kind == "idle_off":
-        text = "outputs left on for %s with nothing happening put to safe: %s" % (e.get("idle"),
-                                                                                 "; ".join(e.get("steps") or []))
+        text = "left on for %s with nothing happening, put to safe: %s" % (e.get("idle"),
+                                                                          "; ".join(e.get("steps") or []))
+    elif kind == "idle_on":
+        text = "still on after %s with nothing happening (left as they are): %s" % (
+            e.get("idle"), ", ".join(e.get("still") or []))
     elif kind == "call_cancelled":
         text = "the client cancelled %s%s%s" % (e.get("tool"), "; its work stopped" if e.get("stopped") else "",
                                                 "; declined what it asked for" if e.get("declined") else "")
@@ -331,6 +341,7 @@ class LabRuntime:
         self._incident_due = True
         self._acted = False   # Kelvin drove something since it started: what is on now may be its own doing
         self.idle_off_s: Optional[float] = IDLE_OFF_S
+        self.idle_off_all = False   # other outputs left idle go to safe too (Settings); else people are told
         self.last_active = time.monotonic()   # the last command, run or queue item: outputs left on idle go to safe
         self._watching: Optional[threading.Thread] = None
         self._watching_stop = threading.Event()
@@ -1782,20 +1793,24 @@ class LabRuntime:
         from ..engine import _Abort
         step, q = load_step(item.text), self.queue
         gen = self.gate.stop_generation
+        # a stop ends the step's waits for its set points too (a cool-down), with a gate that takes the item's start
+        since = {"gen": gen} if "gen" in inspect.signature(self.gate._set).parameters else {}
         for instr, param, value in step.sets:
-            r = self.gate._set(instr, param, value, True, "queue:" + item.name)
-            if not r.ok:
-                q.mark(item, "failed", r.message)
-                return False, r.message
+            if self.gate.stop_generation != gen:
+                q.mark(item, "stopped", "stopped before %s.%s was set" % (instr, param))
+                return False, "stopped"
+            r = self.gate._set(instr, param, value, True, "queue:" + item.name, **since)
+            if not r.ok:   # a person's stop in the middle of it is a stop, not a failure to go on after
+                stopped = self.gate.stop_generation != gen
+                q.mark(item, "stopped" if stopped else "failed", r.message)
+                return False, "stopped" if stopped else r.message
         warnings: List[str] = []
         try:
             if step.stabilize:
                 self.engine._stabilize(step.stabilize, gen, warnings)
-            end = self.lab.clock.now() + step.wait
-            while self.lab.clock.now() < end:
-                if self.gate.stop_generation != gen:
-                    raise _Abort("stop requested")
-                self.lab.clock.sleep(min(1.0, end - self.lab.clock.now()))
+            stops = self.lab.stops.count
+            if self.gate.stop_generation != gen or not self.lab.stops.sleep(self.lab.clock, step.wait, stops):
+                raise _Abort("stop requested")   # a stop ends the wait at once, not at its next second
         except _Abort:
             q.mark(item, "stopped", "stopped while waiting")
             return False, "stopped"
@@ -3997,8 +4012,9 @@ class LabRuntime:
 
     def _idle_check(self) -> None:
         """Outputs left on with nothing happening for idle_off_s (no command, run or queue: a turn that died, a
-        usage limit, a person who left): they go to safe, as at Hands on (sources, excitations, light, RF; never
-        temperature, field or positions), and people are told."""
+        usage limit, a person who left). Light on the sample (lasers, light sources) goes to safe, and other outputs
+        (sources, excitations, RF) too when idle_off_all; the rest are told to people, not changed (a gate held on
+        purpose). Temperature, field and positions are never touched."""
         if not self.idle_off_s or time.monotonic() - self.last_active < self.idle_off_s:
             return
         if self.queue.state in ("running", "pausing") or self.setting_up or (self.live or {}).get("status") == "running":
@@ -4007,12 +4023,21 @@ class LabRuntime:
             return
         try:
             on = self._outputs_on()
-            if on:
-                idle = _dur(time.monotonic() - self.last_active)
-                lines = self._outputs_to_safe(sorted(on), "kelvin (idle %s)" % idle)
-                self.gate.log.write("idle_off", by="kelvin", idle=idle, was=sum(on.values(), []), steps=lines)
-                self.notifier("alarm", "Outputs left on for %s with nothing happening: put to safe" % idle,
+            off = sorted(n for n in on if self.idle_off_all or _light(self.lab.instruments[n].card))
+            told = sorted(n for n in on if n not in off)
+            idle = _dur(time.monotonic() - self.last_active)
+            if off:
+                lines = self._outputs_to_safe(off, "kelvin (idle %s)" % idle)
+                self.gate.log.write("idle_off", by="kelvin", idle=idle, was=sum((on[n] for n in off), []),
+                                    steps=lines)
+                self.notifier("alarm", "Left on for %s with nothing happening: put to safe" % idle,
                               "; ".join(lines)[:300])
+            if told:
+                was = sum((on[n] for n in told), [])
+                self.gate.log.write("idle_on", by="kelvin", idle=idle, still=was)
+                self.notifier("alarm", "Still on after %s with nothing happening: %s" % (idle, ", ".join(told)),
+                              "%s. Kelvin leaves them as they are; Stop, Hands on the sample or Settings → Switch "
+                              "off outputs left idle" % "; ".join(was)[:250])
         finally:
             self.last_active = time.monotonic()   # once per idle stretch
             self.lock.release()

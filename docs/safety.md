@@ -78,6 +78,10 @@ instruments:
     auto: never                     # a person approves every change on this instrument
 ```
 
+### The lab owner's PIN
+
+Everyone at the computer is equal, unless the lab sets an owner's PIN (Settings → **Instruments** → **Lab owner's PIN**, 4 to 12 digits; changing or removing it takes it). Once it is set, what widens Kelvin's reach over the instruments asks for it: changing an instrument's limits or saving the lab config (its interlocks and watches), marking limits or a card reviewed, turning on auto mode (also on the approval page), unlocking **Hands on the sample**, and lifting or changing a device's protection, including taking a protected device out. Narrowing never does: going back to asking, **Hands on the sample**, Stop, protecting a device, a card back to draft. Five wrong tries lock it for five minutes. Kelvin keeps a salted hash of it in `~/Kelvin/owner.json`; no agent tool reaches any of this. Roles (owner, operator, trainee) come later.
+
 ## Protecting the sample
 
 A finished device (a 2D heterostructure, a nanowire, a fragile flake) is often worth more than the setup. Most are lost to the same few accidents: a gate pushed past its dielectric's breakdown, a ramp that goes on while the leakage climbs, a spike when a source changes range or switches its output under bias, and a discharge while someone rewires. Kelvin guards against each.
@@ -115,7 +119,7 @@ Lab watches can't be removed from the portal or by the agent; they change only i
 
 **After a restart, Kelvin says what the stop left behind.** Once the instruments are connected, a card above the chat (and the agent's `lab_status`) lists what reaches the sample and was left on (a source's output, a laser, RF), runs it cut short (kept up to their last point), the queue item it was running, alarms that were on, and watches it couldn't bring back; with them, temperature, field and positions as they were. **Bring the outputs to safe** does that, as **Hands on the sample** would (temperature, field and positions stay as they are); **Dismiss** closes the card. When the work it cut short ran unattended (a queue), the outputs go to safe at once and the card says so.
 
-**Outputs left on with nothing happening go to safe.** When nothing has happened for an hour (no command, run or queue: a turn that died, a usage limit, a person who left), Kelvin brings what reaches the sample (sources, excitations, light, RF) to safe, records it and tells you; temperature, field and positions stay. Settings → **Switch off outputs left idle** sets the time (5 minutes to a day) or turns it off.
+**Light left on with nothing happening goes to safe.** When nothing has happened for an hour (no command, run or queue: a turn that died, a usage limit, a person who left), Kelvin brings lasers and light sources to safe, records it and tells you. Other outputs (sources, excitations, RF) it only tells you about, since a gate may be held on purpose, unless you tick them too. Temperature, field and positions stay. Settings → **Notifications** → **Switch off outputs left idle** sets the time (15 minutes to 4 hours) or turns it off.
 
 ```yaml
 watch:

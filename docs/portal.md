@@ -4,7 +4,7 @@ The portal is where you chat with Kelvin: the desktop app's window, or the site 
 
 ## Signing in
 
-Everyone who uses Kelvin on a lab computer has an account, and everyone is equal: there is no administrator or lab owner. Anyone at the computer can add themselves with **Add a person** on the sign-in screen.
+Everyone who uses Kelvin on a lab computer has an account, and everyone is equal: there is no administrator. A lab can set an owner's PIN that guards limits, auto mode and unlocking Hands on the sample ([safety.md](safety.md#the-lab-owners-pin)). Anyone at the computer can add themselves with **Add a person** on the sign-in screen.
 
 - **Yours alone:** your settings and API keys, ChatGPT sign-in, Kelvin hub connection, chats, projects and memory, your data folder (runs and reports), your queue, the sample you mounted, and your record (`events.jsonl`).
 - **Everyone's:** the instruments, the lab config, the instrument cards, the switches for setting up instruments and phone access, and the lab's **instrument log** (`~/Kelvin/instrument-log.jsonl`): every command and approval from everyone, with the name of whoever was signed in. The Lab panel's **Activity → Everyone** shows it.

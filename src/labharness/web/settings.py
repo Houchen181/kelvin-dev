@@ -31,10 +31,11 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "answer_words", "phone_relay", "ask_folder", "text_size",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
-                     "updates", "hub_old_runs", "collection", "idle_off"}
+                     "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
-       "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off"}
+       "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
+       "idle_off_all"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 IDLE_OFF_MINUTES = 60   # outputs left on this long with nothing happening go to safe (LabRuntime._idle_check)
@@ -231,8 +232,10 @@ class Settings:
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "answer_words":  # how long answers may be before Kelvin condenses them (brevity.py)
                 value = _answer_words(value)
-            if name == "idle_off":  # minutes before outputs left on with nothing happening go to safe, or off
+            if name == "idle_off":  # minutes before light left on with nothing happening goes to safe, or off
                 value = _idle_off(value)
+            if name == "idle_off_all":  # other outputs (sources, excitations, RF) too: off unless on
+                value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "text_size":  # the desktop window's zoom (desktop.py), as a factor
                 value = _text_size(value)
             if name == "ask_folder":  # the folder picker opens for each new chat (desktop app): on unless off
@@ -334,6 +337,7 @@ class Settings:
             "claude_code_path": self._user.get("claude_code_path", ""),
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
             "idle_off": self.idle_off_minutes,
+            "idle_off_all": self._lab.get("idle_off_all") == "on",
         }
 
     @property

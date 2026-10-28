@@ -129,23 +129,32 @@ def test_a_watch_whose_reading_the_lab_no_longer_has_is_dropped_and_said(tmp_pat
     assert "watches not back" in " ".join(rt.incident_lines())
 
 
-def test_outputs_left_on_with_nothing_happening_go_to_safe(tmp_path):
+def test_light_left_on_with_nothing_happening_goes_to_safe_and_other_outputs_are_told(tmp_path):
     rt = kelvin(build_virtual_lab(seed=1), tmp_path / "data")
     left_on(rt)
+    assert "on" in rt.set("laser", "emission", True)
     rt.idle_off_s = 60
     rt._idle_check()
-    assert rt.lab.read("smu", "output") is True                  # it was just used
+    assert rt.lab.read("laser", "emission") is True              # it was just used
     rt.last_active = time.monotonic() - 61
     rt.queue.state = "running"
     rt._idle_check()
-    assert rt.lab.read("smu", "output") is True                  # a queue is running: not idle
+    assert rt.lab.read("laser", "emission") is True              # a queue is running: not idle
     rt.queue.state = "idle"
     rt._idle_check()
-    assert rt.lab.read("smu", "output") is False and rt.lab.read("smu", "V") == 0
-    assert rt.lab.read("magnet", "B") == 0.5                      # only what reaches the sample
+    assert rt.lab.read("laser", "emission") is False             # light on the sample: off
+    assert rt.lab.read("smu", "output") is True                  # a source is only told about (a gate held on purpose)
+    assert rt.lab.read("magnet", "B") == 0.5                      # never field, temperature or positions
     [off] = [e for e in rt.gate.log.events() if e["type"] == "idle_off"]
-    assert off["by"] == "kelvin" and "smu.output on" in off["was"]
-    assert any(n["title"].startswith("Outputs left on for") for n in rt.notifier.notices)
+    assert off["by"] == "kelvin" and "laser.emission on" in off["was"]
+    [told] = [e for e in rt.gate.log.events() if e["type"] == "idle_on"]
+    assert "smu.output on" in told["still"]
+    titles = [n["title"] for n in rt.notifier.notices]
+    assert any(t.startswith("Left on for") for t in titles) and any(t.startswith("Still on after") for t in titles)
+    rt.idle_off_all = True                                        # Settings: other outputs too
+    rt.last_active = time.monotonic() - 61
+    rt._idle_check()
+    assert rt.lab.read("smu", "output") is False and rt.lab.read("smu", "V") == 0
     rt.idle_off_s = None
     left_on(rt)
     rt.last_active = time.monotonic() - 10 ** 6
