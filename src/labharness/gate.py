@@ -141,6 +141,9 @@ class SafetyGate:
         self.in_chat = False   # a portal chat's turn: the chat's own account of web text counts, not the clock's
         self._grants: Dict[str, Allowed] = {}
         self._standing: Dict[str, Allowed] = {}   # what a person approved for a whole queue of scans, while it runs
+        # the drive levels the running plan or queue item set: switching their enable on parks them at safe (_move),
+        # then puts them back (_reapply), so a run measures at what was approved, not at safe. None: no plan running
+        self._asked: Optional[Dict[str, Any]] = None
         self._undo: List[Tuple[str, str, Any]] = []
         self._stop_gen = 0
         self._prefixes: Dict[int, Template] = {}
@@ -437,18 +440,22 @@ class SafetyGate:
         """A queue's approval: every drive range its scans and steps use, approved once before it started. Scans
         inside it run without asking again; anything outside still asks."""
         old, self._standing = self._standing, dict(grants)
+        asked, self._asked = self._asked, {}
         try:
             yield
         finally:
             self._standing = old
+            self._asked = asked
 
     @contextmanager
     def preapproved(self, grants: Dict[str, Allowed]) -> Iterator[None]:
         old, self._grants = self._grants, dict(grants)
+        asked, self._asked = self._asked, {}
         try:
             yield
         finally:
             self._grants = old
+            self._asked = asked
 
     def plan_approval(self, drive_values: Dict[str, List[Any]]) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
         """For a plan's drive targets: lines to show the human, the ranges to grant, and refusals."""
@@ -569,13 +576,33 @@ class SafetyGate:
                         return self._done(Result(False, "declined", key, value=current, message=msg), "set", by)
                     how = "approved"
                 res = self._move(inst, spec, current, target, away=True, wait=wait, how=how)
+                if res.ok and spec.enables:
+                    res = self._reapply(inst, spec, res, wait, by)
         except Exception as e:
             res = Result(False, "error", key, message="%s: instrument error: %s" % (key, e))
             current = None
         undoable = res.ok and record_undo and res.action != "no-change" and current is not None
         if undoable and getattr(self._acting, "by", None) is None:
             self._undo.append((instr, param, current))
+        if res.ok and spec.is_drive and self._asked is not None:
+            self._asked[key] = target
         return self._done(res, "set", by)
+
+    def _reapply(self, inst: Instrument, spec: ParamSpec, res: Result, wait: bool, by: str) -> Result:
+        """An enable has just switched on, its levels parked at safe first (_move). Put back each level the running
+        plan or queue item set, through every check again (limits, interlocks, its approval): a plan that sets the
+        level before the switch would otherwise measure at safe while its approval shows the level."""
+        for dep_name in spec.enables:
+            dep = inst.spec(dep_name)
+            level = (self._asked or {}).get("%s.%s" % (inst.name, dep_name))
+            if level is None or dep.distance(level) == 0:
+                continue
+            r = self._set(inst.name, dep_name, level, wait, by, record_undo=False)
+            if not r.ok:
+                return Result(False, r.action, res.target, value=res.value, before=res.before,
+                              message="%s; but %s could not be put back: %s" % (res.message, dep_name, r.message))
+            res.message += "; %s put back to %s" % (dep_name, dep.show(level))
+        return res
 
     def _done(self, res: Result, method: str, by: Optional[str] = None, **extra: Any) -> Result:
         self.log.write("command", by=by or self._who(), method=method, target=res.target, action=res.action,
