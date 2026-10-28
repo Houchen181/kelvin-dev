@@ -106,7 +106,8 @@ def test_cards_say_where_the_makers_publish_their_manuals():
     makers = ("americanmagnetics.com", "coherent.com", "tek.com", "lakeshore.com", "qdusa.com", "thinksrs.com",
               "thorlabs.com", "yokogawa.com", "zhinst.com", "swabianinstruments.com", "rohde-schwarz.com", "keysight.com",
               "rigoltech.com", "svdcdn.com", "novatechsales.com", "windfreaktech.com",
-              "mymercurysupport.com")   # Oxford Instruments' Mercury support site
+              "mymercurysupport.com",   # Oxford Instruments' Mercury support site
+              "mks.com", "buschgroup.com")   # Newport's and Pfeiffer Vacuum's parent companies, which publish theirs
     real = [c for c in builtin_registry() if not c.id.startswith("virtual/") and c.manual]
     with_url = [c for c in real if c.manual_url]
     assert len(with_url) >= 28

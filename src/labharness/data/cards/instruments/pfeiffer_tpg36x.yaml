@@ -1,0 +1,75 @@
+card: 1
+id: pfeiffer/tpg36x
+model: Pfeiffer Vacuum TPG 361 / TPG 362 SingleGauge / DualGauge controller
+vendor: Pfeiffer Vacuum
+kind: vacuum-gauge
+status: community
+manual: "TPG 361 / TPG 362 Communication Protocol BG 5510 BEN/D (2018-08): 1.2 data transmission (ACK, ENQ), 1.5 PR1, PR2, ERR, 1.9.15 UNI, SEN, TID, 1.13.1 AYT"
+manual_url: "https://www.shop.buschgroup.com/api/empolis/resource/environment/project1_p/documents/pfeifferSharepointProd/2181-bg5510ben_d.pdf"
+identify:
+  query: AYT
+  idn: "^TPG ?36[12],"
+  example: "TPG362,PTG28290,44990000,010100,010100"
+connection: { baud_rate: 9600, framing: 8N1, read_termination: "\r\n", write_termination: "\r\n", timeout_ms: 3000,
+              enq: true }
+error_query: ERR
+
+parameters:
+  P1:
+    label: Pressure, gauge 1
+    kind: measure
+    unit: mbar
+    get: PR1
+    field: 1
+    description: In the controller's pressure unit, which this card takes to be mbar or hPa (the same numbers; unit says which). A missing gauge reads 2.0E-2 with status no sensor, so read status1 too.
+  status1:
+    label: Gauge 1 status
+    kind: measure
+    type: enum
+    get: PR1
+    field: 0
+    values: { ok: 0, underrange: 1, overrange: 2, "sensor error": 3, "sensor off": 4, "no sensor": 5,
+              "identification error": 6 }
+  P2:
+    label: Pressure, gauge 2
+    kind: measure
+    unit: mbar
+    get: PR2
+    field: 1
+    description: The second gauge of a TPG 362, in the same unit as P1
+  status2:
+    label: Gauge 2 status
+    kind: measure
+    type: enum
+    get: PR2
+    field: 0
+    values: { ok: 0, underrange: 1, overrange: 2, "sensor error": 3, "sensor off": 4, "no sensor": 5,
+              "identification error": 6 }
+  unit:
+    label: Pressure unit
+    kind: measure
+    type: enum
+    get: UNI
+    values: { mbar: 0, Torr: 1, Pa: 2, micron: 3, hPa: 4, V: 5 }
+    description: Set on the controller; this card reads P1 and P2 as mbar or hPa, and the health check says otherwise
+  gauges:
+    label: Gauge types
+    kind: measure
+    type: str
+    get: TID
+    description: The gauges connected (TPR/PCR Pirani, IKR cold cathode, PKR full range, ...)
+
+display:
+  headline: P1
+
+health:
+  - query: UNI
+    expect: "^[04]$"
+raw:
+  blocked: [SEN, UNI, SC1, SC2, SP1, SP2, SP3, SP4, DGS, CAL, CF1, CF2, CDA, OFC, FIL, FSR, GAS, PRE, PUC, EVA,
+            RES, SAV, SCM, BAU, NAD, PRO, ETH, WDT, LOC, COM, LCM, ADC, DIS, EEP, EPR, IOT, TAI, TKB]
+notes:
+  - "Written from the TPG 36x Communication Protocol (BG 5510) and tried on labsim's TPG 362; not yet on a real unit, nor on a TPG 361 (one gauge: its P2 readings may fail, so leave them out in this lab's version of the card)."
+  - "RS-485, USB (a COM port) or LAN at 9600 baud, 8N1 (the protocol's defaults). Each mnemonic is acknowledged (ACK) and its answer sent on ENQ; Kelvin passes over the readings the controller sends by itself (COM mode)."
+  - "Read-only by design: switching gauges on or off (SEN), degassing, the setpoints and the pressure unit are left to the front panel. A cold-cathode gauge switched on at high pressure wears out."
+  - "The pressure unit must be mbar or hPa (UNI 0 or 4) for the readings' unit to be right; the health check refuses any other."

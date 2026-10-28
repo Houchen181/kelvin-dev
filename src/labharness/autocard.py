@@ -577,6 +577,17 @@ def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, a
     return text, changed, key, notes
 
 
+def draft_id(entry_id: str, model: str, taken: Any) -> str:
+    """An id for a drafted card of a model whose collection entry's id Kelvin's own card has: the entry's maker, then
+    the model (keithley/6220 under keithley/6221), not one of `taken`."""
+    vendor = entry_id.split("/")[0]
+    name = re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-") or "instrument"
+    card_id, n, taken = "%s/%s" % (vendor, name), 2, set(taken)
+    while card_id in taken:
+        card_id, n = "%s/%s-%d" % (vendor, name, n), n + 1
+    return card_id
+
+
 def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: Optional[Fetch] = None,
               builtin_ids: Any = (), log: Callable[[str], None] = lambda m: None,
               search: Optional[Callable[[str], List[str]]] = None, catalog: Any = None) -> Dict[str, Any]:
@@ -592,6 +603,14 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
     idn = str(found.get("idn") or "")
     entry = catalog.instrument_for(idn) if catalog is not None and idn else None
     maker, model = maker_model(idn) if idn else ("", "")
+    if entry and str(entry.get("id")) in set(builtin_ids):
+        # Kelvin has a card under the collection's id, and it doesn't fit this instrument (the scan would have matched
+        # it): a model the entry also covers, such as a 6220 under the 6221's. The draft gets an id of its own, and
+        # its identity from the instrument's reply, so it never takes the instruments Kelvin's card fits.
+        bare = re.sub(r"(?i)^model\s*", "", model).strip() or str(entry.get("model") or "")
+        entry = {k: v for k, v in entry.items() if k != "identify"}
+        entry.update(id=draft_id(str(entry["id"]), bare, builtin_ids),
+                     name="%s %s" % (str(entry.get("maker") or maker).split(" (")[0], bare))
     if entry and not (maker and model):
         maker, model = str(entry.get("maker") or ""), str(entry.get("model") or "")
     if not maker or not model:

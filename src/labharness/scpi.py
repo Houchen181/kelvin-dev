@@ -113,7 +113,8 @@ class Template:
         self.has_value = "{value}" in text
         self.is_query = "?" in text
         self.header = re.split(r"[\s{]", text, maxsplit=1)[0]
-        pattern = r"^\s*" + (re.escape(self.header) + r"(?=$|[\s;,])" if prefix else _rest(text) + r"\s*$")
+        # a family covers the command with its value run in too: Newport's 1PW1 is 1PW, as 1PA12.5 is 1PA{value}
+        pattern = r"^\s*" + (re.escape(self.header) + r"(?=$|[\s;,]|[-+0-9.])" if prefix else _rest(text) + r"\s*$")
         self._re = re.compile(pattern, re.IGNORECASE | re.S)
 
     def match(self, command: str) -> Optional[str]:

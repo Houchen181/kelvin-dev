@@ -231,7 +231,8 @@ class Lab:
                     problems.append("instrument reports %s" % err)
                 dead = []
                 for spec in card.params.values():  # every reading once (traces are slow, frames are files: skipped)
-                    if spec.kind != "measure" or spec.get_cmd is None or spec.type in ("trace", "image"):
+                    if spec.kind != "measure" or spec.get_cmd is None or spec.type in ("trace", "image") \
+                            or spec.acquires:   # an acquisition runs only when asked or measured, as for a snapshot
                         continue
                     try:
                         inst.read(spec.name)

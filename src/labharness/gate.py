@@ -859,7 +859,7 @@ class SafetyGate:
                         out.append(Result(True, "held", key, value=actual, message="%s held at %s" % (key, spec.show(actual))))
                 continue
             current = self._current(inst, spec)
-            if spec.distance(current) == 0:
+            if current is not None and spec.distance(current) == 0:   # unknown (no read-back): sent to safe anyway
                 continue
             out.append(self._move(inst, spec, current, spec.safe, away=False, wait=wait, how="safe state"))
         return out

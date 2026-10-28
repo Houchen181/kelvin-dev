@@ -10,9 +10,11 @@ notes:
   - "One lab entry per axis, with vars: {axis: 1} (1-7): entries on the same controller share one connection."
   - "Open loop: the controller can't say where an axis is. Steps counts the steps Kelvin made since it connected; setting it steps by the difference and waits until the axis stops."
   - "Offset is the DC voltage on the piezo for fine scanning (modes offs, stp+, stp-; the ANM150 has none). It is ramped and asks before it rises; tighten its limit in the lab config to what your positioner takes at your temperature."
+  - "Kelvin checks who it is with the controller's own ver command: the ANC300's command line has no *IDN?, as its command reference lists. Not yet checked on a real controller."
 identify:
-  idn: "^attocube,ANC300"
-  example: "attocube,ANC300,ANC300B-C-1234"
+  query: ver
+  idn: "^attocube ANC300"
+  example: "attocube ANC300 controller version 1.1.0-1304 2013-10-17 08:16"
 vars:
   axis: { default: "1", label: "Axis (1-7)" }
 

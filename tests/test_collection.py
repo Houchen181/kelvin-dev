@@ -23,7 +23,7 @@ from test_hardware import Bus, Device
 
 A, B = "a" * 40, "b" * 40   # two commits of the public repository
 MANUAL = "https://download.tek.com/manual/622x-901-01.pdf"
-IDN = "KEITHLEY INSTRUMENTS INC.,MODEL 6221,4321,D04 /700x"
+IDN = "KEITHLEY INSTRUMENTS INC.,MODEL 6220,4321,D04 /700x"   # a 6220: Kelvin has a card for the 6221 only
 WIDGET = """card: 1
 id: acme/widget
 model: ACME Widget source
@@ -36,8 +36,8 @@ parameters:
   I: { label: Current, kind: measure, unit: A, get: "CURR?" }
 """
 CURRENT_SOURCE = {   # an instrument the collection knows, with no card yet
-    "id": "keithley/6221", "maker": "Keithley", "model": "6221", "name": "Keithley 6221 AC and DC current source",
-    "kind": "current-source", "identify": {"idn": "^KEITHLEY INSTRUMENTS INC\\.,\\s*MODEL 622[01],"}, "card": None,
+    "id": "keithley/6220", "maker": "Keithley", "model": "6220", "name": "Keithley 6220 DC current source",
+    "kind": "current-source", "identify": {"idn": "^KEITHLEY INSTRUMENTS INC\\.,\\s*MODEL 6220,"}, "card": None,
     "manuals": [{"title": "Model 6220/6221 Reference Manual", "url": MANUAL, "access": "public"},
                 {"title": "Service manual", "url": "https://www.tek.com/service-6221.pdf", "access": "sign-in"}]}
 LAB = """lab: Test bench
@@ -326,10 +326,10 @@ def test_a_scan_names_an_instrument_the_collection_knows(tmp_path):
     c = synced(tmp_path, catalog=[CURRENT_SOURCE])
     bus = Bus({"GPIB0::12::INSTR": Device(idn=IDN)})
     found = identify("GPIB0::12::INSTR", builtin_registry(), bus, catalog=c)
-    assert found.card_id is None and found.collection == "keithley/6221" and found.kind == "current-source"
-    assert found.model == "Keithley 6221 AC and DC current source" and found.manuals == [MANUAL]   # public ones only
-    assert found.suggest_name() == "isrc" and MANUAL in found.line() and "keithley/6221" in found.line()
-    assert reason([found], Survey()).startswith("The Keithley 6221 AC and DC current source answered, but Kelvin")
+    assert found.card_id is None and found.collection == "keithley/6220" and found.kind == "current-source"
+    assert found.model == "Keithley 6220 DC current source" and found.manuals == [MANUAL]   # public ones only
+    assert found.suggest_name() == "isrc" and MANUAL in found.line() and "keithley/6220" in found.line()
+    assert reason([found], Survey()).startswith("The Keithley 6220 DC current source answered, but Kelvin")
     plain = identify("GPIB0::12::INSTR", builtin_registry(), bus)          # the collection off: as before
     assert plain.collection == "" and plain.model == "" and "no card matches" in plain.line()
     assert all("?" in cmd for cmd in bus.devices["GPIB0::12::INSTR"].sent)   # only asked who it is
@@ -339,10 +339,10 @@ def test_setup_names_what_it_found_but_has_no_card_for(tmp_path):
     from labharness.autosetup import AutoSetup
     from test_autosetup import FakeSettings, runtime_for
     rt = runtime_for(tmp_path)
-    unknown = [{"address": "GPIB0::12::INSTR", "idn": IDN, "card_id": None, "collection": "keithley/6221",
+    unknown = [{"address": "GPIB0::12::INSTR", "idn": IDN, "card_id": None, "collection": "keithley/6220",
                 "model": CURRENT_SOURCE["name"], "kind": "current-source", "how": "no card yet"}]
     status = AutoSetup(rt, FakeSettings(auto_cards="off"), tmp_path, scan=lambda: unknown).run()
-    assert "no card for it yet (Keithley 6221 AC and DC current source)" in status["message"]
+    assert "no card for it yet (Keithley 6220 DC current source)" in status["message"]
 
 
 COMMANDS = ("<p>SOURce:CURRent:AMPLitude &lt;n&gt; sets the amplitude; SOURce:CURRent:AMPLitude? reads it. "
@@ -410,19 +410,19 @@ def test_a_drafted_card_is_named_as_the_collection_names_it(tmp_path):
         return DRAFTED, "test:model"
     r = autocard.make_card({"address": "GPIB0::12::INSTR", "idn": IDN}, tmp_path / "cards", ask,
                            lambda url: REFERENCE if url == MANUAL else pytest.fail(url), kelvin_ids(c), catalog=c)
-    assert r["card_id"] == "keithley/6221" and r["kind"] == "current-source", r
-    assert r["model"] == "Keithley 6221 AC and DC current source" and r["manual"]["url"] == MANUAL
-    assert "keithley/6221 in Kelvin's instrument collection" in prompts[0] and "4321" not in prompts[0]
-    card, problems, _ = carddraft.check((tmp_path / "cards" / "keithley_6221.yaml").read_text(encoding="utf-8"))
+    assert r["card_id"] == "keithley/6220" and r["kind"] == "current-source", r
+    assert r["model"] == "Keithley 6220 DC current source" and r["manual"]["url"] == MANUAL
+    assert "keithley/6220 in Kelvin's instrument collection" in prompts[0] and "4321" not in prompts[0]
+    card, problems, _ = carddraft.check((tmp_path / "cards" / "keithley_6220.yaml").read_text(encoding="utf-8"))
     assert problems == [] and card.status == "draft" and card.manual_url == MANUAL
     assert card.idn_pattern == CURRENT_SOURCE["identify"]["idn"]           # the collection's, which fits the reply
 
     gh = GitHub()   # later the collection gets a reviewed card for the model: it replaces Kelvin's draft
-    reviewed = DRAFTED.strip("`\n").replace("yaml\n", "", 1).replace("keithley/model-6221", "keithley/6221").replace(
+    reviewed = DRAFTED.strip("`\n").replace("yaml\n", "", 1).replace("keithley/model-6221", "keithley/6220").replace(
         "kind: source", "kind: current-source")
     gh.publish(B, cards=[reviewed])
     c.sync(gh)
-    assert lab_registry(tmp_path, c).get("keithley/6221").status == "community"
+    assert lab_registry(tmp_path, c).get("keithley/6220").status == "community"
 
 
 # ------------------------------------------------------------------ experiments

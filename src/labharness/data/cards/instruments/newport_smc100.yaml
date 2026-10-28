@@ -1,0 +1,102 @@
+card: 1
+id: newport/smc100
+model: Newport SMC100CC / SMC100PP single-axis motion controller
+vendor: Newport (MKS)
+kind: motion-stage
+status: community
+manual: "SMC100CC & SMC100PP User's Manual EDH0206En2062 (09/26): 2.7 serial settings, 5.2 syntax, 5.5 command set (OR, PA, ST, TE, TP, TS, VA, VE, ID)"
+manual_url: "https://api.p1.mks.com/medias/sys_master/resources/hec/h2b/10211813294110/SMC100CC_and_SMC100PP_-_User_Manual/SMC100CC-and-SMC100PP-User-Manual.pdf"
+identify:
+  query: "{controller}VE"
+  idn: "^{controller}VE\\s*SMC"
+  example: "1VE SMC_CC - Controller-driver version 3. 0. 0"
+connection: { baud_rate: 57600, framing: 8N1, read_termination: "\r\n", write_termination: "\r\n", timeout_ms: 3000 }
+error_query: "{controller}TE"
+no_error: "TE@$"
+vars:
+  controller: { default: "1", label: "Controller address (1-31; 1 unless controllers share a port over RS-485)" }
+
+parameters:
+  position:
+    label: Target position
+    kind: measure
+    unit: mm
+    set: "{controller}PA{value}"
+    get: "{controller}PA?"
+    parse: "PA\\s*([-+0-9.eE]+)"
+    ramp: instrument
+    readback: position_actual
+    tol: 0.002
+    rate_param: velocity
+    timeout: 600
+    description: An absolute move (PA), in the stage's units (mm for linear stages); Kelvin waits until the stage is there. Moves are refused until the stage is homed (do_action home) and outside the controller's software limits.
+  position_actual:
+    label: Position
+    kind: measure
+    unit: mm
+    get: "{controller}TP"
+    parse: "TP\\s*([-+0-9.eE]+)"
+    description: Where the encoder says the stage is (TP)
+  velocity:
+    label: Velocity
+    kind: measure
+    unit: mm/s
+    set: "{controller}VA{value}"
+    get: "{controller}VA?"
+    parse: "VA\\s*([-+0-9.eE]+)"
+    description: The velocity of the following moves (not kept after a power cycle); at most the value stored in the controller
+  state:
+    label: Controller state
+    kind: measure
+    type: enum
+    get: "{controller}TS"
+    parse: "TS[0-9A-Fa-f]{4}([0-9A-Fa-f]{2})"
+    values: { "not referenced (reset)": "0A", "not referenced (from homing)": "0B",
+              "not referenced (from configuration)": "0C", "not referenced (from disable)": "0D",
+              "not referenced (from ready)": "0E", "not referenced (from moving)": "0F",
+              "not referenced (stage error)": "10", "not referenced (from jogging)": "11", configuration: "14",
+              "homing (remote)": "1E", "homing (keypad)": "1F", moving: "28", "ready (from homing)": "32",
+              "ready (from moving)": "33", "ready (from disable)": "34", "ready (from jogging)": "35",
+              "disable (from ready)": "3C", "disable (from moving)": "3D", "disable (from jogging)": "3E",
+              "jogging (from ready)": "46", "jogging (from disable)": "47" }
+    description: The controller's state (TS); moves need ready, which homing reaches
+  positioner_error:
+    label: Positioner error bits
+    kind: measure
+    type: str
+    get: "{controller}TS"
+    parse: "TS([0-9A-Fa-f]{4})"
+    description: "0000 when fine. Bits (hex): 0001 negative end of run, 0002 positive end of run, 0004 peak current limit, 0008 RMS current limit, 0010 short circuit, 0020 following error, 0040 homing time-out, 0080 wrong ESP stage, 0100 DC voltage too low, 0200 80 W output power exceeded"
+  stage:
+    label: Stage
+    kind: measure
+    type: str
+    get: "{controller}ID?"
+    parse: "ID\\s*(.*)"
+    description: The positioner the controller is configured for (ID)
+
+actions:
+  home:
+    send: "{controller}OR"
+    label: Home search (moves the stage to its reference)
+    drives: true
+  stop:
+    send: "{controller}ST"
+    label: Stop the motion
+
+display:
+  headline: position_actual
+
+raw:
+  blocked: ["{controller}PW", "{controller}ZX", "{controller}SU", "{controller}SA", "{controller}RS",
+            "{controller}SL", "{controller}SR", "{controller}HT", "{controller}QI", "{controller}DV",
+            "{controller}FR", "{controller}KP", "{controller}KI", "{controller}KD", "{controller}KV",
+            "{controller}FE", "{controller}FF", "{controller}FD", "{controller}SC", "{controller}BA",
+            "{controller}BH", "{controller}OT", "{controller}OH"]
+notes:
+  - "Written from the SMC100CC/PP User's Manual and tried on labsim's SMC100; not yet on a real unit. Units are the stage's (mm for linear stages, degrees for rotation stages): label the lab's limits in them."
+  - "RS-232 (57600 baud, 8N1, CR LF) or the SMC-USB adapter's COM port. The manual asks for Xon/Xoff flow control, which a card can't set; replies to single commands don't need it."
+  - "After power-up the controller is not referenced and refuses moves (TS 0A): home it once with do_action home (it asks you; the stage moves to its reference switch). The controller keeps its own software limits (SL, SR); set the lab's position limits inside them, to what the stage and setup allow."
+  - "A move (position) returns once position_actual is within tol of the target, after the stage has moved at its velocity."
+  - "The error query TE answers 1TE@ for no error; any other letter is the last command's error (C: out of range, H: not homed)."
+  - "Several controllers on one port (RS-485 chain): one lab entry each, with vars: {controller: '2'}."

@@ -199,7 +199,8 @@ class ParamSpec:
                 if s == name.lower() or s == str(code).lower():
                     return name
             for name, code in (self.values or {}).items():   # an SCPI reply in short form: SIN for SINusoid
-                short = re.match(r"[A-Z]*", str(code)).group(0)
+                m = re.match(r"([A-Z]*)[a-z]*(\d*)$", str(code))   # with its number: ARB1 for ARBitrary1
+                short = m.group(1) + m.group(2) if m and m.group(1) else re.match(r"[A-Z]*", str(code)).group(0)
                 if short and short != str(code) and s == short.lower():
                     return name
             raise ValueError("%s must be one of %s, got %r" % (self.name, ", ".join(self.values or {}), value))
