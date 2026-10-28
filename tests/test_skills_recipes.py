@@ -1,5 +1,5 @@
 """Lab know-how: skills (procedures in words) and recipes (staged measurements that check their own results), kept
-per person and per project once a person approves, and Kelvin's own skills that come with it."""
+per person and per project (shown in the chat when kept), and Kelvin's own skills that come with it."""
 import pytest
 
 pytest.importorskip("numpy")
@@ -111,27 +111,22 @@ def test_kelvins_own_skills_are_listed_and_read(parts):
     assert {i["name"] for i in listed if i["scope"] == "kelvin"} >= {"set-up-an-instrument", "check-a-result"}
 
 
-def test_a_skill_and_a_recipe_are_kept_once_a_person_approves(parts):
+def test_a_skill_and_a_recipe_are_kept_and_shown_in_the_chat(parts):
     runtime_, settings, store = parts
     project = client_project = None
     steps = "1. Ramp the gate to 0 V.\n2. Sweep ±1 V in 11 points.\n3. Keep the peak."
     main = bot("main", [tool("save_skill", {"name": "Gate Check", "description": "Checking the gate before a run",
                                             "steps": steps}), say("Kept."),
                         tool("save_recipe", {"recipe": GATE}, "c2"), say("Kept it too."),
-                        tool("save_skill", {"name": "declined", "description": "x", "steps": "y"}, "c3"), say("Ok."),
                         tool("run_recipe", {"recipe": "find-gate-peak", "values": {"span": 0.5}}, "c4"), say("Ran."),
                         tool("run_recipe", {"recipe": "unknown-one"}, "c5"), say("Hm.")])
     client, headers = client_for(parts, {"main": main})
     with client:
         project = client.post("/api/projects", json={"name": "Graphene"}, headers=headers).json()
         chat = client.post("/api/chats", json={"model": "main:m1", "project": project["id"]}, headers=headers).json()
-        human(runtime_.approver, [True])
-        first = stream_turn(client, headers, chat["id"], "keep that procedure", "main:m1")
-        human(runtime_.approver, [True])
+        first = stream_turn(client, headers, chat["id"], "keep that procedure", "main:m1")   # drives nothing: no question
         stream_turn(client, headers, chat["id"], "and the recipe", "main:m1")
-        human(runtime_.approver, [False])
-        stream_turn(client, headers, chat["id"], "and this", "main:m1")
-        human(runtime_.approver, [True] * 30)
+        human(runtime_.approver, [True] * 30)                                   # running it drives the sample
         ran = stream_turn(client, headers, chat["id"], "run it", "main:m1")
         stream_turn(client, headers, chat["id"], "and the other", "main:m1")
         mine = client.get("/api/know?scope=%s" % project["id"], headers=headers).json()["items"]
@@ -139,15 +134,15 @@ def test_a_skill_and_a_recipe_are_kept_once_a_person_approves(parts):
         gone = client.delete("/api/know/skill/%s/gate-check" % project["id"], headers=headers)
         kelvins = client.delete("/api/know/skill/global/check-a-result", headers=headers)
         client.delete("/api/projects/%s" % project["id"], headers=headers)
-    ask = next(e for e in first if e["type"] == "approval")
-    assert ask["title"] == "Keep the skill “gate-check” for this project?" and ask["items"][1] == "1. Ramp the gate to 0 V."
+    shown = next(e for e in first if e["type"] == "approval")                  # in the chat, approved by Kelvin itself
+    assert shown["auto"] and shown["title"] == "Keep the skill “gate-check” for this project?"
+    assert shown["items"][1] == "1. Ramp the gate to 0 V."
     assert {(i["kind"], i["name"]) for i in mine} == {("skill", "gate-check"), ("recipe", "find-gate-peak")}
     assert not [i for i in everyone if i["scope"] == "global"]                  # kept for the project only
     results = [r for m in store.load(chat["id"])["messages"] if m["role"] == "tool" for r in m["results"]]
-    assert results[2]["content"] == "not kept: the person declined"
-    assert results[3]["content"].startswith("recipe find-gate-peak (2 stages), values: span = 0.5")
-    assert "done; values:" in results[3]["content"]
-    assert results[4]["is_error"] and "no kept recipe 'unknown-one' (kept: find-gate-peak)" in results[4]["content"]
+    assert results[2]["content"].startswith("recipe find-gate-peak (2 stages), values: span = 0.5")
+    assert "done; values:" in results[2]["content"]
+    assert results[3]["is_error"] and "no kept recipe 'unknown-one' (kept: find-gate-peak)" in results[3]["content"]
     assert "- gate-check: Checking the gate before a run (this project's)" in main.systems[-1]
     assert gone.status_code == 200 and kelvins.status_code == 404
     assert not (store.root / "recipes" / project["id"]).exists()                # it went with its project

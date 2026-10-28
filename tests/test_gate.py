@@ -27,7 +27,7 @@ def test_measurement_and_configuration_never_ask(lab, make_gate):
 def test_measurement_still_respects_limits(make_gate):
     gate, approver = make_gate([])
     r = gate.set("lockin", "tc", 1e6)
-    assert r.action == "refused" and "vendor limits" in r.message
+    assert r.action == "refused" and "its card's limits" in r.message
 
 
 # --- drives ---------------------------------------------------------------------------------
@@ -67,7 +67,7 @@ def test_sign_flip_counts_as_away(make_gate):
 def test_beyond_lab_limits_is_refused_without_asking(make_gate):
     gate, approver = make_gate([])
     r = gate.set("smu", "V", 20)
-    assert r.action == "refused" and "lab limits [-15, 15]" in r.message
+    assert r.action == "refused" and "the lab config's limits [-15, 15]" in r.message
 
 
 def test_envelope_runs_inside_and_asks_outside(lab, make_gate):

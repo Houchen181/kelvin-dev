@@ -38,7 +38,7 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
 
 **Set up your instruments in the app:** open the Lab panel and press **Set up…**. In the setup:
 1. **Scan** finds the connected instruments. You can also add one by address, such as `GPIB0::24::INSTR` or `serial://COM3`, and pick its card.
-2. Review the drafted lab config, mainly the limits.
+2. Review the drafted lab config, mainly the limits. **By instrument** shows one row per instrument (its name, card and address) with a search box: type part of a name, card or address to find one, and click it to edit just its part of the file, comments included. **Whole file** shows all of it, with the lab's name, interlocks and watches.
 3. **Save and connect** saves it as `~/Kelvin/lab.yaml` and health-checks every instrument. It checks that each one is the model its card says, so a changed address can't send commands to the wrong instrument. It also reads every reading once and checks that drives sit inside your limits.
 
 **From your lab's scripts.** Many labs already run their instruments from their own Python, Jupyter or MATLAB scripts. In **Set up…**, **From your scripts…** reads the scripts in a folder you choose. It never runs or imports them, and sends nothing from them to an instrument.
@@ -54,6 +54,7 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
 - **Beyond the card:** a limit beyond the card's own is refused; that needs [your version of the card](#cards-for-new-instruments).
 - **Instruments Kelvin added:** tick **I checked these for my sample** to take out its `added_by: kelvin` mark when you save.
 - **Only people:** Kelvin can't change limits. Only a person can, here or in the lab config.
+- **Where a limit comes from:** an instrument's limits are its card's range, narrowed where your lab's `limits:` or a mounted device's protection say so. When Kelvin refuses a value, it says which of these it hit, and it can read your lab config (`lab_config`) to show you what the file says, including where the file differs from what Kelvin uses until you press **Save and connect**.
 
 Kelvin opens on your lab from then on. You can switch back to the virtual lab at any time. If your lab can't be connected at start-up, Kelvin opens the virtual lab and says why. Kelvin only switches labs while it is idle, and approvals go back to asking.
 
@@ -91,8 +92,8 @@ Real hardware gets the same gate as the virtual lab, and a few protections of it
 - **Connecting changes nothing.** Kelvin leaves every instrument as it finds it: no reset, no default values. A card's `on_connect` commands may only set up the connection itself (listen mode, headers, a driver's wiring); a card whose `on_connect` would set any parameter is refused. A drive with no read-back (an RF switch, a DDS amplitude) is unknown until Kelvin sets it: switching it to its safe value always goes ahead, anything else needs approval, and a ramped one first goes to safe.
 
 **Instruments behind vendor software.** Some instruments are not driven with text commands but through their maker's library. Kelvin has drivers for two of them; the address says which:
-- `zhinst://dev1234` for a Zurich Instruments lock-in, through LabOne's Python API (`zhinst-core`, which Kelvin installs the first time, once you approve). Add `?host=...&port=8004&interface=1GbE` if the data server runs elsewhere. A scan finds these devices through LabOne.
-- `qd://<computer>:5000` for a Quantum Design system, through MultiPyVu (Kelvin installs it once you approve; its server runs next to MultiVu). MultiVu ramps temperature and field itself; Kelvin sets the rate and setpoint, then waits for the reading.
+- `zhinst://dev1234` for a Zurich Instruments lock-in, through LabOne's Python API (`zhinst-core`, which Kelvin installs the first time). Add `?host=...&port=8004&interface=1GbE` if the data server runs elsewhere. A scan finds these devices through LabOne.
+- `qd://<computer>:5000` for a Quantum Design system, through MultiPyVu (Kelvin installs it; its server runs next to MultiVu). MultiVu ramps temperature and field itself; Kelvin sets the rate and setpoint, then waits for the reading.
 
 More instruments with a library of their own:
 - `pulsestreamer://<ip>` for a Swabian Pulse Streamer (`pulsestreamer`), `pulseblaster://0?clock=500` for a SpinCore PulseBlaster (SpinCore's SpinAPI, and the `spinapi` wrapper), and `timetagger://<serial>?click=1&gate=2` for a Swabian Time Tagger (`Swabian-TimeTagger`, and Swabian's installer for its USB driver). A scan finds the Swabian devices. Kelvin installs the Python packages they need, once you approve; the makers' installers are yours to run (see [What an instrument needs on this computer](#what-an-instrument-needs-on-this-computer)).
@@ -100,7 +101,7 @@ More instruments with a library of their own:
   - **Firmware:** tProc v1 or v2. Kelvin reads which from the board and runs programs written for it; the gain stays a fraction of full scale either way (on v1 Kelvin converts it to DAC units, and durations to clock cycles). For firmware it doesn't recognise, set `vars: {tproc: "1"}` (or `"2"`) on the instrument in the lab config.
   - **Starting the server:** on a PYNQ board, in its Jupyter (`http://<board>:9090`), run `qick/pyro4/00_nameserver.ipynb`, then `01_server.ipynb`, whose proxy name goes in the address. Kelvin can run them itself (`run_on_board`), once you approve the notebooks' code; it also reads the board's QICK version that way. PYNQ's default Jupyter password is `xilinx`.
   - **Boards without Jupyter** (a Red Pitaya, a Raspberry Pi controller): `run_on_board` runs a shell command over SSH, `ssh://root@<board>`, once you approve it; this computer's SSH key signs in, or a password. The board's host key is kept the first time and checked after. Kelvin installs paramiko for this once you approve.
-  - **The client:** `qick` and `Pyro4` on the computer that runs Kelvin, which Kelvin installs once you approve (the app does not carry them). The board's QICK and this computer's should be the same version: the instrument's identity shows both, and Kelvin installs the board's.
+  - **The client:** `qick` and `Pyro4` on the computer that runs Kelvin, which Kelvin installs (the app does not carry them). The board's QICK and this computer's should be the same version: the instrument's identity shows both, and Kelvin installs the board's.
   - **What Kelvin does:** it plays one generator as a continuous tone or as pulses, and reads I/Q from one readout. A tone keeps playing after a program ends, so Kelvin stops every generator (`reset_gens`) when the output goes off and when it disconnects.
 
 **DAQ cards, spectrometers, monochromators, cameras and nanopositioners.**
@@ -123,7 +124,7 @@ More instruments with a library of their own:
 | USB webcam, microscope or inspection camera (UVC) | `uvc://0` | `opencv-python-headless`, which Kelvin installs | `generic/usb-camera` |
 | GenICam industrial camera (Teledyne FLIR, Allied Vision, IDS, The Imaging Source, Lucid) | `genicam://<serial>?cti=<the maker's .cti file>` | the maker's SDK, and `harvesters`, which Kelvin installs | `generic/genicam-camera` |
 
-- **The app brings no maker's library:** Kelvin installs the Python package an instrument needs (nidaqmx, seabreeze, pypylon, pylablib) on this computer the first time, once you approve. LightField's automation uses pythonnet, which the app has for its own window. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text.
+- **The app brings no maker's library:** Kelvin installs the Python package an instrument needs (nidaqmx, seabreeze, pypylon, pylablib) on this computer the first time. LightField's automation uses pythonnet, which the app has for its own window. PICam, Andor's spectrograph library and the Andor SDKs are the makers' own installs, which Kelvin calls directly. The ANC300, SpectraPro, PI and Thorlabs controllers speak text.
 
 - **Frames as pictures:** a camera's frame is kept as a file (in its run's run.h5 once the run ends). `look_at` shows Kelvin one as a picture, from a run or read now, with its numbers (size, range, the brightest pixel, where the bright part is centered), so a model that sees can judge a spot, a beam or an image by eye.
 
@@ -278,7 +279,7 @@ Kelvin runs the library in a helper process, so a crash or a 32-bit DLL never ta
 ## What an instrument needs on this computer
 
 The app carries no instrument maker's software: every lab has different instruments. When one needs its maker's Python package (QICK, LabOne, MultiPyVu, a camera's SDK) or the maker's files (a DLL, an SDK's Python folder), Kelvin installs them on this computer, once you approve, in an environment of its own:
-- **What you approve:** each package with its version and where it comes from (PyPI, with the project's summary and home page), the maker's files and their source, and the first time uv, the installer Kelvin uses, from its GitHub release (checked against its published checksum). Nothing is installed system-wide, and no administrator rights are needed.
+- **What the chat shows:** installing drives nothing, so Kelvin approves it itself (you answer only after the chat has read text from the web): each package with its version and where it comes from (PyPI, with the project's summary and home page), the maker's files and their source, and the first time uv, the installer Kelvin uses, from its GitHub release (checked against its published checksum). Nothing is installed system-wide, and no administrator rights are needed.
 - **Where it goes:** `~/Kelvin/env/<name>`, each with its own Python. Kelvin's built-in drivers use the `drivers` environment, which has the app's own Python version, so the app loads from it. A library card uses the environment its address names, `lib://<address>?env=<name>`, with the Python its library needs: a 32-bit one for a 32-bit DLL, an older one where the maker's package wants it.
 - **Versions that must match:** some instruments need the same version on both sides, such as a QICK board and this computer's `qick`. Kelvin installs the version the instrument has.
 - **The makers' installers stay yours:** a USB driver or a runtime that needs administrator rights (NI-DAQmx, the Opal Kelly driver, LightField) comes from the maker's installer, which you run. Kelvin says which one, and where it is.

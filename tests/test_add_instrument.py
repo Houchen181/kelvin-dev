@@ -107,10 +107,10 @@ def test_kelvin_adds_a_named_instrument_and_asks_before_its_outputs(tmp_path, be
     assert "smu2" not in rt.lab.config.instruments and (tmp_path / "lab.yaml").read_text(encoding="utf-8") == text
 
     bench.devices["GPIB0::9::INSTR"] = Device("srs/sr830", name="sr830b")   # plugged in after the scan
-    rt.gate.approver = ScriptedApprover([False, True])
-    assert rt.add_instrument("GPIB0::9::INSTR", card="srs/sr830").startswith("declined")
-    assert "did not find an instrument at GPIB0::9::INSTR" in str(rt.gate.approver.requests[0])
+    rt.gate.approver = ScriptedApprover([])                                 # adding drives nothing: no question
     assert rt.add_instrument("GPIB0::9::INSTR", card="srs/sr830").startswith("added lockin2")
+    added = events(tmp_path, "ask")[-1]
+    assert added["answer"] == "auto-approved" and "did not find an instrument at GPIB0::9::INSTR" in added["request"]
     assert sorted(rt.lab.config.unreviewed()) == ["lockin", "lockin2"]
     assert sorted(load_lab_config((tmp_path / "lab.yaml").read_text(encoding="utf-8"),
                                   lab_registry(tmp_path)).unreviewed()) == ["lockin", "lockin2"]
@@ -187,15 +187,15 @@ def test_a_card_for_a_named_instrument_then_adding_it_keeps_its_manual(tmp_path,
     assert "ranges are in 'Widget 9000 specifications', which Kelvin could not get" in out and "with specs" in out
 
 
-def test_try_card_asks_before_an_address_the_scan_did_not_find(tmp_path, bench):
+def test_try_card_at_an_address_the_scan_did_not_find_reads_without_asking(tmp_path, bench):
     rt = file_runtime(tmp_path, SMU_ONLY)
-    rt.gate.approver = ScriptedApprover([False, True])
-    assert rt.try_card("srs/sr830", "GPIB0::8::INSTR").startswith("declined")           # no scan yet
-    assert "Trying the" in str(rt.gate.approver.requests[0]) and "it sets nothing" in str(rt.gate.approver.requests[0])
-    assert "matches the card" in rt.try_card("srs/sr830", "GPIB0::8::INSTR")
+    rt.gate.approver = ScriptedApprover([])                                             # trying only reads
+    assert "matches the card" in rt.try_card("srs/sr830", "GPIB0::8::INSTR")           # no scan yet
+    [tried] = events(tmp_path, "ask")
+    assert tried["answer"] == "auto-approved" and "Trying the" in tried["request"] and "it sets nothing" in tried["request"]
     assert rt.try_card("srs/sr830", "lockin").startswith("Kelvin tries a card on an instrument in the lab")
-    assert "matches the card" in rt.try_card("keithley/2400", "smu")                     # in the lab: no question
-    assert len(rt.gate.approver.requests) == 2
+    assert "matches the card" in rt.try_card("keithley/2400", "smu")                     # in the lab: nothing to say
+    assert len(events(tmp_path, "ask")) == 1
 
 
 def test_kelvin_asks_to_switch_on_an_instrument_a_person_switched_off(tmp_path):
@@ -346,7 +346,8 @@ def test_a_persons_change_while_kelvin_asks_stays_in_the_lab_config(tmp_path, be
     from labharness.discovery import set_limits
     rt = file_runtime(tmp_path, SMU_ONLY)
     rt.scan()
-    bench.devices["GPIB0::9::INSTR"] = Device("srs/sr830", name="sr830b")   # not in the scan: Kelvin asks first
+    bench.devices["GPIB0::9::INSTR"] = Device("srs/sr830", name="sr830b")   # not in the scan, and after text from
+    rt.gate.note_outside("a web page")                                      # the web: Kelvin asks first
     lab_file = tmp_path / "lab.yaml"
 
     class Person(ScriptedApprover):

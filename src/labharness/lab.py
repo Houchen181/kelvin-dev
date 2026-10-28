@@ -254,7 +254,7 @@ class Lab:
                     if spec.numeric and lim and spec.get_cmd is not None:
                         v = inst.read(spec.name)
                         if v is not None and not lim[0] <= v <= lim[1]:
-                            problems.append("%s = %s is outside %s limits" % (spec.name, spec.show(v), inst.limits_source(spec.name)))
+                            problems.append("%s = %s is outside %s limits" % (spec.name, spec.show(v), inst.limits_where(spec.name)))
             except Exception as e:
                 problems.append("no response (%s)" % e)
             out.append(HealthResult(name, not problems, problems))

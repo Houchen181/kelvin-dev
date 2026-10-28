@@ -60,6 +60,28 @@ BRIDGE = Path(__file__).parent / "data" / "bridge" / "kelvin_bridge.py"
 _CALL = re.compile(r"^\s*(SET|GET)\s+([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*)(.*)$", re.I | re.S)
 
 
+def code_folders(addresses: Dict[str, str], home: Any = None) -> List[Tuple[str, Path]]:
+    """(instrument, folder): where each lib:// instrument loads its maker's code from: the address's path=, its
+    environment's files, and the folder of the Python it runs in. Code saved there runs on the instrument when it
+    connects, which no card command checks."""
+    out: List[Tuple[str, Path]] = []
+    for name, address in addresses.items():
+        if not str(address).startswith("lib://"):
+            continue
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(str(address)).query))
+        if q.get("path"):
+            out.append((name, Path(q["path"])))
+        if q.get("python"):
+            out.append((name, Path(q["python"]).parent))
+        if q.get("env"):
+            from . import envs
+            try:
+                out.append((name, envs.env_dir(q["env"], home)))
+            except ValueError:   # not an environment's name: it can't connect either
+                pass
+    return out
+
+
 def bridge_command(python: Optional[str] = None) -> List[str]:
     """How to start the helper: with the given Python, or with Kelvin's own (the app runs it with --bridge)."""
     if python:

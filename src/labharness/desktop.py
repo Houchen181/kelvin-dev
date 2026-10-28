@@ -126,6 +126,32 @@ def _self_test(port: int, key: str) -> int:
     return 0 if ok else 1
 
 
+def _zoom(window: Any, factor: float) -> bool:
+    """Scale the window's page like a browser's zoom, on the window's own thread: the web view's zoom factor on
+    Windows (WebView2), its page zoom on a Mac (WKWebView, macOS 11 and later). False where it has neither."""
+    if sys.platform == "win32":
+        form = getattr(window, "native", None)   # pywebview's form, which holds the WebView2 control
+        view = getattr(getattr(form, "browser", None), "webview", None)
+        if view is None:
+            return False
+        import clr  # noqa: F401  (pythonnet, which pywebview runs on here: loaded before System)
+        from System import Func, Type
+
+        def apply() -> None:
+            view.ZoomFactor = factor
+        form.Invoke(Func[Type](apply))
+        return True
+    if sys.platform == "darwin":
+        from PyObjCTools import AppHelper
+        from webview.platforms.cocoa import BrowserView
+        view = getattr(BrowserView.instances.get(window.uid), "webview", None)
+        if view is None or not hasattr(view, "setPageZoom_"):
+            return False
+        AppHelper.callAfter(view.setPageZoom_, factor)
+        return True
+    return False
+
+
 def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dict] = None) -> None:
     import webview  # imported here so headless self-tests never need a GUI toolkit
 
@@ -155,7 +181,15 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
             return ""
         return str(chosen[0]) if chosen else ""
 
-    window.expose(pick_folder)
+    def set_zoom(factor: float) -> bool:
+        """The person's text size: this window's page scaled like a browser's zoom (the window's own Ctrl+ and Ctrl-
+        are off). False where this window can't."""
+        try:
+            return _zoom(window, min(2.0, max(0.5, float(factor))))
+        except Exception:
+            return False
+
+    window.expose(pick_folder, set_zoom)
     try:
         webview.settings["ALLOW_DOWNLOADS"] = True   # reports can be saved from the window too
     except (AttributeError, TypeError):

@@ -1,5 +1,5 @@
 """Ordinary cameras: a USB webcam or microscope camera (UVC, through OpenCV) and a GenICam industrial camera (through
-Harvesters and its maker's GenTL producer). Kelvin installs OpenCV or Harvesters once a person approves; here they are
+Harvesters and its maker's GenTL producer). Kelvin installs OpenCV or Harvesters when one is needed; here they are
 stood in for, as their documentation describes them."""
 import contextlib
 import types

@@ -5,8 +5,8 @@ are: a folder <name>/ with SKILL.md (its head: name and description; then the in
 with it (a calibration table, a reference figure, a maker's sequence file, a script to read). How to cool the fridge
 down, how to align the laser through the objective, how this lab finds the Dirac point. The model sees the names and
 descriptions that apply to the chat, reads a skill with use_skill when a task matches it (or when the person starts it
-with /name), and its files with read_skill_file. It keeps one with save_skill, once a person approves, when a procedure
-worked and will be needed again. People can add a skill packed for Claude (.zip or .skill), take one of Kelvin's to
+with /name), and its files with read_skill_file. It keeps one with save_skill, shown in the chat (keeping one drives
+nothing), when a procedure worked and will be needed again. People can add a skill packed for Claude (.zip or .skill), take one of Kelvin's to
 Claude, and switch any off. Recipes are listed and kept the same way (save_recipe) and run with run_recipe.
 
 Three scopes that never mix, as memory's: Kelvin's own (built in, data/skills, read-only), the person's (every
@@ -61,7 +61,7 @@ READ_SKILL_FILE = {
 SAVE_SKILL = {
     "name": "save_skill",
     "description": "Keep a procedure that worked, in words, so it can be followed again: the steps, values and "
-                   "checks that mattered, and what to watch out for. A person approves it first. scope: project "
+                   "checks that mattered, and what to watch out for. It shows in the chat. scope: project "
                    "(this project's chats; the default in a project) or global (every project: general know-how). "
                    "Saving under an existing name replaces that skill.",
     "schema": {"type": "object", "required": ["name", "description", "steps"], "properties": {
@@ -75,7 +75,7 @@ SAVE_RECIPE = {
     "description": "Keep a staged measurement that worked as a recipe, to run again with run_recipe: each stage a "
                    "plan (as run_plan takes it, with {{value}} or {{arithmetic}} for numbers that change), a pass "
                    "check on its data, values to keep for later stages, retries. Build it from the plans that "
-                   "worked. A person approves it first. scope: project (default in a project) or global.",
+                   "worked. It shows in the chat. scope: project (default in a project) or global.",
     "schema": {"type": "object", "required": ["recipe"], "properties": {
         "recipe": {"type": "string", "description": "The recipe's YAML (recipe, description, values, stages)"},
         "scope": {"type": "string", "enum": ["project", "global"]}}},
@@ -83,8 +83,8 @@ SAVE_RECIPE = {
 READ_GUIDE = ("Skills are procedures that worked before; when a task matches one, read it with use_skill first (and "
               "the files it comes with, with read_skill_file, when the steps call for them).")
 GUIDE = READ_GUIDE + """ Recipes are staged measurements that check their own results; run one with run_recipe \
-(its name). When a procedure or a staged measurement has worked and will be needed again, offer to keep it \
-(save_skill, save_recipe): a person approves each."""
+(its name). When a procedure or a staged measurement has worked and will be needed again, keep it \
+(save_skill, save_recipe) and say so: the person can switch it off or delete it."""
 
 
 @dataclass

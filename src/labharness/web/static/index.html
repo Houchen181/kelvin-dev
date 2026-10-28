@@ -321,6 +321,7 @@
         <button type="button" id="nav-memory" data-page="memory">Memory</button>
         <button type="button" id="nav-literature" data-page="literature">Literature</button>
         <button type="button" id="nav-notifications" data-page="notifications">Notifications</button>
+        <button type="button" id="nav-display" data-page="display">Display</button>
         <button type="button" id="nav-phone" data-page="phone">Phone</button>
         <button type="button" id="nav-updates" data-page="updates">Updates</button>
       </nav>
@@ -452,7 +453,7 @@
           <div class="field">
             <div class="field-row"><span class="field-label">Installed for instruments</span></div>
             <ul id="env-list" class="env-list"><li class="muted small">Nothing yet.</li></ul>
-            <span class="hint">The makers' packages and files Kelvin installed on this computer for your instruments, once you approved them, each in its own environment in ~/Kelvin/env (nothing system-wide). Removing one stops the instruments that use it from connecting until it is installed again. Uninstalling Kelvin removes them all.</span>
+            <span class="hint">The makers' packages and files Kelvin installed on this computer for your instruments (each install shows in its chat), each in its own environment in ~/Kelvin/env (nothing system-wide). Removing one stops the instruments that use it from connecting until it is installed again. Uninstalling Kelvin removes them all.</span>
           </div>
         </section>
         <section class="set-page" data-page="data" hidden>
@@ -499,7 +500,7 @@
             <div class="field-row"><span class="field-label small">Skills and recipes for every project</span><span id="global-know-count" class="hint"></span><button id="global-know-add" class="link" type="button">Add a skill…</button></div>
             <input id="global-know-file" type="file" accept=".zip,.skill,.md" hidden>
             <ul id="global-know" class="memory-notes"></ul>
-            <span class="hint">Skills are procedures; recipes are measurements in stages that check their own results. Kelvin keeps one when you approve it, and reads a skill when a task matches it; type / in the message box to start one yourself. Kelvin's own skills come with it. Skills are packed as Claude's are (a folder with SKILL.md and the files that go with it): <b>Add a skill…</b> takes one made for Claude (.zip or .skill), <b>Download</b> gives one to use in Claude, and the switch takes one out of Kelvin's sight without deleting it. Add only skills from people you trust: a skill tells Kelvin what to do.</span>
+            <span class="hint">Skills are procedures; recipes are measurements in stages that check their own results. Kelvin keeps one when it worked and will be needed again (saying so in the chat), and reads a skill when a task matches it; type / in the message box to start one yourself. Kelvin's own skills come with it. Skills are packed as Claude's are (a folder with SKILL.md and the files that go with it): <b>Add a skill…</b> takes one made for Claude (.zip or .skill), <b>Download</b> gives one to use in Claude, and the switch takes one out of Kelvin's sight without deleting it. Add only skills from people you trust: a skill tells Kelvin what to do.</span>
           </div>
         </section>
         <section class="set-page" data-page="literature" hidden>
@@ -553,6 +554,20 @@
             <ul id="device-list" class="memory-notes"></ul>
             <span class="hint">Away from the lab, install <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on this computer and the phone; Kelvin then shows its Tailscale address too, and the connection is encrypted. Plain Wi-Fi traffic is not, so on a shared network prefer Tailscale.</span>
             <span class="hint"><b>Phone can't connect?</b> It must be on the same Wi-Fi as this computer, and the computer's firewall must let it in. Many university, housing and hotel Wi-Fi networks keep devices apart; on those, use Tailscale on both.</span>
+          </div>
+        </section>
+        <section class="set-page" data-page="display" hidden>
+          <h3 class="set-title">Display</h3>
+          <div class="field">
+            <span class="field-label">Text size</span>
+            <div class="zoom-row" role="group" aria-label="Text size">
+              <button id="zoom-out" class="btn small" type="button" aria-label="Smaller">A−</button>
+              <span id="zoom-now" class="zoom-now" aria-live="polite">100%</span>
+              <button id="zoom-in" class="btn small" type="button" aria-label="Bigger">A+</button>
+              <button id="zoom-reset" class="link soft" type="button">Back to 100%</button>
+            </div>
+            <span id="zoom-hint" class="hint">The whole window, everything in it bigger or smaller: also Ctrl + and Ctrl −, or Ctrl and the mouse wheel; Ctrl 0 goes back to 100%. Yours: it follows you when you sign in on this computer.</span>
+            <span id="zoom-browser" class="hint" hidden>In a browser, use the browser's own zoom: Ctrl + and Ctrl − (⌘ on a Mac), Ctrl 0 for 100%.</span>
           </div>
         </section>
         <section class="set-page" data-page="updates" hidden>
@@ -627,7 +642,13 @@
       <span class="hint">Instrument not in the list? <button id="open-cards" class="link" type="button">Make a card for it from its manual or example scripts…</button></span>
     </div>
     <div class="field">
-      <label for="lab-yaml">Lab config</label>
+      <div class="field-row"><label for="lab-yaml">Lab config</label>
+        <div id="lab-view" class="seg" role="group" aria-label="How to show the lab config" hidden>
+          <button type="button" data-view="instruments">By instrument</button><button type="button" data-view="file">Whole file</button>
+        </div></div>
+      <input id="lab-find" placeholder="Find an instrument: its name, card or address" spellcheck="false" aria-label="Find an instrument" hidden>
+      <div id="lab-entries" class="lab-entries" hidden></div>
+      <span id="lab-rest" class="hint" hidden>Click an instrument to edit its part of the lab config. The lab's name, interlocks and watches are in Whole file.</span>
       <textarea id="lab-yaml" class="mono" rows="12" spellcheck="false" placeholder="Scan, or add an instrument by address, to start a lab config."></textarea>
       <span class="hint">Set limits to what your sample can take: Kelvin refuses anything beyond them and asks before driving harder. Lasers default to always asking.</span>
     </div>
@@ -777,7 +798,7 @@
       <div class="field-row"><span class="field-label">Skills and recipes</span><span id="know-count" class="hint"></span><button id="project-know-add" class="link" type="button">Add a skill…</button></div>
       <input id="project-know-file" type="file" accept=".zip,.skill,.md" hidden>
       <ul id="project-know" class="memory-notes"></ul>
-      <span class="hint">Procedures and staged measurements kept for this project's chats, each once you approved it.</span>
+      <span class="hint">Procedures and staged measurements Kelvin kept for this project's chats; switch one off or delete it here.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Devices</span><span id="devices-count" class="hint"></span></div>

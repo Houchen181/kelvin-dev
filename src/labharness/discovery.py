@@ -336,6 +336,29 @@ def add_to_config(text: str, items: Sequence[Dict[str, Any]], registry: CardRegi
     return "\n".join(lines[:end] + blocks + lines[end:]) + "\n"
 
 
+def _instrument_lines(lines: List[str], name: str) -> Tuple[int, int]:
+    """Where one instrument's entry is in the lab config's lines: its name's line, and the line after its block."""
+    start = next((i for i, l in enumerate(lines) if re.match(r"^instruments\s*:", l)), len(lines))
+    at = next((i for i in range(start + 1, len(lines))
+               if re.match(r"^(\s+)%s\s*:" % re.escape(name), lines[i])), None)
+    if at is None:
+        raise KeyError("no instrument %r in the lab config" % name)
+    indent = len(lines[at]) - len(lines[at].lstrip())
+    end = at + 1
+    while end < len(lines) and (not lines[end].strip() or len(lines[end]) - len(lines[end].lstrip()) > indent):
+        end += 1
+    while end > at + 1 and not lines[end - 1].strip():
+        end -= 1
+    return at, end
+
+
+def instrument_text(text: str, name: str) -> str:
+    """One instrument's entry in the lab config text, as written (its comments too). KeyError: none by that name."""
+    lines = text.split("\n")
+    at, end = _instrument_lines(lines, name)
+    return "\n".join(lines[at:end])
+
+
 def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]], reviewed: bool = False) -> str:
     """The lab config text with one instrument's limits changed (None takes a limit out), the rest of the text and
     its comments kept; reviewed: without the instrument's added_by: kelvin mark (a person checked its limits)."""
@@ -351,11 +374,7 @@ def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]
         else:
             merged[p] = [float(lim[0]), float(lim[1])]
     lines = text.split("\n")
-    start = next(i for i, l in enumerate(lines) if re.match(r"^instruments\s*:", l))
-    at = next((i for i in range(start + 1, len(lines))
-               if re.match(r"^(\s+)%s\s*:" % re.escape(name), lines[i])), None)
-    if at is None:
-        raise KeyError("no instrument %r in the lab config" % name)
+    at, end = _instrument_lines(lines, name)
     indent = len(lines[at]) - len(lines[at].lstrip())
     head, _, rest = lines[at].partition(":")
     if rest.strip() and not rest.strip().startswith("#"):   # written on one line: name: { card: ..., ... }
@@ -364,11 +383,6 @@ def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]
             entry.pop("added_by", None)
         lines[at] = "%s: %s" % (head, _flow(entry))
         return "\n".join(lines)
-    end = at + 1
-    while end < len(lines) and (not lines[end].strip() or len(lines[end]) - len(lines[end].lstrip()) > indent):
-        end += 1
-    while end > at + 1 and not lines[end - 1].strip():
-        end -= 1
     block = lines[at + 1:end]
     child = min((len(l) - len(l.lstrip()) for l in block if l.strip() and not l.lstrip().startswith("#")),
                 default=indent + 2)

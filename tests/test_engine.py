@@ -70,7 +70,7 @@ def test_declined_plan_does_nothing(lab, make_engine):
 
 def test_invalid_plans_are_refused_before_anything_runs(make_engine):
     engine, gate, approver = make_engine([])
-    assert "lab limits" in engine.run(GATE_SWEEP.replace("to: 5", "to: 30")).message
+    assert "the lab config's limits" in engine.run(GATE_SWEEP.replace("to: 5", "to: 30")).message
     assert "no parameter 'Vg'" in engine.run(GATE_SWEEP.replace("smu.V: {", "smu.Vg: {")).message
     assert "unknown key" in engine.run(GATE_SWEEP + "\nrepeats: 3\n").message
     assert approver.requests == []

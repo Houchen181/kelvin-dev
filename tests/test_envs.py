@@ -1,5 +1,5 @@
 """What an instrument needs on this computer, Kelvin installs, never the app: the maker's Python package (at the version
-the instrument needs) or the maker's files, in an environment of Kelvin's own (envs.py), once a person approves."""
+the instrument needs) or the maker's files, in an environment of Kelvin's own (envs.py); installing drives nothing, so Kelvin approves it."""
 import hashlib
 import io
 import json
@@ -77,12 +77,19 @@ def kelvin(tmp_path, monkeypatch):
     return rt
 
 
-def test_kelvin_installs_a_drivers_package_once_a_person_approves(kelvin, tmp_path):
-    kelvin.approver.answers = [True]
+def asked(tmp_path):
+    """The requests in the event log: what each said, and its answer (Kelvin's own, or a person's)."""
+    logged = [json.loads(x) for x in (tmp_path / "data" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    return [e for e in logged if e.get("type") == "ask"]
+
+
+def test_kelvin_installs_a_drivers_package_and_says_what(kelvin, tmp_path):
     said = kelvin.install_for_instrument("drivers", ["qick==0.2.436", "Pyro4"], why="the RFSoC 4x2")
-    request = kelvin.approver.requests[0]
-    shown = "\n".join(request.items)
-    assert "Install on this computer for the RFSoC 4x2?" in request.title
+    assert kelvin.approver.requests == []                             # it drives nothing: Kelvin approves it itself
+    [request] = asked(tmp_path)
+    shown = request["request"]
+    assert request["answer"] == "auto-approved" and request["note"].startswith("drives nothing: installing")
+    assert "Install on this computer for the RFSoC 4x2?" in shown
     assert "a new environment drivers" in shown and "Python %s" % envs.app_python()[0] in shown
     assert "qick==0.2.436 from PyPI (qick; latest 0.2.436): Quantum Instrumentation Control Kit" in shown
     assert "github.com/irmen/Pyro4" in shown                          # where it comes from
@@ -100,9 +107,11 @@ def test_kelvin_installs_a_drivers_package_once_a_person_approves(kelvin, tmp_pa
     assert any(e.get("type") == "installed" and e.get("env") == "drivers" for e in logged)
 
 
-def test_nothing_is_installed_without_a_yes(kelvin, tmp_path):
+def test_after_reading_the_web_a_person_answers_and_a_no_installs_nothing(kelvin, tmp_path):
+    kelvin.gate.note_outside("a web page")                            # it could be steering the model
     kelvin.approver.answers = [False]
     assert kelvin.install_for_instrument("drivers", ["qick"]).startswith("declined: nothing installed")
+    assert "Not approved by Kelvin itself: " in "\n".join(kelvin.approver.requests[0].items)
     assert not (tmp_path / "env").exists() and kelvin.uv.calls == []
 
 
@@ -122,9 +131,8 @@ def test_a_library_gets_an_environment_of_its_own(kelvin, tmp_path):
     sdk = tmp_path / "attocube" / "attoDRYLib"
     sdk.mkdir(parents=True)
     (sdk / "attoDRYLib.dll").write_bytes(b"MZ")
-    kelvin.approver.answers = [True]
     said = kelvin.install_for_instrument("attodry", python="3.8", bits=32, files=str(sdk), why="the attoDRY2100")
-    assert "a new environment attodry" in "\n".join(kelvin.approver.requests[0].items)
+    assert "a new environment attodry" in asked(tmp_path)[0]["request"]
     made = next(i for i, c in enumerate(kelvin.uv.calls) if c[1] == "venv")
     assert kelvin.uv.calls[made][-2:] == ["--python", "3.8"] and kelvin.uv.envs[made]["UV_PYTHON_ARCH"] == "x86"
     rec = envs.info("attodry", tmp_path)
@@ -138,7 +146,6 @@ def test_an_sdk_python_package_is_installed_not_copied(kelvin, tmp_path):
     sdk = tmp_path / "Andor SDK3" / "Python" / "pyAndorSDK3"
     sdk.mkdir(parents=True)
     (sdk / "setup.py").write_text("from setuptools import setup; setup(name='pyAndorSDK3')")
-    kelvin.approver.answers = [True]
     said = kelvin.install_for_instrument("drivers", files=str(sdk), why="the Zyla")
     assert "installed as a Python package" in said
     install = next(c for c in kelvin.uv.calls if c[1:3] == ["pip", "install"])
@@ -168,13 +175,19 @@ def test_uv_is_fetched_once_and_checked(tmp_path):
     assert envs.uv_path(tmp_path) == tmp_path / "tools" / "uv" / exe
 
 
-def test_removing_an_environment_asks_first(kelvin, tmp_path):
-    kelvin.approver.answers = [True, False, True]
+def test_removing_an_environment_asks_only_when_an_instrument_uses_it(kelvin, tmp_path):
     kelvin.install_for_instrument("drivers", ["qick"])
+    kelvin.lab.instruments["smu"].config.address = "lib://Dev1?env=drivers"   # Kelvin would lose this instrument
+    kelvin.approver.answers = [False, True]
     assert kelvin.remove_environment("drivers").startswith("declined")
+    assert "used by smu" in "\n".join(kelvin.approver.requests[0].items)
     assert kelvin.remove_environment("drivers") == "removed environment drivers"
     assert envs.listing(tmp_path) == [] and not (tmp_path / "env" / "drivers").exists()
     assert kelvin.remove_environment("drivers") == "no environment drivers"
+    kelvin.lab.instruments["smu"].config.address = "GPIB0::24::INSTR"
+    kelvin.install_for_instrument("drivers", ["qick"])
+    assert kelvin.remove_environment("drivers") == "removed environment drivers"   # nothing uses it: no question
+    assert len(kelvin.approver.requests) == 2
 
 
 def test_a_library_address_runs_its_environments_python(tmp_path, monkeypatch):
@@ -262,7 +275,7 @@ def test_a_lab_that_cant_connect_for_a_missing_package_offers_the_install(tmp_pa
         lab.close()
 
 
-def test_the_lab_panels_install_button_asks_then_installs(kelvin, tmp_path, monkeypatch):
+def test_the_lab_panels_install_button_installs(kelvin, tmp_path, monkeypatch):
     pytest.importorskip("starlette")
     from starlette.testclient import TestClient
     from labharness.web import app as webapp
@@ -274,14 +287,11 @@ def test_the_lab_panels_install_button_asks_then_installs(kelvin, tmp_path, monk
     app = webapp.create_app(kelvin, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"],
                             providers={"scripted": Scripted([])})
     headers = {"X-Kelvin-Token": settings.access_key}
-    kelvin.approver.answers = [False, True]
     with TestClient(app) as client:
-        declined = client.post("/api/lab/install", json={"env": "drivers", "packages": ["qick"]}, headers=headers)
-        assert declined.json() == {"ok": False, "message": "declined: nothing installed"}
         r = client.post("/api/lab/install", json={"env": "drivers", "packages": ["qick", "Pyro4"]}, headers=headers)
         assert r.json()["ok"] and "installed in environment drivers" in r.json()["message"]
         assert client.post("/api/lab/install", json={"packages": "qick"}, headers=headers).status_code == 400
-    assert "your lab's instruments" in kelvin.approver.requests[1].title
+    assert kelvin.approver.requests == [] and "your lab's instruments" in asked(tmp_path)[0]["request"]
     logged = [json.loads(x) for x in (tmp_path / "data" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [e["by"] for e in logged if e.get("type") == "installed"] == ["human (portal)"]
 

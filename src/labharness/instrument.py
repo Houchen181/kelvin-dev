@@ -228,6 +228,12 @@ class Instrument:
             return "device %s" % self.device_name if self.device_name else "device"
         return "lab" if param in self.config.limits else "vendor"
 
+    def limits_where(self, param: str) -> str:
+        """Whose limits these are, in words: the card's (the instrument's own range), the lab config's, or a mounted
+        device's."""
+        src = self.limits_source(param)
+        return {"vendor": "its card's", "lab": "the lab config's"}.get(src, src)
+
     def rate(self, param: str) -> Optional[float]:
         base = self.config.rates.get(param) or self.spec(param).max_rate
         dev = self.device_rates.get(param)

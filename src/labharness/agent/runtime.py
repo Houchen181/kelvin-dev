@@ -26,7 +26,7 @@ from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunFolders, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
 from ..lab import Lab
-from ..labconfig import Allowed, Envelope
+from ..labconfig import Allowed, ConfigError, Envelope, load_lab_config
 from .. import carddraft
 from .. import protection
 from .. import rundata
@@ -45,13 +45,14 @@ if TYPE_CHECKING:
 
 MAX_WAIT_S = 3600
 BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
+MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
 SETUP_STEPS = ("connecting", "scanning", "drafting", "reading")   # the instrument setup at work (autosetup.py)
 SCRIPTS_NEXT = ("Next, with the person (nothing above was sent to any instrument): add each instrument that is not in "
                 "the lab yet with add_instrument at its address, with the likely card and the connection settings "
                 "above (Kelvin checks who answers there first); one with no card fitting: draft_card, saying which "
                 "commands the scripts use, as those are the ones this lab relies on. The limits above come from the "
                 "values the scripts use: propose them and set them only once the person agrees. Then offer to keep "
-                "each measurement script as a recipe (save_recipe; the person approves it): its loops become sweeps "
+                "each measurement script as a recipe (save_recipe; it shows in the chat): its loops become sweeps "
                 "(an outer loop, the outer axis), its readings the measure list, its waits the settle times, its "
                 "setup and its end the setup and after steps; say what it can't carry over (the script's own "
                 "processing, plotting). Never run the scripts.")
@@ -61,6 +62,10 @@ def default_project_info(project_id: Optional[str]) -> Dict[str, Any]:
     """Without the portal there are no projects: everything is the General workspace."""
     return {"id": project_id, "name": "General" if not project_id else project_id, "devices": [], "notes": [],
             "references": [], "summary": "", "private": False, "unshared": False}
+
+
+def _limits_text(limits: Dict[str, Tuple[float, float]]) -> str:
+    return ", ".join("%s [%s, %s]" % (p, num(lo), num(hi)) for p, (lo, hi) in sorted(limits.items())) or "none"
 
 
 def tail_events(path: Path, n: int) -> List[Dict[str, Any]]:
@@ -1877,7 +1882,9 @@ class LabRuntime:
             readings, drives, settings = [], [], []
             errors = away = 0
             for pname, value in values.items():
-                spec = card.params[pname]
+                spec = card.params.get(pname)
+                if spec is None:   # read before the lab was loaded again with another card for it
+                    continue
                 bad = isinstance(value, str) and value.startswith("ERROR")
                 errors += bad
                 item = {"name": pname, "label": spec.title, "value": "no response" if bad else spec.show(value),
@@ -2035,6 +2042,58 @@ class LabRuntime:
             vals = ", ".join("%s = %s" % (k, v.get("shown", v.get("value"))) for k, v in st["settings"].items())
             lines.append("settings read at %s (get_value for the current value): %s" % (when, vals))
         return "\n".join(lines)
+
+    def lab_config(self, instrument: str = "") -> str:
+        """The lab config file Kelvin loaded (lab.yaml) as the lab wrote it, or one instrument's entry; and where the
+        file now differs from what Kelvin uses."""
+        from ..discovery import instrument_text
+        path = Path(self.lab.config.source or ".")
+        if path.suffix.lower() not in (".yaml", ".yml") or not path.is_file():
+            return ("%s was not loaded from a lab config file; describe_instrument shows each instrument's limits and "
+                    "where they come from" % self.lab.config.name)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            return "could not read the lab config %s: %s" % (path, e)
+        if instrument:
+            try:
+                text = instrument_text(text, instrument)
+            except KeyError:
+                return "the lab config %s has no instrument %r (it has: %s)" % (
+                    path, instrument, ", ".join(self.lab.config.instruments) or "none")
+        cut = len(text) > MAX_CONFIG_CHARS
+        lines = ["lab config %s%s, as written:" % (path, ", %s's entry" % instrument if instrument else ""),
+                 "```yaml", text[:MAX_CONFIG_CHARS].rstrip(), "```"]
+        if cut:
+            lines.append("(the rest of the file is not shown: name an instrument for its whole entry)")
+        lines += self._config_drift(path)
+        lines.append("A parameter with no limits: here keeps its card's range (the instrument's own); limits: here only "
+                     "narrow it. describe_instrument shows the limits in use and where each comes from.")
+        return "\n".join(lines)
+
+    def _config_drift(self, path: Path) -> List[str]:
+        """Where the lab config file now differs from the one Kelvin loaded: its instruments and their limits."""
+        try:
+            now = load_lab_config(path, self.lab.registry)
+        except ConfigError as e:
+            return ["The file has errors now (%s), so Kelvin keeps using what it loaded before; a person fixes them in "
+                    "Lab → Set up…" % "; ".join(e.errors[:3])]
+        except Exception as e:
+            return ["Kelvin can't read the file as a lab config now (%s), so it keeps using what it loaded before" % e]
+        loaded, out = self.lab.config.instruments, []
+        for name in sorted(set(loaded) | set(now.instruments)):
+            was, new = loaded.get(name), now.instruments.get(name)
+            if was is None:
+                out.append("- %s is in the file but not in the lab Kelvin loaded" % name)
+            elif new is None:
+                out.append("- %s is in the lab Kelvin loaded but no longer in the file" % name)
+            elif dict(was.limits) != dict(new.limits):
+                out.append("- %s's limits: %s in the file, %s in use" % (name, _limits_text(new.limits),
+                                                                        _limits_text(was.limits)))
+        if out:
+            out.insert(0, "The file differs from what Kelvin uses until the lab is loaded again (Save and connect, "
+                          "in Lab → Set up…):")
+        return out
 
     def search_manual(self, instrument: str, query: str, max_passages: int = 4) -> str:
         from .. import profiles
@@ -2648,7 +2707,9 @@ class LabRuntime:
             items.append("the maker's files from %s, kept in the environment (a Python package among them is "
                          "installed)" % files)
         request = ApprovalRequest("Install on this computer%s?" % (" for " + why if why else ""), items)
-        if not self.gate.ask(request):
+        if not self.gate.auto_simple(request, "installing into one of Kelvin's own environments drives nothing; the "
+                                              "instrument's commands still go through Kelvin's checks") \
+                and not self.gate.ask(request):
             note = " (%s)" % request.note if request.note else ""
             return "declined: nothing installed%s" % note
         try:
@@ -2883,7 +2944,9 @@ class LabRuntime:
             "%s (Python %s, %d-bit: %s)%s" % (env, rec.get("python"), rec.get("bits", 64),
                                              ", ".join(rec.get("packages", {})) or "no packages",
                                              "; used by " + ", ".join(using) if using else "")])
-        if not self.gate.ask(request):
+        mine = not using and self.gate.auto_simple(request, "removing an environment no instrument uses drives "
+                                                            "nothing; it can be installed again")
+        if not mine and not self.gate.ask(request):   # one in use: Kelvin would lose that instrument, so a person says
             return "declined: %s stays" % env
         whole = envs.remove(env, self.home)
         self.gate.log.write("environment_removed", by="agent", env=env)
@@ -3529,8 +3592,9 @@ class LabRuntime:
                     ranges.append("%s %s" % (key, rule.show(card.params[param])))
         rule = ("drive changes, runs and queues go ahead without asking when every drive stays within %.0f%% of the way "
                 "from its safe value to its lab limit and switches move at most one step from safe; runs and queues "
-                "also need a clean dry run. Trying a card, adding an instrument at an address and keeping a skill go "
-                "ahead too. Instruments Kelvin isn't sure about, installs and code on boards still ask"
+                "also need a clean dry run. Instruments Kelvin isn't sure about, code on boards, switching an "
+                "instrument on and leaving a virtual lab you chose still ask (what drives nothing, such as installs, "
+                "skills and saved files, never waits for you in either mode)"
                 % (100 * cfg.auto_fraction))
         if ranges:
             rule += ". Own auto ranges: " + ", ".join(ranges)
@@ -3556,10 +3620,14 @@ class LabRuntime:
                 self.lock.release()
         status = {}
         for name, values in dict(self._status).items():
-            card = self.lab.instruments[name].card
+            inst = self.lab.instruments.get(name)
+            if inst is None:   # the lab was loaded again with it renamed or taken out: its last readings go
+                continue
             row = []
             for pname, v in values.items():
-                spec = card.params[pname]
+                spec = inst.card.params.get(pname)
+                if spec is None:
+                    continue
                 bad = isinstance(v, str) and v.startswith("ERROR")
                 row.append({"name": pname, "value": "ERROR" if bad else spec.show(v),
                             "away": (not bad) and spec.is_drive and spec.distance(v) > 0})

@@ -1,15 +1,18 @@
-"""Files in a chat's folder, the folder the person chose for that chat: listed and read for Kelvin's AI, and nothing
-outside it ('..' and links that lead out are refused). Text and CSV files by characters; PDFs by pages, as their text
-or, for a model that reads PDFs, as the pages themselves (figures, plots and equations as drawn); pictures as they
-are. What is read comes from outside the lab: the caller marks it as data for the model."""
+"""Files in a chat's folder, the folder the person chose for that chat: listed, read and saved for Kelvin's AI, and
+nothing outside it ('..' and links that lead out are refused). Text and CSV files by characters; PDFs by pages, as
+their text or, for a model that reads PDFs, as the pages themselves (figures, plots and equations as drawn); pictures
+as they are. What is read comes from outside the lab: the caller marks it as data for the model. What Kelvin saves is
+text (scripts, notes, data); a file it replaces is kept first, in .kelvin-old beside it."""
 from __future__ import annotations
 
 import io
 import logging
+import os
 import re
+import shutil
 import time
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 MAX_CHARS = 12000              # of text in one read; start= reads on
 MAX_PDF_PAGES = 20             # pages a model sees whole at once: each costs about as much as a picture
@@ -19,22 +22,69 @@ MAX_LISTED = 200
 PICTURES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
             ".webp": "image/webp"}
 PDF = "application/pdf"
+MAX_SAVED_CHARS = 1_000_000    # of a text file Kelvin saves
+# files Windows or Python runs by itself (a double click, a start-up): Kelvin doesn't save them
+NOT_SAVED = {".exe", ".com", ".scr", ".pif", ".msi", ".msp", ".dll", ".sys", ".cpl", ".bat", ".cmd", ".ps1", ".psm1",
+             ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".url", ".reg", ".inf", ".pth"}
+STARTUP = {"sitecustomize.py", "usercustomize.py"}
+LOADED = {".py", ".pyw"}   # what a maker's Python library could import from its folder
+KEPT = ".kelvin-old"   # beside a file Kelvin replaced: each version before, by date
 
 Media = List[Tuple[str, bytes]]   # (mime type, the file's bytes): pictures, or PDF pages
 
 
 class FolderError(ValueError):
-    """Not read: outside the chat's folder, not there, or a kind of file Kelvin doesn't read (the message says)."""
+    """Not read or saved: outside the chat's folder, not there, or a kind of file Kelvin doesn't read or save (the
+    message says)."""
 
 
-def inside(folder: Any, path: Any = "") -> Path:
+def inside(folder: Any, path: Any = "", saving: bool = False) -> Path:
     """path (relative to the chat's folder, or in full) as a path in that folder; FolderError if it leads out."""
     base = Path(folder).resolve()
     given = Path(str(path or "").strip() or ".")
     target = (given if given.is_absolute() else base / given).resolve()
     if target != base and base not in target.parents:
-        raise FolderError("%s is outside this chat's folder (%s): Kelvin reads only what is in it" % (path, base))
+        raise FolderError("%s is outside this chat's folder (%s): Kelvin %s only what is in it"
+                          % (path, base, "saves" if saving else "reads"))
     return target
+
+
+def save(folder: Any, path: Any, text: str) -> Tuple[Path, Optional[Path]]:
+    """A text file saved in the chat's folder, its subfolders made as needed: the file, and where the version it
+    replaced was kept (None for a new file, or one already so). FolderError: outside the folder, a kind Kelvin doesn't
+    save, too long, or the computer refused."""
+    if not str(path or "").strip():
+        raise FolderError("say which file: its name, or its path in this chat's folder")
+    target = inside(folder, path, saving=True)
+    if target == Path(folder).resolve() or target.is_dir():
+        raise FolderError("%s is a folder: give the file's name" % path)
+    if target.suffix.lower() in NOT_SAVED or target.name.lower() in STARTUP or KEPT in target.parts:
+        raise FolderError("Kelvin doesn't save %s: Windows or Python would run it by itself (a program, a batch or "
+                          "PowerShell script, a shortcut, Python's start-up files) or it holds the versions Kelvin kept. "
+                          "Give it in the answer; the person saves it if they want it" % target.name)
+    if len(text) > MAX_SAVED_CHARS:
+        raise FolderError("too long to save: %d characters, at most %d" % (len(text), MAX_SAVED_CHARS))
+    data = text.encode("utf-8")
+    kept = None
+    part = target.with_name(".%s.kelvin-new" % target.name)   # written whole first, then put in place
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file():
+            if target.read_bytes() == data:
+                return target, None
+            old = target.parent / KEPT
+            old.mkdir(exist_ok=True)
+            kept = old / ("%s.%s%s" % (target.stem, time.strftime("%Y-%m-%d_%H%M%S"), target.suffix))
+            shutil.copy2(target, kept)
+        part.write_bytes(data)
+        os.replace(part, target)
+    except OSError as e:
+        try:
+            part.unlink()
+        except OSError:
+            pass
+        raise FolderError("could not save %s: %s" % (target, e.strerror or e))
+    return target, kept
 
 
 def _size(n: int) -> str:

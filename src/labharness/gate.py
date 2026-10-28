@@ -250,7 +250,8 @@ class SafetyGate:
             lim = inst.limits(spec.name)
             if lim:
                 src = inst.limits_source(spec.name)   # lab, vendor, or the mounted device's
-                bits.append("[%s, %s]%s" % (num(lim[0]), num(lim[1]), "" if src == "vendor" else " " + src))
+                bits.append("[%s, %s] %s" % (num(lim[0]), num(lim[1]),
+                                             {"vendor": "card", "lab": "lab config"}.get(src, src)))
             if spec.type == "enum":
                 bits.append("{%s}" % ", ".join(spec.values or {}))
             if spec.is_drive:
@@ -353,14 +354,17 @@ class SafetyGate:
         keeps its own account instead, in_chat and outside_chat)."""
         self.outside = (time.monotonic(), source)
 
-    def outside_reason(self) -> Optional[str]:
+    def outside_reason(self, chat: Optional[str] = None) -> Optional[str]:
         """Why auto mode asks a person now, because the model read text from outside the lab (the web; in a portal
         chat, also a file in the chat's folder); None when it hasn't. In a portal chat, until the person writes again
-        in it; for other clients, for OUTSIDE_S."""
-        if self.outside_chat:
+        in it; for other clients, for OUTSIDE_S. chat: what a portal chat has read ("" for nothing), for a request it
+        makes outside the lab's turn, which doesn't set outside_chat."""
+        read = self.outside_chat if chat is None else chat
+        if read:
             return ("this chat has read text from outside the lab (%s) since the person last wrote, which could try "
-                    "to steer a model, so a person approves" % self.outside_chat)
-        if not self.in_chat and self.outside is not None and time.monotonic() - self.outside[0] < OUTSIDE_S:
+                    "to steer a model, so a person approves" % read)
+        if chat is None and not self.in_chat and self.outside is not None and \
+                time.monotonic() - self.outside[0] < OUTSIDE_S:
             return ("Kelvin read text from the web (%s) in the last %d minutes, which could try to steer a model, "
                     "so a person approves" % (self.outside[1], OUTSIDE_S // 60))
         return None
@@ -398,22 +402,22 @@ class SafetyGate:
             return False, blockers
         return True, fine + ["the dry run finished cleanly"]
 
-    def auto_simple(self, request: ApprovalRequest, why: str) -> bool:
-        """Auto mode's yes to a simple, safe request that drives nothing (trying a card, adding an instrument at an
-        address, keeping a skill): approved without asking, and said so. False when auto mode is off, or the model
-        has read text from the web (then the request says so, and a person answers)."""
-        if not self.auto:
-            return False
-        outside = self.outside_reason()
+    def auto_simple(self, request: ApprovalRequest, why: str, chat: Optional[str] = None) -> bool:
+        """Kelvin's own yes to a request that drives nothing (trying a card, adding an instrument at an address,
+        keeping a skill or recipe, installing or removing a maker's package, saving code a library loads): approved
+        without asking, whatever the approval mode, and said so; only driving the sample waits for a person. False
+        when the model has read text from the web, which could be steering it (then the request says so, and a person
+        answers). chat: as for outside_reason."""
+        outside = self.outside_reason(chat)
         if outside:
-            request.items.append("Auto mode does not cover this: " + outside)
+            request.items.append("Not approved by Kelvin itself: " + outside)
             return False
-        self.auto_approve(request, [why])
+        self.auto_approve(request, [why], "drives nothing")
         return True
 
-    def auto_approve(self, request: ApprovalRequest, reasons: List[str]) -> None:
+    def auto_approve(self, request: ApprovalRequest, reasons: List[str], why: str = "auto mode") -> None:
         """Approve without asking, and say so: in the event log and to the human's screen."""
-        request.note = "auto mode: " + "; ".join(reasons)
+        request.note = "%s: %s" % (why, "; ".join(reasons))
         self.log.write("ask", by=self._who(), request=str(request), answer="auto-approved", note=request.note)
         try:
             self.approver.inform(request, reasons)
@@ -592,9 +596,13 @@ class SafetyGate:
         lim = inst.limits(spec.name)
         if lim is None or lim[0] <= target <= lim[1]:
             return None
-        return "%s.%s %s is outside %s limits [%s, %s]%s" % (
-            inst.name, spec.name, spec.show(target), inst.limits_source(spec.name),
-            num(lim[0]), num(lim[1]), " " + spec.unit if spec.unit else "")
+        src = inst.limits_source(spec.name)
+        why = {"vendor": "the instrument's own range, from its card %s; the lab config sets none tighter" % inst.card.id,
+               "lab": "a person changes them with Limits… in Lab → Set up…"}.get(
+                   src, "the protection a person set for the mounted device")
+        return "%s.%s %s is outside %s limits [%s, %s]%s (%s)" % (
+            inst.name, spec.name, spec.show(target), inst.limits_where(spec.name),
+            num(lim[0]), num(lim[1]), " " + spec.unit if spec.unit else "", why)
 
     def _range_problem(self, inst: Instrument, owner: ParamSpec, spec: ParamSpec, target: Any) -> Optional[str]:
         """A source's range (or its autorange) changes only while the source's level is at safe: a range change

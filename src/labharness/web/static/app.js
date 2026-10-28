@@ -1442,6 +1442,7 @@
       case "lab_status": return v("Checking", "Checked") + " the lab status";
       case "describe_instrument": return v("Reading", "Read") + " the card of " + code(a.instrument);
       case "instrument_info": return v("Reading", "Read") + " the folder of " + code(a.instrument);
+      case "lab_config": return v("Reading", "Read") + " the lab config" + (a.instrument ? " for " + code(a.instrument) : "");
       case "search_manual": return v("Searching", "Searched") + " the " + esc(a.instrument || "") + " manual for " + code(a.query || "");
       case "show_sequence": return v("Drawing", "Drew") + " the " + code(a.protocol || "") + " pulse sequence";
       case "read_examples": return v("Reading", "Read") + " the maker's examples in " + code(a.path || "");
@@ -1471,6 +1472,7 @@
       case "web_search": return v("Searching", "Searched") + " the web for " + code(a.query || "");
       case "read_web_page": return v("Reading", "Read") + " " + code(a.url || "") + (a.start ? " from character " + esc(String(a.start)) : "");
       case "list_folder": return v("Looking", "Looked") + " in " + (a.path ? code(a.path) : "the chat's folder");
+      case "write_file": return v("Saving", "Saved") + " " + code(a.path || "a file") + " in the chat's folder";
       case "read_file": return v("Reading", "Read") + " " + code(a.path || "") + (a.pages ? ", pages " + esc(String(a.pages)) : "") +
         (a.start ? " from character " + esc(String(a.start)) : "") + (a.figures ? " (the pages as drawn)" : "");
       case "import_data": return v("Importing", "Imported") + " " + code(String(a.paths || "").split(";").map((p) => p.trim().split(/[\\/]/).pop()).join(", ")) +
@@ -1526,11 +1528,13 @@
   }
 
   // ------------------------------------------------------------------ approvals
+  // a request's points; one of several lines (code to run or save) as it is written, scrolling when long
+  const approvalItem = (i) => h("li", {}, String(i).includes("\n") ? h("pre", { class: "approval-code" }, i) : i);
   // auto mode approved this without asking: show what ran and why, like an answered request
   function autoApproval(ev) {
     const title = h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title));
     const el = h("div", { class: "approval done auto", role: "group", "aria-label": ev.title }, title,
-      h("ul", {}, ...ev.items.map((i) => h("li", {}, i))),
+      h("ul", {}, ...ev.items.map(approvalItem)),
       h("div", { class: "approval-actions" }, h("span", { class: "verdict auto" }, "Auto-approved"),
         h("span", { class: "muted small" }, (ev.reasons || []).join("; "))));
     foldable(el, title);
@@ -1555,7 +1559,7 @@
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
     const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title));
     const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title,
-      h("ul", {}, ...ev.items.map((i) => h("li", {}, i))), actions);
+      h("ul", {}, ...ev.items.map(approvalItem)), actions);
     let left = ev.seconds_left;
     const tick = () => { count.textContent = left > 0 ? "Declines itself in " + left + " s" : ""; left -= 1; };
     tick();
@@ -1756,13 +1760,14 @@
   const toBottom = () => { scroller.scrollTop = scroller.scrollHeight; };
 
   function userBubble(text, attachments) {
-    const bubble = h("div", { class: "bubble" }, text);
-    if (!attachments || !attachments.length) return h("div", { class: "msg user" }, bubble);
-    const files = h("div", { class: "user-files" }, ...attachments.map((a) => String(a.mime).startsWith("image/")
-      ? mediaImg(a.file, a.name)
-      : h("span", { class: "file-chip", title: a.name }, svgIcon("M7 3h7l5 5v13H7zM14 3v5h5"),
-          a.name + (a.pages ? " · " + a.pages + " pages" : ""))));
-    return h("div", { class: "msg user" }, h("div", { class: "user-stack" }, files, bubble));
+    const files = attachments && attachments.length ? h("div", { class: "user-files" }, ...attachments.map((a) =>
+      String(a.mime).startsWith("image/")
+        ? mediaImg(a.file, a.name)
+        : h("span", { class: "file-chip", title: a.name }, svgIcon("M7 3h7l5 5v13H7zM14 3v5h5"),
+            a.name + (a.pages ? " · " + a.pages + " pages" : "")))) : null;
+    const copy = h("button", { class: "link soft", type: "button", title: "Copy your message" }, icon("copy"), "Copy");
+    copy.addEventListener("click", () => copyText(text, copy));
+    return h("div", { class: "msg user" }, files, h("div", { class: "bubble" }, text), h("div", { class: "msg-tools user-tools" }, copy));
   }
   function svgIcon(d) {
     const ns = "http://www.w3.org/2000/svg";
@@ -4084,6 +4089,76 @@
     refreshLabSetup();
   }
   // what setting up changed (status, marks, folders, the lab config Kelvin wrote), without touching the rest
+  // ------------------------------------------------------------------ the lab config, instrument by instrument
+  const LABCFG = { view: store("lh.labView") === "file" ? "file" : "instruments", open: null, find: "" };
+  const ENTRY_NAME = /^\s+(["']?)([^"':#\s][^"':#]*?)\1\s*:/;
+  function labEntries(text) {   // each instrument's entry as written, by line: [{name, start, end}] (as discovery.py finds it)
+    const lines = text.split("\n"), entries = [];
+    const top = lines.findIndex((l) => /^instruments\s*:\s*(#.*)?$/.test(l));
+    let indent = null;
+    for (let i = top < 0 ? lines.length : top + 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (!l.trim() || /^\s*#/.test(l)) continue;
+      const depth = l.length - l.trimStart().length;
+      if (depth === 0) break;   // the lab config's next part (interlocks, watches)
+      if (indent === null) indent = depth;
+      const m = depth === indent && l.match(ENTRY_NAME);
+      if (!m) continue;
+      let end = i + 1;
+      while (end < lines.length && (!lines[end].trim() || lines[end].length - lines[end].trimStart().length > indent)) end++;
+      while (end > i + 1 && !lines[end - 1].trim()) end--;
+      entries.push({ name: m[2].trim(), start: i, end });
+      i = end - 1;
+    }
+    return { lines, entries };
+  }
+  function entryHead(name, text) {   // an entry's name, card and address, written as a block or on one line
+    const pick = (key) => {
+      const m = text.match(new RegExp("(?:^|[\\s{,])" + key + "\\s*:\\s*(\"[^\"]*\"|'[^']*'|[^,}\\n#]+)", "m"));
+      return m ? m[1].trim().replace(/^["']|["']$/g, "") : "";
+    };
+    const card = pick("card"), address = pick("address");
+    return [h("b", {}, name), h("span", { class: "entry-card" }, card || "no card"),
+      address ? h("code", { class: "entry-addr", title: address }, address) : null];
+  }
+  function renderLabConfig() {
+    const { lines, entries } = labEntries($("lab-yaml").value);
+    const byInstrument = LABCFG.view === "instruments" && entries.length > 0;
+    for (const b of document.querySelectorAll("#lab-view button")) b.classList.toggle("on", b.dataset.view === (byInstrument ? "instruments" : "file"));
+    $("lab-view").hidden = !entries.length;
+    $("lab-yaml").hidden = byInstrument;
+    $("lab-find").hidden = $("lab-entries").hidden = $("lab-rest").hidden = !byInstrument;
+    if (!byInstrument) return;
+    const q = LABCFG.find.trim().toLowerCase(), rows = [];
+    for (const e of entries) {
+      const own = lines.slice(e.start, e.end).join("\n");
+      if (q && !(e.name + "\n" + own).toLowerCase().includes(q)) continue;
+      const open = LABCFG.open === e.name;
+      const head = h("button", { class: "entry-head", type: "button", "aria-expanded": String(open) }, ...entryHead(e.name, own));
+      head.addEventListener("click", () => { LABCFG.open = open ? null : e.name; renderLabConfig(); });
+      const row = h("div", { class: "lab-entry" + (open ? " open" : "") }, head);
+      if (open) {
+        const box = h("textarea", { class: "mono entry-text", spellcheck: "false", rows: String(Math.min(18, e.end - e.start + 1)),
+          "aria-label": e.name + " in the lab config" });
+        box.value = own;
+        const at = { start: e.start, count: e.end - e.start };   // where this entry is in the whole file while it is edited
+        box.addEventListener("input", () => {
+          const all = $("lab-yaml").value.split("\n"), mine = box.value.split("\n");
+          all.splice(at.start, at.count, ...mine);
+          at.count = mine.length;
+          $("lab-yaml").value = all.join("\n");
+          const m = mine[0].match(ENTRY_NAME);
+          if (m) LABCFG.open = m[2].trim();   // renamed: it stays open
+          head.replaceChildren(...entryHead(m ? m[2].trim() : e.name, box.value));
+        });
+        row.append(box);
+      }
+      rows.push(row);
+    }
+    $("lab-entries").replaceChildren(...(rows.length ? rows
+      : [h("div", { class: "muted small entry-none" }, "No instrument matches “" + LABCFG.find.trim() + "”.")]));
+  }
+
   async function refreshLabSetup(folders = true) {
     let r;
     try { r = await api("/api/lab"); } catch (e) { return; }
@@ -4097,7 +4172,8 @@
         renderScripts();
       }
     }
-    if (document.activeElement !== $("lab-yaml")) $("lab-yaml").value = r.yaml || "";
+    const editing = document.activeElement && (document.activeElement === $("lab-yaml") || document.activeElement.classList.contains("entry-text"));
+    if (!editing) { $("lab-yaml").value = r.yaml || ""; renderLabConfig(); }
   }
 
   async function openLabSetup() {
@@ -4109,6 +4185,9 @@
     renderFolders(r.folders || []);
     $("lab-card").replaceWith(Object.assign(cardSelect("", "Card…"), { id: "lab-card" }));
     $("lab-yaml").value = r.yaml || "";
+    LABCFG.open = null;
+    $("lab-find").value = LABCFG.find = "";
+    renderLabConfig();
     $("lab-found").hidden = $("lab-add-found").hidden = $("lab-survey").hidden = true;
     renderScripts();   // what the lab's scripts showed, kept while the portal is open
     $("lab-health").hidden = true;
@@ -4183,6 +4262,7 @@
     try {
       const r = await api("/api/instruments/draft", { body: { items, base: $("lab-yaml").value } });
       $("lab-yaml").value = r.yaml;
+      renderLabConfig();
       const already = r.already || [], there = new Set(already.map((a) => a.item));
       const added = items.filter((i, k) => !there.has(k)).map((i) => i.name);
       $("lab-msg").textContent = [added.length ? "Added " + added.join(", ") + ". Review the limits, then save and connect." : "",
@@ -4847,6 +4927,7 @@
 
   function openSettings() {
     settingsPage(store("lh.settingsPage") || "models");
+    showZoom();
     const keys = (S.settings && S.settings.keys) || {};
     for (const hint of document.querySelectorAll("[data-hint]")) {
       const src = keys[hint.dataset.hint];
@@ -5086,6 +5167,56 @@
     }
   }
 
+  // ------------------------------------------------------------------ text size: the desktop window's zoom, each person's own
+  const ZOOMS = [0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
+  const ZOOM = { wheel: 0, saving: null };
+  function canZoom() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.set_zoom); }
+  function zoomNow() { const z = S.settings && Number(S.settings.text_size); return ZOOMS.includes(z) ? z : 1; }
+  function showZoom() {
+    const z = zoomNow(), can = canZoom();
+    $("zoom-now").textContent = Math.round(z * 100) + "%";
+    $("zoom-out").disabled = !can || z <= ZOOMS[0];
+    $("zoom-in").disabled = !can || z >= ZOOMS[ZOOMS.length - 1];
+    $("zoom-reset").hidden = !can || z === 1;
+    $("zoom-hint").hidden = !can;
+    $("zoom-browser").hidden = can;   // a browser has its own zoom
+  }
+  async function applyZoom() {
+    if (canZoom()) { try { await window.pywebview.api.set_zoom(zoomNow()); } catch (e) { /* stays as it was */ } }
+    showZoom();
+  }
+  function stepZoom(dir) {   // +1 bigger, -1 smaller, 0 back to 100%
+    if (!canZoom() || !S.settings) return;
+    const i = ZOOMS.indexOf(zoomNow());
+    const z = dir === 0 ? 1 : ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, i + dir))];
+    if (z === zoomNow()) return;
+    S.settings.text_size = z;
+    applyZoom();
+    clearTimeout(ZOOM.saving);   // kept with the person's settings once they stop changing it
+    ZOOM.saving = setTimeout(() => api("/api/settings", { body: { text_size: String(z) } }).catch(() => {}), 600);
+  }
+  function zoomKeys() {   // the desktop window's own Ctrl + and Ctrl − are off (pywebview): Kelvin's do the same
+    document.addEventListener("keydown", (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || !canZoom()) return;
+      const dir = e.key === "=" || e.key === "+" ? 1 : e.key === "-" || e.key === "_" ? -1 : e.key === "0" ? 0 : null;
+      if (dir === null) return;
+      e.preventDefault();
+      stepZoom(dir);
+    });
+    window.addEventListener("wheel", (e) => {
+      if (!e.ctrlKey || !canZoom()) return;
+      e.preventDefault();
+      ZOOM.wheel += e.deltaY;
+      if (Math.abs(ZOOM.wheel) < 80) return;   // a touchpad sends many small steps
+      stepZoom(ZOOM.wheel < 0 ? 1 : -1);
+      ZOOM.wheel = 0;
+    }, { passive: false });
+    window.addEventListener("pywebviewready", applyZoom);
+    $("zoom-in").addEventListener("click", () => stepZoom(1));
+    $("zoom-out").addEventListener("click", () => stepZoom(-1));
+    $("zoom-reset").addEventListener("click", () => stepZoom(0));
+  }
+
   // ------------------------------------------------------------------ layout bits
   function autosize() {
     const t = $("input");
@@ -5121,6 +5252,7 @@
     $("app").hidden = false;
     for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
     S.settings = boot.settings;
+    applyZoom();   // this person's text size (desktop window)
     S.claudeCode = !!boot.claude_code;   // Claude Code bridge (temporary)
     $("hub-field").hidden = $("project-sharing-field").hidden = !boot.hub_sharing;   // off for now: the hub is for accounts
     showUpdate(boot.update);
@@ -5303,6 +5435,12 @@
     $("lab-recipes").addEventListener("click", recipesFromScripts);
     $("lab-add").addEventListener("click", addByAddress);
     $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value }));
+    for (const b of document.querySelectorAll("#lab-view button")) b.addEventListener("click", () => {
+      LABCFG.view = b.dataset.view;
+      store("lh.labView", LABCFG.view);
+      renderLabConfig();
+    });
+    $("lab-find").addEventListener("input", () => { LABCFG.find = $("lab-find").value; renderLabConfig(); });
     $("lab-unlock").addEventListener("click", unlockLab);
     $("lab-setup-again").addEventListener("click", setupAgain);
     $("lab-observe-review").addEventListener("click", openLabSetup);
@@ -5334,6 +5472,7 @@
     $("close-lab").addEventListener("click", () => toggleLab(false));
     $("open-settings").addEventListener("click", openSettings);
     for (const b of document.querySelectorAll(".set-nav button")) b.addEventListener("click", () => settingsPage(b.dataset.page));
+    zoomKeys();
     $("save-settings").addEventListener("click", saveSettings);
     $("save-project").addEventListener("click", saveProjectSettings);
     $("quit-app").hidden = !boot.can_quit;

@@ -51,7 +51,7 @@ stages:
 - **Numbers that change** are `{{...}}` in a stage's plan: a value, or arithmetic on values. `run_recipe` can give the values others (`values: {span: 4e8}`).
 - **Checks and kept values** are expressions over the run's columns, as `compute` takes them; `at_min(y, x)` and `at_max(y, x)` give x where y is smallest or largest. Put an expression with a comma in quotes.
 - **Each stage runs through the safety gate** like any plan. A stage whose check still fails after its retries ends the recipe, and so does a run that stops. The answer lists each stage's run and whether it passed, with the values kept.
-- **Kept** in the portal per person or per project, once a person approves (save_recipe; Settings → Memory and Project settings list them).
+- **Kept** in the portal per person or per project, shown in the chat when Kelvin keeps it (save_recipe; Settings → Memory and Project settings list them).
 
 ## The queue
 

@@ -29,7 +29,7 @@ SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webho
 SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
-                     "answer_words", "phone_relay", "ask_folder",
+                     "answer_words", "phone_relay", "ask_folder", "text_size",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
@@ -38,6 +38,16 @@ LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 MAX_RECENT_FOLDERS = 8   # chats' folders the folder menu offers again
+TEXT_SIZES = (0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)   # the desktop window's zoom, each person's own
+
+
+def _text_size(value: str) -> str:
+    """What is stored for the text size: the nearest of TEXT_SIZES as a factor ("" for 100%)."""
+    try:
+        size = min(TEXT_SIZES, key=lambda s: abs(s - float(value)))
+    except ValueError:
+        return ""
+    return "" if size == 1.0 else "%g" % size
 
 
 def _answer_words(value: str) -> str:
@@ -207,6 +217,8 @@ class Settings:
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "answer_words":  # how long answers may be before Kelvin condenses them (brevity.py)
                 value = _answer_words(value)
+            if name == "text_size":  # the desktop window's zoom (desktop.py), as a factor
+                value = _text_size(value)
             if name == "ask_folder":  # the folder picker opens for each new chat (desktop app): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
@@ -299,6 +311,7 @@ class Settings:
             "auto_report": self._user.get("auto_report") or "both",
             "report_kinds": self.report_kinds,
             "ask_folder": self._user.get("ask_folder") != "off",
+            "text_size": float(_text_size(str(self._user.get("text_size") or 1)) or 1),
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "claude_code_path": self._user.get("claude_code_path", ""),
