@@ -870,12 +870,19 @@ class SafetyGate:
                     return r
                 notes.append("%s ramped to %s first" % (dep.name, dep.show(dep.safe)))
         t0 = clock.now()
+        moving = spec.busy_cmd is not None or spec.arrived_cmd is not None   # it says when it is there
         if spec.ramp == "gate" and spec.numeric and current is not None:   # unknown: only ever straight to safe
             stop = self._ramp(inst, spec, current, target, watch=away, gen=gen)
             if stop is not None:
                 return stop
         else:
             inst.write(spec.name, target)
+            if moving and wait:   # its read-back means something only once it is there
+                stop = self._arrive(inst, spec, current, target, gen)
+                if stop is not None:
+                    return stop
+            elif moving:
+                notes.append("moving")
             if spec.ramp == "instrument" and spec.readback:
                 if wait:
                     stop = self._wait(inst, spec, current, target, watch=away, gen=gen)
@@ -888,7 +895,7 @@ class SafetyGate:
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, target, trip)
-        err = inst.instrument_error() or self._shown(inst, spec, target)
+        err = inst.instrument_error() or (self._shown(inst, spec, target) if wait or not moving else None)
         if err:
             return Result(False, "error", key, value=target, before=current,
                           message="%s: instrument reported %s" % (key, err))
@@ -980,6 +987,35 @@ class SafetyGate:
                 return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)" % (
                     key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
             self._pause(poll, gen)   # a stop wakes it at once
+
+    def _arrive(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any, gen: int) -> Optional[Result]:
+        """Follow a move the instrument makes by itself (a stage, a piezo) until its card's status says it is there:
+        a delay line read back mid-move looked like a refused value, and every run stopped at its first point. A stop
+        ends the wait."""
+        clock = self.lab.clock
+        key = "%s.%s" % (inst.name, spec.name)
+        eta = self._eta(inst, spec, current, target)
+        timeout = 1.5 * eta + 60 if eta else spec.timeout
+        poll = max(0.05, min(1.0, (eta or 5.0) / 50))
+        t0 = clock.now()
+        while True:
+            if self._arrived(inst, spec):
+                return None
+            if self._stop_gen != gen:
+                return Result(False, "stopped", key, value=target, before=current, message=(
+                    "%s: stopped waiting for it to reach %s (stop requested)" % (key, spec.show(target))))
+            if clock.now() - t0 > timeout:
+                return Result(False, "timeout", key, value=target, before=current, message=(
+                    "%s: its status says it isn't at %s after %s" % (key, spec.show(target), _dur(timeout))))
+            self._pause(poll, gen)
+
+    def _arrived(self, inst: Instrument, spec: ParamSpec) -> bool:
+        if spec.busy_cmd is not None and re.search(spec.busy_re, inst.query_raw(spec.busy_cmd.render()).strip()):
+            return False
+        if spec.arrived_cmd is not None and not re.search(spec.arrived_re,
+                                                          inst.query_raw(spec.arrived_cmd.render()).strip()):
+            return False
+        return True
 
     def _guard_trip(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[Guard, Any]]:
         """The first guard reading past its limit. One that can't be read, or isn't a number (NaN), trips too: a ramp

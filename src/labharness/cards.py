@@ -121,6 +121,12 @@ class ParamSpec:
     status_cmd: Optional[Template] = None          # a query saying whether the reading is valid (Lake Shore RDGST? A)
     status_ok: str = r"^\s*\+?0+\s*$"              # what its reply matches when it is (Lake Shore: 0)
     plausible: Optional[Tuple[float, float]] = None   # a reading outside this is a fault, not a value
+    # a move the instrument makes by itself (a stage, a piezo), followed until its status says it is there before its
+    # read-back is trusted: a delay line read mid-move looked like a refused value and stopped runs at their first point
+    busy_cmd: Optional[Template] = None            # a status query (SMC100: 1TS) ...
+    busy_re: str = ""                              # ... whose reply matches this while it still moves (28 or 1E)
+    arrived_cmd: Optional[Template] = None         # or one (PI: ONT? 1) ...
+    arrived_re: str = ""                           # ... whose reply matches this once it is there (=1)
 
     @property
     def title(self) -> str:
@@ -532,6 +538,21 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
                     spec.status_ok = str(status["ok"])
                 except re.error as e:
                     err(path + ".status.ok", "not a valid regex: %s" % e)
+    for key, when in (("busy", "while it still moves"), ("arrived", "once it is there")):
+        st = p.get(key)
+        if st is None:
+            continue
+        if not isinstance(st, dict) or not st.get("get") or not st.get("match") or set(st) - {"get", "match"}                 or not p.get("set"):
+            err(path + "." + key, "a setting the instrument moves to by itself: {get: its status query, match: the "
+                                  "regex its reply matches %s}" % when)
+            continue
+        try:
+            re.compile(str(st["match"]))
+        except re.error as e:
+            err(path + "." + key + ".match", "not a valid regex: %s" % e)
+            continue
+        setattr(spec, key + "_cmd", _template(st["get"], err, path + "." + key))
+        setattr(spec, key + "_re", str(st["match"]))
     plausible = p.get("plausible")
     if plausible is not None:
         if typ not in ("float", "int") or not (isinstance(plausible, (list, tuple)) and len(plausible) == 2

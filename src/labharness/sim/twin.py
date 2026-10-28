@@ -364,9 +364,6 @@ class Twin:
             return self.errors.pop(0) if self.errors else '0,"No error"'
         if cmd.strip().lower() == self.card.idn_query.strip().lower():
             return self.idn()
-        for s in self.card.params.values():   # a reading's status query: a healthy sensor's reply
-            if s.status_cmd is not None and s.status_cmd.match(cmd) is not None:
-                return _reply_matching(s.status_ok) or "0"
         hits = [s for s in self.card.getters if s.get_cmd.match(cmd) is not None]
         if any(s.field is not None for s in hits):  # one query, several values: answer like the instrument
             reply = ["0"] * (max(s.field or 0 for s in hits) + 1)
@@ -375,6 +372,13 @@ class Twin:
             return ",".join(reply)
         if hits:
             return hits[0].to_wire(self.read(hits[0].name))
+        for s in self.card.params.values():   # a reading's or a move's status: a healthy sensor's, an arrived stage's
+            if s.status_cmd is not None and s.status_cmd.match(cmd) is not None:
+                return _reply_matching(s.status_ok) or "0"
+            if s.arrived_cmd is not None and s.arrived_cmd.match(cmd) is not None:
+                return _reply_matching(s.arrived_re) or "1"
+            if s.busy_cmd is not None and s.busy_cmd.match(cmd) is not None:
+                return next((r for r in ("0", "1", "33", "READY", "OK") if not re.search(s.busy_re, r)), "0")
         return None
 
 
