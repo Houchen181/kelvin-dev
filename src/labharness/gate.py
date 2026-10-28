@@ -653,7 +653,7 @@ class SafetyGate:
                 if gen is not None and self._stop_gen != gen:   # stopped since the plan began: nothing goes up
                     return self._done(Result(False, "stopped", key, value=current, message="%s stays %s (stop requested)"
                                              % (key, spec.show(current))), "set", by)
-                problem = self._away_problem(inst, spec)
+                problem = self._away_problem(inst, spec) or self._fixed_range_problem(inst, spec, target)
                 if problem:
                     return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
                 unsure = self.unsure(inst)
@@ -753,6 +753,34 @@ class SafetyGate:
             return ("%s keeps %s's range fixed while it is mounted (sample protection), so autorange stays off"
                     % ("device " + inst.device_name if inst.device_name else "the mounted device", inst.name))
         return None
+
+    def fixed_range(self, inst: Instrument, spec: ParamSpec) -> Optional[float]:
+        """A source's present range while it is fixed (its autorange off, or it has none), which its level can't pass;
+        None while it ranges itself, or for a drive with no range on its card."""
+        if not spec.range_param or not spec.numeric:
+            return None
+        if spec.autorange_param:
+            auto = inst.read(spec.autorange_param)
+            if auto is None or auto:
+                return None
+        rng = inst.read(spec.range_param)
+        return float(rng) if isinstance(rng, (int, float)) and not isinstance(rng, bool) and rng > 0 else None
+
+    def _fixed_range_problem(self, inst: Instrument, spec: ParamSpec, target: Any,
+                             rng: Optional[float] = None) -> Optional[str]:
+        """A level beyond the source's fixed range: the instrument would clip or refuse it partway through a sweep
+        (a 2400 held on its 21 V range under a ±60 V limit stopped at -21 V). rng: the range to check against."""
+        if not isinstance(target, (int, float)):
+            return None
+        rng = self.fixed_range(inst, spec) if rng is None else rng
+        if rng is None or abs(target) <= rng * (1 + 1e-9):
+            return None
+        bigger = next((r for r in spec.range_steps if r >= abs(target) * (1 - 1e-9)), None)
+        return "%s.%s %s is beyond its fixed range (%s)%s" % (
+            inst.name, spec.name, spec.show(target), spec.show(rng),
+            ": set %s.%s to %s first, while %s.%s is at %s" % (inst.name, spec.range_param, spec.show(bigger),
+                                                                inst.name, spec.name, spec.show(spec.safe))
+            if bigger is not None else "")
 
     def _hands_problem(self, what: str) -> Optional[str]:
         """While a person has their hands on the sample, nothing moves away from safe."""
@@ -856,6 +884,10 @@ class SafetyGate:
         clock = self.lab.clock
         notes: List[str] = []
         gen = self._stop_gen if gen is None else gen
+        stale, standing = self._drain(inst)   # older errors are not this change's
+        if stale:
+            notes.append(("it shows a standing error from before: %s" if standing else
+                          "older errors in its queue, cleared first: %s") % "; ".join(sorted(set(stale))[:3]))
         for dep_name in spec.enables:  # a switch that applies other drives to the sample
             dep = inst.spec(dep_name)
             dep_now = self._current(inst, dep)
@@ -895,7 +927,8 @@ class SafetyGate:
                 trip = self._guard_trip(inst, spec)
                 if trip:
                     return self._tripped(inst, spec, target, trip)
-        err = inst.instrument_error() or (self._shown(inst, spec, target) if wait or not moving else None)
+        err = self._new_error(inst, stale, standing) or (self._shown(inst, spec, target) if wait or not moving
+                                                          else None)
         if err:
             return Result(False, "error", key, value=target, before=current,
                           message="%s: instrument reported %s" % (key, err))
@@ -908,6 +941,24 @@ class SafetyGate:
         if notes:
             msg += "; " + "; ".join(notes)
         return Result(True, "set", key, value=target, before=current, message=msg)
+
+    def _drain(self, inst: Instrument) -> Tuple[List[str], bool]:
+        """The errors already in an instrument's queue before a command, read out of the way and logged, so they are
+        never blamed on it (field tests: stale errors were reported as a later safe move's, and queues overflowed)."""
+        if inst.card.error_query is None:
+            return [], False
+        try:
+            stale, standing = inst.drain_errors()
+        except Exception:
+            return [], False   # the queue doesn't answer: the command's own check says so
+        if stale:
+            self.log.write("stale_errors", by=self._who(), instrument=inst.name, errors=stale, standing=standing or None)
+        return stale, standing
+
+    def _new_error(self, inst: Instrument, stale: List[str], standing: bool) -> Optional[str]:
+        """The command's own error: what the queue holds now, unless it is the standing status it showed before."""
+        err = inst.instrument_error()
+        return None if err is not None and standing and err == stale[-1] else err
 
     def _shown(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
         """What a real instrument shows instead of the number Kelvin just set, when it reads back clearly different
@@ -1278,8 +1329,9 @@ class SafetyGate:
         return asked("; ".join(bits))
 
     def _send(self, inst: Instrument, cmd: str, target: str, done: Any, how: Optional[str], **extra: Any) -> Result:
+        stale, standing = self._drain(inst)
         inst.write_raw(cmd)
-        err = inst.instrument_error()
+        err = self._new_error(inst, stale, standing)
         if err:
             return done(Result(False, "error", target, message="%s: sent %r, instrument reported %s" % (inst.name, cmd, err)), **extra)
         return done(Result(True, "sent", target, message="%s: sent %r%s" % (inst.name, cmd, " (%s)" % how if how else "")), **extra)

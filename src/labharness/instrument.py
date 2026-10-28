@@ -232,6 +232,18 @@ class Instrument:
         resp = self.backend.query(self.card.error_query.render()).strip()
         return None if re.match(r"^\+?0+\s*(,|$)", resp) else resp   # "0,No error", 0 (SRS LERR?), 0000 (Pfeiffer ERR)
 
+    def drain_errors(self, most: int = 10) -> Tuple[List[str], bool]:
+        """Every error queued now, oldest first: read until the queue says no error, at most `most` times, so a
+        command's own errors aren't mixed with older ones and the queue doesn't overflow (-350). Also whether the
+        reply is a standing status that reading doesn't clear (`most` identical replies, as Pfeiffer's ERR gives)."""
+        out: List[str] = []
+        while len(out) < most:
+            err = self.instrument_error()
+            if err is None:
+                return out, False
+            out.append(err)
+        return out, len(set(out)) == 1
+
     def limits(self, param: str) -> Optional[Tuple[float, float]]:
         """The lab's limits (or the card's), narrowed to the mounted device's: the tighter side always holds."""
         base = self.config.limits.get(param) or self.spec(param).limits

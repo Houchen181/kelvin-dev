@@ -156,6 +156,25 @@ class RunEngine:
                 return None, None
             return inst, spec
 
+        ranges: Dict[str, Optional[float]] = {}
+
+        def fixed_range(inst, spec):
+            """The range a source runs the plan in, while it is fixed: as the plan's setup sets it, else as it is."""
+            key = "%s.%s" % (inst.name, spec.name)
+            if key not in ranges:
+                planned = {s.param: s.value for s in plan.setup if s.instr == inst.name}
+                auto = planned.get(spec.autorange_param) if spec.autorange_param else None
+                try:
+                    if auto is not None and inst.spec(spec.autorange_param).coerce(auto):
+                        ranges[key] = None
+                    elif spec.range_param in planned:
+                        ranges[key] = float(planned[spec.range_param])
+                    else:
+                        ranges[key] = self.gate.fixed_range(inst, spec) if spec.range_param else None
+                except Exception:   # can't tell now: the gate checks each change as it comes
+                    ranges[key] = None
+            return ranges[key]
+
         def check_value(inst, spec, value, where):
             try:
                 v = spec.coerce(value)
@@ -163,6 +182,9 @@ class RunEngine:
                 errors.append("%s: %s" % (where, e))
                 return value
             problem = self.gate._limit_problem(inst, spec, v)
+            if not problem and spec.is_drive and spec.range_param:
+                rng = fixed_range(inst, spec)
+                problem = self.gate._fixed_range_problem(inst, spec, v, rng) if rng is not None else None
             if problem:
                 errors.append("%s: %s" % (where, problem))
             return v

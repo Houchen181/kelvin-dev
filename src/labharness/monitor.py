@@ -300,12 +300,14 @@ class Monitor:
             if now - self._last_error_check.get(name, -1e18) < ERROR_CHECK_EVERY:
                 continue
             self._last_error_check[name] = now
-            try:
-                err = inst.instrument_error()
+            try:   # the whole queue, so it never overflows (-350) while one error a minute is read
+                errs, _ = inst.drain_errors()
             except Exception:
                 continue  # silence is the read failures' job
+            err = errs[0] if errs else None
             if err and name not in self._errors:
-                text = "%s reports an error: %s" % (name, err)
+                text = "%s reports an error: %s%s" % (name, err, " (and %d more)" % (len(set(errs)) - 1)
+                                                      if len(set(errs)) > 1 else "")
                 self._errors[name] = self._new("error", name, text)
                 self.gate.log.write("alarm", by="monitor", text=text)
                 self.notify("alarm", "Alarm: " + text, "")
