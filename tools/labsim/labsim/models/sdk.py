@@ -544,12 +544,14 @@ class ZurichMFLI(SdkDevice):
 # ---------------------------------------------------------------- a PPMS and an NI DAQ card
 class QuantumDesignPPMS(SdkDevice):
     """A PPMS / DynaCool behind MultiVu: it controls the bench's cryostat and magnet itself; set points approach at
-    the rate given (K/min, Oe/s); the resistivity bridge measures the sample (channel 1)."""
+    the rate given (K/min, Oe/s) and settle there (it owns the stage temperature, so the cryostat's own cooling
+    doesn't hold it short); the resistivity bridge measures the sample (channel 1)."""
     model = "qd_ppms"
     kind = "ppms"
     default_serial = "127.0.0.1:5000"
 
     def reset(self) -> None:
+        self.world.cryo.owner = self.name   # its own temperature control holds the stage while it is on
         self.t_set = self.world.cryo.stage
         self.t_rate = 10.0
         self.b_set_oe, self.b_rate_oe, self.b_oe = 0.0, 100.0, 0.0
@@ -559,6 +561,11 @@ class QuantumDesignPPMS(SdkDevice):
     def status(self):
         return {"T_K": round(self.world.cryo.sample, 3), "T_set": self.t_set, "B_Oe": round(self.b_oe, 2),
                 "B_set_Oe": self.b_set_oe}
+
+    def power(self, on: bool) -> None:
+        super().power(on)
+        if not on and self.world.cryo.owner == self.name:
+            self.world.cryo.owner = None   # switched off: nothing holds the stage, the cryostat drifts on its own
 
     def tick(self, dt: float, now: float) -> None:
         cryo = self.world.cryo

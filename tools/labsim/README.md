@@ -61,7 +61,9 @@ Requirements: Python 3.9+ with `pyvisa` (and `pyvisa-py` if the program also doe
   - The flux coil tunes the resonator, and a tone at the qubit frequency shifts it dispersively.
   - Where the piezo points decides the photon counts, the camera image and the CCD's spectrum (photoluminescence,
     silicon's Raman line, the laser leaking through).
-  - A warm CCD is dark-current limited, and a PPMS ramps at the rate it is given.
+  - A warm CCD is dark-current limited.
+  - A PPMS ramps at the rate it is given and settles on its set point: it owns the stage temperature, so the
+    cryostat's own cooling doesn't hold it short.
 - **Timing:**
   - Measurements take their integration time (NPLC, time constants, exposures, sweeps).
   - Cool-downs take minutes, not hours, but they do take minutes.
@@ -93,6 +95,27 @@ resource, `COMn`, or `sdk:<kind>:<serial>`) and what it is wired to (`connect: {
 | `python -m labsim fault laser interlock_open` | The OBIS key interlock opens: emission stops |
 | `python -m labsim set PATH VALUE` | Change the world: `cryo.stage 4.2`, `vacuum.leak 1e-4`, `sample.damaged none` (repair), `magnet.quench_rate 0.05` |
 | `python -m labsim status` / `log NAME [N]` | What every instrument is doing, the world, recent events (quench, sample damage); what NAME was sent and answered |
+
+## In Kelvin's tests
+
+`tests/labsim_bench.py`, in Kelvin's own tests folder, has two pytest fixtures (`tests/test_labsim.py` uses both):
+
+- `labsim_bench(bench, sdk=False)` starts the bench's server in the test's temporary folder and points the test's own
+  process at it: Kelvin's VISA (`KELVIN_VISA_BACKEND=@labsim`), the bench's COM ports in pyserial and, with
+  `sdk=True`, the makers' libraries as labsim's stand-ins. It returns the bench: `.env` points another program at
+  it, and `.ctl("fault", "tc", "sensor_openA")` does what the command line does. When the test ends the server stops
+  and everything is put back. It needs PyVISA; without it the test is skipped.
+- `labsim_offline(bench)` builds a bench's world and instruments in the test's process, with no server.
+  `advance(bench, seconds)` lets that much time pass at once. Use it for one instrument's physics.
+
+```python
+from labsim_bench import labsim_bench  # noqa: F401  (the fixture)
+
+def test_gate_sweep(labsim_bench, tmp_path):
+    bench = labsim_bench("transport")
+    lab = build_lab(tmp_path / "lab.yaml", partial=True)   # Kelvin's own adapters and cards, on the bench
+    bench.ctl("fault", "li_xx", "garble")
+```
 
 ## Limits
 

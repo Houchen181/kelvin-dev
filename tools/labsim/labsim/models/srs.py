@@ -124,6 +124,7 @@ class SR830(LockIn):
         self.amp = 1.0
         self.sens_i, self.oflt_i, self.slope = 26, 8, 1
         self.rmod, self.ilin, self.icpl, self.ignd = 1, 0, 0, 0
+        self.rslp = 0   # the external reference's trigger: sine zero crossing (1: TTL rising, 2: TTL falling edge)
 
     def sens(self) -> float:
         return SENS_830[self.sens_i] * (1e-6 if self.isrc >= 2 else 1.0)
@@ -169,8 +170,8 @@ class SR830(LockIn):
     @command("RSLP")
     def _rslp(self, q, a, ch):
         if q:
-            return "0"
-        a.int(0, 0, 2)
+            return str(self.rslp)
+        self.rslp = a.int(0, 0, 2)
 
     @command("HARM")
     def _harm(self, q, a, ch):
