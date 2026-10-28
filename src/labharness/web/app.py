@@ -1105,17 +1105,30 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if project:
             store.set_folder(project, path)
 
+    def chat_folder(raw: Any) -> str:
+        """A folder a person chose for a chat's runs and files, checked: not in Kelvin's own folder (the lab config,
+        settings, accounts, cards and everyone's chats, which a chat's file tools never reach: folderfiles.off_limits),
+        and Kelvin can write there."""
+        from .. import folderfiles
+        text = str(raw or "").strip()
+        given = Path(text).expanduser()
+        if text and given.is_absolute():
+            why = folderfiles.off_limits(given.resolve(), [home, store.root])
+            if why:
+                raise ValueError(why)
+        return str(writable_folder(text))
+
     async def new_chat_folder(body: Dict[str, Any], project: Optional[str]) -> Optional[str]:
         """The folder a new chat saves its runs in: the one the person picked (checked: a problem is theirs to
         see), else the suggested one if Kelvin can write there now (a drive that is away: the data folder)."""
         picked = str(body.get("folder") or "").strip()
         if picked:
-            return str(await asyncio.to_thread(writable_folder, picked))
+            return await asyncio.to_thread(chat_folder, picked)
         suggested = suggested_folder(project)
         if Path(suggested) == runtime.data_dir / "runs":
             return None
         try:
-            return str(await asyncio.to_thread(writable_folder, suggested))
+            return await asyncio.to_thread(chat_folder, suggested)
         except ValueError:
             return None
 
@@ -1165,7 +1178,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                                           "it finishes. Press Stop to end it.")
                     raw = str(body.get("folder") or "").strip()
                     if raw:
-                        data["folder"] = str(await asyncio.to_thread(writable_folder, raw))
+                        data["folder"] = await asyncio.to_thread(chat_folder, raw)
                         keep_folder(data["folder"], store.project_of(chat_id))
                     else:
                         data.pop("folder", None)
@@ -2191,7 +2204,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             if not str(body.get("path") or "").strip():   # new chats start in the data folder again
                 keep_folder(None, project)
                 return JSONResponse({"folder": str(runtime.data_dir / "runs")})
-            path = str(await asyncio.to_thread(writable_folder, body.get("path")))
+            path = await asyncio.to_thread(chat_folder, body.get("path"))
         except KeyError as e:
             return error(404, e.args[0])
         except ValueError as e:

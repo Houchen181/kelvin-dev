@@ -2,7 +2,12 @@
 nothing outside it ('..' and links that lead out are refused). Text and CSV files by characters; PDFs by pages, as
 their text or, for a model that reads PDFs, as the pages themselves (figures, plots and equations as drawn); pictures
 as they are. What is read comes from outside the lab: the caller marks it as data for the model. What Kelvin saves is
-text (scripts, notes, data); a file it replaces is kept first, in .kelvin-old beside it."""
+text (scripts, notes, data); a file it replaces is kept first, in .kelvin-old beside it.
+
+Kelvin's own folders are never reached this way, wherever the person put the chat's folder (off_limits): Kelvin's
+folder holds the lab config, the settings, the accounts, the cards and everyone's chats, which a model that could
+rewrite them would use to change its own limits and approvals; and the lab's records in the data folder are Kelvin's
+alone to write."""
 from __future__ import annotations
 
 import io
@@ -12,7 +17,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 MAX_CHARS = 12000              # of text in one read; start= reads on
 MAX_PDF_PAGES = 20             # pages a model sees whole at once: each costs about as much as a picture
@@ -29,6 +34,11 @@ NOT_SAVED = {".exe", ".com", ".scr", ".pif", ".msi", ".msp", ".dll", ".sys", ".c
 STARTUP = {"sitecustomize.py", "usercustomize.py"}
 LOADED = {".py", ".pyw"}   # what a maker's Python library could import from its folder
 KEPT = ".kelvin-old"   # beside a file Kelvin replaced: each version before, by date
+# the lab's records in the data folder, and in each run's folder, which only Kelvin itself writes: the event log, the
+# mounted sample and its protection, the queue, the chats' folders of runs, the catalog, a run's record and run.h5
+RECORDS = {"events.jsonl", "mounted.json", "queue.json", "folders.json", "watches.json", "alarms.jsonl",
+           "catalog.sqlite", "catalog.sqlite-wal", "catalog.sqlite-shm", "catalog.sqlite-journal", "record.bin",
+           "run.h5"}
 
 Media = List[Tuple[str, bytes]]   # (mime type, the file's bytes): pictures, or PDF pages
 
@@ -38,24 +48,53 @@ class FolderError(ValueError):
     message says)."""
 
 
-def inside(folder: Any, path: Any = "", saving: bool = False) -> Path:
-    """path (relative to the chat's folder, or in full) as a path in that folder; FolderError if it leads out."""
+def _within(path: Path, folder: Any) -> bool:
+    try:
+        folder = Path(folder).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return path == folder or folder in path.parents
+
+
+def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: bool = False) -> Optional[str]:
+    """Why Kelvin's AI may not reach target through a chat's folder (None: it may). own: Kelvin's own folders (its
+    folder, with the lab config, settings, accounts, cards and everyone's chats; the signed-in person's chats), never
+    read or written this way. data: the data folder, whose records (RECORDS) only Kelvin itself writes; a run's
+    record and run.h5 are Kelvin's wherever the run is."""
+    for folder in own:
+        if folder and _within(target, folder):
+            return ("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, the "
+                    "instrument cards and everyone's chats: Kelvin's AI never %s there. Choose a folder for this "
+                    "chat outside it" % (target, Path(folder).expanduser(), "saves" if saving else "reads"))
+    name = target.name.lower()
+    if saving and name in RECORDS and (name in ("run.h5", "record.bin") or data is None or _within(target, data)):
+        return ("%s is one of the lab's records (the event log, the mounted sample's protection, the queue, the "
+                "catalog, a run's data), which only Kelvin itself writes" % target)
+    return None
+
+
+def inside(folder: Any, path: Any = "", saving: bool = False, own: Iterable[Any] = (), data: Any = None) -> Path:
+    """path (relative to the chat's folder, or in full) as a path in that folder; FolderError if it leads out, or to
+    Kelvin's own folders or records (off_limits)."""
     base = Path(folder).resolve()
     given = Path(str(path or "").strip() or ".")
     target = (given if given.is_absolute() else base / given).resolve()
     if target != base and base not in target.parents:
         raise FolderError("%s is outside this chat's folder (%s): Kelvin %s only what is in it"
                           % (path, base, "saves" if saving else "reads"))
+    why = off_limits(target, own, data, saving)
+    if why:
+        raise FolderError(why)
     return target
 
 
-def save(folder: Any, path: Any, text: str) -> Tuple[Path, Optional[Path]]:
+def save(folder: Any, path: Any, text: str, own: Iterable[Any] = (), data: Any = None) -> Tuple[Path, Optional[Path]]:
     """A text file saved in the chat's folder, its subfolders made as needed: the file, and where the version it
-    replaced was kept (None for a new file, or one already so). FolderError: outside the folder, a kind Kelvin doesn't
-    save, too long, or the computer refused."""
+    replaced was kept (None for a new file, or one already so). FolderError: outside the folder, in Kelvin's own
+    folders or records (own, data: off_limits), a kind Kelvin doesn't save, too long, or the computer refused."""
     if not str(path or "").strip():
         raise FolderError("say which file: its name, or its path in this chat's folder")
-    target = inside(folder, path, saving=True)
+    target = inside(folder, path, saving=True, own=own, data=data)
     if target == Path(folder).resolve() or target.is_dir():
         raise FolderError("%s is a folder: give the file's name" % path)
     if target.suffix.lower() in NOT_SAVED or target.name.lower() in STARTUP or KEPT in target.parts:
@@ -91,12 +130,12 @@ def _size(n: int) -> str:
     return "%d B" % n if n < 1024 else "%.0f KB" % (n / 1024) if n < 1024 ** 2 else "%.1f MB" % (n / 1024 ** 2)
 
 
-def listing(folder: Any, path: Any = "") -> str:
+def listing(folder: Any, path: Any = "", own: Iterable[Any] = ()) -> str:
     """The subfolders (Kelvin's runs marked) and files of the chat's folder, or of a folder in it: newest files
-    first, with sizes and dates."""
+    first, with sizes and dates. Never in Kelvin's own folders (own: off_limits)."""
     from . import rundata
     from .eventlog import RUN_NAME
-    where = inside(folder, path)
+    where = inside(folder, path, own=own)
     if not where.is_dir():
         raise FolderError("there is no folder %s in this chat's folder" % (path or "."))
     try:
@@ -148,9 +187,11 @@ def _ranges(indices: List[int]) -> str:
     return ", ".join("%d" % (a + 1) if a == b else "%d-%d" % (a + 1, b + 1) for a, b in spans)
 
 
-def read(folder: Any, path: Any, pages: Any = "", start: int = 0, figures: bool = False) -> Tuple[str, Media]:
-    """A file in the chat's folder: (what to tell the model, the pictures or PDF pages to show it)."""
-    target = inside(folder, path)
+def read(folder: Any, path: Any, pages: Any = "", start: int = 0, figures: bool = False,
+         own: Iterable[Any] = ()) -> Tuple[str, Media]:
+    """A file in the chat's folder: (what to tell the model, the pictures or PDF pages to show it). Never one in
+    Kelvin's own folders (own: off_limits)."""
+    target = inside(folder, path, own=own)
     if not target.is_file():
         raise FolderError("there is no file %s in this chat's folder (list_folder shows what is there)" % path)
     shown = target.relative_to(Path(folder).resolve()).as_posix()
