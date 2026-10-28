@@ -10,6 +10,9 @@
   has reviewed its limits): every change away from safe asks a person and says why; no envelope or auto mode
   covers it.
 - Beyond limits, or blocked commands: refused.
+- Raw commands: what the card lists is checked as such (a setting with its limits, an action, a reset); a source
+  function, protection, units or calibration command it doesn't list is refused; anything else unlisted on an
+  instrument with drives asks a person.
 - A mounted device's protection (protection.py) narrows the limits and rates and adds its gates' leakage guards;
   a source's range changes only while its level is at safe; while a person has their hands on the sample
   (lab.hands_on), nothing moves away from safe.
@@ -17,6 +20,7 @@
 from __future__ import annotations
 
 import math
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -120,6 +124,53 @@ def _same(spec: ParamSpec, a: Any, b: Any) -> bool:
     return a == b
 
 
+# Raw commands no card lists that change what the instrument is or means, refused unless its card has them as a
+# parameter (checked with limits) or an action: the source function (a 2400 put into current mode drove 10 µA into a
+# gate oxide), protection limits and compliance, the units its readings are in (an AMI 430 switched to kG), and
+# calibration (*CAL? calibrates).
+RESTRICTED = {"function": "the source function (what it applies to the sample)",
+              "protection": "a protection limit or compliance",
+              "units": "the units its values are in",
+              "calibration": "its calibration"}
+_RESTRICTED_WHY = ("%r changes %s on %s, which its card doesn't list, so Kelvin can't check it; to use it, add it to "
+                   "the card as a parameter (Lab → Cards…)")
+_HARMLESS = re.compile(r"^\s*\*(CLS|WAI|OPC|ESE|SRE)\b", re.I)   # IEEE 488.2 status housekeeping: never an output
+_NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+
+def _restricted(cmd: str) -> Optional[str]:
+    """Which kind of RESTRICTED command this is, from the nodes of its SCPI header; None for anything else."""
+    text = cmd.strip()
+    if re.match(r"^\*CAL\b", text, re.I):
+        return "calibration"
+    header = re.split(r"[\s?]", text, maxsplit=1)[0]
+    if not re.match(r"^:?[A-Za-z][A-Za-z0-9]*(:[A-Za-z][A-Za-z0-9]*)*$", header):
+        return None   # not SCPI-shaped (a driver's SET path, a vendor's mnemonic): its card's families decide
+    nodes = [re.sub(r"\d+$", "", n).upper() for n in header.lstrip(":").split(":")]
+    if nodes[0] in ("CAL", "CALIBRATION"):
+        return "calibration"
+    if any(n in ("UNIT", "UNITS") for n in nodes):
+        return "units"
+    if any(n in ("PROT", "PROTECTION", "ILIM", "ILIMIT", "VLIM", "VLIMIT") for n in nodes) or any(
+            a in ("VOLT", "VOLTAGE", "CURR", "CURRENT", "POW", "POWER") and b in ("LIM", "LIMIT")
+            for a, b in zip(nodes, nodes[1:])):
+        return "protection"
+    if nodes[0] in ("FUNC", "FUNCTION") or (nodes[0] in ("SOUR", "SOURCE") and len(nodes) > 1
+                                             and nodes[1] in ("FUNC", "FUNCTION")):
+        return "function"
+    return None
+
+
+def _number_in(cmd: str) -> Optional[float]:
+    """The first number after a command's header (its value, as far as Kelvin can tell), or None."""
+    parts = re.split(r"[\s,]+", cmd.strip(), maxsplit=1)
+    m = _NUMBER.search(parts[1]) if len(parts) > 1 else None
+    try:
+        return float(m.group(0)) if m else None
+    except ValueError:
+        return None
+
+
 def _unreachable(spec: ParamSpec) -> bool:
     """A set point the instrument ramps to by itself whose safe value no instrument reaches: absolute zero. After a
     stop it holds where its reading is; waiting for 0 K hung a stopped run until the wait timed out."""
@@ -195,6 +246,9 @@ class SafetyGate:
         parts = split_compound(command)
         if not parts:
             return Result(False, "refused", instr, message="refused: empty command")
+        if len(parts) > 1 and any(";" in s.set_cmd.text and s.set_cmd.match(command) is not None
+                                  for s in inst.card.setters):
+            parts = [command]   # the card's own setting is a chain (an AMI 430's TARG {value};RAMP): checked as one
         results = []
         for part in parts:
             results.append(self._raw_one(inst, part))
@@ -962,11 +1016,22 @@ class SafetyGate:
         def done(res: Result, **extra: Any) -> Result:
             return self._done(res, "raw", None, command=cmd, instrument=inst.name, **extra)
 
+        def refused(why: str) -> Result:
+            return done(Result(False, "refused", target, message="refused: " + why))
+
+        def asked(item: str) -> Result:
+            request = ApprovalRequest("Send raw command?", [item])
+            if not self.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                return done(Result(False, "declined", target, message="declined: %r not sent%s" % (cmd, note)))
+            return self._send(inst, cmd, target, done, "approved")
+
         try:
             for b in card.blocked:
                 if b.match(cmd) is not None:
-                    return done(Result(False, "refused", target,
-                                       message="refused: %r is blocked on %s (firmware/calibration class)" % (cmd, inst.name)))
+                    return refused("%r is blocked on %s (firmware/calibration class)" % (cmd, inst.name))
+            if _restricted(cmd) == "calibration":   # *CAL? is a query that calibrates
+                return refused("%r is blocked on %s (firmware/calibration class)" % (cmd, inst.name))
             if is_query(cmd, bool(card.connection.get("enq"))):
                 resp = inst.query_raw(cmd).strip()
                 shown = resp if len(resp) <= 80 else resp[:77] + "..."
@@ -978,10 +1043,13 @@ class SafetyGate:
                 try:
                     value = spec.from_wire(text)
                 except ValueError as e:
-                    return done(Result(False, "refused", target, message="refused: %s" % e))
+                    return refused(str(e))
                 res = self._set(inst.name, spec.name, value, True, self._who())
                 res.message = "raw %r → %s" % (cmd, res.message)
                 return res
+            for name, action in card.actions.items():   # the card's own named command: as do_action sends it
+                if len(action.send) == 1 and action.send[0].strip().lower() == cmd.strip().lower():
+                    return self.act(inst.name, name)
             for r in card.reset:
                 if r.match(cmd) is not None:
                     prep = self._to_safe(inst, wait=True)
@@ -990,29 +1058,62 @@ class SafetyGate:
                         return done(Result(False, bad[0].action, target, message="not sent: " + bad[0].message))
                     inst.write_raw(cmd)
                     return done(Result(True, "sent", target, message="%s: drives brought to safe, then sent %r" % (inst.name, cmd)))
+            restricted = _restricted(cmd)
             for spec in card.drives:
                 if spec.set_cmd is not None and self._prefix(spec).match(cmd) is not None:
-                    hands = self._hands_problem("%s.%s" % (inst.name, spec.name))
+                    key = "%s.%s" % (inst.name, spec.name)
+                    hands = self._hands_problem(key)
                     if hands:
-                        return done(Result(False, "refused", target, message="refused: %r not sent; %s" % (cmd, hands)))
-                    item = ("%s: %r touches drive %s but is not a plain %s setting, so limits can't be checked"
-                            % (inst.name, cmd, spec.name, spec.name))
-                    request = ApprovalRequest("Send raw command?", [item])
-                    if not self.ask(request):
-                        note = " (%s)" % request.note if request.note else ""
-                        return done(Result(False, "declined", target, message="declined: %r not sent%s" % (cmd, note)))
-                    return self._send(inst, cmd, target, done, "approved")
+                        return refused("%r not sent; %s" % (cmd, hands))
+                    if restricted:
+                        return refused(_RESTRICTED_WHY % (cmd, RESTRICTED[restricted], inst.name))
+                    return self._raw_drive_family(inst, spec, cmd, refused, asked)
+            if restricted:
+                return refused(_RESTRICTED_WHY % (cmd, RESTRICTED[restricted], inst.name))
             if card.status == "draft" and not inst.simulated:
                 hands = self._hands_problem(inst.name)
                 if hands:
-                    return done(Result(False, "refused", target, message="refused: %r not sent; %s" % (cmd, hands)))
-                item = "%s: %r is not on the (draft) card, so it can't be classified" % (inst.name, cmd)
-                if not self.ask(ApprovalRequest("Send raw command?", [item])):
-                    return done(Result(False, "declined", target, message="declined: %r not sent" % cmd))
-                return self._send(inst, cmd, target, done, "approved")
+                    return refused("%r not sent; %s" % (cmd, hands))
+                return asked("%s: %r is not on the (draft) card, so it can't be classified" % (inst.name, cmd))
+            if card.drives and not _HARMLESS.match(cmd):   # it could reach the sample: a person decides
+                hands = self._hands_problem(inst.name)
+                if hands:
+                    return refused("%r not sent; %s" % (cmd, hands))
+                return asked("%s: %r is not on its card, so Kelvin can't tell what it does; %s has drives that reach "
+                             "the sample (%s)" % (inst.name, cmd, inst.name, ", ".join(s.name for s in card.drives)))
             return self._send(inst, cmd, target, done, None, unmatched=True)
         except Exception as e:
             return done(Result(False, "error", target, message="%s: instrument error: %s" % (inst.name, e)))
+
+    def _raw_drive_family(self, inst: Instrument, spec: ParamSpec, cmd: str, refused: Any, asked: Any) -> Result:
+        """A raw command in a drive's family that isn't its plain setting (a sweep's stop value, a mode): Kelvin can't
+        be sure what it applies. Refused on a drive with an interlock (the interlock can't be checked against it), or
+        when the number it carries is beyond the drive's limits; otherwise a person sees that number against the
+        limits, and decides."""
+        key = "%s.%s" % (inst.name, spec.name)
+        locks = [lk.require.text for lk in self.lab.config.interlocks if lk.drive == key]
+        if locks:
+            return refused("%r touches drive %s, which an interlock guards (%s): only its plain setting can be checked "
+                           "against it, so it isn't sent" % (cmd, key, "; ".join(locks)))
+        problem = self._away_problem(inst, spec)
+        if problem:
+            return refused("%r not sent; %s" % (cmd, problem))
+        bits = ["%s: %r touches drive %s but is not a plain %s setting" % (inst.name, cmd, spec.name, spec.name)]
+        lim = inst.limits(spec.name) if spec.numeric else None
+        number = _number_in(cmd)
+        unit = " " + spec.unit if spec.unit else ""
+        if lim is not None and number is not None:
+            if not lim[0] <= number <= lim[1]:
+                return refused("%r carries %s%s, beyond %s's limits [%s, %s]%s" % (
+                    cmd, num(number), unit, key, num(lim[0]), num(lim[1]), unit))
+            bits.append("it carries %s%s, within %s's limits [%s, %s]%s (now %s)" % (
+                num(number), unit, key, num(lim[0]), num(lim[1]), unit, spec.show(self._current(inst, spec))))
+        else:
+            bits.append("Kelvin finds no value in it to check against %s's limits" % key)
+        g = self._guard_text(inst, spec)
+        if g:
+            bits.append("guards are not watched for it (%s)" % g)
+        return asked("; ".join(bits))
 
     def _send(self, inst: Instrument, cmd: str, target: str, done: Any, how: Optional[str], **extra: Any) -> Result:
         inst.write_raw(cmd)

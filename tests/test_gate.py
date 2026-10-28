@@ -149,8 +149,9 @@ def test_raw_drive_is_treated_as_a_drive(lab, make_gate):
 
 def test_raw_command_touching_a_drive_family_asks(make_gate):
     gate, approver = make_gate([False])
-    r = gate.raw("smu", "SOUR:VOLT:PROT 20")
+    r = gate.raw("smu", "SOUR:VOLT:MODE SWE")
     assert r.action == "declined" and "touches drive V" in str(approver.requests[0])
+    assert gate.raw("smu", "SOUR:VOLT:PROT 20").action == "refused"      # a protection limit no card lists
 
 
 def test_raw_blocked_commands_are_refused(make_gate):
