@@ -38,7 +38,9 @@ class Source:
 # ---------------------------------------------------------------- cryostat
 class Cryostat:
     """A stage with a heater, cooled toward base; the sample follows the stage. A heater range on a temperature
-    controller is a fraction of heater_max_W, so a low range cannot reach a high temperature."""
+    controller is a fraction of heater_max_W, so a low range cannot reach a high temperature. An instrument that runs
+    its own temperature control (a PPMS) can own the stage: then it sets the stage, and the cooling and heaters
+    here don't pull against it."""
 
     def __init__(self, c: Dict[str, Any]):
         self.base = float(c.get("base_K", 1.6))
@@ -50,14 +52,16 @@ class Cryostat:
         self.heaters: Dict[str, float] = {}
         self.pulse = 0.0          # heat from a quench, decaying
         self.helium = float(c.get("helium_pct", 78.0))
+        self.owner: Optional[str] = None   # the instrument that sets the stage itself, if one does
 
     def t_eq(self) -> float:
         frac = min(1.0, sum(self.heaters.values()) / self.p_max)
         return self.base + self.span * frac ** 0.6 + self.pulse
 
     def step(self, dt: float) -> None:
-        tau = self.tau * min(2.0, max(0.15, math.sqrt(max(self.stage, 0.1) / 50.0)))
-        self.stage += (self.t_eq() - self.stage) * (1.0 - math.exp(-dt / tau))
+        if self.owner is None:   # else its owner puts the stage where it wants it, in its own tick
+            tau = self.tau * min(2.0, max(0.15, math.sqrt(max(self.stage, 0.1) / 50.0)))
+            self.stage += (self.t_eq() - self.stage) * (1.0 - math.exp(-dt / tau))
         self.sample += (self.stage + 0.004 - self.sample) * (1.0 - math.exp(-dt / self.link_tau))
         self.pulse *= math.exp(-dt / 40.0)
 

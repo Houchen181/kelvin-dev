@@ -212,6 +212,17 @@ def shown(message: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def unseen_pictures(provider: Provider, attached: List[Dict[str, Any]]) -> Optional[str]:
+    """What to tell a person who sends pictures to a model that can't see them (the Claude Code bridge passes none
+    on): said as they send them, not learnt from an answer about a picture the model never saw."""
+    names = [str(a.get("name") or "the picture") for a in attached if str(a.get("mime") or "").startswith("image/")]
+    if not names or getattr(provider, "sees_images", False):
+        return None
+    return ("The model can't see pictures through %s: it gets only the name of %s. To have a model look at %s, pick "
+            "one that sees pictures (such as Claude, GPT or Gemini with an API key)."
+            % (provider.label, ", ".join(names), "it" if len(names) == 1 else "them"))
+
+
 def open_path(path: Path) -> None:
     """Open a file with the program the user has for it."""
     if sys.platform.startswith("win"):
@@ -2451,10 +2462,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except (KeyError, ValueError) as e:
             return error(400, e.args[0])
         queue: asyncio.Queue = asyncio.Queue()
+        unseen = unseen_pictures(provider, attached)
+
+        async def emit(event: Dict[str, Any]) -> None:
+            await queue.put(event)
+            if unseen and event.get("type") == "turn_start":   # said at once, before the model answers
+                await queue.put({"type": "note", "text": unseen})
 
         async def run() -> None:
             try:
-                await agent.run_turn(chat_id, text, model, provider, queue.put, attachments=attached)
+                await agent.run_turn(chat_id, text, model, provider, emit, attachments=attached)
             finally:
                 await queue.put(None)
 

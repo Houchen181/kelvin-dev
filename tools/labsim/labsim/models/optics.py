@@ -489,7 +489,7 @@ class AttocubeANC300(Wired, Instrument):
 
 class NewportSMC100(Wired, Instrument):
     """A delay line on an SMC100CC (57600 8N1): addressed commands (1TP, 1PA10.5), not referenced after power-up
-    so it refuses moves until homed (1OR); 1TE gives the last error letter."""
+    so it refuses moves until homed (1OR); 1TE gives the last error letter, 1TH the position a move is going to."""
     model = "newport_smc100"
     idn = "SMC100CC"
     default_serial = "B092345"
@@ -538,6 +538,8 @@ class NewportSMC100(Wired, Instrument):
             return "%sTE%s" % (a, e)
         if cmd == "TP":
             return "%sTP%.6f" % (a, self.pos)
+        if cmd == "TH":   # the set-point position: where a move is going (TP is where the stage is now)
+            return "%sTH%.6f" % (a, self.target)
         if cmd == "ID" and q:
             return "%sID%s" % (a, self.opt("stage", "LTA-HS"))
         if cmd == "VE":

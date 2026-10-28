@@ -381,7 +381,10 @@ class Keithley2450(Keithley2400):
 
 class Keithley6221(Wired, Instrument):
     """DC and AC current source. A running sine (SOUR:WAVE) drives the sample at its frequency; with the phase
-    marker on, its trigger link carries the reference a lock-in can lock to."""
+    marker on, its trigger link carries the reference a lock-in can lock to. Delta mode (SOUR:DELT) runs with the
+    2182A the bench names as `nanovoltmeter:` (on the 6221's RS-232 and trigger link): the current alternates
+    between high and low, and each reading is half the difference of the 2182A's two readings, so a thermal EMF
+    cancels."""
     model = "keithley_6221"
     idn = "KEITHLEY INSTRUMENTS INC.,MODEL 6221,{serial},D04  /700x "
     default_serial = "4123960"
@@ -393,11 +396,22 @@ class Keithley6221(Wired, Instrument):
         self.output = False
         self.wave = dict(func="SIN", ampl=2e-12, freq=1e3, offs=0.0, pmar=False, pmar_deg=0.0, olin=2, dur=9.9e37,
                          armed=False, running=False, rng="BEST")
+        self.delta = dict(high=1e-3, low=-1e-3, delay=2e-3, count=9.9e37, cab=False, units="V", armed=False,
+                          running=False, high_now=True, t=0.0, elapsed=0.0, n=0, last=None)
         self.compl = False
         self._apply()
 
     def status(self):
-        return {"output": self.output, "level_A": self.level, "wave": dict(self.wave), "compliance": self.compl}
+        return {"output": self.output, "level_A": self.level, "wave": dict(self.wave), "compliance": self.compl,
+                "delta": {k: v for k, v in self.delta.items()
+                          if k in ("high", "low", "count", "units", "armed", "running", "n", "last")}}
+
+    def _limited(self, i: float) -> Tuple[float, bool]:
+        """The current the source gets through its load, and whether it is in compliance."""
+        r2 = self.world.r2() if self.terminal("out")[0] == "bias" else 1e12
+        if abs(i) * r2 > self.comp:
+            return math.copysign(self.comp / r2, i), True
+        return i, False
 
     def _apply(self) -> None:
         if not self.output:
@@ -407,7 +421,11 @@ class Keithley6221(Wired, Instrument):
             return
         w = self.wave
         r2 = self.world.r2() if self.terminal("out")[0] == "bias" else 1e12
-        if w["running"]:
+        if self.delta["running"]:
+            i, self.compl = self._limited(self.delta["high"] if self.delta["high_now"] else self.delta["low"])
+            self.put("out", Source("I", dc=i))
+            self.put("ref", None)
+        elif w["running"]:
             peak = w["ampl"] + abs(w["offs"])
             scale = min(1.0, self.comp / max(peak * r2, 1e-30))
             self.compl = scale < 1.0
@@ -424,8 +442,132 @@ class Keithley6221(Wired, Instrument):
             self.put("ref", None)
 
     def tick(self, dt: float, now: float) -> None:
+        if self.delta["running"]:
+            self._delta_step(dt)
         if self.output:
             self._apply()
+
+    # -- Delta mode with a 2182A (manual section 5)
+    def _nanovoltmeter(self) -> Optional[Instrument]:
+        """The 2182A on this 6221's RS-232, if the bench wires one there and it answers."""
+        server = getattr(self, "server", None)
+        nvm = server.instruments.get(str(self.opt("nanovoltmeter", ""))) if server is not None else None
+        return nvm if nvm is not None and nvm.reachable() and "dead" not in nvm.faults else None
+
+    def _delta_half(self, nvm: Instrument) -> float:
+        """Half a Delta cycle: the delay, then a 2182A reading at its integration time."""
+        return self.delta["delay"] + float(getattr(nvm, "nplc", 1.0)) / 60.0
+
+    def _delta_reading(self, nvm: Instrument) -> float:
+        """The 2182A's voltage at the high and at the low current: half their difference, in the units asked."""
+        d = self.delta
+        v = []
+        for i in (d["high"], d["low"]):
+            self.put("out", Source("I", dc=self._limited(i)[0]))
+            v.append(nvm.dc_on("in"))
+        volts = (v[0] - v[1]) / 2.0 + nvm.noise(1.5e-9 * math.sqrt(5.0 / float(getattr(nvm, "nplc", 5.0))))
+        mid = (d["high"] - d["low"]) / 2.0
+        if d["units"] == "OHMS":
+            return volts / mid if mid else 9.9e37
+        if d["units"] == "SIEM":
+            return mid / volts if volts else 9.9e37
+        return volts * mid if d["units"] == "W" else volts
+
+    def _delta_step(self, dt: float) -> None:
+        d = self.delta
+        nvm = self._nanovoltmeter()
+        if nvm is None:   # the 2182A went quiet (switched off, cable pulled): Delta stops
+            d["running"] = d["armed"] = False
+            return
+        half = self._delta_half(nvm)
+        d["t"] += dt
+        d["elapsed"] += dt
+        d["high_now"] = d["t"] % (2 * half) < half
+        if d["t"] < 2 * half:
+            return
+        d["t"] -= 2 * half
+        d["last"] = (self._delta_reading(nvm), d["elapsed"])
+        d["n"] += 1
+        if d["n"] >= d["count"] or self.compl and d["cab"]:   # done, or stopped by compliance
+            d["running"] = d["armed"] = False
+
+    @command("SOURce:DELTa:HIGH")
+    def _dhigh(self, q, a, ch):
+        if q:
+            return fmt_e(self.delta["high"])
+        self.delta["high"] = a.num(0, -0.105, 0.105, minmax=(-0.105, 0.105, 1e-3))
+
+    @command("SOURce:DELTa:LOW")
+    def _dlow(self, q, a, ch):
+        if q:
+            return fmt_e(self.delta["low"])
+        self.delta["low"] = a.num(0, -0.105, 0.105, minmax=(-0.105, 0.105, -1e-3))
+
+    @command("SOURce:DELTa:DELay")
+    def _ddelay(self, q, a, ch):
+        if q:
+            return fmt_e(self.delta["delay"])
+        self.delta["delay"] = a.num(0, 1e-3, 9999.999, minmax=(1e-3, 9999.999, 2e-3))
+
+    @command("SOURce:DELTa:COUNt")
+    def _dcount(self, q, a, ch):
+        if q:
+            return fmt_e(self.delta["count"])
+        n = a.num(0, minmax=(1, 65536, 9.9e37))
+        if n != 9.9e37 and not 1 <= n <= 65536:
+            raise fail(OUT_OF_RANGE, a[0])
+        self.delta["count"] = n if n == 9.9e37 else float(int(n))
+
+    @command("SOURce:DELTa:CABort")
+    def _dcab(self, q, a, ch):
+        if q:
+            return onoff(self.delta["cab"])
+        self.delta["cab"] = a.bool(0)
+
+    @command("UNIT[:VOLTage][:DC]")
+    def _unit(self, q, a, ch):
+        if q:
+            return self.delta["units"]
+        self.delta["units"] = a.word(0, ["V", "OHMS", "W", "SIEMens"])[:4]
+
+    @command("SOURce:DELTa:NVPResent", setter=False)
+    def _nvpr(self, q, a, ch):
+        # over RS-232 the computer has the 6221's only serial port, so no 2182A can be on it
+        return "1" if self.bus != "asrl" and self._nanovoltmeter() is not None else "0"
+
+    @command("SOURce:DELTa:ARM")
+    def _darm(self, q, a, ch):
+        if q:
+            return onoff(self.delta["armed"])
+        if self.bus == "asrl" or self._nanovoltmeter() is None:
+            raise fail(CONFLICT, "Delta needs a 2182A on the RS-232 port")
+        self.delta.update(armed=True, last=None, n=0)
+
+    @command("INITiate[:IMMediate]", query=False)
+    def _init(self, q, a, ch):
+        if not self.delta["armed"]:
+            raise fail(CONFLICT, "nothing armed")
+        self.delta.update(running=True, high_now=True, t=0.0, elapsed=0.0, n=0, last=None)
+        self.output = True
+        self._apply()
+
+    @command("SOURce:SWEep:ABORt", query=False)
+    def _dabort(self, q, a, ch):
+        self.delta["running"] = self.delta["armed"] = False
+        self._apply()   # the source goes back to its DC level
+
+    @command("SENSe:DATA[:LATest]", setter=False)
+    def _data(self, q, a, ch):
+        d = self.delta
+        nvm = self._nanovoltmeter()
+        if d["last"] is None and d["running"] and nvm is not None:   # the first reading: the reply waits for it
+            wait = max(0.0, 2 * self._delta_half(nvm) - d["t"])
+            self.delay(wait)
+            d["last"] = (self._delta_reading(nvm), d["elapsed"] + wait)
+            self._apply()
+        if d["last"] is None:
+            raise fail(CONFLICT, "no Delta reading")
+        return "%s,%s" % (fmt_e(d["last"][0]), fmt_e(d["last"][1], 3))
 
     @command("OUTPut[:STATe]")
     def _outp(self, q, a, ch):
@@ -434,6 +576,7 @@ class Keithley6221(Wired, Instrument):
         self.output = a.bool(0)
         if not self.output:
             self.wave["running"] = False
+            self.delta["running"] = self.delta["armed"] = False
         self._apply()
 
     @command("SOURce:CURRent[:LEVel][:IMMediate][:AMPLitude]")
@@ -467,6 +610,7 @@ class Keithley6221(Wired, Instrument):
     def _clear(self, q, a, ch):
         self.output = False
         self.wave["running"] = False
+        self.delta["running"] = self.delta["armed"] = False
         self._apply()
 
     @command("SOURce:WAVE:FUNCtion")
@@ -527,13 +671,11 @@ class Keithley6221(Wired, Instrument):
             return self.wave["rng"]
         self.wave["rng"] = a.word(0, ["BEST", "FIXed"])[:4]
 
-    @command("SOURce:WAVE:ARM", query=False)
+    @command("SOURce:WAVE:ARM")   # one handler for both: on two, the first one found would answer the query too
     def _arm(self, q, a, ch):
+        if q:
+            return onoff(self.wave["armed"])
         self.wave["armed"] = True
-
-    @command("SOURce:WAVE:ARM", setter=False)
-    def _armq(self, q, a, ch):
-        return onoff(self.wave["armed"])
 
     @command("SOURce:WAVE:INITiate", query=False)
     def _winit(self, q, a, ch):
