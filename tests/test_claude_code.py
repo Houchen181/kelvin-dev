@@ -287,6 +287,32 @@ def test_a_recorded_invoke_turn_works_the_lab(parts, monkeypatch):
     assert '<tool_call name="set_value">' in runs[1] and "<invoke" not in runs[1]   # the model sees its calls ran
 
 
+class Seeing(Scripted):
+    sees_images = True
+
+
+def test_a_picture_sent_to_the_bridge_is_said_to_go_unseen(parts, monkeypatch):
+    """F1/F3: people attached wiring photos and plots; the bridge model got only their names and said so late."""
+    from test_web import client_for
+    replies(monkeypatch, "I can only read the file name.")
+    client, headers = client_for(parts, {"claudecode": ClaudeCodeProvider(["claude"], parts[2].root),
+                                         "scripted": Seeing([[{"type": "text", "text": "A clean bias tee."}]])})
+
+    def send(model):
+        chat = client.post("/api/chats", json={"model": model}, headers=headers).json()
+        photo = client.post("/api/chats/%s/attachments" % chat["id"], content=screen.png(b"\xff" * 48, 4, 4),
+                            headers=dict(headers, **{"X-File-Name": "wiring.png"})).json()
+        with client.stream("POST", "/api/chats/%s/turn" % chat["id"], headers=headers,
+                           json={"text": "is this wired right?", "model": model, "attachments": [photo]}) as r:
+            assert r.status_code == 200
+            return [json.loads(line) for line in r.iter_lines() if line.strip()]
+    events = send("claudecode:sonnet")
+    assert [e["type"] for e in events][:2] == ["turn_start", "note"]   # before the model's answer
+    assert events[1]["text"].startswith("The model can't see pictures through Claude Code: it gets only the name "
+                                        "of wiring.png.")
+    assert not [e for e in send("scripted:m1") if e["type"] == "note"]   # a model that sees it: nothing to say
+
+
 def test_a_chat_turn_through_claude_code(tmp_path, monkeypatch):
     log = tmp_path / "calls.jsonl"
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
