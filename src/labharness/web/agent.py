@@ -689,7 +689,7 @@ class ChatAgent:
         parts.append(self._more_tools(chat))
         parts.append(self._files())
         parts.append(self._folder(chat))   # last: it changes only when the person picks another folder
-        remember =[remember_tool(bool(project), not private)] if learn and (project or not private) else []
+        remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
         tools = self._lab_tools(chat) + remember + ([SAVE_PAPER] if project else []) + [
             DEVICES, ADD_DEVICE, MOUNT_DEVICE, CHAT_HISTORY, WAKE_ME, USE_SKILL, READ_SKILL_FILE, FIND_TOOLS]
         if project or not private:   # unshared work keeps what it learned in its project
@@ -803,8 +803,8 @@ class ChatAgent:
         outside = rt.gate.outside_reason(chat.get("outside") or "")
         if outside:
             request.items.append("Not kept by Kelvin itself: " + outside)
-            if not await self._ask_human(call["id"], emit, request):
-                return "not saved: the person declined", True
+            if not await self._ask_human(call["id"], emit, request):   # declined, or nobody answered
+                return "not saved: " + (request.note or "the person declined"), True
         return await asyncio.to_thread(rt.keep_lab_note, args.get("kind"), args.get("text"), args.get("instruments"),
                                        replaces, "Kelvin", rt.user)
 

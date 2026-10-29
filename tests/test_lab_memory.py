@@ -176,9 +176,10 @@ def test_a_note_on_an_instrument_is_shown_when_it_is_used(tmp_path):
     assert "quench" not in described + first                                        # only the instrument's own
     note = rt.lab_notes()[0]
     rt.change_lab_note(note["id"], "human (portal)", None, text="Ramp the gate to 0 V before touching the bonds.")
-    plan = "plan: gate\nsweep: { smu.V: {from: 0, to: 0.2, step: 0.1} }\nmeasure: [smu.I]\nafter: { smu.V: 0 }"
+    plan = ("plan: gate\nsweep: { smu.V: {from: 0, to: 0.2, step: 0.1} }\nmeasure: [smu.I, lockin.X]\n"
+            "after: { smu.V: 0 }")
     ran, again = call(rt, ("run_plan", {"plan": plan}), ("run_plan", {"plan": plan}))
-    assert "From the lab's memory, on smu:" in ran and "Ramp the gate to 0 V" in ran   # changed: shown again
+    assert "From the lab's memory, on smu:\n" in ran and "Ramp the gate to 0 V" in ran   # changed: shown again
     assert "From the lab's memory" not in again
     rt.attribution = {"chat": "c2"}                       # another chat (the portal sets this for its lab calls)
     assert "Ramp the gate to 0 V" in rt.lab_notes_at_use(["smu"])
@@ -336,7 +337,8 @@ def test_a_chat_that_read_a_web_page_asks_the_person_before_it_keeps_a_lab_note(
     provider = Scripted([
         [{"type": "tool_call", "id": "c1", "name": "read_web_page", "input": {"url": "https://example.com/tips"}}],
         [{"type": "tool_call", "id": "c2", "name": "remember",
-          "input": {"scope": "lab", "kind": "lesson", "text": "Ramp the magnet at 2 T/min.", "instruments": ["magnet"]}}],
+          "input": {"scope": "lab", "kind": "lesson", "text": "Ramp the magnet at 2 T/min.",
+                    "instruments": ["magnet"]}}],
         DONE])
     agent = ChatAgent(rt, store, build_server(rt), {"scripted": provider})
     chat = store.create("scripted:m1")
@@ -389,7 +391,8 @@ def test_people_keep_change_and_delete_notes_in_the_lab_panel(tmp_path):
         assert empty["notes"] == [] and empty["virtual"] is True and "lesson" in empty["kinds"]
         stamp = client.get("/api/state", headers=headers).json()["lab_memory"]
         kept = client.post("/api/lab-memory", headers=headers, json={
-            "kind": "wiring", "text": "The mixing chamber is channel A of the LS350.", "instruments": "tc, magnet"}).json()
+            "kind": "wiring", "text": "The mixing chamber is channel A of the LS350.",
+            "instruments": "tc, magnet"}).json()
         note = kept["notes"][0]
         assert (note["kind"], note["instruments"], note["who"]) == ("wiring", ["tc", "magnet"], "ada")
         assert client.get("/api/state", headers=headers).json()["lab_memory"] != stamp   # the panel reloads it
@@ -402,8 +405,8 @@ def test_people_keep_change_and_delete_notes_in_the_lab_panel(tmp_path):
             "kind": "lesson", "text": "Ramp the magnet slowly below 4 K.", "instruments": ["magnet"]}).json()
         assert [n["kind"] for n in lesson["notes"]] == ["lesson", "wiring"]   # in the order the chats' brief has
         rt.user = "grace"
-        changed = client.post("/api/lab-memory/" + note["id"], headers=headers,
-                              json={"text": "The mixing chamber is channel B of the LS350.", "instruments": ["tc"]}).json()
+        changed = client.post("/api/lab-memory/" + note["id"], headers=headers, json={
+            "text": "The mixing chamber is channel B of the LS350.", "instruments": ["tc"]}).json()
         now = next(n for n in changed["notes"] if n["id"] == note["id"])
         assert now["text"].endswith("channel B of the LS350.") and now["edited_who"] == "grace" and now["who"] == "ada"
         assert now["before"][0]["text"] == "The mixing chamber is channel A of the LS350."
@@ -424,7 +427,7 @@ def test_the_lab_memory_is_the_computers_not_a_phones_and_not_claudes_while_it_o
             assert not allowed(role, method, "/api/lab-memory/m1") and not allowed(role, method, "/api/lab-memory")
     rt, store, client, headers = portal(tmp_path, {})
     with client:
-        rt.operating = "Open LaserDesk"                               # Claude works the screen: its clicks never edit it
+        rt.operating = "Open LaserDesk"             # Claude works the screen: its clicks never edit the lab's memory
         r = client.post("/api/lab-memory", headers=headers, json={"kind": "fact", "text": "Base temperature 8 mK."})
         assert r.status_code == 423 and client.get("/api/lab-memory", headers=headers).status_code == 200
         rt.operating = None

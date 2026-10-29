@@ -2087,8 +2087,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def lab_memory_view(request: Request) -> Response:
         """GET: the lab's memory for the Lab panel, every note with who wrote it and when (labmemory.py). POST {kind,
-        text, instruments}: a person keeps a note, as theirs (their account; the portal or their phone), and the lab's
-        record says so."""
+        text, instruments}: a person at this computer keeps a note, as theirs (their account), and the lab's record
+        says so. Phones can't (remote.py), nor Claude's clicks while it operates the screen (Guard)."""
         if request.method == "POST":
             body = await request.json()
             said, failed = await asyncio.to_thread(runtime.keep_lab_note, body.get("kind"), body.get("text"),

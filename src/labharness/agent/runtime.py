@@ -358,7 +358,7 @@ class LabRuntime:
         # Kelvin's own folder, where the lab's memory is kept for everyone here (labmemory.py); set by the app and the
         # MCP server. None: the data folder (a script, a test)
         self.lab_memory_dir: Optional[Path] = None
-        self._lab_told: Dict[Any, set] = {}   # the lab's notes each chat (or agent session) was shown at an instrument's use
+        self._lab_told: Dict[Any, set] = {}   # the lab's notes each chat (agent session) saw at an instrument's use
         self.protection_missing: List[str] = []   # the mounted device's protection names what this lab lacks
         # the mounted device's caps that are not in the instruments yet: written when Kelvin is next idle
         self.caps_waiting = False
@@ -2678,8 +2678,8 @@ class LabRuntime:
         outside = self.gate.outside_reason()
         if outside:
             request.items.append("Not kept by Kelvin itself: " + outside)
-            if not self.gate.ask(request):
-                return "not kept: the person declined" + (" (%s)" % request.note if request.note else "")
+            if not self.gate.ask(request):   # declined, or nobody answered: the request's note says which
+                return "not kept: " + (request.note or "the person declined")
         return self.keep_lab_note(kind, text, instruments, replaces, by, account)[0]
 
     def change_lab_note(self, note_id: str, by: str, account: Optional[str] = None, **fields: Any) -> Dict[str, Any]:
@@ -2715,7 +2715,9 @@ class LabRuntime:
             told.update((n["id"], n["text"]) for n in notes[:lm.AT_USE])
         if not notes:
             return ""
-        out = ["", "From the lab's memory, on %s:" % ", ".join(names)] + [lm.line(n) for n in notes[:lm.AT_USE]]
+        shown = notes[:lm.AT_USE]
+        on = [name for name in names if lm.for_instruments(shown, [name])]   # only the instruments it has notes on
+        out = ["", "From the lab's memory, on %s:" % ", ".join(on)] + [lm.line(n) for n in shown]
         if len(notes) > lm.AT_USE:
             out.append("(%d more: lab_memory with the instrument)" % (len(notes) - lm.AT_USE))
         return "\n".join(out)

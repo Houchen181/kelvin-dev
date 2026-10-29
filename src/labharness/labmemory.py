@@ -75,6 +75,7 @@ def path_for(folder: Any, virtual: bool) -> Path:
 
 
 def kind_of(kind: Any) -> str:
+    """A note's kind, checked (lessons is lesson)."""
     k = str(kind or "").strip().lower()
     k = k[:-1] if k.endswith("s") and k[:-1] in KINDS else k   # lessons, facts
     if k not in KINDS:
@@ -84,6 +85,7 @@ def kind_of(kind: Any) -> str:
 
 
 def text_of(text: Any) -> str:
+    """A note's text on one line, checked: one fact, not empty, not long."""
     t = " ".join(str(text or "").split())
     if not t:
         raise LabMemoryError("a note needs its text: the fact, in a sentence")
@@ -167,8 +169,8 @@ def _tied_to(note: Dict[str, Any], names: Iterable[str]) -> bool:
 
 def newest(note: Dict[str, Any]) -> str:
     """When a note was last written: changed, else kept."""
-    edited = note.get("edited")
-    return str((edited or {}).get("at") or note.get("at") or "") if isinstance(edited, dict) else str(note.get("at") or "")
+    edited = note.get("edited") if isinstance(note.get("edited"), dict) else {}
+    return str(edited.get("at") or note.get("at") or "")
 
 
 def _newest_first(notes: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
