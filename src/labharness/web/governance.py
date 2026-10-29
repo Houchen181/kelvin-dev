@@ -88,8 +88,11 @@ def routes(runtime: Any, settings: Any, accounts: Any, needs_owner: Callable[...
             if text is None:
                 return error(400, "In #%d there was no lab config. To leave your instruments, choose the virtual lab "
                                   "in Lab setup." % n)
-            if text == runtime.versions.now(LAB):
-                return error(409, "The lab config is #%d's already." % n)
+            try:
+                if text == runtime.versions.now(LAB):
+                    return error(409, "The lab config is #%d's already." % n)
+            except Unreadable:
+                pass   # Save and connect writes it whole
             return await lab_post({"yaml": text, "pin": body.get("pin")}, by, why, n)
         refused = needs_owner(body, "Rolling the lab's cards back", owner=False)   # a trainee: never
         if refused:
