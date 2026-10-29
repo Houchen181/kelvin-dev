@@ -275,6 +275,9 @@ def test_near_waits_for_the_set_point_not_only_a_steady_reading(lab, make_engine
     st.near = 0.05
     info = engine._stabilize(st, gate.stop_generation, warnings)
     assert not info["settled"] and "it reads 4 K, not within 50 mK of 5 K" in warnings[0]
+    from labharness.scanqueue import load_step   # a queue's step between scans takes near: too
+    assert load_step("step: s\nset: {tc.setpoint: 5}\nstabilize: {read: tc.T_sample, within: 0.01, near: 0.05}"
+                     ).stabilize.near == 0.05
 
 
 def test_a_plans_retry_takes_a_reading_again_and_marks_the_gap(lab, make_engine, monkeypatch, tmp_path):

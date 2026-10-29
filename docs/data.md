@@ -64,7 +64,6 @@ With `retry: {times: 3, wait: 10}` (or `retry: 3`), a point whose reading fails 
 - **The gap is marked:** every point has `gap_s`, the time lost to a fault just before it (0 for none), and the run lists the gaps (`gaps`) and says how much time was lost.
 - **Never retried:** a sensor fault, a stop or an instrument switched off. Without `retry:`, a failed reading stops the run.
 
-
 ## Recipes
 
 A recipe is a measurement in stages that checks its own results, kept so that it can be run again (`run_recipe`; in the portal by its name). Each stage is a plan, a check on its run's data, values kept for the later stages, and how often to try again with changed values:
