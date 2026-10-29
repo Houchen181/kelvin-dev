@@ -65,11 +65,11 @@ Only people can change the lab config, the approval mode, a sample's limits or w
 
 Kelvin opens on a simulated lab with a demo model, so you can try it right away. Add an API key in Settings, or sign in with ChatGPT, to use a real model. It keeps itself up to date, replacing the installed copy, so there is only ever one Kelvin on a computer.
 
-Also included: sign-in for everyone in the lab, each with their own chats, keys, data and record, and a shared instrument log; a queue that runs scans overnight after one approval; reports that keep themselves up to date for every scan, every sample and every project (PDF and PowerPoint), with each run's data saved point by point as it is measured and kept in one HDF5 file, and a catalog of every run that the AI can search; project memory with skills and recipes (procedures and staged measurements that worked), incognito chats, models that look at plots, camera frames and the photos or PDFs you attach, second opinions that check the evidence, chats Kelvin continues by itself after a long wait, literature search with citations, a terminal, alarms and approvals from your phone, and MCP access for Claude Code, Codex or Gemini CLI.
+Also included: sign-in for everyone in the lab, each with their own chats, keys, data and record, and a shared instrument log; a queue that runs scans overnight after one approval; reports that keep themselves up to date for every scan, every sample and every project (PDF and PowerPoint), with each run's data saved point by point as it is measured and kept in one HDF5 file, and a catalog of every run that the AI can search; project memory with skills and recipes (procedures and staged measurements that worked), a lab memory every chat shares (wiring, reference sources, excitations, lessons, each with who wrote it and when), incognito chats, models that look at plots, camera frames and the photos or PDFs you attach, second opinions that check the evidence, chats Kelvin continues by itself after a long wait, literature search with citations, a terminal, alarms and approvals from your phone, and MCP access for Claude Code, Codex or Gemini CLI.
 
 ## Documentation
 
-- [Using Kelvin](docs/portal.md): models, projects, memory, the terminal, phone access
+- [Using Kelvin](docs/portal.md): models, projects, memory and the lab's memory, the terminal, phone access
 - [Instruments](docs/instruments.md): setup, supported instruments, writing and trying cards
 - [Plans, data and reports](docs/data.md): plans, the queue, analysis, the data folder, reports, uninstalling
 - [Safety](docs/safety.md): the rules in full, auto mode, watches
