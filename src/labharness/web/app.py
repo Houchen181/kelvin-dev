@@ -272,6 +272,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
+    runtime.lab_memory_dir = home                         # the lab's memory, everyone's (labmemory.py)
     from .. import envs
     envs.set_home(home)          # the instrument environments Kelvin installs makers' packages into (envs.py)
     envs.cleanup()               # environments removed while their files were in use
@@ -2147,6 +2148,42 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         ok = runtime.monitor.acknowledge(request.path_params["alarm_id"])
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
+    def lab_memory_now(said: str = "") -> Dict[str, Any]:
+        from .. import labmemory
+        notes = labmemory.ordered(runtime.lab_notes(), runtime.lab.instruments)   # as the chats' brief has them
+        return {"notes": [labmemory.view(n) for n in notes], "kinds": list(labmemory.KINDS),
+                "stamp": runtime.lab_memory_stamp(), "virtual": runtime.lab_info.get("kind") != "file", "said": said}
+
+    async def lab_memory_view(request: Request) -> Response:
+        """GET: the lab's memory for the Lab panel, every note with who wrote it and when (labmemory.py). POST {kind,
+        text, instruments}: a person at this computer keeps a note, as theirs (their account), and the lab's record
+        says so. Phones can't (remote.py), nor Claude's clicks while it operates the screen (Guard)."""
+        if request.method == "POST":
+            body = await request.json()
+            said, failed = await asyncio.to_thread(runtime.keep_lab_note, body.get("kind"), body.get("text"),
+                                                   body.get("instruments"), "", person(request), runtime.user)
+            if failed:
+                return error(400, said[len("not kept: "):] if said.startswith("not kept: ") else said)
+            return JSONResponse(await asyncio.to_thread(lab_memory_now, said.split(":")[0]))
+        return JSONResponse(await asyncio.to_thread(lab_memory_now))
+
+    async def lab_memory_note(request: Request) -> Response:
+        """POST {kind, text, instruments}: a person changes a note (what it said before stays with it); DELETE: a
+        person deletes it. Both go in the lab's record, with who did it."""
+        note_id = request.path_params["note_id"]
+        try:
+            if request.method == "DELETE":
+                await asyncio.to_thread(runtime.remove_lab_note, note_id, person(request), runtime.user)
+            else:
+                body = await request.json()
+                fields = {k: body[k] for k in ("kind", "text", "instruments") if k in body}
+                await asyncio.to_thread(runtime.change_lab_note, note_id, person(request), runtime.user, **fields)
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else "no such note")
+        except ValueError as e:   # LabMemoryError: what is wrong with the note, in words
+            return error(400, str(e))
+        return JSONResponse(await asyncio.to_thread(lab_memory_now))
+
     async def notify_test(request: Request) -> Response:
         return JSONResponse({"result": await asyncio.to_thread(runtime.notifier.test)})
 
@@ -2833,6 +2870,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         data["ask_scripts"] = setup.first and settings.lab_scripts is None   # the first setup: the lab's scripts?
         from ..cardlang import shown   # each card also as this person reads it (Settings → Display), for the phone too
         data["pending"] = [shown(p, settings.card_language) for p in data.get("pending") or []]
+        data["lab_memory"] = runtime.lab_memory_stamp()   # the Lab panel reloads the lab's memory when it changes
         return JSONResponse(data)
 
     async def scripts_folder(request: Request) -> Response:
@@ -3072,6 +3110,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/watches", watches_view, methods=["GET", "POST"]),
         Route("/api/watches/{watch_id}", watch_view, methods=["DELETE"]),
         Route("/api/alarms/{alarm_id}/ack", alarm_ack, methods=["POST"]),
+        Route("/api/lab-memory", lab_memory_view, methods=["GET", "POST"]),
+        Route("/api/lab-memory/{note_id}", lab_memory_note, methods=["POST", "DELETE"]),
         Route("/api/notify/test", notify_test, methods=["POST"]),
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
         Route("/api/instruments/scripts", scripts_view, methods=["POST"]),

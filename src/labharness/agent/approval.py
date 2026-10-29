@@ -68,6 +68,8 @@ class WebApprover(Approver):
         # lines a card adds about the instruments it names, kept with it in the record: a calibration out of date
         # (LabRuntime.card_notes)
         self.notes: Optional[Callable[[ApprovalRequest], List[str]]] = None
+        # the lab's lessons on the instruments a request names, shown on its card (LabRuntime.lab_lessons_for)
+        self.lessons: Optional[Callable[[ApprovalRequest], List[str]]] = None
 
     def subscribe(self, listener: Callable[[Dict[str, Any]], None]) -> Callable[[], None]:
         """Call `listener(request)` for every new request (from the requesting thread). Returns unsubscribe."""
@@ -88,12 +90,16 @@ class WebApprover(Approver):
             where = self.where(request) if self.where else None
         except Exception:
             where = "REAL HARDWARE"   # unsure: say the instruments may be real
+        try:
+            lessons = list(self.lessons(request)) if self.lessons else []
+        except Exception:   # the lab's memory never holds up an approval
+            lessons = []
         with self._cv:
             self._seq += 1
             now = time.time()
             entry = {"id": "r%d" % self._seq, "title": request.title, "items": list(request.items),
                      "created": now, "expires": now + self.timeout, "answer": None, "by": None,
-                     "thread": threading.get_ident(), "where": where}
+                     "thread": threading.get_ident(), "where": where, "lessons": lessons}
             if why:   # never shown: nobody is left to act on a yes
                 entry.update(answer=False, by=why, decided=now)
                 self._history.appendleft(entry)
@@ -102,7 +108,7 @@ class WebApprover(Approver):
             self._pending[entry["id"]] = entry
             self._cv.notify_all()
         public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "seconds_left": int(self.timeout),
-                  "where": where}
+                  "where": where, "lessons": lessons}
         for listener in list(self._listeners):
             try:
                 listener(public)
@@ -217,7 +223,7 @@ class WebApprover(Approver):
             now = time.time()
             return [{"id": e["id"], "title": e["title"], "items": e["items"],
                      "seconds_left": max(0, int(e["expires"] - now)), "where": e.get("where"),
-                     "escalated": bool(e.get("escalated"))}
+                     "escalated": bool(e.get("escalated")), "lessons": e.get("lessons") or []}
                     for e in self._pending.values() if e["answer"] is None]
 
     def history_list(self) -> List[Dict[str, Any]]:

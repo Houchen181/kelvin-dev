@@ -5,7 +5,8 @@ The model reaches the lab only through the same MCP tools external agents use
 
 Memory has three levels that never mix: the user's global instructions and notes (every chat), a project's
 instructions and notes (only the chats filed under that project), and the conversation itself. Notes are recalled
-per message (memory.py); incognito chats use and keep no memory.
+per message (memory.py); incognito chats use and keep no memory. Beside them is the lab's memory, everyone's
+(labmemory.py): its brief is in every chat's prompt, incognito included, as the lab's instruments are.
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_REC
 from .wakeups import WAKE_ME, Waker
 from .settings import Settings
 from .store import MAX_NOTE, ChatStore
+from ..labmemory import KINDS as LAB_KINDS
 
 SYSTEM = INSTRUCTIONS + """
 You are Kelvin, the lab assistant in this portal, working with an experimental physicist.
@@ -80,7 +82,10 @@ of this conversation. Use a note only if it bears on the question, and say so if
 LEARN_RULES = """Use the remember tool when something durable is settled. For the user (scope global): a lasting
 preference or convention, such as units or how cautious to be. For this project (scope project): a decision, a working
 procedure, an instrument quirk, or a key result with units and run ID. Never save questions, one-off requests,
-chit-chat, guesses, or anything already in the notes. To correct an outdated note, pass its id as replaces."""
+chit-chat, guesses, or anything already in the notes. To correct an outdated note, pass its id as replaces.
+For the lab (scope lab, which every chat and everyone here sees): how it is wired, where a reference comes from, what
+excites the sample and how it is stated (rms or peak), a lesson learned at the bench (what to do first, what to avoid),
+tied to the instruments it concerns; only what a person said or a run showed."""
 
 FOLDER = """# This chat's folder
 Runs started in this chat are saved {where}, each in its own folder named by its run id (date, time, plan). Only \
@@ -103,25 +108,31 @@ def unshared(item: Optional[Dict[str, Any]]) -> bool:
 
 
 def remember_tool(in_project: bool, everywhere: bool = True) -> Dict[str, Any]:
-    """everywhere: may this chat keep notes for every conversation? Not from unshared work, whose notes would be
-    recalled in shared chats."""
-    scopes = (["global"] if everywhere else []) + (["project"] if in_project else [])
-    kinds = (list(memory.GLOBAL_KINDS) if everywhere else []) + (list(memory.PROJECT_KINDS) if in_project else [])
+    """everywhere: may this chat keep notes for every conversation (the user's, and the lab's)? Not from unshared
+    work, whose notes would be recalled in shared chats."""
+    scopes = (["global", "lab"] if everywhere else []) + (["project"] if in_project else [])
+    kinds = (list(memory.GLOBAL_KINDS) + list(LAB_KINDS) if everywhere else []) + \
+        (list(memory.PROJECT_KINDS) if in_project else [])
     return {
         "name": "remember",
         "description": "Keep one short, durable fact for later conversations." + (
                            " global: the user's lasting preferences and conventions (used in every conversation)."
+                           " lab: a fact about this lab (wiring, a reference source, an excitation, a lesson), which "
+                           "every chat and everyone here sees, tied to the instruments it concerns."
                            if everywhere else " This work isn't shared, so nothing from it goes into the notes for "
-                           "every conversation.") + (
+                           "every conversation or the lab's memory.") + (
                            " project: a decision, procedure, instrument quirk or key result, used only in this "
                            "project's conversations." if in_project else " This chat is in no project, so "
                            "experiment facts cannot be kept.") + " The user sees every note and can delete it.",
         "schema": {"type": "object", "required": ["scope", "kind", "text"], "properties": {
             "scope": {"type": "string", "enum": scopes},
             "kind": {"type": "string", "enum": kinds,
-                     "description": ("global: preference, convention or profile; " if everywhere else "")
+                     "description": ("global: preference, convention or profile; lab: lesson, wiring, reference, "
+                                     "excitation or fact; " if everywhere else "")
                                     + "project: decision, procedure, quirk or result"},
             "text": {"type": "string", "description": "The fact in one sentence, at most %d characters." % MAX_NOTE},
+            "instruments": {"type": "array", "items": {"type": "string"},
+                            "description": "lab: the instruments it concerns (it is shown when one is used)"},
             "replaces": {"type": "string", "description": "id of an outdated note this one corrects (optional)"}}},
     }
 MAX_STEPS = 25
@@ -251,7 +262,10 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "card_guide", "find_card", "experiment_guide", "look_at", "watches", "queue_show",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
-           "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "activity"}
+           "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "activity", "shared_memory"}
+# agents over MCP keep a note in the lab's memory with remember_shared; the portal's chats with remember (scope lab),
+# which knows whose chat it is and asks the person after the chat read text from outside the lab
+MCP_ONLY = {"remember_shared"}
 # readings: beside another chat's change to the lab, as an instrument that change uses isn't asked (its latest values
 # instead: LabRuntime._reading)
 READINGS = {"lab_status", "get_value", "health_check", "show_sequence"}
@@ -495,7 +509,7 @@ class ChatAgent:
         self.read_only = {t.name for t in listed if t.annotations is not None and t.annotations.read_only_hint}
         self.tools = [{"name": t.name, "description": (t.description or "") + (REPORT_SCOPE if t.name == "make_report"
                                                                              else ""), "schema": t.input_schema}
-                      for t in listed]
+                      for t in listed if t.name not in MCP_ONLY]
 
     async def close(self) -> None:
         await self._exit.aclose()
@@ -539,6 +553,16 @@ class ChatAgent:
         lines.append("Data Kelvin didn't measure (another program's files) become runs with import_data. Give "
                      "whole paths when you say where something is.")
         return "\n".join(lines)
+
+    def _lab_memory(self, keep: str) -> List[str]:
+        """The lab's memory as every chat has it in its prompt (labmemory.py), or nothing while it is empty. It changes
+        only when someone keeps or changes a note, so the cached prefix mostly holds. keep: how this chat keeps a
+        note ("": it keeps none)."""
+        try:
+            brief = self.runtime.lab_memory_brief(keep)
+        except Exception:   # the lab's memory never keeps a chat from answering
+            return []
+        return [brief] if brief else []
 
     def _folder(self, chat: Dict[str, Any]) -> str:
         """Where this chat's runs go, so Kelvin can say where its data are; and its files, which Kelvin may read."""
@@ -627,11 +651,12 @@ class ChatAgent:
         """The system prompt and tools for one turn in this chat. Only stable text goes here (Kelvin's rules, the
         user's instructions, the project's instructions), so the cached prompt prefix survives; notes are recalled
         per message instead (see recall). A chat outside every project gets no project memory; an incognito chat
-        gets no memory at all and cannot save any."""
+        gets none of the user's or a project's memory and cannot save any. Every chat has the lab's memory (the
+        lab's facts and lessons, everyone's: labmemory.py), as it has the lab's instruments."""
         if chat.get("incognito"):   # not kept, so never continued later either; Kelvin's own skills only
             own = self.know.index(incognito=True)
             return {"system": "\n\n".join([SYSTEM] + self._brevity() + [INCOGNITO] +
-                                           ([READ_GUIDE + "\n" + own] if own else []) + [
+                                           ([READ_GUIDE + "\n" + own] if own else []) + self._lab_memory("") + [
                                                self._more_tools(chat), self._files(), self._folder(chat)]),
                     "tools": self._lab_tools(chat) + [CHAT_HISTORY, FIND_TOOLS] + ([USE_SKILL, READ_SKILL_FILE]
                                                                                     if own else []) +
@@ -651,16 +676,17 @@ class ChatAgent:
                     "- %s [id %s]%s" % (reference(e), e["paper"], " — " + e["why"] if e.get("why") else "")
                     for e in papers[-40:]))
         learn = self.settings.learning if self.settings else True
+        rules = self.chat_rules(chat)
+        private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         parts.append(MEMORY_RULES + ("\n" + LEARN_RULES if learn else ""))
+        parts += self._lab_memory("remember, scope lab" if learn and not private else "")   # the lab's, everyone's
         know = self.know.index(project["id"] if project else None)
         parts.append(SKILLS_GUIDE + ("\n" + know if know else ""))
-        rules = self.chat_rules(chat)
         if rulebook.restrictive(rules):
             parts.append(CONFIDENTIAL.format(rules=rulebook.describe(rules)))
         parts.append(self._more_tools(chat))
         parts.append(self._files())
         parts.append(self._folder(chat))   # last: it changes only when the person picks another folder
-        private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         remember = [remember_tool(bool(project), not private)] if learn and (project or not private) else []
         tools = self._lab_tools(chat) + remember + ([SAVE_PAPER] if project else []) + [
             DEVICES, ADD_DEVICE, MOUNT_DEVICE, CHAT_HISTORY, WAKE_ME, USE_SKILL, READ_SKILL_FILE, FIND_TOOLS]
@@ -745,9 +771,9 @@ class ChatAgent:
         if not isinstance(args, dict):
             return "the arguments were not valid JSON; send the call again", True
         scope = str(args.get("scope") or "")
-        if scope == "global" and context.get("private"):
+        if scope in ("global", "lab") and context.get("private"):
             return ("not saved: this work isn't shared (unpublished, confidential or model-limited), so nothing from "
-                    "it goes into the notes for every conversation"), True
+                    "it goes into the notes for every conversation or the lab's memory"), True
         try:
             note, what = self.store.remember(scope, args.get("text"), str(args.get("kind") or ""),
                                              project_id=context["project"], chat_id=chat["id"],
@@ -759,6 +785,26 @@ class ChatAgent:
         where = "your notes for every conversation" if scope == "global" else "this project's notes"
         verb = {"saved": "kept in", "known": "already in", "updated": "updated in"}[what]
         return "%s %s: [%s] %s (id %s)" % (verb, where, note["kind"], note["text"], note["id"]), False
+
+    async def _remember_lab(self, chat: Dict[str, Any], call: Dict[str, Any], emit: Emit) -> Tuple[str, bool]:
+        """remember with scope lab: kept in the lab's memory, which every chat and everyone here sees (labmemory.py),
+        as Kelvin's in this person's chat. A chat that has read text from outside the lab since the person last wrote
+        asks the person first: a note goes into every chat's prompt."""
+        args, rt = call["input"], self.runtime
+        replaces = str(args.get("replaces") or "")
+        try:
+            request = rt.lab_note_request(args.get("kind"), args.get("text"), args.get("instruments"), replaces)
+        except KeyError as e:
+            return "not saved: %s" % (e.args[0] if e.args else e), True
+        except ValueError as e:
+            return "not saved: %s" % e, True
+        outside = rt.gate.outside_reason(chat.get("outside") or "")
+        if outside:
+            request.items.append("Not kept by Kelvin itself: " + outside)
+            if not await self._ask_human(call["id"], emit, request):   # declined, or nobody answered
+                return "not saved: " + (request.note or "the person declined"), True
+        return await asyncio.to_thread(rt.keep_lab_note, args.get("kind"), args.get("text"), args.get("instruments"),
+                                       replaces, "Kelvin", rt.user)
 
     # ------------------------------------------------------------------ reports
 
@@ -1161,7 +1207,11 @@ class ChatAgent:
         if name == "find_tools":
             return _without_opinion(self._find_tools(chat, context, args))
         if name == "remember" and context["learn"]:
+            if isinstance(args, dict) and args.get("scope") == "lab" and not context.get("private"):
+                return _without_opinion(await self._remember_lab(chat, call, emit))
             return _without_opinion(self._remember(chat, context, args))
+        if name in MCP_ONLY:   # an agent's over MCP: a chat that calls one by name never gets past its own rules
+            return "not a tool in Kelvin's chats: keep a fact about the lab with remember, scope lab", True, None
         if name == "wake_me" and not chat.get("incognito"):
             return _without_opinion(self.waker.add(chat["id"], args))
         if name == "wait" and _seconds(args) > WAIT_S:   # other chats would wait too

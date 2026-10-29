@@ -181,6 +181,11 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "chain":
         text = "measurement chain of %s %s" % (e.get("device") or "the setup", "removed" if e.get("removed")
                                                else "recorded")
+    elif kind == "lab_memory":
+        from ..labmemory import who
+        tied = "; " + ", ".join(e["instruments"]) if e.get("instruments") else ""
+        return "%s %s %s a note in the lab's memory (%s%s): %s" % (
+            t, who(e.get("by"), e.get("account")), e.get("change"), e.get("kind") or "?", tied, e.get("text") or "")
     elif kind == "lab_changed":
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
     elif kind == "instrument_switched":
@@ -357,6 +362,10 @@ class LabRuntime:
         # a person's hands on the sample (who, since): every drive held at safe; the app keeps it across restarts
         self.hands: Optional[Dict[str, Any]] = None
         self.owner: Any = None   # the lab owner's PIN when one is set (accounts.OwnerPin); set by the app
+        # Kelvin's own folder, where the lab's memory is kept for everyone here (labmemory.py); set by the app and the
+        # MCP server. None: the data folder (a script, a test)
+        self.lab_memory_dir: Optional[Path] = None
+        self._lab_told: Dict[Any, set] = {}   # the lab's notes each chat (agent session) saw at an instrument's use
         self.protection_missing: List[str] = []   # the mounted device's protection names what this lab lacks
         # the mounted device's caps that are not in the instruments yet: written when Kelvin is next idle
         self.caps_waiting = False
@@ -395,6 +404,8 @@ class LabRuntime:
             approver.where = self.where
         if hasattr(approver, "notes"):   # and when an instrument it names is out of calibration (profiles.py)
             approver.notes = self.card_notes
+        if hasattr(approver, "lessons"):   # and the lab's lessons on the instruments it names (labmemory.py)
+            approver.lessons = self.lab_lessons_for
         if hasattr(approver, "escalate"):   # nobody answers at the computer: people away from it are asked
             approver.escalate = self._escalate
         self.notifier.alive = lambda: self.monitor.watching()   # the heartbeat: Kelvin is there, watching the lab
@@ -2713,6 +2724,207 @@ class LabRuntime:
             return
         if found:
             meta["chain"], meta["chain_of"] = found["chain"], found["of"]
+
+    # ------------------------------------------------------------------ the lab's memory (labmemory.py)
+
+    def _lab_memory(self) -> Any:
+        """The memory of the lab Kelvin controls now: in Kelvin's own folder, everyone's; the virtual lab's apart from
+        the lab in lab.yaml."""
+        from ..labmemory import LabMemory, path_for
+        return LabMemory(path_for(self.lab_memory_dir or self.data_dir, self.lab_info.get("kind") != "file"))
+
+    def lab_memory_stamp(self) -> str:
+        """Changes when the lab's memory does, or when Kelvin controls another lab: the Lab panel reloads it then."""
+        return self._lab_memory().stamp()
+
+    def lab_notes(self) -> List[Dict[str, Any]]:
+        return self._lab_memory().notes()
+
+    def named_in(self, text: str) -> List[str]:
+        """The lab's instruments a text names (a plan's keys, a request's lines): pump in pump.power, as where() reads
+        a request."""
+        return [name for name in self.lab.instruments
+                if re.search(r"(?<![\w.])%s(?![\w])" % re.escape(name), str(text or ""))]
+
+    def _chain_line(self) -> str:
+        """The measurement chain of the mounted device (or the setup's), in one line, for every chat's brief."""
+        try:
+            from ..chain import Chains, lines
+            m = self.mounted or {}
+            found = Chains(self.data_dir).get(m.get("device"), m.get("device_name"))
+        except Exception:
+            return ""
+        if not found:
+            return ""
+        whose = "the setup's" if found["of"] == "setup" else "%s's" % (found.get("device_name") or "the device")
+        text = "Measurement chain (%s, recorded by %s, %s): %s" % (whose, found.get("by") or "?",
+                                                                  str(found.get("at") or "?")[:10],
+                                                                  "; ".join(lines(found["chain"])))
+        return text if len(text) <= 500 else text[:497] + "…"
+
+    def lab_memory_brief(self, keep: str = "remember_shared") -> str:
+        """The lab's memory as every chat (and every agent's instructions) has it: what to do with it, its notes
+        within the brief's budget, the measurement chain on record, and how many notes shared_memory has besides.
+        keep: how this client keeps a note ("": it keeps none). "" when the lab's memory is empty and no chain is on
+        record."""
+        from .. import labmemory as lm
+        notes, chain = self.lab_notes(), self._chain_line()
+        if not notes and not chain:
+            return ""
+        shown, left = lm.brief(notes, self.lab.instruments)
+        out = [lm.head(keep)] + shown + ([chain] if chain else [])
+        if left:
+            out.append("%d more note%s: shared_memory looks them up, by instrument or by words." % (
+                left, "" if left == 1 else "s"))
+        return "\n".join(out)
+
+    def shared_memory(self, query: str = "", instrument: str = "") -> str:
+        """shared_memory: the lab's memory, each note with who wrote it and when: all of it, the notes on an instrument,
+        or those that bear on the words; with the measurement chains on record."""
+        from .. import labmemory as lm
+        from ..chain import Chains, lines
+        notes = self.lab_notes()
+        lab = "the virtual lab" if self.lab_info.get("kind") != "file" else "this lab (%s)" % self.lab.config.name
+        query, instrument = str(query or "").strip(), str(instrument or "").strip()
+        if instrument:
+            found = lm.for_instruments(notes, [instrument])
+            missing = "" if any(i.lower() == instrument.lower() for i in self.lab.instruments) else \
+                " (%s is not in %s now)" % (instrument, lab)
+            head = "the lab's memory on %s%s: %d note%s" % (instrument, missing, len(found),
+                                                             "" if len(found) == 1 else "s")
+        elif query:
+            found = lm.find(notes, query)
+            head = "the lab's memory, notes that bear on %r: %d of %d" % (query, len(found), len(notes))
+        else:
+            found = lm.ordered(notes, self.lab.instruments)
+            head = "the lab's memory, %s: %d note%s, shared by every chat and agent here" % (
+                lab, len(found), "" if len(found) == 1 else "s")
+        out = [head] + [lm.line(n) for n in found]
+        if not notes:
+            out.append("Nothing is kept yet. When a person says how the lab is wired, where a reference comes from, "
+                       "what excites the sample, or a lesson learned, keep it.")
+        if not instrument and not query:
+            try:
+                kept = Chains(self.data_dir).every()
+            except Exception:
+                kept = {}
+            if kept:
+                out.append("Measurement chains on record (measurement_chain reads or records one):")
+                for entry in kept.values():
+                    whose = entry.get("device_name") or "the setup"
+                    out.append("- %s (recorded by %s, %s): %s" % (whose, entry.get("by") or "?",
+                                                                 str(entry.get("at") or "?")[:10],
+                                                                 "; ".join(lines(entry["chain"]))))
+        return "\n".join(out)
+
+    def lab_note_request(self, kind: Any, text: Any, instruments: Any = None,
+                         replaces: str = "") -> ApprovalRequest:
+        """What a person sees when they are asked to let Kelvin keep a note (it read text from the web): the note, and
+        the one it corrects. LabMemoryError or KeyError says what is wrong with it."""
+        from .. import labmemory as lm
+        kind, text, tied = lm.kind_of(kind), lm.text_of(text), lm.ties(instruments)
+        items = ["%s%s: %s" % (kind, " [%s]" % ", ".join(tied) if tied else "", text)]
+        if replaces:
+            items.append("It corrects: %s" % self._lab_memory().get(str(replaces))["text"])
+        return ApprovalRequest("Keep this in the lab's memory, which every chat and everyone here sees?", items)
+
+    def keep_lab_note(self, kind: Any, text: Any, instruments: Any = None, replaces: str = "", by: str = "agent",
+                      account: Optional[str] = None) -> Tuple[str, bool]:
+        """Keep a note in the lab's memory, or correct one (replaces: its id), and say so in the lab's record. (text,
+        failed)."""
+        from .. import labmemory as lm
+        try:
+            note, what = self._lab_memory().add(kind, text, instruments, by=by, account=account,
+                                                replaces=str(replaces) if replaces else None)
+        except KeyError as e:
+            return "not kept: %s" % (e.args[0] if e.args else e), True
+        except (lm.LabMemoryError, OSError) as e:
+            return "not kept: %s" % e, True
+        if what != "known":
+            self.gate.log.write("lab_memory", by=by, account=account, change="added" if what == "saved" else "changed",
+                                note=note["id"], kind=note["kind"], text=note["text"],
+                                instruments=note.get("instruments") or None)
+        verb = {"saved": "kept in", "known": "already in", "updated": "corrected in"}[what]
+        out = ["%s the lab's memory, which every chat and everyone here sees:" % verb, lm.line(note)]
+        here = {i.lower() for i in self.lab.instruments}
+        away = [i for i in note.get("instruments") or [] if i.lower() not in here]
+        if away:
+            out.append("note: %s %s not in this lab now" % (", ".join(away), "is" if len(away) == 1 else "are"))
+        if note["kind"] == "excitation":
+            out.append("The excitation's form (rms or peak), a series resistor and the preamplifiers' gains also go in "
+                       "the measurement chain (measurement_chain), which every run of the device carries.")
+        return "\n".join(out), False
+
+    def remember_shared(self, kind: Any, text: Any, instruments: Any = None, replaces: str = "",
+                         by: str = "agent", account: Optional[str] = None) -> str:
+        """remember_shared (an agent over MCP): keep a note at once; or, when the agent read text from the web in the
+        last minutes (which could be steering it into every chat), once a person approves."""
+        from ..labmemory import LabMemoryError
+        try:
+            request = self.lab_note_request(kind, text, instruments, replaces)
+        except KeyError as e:
+            return "not kept: %s" % (e.args[0] if e.args else e)
+        except LabMemoryError as e:
+            return "not kept: %s" % e
+        outside = self.gate.outside_reason()
+        if outside:
+            request.items.append("Not kept by Kelvin itself: " + outside)
+            if not self.gate.ask(request):   # declined, or nobody answered: the request's note says which
+                return "not kept: " + (request.note or "the person declined")
+        return self.keep_lab_note(kind, text, instruments, replaces, by, account)[0]
+
+    def change_lab_note(self, note_id: str, by: str, account: Optional[str] = None, **fields: Any) -> Dict[str, Any]:
+        """A person changes a note in the portal (kind, text, instruments): kept with what it said before, and said in
+        the lab's record. KeyError, LabMemoryError."""
+        note = self._lab_memory().change(note_id, by, account, **fields)
+        self.gate.log.write("lab_memory", by=by, account=account, change="changed", note=note["id"],
+                            kind=note["kind"], text=note["text"], instruments=note.get("instruments") or None)
+        return note
+
+    def remove_lab_note(self, note_id: str, by: str, account: Optional[str] = None) -> Dict[str, Any]:
+        """A person deletes a note in the portal; the lab's record keeps what it said."""
+        note = self._lab_memory().remove(note_id)
+        self.gate.log.write("lab_memory", by=by, account=account, change="deleted", note=note["id"],
+                            kind=note["kind"], text=note["text"], instruments=note.get("instruments") or None)
+        return note
+
+    def lab_notes_at_use(self, instruments: Iterable[str], always: bool = False) -> str:
+        """The lab's notes on these instruments, for a tool's answer: always (describe_instrument), or the first time
+        a chat uses one of them (set_value, send_raw, do_action, run_plan; for agents over MCP, the first time this
+        server does), and again once a note's text changes. "" when there are none to show."""
+        from .. import labmemory as lm
+        names = [str(n) for n in dict.fromkeys(instruments) if n]
+        if not names:
+            return ""
+        try:
+            notes = lm.for_instruments(self.lab_notes(), names)
+        except Exception:   # the memory never stands in the way of the instruments
+            return ""
+        if not always:
+            told = self._lab_told.setdefault((self.attribution or {}).get("chat"), set())
+            notes = [n for n in notes if (n["id"], n["text"]) not in told]
+            told.update((n["id"], n["text"]) for n in notes[:lm.AT_USE])
+        if not notes:
+            return ""
+        shown = notes[:lm.AT_USE]
+        on = [name for name in names if lm.for_instruments(shown, [name])]   # only the instruments it has notes on
+        out = ["", "From the lab's memory, on %s:" % ", ".join(on)] + [lm.line(n) for n in shown]
+        if len(notes) > lm.AT_USE:
+            out.append("(%d more: shared_memory with the instrument)" % (len(notes) - lm.AT_USE))
+        return "\n".join(out)
+
+    def lab_lessons_for(self, request: ApprovalRequest) -> List[str]:
+        """The lab's lessons on the instruments an approval card names, for the person who answers it."""
+        from .. import labmemory as lm
+        named = self.named_in(" ".join([request.title] + [str(i) for i in request.items]))
+        if not named:
+            return []
+        try:
+            found = lm.for_instruments(self.lab_notes(), named, kinds=("lesson",))
+        except Exception:
+            return []
+        return ["%s (%s, %s)" % (n["text"], lm.who(n.get("by"), n.get("account")), str(n.get("at") or "")[:10])
+                for n in found[:lm.ON_CARD]]
 
     # ------------------------------------------------------------------ for the approval page
 

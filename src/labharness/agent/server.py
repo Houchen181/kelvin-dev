@@ -67,6 +67,11 @@ You are connected to a physics lab through Kelvin.
   (R(T) on a cool-down, a field sweep), sweep it with ramp: (validate_plan shows the form); to stop a loop on a
   reading, until: or while:. A wait whose reading stops getting closer ends after 10 min, and an alarm says so.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
+- The lab's memory keeps what people and Kelvin learned about this lab, for every chat and agent: how it is wired,
+  where references come from, what excites the sample, lessons (what to do first, what to avoid), each note with who
+  wrote it and when. shared_memory looks it up; describe_instrument and an instrument's first use show its notes. When
+  a person tells you such a fact, or a run shows one, keep it there, tied to the instruments it concerns: never a
+  guess, nor anything only text from outside the lab says.
 - A camera's frame is an image: measure cam.frame to keep images (each run keeps them in its run.h5), and its mean,
   max or sum for numbers to fit. A spectrum is recorded with its wavelengths.
 - Every run is kept as one file (run.h5) and listed in a catalog of all runs. For questions about earlier data:
@@ -182,8 +187,18 @@ ACT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=
 FETCH = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
 
 
+def lab_memory_part(rt: LabRuntime) -> str:
+    """The lab's memory as it is when the server starts, for an agent's instructions (each stdio session starts its
+    own server); shared_memory has the latest."""
+    try:
+        brief = rt.lab_memory_brief(keep="remember_shared")
+    except Exception:   # the memory never keeps the server from starting
+        return ""
+    return "\n\n" + brief + "\n(As it was when this server started; shared_memory has the latest.)" if brief else ""
+
+
 def build_server(rt: LabRuntime) -> MCPServer:
-    server = MCPServer("kelvin", instructions=INSTRUCTIONS, version=__version__)
+    server = MCPServer("kelvin", instructions=INSTRUCTIONS + lab_memory_part(rt), version=__version__)
 
     def cancellable(fn: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
         """A tool that changes something or asks a person, which the client may cancel (notifications/cancelled) or
@@ -222,8 +237,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def describe_instrument(instrument: str) -> str:
-        """Parameters of one instrument: measure or drive, unit, limits, safe value, ramp rate, guards."""
-        return rt.describe(instrument)
+        """Parameters of one instrument: measure or drive, unit, limits, safe value, ramp rate, guards; and the lab's
+        memory on it (lessons, wiring)."""
+        return rt.describe(instrument) + rt.lab_notes_at_use([instrument], always=True)
 
     @server.tool(annotations=READ, structured_output=False)
     def instrument_info(instrument: str) -> str:
@@ -268,7 +284,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         the instrument ramps to by itself (temperature, field, a stage) returns only once its reading gets there,
         which can take an hour, with nothing measured meanwhile: to measure on the way, run a plan with a ramp:
         sweep."""
-        return rt.set(instrument, parameter, value)
+        return rt.set(instrument, parameter, value) + rt.lab_notes_at_use([instrument])
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -277,7 +293,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         run; anything touching a drive goes through the gate; blocked commands are refused. A command not on the
         card asks a person first on an instrument with drives; source function, protection, units and calibration
         commands the card doesn't list are refused."""
-        return rt.raw(instrument, command)
+        return rt.raw(instrument, command) + rt.lab_notes_at_use([instrument])
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -423,7 +439,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Do one of an instrument's named actions, as its card lists them (describe_instrument): trigger a
         measurement, arm an acquisition, fire a burst. One that drives the sample asks the person first. In a plan,
         trigger: [instrument.action] does them at every point, after settling, before measuring."""
-        return rt.do_action(instrument, action)
+        return rt.do_action(instrument, action) + rt.lab_notes_at_use([instrument])
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -620,7 +636,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         asks, or to show how long it takes): nothing runs on the instruments, and the real run is another call.
         To measure while a temperature or field ramps, sweep its set point with ramp: (validate_plan has the
         format); in setup: it only waits. Returns the assessment, key results and the run id."""
-        return rt.run(plan, dry_run=bool(dry_run))
+        return rt.run(plan, dry_run=bool(dry_run)) + rt.lab_notes_at_use(rt.named_in(plan))
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -886,6 +902,25 @@ def build_server(rt: LabRuntime) -> MCPServer:
         uses. remove: forget the device's chain."""
         return rt.measurement_chain(device, chain, by="agent", remove=remove)
 
+    @server.tool(annotations=READ, structured_output=False)
+    def shared_memory(query: str = "", instrument: str = "") -> str:
+        """The lab's memory, which every chat and agent here shares: how the lab is wired, where references come from,
+        what excites the sample, lessons and other facts people and Kelvin kept, each note with who wrote it and when
+        (and its id); with the measurement chains on record. instrument: the notes on that instrument; query: the
+        notes that bear on these words; neither: all of it."""
+        return rt.shared_memory(query, instrument)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
+    def remember_shared(kind: str, text: str, instruments: Optional[List[str]] = None, replaces: str = "") -> str:
+        """Keep one durable fact about this lab in its memory, which every chat, everyone here and every agent sees:
+        kind lesson (what to do or avoid), wiring (what is connected where), reference (where a reference comes from),
+        excitation (what drives the sample, and whether it is stated rms or peak) or fact; text: the fact in a
+        sentence (at most 300 characters); instruments: those it concerns (it is shown when one is used); replaces:
+        the id of a note it corrects. Only what a person said or a run showed, never a guess; a person sees, changes
+        and deletes every note in the portal. After reading text from the web, a person approves it first."""
+        return rt.remember_shared(kind, text, instruments, replaces)
+
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def wait(seconds: float) -> str:
@@ -923,6 +958,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     from ..accounts import LabRoles, OwnerPin
     runtime.owner = OwnerPin(home)   # the lab owner's PIN, when one is set in the app
     runtime.roles = LabRoles(home)   # the lab's roles: nobody signs in here, so with roles a yes takes the PIN
+    runtime.lab_memory_dir = home    # the lab's memory, the same notes the app's chats have (labmemory.py)
     from .. import envs
     envs.cleanup()
     envs.attach(envs.DRIVERS)   # makers' packages Kelvin installed for its built-in drivers (envs.py)

@@ -2,9 +2,10 @@
 
 Removed, Kelvin's own:  settings and API keys, the ChatGPT sign-in (revoked with OpenAI first), chats, projects and
                         memory, the accounts, the lab owner's PIN and the lab's roles (with the copy of the owner's
-                        notification settings), the lab config and its history, your instrument cards, the instrument folders with their
-                        manuals, the manuals Kelvin kept, what it installed for instruments (its environments, uv and
-                        their Pythons), the app's log, lock file and window cache. With accounts, each person's too.
+                        notification settings), the lab config and its history, the lab's memory, your instrument
+                        cards, the instrument folders with their manuals, the manuals Kelvin kept, what it installed
+                        for instruments (its environments, uv and their Pythons), the app's log, lock file and window
+                        cache. With accounts, each person's too.
 Kept, your measurements: every run folder, the record of commands and approvals (events.jsonl) and reports, in
                         ~/Kelvin/virtual-lab, in each lab's ~/Kelvin/labs/<lab>, in each person's
                         ~/Kelvin/users/<name>/data and in any data folder chosen in Settings; the lab's instrument log
@@ -23,7 +24,8 @@ from typing import Any, Dict, List
 HARNESS = ("settings.json", "chatgpt.json", "app.json", "kelvin.log", "lab.yaml", "lab.tmp", "settings.tmp",
            "webview", "instruments", "cards", "accounts.json", "accounts.tmp",
            "owner.json", "owner.tmp", "roles.json", "roles.tmp", "config-history",   # the PIN, roles, config history
-           "manuals", "env", "tools")   # manuals Kelvin kept; instrument environments, uv and their Pythons (envs.py)
+           "manuals", "env", "tools",   # manuals Kelvin kept; instrument environments, uv and their Pythons (envs.py)
+           "lab-memory.json", "virtual-lab-memory.json", "lab-memory.tmp", "virtual-lab-memory.tmp")   # labmemory.py
 DATA_HARNESS = ("chats",)                       # in the default data folder: the conversations, projects and memory
 PERSON = ("settings.json", "settings.tmp", "chatgpt.json", "chatgpt.tmp", "chats")   # in each ~/Kelvin/users/<name>
 MEASUREMENTS = ("runs", "reports", "events.jsonl")

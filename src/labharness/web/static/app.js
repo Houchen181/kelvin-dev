@@ -1706,8 +1706,10 @@
         (a.model ? " for the " + esc(String((a.maker ? a.maker + " " : "") + a.model)) : "");
       case "make_report": return v("Writing", "Wrote") + " a report" + (a.title ? ": " + esc(String(a.title)) : "");
       case "operate_computer": return v("Operating", "Operated") + " the computer: " + esc(String(a.task || ""));
-      case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat" : " for this project") +
-        (a.text ? ": " + esc(String(a.text)) : "");
+      case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat"
+        : a.scope === "lab" ? " for the lab (everyone here)" : " for this project") + (a.text ? ": " + esc(String(a.text)) : "");
+      case "shared_memory": return v("Reading", "Read") + " the lab's memory" + (a.instrument ? " on " + code(a.instrument)
+        : a.query ? " for " + code(a.query) : "");
       default: return code(name);
     }
   }
@@ -1814,6 +1816,9 @@
   // where a request acts (runtime.where): a request on the simulator once looked just like one on the instruments
   const whereTag = (where) => where ? h("span", { class: "where " + (where === "SIMULATOR" ? "sim" : "real"),
     title: where === "SIMULATOR" ? "Only simulated instruments: nothing real moves" : "Real instruments" }, where) : null;
+  // the lab's lessons on the instruments a request names (labmemory.py): what the lab learned, where it is decided
+  const lessonsOf = (ev) => (ev.lessons || []).length ? h("div", { class: "approval-lessons" }, icon("memory"),
+    h("div", {}, h("b", {}, "From the lab's memory"), ...ev.lessons.map((l) => h("span", {}, l)))) : null;
   function makeApproval(ev) {
     const verdict = h("span", { class: "verdict" });
     const count = h("span", { class: "muted small" });
@@ -1822,7 +1827,8 @@
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
     const text = h("span", {}, ev.title), where = whereTag(ev.where), list = h("ul", {}, ...ev.items.map(approvalItem));
     const title = h("div", { class: "approval-title" }, icon("hand"), text, where);
-    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title, list, actions);
+    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title, list, lessonsOf(ev),
+      actions);
     localizeCard(ev, { title: text, list, where });
     let left = ev.seconds_left;
     const words = cardWords();
@@ -2635,11 +2641,11 @@
     b.classList.toggle("on", S.incognito);
     // always there: from a saved chat it starts a new incognito one; in incognito it leaves (and forgets) it
     b.title = S.incognito ? "Leave incognito: this chat is forgotten and a normal chat starts"
-      : S.chatId ? "New incognito chat: no memory is used or kept, and the chat is not saved"
-        : "Make this chat incognito: no memory is used or kept, and the chat is not saved";
+      : S.chatId ? "New incognito chat: none of your memory is used or kept, and the chat is not saved"
+        : "Make this chat incognito: none of your memory is used or kept, and the chat is not saved";
     $("greeting").textContent = S.incognito ? "Incognito chat" : "What are we measuring today?";
     $("empty-sub").textContent = S.incognito
-      ? "Kelvin uses no memory here, keeps nothing from this chat, and forgets it when you leave. Instrument commands and runs are still logged."
+      ? "Kelvin uses none of your memory here, keeps nothing from this chat, and forgets it when you leave. The lab's memory still applies, and instrument commands and runs are still logged."
       : S.labSub || "";
     $("input").placeholder = askHint();
   }
@@ -3712,6 +3718,7 @@
     showMode(s.approval_mode, s.approval_rule);
     renderAlerts(s.alarms, s.incident);
     renderWatches(s.watches || [], s.status);
+    if (s.lab_memory && s.lab_memory !== LABMEM.stamp) { LABMEM.stamp = s.lab_memory; loadLabMemory(); }
     notifySystem(s.notices);
     $("lab-name").textContent = s.lab;
     $("sim-tag").hidden = !s.simulated;
@@ -3829,6 +3836,54 @@
       $("watch-form").reset(); $("watch-form").hidden = true;
       toast("Watching " + body.key + ".");
       pollState();
+    } catch (err) { toast(err.message); }
+  }
+
+  // ------------------------------------------------------------------ the lab's memory (labmemory.py)
+  // What people and Kelvin keep about this lab, for every chat and everyone here: wiring, references, excitations,
+  // lessons. Anyone at the computer adds, changes or deletes a note here; each says who wrote it and when.
+  const LABMEM = { stamp: null, editing: null };
+  async function loadLabMemory() {
+    let r;
+    try { r = await api("/api/lab-memory"); } catch (e) { return; }
+    renderLabMemory(r);
+  }
+  function renderLabMemory(r) {
+    LABMEM.stamp = r.stamp;
+    const day = (iso) => { const d = new Date(iso); return isNaN(d) ? String(iso || "").slice(0, 10) : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }); };
+    $("labmem-summary").textContent = r.notes.length ? r.notes.length + (r.notes.length === 1 ? " note" : " notes") + (r.virtual ? " · virtual lab" : "") : "";
+    $("labmem-list").replaceChildren(...(r.notes.length ? r.notes.map((n) => {
+      const said = n.who + ", " + day(n.at) + (n.edited ? " · changed by " + n.edited_who + ", " + day(n.edited.at) : "");
+      const before = (n.before || []).map((b) => b.text).join("\n");
+      return h("li", { class: "memory-note labmem-note" }, h("span", { class: "memory-kind" }, n.kind),
+        h("div", { class: "memory-body" }, h("span", {}, n.text),
+          h("span", { class: "memory-meta", title: before ? "Before:\n" + before : null },
+            (n.instruments.length ? n.instruments.join(", ") + " · " : "") + said)),
+        rowButton("pencil", "Change this note", () => editLabNote(n)),
+        rowButton("trash", "Delete this note", async () => {
+          if (!confirm("Delete this note from the lab's memory? Every chat and everyone here loses it.")) return;
+          try { renderLabMemory(await api("/api/lab-memory/" + encodeURIComponent(n.id), { method: "DELETE" })); }
+          catch (e) { toast(e.message); }
+        }));
+    }) : [h("li", { class: "inst-empty" }, "Nothing kept yet. Tell Kelvin how the lab is wired, where a reference comes from or a lesson learned, or add it here: every chat sees it.")]));
+  }
+  function editLabNote(n) {   // null: a new note
+    LABMEM.editing = n ? n.id : null;
+    $("labmem-kind").value = n ? n.kind : "lesson";
+    $("labmem-instruments").value = n ? n.instruments.join(", ") : "";
+    $("labmem-text").value = n ? n.text : "";
+    $("labmem-keep").textContent = n ? "Save" : "Keep";
+    $("labmem-form").hidden = false;
+    $("labmem-text").focus();
+  }
+  async function keepLabNote(e) {
+    e.preventDefault();
+    const body = { kind: $("labmem-kind").value, instruments: $("labmem-instruments").value, text: $("labmem-text").value };
+    try {
+      const r = await api("/api/lab-memory" + (LABMEM.editing ? "/" + encodeURIComponent(LABMEM.editing) : ""), { body });
+      if (r.said && r.said.startsWith("already")) toast("That is in the lab's memory already.");
+      $("labmem-form").reset(); $("labmem-form").hidden = true; LABMEM.editing = null;
+      renderLabMemory(r);
     } catch (err) { toast(err.message); }
   }
 
@@ -5170,6 +5225,7 @@
     TERM.askAt = Date.now();
     termLine(p.title, "ask");
     for (const i of p.items || []) termLine("  - " + i, "ask");
+    for (const l of p.lessons || []) termLine("  from the lab's memory: " + l, "dim");
     termSync();
     if (!TERM.open) toggleTerm(true);
     $("term-input").focus();
@@ -5935,6 +5991,9 @@
     $("make-report").addEventListener("click", makeReport);
     $("watch-add-toggle").addEventListener("click", () => { $("watch-form").hidden = !$("watch-form").hidden; });
     $("watch-form").addEventListener("submit", addWatch);
+    $("labmem-add").addEventListener("click", () => { if ($("labmem-form").hidden || LABMEM.editing) editLabNote(null); else $("labmem-form").hidden = true; });
+    $("labmem-form").addEventListener("submit", keepLabNote);
+    $("labmem-cancel").addEventListener("click", () => { $("labmem-form").reset(); $("labmem-form").hidden = true; LABMEM.editing = null; });
     $("allow-notify").addEventListener("click", async () => {
       try { await Notification.requestPermission(); } catch (e) { /* not supported */ }
       $("allow-notify").hidden = Notification.permission !== "default";
