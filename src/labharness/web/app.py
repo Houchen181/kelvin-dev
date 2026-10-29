@@ -2848,12 +2848,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         body = await request.json()
         op, by = str(body.get("op") or ""), "human"
         item = body.get("item")
+
+        def persons(fn: Any, *args: Any) -> str:
+            """A person's change, beside whatever Kelvin does (the check may read an instrument): filed under no
+            chat, never under the one whose call changes the lab meanwhile."""
+            with runtime.attributed({}):
+                return fn(*args)
         if op == "add":
             pos = body.get("position")
-            msg = runtime.queue_add(str(body.get("text") or ""), int(pos) if pos else None, str(body.get("note") or ""), by)
+            msg = await asyncio.to_thread(persons, runtime.queue_add, str(body.get("text") or ""),
+                                          int(pos) if pos else None, str(body.get("note") or ""), by)
             ok = not msg.startswith("not added")
         elif op == "edit":
-            msg = runtime.queue_edit(item, str(body.get("text") or ""), by)
+            msg = await asyncio.to_thread(persons, runtime.queue_edit, item, str(body.get("text") or ""), by)
             ok = not msg.startswith("not changed")
         elif op in ("move", "remove", "again", "clear"):
             msg = runtime.queue_change(op, item, body.get("position"), by)
@@ -2873,7 +2880,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             msg = runtime.queue_save(str(body.get("name") or ""))
             ok = msg.startswith("saved")
         elif op == "load":
-            msg = runtime.queue_load(str(body.get("name") or ""), by)
+            msg = await asyncio.to_thread(persons, runtime.queue_load, str(body.get("name") or ""), by)
             ok = msg.startswith("added")
         else:
             return error(400, "unknown queue operation %r" % op)

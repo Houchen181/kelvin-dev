@@ -241,20 +241,29 @@ DEFERRED = {
 }
 DEFERRED_NAMES = {n for names in DEFERRED.values() for n in names}
 MAX_FOUND = 10
-# lookups that touch no instrument and change nothing: several in one step run side by side
+# lookups that touch no instrument and change nothing: several in one step run side by side (look_at: a run's plots;
+# a camera's frame is read as any reading is)
 LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", "query_runs", "list_runs", "analyze_run",
            "recent_events", "kelvin_help", "describe_instrument", "search_manual", "instrument_info", "lab_config",
-           "card_guide", "find_card",
+           "card_guide", "find_card", "experiment_guide", "look_at", "watches", "queue_show",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
            "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "activity"}
-# what never works the lab: everything else runs one call at a time across chats, filed under its own chat
-OFF_LAB = LOOKUPS | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe", "save_paper", "make_report",
-                     "write_file", "measurement_chain"}
+# readings: beside another chat's change to the lab, as an instrument that change uses isn't asked (its latest values
+# instead: LabRuntime._reading)
+READINGS = {"lab_status", "get_value", "health_check", "show_sequence"}
+# the queue, watches and stop: kept apart from the instruments, so they work from any chat while a scan runs
+BESIDE_THE_LAB = {"queue_add", "queue_edit", "queue_change", "queue_pause", "queue_save", "queue_load", "watch",
+                  "unwatch", "stop_run"}
+# what never changes the lab: everything else (a drive, a run, the queue's start, adding an instrument...) runs one
+# call at a time across chats, filed under its own chat, as the gate's approvals are the lab's
+OFF_LAB = LOOKUPS | READINGS | BESIDE_THE_LAB | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe",
+                                                 "save_paper", "make_report", "write_file", "measurement_chain"}
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
 LOOKUPS |= ANALYSIS
 OFF_LAB |= ANALYSIS
+QUEUE_FILED = {"queue_add", "queue_load"}   # items filed under the chat that queued them (its project, folder)
 MAX_TURNS = 4      # chats answering at once
 LAB_WAIT_S = 10.0  # how long a chat's lab call waits while another chat works the lab, before it says so
 
@@ -977,15 +986,16 @@ class ChatAgent:
 
     async def _work(self, chat: Dict[str, Any], provider: Provider, context: Dict[str, Any], call: Dict[str, Any],
                     emit: Emit) -> Tuple[str, bool, Optional[Dict[str, Any]]]:
-        """The call; one that works the lab has the lab to itself, under its chat's name (another chat's lab call
-        waits a little, then hears why), as the lab has one set of instruments."""
+        """The call. One that changes the lab has the lab to itself, under its chat's name (another chat's such call
+        waits a little, or not at all while a run has it, then hears why), as the gate's approvals are the lab's.
+        Lookups, readings, the queue, watches and stop_run never wait for that (OFF_LAB)."""
         if call["name"] in OFF_LAB:
             return await self._dispatch(chat, provider, context, call, emit)
         if self._lab is None:
             self._lab = asyncio.Lock()
         until = time.monotonic() + LAB_WAIT_S
-        while self._lab.locked():
-            if time.monotonic() > until:
+        while self._lab.locked():   # a run that will take longer than the wait: said at once
+            if time.monotonic() > until or self.runtime.busy_for(until - time.monotonic()):
                 return self._lab_busy(), True, None
             await asyncio.sleep(0.1)
         await self._lab.acquire()   # free: taken at once
@@ -1008,9 +1018,11 @@ class ChatAgent:
             title = self.store.load(holder).get("title") if holder else None
         except KeyError:
             title = None
-        return ("not run: %s is working the lab (%s). Kelvin does one thing on the lab at a time; try again when it "
-                "is done, or tell the person." % ("another conversation (“%s”)" % title if title else
-                                                  "another conversation", self.runtime.busy or "a request"))
+        return ("not run: %s is working the lab (%s). Kelvin changes the lab one thing at a time; readings (the latest "
+                "values of the instruments that work uses), lookups, the queue, watches and stop_run work meanwhile. "
+                "Try this again when it is done, or tell the person." % (
+                    "another conversation (“%s”)" % title if title else "another conversation",
+                    self.runtime.held_by()))
 
     async def _step(self, chat: Dict[str, Any], provider: Provider, model_id: str, context: Dict[str, Any],
                     emit: Emit) -> bool:
@@ -1164,6 +1176,10 @@ class ChatAgent:
         if name == "chat_history":
             query = str((args or {}).get("query") or "") if isinstance(args, dict) else ""
             return compaction.search(chat, query), False, None
+        if name in QUEUE_FILED or name == "stop_run":
+            if not isinstance(args, dict):
+                return "the arguments were not valid JSON; send the call again", True, None
+            return _without_opinion(await asyncio.to_thread(self._beside_the_lab, chat, name, args))
         if name in DEVICE_TOOLS and not chat.get("incognito"):   # mounting may write caps
             return _without_opinion(await asyncio.to_thread(self._device_tool, chat, name, args))
         if name == "save_paper" and context["project"]:
@@ -1179,6 +1195,24 @@ class ChatAgent:
         if name == "run_plan" and self.settings and self.settings.get("reviewer"):
             return await self._reviewed_run(chat, call, emit)
         return _without_opinion(await self._call(call, emit))
+
+    def _beside_the_lab(self, chat: Dict[str, Any], name: str, args: Dict[str, Any]) -> Tuple[str, bool]:
+        """queue_add and queue_load, filed under this chat (its project, folder, incognito) as its runs are, though
+        they go beside another chat's call that changes the lab, whose chat the lab's own attribution names
+        meanwhile; stop_run, said to be this chat's in the record."""
+        rt = self.runtime
+        if name == "stop_run":
+            return rt.stop_work(str(args.get("reason") or ""), by="agent (in “%s”)" % chat.get("title", "a chat")), False
+        with rt.attributed(self._attribution(chat)):
+            if name == "queue_load":
+                text = rt.queue_load(str(args.get("name") or ""))
+                return text, not text.startswith("added")
+            try:
+                position = int(args["position"]) if args.get("position") not in (None, "") else None
+            except (TypeError, ValueError):
+                return "not added: position is a whole number (1 = first)", True
+            text = rt.queue_add(str(args.get("item") or ""), position, str(args.get("note") or ""))
+            return text, text.startswith("not added")
 
     async def _web_search(self, args: Any) -> Tuple[str, bool]:
         """Through the chat's own model service if it can search the web, else another that can (websearch.py)."""

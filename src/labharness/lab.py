@@ -205,11 +205,11 @@ class Lab:
     def read(self, instr: str, param: str) -> Any:
         return self.instrument(instr).read(param)
 
-    def snapshot(self) -> Dict[str, Dict[str, Any]]:
-        """Every readable scalar parameter of every instrument."""
+    def snapshot(self, names: Optional[Iterable[str]] = None) -> Dict[str, Dict[str, Any]]:
+        """Every readable scalar parameter of every instrument (or of these)."""
         snap: Dict[str, Dict[str, Any]] = {}
         for name, inst in self.instruments.items():
-            if not inst.enabled:
+            if not inst.enabled or (names is not None and name not in names):
                 continue
             values: Dict[str, Any] = {}
             silent = False
