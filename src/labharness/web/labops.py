@@ -39,7 +39,7 @@ def checklist(runtime: Any, settings: Any, home: Any) -> List[Dict[str, Any]]:
          "Kelvin is on the virtual lab, whose instruments are simulated. Lab → Set up… finds your own instruments "
          "and writes the lab config.", "lab")
 
-    missing = sorted(n for n in lab.unavailable if n in real or not lab.instruments[n].simulated)
+    missing = sorted(n for n in lab.unavailable if n in real)
     drafts = sorted(n for n, i in real.items() if i.enabled and i.card.status == "draft")
     why = ["%s isn't connected" % n for n in missing] + ["%s's card is a draft nobody has reviewed (Lab → Cards…)" % n
                                                           for n in drafts]
@@ -54,9 +54,10 @@ def checklist(runtime: Any, settings: Any, home: Any) -> List[Dict[str, Any]]:
     if unreviewed:
         why.append("Nobody has reviewed the limits of %s, which Kelvin added itself." % ", ".join(unreviewed))
     if card_only:
-        why.append("On the card's limits, the maker's full range: %s. Set the lab's own: Lab → Set up… → Limits…." % (
-            ", ".join(card_only[:MAX_SHOWN]) + (" and %d more" % (len(card_only) - MAX_SHOWN)
-                                                if len(card_only) > MAX_SHOWN else "")))
+        named = ", ".join(card_only[:MAX_SHOWN]) + (" and %d more" % (len(card_only) - MAX_SHOWN)
+                                                    if len(card_only) > MAX_SHOWN else "")
+        why.append("On the card's limits, the maker's full range: %s. Set the lab's own with Limits… on each row "
+                   "(Lab → Set up…)." % named)
     item("limits", "Limits set for your setup", bool(real) and not why, " ".join(why) if why else
          ("Every output has the lab's own limits." if real else "No instruments of your own yet."), "lab")
 
