@@ -372,14 +372,26 @@ class Forecast:
             bits.append(mode_words(inst, self.value, self.set_by, self.who))
         return "; ".join(b for b in bits if b)
 
-    def action_lines(self) -> List[str]:
-        """A line for each action the run starts once that drives the sample (a waveform started, a stage homed)."""
+    def driving_actions(self) -> List[str]:
+        """The actions the run starts once that drive the sample (a waveform started, a stage homed): instr.action."""
+        out = []
+        for _, instr, name in self.actions:
+            action = action_of(self.lab, instr, name)
+            if action is not None and action.drives and "%s.%s" % (instr, name) not in out:
+                out.append("%s.%s" % (instr, name))
+        return out
+
+    def action_lines(self, keys: Optional[List[str]] = None) -> List[str]:
+        """A line for each of these driving actions (default: all of them): a person approves it with the run, as
+        do_action would ask on its own."""
+        keys = self.driving_actions() if keys is None else keys
         out = []
         for where, instr, name in self.actions:
-            action = action_of(self.lab, instr, name)
-            if action is not None and action.drives:
-                out.append("%s: %s.%s (%s), which drives the sample" % (
-                    "At the start" if where == "setup" else "At the end", instr, name, action.label or name))
+            key = "%s.%s" % (instr, name)
+            if key in keys:
+                out.append("%s: %s (%s), which drives the sample" % (
+                    "At the start" if where == "setup" else "At the end", key, action_of(self.lab, instr, name).label
+                    or name))
         return out
 
     def closing(self) -> List[str]:

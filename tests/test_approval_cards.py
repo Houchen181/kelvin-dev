@@ -10,6 +10,7 @@ up first (an excitation started, a laser on) goes in its setup, on that same car
 import re
 
 from labharness import load_plan
+from labharness.cards import Action
 
 COOL_AND_SWEEP = """
 plan: cool_and_sweep
@@ -109,6 +110,43 @@ def test_a_draft_cards_settings_in_an_approved_plan_ask_once_on_its_card(lab, ma
     assert "smu.nplc: now 1 PLC, plan uses 1 … 10 PLC" in text and "isn't sure about smu" in text
     r = gate.set("smu", "nplc", 3)                          # outside the plan: it asks, as before
     assert r.action == "error" or len(approver.requests) == 2
+
+
+def test_a_setup_action_runs_once_on_the_runs_own_card(lab, make_engine):
+    """An excitation took three cards before the run's own (amplitude, output on, start the waveform: l10)."""
+    engine, gate, approver = make_engine([True])
+    smu = lab.instruments["smu"]
+    sent = []
+    smu.card.actions["arm"] = Action("arm", ["ARM"], "Arm the source's trigger", drives=True)
+    smu.backend.simulated = False
+    real_write = smu.backend.write
+    smu.backend.write = lambda cmd: sent.append(cmd) if cmd == "ARM" else real_write(cmd)
+    report = engine.run("plan: armed\nsetup: { smu.output: on, smu.V: 1, smu.arm: run }\nmeasure: [smu.I]\n"
+                        "after: { smu.V: 0 }\n")
+    assert report.ok, report.message
+    assert sent == ["ARM"] and len(approver.requests) == 1
+    assert "At the start: smu.arm (Arm the source's trigger), which drives the sample" in card(approver)
+    bad = engine.run("plan: x\nsetup: { smu.arm: off }\nmeasure: [smu.I]\n")
+    assert bad.status == "refused" and "smu.arm is one of smu's actions" in bad.message
+
+
+def test_a_queue_whose_scans_start_an_action_asks_once_on_its_card(tmp_path):
+    from test_queue import runtime
+    rt = runtime(tmp_path, [True])                          # one approval: another would fail the test
+    smu = rt.lab.instruments["smu"]
+    sent = []
+    smu.card.actions["arm"] = Action("arm", ["ARM"], "Arm the source's trigger", drives=True)
+    smu.backend.simulated = False
+    real_write = smu.backend.write
+    smu.backend.write = lambda cmd: sent.append(cmd) if cmd == "ARM" else real_write(cmd)
+    for n in (1, 2):
+        rt.queue_add("plan: armed_%d\nsetup: { smu.arm: run }\nmeasure: [smu.I]\n" % n)
+    out = rt.queue_start()
+    assert out.startswith("queue started"), out
+    rt._queue_thread.join(60)
+    assert [i.status for i in rt.queue.items] == ["done", "done"], [(i.name, i.message) for i in rt.queue.items]
+    assert sent == ["ARM", "ARM"]
+    assert "At the start: smu.arm (Arm the source's trigger), which drives the sample" in str(rt.approver.requests[0])
 
 
 def test_a_queue_card_shows_its_duration_and_where_the_queue_leaves_the_lab(tmp_path):

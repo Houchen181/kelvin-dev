@@ -1693,7 +1693,8 @@ class LabRuntime:
             if problems:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
             forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
-            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast)
+            starting = forecast.driving_actions()     # a waveform its scans start: on this card, approved with it
+            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast, bool(starting))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
             duration = forecast.seconds or None
@@ -1701,14 +1702,16 @@ class LabRuntime:
             steps = len(items) - scans
             title = "Run the queue: %d scan%s%s%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
                 steps, "" if steps == 1 else "s") if steps else "", forecast.duration())
-            if lines:
-                request = ApprovalRequest(title, lines + forecast.action_lines() + forecast.closing() + [
+            if lines or starting:
+                request = ApprovalRequest(title, lines + forecast.action_lines(starting) + forecast.closing() + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
                 covered = False
                 if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
                     duration, failed = self._rehearse(items)
                     rehearsal = type("Rehearsal", (), {"ok": not failed})()
                     covered, why = self.gate.auto_plan(grants, rehearsal)
+                    if starting:   # an action that drives the sample is a person's to start, as with do_action
+                        covered, why = False, why + ["its scans start %s" % ", ".join(starting)]
                     if covered:
                         self.gate.auto_approve(request, why)
                     else:
@@ -1718,6 +1721,7 @@ class LabRuntime:
                     note = " (%s)" % request.note if request.note else ""
                     self.gate.log.write("queue_declined", by=by)
                     return "declined: the queue did not start%s" % note
+            self.gate.queue_actions = frozenset(starting)   # its scans start these without asking again
             with self.queue.lock:
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()

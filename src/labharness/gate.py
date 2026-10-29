@@ -222,6 +222,10 @@ class SafetyGate:
         self.in_chat = False   # a portal chat's turn: the chat's own account of web text counts, not the clock's
         self._grants: Dict[str, Allowed] = {}
         self._standing: Dict[str, Allowed] = {}   # what a person approved for a whole queue of scans, while it runs
+        # the actions that drive the sample (instr.action) its scans start, which the queue's card showed: approved
+        # with it (runtime.queue_start), and counted only while one of its items runs (standing)
+        self.queue_actions: frozenset = frozenset()
+        self._queued = False
         # the drive levels the running plan or queue item set: switching their enable on parks them at safe (_move),
         # then puts them back (_reapply), so a run measures at what was approved, not at safe. None: no plan running
         self._asked: Optional[Dict[str, Any]] = None
@@ -529,11 +533,18 @@ class SafetyGate:
         inside it run without asking again; anything outside still asks."""
         old, self._standing = self._standing, dict(grants)
         asked, self._asked = self._asked, {}
+        queued, self._queued = self._queued, True
         try:
             yield
         finally:
             self._standing = old
             self._asked = asked
+            self._queued = queued
+
+    def action_covered(self, key: str) -> bool:
+        """An action that drives the sample (instr.action), started by a scan of the queue running now whose card
+        showed it: the queue's approval covers it, so the scan doesn't ask again in the night."""
+        return self._queued and key in self.queue_actions
 
     @contextmanager
     def preapproved(self, grants: Dict[str, Allowed]) -> Iterator[None]:
@@ -545,12 +556,13 @@ class SafetyGate:
             self._grants = old
             self._asked = asked
 
-    def plan_approval(self, drive_values: Dict[str, List[Any]],
-                      forecast: Any = None) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
+    def plan_approval(self, drive_values: Dict[str, List[Any]], forecast: Any = None,
+                      asking: bool = False) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
         """For a plan's drive targets: lines to show the human, the ranges to grant, and refusals. forecast: the run
         walked through (forecast.py), for a card that shows every drive it changes, toward safe or inside the envelope
         too, with the rate an instrument moves each at; and that covers a draft card's settings in the plan, which
-        would otherwise ask at every step. The lines are empty when nothing needs a person."""
+        would otherwise ask at every step. The lines are empty when nothing needs a person, unless asking: the run
+        asks for something else anyway (an action that drives the sample), so its card shows them all."""
         lines: List[Tuple[bool, str]] = []   # (a person approves it, the line)
         grants: Dict[str, Allowed] = {}
         problems: List[str] = []
@@ -613,7 +625,7 @@ class SafetyGate:
             grants[key] = Allowed.of(spec, change.values)
             lines.append((True, "; ".join(shown(inst, spec, change.start, change.values) + [
                 "Kelvin isn't sure about %s: %s" % (inst.name, self.unsure(inst))])))
-        items = [text for _, text in lines] if any(asks for asks, _ in lines) else []
+        items = [text for _, text in lines] if asking or any(asks for asks, _ in lines) else []
         return items, grants, problems
 
     # ------------------------------------------------------------------ internals
