@@ -30,7 +30,7 @@
       <input id="new-name" autocomplete="name" maxlength="40" spellcheck="false">
       <label for="new-password">Password <span class="muted">(optional)</span></label>
       <input id="new-password" type="password" autocomplete="new-password">
-      <span class="hint">With a password, your API keys are encrypted with it. Nobody can reset a forgotten one: there is no administrator.</span>
+      <span class="hint">A forgotten password can't be reset.</span>
       <div class="signin-actions"><button id="new-back" class="link" type="button">Back</button><button class="btn primary" type="submit">Create account</button></div>
     </form>
     <form id="central-signin" class="signin-form" hidden>
@@ -51,14 +51,14 @@
       <div class="signin-actions"><button id="cn-back" class="link" type="button">Back</button><button class="btn primary" type="submit">Create account</button></div>
     </form>
     <div id="central-link" class="signin-form" hidden>
-      <p>This computer has Kelvin accounts from before. Is one of them yours? It keeps its chats, data and API keys.</p>
+      <p>Is one of these accounts yours?</p>
       <div id="link-people" class="signin-people"></div>
       <label id="link-pass-label" for="link-password" hidden>Its password on this computer</label>
       <input id="link-password" type="password" autocomplete="off" hidden>
       <div class="signin-actions"><button id="link-none" class="link" type="button">None of these: start fresh</button><button id="link-go" class="btn primary" type="button" hidden>Use it</button></div>
     </div>
     <form id="central-rekey" class="signin-form" hidden>
-      <p>Your password changed since you last signed in on this computer. Give your old password once to keep your API keys here, or skip and add them again in Settings.</p>
+      <p>Your password changed. Give the old one to keep your API keys here.</p>
       <label for="rekey-old">Old password</label>
       <input id="rekey-old" type="password" autocomplete="off">
       <div class="signin-actions"><button id="rekey-skip" class="link" type="button">Skip</button><button class="btn primary" type="submit">Keep my keys</button></div>
@@ -77,7 +77,6 @@
     <p id="signin-msg" class="signin-msg" role="status"></p>
     <div id="signin-setup" class="signin-setup" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="signin-setup-text"></span></div>
     <div id="signin-busy" class="signin-busy" hidden><span id="signin-busy-text"></span><button id="signin-stop" class="btn small" type="button">Stop it</button></div>
-    <p id="signin-foot" class="muted small signin-foot">Each person has their own chats, projects, memory, API keys, data folder and record. The instruments, their cards and the lab's instrument log are shared, and the lab's owner may give people roles.</p>
     <p class="muted small signin-foot"><span id="central-hub-text">Accounts on this computer only.</span> <button id="central-hub-edit" class="link" type="button">Use a Kelvin hub</button></p>
   </div>
 </div>
@@ -119,11 +118,11 @@
       </button>
       <div id="chat-title" class="chat-title"></div>
       <div class="spacer"></div>
-      <button id="toggle-incognito" class="pill" type="button" aria-pressed="false" title="Incognito chat: none of your memory is used or kept, and the chat is not saved">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg><span class="incog-text pill-text">Incognito</span>
+      <button id="toggle-incognito" class="pill icon-only" type="button" aria-label="Incognito chat" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg>
       </button>
-      <button id="toggle-term" class="pill" type="button" aria-label="Show the terminal" aria-pressed="false" title="Terminal: type to Kelvin, or send instruments their own commands (Ctrl+`)">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg><span class="term-text pill-text">Terminal</span>
+      <button id="toggle-term" class="pill icon-only" type="button" aria-label="Show the terminal" aria-pressed="false" title="Terminal (Ctrl+`)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg>
       </button>
       <button id="toggle-runs" class="pill" type="button" aria-label="Show the runs pane" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg><span class="pill-text">Runs</span><span id="runs-dot" class="live-dot" hidden></span>
@@ -201,7 +200,6 @@
           </button>
         </div>
       </form>
-      <p id="fineprint" class="fineprint">Measurements run right away. Anything that drives the sample harder waits for your approval.</p>
     </div>
 
     <section id="termpane" class="termpane" aria-label="Terminal" hidden>
@@ -240,12 +238,13 @@
       </button>
     </header>
     <div id="run-body" class="pane-body">
-      <div class="pane-empty"><p>No run open.</p><p class="muted small">When a plan runs, its progress and data appear here. Open an earlier run from the clock button.</p></div>
+      <div class="pane-empty"><p>No run open.</p></div>
       <div id="queue-view" class="queue-view" hidden></div>
     </div>
   </section>
 
   <aside id="labpanel" class="labpanel" aria-label="Lab" hidden>
+    <div id="labpanel-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the lab panel" tabindex="0"></div>
     <header class="lab-head">
       <h2>Lab</h2>
       <span id="agent-state" class="agent-chip"></span>
@@ -263,13 +262,12 @@
         <div class="why-actions"><button id="lab-why-details" class="link" type="button" aria-expanded="false">What Kelvin looked through</button><button id="lab-why-setup" class="link" type="button">Set up…</button></div>
         <ul id="lab-why-lines" class="why-lines" hidden></ul>
       </div>
-      <div id="lab-observe" class="callout small calm" hidden>
-        <b>Limits not reviewed.</b> <span id="lab-observe-who">Kelvin added these instruments itself.</span> It asks
-        you before each output change on them until you check their limits and mark them reviewed.
+      <div id="lab-observe" class="callout small calm" title="Kelvin asks before each output change on these until you review their limits" hidden>
+        <b>Limits not reviewed:</b> <span id="lab-observe-who"></span>
         <button id="lab-observe-review" class="link" type="button">Review limits…</button>
       </div>
-      <div id="lab-drafts" class="callout small calm" hidden>
-        <b>Cards not reviewed.</b> <span id="lab-drafts-who"></span>
+      <div id="lab-drafts" class="callout small calm" title="Kelvin asks before each setting or output change on these until you mark their cards reviewed" hidden>
+        <b>Cards not reviewed:</b> <span id="lab-drafts-who"></span>
         <button id="lab-drafts-review" class="link" type="button">Review cards…</button>
       </div>
       <div class="inst-head-row"><h3>Sample</h3><span id="mount-summary" class="inst-summary"></span>
@@ -281,7 +279,6 @@
       </div>
       <button id="hands-on" class="btn small hands-btn" type="button" title="Before you touch the sample: Kelvin stops what runs, brings everything that reaches the sample to safe and keeps it there until you unlock"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg> Hands on the sample</button>
       <div id="hands-locked" class="hands-locked" role="status" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22c4.4 0 8-3.6 8-8V9a2 2 0 0 0-4 0V5a2 2 0 0 0-4 0v-1a2 2 0 0 0-4 0v9l-1.6-1.6a2 2 0 0 0-2.9 2.8L8 18c1 2.4 2.4 4 4 4z"/></svg><span>Locked: hands on the sample</span><button id="hands-done-panel" class="btn small" type="button">Unlock…</button></div>
-      <span class="hint mount-hint">Every scan is filed under this device and its project. Its report and the project's master report update after each scan.</span>
       <div class="inst-head-row"><h3>Instruments</h3><span id="inst-summary" class="inst-summary"></span>
         <button id="open-lab-setup" class="link soft" type="button">Set up…</button>
         <button id="open-cards-lab" class="link soft" type="button" title="Your instrument cards: review a draft, edit one, or make one from a manual">Cards…</button></div>
@@ -346,7 +343,7 @@
           <h3 class="set-title">Account</h3>
           <div id="account-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your account</span><span id="account-status" class="hint"></span></div>
-            <span id="account-hint" class="hint">Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.</span>
+            <span id="account-hint" class="hint"></span>
             <div class="key-row pw-row"><input id="pw-old" type="password" autocomplete="current-password" placeholder="Current password"><input id="pw-new" type="password" autocomplete="new-password" placeholder="New password (empty: none)"><button id="pw-change" class="btn small" type="button">Change</button></div>
             <div class="chatgpt-row"><a id="account-hub-link" class="link soft" target="_blank" rel="noopener noreferrer" hidden>Your account on the Kelvin hub</a><span id="account-hub-text" class="hint"></span><button id="account-hub-edit" class="link soft" type="button">change</button></div>
             <details id="account-delete" class="account-delete">
@@ -359,11 +356,11 @@
           <div id="relay-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>
             <label class="check wrap"><input id="relay-on" type="checkbox"> Let my phone reach this Kelvin through the hub while I'm signed in here</label>
-            <span class="hint">Sign in to the Kelvin app on your iPhone with this Kelvin account: it finds this computer with no pairing, from any network. The hub passes your phone's requests through and keeps none of them. Unshared work (unpublished, confidential or model-limited projects, incognito chats and their runs) doesn't go that way; it opens when your phone reaches this computer directly (phone access on, on the lab network or through Tailscale).</span>
+            <span class="hint">Sign in to the iPhone app with this account; no pairing needed. Unshared work never goes through the hub.</span>
           </div>
           <div id="hub-field" class="field">
             <div class="field-row"><span class="field-label">Your hub account</span><span id="hub-status" class="hint"></span></div>
-            <span class="hint">The hub is one server for Kelvin users in every lab. Connected, Kelvin shares your normal projects and unfiled chats there, with their runs and whole conversations, with the lab you choose. Never: projects marked unpublished or confidential (in each project's settings) or limited to some models, incognito chats and their runs, API keys, or ChatGPT and Claude Code sign-ins.</span>
+            <span class="hint">Shares your normal projects and chats, with their runs, with your lab. Never unpublished or confidential projects, incognito chats or API keys.</span>
             <div class="key-row"><input id="hub-url" type="url" placeholder="https://hub.example.org" spellcheck="false" autocomplete="off" aria-label="The hub's address"><button id="hub-connect" class="btn small" type="button">Connect</button></div>
             <div id="hub-actions" class="chatgpt-row" hidden>
               <a id="hub-account" class="link soft" href="#" target="_blank" rel="noopener noreferrer">Your account on the hub</a>
@@ -372,13 +369,12 @@
             </div>
             <span id="hub-sync-status" class="hint"></span>
             <label class="check"><input id="hub-old-runs" type="checkbox"> Also share older runs</label>
-            <span class="hint">Runs made before this version of Kelvin don't record who made them or whether an incognito chat started them, so they stay on this computer unless you tick this. Tick it only if your data folder is yours alone. Runs made since are shared by the same rules as your chats, and never anyone else's.</span>
-            <span class="hint">Kelvin opens the hub in your browser to connect; it never sees your hub password. Its token stays in your settings, encrypted with your password. Disconnecting stops sharing; what was shared stays on the hub until you delete it there.</span>
+            <span class="hint">Only if your data folder is yours alone: older runs don't record who made them.</span>
           </div>
         </section>
         <section class="set-page" data-page="models" hidden>
           <h3 class="set-title">Models</h3>
-          <p class="muted small">API keys stay on this computer (in your own settings file) and go only to their own provider. Leave a field empty to keep the current key.</p>
+          <p class="muted small">Keys stay on this computer. An empty field keeps its key.</p>
           <div class="field">
             <label for="k-anthropic">Claude — Anthropic API key</label>
             <div class="key-row"><input id="k-anthropic" name="anthropic_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="anthropic_api_key">Remove</button></div>
@@ -391,7 +387,7 @@
           </div>
           <div class="field">
             <div class="field-row"><span class="field-label">ChatGPT plan</span><span id="chatgpt-status" class="hint"></span></div>
-            <span class="hint">Use your ChatGPT plan for ChatGPT models instead of an API key. Kelvin opens ChatGPT's sign-in page in your browser and never sees your password; it gets no access to your ChatGPT conversations.</span>
+            <span class="hint">Instead of an OpenAI API key.</span>
             <div class="chatgpt-row">
               <button id="chatgpt-signin" class="chatgpt-btn" type="button">Continue with ChatGPT</button>
               <a id="chatgpt-usage" class="link soft" href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer" hidden>Manage usage</a>
@@ -414,7 +410,7 @@
           </details>
           <div class="field">
             <span class="field-label">Other model services</span>
-            <span class="hint">Any service that speaks the OpenAI Chat Completions API: OpenRouter (models from many companies with one key), OpenCode, DeepSeek, Groq, Mistral, xAI, or your own gateway. Each shows under its own name in the model picker and in a project's rules. Kelvin needs models that can call tools.</span>
+            <span class="hint">Any OpenAI-compatible service: OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI or your own. Its models must call tools.</span>
             <ul id="service-list" class="memory-notes"></ul>
             <div class="service-form">
               <select id="svc-preset" aria-label="Service"></select>
@@ -428,7 +424,7 @@
           </div>
           <div id="cc-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Claude Code on this computer <span class="tag">temporary</span></span><span id="cc-status" class="hint"></span></div>
-            <span class="hint">Chats can use the Claude Code you are signed in to here, on your own Claude plan, and Kelvin can have Claude operate this computer's screen, mouse and keyboard for programs without an API. It is only in Kelvin run from source or in a private build, because Anthropic's terms don't let apps route requests through other people's Claude plans. While Claude operates the computer, Kelvin's approvals and settings are locked; Stop ends it.</span>
+            <span class="hint">Chats on your own Claude plan, and Claude operating this computer's screen for programs without an API. Private builds only.</span>
             <label class="check"><input id="cc-on" type="checkbox"> Use Claude Code</label>
             <label for="cc-path">The claude program <span class="muted">(only if Kelvin doesn't find it)</span></label>
             <input id="cc-path" name="claude_code_path" spellcheck="false" placeholder="C:\Users\you\.local\bin\claude.exe">
@@ -445,12 +441,12 @@
               <option value="400">Longer: at most 400 words</option>
               <option value="off">Any length</option>
             </select>
-            <span class="hint">So you can judge an answer at a glance. A longer one is condensed, with the full answer a click away; one you asked to be long (a derivation, every step) stays whole. Code and plans don't count.</span>
+            <span class="hint">The model is asked to keep each answer this short. Code and plans don't count.</span>
           </div>
           <div class="field">
             <label for="reviewer">Second opinion on plans</label>
             <select id="reviewer" name="reviewer"></select>
-            <span class="hint">Another model reviews every plan before it runs. If it advises stopping, Kelvin asks you first. Pick a model from a different company for a more independent view. Any answer can also get a second opinion from its button.</span>
+            <span class="hint">Another model reviews every plan before it runs.</span>
           </div>
         </section>
         <section class="set-page" data-page="instruments" hidden>
@@ -487,12 +483,12 @@
               <label class="check"><input id="scan-network" type="checkbox"> Look on the local network too</label>
               <label class="check"><input id="auto-cards" type="checkbox"> Write cards for instruments Kelvin doesn't know</label>
             </div>
-            <span class="hint">When Kelvin starts without a lab of your own, it asks each connected instrument who it is (nothing is set) and connects the ones it knows; until you review their limits, Kelvin asks you before each output change on them. When you name an instrument in a chat, Kelvin sets it up the same way. Each instrument gets a folder in ~/Kelvin/instruments with its identity, settings and manual, refreshed on every start. Fetching a manual sends only its address to the maker's website. Looking on the local network finds instruments that announce themselves (LXI); the first time, Windows may ask whether Kelvin may use the network: allow private networks. For an instrument it doesn't know, Kelvin finds the maker's manual and writes a draft card with your default model (it sends the maker, the model and the manual's command pages, never the serial number). Every setting and output change on a draft asks you until you review it.</span>
+            <span class="hint">Setting up only asks each instrument who it is. On the network, Windows may ask once: allow private networks.</span>
           </div>
           <div class="field">
             <div class="field-row"><span class="field-label">Installed for instruments</span></div>
             <ul id="env-list" class="env-list"><li class="muted small">Nothing yet.</li></ul>
-            <span class="hint">The makers' packages and files Kelvin installed on this computer for your instruments (each install shows in its chat), each in its own environment in ~/Kelvin/env (nothing system-wide). Removing one stops the instruments that use it from connecting until it is installed again. Uninstalling Kelvin removes them all.</span>
+            <span class="hint">Each in its own environment in ~/Kelvin/env. Removing one stops the instruments that use it.</span>
           </div>
           <div class="field">
             <div class="field-row"><span class="field-label">Instrument collection</span><button id="collection-sync" class="link" type="button">Update now</button></div>
@@ -500,7 +496,7 @@
               <label class="check"><input id="collection" type="checkbox"> Use Kelvin's instrument collection</label>
             </div>
             <span id="collection-status" class="hint"></span>
-            <span class="hint">Cards, the makers' manual addresses and experiments from Kelvin's public repository on GitHub, kept in ~/Kelvin/collection so they work offline. Kelvin looks for a newer collection twice a day and checks every file against the collection's index. A collection card replaces Kelvin's own card for the same instrument (a fix, or a lab's check on hardware) when the lab is next connected, but never a card you reviewed on this computer, and a draft stays simulation-only. A scan names instruments the collection knows and takes their manuals from it. Switched off, Kelvin doesn't go to GitHub for it, and uses only its own cards and yours once the lab is next connected.</span>
+            <span class="hint">Cards and manuals from Kelvin's public repository, kept for offline use. Never replaces a card you reviewed.</span>
           </div>
         </section>
         <section class="set-page" data-page="data" hidden>
@@ -510,12 +506,11 @@
             <div class="key-row"><input id="data-path" spellcheck="false" autocomplete="off" aria-label="Data folder"><button id="data-choose" class="btn small" type="button" hidden>Choose…</button><button id="data-use" class="btn small" type="button" disabled>Use this folder</button></div>
             <div id="data-move-row" class="checks" hidden><label class="check wrap"><input id="data-move" type="checkbox" checked> <span id="data-move-text">Move what is saved now</span></label></div>
             <span id="data-msg" class="hint"></span>
-            <span class="hint">Where Kelvin saves the lab record of every command and approval, reports, and the runs of chats without a folder of their own (each run in its own dated folder with its data, the instrument settings and the analysis). A lab server or a synced drive works. Chats, settings and API keys stay in ~/Kelvin.</span>
+            <span class="hint">The lab record, reports, and the runs of chats without a folder of their own.</span>
           </div>
           <div class="field">
             <span class="field-label">Chats' folders</span>
             <div class="checks"><label class="check wrap"><input id="ask-folder" type="checkbox" checked> Ask for a folder when I start a new chat (in the Kelvin app)</label></div>
-            <span class="hint">Each chat saves its runs in its own folder, shown under the message box: click it to change it (Choose folder…, or a recent folder) or to see it (Open folder). A new chat starts in the folder you last chose (in a project: the project's). Kelvin finds every run wherever it is saved.</span>
           </div>
           <div class="field">
             <label class="field-label" for="auto-report">Reports</label>
@@ -530,7 +525,6 @@
               <label class="check"><input type="checkbox" value="device"> Device reports</label>
               <label class="check"><input type="checkbox" value="project"> Master reports</label>
             </div>
-            <span class="hint">Every run's folder gets its data as data.csv, and a CSV for each trace (always); Download data on a run's tab also gives Excel and NumPy files. The reports folder holds a folder per project, with its master report, a report per device, an index of every scan (index.csv) and a dated copy each day; queues and reports you ask for have their own folders.</span>
           </div>
         </section>
         <section class="set-page" data-page="memory" hidden>
@@ -540,14 +534,13 @@
               <label class="check"><input id="learn" type="checkbox"> Learn from conversations</label></div>
             <label for="global-instructions">Instructions for every conversation</label>
             <textarea id="global-instructions" rows="4" maxlength="4000" spellcheck="true" placeholder="e.g. Give fields in tesla and temperatures in kelvin. Ask me before any overnight run."></textarea>
-            <span class="hint">Kelvin reads these in every chat. Keep what belongs to one experiment in that project's settings.</span>
             <div class="field-row"><span class="field-label small">What Kelvin keeps about you</span><span id="global-notes-count" class="hint"></span></div>
             <ul id="global-notes" class="memory-notes"></ul>
-            <span class="hint">Preferences and conventions Kelvin kept from your chats, used in every conversation. Facts about an experiment are kept per project. Incognito chats use none of this and add nothing. What everyone here knows about the lab itself (wiring, references, excitations, lessons) is the lab's: Lab panel → Lab memory.</span>
+            <span class="hint">What everyone knows about the lab itself is in the Lab panel → Lab memory.</span>
             <div class="field-row"><span class="field-label small">Skills and recipes for every project</span><span id="global-know-count" class="hint"></span><button id="global-know-add" class="link" type="button">Add a skill…</button></div>
             <input id="global-know-file" type="file" accept=".zip,.skill,.md" hidden>
             <ul id="global-know" class="memory-notes"></ul>
-            <span class="hint">Skills are procedures; recipes are measurements in stages that check their own results. Kelvin keeps one when it worked and will be needed again (saying so in the chat), and reads a skill when a task matches it; type / in the message box to start one yourself. Kelvin's own skills come with it. Skills are packed as Claude's are (a folder with SKILL.md and the files that go with it): <b>Add a skill…</b> takes one made for Claude (.zip or .skill), <b>Download</b> gives one to use in Claude, and the switch takes one out of Kelvin's sight without deleting it. Add only skills from people you trust: a skill tells Kelvin what to do.</span>
+            <span class="hint">Type / in the message box to start one. Add only skills from people you trust.</span>
           </div>
         </section>
         <section class="set-page" data-page="literature" hidden>
@@ -555,8 +548,8 @@
           <div class="field">
             <div class="field-row"><span class="field-label">Literature and web search</span>
               <label class="check"><input id="literature" type="checkbox"> On</label></div>
-            <span class="hint">Kelvin searches arXiv and journals (through OpenAlex) and reads papers to plan experiments and check results. It also searches the web, through your model service's own web search, and reads web pages and manuals: instruments' manuals, makers' pages, documentation. Only the search words and the pages it opens leave this computer, never your data or chats. Switch it off for confidential work.</span>
-            <label for="k-openalex">OpenAlex API key <span class="muted">(optional; a free key raises the daily search allowance)</span></label>
+            <span class="hint">arXiv, journals and the web. Only search words leave this computer, never your data or chats.</span>
+            <label for="k-openalex">OpenAlex API key <span class="muted">(optional)</span></label>
             <div class="key-row"><input id="k-openalex" name="openalex_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="openalex_api_key">Remove</button></div>
             <span class="hint" data-hint="openalex_api_key"></span>
           </div>
@@ -566,7 +559,6 @@
           <div class="field">
             <div class="field-row"><span class="field-label">Notifications</span>
               <button id="allow-notify" class="btn small" type="button">Allow on this computer</button></div>
-            <span class="hint">Alarms, approvals that wait for you, and finished runs show here; allow system notifications to see them when Kelvin is in the background.</span>
             <label for="k-webhook">Also send to (an ntfy topic for your phone, or a Slack, Teams or Discord webhook)</label>
             <div class="key-row"><input id="k-webhook" name="webhook" type="password" autocomplete="off" spellcheck="false" placeholder="https://ntfy.sh/your-own-secret-topic"><button type="button" class="link" data-clear="webhook">Remove</button></div>
             <span class="hint" data-hint="webhook"></span>
@@ -578,7 +570,7 @@
               <label class="check"><input type="checkbox" value="safety"> Safety changes</label>
               <button id="notify-test" class="link soft" type="button">Send a test</button>
             </div>
-            <span class="hint">Only what you tick goes to that address, which then holds lab details; use a private topic or channel.</span>
+            <span class="hint">Use a private topic or channel.</span>
           </div>
           <div class="field">
             <label for="smtp-host">Also send by email <span class="muted">(your institution's or provider's mail server, SMTP)</span></label>
@@ -638,7 +630,6 @@
           <div class="field">
             <div class="field-row"><span class="field-label">Phone access</span>
               <label class="check"><input id="phone-on" type="checkbox"> On</label></div>
-            <span class="hint">Paired phones can see the lab, runs and alarms, stop a run and decline requests; phones you allow to control can also chat and approve. Settings, instruments and the lab config stay on this computer.</span>
             <span id="phone-status" class="hint phone-status"></span>
             <div id="firewall-row" class="field-row" hidden><span id="firewall-status" class="hint"></span>
               <button id="firewall-allow" class="btn small" type="button">Let phones through</button></div>
@@ -652,8 +643,8 @@
             </div>
             <div id="pair-box" class="pair-box" hidden></div>
             <ul id="device-list" class="memory-notes"></ul>
-            <span class="hint">Away from the lab, install <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on this computer and the phone; Kelvin then shows its Tailscale address too, and the connection is encrypted. Plain Wi-Fi traffic is not, so on a shared network prefer Tailscale.</span>
-            <span class="hint"><b>Phone can't connect?</b> It must be on the same Wi-Fi as this computer, and the computer's firewall must let it in. Many university, housing and hotel Wi-Fi networks keep devices apart; on those, use Tailscale on both.</span>
+            <span class="hint">Away from the lab, use <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on both (encrypted; plain Wi-Fi is not).</span>
+            <span class="hint"><b>Phone can't connect?</b> Same Wi-Fi, and the firewall must let it in; otherwise use Tailscale.</span>
           </div>
         </section>
         <section class="set-page" data-page="display" hidden>
@@ -666,8 +657,8 @@
               <button id="zoom-in" class="btn small" type="button" aria-label="Bigger">A+</button>
               <button id="zoom-reset" class="link soft" type="button">Back to 100%</button>
             </div>
-            <span id="zoom-hint" class="hint">The whole window, everything in it bigger or smaller: also Ctrl + and Ctrl −, or Ctrl and the mouse wheel; Ctrl 0 goes back to 100%. Yours: it follows you when you sign in on this computer.</span>
-            <span id="zoom-browser" class="hint" hidden>In a browser, use the browser's own zoom: Ctrl + and Ctrl − (⌘ on a Mac), Ctrl 0 for 100%.</span>
+            <span id="zoom-hint" class="hint">Also Ctrl + and Ctrl −, or Ctrl and the mouse wheel; Ctrl 0 for 100%.</span>
+            <span id="zoom-browser" class="hint" hidden>In a browser, use the browser's zoom.</span>
           </div>
           <div class="field">
             <label for="card-language">Approval cards in</label>
@@ -688,7 +679,7 @@
               <option value="off">Off</option>
             </select>
             <span id="update-status" class="hint"></span>
-            <span class="hint">For everyone on this computer. Kelvin looks twice a day for a newer version and checks each download against GitHub's checksum. An update replaces the installed Kelvin, so there is only ever one, and never installs while a plan, the queue or a chat is running. Your settings, chats and data stay.</span>
+            <span class="hint">For everyone on this computer. Never installs while something runs.</span>
           </div>
         </section>
       </div>
@@ -726,14 +717,13 @@
     </div>
     <div id="lab-folders-field" class="field" hidden>
       <span class="field-label">Instrument folders</span>
-      <span class="hint">Who each instrument is, its settings, and its manual. Kelvin reads the manual before it plans an involved scan.</span>
       <ul id="lab-folders" class="folder-list"></ul>
       <input id="lab-pdf" type="file" accept="application/pdf,.pdf" hidden>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Find instruments</span>
         <span class="field-actions"><button id="lab-scripts" class="btn small" type="button">From your scripts…</button><button id="lab-scan" class="btn small" type="button">Scan</button></span></div>
-      <span class="hint">Scan asks each connected instrument (GPIB, USB, LAN, serial) who it is; nothing is set. From your scripts reads the Python, notebook and MATLAB scripts your lab runs its instruments with (it never runs them) and lists their instruments, with the card and limits they suggest.</span>
+      <span class="hint">Scanning sets nothing. Scripts are read, never run.</span>
       <div id="lab-from-scripts" class="found-list" hidden></div>
       <div class="field-actions" id="lab-scripts-actions" hidden>
         <button id="lab-add-scripts" class="btn small" type="button">Add the checked ones to the lab config</button>
@@ -747,7 +737,7 @@
         <select id="lab-card" aria-label="Card"></select>
         <button id="lab-add" class="btn small" type="button">Add</button>
       </div>
-      <span class="hint">Instrument not in the list? <button id="open-cards" class="link" type="button">Make a card for it from its manual or example scripts…</button></span>
+      <span class="hint">Not in the list? <button id="open-cards" class="link" type="button">Make a card for it…</button></span>
     </div>
     <div class="field">
       <div class="field-row"><label for="lab-yaml">Lab config</label>
@@ -757,10 +747,9 @@
         </div></div>
       <input id="lab-find" placeholder="Find an instrument: its name, card or address" spellcheck="false" aria-label="Find an instrument" hidden>
       <div id="lab-entries" class="lab-entries" hidden></div>
-      <span id="lab-rest" class="hint" hidden>Click an instrument to edit its part of the lab config. The lab's name, interlocks and watches are in Whole file.</span>
       <textarea id="lab-yaml" class="mono" rows="12" spellcheck="false" placeholder="Scan, or add an instrument by address, to start a lab config."></textarea>
-      <input id="lab-why" placeholder="Why this change? (kept with it in the lab config's history)" aria-label="Why this change">
-      <span class="hint">Set limits to what your sample can take: Kelvin refuses anything beyond them and asks before driving harder. Lasers default to always asking.</span>
+      <input id="lab-change-why" placeholder="Why this change? (kept with it in the lab config's history)" aria-label="Why this change">
+      <span class="hint">Kelvin refuses anything beyond the limits.</span>
     </div>
     <ul id="lab-health" class="health-list" hidden></ul>
     <footer class="dialog-foot">
@@ -803,8 +792,7 @@
 <dialog id="chatgpt-dialog" class="dialog" aria-labelledby="chatgpt-dialog-title">
   <form method="dialog">
     <header class="dialog-head"><h2 id="chatgpt-dialog-title">Kelvin can now use your ChatGPT plan</h2></header>
-    <p>When you pick a ChatGPT model, Kelvin's requests use your ChatGPT plan instead of an API key, and count toward its limits. The composer says <b>Using ChatGPT plan</b> while that is so.</p>
-    <p class="muted small">Kelvin gets no access to your ChatGPT conversations. You can set limits for Kelvin, or disconnect it, in ChatGPT's settings, and sign out here in Settings.</p>
+    <p>ChatGPT models now count toward your ChatGPT plan. Kelvin can't see your ChatGPT conversations.</p>
     <footer class="dialog-foot">
       <div class="spacer"></div>
       <button class="btn" value="ok" type="submit">Continue</button>
@@ -821,7 +809,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">A card tells Kelvin how to talk to an instrument model. For one Kelvin doesn't know, give the command reference from its manual, or the maker's example scripts, and a model drafts the card. Try it on the instrument, compare its readings with the front panel, and fix it until they agree. New cards are <b>drafts</b>: on real hardware their readings work, so you can try them, but Kelvin asks you before each setting or output change until you mark the card reviewed.</p>
+    <p class="muted small">Give a manual's command pages or the maker's example scripts, and a model drafts the card. Kelvin asks before each change on a <b>draft</b> until you mark it reviewed.</p>
     <ul id="card-list" class="memory-notes"></ul>
     <div class="field">
       <span class="field-label">New card from a manual or example scripts</span>
@@ -831,7 +819,7 @@
         <button id="card-draft" class="btn small" type="button">Draft the card</button>
       </div>
       <textarea id="card-manual" class="mono" rows="6" spellcheck="false" placeholder="Paste the manual's remote-programming chapter, or the maker's example scripts (Python, MATLAB, C header): the commands or functions with their arguments, ranges and replies."></textarea>
-      <span class="hint">A PDF manual? Copy the command pages from your PDF viewer and paste them here. Example scripts? <label class="link file-pick">Load files<input id="card-file" type="file" multiple accept=".txt,.md,.text,.csv,.html,.htm,.py,.m,.h,.hpp,.c,.cpp,.cs,.vb,.ipynb,.json,.ini,.yaml,.yml" hidden></label>, several at once: the scripts, a DLL's header file, the README. What you give goes to the model you pick.</span>
+      <span class="hint">Paste the manual's command pages, or <label class="link file-pick">Load files<input id="card-file" type="file" multiple accept=".txt,.md,.text,.csv,.html,.htm,.py,.m,.h,.hpp,.c,.cpp,.cs,.vb,.ipynb,.json,.ini,.yaml,.yml" hidden></label> (scripts, a DLL header, the README). They go to the model you pick.</span>
     </div>
     <div id="card-edit" class="field" hidden>
       <div class="field-row"><label for="card-yaml">Card</label><span id="card-editing" class="hint"></span></div>
@@ -842,7 +830,7 @@
         <input id="card-try-address" placeholder="Try it on: GPIB0::12::INSTR, serial://COM3, or lib://COM4?python=…&amp;path=…" aria-label="Address to try the card on">
         <button id="card-try" class="btn small" type="button">Try it</button>
       </div>
-      <span class="hint">Trying only asks who the instrument is and reads every reading; it sets nothing.</span>
+      <span class="hint">Trying sets nothing.</span>
       <ul id="card-try-results" class="health-list"></ul>
     </div>
     <footer class="dialog-foot">
@@ -862,7 +850,6 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">Kelvin keeps three kinds of report up to date by itself: each <b>scan</b>'s report in its run folder, each <b>device</b>'s report, and each project's <b>master report</b>. Below them, make a separate report of runs you choose.</p>
     <div class="field">
       <div class="field-row"><span class="field-label">Library</span><button id="report-folder" class="link soft" type="button">Open folder</button></div>
       <div id="report-library" class="report-library"></div>
@@ -935,17 +922,16 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small"><b id="project-dialog-name"></b> · Only conversations in this project see what is here.</p>
+    <p class="muted small"><b id="project-dialog-name"></b></p>
     <div class="field">
       <label for="project-instructions">Instructions</label>
       <textarea id="project-instructions" rows="6" maxlength="4000" spellcheck="true" placeholder="e.g. Sample: Hall bar D3, contacts 1–4 for the four-probe. Keep the gate within ±5 V."></textarea>
-      <span class="hint">Kelvin reads these in every conversation in this project.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Who may see this project</span><span id="rules-summary" class="hint"></span></div>
       <div class="checks" id="project-providers"></div>
       <div class="checks"><label class="check"><input id="project-literature" type="checkbox"> Literature and web search (the search words leave this computer)</label></div>
-      <span class="hint">For confidential work, allow only local models and switch off literature search. A chat that ran under these rules keeps them, even if it is moved out of the project or the project is deleted.</span>
+      <span class="hint">For confidential work: local models only, literature search off.</span>
     </div>
     <div id="project-sharing-field" class="field">
       <label class="field-label" for="project-sharing">On the Kelvin hub</label>
@@ -954,24 +940,21 @@
         <option value="unpublished">Unpublished: not shared</option>
         <option value="confidential">Confidential: not shared</option>
       </select>
-      <span class="hint">While Kelvin is connected to the hub (Settings → Account), it shares normal projects with your lab there. Unpublished and confidential projects, and projects limited to some models or without literature search, are never shared, not even their names; marking a project removes what the hub had of it. A chat moved out of an unshared project, or left when it is deleted, stays unshared.</span>
+      <span class="hint">Unpublished and confidential projects are never shared on the hub.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Notes</span><span id="notes-count" class="hint"></span></div>
       <ul id="project-notes" class="memory-notes"></ul>
-      <span class="hint">Short facts Kelvin saved from this project's conversations. Delete any that are wrong or out of date; a deleted note is gone at once.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Skills and recipes</span><span id="know-count" class="hint"></span><button id="project-know-add" class="link" type="button">Add a skill…</button></div>
       <input id="project-know-file" type="file" accept=".zip,.skill,.md" hidden>
       <ul id="project-know" class="memory-notes"></ul>
-      <span class="hint">Procedures and staged measurements Kelvin kept for this project's chats; switch one off or delete it here.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Devices</span><span id="devices-count" class="hint"></span></div>
       <ul id="project-devices" class="memory-notes"></ul>
       <div class="add-row"><input id="device-name" placeholder="New device, e.g. D3" aria-label="Device name"><input id="device-material" placeholder="Material" aria-label="Material"><button id="device-add" class="btn small" type="button">Add</button></div>
-      <span class="hint">The samples measured in this project. Mount one in the Lab panel before measuring; each gets its own report.</span>
     </div>
     <div class="field">
       <div class="field-row"><label class="field-label" for="project-summary">Master report</label><span id="master-files" class="hint"></span></div>
@@ -981,7 +964,6 @@
     <div class="field">
       <div class="field-row"><span class="field-label">Reading list</span><span id="papers-count" class="hint"></span></div>
       <ul id="project-papers" class="memory-notes"></ul>
-      <span class="hint">Papers this project relies on. Kelvin adds them when you ask ("keep that paper"); they are listed as references in the project's reports.</span>
     </div>
     <footer class="dialog-foot">
       <span id="project-msg" class="muted small"></span>
@@ -1000,18 +982,17 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">While this device is mounted, Kelvin keeps every drive within these limits, whatever a plan, a conversation or an approval asks; only a person changes them, here. Where the instrument allows, they are also written into it (its source range, autorange off, its current limit), so they hold even if Kelvin or the computer stops.</p>
+    <p class="muted small">While this device is mounted, every drive stays within these limits. Only a person changes them.</p>
     <div class="field">
       <div class="field-row"><span class="field-label">Gates</span><span class="hint">Limit from the dielectric: 0.3 V/nm for hBN and SiO₂, 0.2 V/nm for Al₂O₃ and HfO₂, well below breakdown</span></div>
       <div id="protect-gates" class="prot-rows"></div>
       <button id="protect-add-gate" class="link soft prot-add" type="button">+ Add a gate</button>
-      <span class="hint">A ramp stops and goes back to 0 once the leakage passes its limit, and the source's own current limit is set to 10× that.</span>
+      <span class="hint">Past it, a ramp stops and goes back to 0.</span>
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Other limits</span></div>
       <div id="protect-limits" class="prot-rows"></div>
       <button id="protect-add-limit" class="link soft prot-add" type="button">+ Add a limit</button>
-      <span class="hint">What else this sample can take, e.g. the bias current or the laser power.</span>
     </div>
     <footer class="dialog-foot">
       <button id="protect-clear" class="btn ghost" type="button">Remove protection</button>
@@ -1031,11 +1012,9 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">Once you unlock, Kelvin may move drives again, each still within its limits and approvals.</p>
     <div class="field">
       <label for="hands-device" class="field-label">The sample in the setup now</label>
       <select id="hands-device" class="mount-select"></select>
-      <span class="hint">Its protection holds from the moment you unlock.</span>
     </div>
     <div class="field checks-col">
       <label class="check wrap"><input type="checkbox" class="hands-check"> It is wired as the next measurement needs (cables, breakout box, grounding switches)</label>
@@ -1058,10 +1037,10 @@
     </header>
     <p id="setup-wait-step" class="setup-wait-step" role="status"></p>
     <div id="setup-wait-bar" class="setup-wait-bar" hidden><span id="setup-wait-fill"></span></div>
-    <p id="setup-wait-hint" class="muted small setup-wait-hint">Kelvin connects to each instrument and reads its settings before it uses it. This can take a few minutes. Wait here, or use Kelvin meanwhile: it uses each instrument once it is ready.</p>
+    <p id="setup-wait-hint" class="muted small setup-wait-hint">This can take a few minutes. You can use Kelvin meanwhile.</p>
     <section id="setup-scripts" class="setup-scripts" hidden>
       <h3>Does your lab run its instruments from scripts?</h3>
-      <p class="muted small">Python, notebooks or MATLAB. Kelvin reads them, and never runs them, to recognise your instruments, the connection settings they need and the values your lab uses, which become their limits for you to check.</p>
+      <p class="muted small">Python, notebooks or MATLAB. Kelvin reads them; it never runs them.</p>
       <div class="field-actions"><button id="setup-scripts-choose" class="btn small primary" type="button">Choose the scripts folder…</button><button id="setup-scripts-none" class="btn small" type="button">No scripts</button></div>
     </section>
     <p id="setup-scripts-msg" class="muted small setup-scripts-msg" hidden></p>

@@ -537,7 +537,7 @@ def test_the_portal_asks_who_confirms_and_shows_the_history_and_the_roles():
     assert "function askApprover(why, names, pinSet)" in js and "data.approver && opts.body" in js
     assert "e.data && e.data.approver" in js                            # a card not confirmed stays open
     for id_ in ("history-dialog", "history-list", "lab-history", "roles-box", "roles-edit", "owner-notify-mine",
-                "lab-why"):
+                "lab-change-why"):
         assert 'id="%s"' % id_ in page, id_
     assert 'value="safety"' in page                                      # a person may tick safety changes too
 

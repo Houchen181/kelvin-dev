@@ -202,6 +202,11 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "approval_mode":
         text = "approvals: " + ("auto mode on (low-risk changes run without asking)" if e.get("mode") == "auto"
                                 else "ask before every drive increase")
+    elif kind == "network_search":
+        text = "looked for instruments on the network%s: %s" % (
+            " (%s)" % ", ".join(e["networks"]) if e.get("networks") else "",
+            "found " + ", ".join(e["found"]) if e.get("found") else
+            "%d address(es) answered" % len(e["answered"]) if e.get("answered") else "nothing answered")
     else:
         text = str(kind)
     by = e.get("by")
@@ -2668,8 +2673,30 @@ class LabRuntime:
         data, caption = pictures.frame_png(frame)
         return data, "%s. %s" % (head, caption)
 
-    def events(self, n: int = 20) -> str:
-        return "\n".join(event_line(e) for e in tail_events(self.events_path, max(1, min(int(n), 200)))) or "no events yet"
+    def events(self, n: int = 20, about: str = "") -> str:
+        """The last n entries of the event log; about: only those that mention it (an instrument, a run, a word)."""
+        n = max(1, min(int(n), 200))
+        if not about.strip():
+            return "\n".join(event_line(e) for e in tail_events(self.events_path, n)) or "no events yet"
+        word = about.strip().lower()
+        lines = [line for line in map(event_line, tail_events(self.events_path, 5000)) if word in line.lower()]
+        return "\n".join(lines[-n:]) or "nothing about %r in the last 5000 events" % about.strip()
+
+    def calculate(self, expression: str) -> str:
+        """A number worked out exactly: arithmetic, functions and physical constants (expr.py), no columns."""
+        import numpy as np
+        from .. import expr
+
+        def no_column(key: str) -> Any:
+            raise KeyError("%r is not a known constant (%s)" % (key, " ".join(expr.CONSTANTS)))
+        try:
+            with np.errstate(all="ignore"):
+                value = np.asarray(expr.evaluate(expression, no_column, np), dtype=float)
+        except (expr.ExprError, ArithmeticError, ValueError, TypeError) as e:
+            return "not calculated: %s" % e
+        shown = ("%.10g" % value.item() if value.size == 1 else
+                 "[%s%s]" % (", ".join("%.6g" % v for v in value.ravel()[:20]), ", …" if value.size > 20 else ""))
+        return "%s = %s" % (expression.strip(), shown)
 
     # ------------------------------------------------------------------ provenance and measurement chains
 
@@ -3764,6 +3791,111 @@ class LabRuntime:
         for resource in found_here:
             if resource not in self.last_found:
                 self.last_found.append(resource)   # found here: try_card and add_instrument may use it
+        return "\n".join(lines)
+
+    def find_on_network(self, network: str = "") -> str:
+        """Instruments on the local network: those that announce themselves (mDNS, as LXI instruments do, and a
+        VXI-11 broadcast), and every address of this computer's networks (or the local range named) with a port open
+        that instruments or their gateways use. Each is asked who it is and matched to a card, and what answered is
+        kept for try_card and add_instrument. Only looks: one connection per port, *IDN? only where instruments
+        speak SCPI; an instrument already in the lab is left alone."""
+        import concurrent.futures
+        import ipaddress
+        from .. import probe
+        from ..adapters import resource_name
+        from ..discovery import Found, identify, look_up, match_card
+        from ..survey import network_adverts
+        adapters = probe.network_adapters()
+        try:
+            nets, notes = probe.sweep_networks(network, adapters)
+        except ValueError as e:
+            return str(e)
+        in_lab: Dict[str, str] = {}   # the lab's instruments on the network: host -> name
+        for name, ic in self.lab.config.instruments.items():
+            address = ic.address.strip()
+            if address.upper().startswith("TCPIP") or ("://" in address and not address.startswith(
+                    ("sim://", "serial://", "lib://", "uvc://", "genicam://"))):
+                host = probe.host_of(address)[0]
+                if "." in host or ":" in host:   # an address or a host name, not a VISA board number
+                    in_lab.setdefault(host, name)
+        found: Dict[str, List[Found]] = {}   # host -> the instruments that said who they are there
+
+        def keep(host: str, got: Found) -> None:
+            found.setdefault(host, []).append(got)
+            self.found_info[resource_name(got.address)] = {"address": got.address, "idn": got.idn,
+                                                           "card_id": got.card_id, "model": got.model, "kind": got.kind}
+            if got.address not in self.last_found:
+                self.last_found.append(got.address)   # found here: try_card and add_instrument may use it
+
+        self.busy = "looking for instruments on the network"
+        try:
+            adverts, problems = ([], []) if network else network_adverts()
+            ports = probe.sweep(nets, skip=set(in_lab) | {a["address"] for a in adapters})
+            hosts = list(ports)[:probe.MAX_IDENTIFIED]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                said = dict(zip(hosts, pool.map(lambda ip: probe.identify_host(ip, ports[ip]), hosts)))
+            visa = [(r, probe.host_of(r)[0]) for r, _ in adverts if probe.host_of(r)[0] not in in_lab]
+            for ip in hosts:
+                for f in said[ip]["found"]:
+                    if f.get("idn"):
+                        card = match_card(f["idn"], self.lab.registry)
+                        got = Found("TCPIP0::%s::%d::SOCKET" % (ip, f["port"]), f["idn"], card.id if card else None,
+                                    card.model if card else "", card.kind if card else "", "identity reply")
+                        keep(ip, got if card else look_up(got, self.collection))
+                    elif f["port"] in (111, 4880) and all(host != ip for _, host in visa):
+                        visa.append(("TCPIP0::%s::%s::INSTR" % (ip, "inst0" if f["port"] == 111 else "hislip0"), ip))
+            for resource, host in visa[:8]:   # VXI-11 and HiSLIP answer through VISA, one at a time
+                if host in found:
+                    continue   # it said who it is on a socket already
+                try:
+                    got = identify(resource, self.lab.registry, timeout_ms=1500, catalog=self.collection)
+                except Exception:
+                    continue
+                if got.idn:
+                    keep(host, got)
+        finally:
+            self.busy = None
+
+        def order(host: str) -> Tuple[int, int, str]:
+            try:
+                return 0, int(ipaddress.ip_address(host)), ""
+            except ValueError:
+                return 1, 0, host
+
+        everyone = sorted(set(hosts) | set(found), key=order)
+        lines = ["%s%s: %s" % (
+            "Looked on %s (ports %s)" % (", ".join(map(str, nets)), " ".join(map(str, probe.SWEEP_PORTS))) if nets
+            else "Swept no network", "" if network else " and for instruments that announce themselves",
+            "%d address%s answered" % (len(everyone), "" if len(everyone) == 1 else "es") if everyone else
+            "nothing answered")]
+        for host in everyone:
+            seen = said.get(host) or {"found": [], "lxi": {}}
+            bits = [probe.what_answers(f) for f in seen["found"] if not f.get("idn")]
+            if seen["lxi"]:
+                bits.append("LXI identification: " + ", ".join("%s %s" % kv for kv in seen["lxi"].items()))
+            for got in found.get(host, []):
+                bits.append("%s answers %r → %s" % (got.address, got.idn[:100], (
+                    "card %s (%s): add_instrument %s" % (got.card_id, got.model, got.address) if got.card_id else
+                    "no card yet%s: draft_card %s" % (" (the instrument collection knows it as %s)" % got.collection
+                                                      if got.collection else "", got.address))))
+            for f in seen["found"]:   # a gateway: the address to try a card on
+                gate = {502: "modbus://%s?unit=1", 4001: "TCPIP0::%s::4001::SOCKET",
+                        10001: "TCPIP0::%s::10001::SOCKET"}.get(f["port"])
+                if gate and gate % host not in self.last_found:
+                    self.last_found.append(gate % host)
+            lines.append("- %s: %s" % (host, "; ".join(bits) or "ports %s open" % ", ".join(map(str, ports[host]))))
+        if len(ports) > len(hosts):
+            lines.append("Also answered, not asked who they are: " + ", ".join(list(ports)[len(hosts):]))
+        if in_lab:
+            lines.append("In the lab already, left alone: " + ", ".join("%s (%s)" % (n, h) for h, n in in_lab.items()))
+        lines += notes + problems
+        if not everyone:
+            lines.append("Check that the instrument is switched on, on one of this computer's networks "
+                         "(connected_devices lists them), with its network interface on (often a front-panel "
+                         "setting); or give its address, from its front panel, to inspect_address.")
+        self.gate.log.write("network_search", by="agent", networks=[str(n) for n in nets] or None,
+                            answered=everyone or None, found=[g.address for h in everyone for g in found.get(h, [])]
+                            or None)
         return "\n".join(lines)
 
     def inspect_serial(self, port: str, query: str = "*IDN?", baud: int = 0) -> str:

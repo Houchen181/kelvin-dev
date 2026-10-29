@@ -228,6 +228,28 @@ def _usb_advice(u: Dict[str, Any]) -> str:
     return "%s is plugged in, but Kelvin could not open it: unplug it, plug it in again, and scan again" % who
 
 
+def network_adverts(broadcast: bool = True, mdns_seconds: float = 2.0,
+                    mdns: Optional[Callable[[], Iterable[Tuple[str, str]]]] = None
+                    ) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """Instruments on the local network that answer a VXI-11 broadcast (through Kelvin's built-in VISA) or announce
+    themselves over mDNS (LXI instruments do), as (VISA resource, how it was found), and what went wrong. mdns
+    replaces the mDNS lookup in tests."""
+    found: List[Tuple[str, str]] = []
+    problems: List[str] = []
+    if broadcast:
+        py = _builtin_rm()
+        if py is not None:
+            try:
+                found += [(str(r), "network (VXI-11)") for r in py.list_resources("TCPIP?*::INSTR")]
+            except Exception:
+                pass
+    try:
+        found += list(mdns() if mdns is not None else mdns_instruments(mdns_seconds))
+    except Exception as e:
+        problems.append("Looking on the network failed (%s)" % first_line(e))
+    return found, problems
+
+
 def survey(rm: Any, network: bool = True, usb: bool = True, mdns_seconds: float = 2.0,
            mdns: Optional[Callable[[], Iterable[Tuple[str, str]]]] = None,
            usb_list: Optional[Callable[[], List[Dict[str, Any]]]] = None,
@@ -242,18 +264,11 @@ def survey(rm: Any, network: bool = True, usb: bool = True, mdns_seconds: float 
                           % first_line(e))
     real = _is_pyvisa(rm)
     if network and (real or mdns is not None):
-        found_net: List[Tuple[str, str]] = []
-        if real and not _is_builtin(rm):   # the installed VISA lists only what is configured: broadcast too
-            py = _builtin_rm()
-            if py is not None:
-                try:
-                    found_net += [(str(r), "network (VXI-11)") for r in py.list_resources("TCPIP?*::INSTR")]
-                except Exception:
-                    pass
-        try:
-            found_net += list(mdns() if mdns is not None else (mdns_instruments(mdns_seconds) if real else []))
-        except Exception as e:
-            s.problems.append("Looking on the network failed (%s)" % first_line(e))
+        # an installed VISA lists only what is configured in it, so the broadcast goes out too; the built-in one
+        # broadcast when it listed
+        found_net, problems = network_adverts(real and not _is_builtin(rm), mdns_seconds,
+                                              mdns if mdns is not None else (None if real else (lambda: [])))
+        s.problems += problems
         for r, how in found_net:
             s.add(r, how)
         s.network = "searched the local network (VXI-11 broadcast and mDNS)"

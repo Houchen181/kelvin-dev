@@ -16,6 +16,7 @@ from labharness import claudecode, screen  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.web.agent import ChatAgent  # noqa: E402
 from labharness.web.app import create_app, make_providers  # noqa: E402
+from labharness.web.brevity import REMINDER  # noqa: E402
 from labharness.web.providers.claudecode_provider import (ASK, ClaudeCodeProvider, Shown, parse, read,  # noqa: E402
                                                           transcript)
 from labharness.web.settings import Settings  # noqa: E402
@@ -344,7 +345,8 @@ def test_the_bridge_passes_pictures_to_claude(parts, monkeypatch, tmp_path):
     message = json.loads(call["stdin"])
     content = message["message"]["content"]
     assert [b["type"] for b in content] == ["text", "image", "text"]
-    assert content[0]["text"].endswith("is this wired right?\n")             # the picture inside the person's message
+    budget = REMINDER.format(words=200)                                    # with each message (brevity.py)
+    assert content[0]["text"].endswith("is this wired right?\n\n%s\n" % budget)   # the picture inside the message
     assert content[1]["source"]["media_type"] == "image/png" and content[2]["text"].startswith("</message>")
     assert content[2]["text"].endswith(ASK)
 

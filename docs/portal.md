@@ -61,9 +61,9 @@ People sign in with a **Kelvin account**: email and password, the same on every 
   - **Which models:** Kelvin lists the newest models that can call tools (it needs tools), or the ones you name.
   - **OpenCode:** only its Chat Completions models are listed, because its Claude, GPT and Gemini models use other formats.
   - **Security:** keys can also come from environment variables such as `OPENROUTER_API_KEY`. Services on the internet need https.
-- **Short answers:** Kelvin keeps answers under 200 words, so you can judge one at a glance. Code and plans don't count.
-  - **Condensed:** an answer that still runs longer is condensed by the same model. Every number, unit, run ID, warning and question stays; background and restatements go. **Full answer** shows the whole one, and Kelvin keeps both.
-  - **Kept whole:** when you asked for the length (a full derivation, every step, a whole document), the answer stays long, with a note saying why.
+- **Short answers:** Kelvin asks the model to keep answers under 200 words, so you can judge one at a glance. Code and plans don't count.
+  - **How:** the budget is in the model's instructions and comes again with each message you send, so the model writes a short answer itself. Kelvin doesn't rewrite it.
+  - **Longer when asked:** ask for a full derivation, every step or a whole document, and the answer is as long as it needs to be.
   - **Your choice:** Settings → Models → **Answer length**: 100, 200 or 400 words, or any length.
 - **Projects:** The sidebar groups conversations into projects, for example one per sample or experiment. Make a project with **+**, start a chat inside it with its **+**, and move a conversation with its **⋯** menu or by dragging it onto a project. Deleting a project keeps its conversations.
 - **Memory:** Kelvin learns from conversations, but keeps three levels that never mix:

@@ -32,7 +32,10 @@ PORTS: List[Tuple[int, str, str]] = [
     (443, "https", "web page"),
     (502, "open", "Modbus TCP (compressors, temperature controllers, chillers, gauges): modbus://{host}?unit=1, "
                   "with a card from its register map"),
+    (1234, "open", "Prologix GPIB-ETHERNET: GPIB instruments behind it, each at its own GPIB address"),
     (1998, "banner", "Toptica DLC pro command line"),
+    (4001, "open", "a serial device server (Moxa NPort): an RS-232 instrument behind it, TCPIP0::{host}::4001::SOCKET "
+                   "(its speed and framing are set on the server)"),
     (4880, "open", "HiSLIP (SCPI over the network): TCPIP0::{host}::hislip0::INSTR"),
     (5000, "open", "Red Pitaya's SCPI server, or Quantum Design's MultiPyVu server (qd://{host}:5000)"),
     (5024, "banner", "SCPI over Telnet"),
@@ -46,8 +49,15 @@ PORTS: List[Tuple[int, str, str]] = [
     (8080, "http", "web service"),
     (8888, "http", "a Pyro4 name server, as QICK boards run (qick://{host}:8888/<proxy name>), or Jupyter"),
     (9090, "http", "Jupyter (PYNQ boards), or attocube's JSON-RPC interface (attoDRY, IDS, AMC)"),
+    (10001, "open", "a serial device server (Lantronix): an RS-232 instrument behind it, "
+                    "TCPIP0::{host}::10001::SOCKET (its speed and framing are set on the server)"),
 ]
 SOCKET_PORTS = {5025, 5555, 7020, 7777}
+# what a sweep of a whole network knocks on: ports only instruments and their gateways open, not the web, SSH or
+# Jupyter, which any computer may have (inspect_address looks at those on one address)
+SWEEP_PORTS = (111, 502, 1234, 1998, 4001, 4880, 5024, 5025, 5555, 7020, 7230, 7777, 8004, 10001)
+MAX_SWEEP = 1024     # addresses one sweep looks at, at most (a /22)
+MAX_IDENTIFIED = 32  # hosts that answered whose identity a sweep asks for
 
 # USB vendor IDs of instrument makers, and of the chips instruments are built around
 USB_VENDORS = {
@@ -262,6 +272,97 @@ def inspect(address: str, ports: Optional[List[Tuple[int, str, str]]] = None, se
             found.append(res)
     lxi = lxi_identity(ip, connect) if any(f["port"] == 80 for f in found) and ports is None else {}
     return {"host": host, "ip": ip, "found": found, "lxi": lxi, "looked": [p for p, _, _ in table]}
+
+
+def sweep_networks(named: str = "", adapters: Optional[List[Dict[str, Any]]] = None
+                   ) -> Tuple[List[ipaddress.IPv4Network], List[str]]:
+    """The networks a sweep looks at, with notes on what it leaves out: the range named (192.168.1.0/24,
+    192.168.1.*, or an address for its /24), else each network this computer is on (of a wider one, only this
+    computer's own /24). Raises ValueError for a range on the internet or wider than MAX_SWEEP addresses."""
+    if named.strip():
+        text = named.strip()
+        if text.endswith(".*"):
+            text = text[:-2] + ".0/24"
+        elif "/" not in text:
+            text += "/24"
+        try:
+            net = ipaddress.ip_network(text, strict=False)
+        except ValueError:
+            raise ValueError("%r is not a network: give it as 192.168.1.0/24 (or 192.168.1.*)" % named)
+        if net.version != 4 or net.is_global or net.is_loopback or net.is_multicast or net.is_unspecified:
+            raise ValueError("%s is not a local network: Kelvin looks only on local networks, where instruments are"
+                             % net)
+        if net.num_addresses > MAX_SWEEP:
+            raise ValueError("%s has %d addresses: Kelvin looks at %d at most (a /22), so name a smaller range"
+                             % (net, net.num_addresses, MAX_SWEEP))
+        return [net], []
+    nets: List[ipaddress.IPv4Network] = []
+    notes: List[str] = []
+    for a in adapters if adapters is not None else network_adapters():
+        net = ipaddress.ip_network(a["network"], strict=False)
+        if net.prefixlen >= 31 or net.is_loopback:
+            continue
+        if a.get("link_local") or net.is_link_local:
+            notes.append("%s (%s) is a link-local network, too wide to sweep: an instrument there answers its "
+                         "announcements, or give its address (front panel) to inspect_address" % (net, a["name"]))
+            continue
+        if ipaddress.ip_address(a["address"]) in ipaddress.ip_network("100.64.0.0/10"):
+            continue   # a VPN's own addresses (Tailscale): no instruments there
+        if net.is_global:
+            notes.append("%s (%s) is a public network: Kelvin doesn't sweep public addresses" % (net, a["name"]))
+            continue
+        if net.num_addresses > 256:
+            own = ipaddress.ip_network("%s/24" % a["address"], strict=False)
+            notes.append("%s (%s) has %d addresses: looked only at this computer's part of it, %s; name another "
+                         "range to look there" % (net, a["name"], net.num_addresses, own))
+            net = own
+        if net not in nets:
+            nets.append(net)
+    return nets, notes
+
+
+def sweep(networks: Iterable[ipaddress.IPv4Network], ports: Iterable[int] = SWEEP_PORTS, seconds: float = 0.35,
+          connect: Optional[Connect] = None, skip: Iterable[str] = (), workers: int = 192) -> Dict[str, List[int]]:
+    """Which addresses of these networks have which of these ports open: one connection to each, closed at once,
+    nothing sent. {ip: [ports]}, in address order."""
+    left_out = set(skip)
+    hosts = [str(ip) for net in networks for ip in net.hosts() if str(ip) not in left_out]
+    tasks = [(ip, port) for ip in hosts for port in ports]
+
+    def knock(task: Tuple[str, int]) -> Optional[Tuple[str, int]]:
+        try:
+            sock = (connect or _connect)(task[0], task[1], seconds)
+        except OSError:
+            return None
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return task
+
+    found: Dict[str, List[int]] = {}
+    if tasks:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, len(tasks))) as pool:
+            for hit in pool.map(knock, tasks):
+                if hit:
+                    found.setdefault(hit[0], []).append(hit[1])
+    return {ip: sorted(found[ip]) for ip in sorted(found, key=ipaddress.ip_address)}
+
+
+def identify_host(ip: str, ports: Iterable[int], seconds: float = 0.8, connect: Optional[Connect] = None
+                  ) -> Dict[str, Any]:
+    """What one address that answered a sweep says on its open ports (*IDN? on SCPI sockets, a greeting where
+    instruments greet), and its LXI identification page when it speaks VXI-11 or HiSLIP. Like inspect's result."""
+    table = [p for p in PORTS if p[0] in set(ports)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(table) or 1)) as pool:
+        results = list(pool.map(lambda p: probe_port(ip, p[0], p[1], seconds, connect), table))
+    found = []
+    for (port, how, hint), res in zip(table, results):
+        if res is not None:
+            res["hint"], res["how"] = hint.replace("{host}", ip), how
+            found.append(res)
+    lxi = lxi_identity(ip, connect) if {111, 4880} & {f["port"] for f in found} else {}
+    return {"host": ip, "ip": ip, "found": found, "lxi": lxi, "looked": [p for p, _, _ in table]}
 
 
 def what_answers(f: Dict[str, Any]) -> str:

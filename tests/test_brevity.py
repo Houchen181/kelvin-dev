@@ -1,4 +1,5 @@
-"""Short answers (VISION item 9): a budget in the prompt, long answers condensed with the full one kept."""
+"""Short answers (VISION item 9): the model is asked for a word budget and keeps to it itself; Kelvin doesn't
+rewrite its answers."""
 import pytest
 
 pytest.importorskip("starlette")
@@ -15,6 +16,7 @@ LONG = ("The lock-in signal at 1.5 K shows a clear peak at 2.41 V. " * 4 + "\n\n
         "see in the sweep. " * 5 + "\n\nIn summary, run 20261023-101500-gate_sweep looks fine; would you like me "
         "to repeat it with a finer step near the peak? Let me know if there is anything else I can help with.")
 SHORT = "Peak at **2.41 V** (1.5 K), run 20261023-101500-gate_sweep. Repeat with a finer step near the peak?"
+ASKED = "(Answer in at most %d words"
 
 
 def test_counting_the_words_a_person_reads():
@@ -26,84 +28,77 @@ def test_counting_the_words_a_person_reads():
     assert brevity.words(LONG) > 200 and brevity.words(SHORT) < 30
 
 
-def test_a_long_answer_is_condensed_and_the_full_one_kept(parts):
-    model = Scripted([say(LONG), say(SHORT)])
-    client, headers = client_for(parts, {"scripted": model})
-    with client:
-        chat = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
-        events = stream_turn(client, headers, chat["id"], "how did the gate sweep go?", "scripted:m1")
-        kinds = [e["type"] for e in events]
-        assert kinds.index("condensing") < kinds.index("condensed") < kinds.index("turn_end")
-        done = next(e for e in events if e["type"] == "condensed")
-        assert done["text"] == SHORT and done["full_words"] == brevity.words(LONG) and done["words"] < 30
-        assert "# Short answers" in model.systems[0] and "under 200 words" in model.systems[0]
-        assert model.systems[1].startswith("You shorten answers") and "at most 200 words" in model.systems[1]
-        assert "how did the gate sweep go?" in model.prompts[1][0] and LONG.strip() in model.prompts[1][0]
-        saved = client.get("/api/chats/" + chat["id"], headers=headers).json()["messages"][-1]
-        assert [b["text"] for b in saved["blocks"] if b["type"] == "text"] == [SHORT]
-        assert saved["full"] == LONG.strip() and saved["full_words"] == brevity.words(LONG)
+def test_the_reminder_rides_with_each_message_and_is_never_stored():
+    history = [{"role": "user", "text": "sweep the gate"}, {"role": "assistant", "blocks": []},
+               {"role": "tool", "results": []}, {"role": "user", "text": "and now?"}]
+    sent = brevity.with_reminder(history, 150)
+    assert [m.get("brief") for m in sent] == [brevity.REMINDER.format(words=150), None, None,
+                                              brevity.REMINDER.format(words=150)]
+    assert all("brief" not in m for m in history)                       # the chat as stored is untouched
+    assert brevity.with_reminder(history, 0) is history                  # any length: nothing added
 
 
-def test_a_short_answer_is_left_alone(parts):
+def test_the_model_is_asked_for_a_short_answer(parts):
     model = Scripted([say(SHORT)])
     client, headers = client_for(parts, {"scripted": model})
     with client:
         chat = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
-        events = stream_turn(client, headers, chat["id"], "how did it go?", "scripted:m1")
-        assert not {"condensing", "condensed"} & {e["type"] for e in events} and len(model.systems) == 1
+        events = stream_turn(client, headers, chat["id"], "how did the gate sweep go?", "scripted:m1")
+        assert "# Short answers" in model.systems[0] and "under 200 words" in model.systems[0]
+        latest = model.asked[0][-1]
+        assert latest.startswith("how did the gate sweep go?") and ASKED % 200 in latest
+        assert len(model.systems) == 1 and events[-1] == {"type": "turn_end", "reason": "end"}   # one call, no rewrite
+        saved = client.get("/api/chats/" + chat["id"], headers=headers).json()["messages"]
+        assert saved[0]["text"] == "how did the gate sweep go?" and "brief" not in saved[0]
 
 
-def test_a_long_answer_the_user_asked_for_stays(parts):
-    model = Scripted([say(LONG), say("KEEP: you asked for the full derivation")])
+def test_a_long_answer_stays_as_the_model_wrote_it(parts):
+    model = Scripted([say(LONG)])
     client, headers = client_for(parts, {"scripted": model})
     with client:
         chat = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
         events = stream_turn(client, headers, chat["id"], "derive it in full, every step", "scripted:m1")
-        done = next(e for e in events if e["type"] == "condensed")
-        assert done["kept"] == "you asked for the full derivation" and "text" not in done
+        assert not {"condensing", "condensed"} & {e["type"] for e in events} and len(model.systems) == 1
         saved = client.get("/api/chats/" + chat["id"], headers=headers).json()["messages"][-1]
-        assert saved["blocks"][0]["text"] == LONG and saved["kept"] and "full" not in saved
+        assert saved["blocks"][0]["text"] == LONG and "full" not in saved
 
 
-def test_when_condensing_fails_the_full_answer_stays(parts):
-    model = Scripted([say(LONG)])                                    # nothing left to answer the condensing with
+def test_earlier_messages_replay_unchanged(parts):
+    """Each message carries the same reminder every time, so the request only grows at its end (prompt cache)."""
+    model = Scripted([say(SHORT), say(SHORT)])
     client, headers = client_for(parts, {"scripted": model})
     with client:
         chat = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
-        events = stream_turn(client, headers, chat["id"], "how did it go?", "scripted:m1")
-        assert next(e for e in events if e["type"] == "condensed") == {"type": "condensed"}
-        assert events[-1] == {"type": "turn_end", "reason": "end"}
-        saved = client.get("/api/chats/" + chat["id"], headers=headers).json()["messages"][-1]
-        assert saved["blocks"][0]["text"] == LONG and "full" not in saved
+        stream_turn(client, headers, chat["id"], "how did it go?", "scripted:m1")
+        stream_turn(client, headers, chat["id"], "and the second run?", "scripted:m1")
+        assert model.asked[1][0] == model.asked[0][0] and ASKED % 200 in model.asked[1][1]
 
 
 def test_the_budget_follows_the_setting(parts):
     runtime, settings, store = parts
     settings.update({"answer_words": "off"})
-    model = Scripted([say(LONG)])
+    model = Scripted([say(LONG), say(SHORT)])
     client, headers = client_for(parts, {"scripted": model})
     with client:
         chat = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
-        events = stream_turn(client, headers, chat["id"], "how did it go?", "scripted:m1")
-        assert "Short answers" not in model.systems[0] and "condensing" not in {e["type"] for e in events}
+        stream_turn(client, headers, chat["id"], "how did it go?", "scripted:m1")
+        assert "Short answers" not in model.systems[0] and "(Answer in" not in model.asked[0][-1]
 
         settings.update({"answer_words": "100"})
-        model.turns = [say(" ".join(["word"] * 150)), say(SHORT)]
-        events = stream_turn(client, headers, chat["id"], "and now?", "scripted:m1")
-        assert "under 100 words" in model.systems[1] and "at most 100 words" in model.systems[2]
-        assert next(e for e in events if e["type"] == "condensed")["text"] == SHORT
+        stream_turn(client, headers, chat["id"], "and now?", "scripted:m1")
+        assert "under 100 words" in model.systems[1] and ASKED % 100 in model.asked[1][-1]
         assert client.get("/api/settings", headers=headers).json()["settings"]["answer_words"] == 100
 
 
-def test_compared_answers_are_condensed_each(parts):
-    alpha = bot("alpha", [say(LONG), say("Alpha, short: peak at 2.41 V.")])
+def test_compared_models_are_each_asked_for_short_answers(parts):
+    alpha = bot("alpha", [say(LONG)])
     beta = bot("beta", [say("Beta: peak at 2.41 V.")])
     client, headers = client_for(parts, {"alpha": alpha, "beta": beta})
     with client:
         chat = client.post("/api/chats", json={"model": "alpha:m1"}, headers=headers).json()
         events = compare(client, headers, chat["id"], "how did it go?", ["alpha:m1", "beta:m1"])
-        condensed = [e for e in events if e["type"] == "condensed"]
-        assert [(e["lane"], e["text"]) for e in condensed] == [(0, "Alpha, short: peak at 2.41 V.")]
+        assert ASKED % 200 in alpha.asked[0][-1] and ASKED % 200 in beta.asked[0][-1]
+        assert not {"condensing", "condensed"} & {e["type"] for e in events}
         saved = client.get("/api/chats/" + chat["id"], headers=headers).json()
         lane = saved["messages"][0]["compare"]["lanes"][0]["messages"][-1]
-        assert lane["full"] == LONG.strip() and lane["blocks"][-1]["text"] == "Alpha, short: peak at 2.41 V."
+        assert lane["blocks"][-1]["text"] == LONG and "full" not in lane

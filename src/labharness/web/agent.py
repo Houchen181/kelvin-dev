@@ -242,8 +242,9 @@ def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
 
 # Kelvin's rarer tools, loaded in a chat when it needs them (find_tools), so every step doesn't carry them all
 DEFERRED = {
-    "setting up instruments": ["scan_instruments", "connected_devices", "inspect_address", "inspect_serial",
-                               "add_instrument", "reconnect_instrument", "ask_to_switch_on", "survey_scripts"],
+    "setting up instruments": ["scan_instruments", "find_on_network", "connected_devices", "inspect_address",
+                               "inspect_serial", "add_instrument", "reconnect_instrument", "ask_to_switch_on",
+                               "survey_scripts"],
     "writing and trying cards": ["card_guide", "draft_card", "check_card", "try_card", "save_card", "read_examples",
                                  "find_maker_files", "library_api", "save_manual"],
     "makers' software": ["install_for_instrument", "installed_software", "environments", "remove_environment"],
@@ -258,8 +259,8 @@ MAX_FOUND = 10
 # lookups that touch no instrument and change nothing: several in one step run side by side (look_at: a run's plots;
 # a camera's frame is read as any reading is)
 LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", "query_runs", "list_runs", "analyze_run",
-           "recent_events", "kelvin_help", "describe_instrument", "search_manual", "instrument_info", "lab_config",
-           "card_guide", "find_card", "experiment_guide", "look_at", "watches", "queue_show",
+           "recent_events", "calculate", "kelvin_help", "describe_instrument", "search_manual", "instrument_info",
+           "lab_config", "card_guide", "find_card", "experiment_guide", "look_at", "watches", "queue_show",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
            "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "activity", "shared_memory"}
@@ -707,37 +708,13 @@ class ChatAgent:
 
     # ------------------------------------------------------------------ short answers (brevity.py)
 
-    def _brevity(self) -> List[str]:
-        limit = self.settings.answer_words if self.settings else brevity.WORDS
-        return [brevity.RULE.format(words=limit)] if limit else []
+    def _budget(self) -> int:
+        """The word budget for answers (0: any length): the model is asked for it and keeps to it itself."""
+        return self.settings.answer_words if self.settings else brevity.WORDS
 
-    async def _shorten(self, provider: Provider, model_id: str, request: str, message: Dict[str, Any],
-                       emit: Emit) -> None:
-        """Condense a finished answer that runs over the word budget, keeping the full one in the message ("full")."""
-        limit = self.settings.answer_words if self.settings else brevity.WORDS
-        answer = text_of(message.get("blocks") or []).strip()
-        n = brevity.words(answer)
-        if not limit or n <= limit:
-            return
-        await emit({"type": "condensing", "words": n})
-        try:
-            kind, said = await asyncio.wait_for(brevity.condense(provider, model_id, request, answer, limit),
-                                                brevity.TIMEOUT)
-        except asyncio.CancelledError:
-            raise
-        except Exception:   # the model failed or took too long: the full answer stays
-            kind, said = "", ""
-        if kind == "keep":
-            message["kept"] = said or "the request needed it"
-            await emit({"type": "condensed", "kept": message["kept"], "words": n})
-            return
-        short = brevity.words(said)
-        if kind != "short" or not short or short >= n:
-            await emit({"type": "condensed"})
-            return
-        message["full"], message["full_words"] = answer, n
-        message["blocks"] = [b for b in message["blocks"] if b["type"] != "text"] + [{"type": "text", "text": said}]
-        await emit({"type": "condensed", "text": said, "words": short, "full_words": n})
+    def _brevity(self) -> List[str]:
+        limit = self._budget()
+        return [brevity.RULE.format(words=limit)] if limit else []
 
     # ------------------------------------------------------------------ who may see a project
 
@@ -1108,8 +1085,9 @@ class ChatAgent:
                                                     "model, to stay within what it can read at once. The whole chat "
                                                     "stays here, and Kelvin can still search it."})
         self._stream_task = asyncio.ensure_future(
-            provider.stream(model_id, context["system"], self._pictures(chat, history, provider), context["tools"],
-                            relay))
+            provider.stream(model_id, context["system"],
+                            self._pictures(chat, brevity.with_reminder(history, self._budget()), provider),
+                            context["tools"], relay))
         try:
             result = await self._stream_task
         except asyncio.CancelledError:
@@ -1132,19 +1110,6 @@ class ChatAgent:
         if result.stop_reason == "pause":
             return True
         if result.stop_reason != "tool_calls":
-            if result.stop_reason == "end":   # a finished answer, not one cut short: condensed if it runs long
-                self._stream_task = asyncio.ensure_future(
-                    self._shorten(provider, model_id, review.last_request(chat["messages"]), chat["messages"][-1],
-                                  emit))
-                try:
-                    await self._stream_task
-                except asyncio.CancelledError:
-                    if not self._stop:
-                        raise
-                    await emit({"type": "condensed"})   # stopped: the full answer stays
-                finally:
-                    self._stream_task = None
-                self.store.save(chat)
             await emit({"type": "turn_end", "reason": result.stop_reason})
             return False
 
@@ -1639,8 +1604,8 @@ class ChatAgent:
 
         try:
             for _ in range(COMPARE_STEPS):
-                result = await provider.stream(model_id, system, self._pictures({"id": chat_id}, base + out, provider),
-                                               tools, lane_emit)
+                result = await provider.stream(model_id, system, self._pictures(
+                    {"id": chat_id}, brevity.with_reminder(base + out, self._budget()), provider), tools, lane_emit)
                 out.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
                             "blocks": result.blocks, "raw": result.raw})
                 if result.stop_reason != "tool_calls":
@@ -1673,8 +1638,6 @@ class ChatAgent:
             else:
                 out.append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
                             "blocks": [{"type": "text", "text": "(paused after %d steps)" % COMPARE_STEPS}]})
-            if result.stop_reason == "end":
-                await self._shorten(provider, model_id, review.last_request(base), out[-1], lane_emit)
             await lane_emit({"type": "lane_end", "reason": "end"})
             return {"model": key, "messages": out}
         except asyncio.CancelledError:

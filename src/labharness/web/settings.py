@@ -302,7 +302,7 @@ class Settings:
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "hub_old_runs":  # also share runs from before Kelvin noted who made them: off unless on
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
-            if name == "answer_words":  # how long answers may be before Kelvin condenses them (brevity.py)
+            if name == "answer_words":  # how long the model is asked to keep answers (brevity.py)
                 value = _answer_words(value)
             if name == "idle_off":  # minutes before light left on with nothing happening goes to safe, or off
                 value = _idle_off(value)
@@ -460,7 +460,7 @@ class Settings:
 
     @property
     def answer_words(self) -> int:
-        """How many words an answer may have before Kelvin condenses it (brevity.py); 0: any length."""
+        """How many words the model is asked to keep each answer under (brevity.py); 0: any length."""
         value = self._user.get("answer_words")
         if value == "off":
             return 0

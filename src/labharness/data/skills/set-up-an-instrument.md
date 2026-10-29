@@ -2,7 +2,7 @@
 name: set-up-an-instrument
 description: Adding an instrument Kelvin does not know yet: find it, identify it, read its manual, draft and try its card, then add it.
 ---
-1. Find it: connected_devices (USB, serial), scan_instruments (VISA, the local network), then inspect_address or inspect_serial on what showed up. installed_software and find_maker_files show the maker's program and libraries if the person installed them.
+1. Find it: connected_devices (USB, serial), scan_instruments (VISA, the local network), find_on_network for one on the network whose address nobody knows, then inspect_address or inspect_serial on what showed up. installed_software and find_maker_files show the maker's program and libraries if the person installed them.
 2. Identify maker, model and firmware (*IDN?, or the USB vendor and product IDs). Ask the person when two candidates fit.
 3. The manual: save_manual (from the maker's site, or the PDF the person has), then search_manual for the command set, terminators, baud rate, ranges and limits. Never guess a command that drives the sample.
 4. If it needs the maker's library: install_for_instrument (a person approves), then library_api to read its functions.

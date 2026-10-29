@@ -309,12 +309,11 @@
       for (const id of parts) $(id).hidden = !shown.includes(id);
       $("signin-title").textContent = { signin: "Sign in to Kelvin", new: "Create a Kelvin account", link: "Welcome to this computer",
         rekey: "Keep your API keys?", remove: "Remove someone from this computer" }[mode];
-      $("signin-sub").textContent = mode === "signin" ? "Your Kelvin account works on every computer." : "";
+      $("signin-sub").textContent = "";
       if (mode === "signin") (($("c-email").value ? $("c-password") : $("c-email"))).focus();
       if (mode === "new") $("cn-name").focus();
       if (mode === "rekey") $("rekey-old").focus();
     };
-    $("signin-foot").textContent = "After you've signed in on a computer once, your password works there offline too. Your chats, data and API keys stay on each computer.";
     $("cn-terms").href = session.hub + "/terms";
     $("cn-privacy").href = session.hub + "/privacy";
     const known = (session.accounts || []).filter((a) => a.email);
@@ -496,8 +495,8 @@
       $("new-back").hidden = !people.length;
       $("signin-title").textContent = mode === "new" ? (people.length ? "Add a person" : "Welcome to Kelvin")
         : mode === "remove" ? "Remove someone from this computer" : "Who's using Kelvin?";
-      $("signin-sub").textContent = mode !== "new" ? "" : people.length ? "Anyone can add themselves; nobody's account is above another's."
-        : session.legacy ? "Make your account. Your chats, runs and API keys from before come with it." : "Make your account to start.";
+      $("signin-sub").textContent = mode === "new" && !people.length && session.legacy
+        ? "Your chats, runs and API keys from before come with it." : "";
       say("");
       if (mode === "password") { $("signin-pass-label").textContent = chosen.name + "'s password"; $("signin-password").value = ""; $("signin-password").focus(); }
       if (mode === "new") { $("new-name").value = people.length ? "" : session.suggest || ""; $("new-password").value = ""; $("new-name").focus(); }
@@ -557,12 +556,11 @@
     $("account-delete-everywhere-row").hidden = !kelvinAccount;
     $("account-delete-everywhere").checked = false;
     $("account-delete-password").hidden = !a.user.password && !kelvinAccount;
-    $("account-delete-what").textContent = "Takes you off this computer: your settings, API keys, ChatGPT sign-in, chats, projects " +
-      "and memory. Your measurements (runs, reports and record) stay on disk." +
-      (kelvinAccount ? " Your Kelvin account stays for your other computers, unless you also delete it." : "");
+    $("account-delete-what").textContent = "Removes your settings, API keys, chats, projects and memory from this computer. " +
+      "Runs and reports stay.";
     $("account-hint").textContent = a.user.central
-      ? "One Kelvin account, on the Kelvin hub, signs you in on every computer; after a first sign-in on a computer it works there offline too. Your settings, API keys, chats, projects, memory, data folder and record stay on each computer, and your API keys are encrypted with your password. The instruments, their cards, the lab switches below and the lab's instrument log are everyone's. Forgot your password? Sign out and choose \"Forgot your password?\"."
-      : "Your settings, API keys, chats, projects, memory, data folder and record are yours; the instruments, their cards, the lab switches below and the lab's instrument log are everyone's. With a password, your API keys are encrypted with it. Nobody can reset a forgotten password: there is no administrator. Accounts keep people's work apart in Kelvin; they don't lock files: anyone who can open this computer's files can read the folders.";
+      ? ""
+      : "A forgotten password can't be reset.";
   }
 
   async function setRelay() {
@@ -1145,7 +1143,8 @@
   // The conversation keeps at least CHAT_MIN pixels. When the side panels need the room, the sidebar steps aside (the
   // menu button brings it back over the page), and if that is not enough the lab panel floats over the runs pane.
   // Below 1100 px both panels float anyway (app.css), below 820 px the sidebar too.
-  const CHAT_MIN = 520, SIDEBAR_W = 264, LAB_W = 380, RUNS_MIN = 340;
+  const CHAT_MIN = 520, SIDEBAR_W = 264, LAB_MIN = 300, RUNS_MIN = 340;
+  let LAB_W = 380;   // the lab panel's width: the person drags its left edge, like the runs pane's (lh.labWidth)
   function fitLayout() {
     const app = $("app"), w = window.innerWidth;
     const floating = w <= 1100;
@@ -1155,8 +1154,45 @@
     app.classList.toggle("compact", compact);
     app.classList.toggle("float-lab", lab > 0 && (compact ? 0 : SIDEBAR_W) + CHAT_MIN + runs + LAB_W > w);
     if (!compact && w > 820) app.classList.remove("side-open");
+    if (S.labOpen && !floating) setLabWidth(LAB_W);
     if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width);
     syncScrim();
+  }
+  function setLabWidth(w) {
+    const app = $("app"), vw = window.innerWidth;
+    const sidebar = vw <= 820 || app.classList.contains("compact") ? 0 : SIDEBAR_W;
+    const runs = RUNS.open && vw > 1100 && !app.classList.contains("float-lab") ? RUNS_MIN : 0;
+    const max = Math.max(LAB_MIN, vw - sidebar - runs - CHAT_MIN);
+    LAB_W = Math.round(Math.min(max, Math.max(LAB_MIN, w || 0)));
+    $("labpanel").style.width = LAB_W + "px";
+    return LAB_W;
+  }
+  function initLabPanel() {
+    const saved = Number(store("lh.labWidth"));
+    if (saved > 0) LAB_W = saved;
+    $("labpanel").style.width = LAB_W + "px";
+    const handle = $("labpanel-resize");
+    handle.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const right = $("labpanel").getBoundingClientRect().right;
+      handle.setPointerCapture(e.pointerId);
+      document.body.classList.add("resizing");
+      const move = (ev) => setLabWidth(right - ev.clientX);
+      const up = () => {
+        handle.removeEventListener("pointermove", move);
+        document.body.classList.remove("resizing");
+        store("lh.labWidth", String(LAB_W));
+        fitLayout();
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", up, { once: true });
+    });
+    handle.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      store("lh.labWidth", String(setLabWidth(LAB_W + (e.key === "ArrowLeft" ? 32 : -32))));
+      fitLayout();
+    });
   }
   function setPaneWidth(w) {
     const app = $("app"), vw = window.innerWidth;
@@ -1399,7 +1435,7 @@
     if (t.custom.length) rows.push(h("div", { class: "lib-project" }, h("div", { class: "lib-head" }, h("b", {}, "Made on request")),
       ...t.custom.slice(0, 8).map((n) => h("div", { class: "lib-row" }, h("span", { class: "lib-label" }, n.split("/").pop()), link(n, "Open")))));
     box.replaceChildren(...(rows.length ? rows : [h("p", { class: "hint" },
-      "No reports yet. They appear after the first scan: mount a device in the Lab panel, then measure.")]));
+      "No reports yet.")]));
   }
   // ------------------------------------------------------------------ the sample in the setup
   const MOUNT = { choices: [], key: "" };
@@ -1479,7 +1515,7 @@
     const at = String(hands.since || "").slice(11, 16);
     const who = String(hands.by || "").replace(/^human \((.*)\)$/, "$1");
     $("hands-text").textContent = "Locked" + (at ? " at " + at : "") + (who && who !== "portal" ? " from " + who : "")
-      + ". Everything that reaches the sample stays at safe until you unlock; Kelvin can still read and measure.";
+      + ". Drives stay at safe until you unlock.";
   }
   async function handsOn() {   // at once, also while Kelvin works: it stops that work (no dialog on the stop path)
     $("hands-on").disabled = true;
@@ -1912,20 +1948,7 @@
       }
       this.text = null;
     }
-    condensing(words) {   // a long answer is being shortened (brevity.py)
-      this.endText();
-      if (this.pending) return;
-      this.pending = h("div", { class: "condense-note" }, h("span", { class: "spinner" }),
-        h("span", {}, "Condensing a long answer (" + words + " words)…"));
-      this.el.append(this.pending);
-    }
-    condensed(ev) {
-      this.endText();
-      if (this.pending) { this.pending.remove(); this.pending = null; }
-      if (ev.text && this.last) this.shorten(this.last, ev.text, this.last.buf, ev.full_words);
-      else if (ev.kept) this.keptWhole(ev.words, ev.kept);
-    }
-    shorten(last, short, full, fullWords) {
+    shorten(last, short, full, fullWords) {   // an answer condensed by an earlier version: the full one a click away
       const shortHtml = md(short), fullHtml = md(full);
       let open = false;
       const label = () => (open ? "Show the short answer" : "Full answer (" + fullWords + " words)");
@@ -2477,7 +2500,7 @@
     $("notes-count").textContent = notes.length ? notes.length + (notes.length === 1 ? " note" : " notes") : "";
     if (!notes.length) {
       $("project-notes").replaceChildren(h("li", { class: "memory-empty" },
-        "No notes yet. When a conversation settles something worth keeping (a decision, a procedure, an instrument quirk, a result), Kelvin saves it here."));
+        "No notes yet."));
       return;
     }
     $("project-notes").replaceChildren(...notes.map((n) => {
@@ -2493,7 +2516,7 @@
     $("papers-count").textContent = papers.length ? papers.length + (papers.length === 1 ? " paper" : " papers") : "";
     if (!papers.length) {
       $("project-papers").replaceChildren(h("li", { class: "memory-empty" },
-        "No papers yet. Ask Kelvin to look up the literature, then to keep the papers that matter."));
+        "No papers yet."));
       return;
     }
     $("project-papers").replaceChildren(...papers.map((e) => {
@@ -2658,7 +2681,7 @@
         : "Make this chat incognito: none of your memory is used or kept, and the chat is not saved";
     $("greeting").textContent = S.incognito ? "Incognito chat" : "What are we measuring today?";
     $("empty-sub").textContent = S.incognito
-      ? "Kelvin uses none of your memory here, keeps nothing from this chat, and forgets it when you leave. The lab's memory still applies, and instrument commands and runs are still logged."
+      ? "No memory, and forgotten when you leave. Instrument commands and runs are still logged."
       : S.labSub || "";
     $("input").placeholder = askHint();
   }
@@ -3165,7 +3188,7 @@
     menu.replaceChildren(
       h("div", { class: "pane-menu-note" }, (S.labels[main] || "The chosen model") + " answers, and so do the ones you tick here (up to two)."),
       ...(items.length ? items : [h("div", { class: "pane-menu-note" }, "Add another provider's API key in Settings to compare models.")]),
-      h("div", { class: "pane-menu-note" }, "While comparing, models can read the lab but not change it. Pick one answer to continue with. ", off));
+      h("div", { class: "pane-menu-note" }, "Models can't change the lab while comparing. ", off));
     menu.hidden = false;
     $("compare-btn").setAttribute("aria-expanded", "true");
   }
@@ -3547,8 +3570,6 @@
       case "run_progress": reply.runProgress(ev); break;
       case "computer_step": reply.computerStep(ev); break;
       case "note": reply.note(ev.text); break;
-      case "condensing": reply.condensing(ev.words); break;
-      case "condensed": reply.condensed(ev); break;
       case "memory": reply.memory(ev.notes); break;
       case "review_start": reply.reviewStart(ev); break;
       case "review": reply.review(ev); break;
@@ -3617,10 +3638,8 @@
     if (!open) return item;
     const card = item;
     const body = h("div", { class: "inst-body" });
-    if (missing) body.append(h("div", { class: "hint" }, "Kelvin could not connect to it, so it sends it nothing, and plans "
-      + "that use it are refused. Once that is fixed, switch it on to connect it; the rest of the lab works as usual."));
-    else if (off) body.append(h("div", { class: "hint" }, "Kelvin sends it no command and reads nothing from it: no checks, "
-      + "no alarms, and plans that use it are refused. Switch it on to use it again."));
+    if (missing) body.append(h("div", { class: "hint" }, "Not connected: plans that use it are refused. Switch it on once it is fixed."));
+    else if (off) body.append(h("div", { class: "hint" }, "Off: no commands, readings or alarms."));
     const others = inst.readings.filter((r) => r.name !== inst.headline);
     if (others.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Readings"), ...others.map((r) => kv(r))));
     if (inst.drives.length) body.append(h("div", { class: "group" }, h("div", { class: "group-title" }, "Outputs"), ...inst.drives.map((d) => kv(d))));
@@ -3750,13 +3769,11 @@
     } else delete $("lab-problem").dataset.text;
     const unreviewed = s.unreviewed || [];
     $("lab-observe").hidden = !unreviewed.length;
-    if (unreviewed.length) $("lab-observe-who").textContent = "Kelvin added " + andList(unreviewed) + " itself.";
+    if (unreviewed.length) $("lab-observe-who").textContent = andList(unreviewed) + ".";
     const drafts = s.drafts || [];   // real instruments whose card nobody has checked yet
     $("lab-drafts").hidden = !drafts.length;
     if (drafts.length) {
-      $("lab-drafts-who").textContent = drafts.length === 1
-        ? drafts[0] + " runs on a draft card: Kelvin asks you before each setting or output change on it until you check the card against the instrument and mark it reviewed."
-        : andList(drafts) + " run on draft cards: Kelvin asks you before each setting or output change on them until you check their cards against the instruments and mark them reviewed.";
+      $("lab-drafts-who").textContent = andList(drafts) + ".";
     }
     showWhy(s);
     const busySetup = s.setup && SETUP_BUSY.has(s.setup.state);
@@ -3973,7 +3990,7 @@
     });
     const yours = h("button", { class: "link soft", type: "button", title: "Change it for your lab's instrument (another firmware, a wider range, a different command); Kelvin's card stays for other labs" }, "Make your version");
     yours.addEventListener("click", () => {
-      showCardEditor(c.yaml, c.id, [], [], "Your lab's version of Kelvin's card " + c.id + ": keep its id, change what differs on your instrument, then Save card. It replaces Kelvin's card in this lab.");
+      showCardEditor(c.yaml, c.id, [], [], "Your lab's version of " + c.id + ": change what differs, then Save card.");
       CARDS.version = true;
     });
     const draft = c.status === "draft", kept = c.status === "lab-verified" && c.reviewable;
@@ -4098,7 +4115,7 @@
           h("input", { id: "queue-note", placeholder: "Note (kept with the run)", "aria-label": "Note" }),
           h("input", { id: "queue-pos", class: "q-pos", placeholder: "at #", inputmode: "numeric", "aria-label": "Position" }),
           add),
-        h("span", { class: "hint" }, "Add a scan or ", example, " (set values, wait for a reading to settle, wait). Ask Kelvin in the chat to line up scans for you. Keys on an item: u / d move it, Delete removes it.")),
+        h("span", { class: "hint" }, "Add a scan or ", example, ".")),
       h("div", { class: "q-foot" },
         h("button", { id: "queue-clear", class: "btn small ghost", type: "button" }, "Clear finished"),
         h("button", { id: "queue-save", class: "btn small ghost", type: "button" }, "Save as…"),
@@ -4243,7 +4260,7 @@
     if (SETUP_BUSY.has(setup.state)) return null;        // "Setting up instruments…" shows instead
     const lines = (setup.lines && setup.lines.length ? setup.lines : (s.survey && s.survey.lines)) || [];
     const text = setup.state === "done" || setup.state === "failed" ? setup.message
-      : s.survey ? s.survey.reason : "Kelvin hasn't looked for instruments on this computer yet. Set up… scans for them.";
+      : s.survey ? s.survey.reason : "Kelvin hasn't looked for instruments yet.";
     return { text, lines };
   }
   function showWhy(s) {
@@ -4318,8 +4335,8 @@
       const n = r.instruments, k = r.scripts;
       WAIT.said = !n ? "No instrument work in the scripts there. Set up… reads another folder any time."
         : "Read " + k + " script" + (k === 1 ? "" : "s") + " using " + n + " instrument" + (n === 1 ? "" : "s") + ". " +
-          (r.now ? "Kelvin sets them up the way your scripts use them: names, settings, and limits from the values used, for you to check."
-            : "When the setup is done, Set up shows what they add: instruments to add, and limits from the values they use.");
+          (r.now ? "Kelvin sets them up as your scripts use them, for you to check."
+            : "Set up shows what they add once the setup is done.");
       msg.textContent = WAIT.said;
       if (n && !r.now) WAIT.later = folder;
     } catch (e) { msg.textContent = e.message; }
@@ -4334,9 +4351,7 @@
     const busy = setup && SETUP_BUSY.has(setup.state);
     const waiting = (unreviewed || []).length > 0;
     const text = waiting
-      ? "Kelvin added " + andList(unreviewed) + " itself. Check " + (unreviewed.length === 1 ? "its" : "their") +
-        " limits with Limits… on " + (unreviewed.length === 1 ? "its row" : "each one's row") + " below: until you mark them reviewed, Kelvin asks you before each output change on " +
-        (unreviewed.length === 1 ? "it." : "them.")
+      ? "Kelvin added " + andList(unreviewed) + ": check " + (unreviewed.length === 1 ? "its" : "their") + " limits (Limits… on the row)."
       : (setup && setup.message ? setup.message + (busy ? "…" : "") : "");
     $("lab-setup-box").hidden = !text;
     $("lab-setup-box").classList.toggle("locked", waiting);
@@ -4395,7 +4410,7 @@
     });
     const msg = h("span", { class: "muted small" });
     box.append(h("p", { class: "hint" }, r.rows.length
-      ? "What " + name + " may reach. Kelvin refuses anything beyond these and asks before driving harder. Empty: the card's limits." +
+      ? "What " + name + " may reach. Empty: the card's limits." +
         (r.editable ? "" : " The virtual lab's limits are fixed; your own lab's are set here.")
       : name + " has no numeric setting to limit."), ...rows);
     if (r.editable && r.rows.length) {
@@ -4570,7 +4585,7 @@
     for (const b of document.querySelectorAll("#lab-view button")) b.classList.toggle("on", b.dataset.view === (byInstrument ? "instruments" : "file"));
     $("lab-view").hidden = !entries.length;
     $("lab-yaml").hidden = byInstrument;
-    $("lab-find").hidden = $("lab-entries").hidden = $("lab-rest").hidden = !byInstrument;
+    $("lab-find").hidden = $("lab-entries").hidden = !byInstrument;
     if (!byInstrument) return;
     const q = LABCFG.find.trim().toLowerCase(), rows = [];
     for (const e of entries) {
@@ -4693,8 +4708,7 @@
       Object.assign(f, { card_id: r.card_id, model: r.model, kind: r.kind, how: "card written by Kelvin" });
       if (!f.suggested) f.suggested = KIND_NAME[r.kind] || "instr";
       renderFound();
-      $("lab-msg").textContent = "Kelvin wrote " + r.card_id + " from " + r.manual_url + ". It is a draft: Kelvin " +
-        "asks you before each setting or output change on it until you review it under Your instrument cards.";
+      $("lab-msg").textContent = "Kelvin wrote a draft card, " + r.card_id + ", from " + r.manual_url + ".";
     } catch (e) {
       btn.disabled = false;
       btn.textContent = "Find its manual and write its card";
@@ -4865,9 +4879,6 @@
     if (rule) S.approvalRule = rule;
     if (document.activeElement !== select) select.value = mode === "auto" ? "auto" : "ask";
     $("mode-box").classList.toggle("auto", mode === "auto");
-    $("fineprint").textContent = mode === "auto"
-      ? "Auto mode: low-risk changes run without asking; everything else waits for your approval."
-      : "Measurements run right away. Anything that drives the sample harder waits for your approval.";
     $("mode-box").title = mode === "auto" ? "Auto mode: " + (S.approvalRule || "low-risk changes run without asking")
       : "Kelvin asks you before anything drives the sample harder";
   }
@@ -5534,7 +5545,7 @@
     const kept = items.filter((i) => i.scope !== "kelvin").length;
     count.textContent = kept ? kept + " kept" : "";
     if (!items.length) {
-      list.replaceChildren(h("li", { class: "memory-empty" }, "Nothing yet. When a procedure or a staged measurement works, Kelvin offers to keep it here."));
+      list.replaceChildren(h("li", { class: "memory-empty" }, "Nothing yet."));
       return;
     }
     list.replaceChildren(...items.map((it) => {
@@ -5602,7 +5613,7 @@
     if (!notes) { list.replaceChildren(h("li", { class: "memory-empty" }, "Loading…")); return; }
     if (!notes.length) {
       list.replaceChildren(h("li", { class: "memory-empty" },
-        "Nothing yet. When you state a lasting preference (units, how careful to be, how you like answers), Kelvin keeps it here."));
+        "Nothing yet."));
       return;
     }
     list.replaceChildren(...notes.map((n) => {
@@ -5846,7 +5857,7 @@
     S.projects = boot.projects || [];
     $("lab-name").textContent = boot.lab;
     $("sim-tag").hidden = !boot.simulated;
-    S.labSub = boot.lab + (boot.simulated ? " (simulated)" : "") + " · Claude, GPT, Gemini or a local model";
+    S.labSub = boot.lab + (boot.simulated ? " (simulated)" : "");
     $("empty-sub").textContent = S.labSub;
     $("toggle-incognito").addEventListener("click", toggleIncognito);
     applyIncognito();
@@ -5860,6 +5871,7 @@
     }));
     applyModels(boot.models.groups, boot.default_model, boot.auto_model);
     initRunsPane();
+    initLabPanel();
     fitLayout();
     initTerminal();
     renderChats();
@@ -6025,7 +6037,7 @@
     $("lab-add-scripts").addEventListener("click", addScripts);
     $("lab-recipes").addEventListener("click", recipesFromScripts);
     $("lab-add").addEventListener("click", addByAddress);
-    $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value, why: $("lab-why").value.trim() }));
+    $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value, why: $("lab-change-why").value.trim() }));
     for (const b of document.querySelectorAll("#lab-view button")) b.addEventListener("click", () => {
       LABCFG.view = b.dataset.view;
       store("lh.labView", LABCFG.view);

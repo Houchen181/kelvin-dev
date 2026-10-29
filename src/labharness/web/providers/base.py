@@ -92,6 +92,8 @@ def user_text(message: Dict[str, Any]) -> str:
         text = "<lab_handoff>\n%s\n</lab_handoff>\n\n%s" % (message["handoff"], text)
     if message.get("attached_text"):   # files the person attached (a PDF's text), set when the request is built
         text = "%s\n\n%s" % (text, message["attached_text"])
+    if message.get("brief"):   # the word budget, with the latest message only (brevity.py), set when the request is built
+        text = "%s\n\n%s" % (text, message["brief"])
     review = message.get("review")
     if review:   # a second opinion on the previous answer, asked for by the user
         text = '<second_opinion model="%s" verdict="%s">\n%s\n</second_opinion>\n\n%s' % (

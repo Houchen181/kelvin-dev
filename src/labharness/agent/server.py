@@ -133,8 +133,10 @@ You are connected to a physics lab through Kelvin.
   folder the person names reads how it works (addresses, connection settings, commands, the values used, the card
   that fits each instrument) without running anything; set the lab up from it with the person, and offer each
   measurement script as a recipe.
-- An instrument the scan doesn't find or doesn't identify: find out what it is yourself. inspect_address for one on
-  the network (what its ports answer), inspect_serial for one on a serial port (its speed and framing),
+- An instrument the scan doesn't find or doesn't identify: find out what it is yourself. find_on_network for one on
+  the network whose address nobody knows (it sweeps this computer's networks, or the range named, for the ports
+  instruments and their gateways use, and asks each who it is), inspect_address for one at a known address (what its
+  ports answer), inspect_serial for one on a serial port (its speed and framing),
   connected_devices for one plugged in (USB devices, also without a driver; serial ports; this computer's networks),
   installed_software and find_maker_files for the maker's software, SDK, examples and manual on this computer. Then how its maker talks to it (the manual, the maker's examples, the web)
   decides the card: text commands give an ordinary card; a maker's Python package, DLL, .NET assembly (Thorlabs
@@ -548,6 +550,16 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "what a network address answered", rt.inspect_address(address))
 
     @server.tool(annotations=READ, structured_output=False)
+    def find_on_network(network: str = "") -> str:
+        """Find instruments on the local network whose address nobody knows: those that announce themselves (mDNS,
+        as LXI instruments do, and a VXI-11 broadcast), and every address of this computer's networks with a port
+        open that instruments or their gateways use (VXI-11, HiSLIP, SCPI sockets, Modbus, Prologix GPIB-ETHERNET,
+        serial device servers). Each is asked who it is (*IDN?, its LXI page) and matched to a card; what answered
+        can then go to try_card and add_instrument. network: a local range to sweep instead (192.168.1.0/24 or
+        192.168.1.*, at most a /22); empty: this computer's own networks. Takes up to half a minute; only looks."""
+        return outside(rt, "what addresses on the network answered", rt.find_on_network(network))
+
+    @server.tool(annotations=READ, structured_output=False)
     def inspect_serial(port: str, query: str = "*IDN?", baud: int = 0) -> str:
         """What an instrument on a serial port is, when the scan didn't identify it: what it sends by itself (some
         stream their readings), then its answer to an identity query at each speed and framing instruments use
@@ -905,9 +917,17 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return [Image(data=data, format="png"), caption] if data else [caption]
 
     @server.tool(annotations=READ, structured_output=False)
-    def recent_events(n: int = 20) -> str:
-        """The last n entries of the lab's event log (commands, approvals, trips, runs)."""
-        return rt.events(n)
+    def recent_events(n: int = 20, about: str = "") -> str:
+        """The last n entries of the lab's event log (commands, approvals, trips, runs). about: only the entries
+        that mention it, e.g. an instrument's name to see what it was sent and answered, or a run's id."""
+        return rt.events(n, about)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def calculate(expression: str) -> str:
+        """Work a number out exactly instead of in your head: arithmetic (+ - * / ** %), sqrt exp log log10 sin cos
+        tan arctan2 hypot sinh cosh tanh and the like, and the SI constants pi kB qe h hbar muB mu0 eps0 c me G0 RK
+        Phi0. E.g. 2*muB*0.35/h (a free spin's Larmor frequency at 0.35 T, in Hz) or h*c/(1.55e-6*qe) (eV)."""
+        return rt.calculate(expression)
 
     @server.tool(annotations=READ, structured_output=False)
     def run_provenance(run_id: str) -> str:
