@@ -168,6 +168,42 @@ def test_an_accepted_fit_is_the_one_its_report_shows(tmp_path):
     assert "kept as" not in rt.analyze(run_id, "smu.I", "linear")   # looking again keeps nothing
 
 
+def test_the_fits_fit_run_keeps_are_in_the_runs_reports_with_who_kept_them_and_when(tmp_path):
+    """fit_run keeps each fit in run.h5 (/fits/<name>), but a report showed only the one accepted with analyze_run.
+    A kept fit is now in the run's reports, its points with the model and its values, saying who kept it and when;
+    beyond MAX_KEPT the others are listed by name."""
+    from labharness import datatools, fitting
+    from labharness.reports import collect
+    from test_reports import check_pptx
+    rt = runtime(tmp_path)
+    rt.user = "ada"   # signed in to the portal: the agent keeps it for her
+    rt.run(SWEEP)
+    run_id = rt.runs_index(1)[0]["run_id"]
+    _, text = datatools.fit_run(rt, run_id, "linear", x="smu.V", y="smu.I")
+    assert "as /fits/smu.I linear" in text and "its scan report shows it now (report.pdf, report.pptx)" in text, text
+    _, text = datatools.fit_run(rt, run_id, "a*x + c", x="smu.V", y="smu.I", x_range=[0.5, None], name="above 0.5 V")
+    kept = {f["name"]: f for f in fitting.stored(rt._run_dir(run_id))}
+    assert kept["smu.I linear"]["by"] == "agent" and kept["smu.I linear"]["account"] == "ada"
+    assert kept["above 0.5 V"]["stored"][:4].isdigit()                       # when, as an ISO time
+    folder = rt._run_dir(run_id)
+    words = " ".join(pdf_strings(folder / "report.pdf"))
+    assert "Kept fit “smu.I linear” vs smu.V: linear fit, kept by agent for ada on " in words, words
+    assert "Kept fit “above 0.5 V” vs smu.V: expression fit, kept by agent for ada on " in words
+    assert "resistance (1/slope)" in words and "points 8 (smu.V from 0.5 to its end)" in words
+    slides = " ".join(check_pptx(folder / "report.pptx"))
+    assert "Kept fit “smu.I linear”" in slides and "kept by agent for ada" in slides
+    made = rt.report([run_id], title="Gate sweep", fmt="pdf")   # a report of runs someone asks for shows them too
+    assert "Kept fit “above 0.5 V”" in " ".join(pdf_strings(rt.reports_dir / made[0]["name"]))
+    assert [e for e in rt.gate.log.events() if e["type"] == "fit_kept"][-1]["account"] == "ada"
+    for n in range(collect.MAX_KEPT):   # more than a report draws: the rest by name, with who and when
+        datatools.fit_run(rt, run_id, "linear", x="smu.V", y="smu.I", name="again %d" % n)
+    words = " ".join(pdf_strings(folder / "report.pdf"))
+    assert "Other fits kept with the run (in run.h5)" in words and "above 0.5 V expression by agent for ada" in words
+    answer = rt.analyze(run_id, "smu.I", "linear", accept=True)   # the accepted fit is the run's result, as before
+    assert "kept as the run's fit" in answer
+    assert "accepted by agent for ada" in " ".join(pdf_strings(folder / "report.pdf"))
+
+
 def test_each_lab_keeps_its_data_in_a_folder_named_after_it(tmp_path):
     """F2 l05, l08, l09: a real lab's runs sat under ~/Kelvin/virtual-lab. The virtual lab keeps that folder; a lab
     of real instruments gets its own, named after it, recorded so a renamed lab keeps it; nothing moves."""

@@ -545,8 +545,9 @@ class RunEngine:
                                   for leg in ramp.segments)
         except KeyError:
             legs = ", then ".join(str(leg.to) for leg in ramp.segments)
-        return "measures every %s while %s ramps to %s (%s points)" % (
-            _dur(ramp.every), ramp.key, legs, "~%d" % plan.points if ramp.estimate else "as many as it takes")
+        return "measures every %s while %s ramps to %s (%s)" % (
+            _dur(ramp.every), ramp.key, legs, "~%d points" % plan.points if ramp.estimate else
+            "as many points as it takes")
 
     def _refuse(self, name: str, why: str, sim: Optional[RunReport] = None) -> RunReport:
         self.gate.log.write("run_refused", by=self.gate.operator, plan=name, reason=why)

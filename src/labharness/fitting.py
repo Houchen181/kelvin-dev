@@ -1058,9 +1058,12 @@ def _attr(v: Any) -> Any:
     return json.dumps(v, ensure_ascii=False)
 
 
-def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any], by: str = "agent") -> str:
+def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any], by: str = "agent",
+          account: Optional[str] = None) -> str:
     """Keep a fit in the run's run.h5 as /fits/<name> (replacing one of that name): the model and how it was asked
-    for as attributes, the values, errors and covariance, and the points with the model and residuals at each."""
+    for as attributes, the values, errors and covariance, and the points with the model and residuals at each. Who
+    kept it (by: the agent or a person; account: the person signed in, when people sign in) and when (stored) go with
+    it, for the run's reports."""
     import h5py
     np = _np()
     from .rundata import RUN_FILE
@@ -1079,7 +1082,7 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
              "derived": result["derived"], "warnings": result["warnings"], "x_start": result.get("x_start"),
              "x_unit": result.get("x_unit", ""), "y_unit": result.get("y_unit", ""),
              "spec": {k: v for k, v in spec.items() if v not in (None, "", [], {})},
-             "stored": datetime.now().isoformat(timespec="seconds"), "by": by}
+             "stored": datetime.now().isoformat(timespec="seconds"), "by": by or "agent", "account": account or None}
     last: Optional[Exception] = None
     for _ in range(20):   # another reader may hold the file for a moment
         try:
@@ -1102,14 +1105,15 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
 
 
 def stored(folder: Path, with_data: bool = False) -> List[Dict[str, Any]]:
-    """The fits kept in a run's run.h5, oldest first (attributes read back as values)."""
+    """The fits kept in a run's run.h5, oldest first (attributes read back as values). Read while no fit is being
+    kept in this Kelvin: one thread at a time has the file."""
     from .rundata import RUN_FILE, have_h5
     path = Path(folder) / RUN_FILE
     if not path.exists() or not have_h5():
         return []
     import h5py
     out = []
-    with h5py.File(path, "r") as f:
+    with _STORE, h5py.File(path, "r") as f:
         for name, g in (f["fits"].items() if "fits" in f else []):
             item: Dict[str, Any] = {"name": name}
             for k, v in g.attrs.items():
@@ -1126,3 +1130,37 @@ def stored(folder: Path, with_data: bool = False) -> List[Dict[str, Any]]:
                     item[k] = g[k][()].tolist()
             out.append(item)
     return sorted(out, key=lambda i: str(i.get("stored", "")))
+
+
+def kept_curve(kept: Dict[str, Any]) -> Tuple[List[float], List[float]]:
+    """A kept fit (stored, with its data) drawn: the model over its points' range when Kelvin can rebuild it, else at
+    its points (a complex model's as its magnitude)."""
+    np = _np()
+    x = np.asarray(kept.get("x") or [], dtype=float)
+    fy = np.asarray(kept.get("fit") or [], dtype=float)
+    try:
+        if kept.get("model") in MODELS:
+            m = MODELS[kept["model"]]()
+        elif kept.get("model") == "expression":
+            m = expression_model(kept["formula"])
+        else:
+            raise KeyError(kept.get("model"))
+        if len(m.params) != len(kept.get("params") or []) or m.complex:
+            raise KeyError("shape")
+        result = {"x": x.tolist(), "fit": fy.tolist(), "x_start": kept.get("x_start"),
+                  "params": [{"name": k, "value": v} for k, v in zip(kept["params"], kept["values"])]}
+        return curve(m, result)
+    except (KeyError, ValueError, TypeError, FitError):
+        if fy.ndim == 2:
+            fy = np.hypot(fy[:, 0], fy[:, 1])
+        return x.tolist(), fy.tolist()
+
+
+def kept_points(kept: Dict[str, Any]) -> Tuple[List[float], List[float]]:
+    """A kept fit's points as fitted (its window, sorted by x; a complex one's as its magnitude)."""
+    np = _np()
+    x = np.asarray(kept.get("x") or [], dtype=float)
+    y = np.asarray(kept.get("y") or [], dtype=float)
+    if y.ndim == 2:
+        y = np.hypot(y[:, 0], y[:, 1])
+    return x.tolist(), y.tolist()
