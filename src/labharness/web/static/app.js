@@ -1886,11 +1886,17 @@
     const files = attachments && attachments.length ? h("div", { class: "user-files" }, ...attachments.map((a) =>
       String(a.mime).startsWith("image/")
         ? mediaImg(a.file, a.name)
-        : h("span", { class: "file-chip", title: a.name }, svgIcon("M7 3h7l5 5v13H7zM14 3v5h5"),
-            a.name + (a.pages ? " · " + a.pages + " pages" : "")))) : null;
+        : h("span", { class: "file-chip", title: a.run ? a.name + ": run " + a.run : a.name }, svgIcon("M7 3h7l5 5v13H7zM14 3v5h5"),
+            a.name + attachedSize(a)))) : null;
     const copy = h("button", { class: "link soft", type: "button", title: "Copy your message" }, icon("copy"), "Copy");
     copy.addEventListener("click", () => copyText(text, copy));
     return h("div", { class: "msg user" }, files, h("div", { class: "bubble" }, text), h("div", { class: "msg-tools user-tools" }, copy));
+  }
+  function attachedSize(a) {   // a PDF's pages; a data file's points or frames (it became a run as it was attached)
+    if (a.pages) return " · " + a.pages + " pages";
+    if (!a.run) return "";
+    const n = a.points || 0;
+    return " · " + n + (a.frames ? (n === 1 ? " frame" : " frames") : (n === 1 ? " point" : " points"));
   }
   function svgIcon(d) {
     const ns = "http://www.w3.org/2000/svg";
@@ -2695,11 +2701,14 @@
     return next;
   }
 
-  // ------------------------------------------------------------------ attached pictures and PDFs
+  // ------------------------------------------------------------------ attached pictures, PDFs and data files
   const ATT = { items: [] };
+  // data files: each becomes a run as it is attached, which Kelvin's tools read (imports.py)
+  const DATA_FILE = /\.(csv|tsv|txt|dat|asc|xlsx|xlsm|mpt|mpr|dta|npy|npz|tiff?|spe)$/i;
+  const isData = (f) => DATA_FILE.test(f.name || "");
   function addFiles(list) {
     for (const f of list) {
-      if (!/^image\//.test(f.type) && f.type !== "application/pdf") { toast((f.name || "That file") + ": Kelvin takes pictures and PDFs."); continue; }
+      if (!isData(f) && !/^image\//.test(f.type) && f.type !== "application/pdf") { toast((f.name || "That file") + ": Kelvin takes pictures, PDFs and data files (CSV, Excel, NumPy, TIFF, BioLogic, Gamry, Arbin)."); continue; }
       if (ATT.items.length >= 10) { toast("Up to 10 files with one message."); break; }
       ATT.items.push(f);
     }
@@ -2715,7 +2724,7 @@
     updateSend();
   }
   async function shrink(file) {   // a phone's photo is megabytes; models read about 1600 pixels across
-    if (file.type === "application/pdf" || file.type === "image/gif") return file;
+    if (isData(file) || file.type === "application/pdf" || file.type === "image/gif") return file;   // a TIFF's numbers stay as they are
     let bmp;
     try { bmp = await createImageBitmap(file); } catch (e) { throw new Error((file.name || "The picture") + ": Kelvin can't read this picture. Save it as JPEG or PNG."); }
     const scale = Math.min(1, 1568 / Math.max(bmp.width, bmp.height));

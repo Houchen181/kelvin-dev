@@ -28,9 +28,10 @@ from .rules import merge, normalize, restrictive
 
 _ID = re.compile(r"^[0-9a-f]{12}$")
 _PROJECT_ID = re.compile(r"^p[0-9a-f]{8}$")
-_MEDIA = re.compile(r"^[0-9a-f]{24}\.(png|jpg|gif|webp|pdf|txt)$")
+_MEDIA = re.compile(r"^[0-9a-f]{24}\.(png|jpg|gif|webp|pdf|txt|dat)$")
+# dat: a data file a person attached (a table, an array, a TIFF), served as bytes so no browser shows it as a page
 MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "gif": "image/gif", "webp": "image/webp",
-               "pdf": "application/pdf", "txt": "text/plain"}
+               "pdf": "application/pdf", "txt": "text/plain", "dat": "application/octet-stream"}
 MAX_NAME = 60
 MAX_INSTRUCTIONS = 4000  # characters, for a project's instructions and for the global ones
 MAX_NOTE = 300

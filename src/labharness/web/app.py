@@ -62,7 +62,7 @@ log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/ke
 
 STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
-ATTACH_MAX = 40 * 2 ** 20   # a photo (the portal shrinks it first) or a PDF
+ATTACH_MAX = 40 * 2 ** 20   # a photo (the portal shrinks it first), a PDF or a data file
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
 SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/accounts/remove",
               "/api/stop", "/api/runs/stop"}
@@ -2519,7 +2519,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse({"ok": agent.waker.cancel(chat_id)})
 
     async def media(request: Request) -> Response:
-        """A picture or file kept with a chat: a plot look_at drew, a photo or PDF the person attached."""
+        """A picture or file kept with a chat: a plot look_at drew, a photo, PDF or data file the person attached."""
         from .store import MEDIA_TYPES
         name = request.path_params["name"]
         try:
@@ -2537,7 +2537,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if not data:
             return error(400, "The file is empty.")
         if len(data) > ATTACH_MAX:
-            return error(413, "Kelvin takes files up to %d MB." % (ATTACH_MAX // 2 ** 20))
+            return error(413, "Kelvin takes files up to %d MB. For a bigger data file, give Kelvin its full path: it "
+                              "imports it from there." % (ATTACH_MAX // 2 ** 20))
         try:
             store.load(chat_id)
             return JSONResponse(await asyncio.to_thread(agent.attach, chat_id,

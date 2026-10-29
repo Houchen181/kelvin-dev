@@ -804,10 +804,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @cancellable
     def import_data(paths: str, name: str = "") -> str:
         """Make data Kelvin didn't measure into a run, so the run tools work on it (describe_run, get_run_data,
-        compute, look_at, reports, the automatic fits): another program's tables (CSV, TSV, text with a header) and
-        LightField's .spe spectra (rows summed, frames averaged, wavelengths from its calibration). paths: the files'
-        full paths, ';' between several; files with the same x values go side by side into one run, to compare,
-        normalise or subtract them with compute. name: the run's name. Only numbers are read."""
+        compute, look_at, plot_runs, fit_run, run_python, reports, the automatic fits): another program's tables
+        (CSV, TSV, text, Excel .xlsx; dates become seconds, text columns are left out; a long x, y, value table of a
+        2-D scan becomes a 2-D run), makers' files (BioLogic .mpt and .mpr, Gamry .dta, Arbin's CSV and Excel
+        exports, LightField's .spe), NumPy's .npy and .npz, and TIFF images (a camera frame, or a stack: a point per
+        frame). paths: the files' full paths, ';' between several; files with the same x values go side by side into
+        one run, to compare, normalise or subtract them with compute. name: the run's name. Only numbers are read.
+        Data files a person attaches in the chat are imported as they attach them."""
         return rt.import_data(paths, name)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -842,7 +845,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """See data as a picture, to judge it by eye as a physicist glances at a plot: a peak's shape, noise, a
         jump, drift, hysteresis, a bad fit, where a beam or spot sits. run_id: a run's plots as its report draws
         them ('last': the latest run); column: only that measured column (a 2-D scan shows it as a map, a camera
-        column its last frame). frame: a saved frame's file (with run_id: its name in the run's data). camera:
+        column its last frame). frame: a saved frame's file (with run_id: its name in the run's data, or its
+        number in the run, from 0: frame k of a stack). camera:
         instrument.parameter, a frame read now. The caption gives the numbers: take values from it, get_run_data
         or compute, not from the pixels."""
         data, caption = rt.look(run_id, column, frame, camera)

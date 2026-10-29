@@ -1557,12 +1557,11 @@ class LabRuntime:
         return "\n".join(lines)
 
     def import_data(self, paths: Any, name: str = "") -> str:
-        """Files Kelvin didn't measure, as a run (imports.py): another program's tables (CSV, TSV, text) and
-        LightField's .spe spectra; several with the same x values side by side in one run, to compare or subtract.
+        """Files Kelvin didn't measure, as a run (imports.py): another program's tables (CSV, TSV, text, Excel),
+        makers' files (BioLogic .mpt/.mpr, Gamry .dta, Arbin's exports, LightField .spe), NumPy arrays and TIFF
+        images (camera frames); several with the same x values side by side in one run, to compare or subtract.
         The run goes with this chat's runs, gets the automatic fits, and Kelvin's run tools read it."""
-        from types import SimpleNamespace
         from .. import imports
-        from ..analysis import analyze_run
         given = paths if isinstance(paths, (list, tuple)) else str(paths or "").split(";")
         files = [str(p).strip().strip('"') for p in given if str(p).strip()]
         if not files:
@@ -1575,47 +1574,97 @@ class LabRuntime:
             return "not imported: %s" % e
         except OSError as e:
             return "not imported: %s" % (e.strerror or e)
-        plan_name = re.sub(r"[^\w.-]+", "_", (name or "").strip() or "imported_" + table.name)[:48]
+        return self._do("importing data", lambda: self._imported(table, files, name, self.gate.operator)["text"])
 
-        def run() -> str:
-            rec = self.engine.store.create(plan_name, {"plan": plan_name, "imported": files}, "import",
-                                           self.attribution.get("folder"))
-            rec.meta.update(self._attribute(SimpleNamespace(device=None)))
-            rec.meta.update(lab="imported", simulated=False, imported=files)
-            axes = [{"key": table.x_key, "unit": table.x_unit, "kind": "imported"}]
-            measures = [{"key": k, "unit": u, "kind": "scalar"} for k, (u, _) in table.columns.items()]
-            rec.set_columns({"axes": axes, "measures": measures})
-            rows = []
-            for i, x in enumerate(table.x):
-                row = {"i": i, "t": 0.0, table.x_key: x}
-                row.update({k: values[i] for k, (_, values) in table.columns.items()})
-                rec.add(row)
-                rows.append(row)
-            meta = dict(status="done", reason=None, points=len(rows), planned_points=len(rows), duration_s=0.0,
-                        warnings=list(table.notes))
-            analysis = None
-            try:
+    def import_attached(self, path: Any, shown: str, attribution: Dict[str, Any], by: str = "human") -> Dict[str, Any]:
+        """A data file a person attached in a chat, as a run filed under that chat (its folder and project): {text:
+        what Kelvin says of it, run: its id, points, frames: whether they are camera frames}. It is made beside
+        whatever works the lab, as an import touches no instrument: a file attached while a run holds the lab still
+        becomes data. imports.DataError: not imported, saying why. shown: the file's name as the person attached it."""
+        from .. import imports
+        table = imports.read(path)
+        with self.attributed(attribution):
+            return self._imported(table, [shown], "", by)
+
+    def _imported(self, table: Any, files: List[str], name: str, by: str) -> Dict[str, Any]:
+        """An imported table kept as a run: its x (and a 2-D scan's slow axis), its columns, and camera frames as a
+        run keeps a camera's. {text: what Kelvin says of it, run: its id, points, frames}."""
+        from types import SimpleNamespace
+        from ..analysis import analyze_run
+        # a run's own i (its points' numbers) and t (its clock): an x named I (a current) or T (a temperature) would
+        # take their place and come back as whole numbers, so it keeps its numbers under another name
+        if table.x_key in ("i", "t"):
+            table.x_key = "x_" + table.x_key
+        if table.outer and table.outer[0] in ("i", "t"):
+            table.outer = ("x_" + table.outer[0],) + tuple(table.outer[1:])
+        plan_name = re.sub(r"[^\w.-]+", "_", (name or "").strip() or "imported_" + table.name)[:48]
+        rec = self.engine.store.create(plan_name, {"plan": plan_name, "imported": files}, "import",
+                                       self.attribution.get("folder"))
+        rec.meta.update(self._attribute(SimpleNamespace(device=None)))
+        rec.meta.update(lab="imported", simulated=False, imported=files)
+        axes = [{"key": table.x_key, "unit": table.x_unit, "kind": "imported"}]
+        if table.outer:   # a 2-D scan: its slow axis first, as a plan's outer sweep
+            axes.insert(0, {"key": table.outer[0], "unit": table.outer[1], "kind": "imported"})
+        measures = [{"key": k, "unit": u, "kind": "scalar"} for k, (u, _) in table.columns.items()]
+        framed = table.frames[0] if table.frames else None
+        if table.frames:
+            if rec.path is None:
+                raise RunFolderError("camera frames need a data folder to be kept in")
+            measures.insert(0, {"key": framed, "unit": table.frames[1], "kind": "image"})
+        rec.set_columns({"axes": axes, "measures": measures})
+        rows = []
+        for i, x in enumerate(table.x):
+            row: Dict[str, Any] = {"i": i, "t": 0.0, table.x_key: x}
+            if table.outer:
+                row[table.outer[0]] = table.outer[2][i]
+            if table.frames:   # each frame a file in the run's folder, as a camera's are, packed into run.h5 at the end
+                row[framed] = frames.keep(frames.save(table.frames[2][i], framed), rec.path, framed, i)
+            row.update({k: values[i] for k, (_, values) in table.columns.items()})
+            rec.add(row)
+            rows.append(row)
+        meta = dict(status="done", reason=None, points=len(rows), planned_points=len(rows), duration_s=0.0,
+                    warnings=list(table.notes))
+        analysis = None
+        try:
+            if table.fits:   # a maker's electrochemistry, a cycler's record or frames: not the sweeps they are for
                 analysis = analyze_run(rows, axes, measures, meta)
                 rec.set_analysis(analysis)
-            except Exception:
-                analysis = None   # the fits are a convenience; the numbers are kept
-            rec.finish(**meta)
-            self.gate.log.write("run_imported", by=self.gate.operator, run=rec.run_id, files=len(files))
-            try:
-                self.catalog.add(rec.path)
-            except Exception:
-                pass   # the catalog finds it at its next look
-            first = next(iter(table.columns))
+        except Exception:
+            analysis = None   # the fits are a convenience; the numbers are kept
+        rec.finish(**meta)
+        self.gate.log.write("run_imported", by=by, run=rec.run_id, files=len(files))
+        try:
+            self.catalog.add(rec.path)
+        except Exception:
+            pass   # the catalog finds it at its next look
+        names = ", ".join(Path(f).name for f in files)
+        if framed:
+            lines = ["imported %s as run %s: %d frame%s of a camera's kind (column %s)%s" % (
+                names, rec.run_id, len(rows), "" if len(rows) == 1 else "s", framed,
+                ", and each one's %s" % ", ".join(table.columns) if table.columns else "")]
+        elif table.outer:
+            lines = ["imported %s as run %s: %d points, a 2-D scan of %s (%s) over %s (%s), columns %s" % (
+                names, rec.run_id, len(rows), table.x_key, table.x_unit or "no unit", table.outer[0],
+                table.outer[1] or "no unit", ", ".join(table.columns))]
+        else:
             lines = ["imported %s as run %s: %d points of %s (%s), columns %s" % (
-                         ", ".join(Path(f).name for f in files), rec.run_id, len(rows), table.x_key,
-                         table.x_unit or "no unit", ", ".join(table.columns)),
-                     "saved in %s" % rec.path] + ["note: " + n for n in table.notes]
-            if analysis:
-                lines += self._analysis_lines(analysis)
+                names, rec.run_id, len(rows), table.x_key, table.x_unit or "no unit", ", ".join(table.columns))]
+        lines += ["saved in %s" % rec.path] + ["note: " + n for n in table.notes]
+        if analysis:
+            lines += self._analysis_lines(analysis)
+        elif not table.fits:
+            lines.append("fits: none made by themselves (Kelvin's automatic fits are made for its own sweeps); "
+                         "fit_run fits the model you choose")
+        if framed:
+            lines.append("pictures: look_at with run_id %s shows its %s (column %s: the last frame; frame k, from 0: "
+                         "that frame); run_python reads them all from run.h5 (/frames/%s: frames x rows x columns)%s"
+                         % (rec.run_id, "frames' means and maxima" if table.columns else "frame", framed, framed,
+                            "; numbers: get_run_data" if table.columns else ""))
+        else:
+            first = next((k for k, (unit, _) in table.columns.items() if unit), next(iter(table.columns)))
             lines.append("numbers: get_run_data, compute (e.g. %s / max(%s)), look_at; describe_run for its card"
                          % (first, first))
-            return "\n".join(lines)
-        return self._do("importing data", run)
+        return {"text": "\n".join(lines), "run": rec.run_id, "points": len(rows), "frames": bool(framed)}
 
     def stop_run(self, by: str = "human") -> bool:
         """Stop the plan that is running (its on_abort steps then run); a queue it is part of stops after it.
@@ -2369,6 +2418,7 @@ class LabRuntime:
         alone; a 2-D scan with many rows as a map; a camera column as its last frame), a saved frame, or a frame
         read now from a camera."""
         from .. import pictures
+        frame = str(frame or "")
         try:
             if camera:
                 return self._look_camera(camera.strip())
@@ -2383,6 +2433,10 @@ class LabRuntime:
                     return None, "no runs yet"
                 run_id = ids[-1]
             d = self._run_dir(run_id)
+            if frame.strip().isdigit():   # a frame by its point's number (from 0): frame k of a stack
+                ref, key, total = self._frame_at(d, column, int(frame))
+                return self._look_array(rundata.frame(d, ref), "%s: frame %s of %s (%d frames)" % (
+                    run_id, frame.strip(), key, total))
             if frame:   # one of this run's frames, by the reference its data keep
                 return self._look_array(rundata.frame(d, frame), "%s, frame %s" % (run_id, frame))
             rec = rundata.load(d)
@@ -2421,6 +2475,19 @@ class LabRuntime:
             return None, "nothing to show: %s" % (e.args[0] if e.args else e)
         except ImportError:
             return None, "pictures need NumPy, which this Kelvin does not have"
+
+    def _frame_at(self, d: Path, column: str, k: int) -> Tuple[str, str, int]:
+        """The reference of a run's frame k (from 0) in its camera column (the first, without one): (ref, column,
+        how many points it has). ValueError: no such frame."""
+        rec = rundata.load(d)
+        images = [m["key"] for m in self._columns(rec).get("measures") or []
+                  if m.get("kind") == "image" and (not column or m["key"] == column)]
+        if not images:
+            raise ValueError("%s has no camera frames%s" % (d.name, " in " + column if column else ""))
+        if not 0 <= k < len(rec.rows) or not rec.rows[k].get(images[0]):
+            raise ValueError("%s has no frame %d of %s (its frames are 0 to %d)" % (
+                d.name, k, images[0], len(rec.rows) - 1))
+        return str(rec.rows[k][images[0]]), images[0], len(rec.rows)
 
     def _look_camera(self, key: str) -> Tuple[Optional[bytes], str]:
         spec = self._spec(key)
