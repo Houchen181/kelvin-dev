@@ -27,7 +27,7 @@ GROUPS = {"approvals": {"ask", "answer"},
           "settings": {"command"},
           "alarms": {"alarm", "alarm_cleared", "trip", "watch"},
           "lab": {"lab_changed", "lab_connected", "instrument_switched", "mount", "unmount", "protection", "card",
-                  "data_folder", "approval_mode", "chain", "report"},
+                  "data_folder", "approval_mode", "chain", "report", "lab_memory"},
           "people": {"signed_in", "signed_out"},
           "computer": {"computer_task", "computer", "computer_task_end"}}
 

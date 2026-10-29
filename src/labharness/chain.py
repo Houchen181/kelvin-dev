@@ -206,6 +206,12 @@ class Chains:
                 return dict(data[k], of="setup" if k == SETUP else "device")
         return None
 
+    def every(self) -> Dict[str, Dict[str, Any]]:
+        """Every chain on record, the setup's first: {key: {chain, device_name, by, at}} (the lab's memory lists
+        them)."""
+        data = {k: v for k, v in self._read().items() if isinstance(v, dict) and isinstance(v.get("chain"), dict)}
+        return dict(sorted(data.items(), key=lambda kv: kv[0] != SETUP))
+
     def put(self, chain: Dict[str, Any], device: Optional[str], device_name: Optional[str], by: str) -> None:
         with self._lock:
             data = self._read()

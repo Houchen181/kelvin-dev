@@ -271,6 +271,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     lab_file = Path(settings.path).parent / "lab.yaml"   # the user's own lab, next to their settings
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
+    runtime.lab_memory_dir = home                         # the lab's memory, everyone's (labmemory.py)
     from .. import envs
     envs.set_home(home)          # the instrument environments Kelvin installs makers' packages into (envs.py)
     envs.cleanup()               # environments removed while their files were in use
