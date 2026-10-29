@@ -52,6 +52,7 @@ def night(labsim_bench, tmp_path, monkeypatch):
                           ("GARBLE_CLEAR_S", 6.0)):
         monkeypatch.setattr(monitor, name, seconds, raising=False)
     bench = labsim_bench("ppms", sdk=True)
+    forget_link()   # an earlier test's bench may have left this thread's SDK link pointing at its stopped server
     (tmp_path / "lab.yaml").write_text(LAB, encoding="utf-8")
     lab = build_lab(tmp_path / "lab.yaml", partial=True)
     assert lab.unavailable == {}
@@ -65,6 +66,20 @@ def night(labsim_bench, tmp_path, monkeypatch):
         rt.stop(by="test")
         rt.stop_watching()
         lab.close()
+        forget_link()
+
+
+def forget_link():
+    """labsim's SDK stand-ins keep one link to the bench per thread (labsim.link.shared), made when first used; a link
+    made for an earlier test's bench still points at its stopped server."""
+    from labsim import link
+    old = getattr(link._local, "link", None)
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+        link._local.link = None
 
 
 def fault_in_a_scan(bench, rt, on, off=None, gap=0.0):
