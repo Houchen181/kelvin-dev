@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from .cards import Card, CardRegistry, ParamSpec, num
 from .adapters import timed_out
 from .clock import SimClock, Stops
-from .instrument import NOT_CONNECTED, OFF_TEXT, Instrument, InstrumentLost, OffBackend, Unavailable
+from .instrument import NOT_CONNECTED, OFF_TEXT, Garbled, Instrument, InstrumentLost, OffBackend, Unavailable
 from .labconfig import InstrumentConfig, LabConfig
 
 BackendFactory = Callable[[str, Card, str], Any]
@@ -246,6 +246,10 @@ class Lab:
                 card = inst.card
                 if card.idn_pattern:
                     idn = inst.query_raw(card.idn_query).strip()
+                    if not re.search(card.idn_pattern, idn, re.I) and Instrument._noise(idn):
+                        problems.append(str(inst._garbled(card.idn_query, idn)))   # noise, not another instrument
+                        out.append(HealthResult(name, False, problems))
+                        continue
                     if not re.search(card.idn_pattern, idn, re.I):
                         from .virtual_lab import builtin_ids
                         problems.append("identity %r does not match card %s (wrong address or instrument? If it is "
@@ -285,7 +289,7 @@ class Lab:
                         v = inst.read(spec.name)
                         if v is not None and not lim[0] <= v <= lim[1]:
                             problems.append("%s = %s is outside %s limits" % (spec.name, spec.show(v), inst.limits_where(spec.name)))
-            except InstrumentLost as e:   # already in words: which instrument, on which bus, what to check
+            except (InstrumentLost, Garbled) as e:   # already in words: which instrument, which bus, what to check
                 problems.append(str(e))
             except Exception as e:
                 problems.append("no response (%s)" % e)

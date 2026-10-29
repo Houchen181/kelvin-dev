@@ -41,6 +41,13 @@ class InstrumentLost(RuntimeError):
     A run that met it stopped with these words, not a raw VISA code; the error it came from is its __cause__."""
 
 
+class Garbled(RuntimeError):
+    """A reply that arrived garbled: characters no instrument sends, a reading that always read before and now can't
+    be, an error-queue reply that isn't one. A loose cable, a bad adapter or electrical noise; nothing in it can be
+    trusted, so it is neither a value nor an instrument error (field test: a garbled "0,No error" was alarmed as an
+    instrument error and cleared again 42 times in a night)."""
+
+
 @dataclass
 class Health:
     """How an instrument has been answering, kept by every exchange with it (Instrument._io), whoever made it: a run,
@@ -51,6 +58,9 @@ class Health:
     lost_text: str = ""                  # the latest, in plain words
     lost_at: Optional[float] = None      # when it last didn't answer (wall time)
     answered_at: Optional[float] = None  # when it last answered
+    garbles: int = 0                     # replies that arrived garbled since Kelvin connected it
+    garbled_text: str = ""               # the latest, in plain words
+    garbled_at: Optional[float] = None
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -64,6 +74,12 @@ class Health:
     def answered(self) -> None:
         with self._lock:
             self.fails, self.gone, self.answered_at = 0, False, time.time()
+
+    def garbled(self, text: str) -> None:
+        with self._lock:   # it did answer, if not clearly
+            self.fails, self.gone = 0, False
+            self.garbles += 1
+            self.garbled_text, self.garbled_at = text, time.time()
 
 
 class OffBackend:
@@ -112,6 +128,8 @@ class Instrument:
         self.device_rates: Dict[str, float] = {}
         self.device_guards: Dict[str, List[Guard]] = {}
         self.health = Health()   # how it has been answering: the monitor's instrument-loss alarms read it
+        self._read_ok: set = set()   # readings whose replies parsed: one that later can't is a garbled reply
+        self._error_form = False     # its error query has answered as SCPI's do (-113,"Undefined header")
 
     def _io(self, fn: Callable[..., Any], *args: Any, alive: bool = True) -> Any:
         """One exchange with the instrument, kept in its health. No answer, or no connection, is raised in plain words
@@ -138,6 +156,35 @@ class Instrument:
         where, cause = where_and_cause(self.config.address)
         return "%s (%s) doesn't answer%s%s [%s]" % (self.name, short_model(self.card.model), " " + where if where else "",
                                                     ": " + cause if cause else "", short_code(e))
+
+    def garble_text(self, command: str, reply: str) -> str:
+        """Its reply arrived garbled, in words: "nvm's reply to :READ? arrived garbled ('k5.1438:127E,04') on GPIB
+        (address 7): a loose cable, a bad adapter or electrical noise; ..."."""
+        where, _ = where_and_cause(self.config.address)
+        return ("%s's reply to %s arrived garbled (%r)%s: a loose cable, a bad adapter or electrical noise; its "
+                "readings can't be trusted until its replies are clean again" % (
+                    self.name, command.strip(), reply.strip()[:60], " " + where if where else ""))
+
+    def _garbled(self, command: str, reply: str) -> Garbled:
+        self.health.garbled(self.garble_text(command, reply))
+        return Garbled(self.health.garbled_text)
+
+    @staticmethod
+    def _noise(reply: str) -> bool:
+        """Characters no instrument puts in a text reply: control characters other than tabs and line ends."""
+        return any((ord(c) < 32 and c not in "\t\r\n") or ord(c) == 127 for c in reply)
+
+    def _parse(self, spec: ParamSpec, command: str, reply: str) -> Any:
+        """A reading from its reply. One that can't be read is a garbled reply when it holds characters no instrument
+        sends, or this reading has read before; otherwise it is the card's (a wrong command or format)."""
+        try:
+            value = spec.from_wire(reply)
+        except ValueError:
+            if isinstance(reply, str) and (self._noise(reply) or spec.name in self._read_ok):
+                raise self._garbled(command, reply) from None
+            raise
+        self._read_ok.add(spec.name)
+        return value
 
     @property
     def simulated(self) -> bool:
@@ -176,7 +223,8 @@ class Instrument:
             return self._acquire(spec)
         if spec.type == "trace":
             return self._trace(spec)
-        value = spec.from_wire(self._io(self.backend.query, spec.get_cmd.render()))
+        command = spec.get_cmd.render()
+        value = self._parse(spec, command, self._io(self.backend.query, command))
         if spec.status_cmd is not None or spec.plausible is not None:
             self._vouch(spec, value)
         return value
@@ -293,9 +341,17 @@ class Instrument:
         """The first queued instrument error, or None."""
         if self.card.error_query is None:
             return None
-        resp = self._io(self.backend.query, self.card.error_query.render()).strip()
+        command = self.card.error_query.render()
+        raw = self._io(self.backend.query, command)
+        resp = raw.strip()
+        if self._noise(raw):
+            raise self._garbled(command, raw)
         if self.card.no_error and re.search(self.card.no_error, resp):   # the card's own no-error reply: 1TE@ (SMC100)
             return None
+        if re.match(r"^[+-]?\d+\s*,", resp):
+            self._error_form = True
+        elif self._error_form:   # it has answered as SCPI's error queue does, and this isn't that: a garbled reply
+            raise self._garbled(command, raw)
         return None if re.match(r"^\+?0+\s*(,|$)", resp) else resp   # "0,No error", 0 (SRS LERR?), 0000 (Pfeiffer ERR)
 
     def drain_errors(self, most: int = 10) -> Tuple[List[str], bool]:

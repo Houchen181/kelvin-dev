@@ -4,6 +4,7 @@ alerts needed a third-party webhook). Each check reproduces what testers met, on
 import pytest
 
 from labharness import ScriptedApprover, build_virtual_lab
+from labharness.monitor import Watch
 
 SWEEP = """plan: {name}
 setup: {{ smu.output: on }}
@@ -233,3 +234,80 @@ def test_a_lost_instrument_that_ends_a_queue_item_alarms_at_once_and_names_itsel
     assert alarm.kind == "silent" and alarm.key == "lockin"
     rt.monitor.tick()
     assert len(rt.monitor.alarms) == 1
+
+
+# ---------------------------------------------------------------------------------------------- garbled replies
+
+
+def garbling(twin, every=2):
+    """Its replies garbled as a bad cable does: one in `every` comes through clean, the others with characters
+    flipped ("0,"No error"" arrives as "0$"No!errov"", a number with a control character in it)."""
+    real, n = twin.query, [0]
+
+    def query(command):
+        reply = real(command)
+        n[0] += 1
+        if n[0] % every == 0:
+            return reply
+        if reply.startswith("0,"):
+            return '0$"No!errov"'
+        return reply[:2] + "\x0b" + reply[3:]
+    twin.query = query
+    return real
+
+
+def test_garbled_replies_raise_one_comms_fault_that_holds_until_they_are_clean(lab, make_gate):
+    """l09 garbled the 2182A's replies for 2.7 h: "nvm reports an error: 0$"No!errov"" was raised and cleared about
+    42 times. Garbled replies are one comms fault: raised at the first, kept while they come, cleared once they have
+    been clean for five minutes; never an instrument error, never an unreadable reading."""
+    from labharness.monitor import GARBLE_CLEAR_S, Monitor
+    gate, _ = make_gate([])
+    notices = []
+    monitor = Monitor(lab, gate, lambda kind, title, text="": notices.append((kind, title)))
+    twin = real_twin(lab, "lockin")
+    monitor.add(Watch("lockin.X", above=1, every=0))
+    monitor.tick()                                                   # clean: its replies are known
+    real = garbling(twin)
+    for _ in range(42):                                              # a night of it, a check a minute
+        lab.clock.sleep(61)
+        monitor.tick()
+    [alarm] = monitor.alarms
+    assert alarm.kind == "comms" and alarm.text.startswith("lockin's reply to ") and "arrived garbled" in alarm.text
+    assert "a loose cable, a bad adapter or electrical noise" in alarm.text and not alarm.cleared
+    assert [k for k, _ in notices] == ["alarm"]
+    twin.query = real
+    lab.clock.sleep(61)
+    monitor.tick()
+    assert not alarm.cleared                                         # clean once is not clean
+    for _ in range(int(GARBLE_CLEAR_S // 61) + 1):
+        lab.clock.sleep(61)
+        monitor.tick()
+    assert alarm.cleared and len(monitor.alarms) == 1
+    assert notices[-1][1].startswith("Cleared: lockin's replies are clean again (none garbled for 5 min")
+
+
+def test_a_garbled_reading_stops_a_run_in_words_and_a_garbled_error_check_fails_a_set(lab, make_engine):
+    from labharness import load_plan
+    from labharness.instrument import Garbled
+    engine, gate, _ = make_engine([])
+    twin = lab.instruments["lockin"].backend
+    assert isinstance(lab.read("lockin", "X"), float)                 # it reads, as it always has
+    garbling(twin, every=10 ** 6)
+    with pytest.raises(Garbled, match="lockin's reply to .* arrived garbled"):
+        lab.read("lockin", "X")
+    report = engine.run(load_plan("plan: look\ntime: { every: 1, points: 3 }\nmeasure: [lockin.X]"))
+    assert report.status == "refused" and "arrived garbled" in report.message   # its check before the run says it
+    r = gate.set("lockin", "frequency", 1234)                         # its error check after the set: garbled
+    assert not r.ok and "arrived garbled" in r.message
+
+
+def test_a_reading_its_card_never_read_is_the_cards_problem_not_a_garbled_reply(lab):
+    """The first reply a reading ever gets that can't be read, with nothing but printable characters, is the card's
+    problem (a wrong command or format), said as before: only one that read before, or has noise in it, is garbled."""
+    from labharness.instrument import Garbled
+    twin = lab.instruments["lockin"].backend
+    real = twin.query
+    twin.query = lambda c: "OVLD" if c.upper().startswith("MEAS") or "X" in c.upper() else real(c)
+    with pytest.raises(ValueError) as e:
+        lab.read("lockin", "X")
+    assert not isinstance(e.value, Garbled)

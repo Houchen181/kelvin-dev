@@ -5,7 +5,8 @@ their safe values - the only kind of change it may make.
 
 An instrument that stops answering raises one alarm in plain words, whoever met it (a watch, a run, the monitor's own
 check that each real instrument still answers): which instrument, on which bus, what to check ("nvm (Keithley 2182A)
-doesn't answer on GPIB (address 7): cable or power?"). It clears when the instrument answers again.
+doesn't answer on GPIB (address 7): cable or power?"). It clears when the instrument answers again. Replies that
+arrive garbled are one comms fault, latched: raised once, cleared only after its replies have been clean for a while.
 
 Durations are in lab time (the lab clock), so the virtual lab at 10x real time and tests on a simulated clock behave
 like the real lab.
@@ -13,25 +14,32 @@ like the real lab.
 from __future__ import annotations
 
 import itertools
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .instrument import InstrumentLost, SensorError
+from .instrument import Garbled, InstrumentLost, SensorError
 
 FAILS_BEFORE_ALARM = 3       # failed exchanges in a row before "doesn't answer" (one that can't reach it at all: one)
 ERROR_CHECK_EVERY = 60.0     # lab seconds between error-queue checks on real instruments
 ALIVE_EVERY = 20.0           # lab seconds between checks that each real instrument answers, while a run or queue goes
 RESET_EVERY = 5.0            # lab seconds between checks that the outputs the running plan switched on are still on
+GARBLE_CLEAR_S = 300.0       # lab seconds without a garbled reply before a comms fault clears
 INTERLOCK_EVERY = 5.0       # lab seconds between checks of the interlocks whose drive is away from safe
 _ids = itertools.count(1)
 
 
-def _since(t: float) -> str:
-    """How long ago a wall time was, in words: "40 s", "3 min", "2.5 h"."""
-    s = max(0.0, time.time() - t)
+def _dur(s: float) -> str:
+    """A duration in words: "40 s", "3 min", "2.5 h"."""
+    s = max(0.0, s)
     return "%.0f s" % s if s < 90 else "%.0f min" % (s / 60) if s < 5400 else "%.1f h" % (s / 3600)
+
+
+def _since(t: float) -> str:
+    """How long ago a wall time was, in words."""
+    return _dur(time.time() - t)
 
 
 @dataclass
@@ -92,6 +100,7 @@ class Monitor:
         self.notify = notify
         self.poll_s = poll_s
         self.watches: Dict[str, Watch] = {}
+        self.last_tick: Optional[float] = None   # wall time of the latest pass: the heartbeat's sign of life
         self.alarms: List[Alarm] = []        # newest first, active and cleared
         self._fails: Dict[str, int] = {}
         self._unreadable: Dict[str, Alarm] = {}   # a watch's reading that fails though its instrument answers
@@ -102,6 +111,9 @@ class Monitor:
         self._last_alive_check: Dict[str, float] = {}
         self._last_reset_check: Dict[str, float] = {}
         self._suspect: Dict[str, float] = {}      # output switches read off under a running plan once: since when
+        self._comms: Dict[str, Alarm] = {}        # instruments whose replies arrive garbled (latched)
+        self._garbles_seen: Dict[str, int] = {}   # garbled replies already counted, by instrument
+        self._garbled_lab: Dict[str, float] = {}  # lab time the latest garbled reply was seen
         self._last_interlock_check = -1e18
         self._broken: Dict[int, Alarm] = {}   # interlocks found broken (by their place in the lab config)
         self._lock = threading.RLock()
@@ -174,7 +186,12 @@ class Monitor:
             except Exception:  # the monitor must outlive any one bad read
                 pass
 
+    def watching(self) -> bool:
+        """Is the monitor going: it ticked lately (the heartbeat pings only then)."""
+        return self.last_tick is not None and time.time() - self.last_tick < max(60.0, 20 * self.poll_s)
+
     def tick(self) -> None:
+        self.last_tick = time.time()
         now = self.lab.clock.now()
         with self._lock:
             watches = list(self.watches.values())
@@ -215,7 +232,7 @@ class Monitor:
         self._check_interlocks(now)
         self._check_errors(now)
         self._check_alive(now)
-        self._check_health()
+        self._check_health(now)
 
     # ------------------------------------------------------------------ alarms
 
@@ -300,8 +317,8 @@ class Monitor:
         """A watch's reading failed. One its instrument didn't answer is that instrument's health, which
         _check_health says once for everyone who met it; any other failure (a reply its card can't read) alarms after
         a few tries as a reading that can't be had."""
-        if isinstance(e, InstrumentLost):
-            return
+        if isinstance(e, (InstrumentLost, Garbled)):
+            return   # the instrument's: said once, for everyone who met it
         self._fails[instr] = self._fails.get(instr, 0) + 1
         if self._fails[instr] >= FAILS_BEFORE_ALARM and instr not in self._unreadable:
             text = "%s can't be read (%s)" % (instr, str(e).splitlines()[0][:160] if str(e) else type(e).__name__)
@@ -335,8 +352,7 @@ class Monitor:
             with self._lock:
                 a = self._silent.get(name) or self._raise_lost(name, h.lost_text)
             out.append(a)
-            if h.fails == 0:
-                self._check_health()
+        self._check_health()   # one that answers again is cleared; garbled replies latch their fault
         return out
 
     def _raise_lost(self, name: str, text: str) -> Alarm:
@@ -347,12 +363,15 @@ class Monitor:
                                                "again.")
         return a
 
-    def _check_health(self) -> None:
+    def _check_health(self, now: Optional[float] = None) -> None:
         """The instruments' health, from every exchange with them whoever made it (a watch, a run, a set, this
         monitor): one alarm per instrument that doesn't answer, after FAILS_BEFORE_ALARM in a row, or at once when the
-        bus says it can't be reached at all (nothing listens on GPIB, a pulled USB cable); cleared when it answers."""
+        bus says it can't be reached at all (nothing listens on GPIB, a pulled USB cable); cleared when it answers.
+        Garbled replies: one comms-fault alarm at the first, kept until none has come for GARBLE_CLEAR_S."""
+        now = self.lab.clock.now() if now is None else now
         for name, inst in list(self.lab.instruments.items()):
             h = inst.health
+            self._check_garbles(name, inst, now)
             with self._lock:
                 on = self._silent.get(name)
                 if on is None and inst.enabled and h.fails and (h.gone or h.fails >= FAILS_BEFORE_ALARM):
@@ -363,6 +382,24 @@ class Monitor:
                         name, _since(on.raised), "; a power cut puts an instrument back to its power-on settings "
                         "(outputs off), so check them before going on" if any(s.enables for s in inst.card.drives)
                         else ""))
+
+    def _check_garbles(self, name: str, inst: Any, now: float) -> None:
+        h = inst.health
+        with self._lock:
+            if h.garbles > self._garbles_seen.get(name, 0):
+                self._garbles_seen[name] = h.garbles
+                self._garbled_lab[name] = now
+                if name not in self._comms:
+                    a = self._comms[name] = self._new("comms", name, h.garbled_text)
+                    self.gate.log.write("alarm", by="monitor", instrument=name, text=a.text)
+                    self.notify("alarm", "Alarm: " + a.text, "Raised once: it stays until %s's replies have been clean "
+                                                             "for %s. Runs that read it stop at a reply Kelvin can't read."
+                                % (name, _dur(GARBLE_CLEAR_S)))
+            elif name in self._comms and now - self._garbled_lab.get(name, now) >= GARBLE_CLEAR_S \
+                    and (h.answered_at or 0) > (h.garbled_at or 0):
+                a = self._comms.pop(name)
+                self._clear(a.id, "%s's replies are clean again (none garbled for %s; %d garbled in all)"
+                            % (name, _dur(GARBLE_CLEAR_S), h.garbles))
 
     def _check_alive(self, now: float) -> None:
         """While a plan or a queue item runs, each real instrument is asked to answer every ALIVE_EVERY (lab time): an
@@ -394,7 +431,11 @@ class Monitor:
 
     def _probe(self, inst: Any) -> Optional[Callable[[], Any]]:
         if inst.card.idn_pattern and not hasattr(inst.backend, "identity"):
-            return lambda: inst.query_raw(inst.card.idn_query)
+            def ask() -> None:   # its identity, which it gave at the start: anything else arrived garbled
+                reply = inst.query_raw(inst.card.idn_query)
+                if not re.search(inst.card.idn_pattern, reply.strip(), re.I):
+                    inst.health.garbled(inst.garble_text(inst.card.idn_query, reply))
+            return ask
         param = inst.card.headline
         if param is None:
             param = next((s.name for s in inst.card.params.values() if s.kind == "measure" and s.get_cmd is not None
@@ -456,6 +497,8 @@ class Monitor:
             except Exception:
                 continue  # one it didn't answer is its health's (_check_health)
             err = errs[0] if errs else None
+            if name in self._comms:
+                continue   # while its replies arrive garbled, an "error" in one may be noise: the comms fault says it
             if err and name not in self._errors:
                 text = "%s reports an error: %s%s" % (name, err, " (and %d more)" % (len(set(errs)) - 1)
                                                       if len(set(errs)) > 1 else "")
