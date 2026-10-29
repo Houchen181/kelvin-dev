@@ -60,7 +60,8 @@ def test_the_scan_report_is_one_short_page(tmp_path):
         assert want in text, want
     for gone in ("Contents", "1. Result", "Appendix", "plan: gate_sweep", "Next:"):   # the plan is in run.h5
         assert gone not in text, gone
-    assert text.count("approved: Run plan gate_sweep") == 1                     # its approval, once
+    assert text.count("Run plan gate_sweep") == 1 and "approved (asked by agent)" in text   # its approval, once,
+    assert "agent approved" not in text                                         # never a person's yes as the agent's
     from labharness import rundata
     kept = rundata.load(folder, with_rows=False).snapshots                      # every setting, start and end
     assert kept["start"]["smu"]["output"] is False and kept["end"]["smu"]["output"] is True

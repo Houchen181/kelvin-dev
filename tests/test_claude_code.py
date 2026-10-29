@@ -19,7 +19,7 @@ from labharness.web.app import create_app, make_providers  # noqa: E402
 from labharness.web.providers.claudecode_provider import (ClaudeCodeProvider, Shown, parse, read,  # noqa: E402
                                                           transcript)
 from labharness.web.settings import Settings  # noqa: E402
-from test_web import Scripted, parts  # noqa: E402,F401
+from test_web import Scripted, human, parts  # noqa: E402,F401
 
 FAKE = [sys.executable, str(Path(__file__).with_name("fake_claude.py"))]
 
@@ -371,8 +371,8 @@ def test_only_on_the_developers_computer(tmp_path, monkeypatch):
     assert not claudecode.enabled() and "claudecode" not in make_providers(settings)   # a published build: never
 
 
-def operate(runtime, store, steps, slow=False):
-    """A chat whose model asks Claude to operate the computer."""
+def operate(runtime, store, steps, slow=False, answers=(True,)):
+    """A chat whose model asks Claude to operate the computer; the person answers its request with answers."""
     call = [{"type": "tool_call", "id": "c1", "name": "operate_computer",
              "input": {"task": "Open LaserDesk and read the power"}}]
     done = [{"type": "text", "text": "Done."}]
@@ -388,6 +388,7 @@ def operate(runtime, store, steps, slow=False):
 
             async def emit(e):
                 events.append(e)
+            human(runtime.approver, answers)
             task = asyncio.ensure_future(agent.run_turn(chat["id"], "read the laser power", "scripted:m1", provider, emit))
             for _ in range(100):
                 await asyncio.sleep(0.05)
@@ -415,6 +416,23 @@ def test_claude_operates_the_computer_and_every_step_is_recorded(parts):
     record = [e for e in runtime.gate.log.events() if e["type"].startswith("computer")]
     assert [e["type"] for e in record] == ["computer_task", "computer", "computer", "computer_task_end"]
     assert record[1]["by"] == "Claude Code"
+
+
+def test_claude_uses_the_screen_only_once_a_person_says_yes(parts):
+    """operate_computer drove the real desktop for 44 steps with no approval card (P2)."""
+    runtime, _, store = parts
+    runtime.gate.auto = True                                            # auto mode doesn't cover it either
+    seen = []
+    events = operate(runtime, store, seen, answers=(False,))
+    [asked] = [e for e in events if e["type"] == "approval"]
+    assert asked["title"] == "Let Claude use this computer's screen, mouse and keyboard?" and not asked.get("auto")
+    assert asked["items"][0] == "Task: Open LaserDesk and read the power"
+    end = next(e for e in events if e["type"] == "tool_end")
+    assert end["is_error"] and end["content"].startswith("declined: Claude did not use the computer")
+    assert seen == [] and not [e for e in events if e["type"] == "computer_step"]
+    record = runtime.gate.log.events()
+    assert not [e for e in record if e["type"].startswith("computer")]
+    assert [e["answer"] for e in record if e["type"] == "ask"] == ["declined"]
 
 
 def test_stop_ends_the_operation(parts, monkeypatch):

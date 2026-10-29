@@ -88,10 +88,12 @@ class Collector:
         return num(value) if _numbers(value) else str(value)
 
     def _line(self, e: Dict[str, Any]) -> Tuple[str, str]:
-        if e.get("type") == "ask":   # the request's first line says what was asked
+        if e.get("type") == "ask":   # the request's first line says what was asked; its note, who answered and when
             first = str(e.get("request", "")).splitlines()[0] if e.get("request") else ""
-            return str(e.get("wall", ""))[11:19], "%s %s: %s%s" % (
-                e.get("by", ""), e.get("answer", "asked"), first, " (%s)" % e["note"] if e.get("note") else "")
+            note = str(e.get("note") or "")
+            said = note if note.startswith(str(e.get("answer"))) else "%s%s" % (
+                e.get("answer", "asked"), " (%s)" % note if note else "")
+            return str(e.get("wall", ""))[11:19], "%s: %s (asked by %s)" % (first, said, e.get("by") or "?")
         text = self.event_line(e)
         return text[:8], text[9:]
 

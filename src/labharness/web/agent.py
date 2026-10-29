@@ -19,7 +19,7 @@ import sys
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from mcp import Client
 
@@ -136,6 +136,13 @@ STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the s
 STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
                 "lets it: a plan stops at once, an instrument still taking a reading is told to stop.")
 _RUN_ID = re.compile(r"run_id='([^']+)'")
+# a message that only says stop: STOP, stop!, Stop now, abort, /stop. A hard stop, never words for the model to read
+# at its next step (a run or a wait could last hours before it got there)
+_TYPED_STOP = re.compile(r"\s*/?(?:stop|abort|halt)(?:\s+(?:it|now|everything|all|stop|abort))*\s*[.!]*\s*", re.I)
+
+
+def typed_stop(text: Any) -> bool:
+    return bool(_TYPED_STOP.fullmatch(str(text or "")))
 
 
 def _within(path: Path, folder: Path) -> bool:
@@ -354,7 +361,7 @@ OPERATE_COMPUTER = {
                    "task in another program: vendor software without an API, a web app that needs a person's sign-in, "
                    "a file dialog. Not for searching the web, reading pages or downloading files: web_search, "
                    "read_web_page and save_manual do those directly. Say what to do, what done looks like, and what "
-                   "must not be touched. It returns what was done. Settings changed this way bypass Kelvin's safety "
+                   "must not be touched. The person approves it first; it returns what was done. Settings changed this way bypass Kelvin's safety "
                    "gate: use Kelvin's own instrument tools whenever they can do it, and name in the task exactly "
                    "which instrument settings may change. Never for a program Kelvin drives as an instrument: "
                    "LightField (Teledyne Princeton cameras and spectrographs) is one: add_instrument with "
@@ -1189,8 +1196,10 @@ class ChatAgent:
 
     async def _operate_computer(self, call: Dict[str, Any], emit: Any) -> Tuple[str, bool]:
         """Claude Code does a task on the screen with Kelvin's screen tools (screen.py), every step shown and
-        recorded. While it runs, Kelvin's own approvals and settings are locked (the guard in app.py), so a click
-        can never stand in for a person's yes. Stop ends it."""
+        recorded, once a person says yes: it takes over this computer's mouse and keyboard, and what it changes in
+        another program bypasses Kelvin's gate, so neither Kelvin itself nor auto mode approves it. While it runs,
+        Kelvin's own approvals and settings are locked (the guard in app.py), so a click can never stand in for a
+        person's yes. Stop ends it."""
         from .. import claudecode, screen
         provider = self.providers.get("claudecode")
         if provider is None:
@@ -1203,6 +1212,17 @@ class ChatAgent:
             minutes = max(1.0, min(30.0, float(args.get("minutes") or 10)))
         except (TypeError, ValueError):
             minutes = 10.0
+        request = ApprovalRequest("Let Claude use this computer's screen, mouse and keyboard?", [
+            "Task: %s" % task,
+            "For up to %g minutes it sees the screen and clicks and types in other programs as a person would. What "
+            "it changes there (an instrument's settings in its maker's software) doesn't go through Kelvin's safety "
+            "checks." % minutes,
+            "Every step shows in the chat. Kelvin's approvals and settings are locked while it works; Stop ends it."])
+        go = await self._ask_human(call["id"], emit, request)   # a person, always: not Kelvin itself, not auto mode
+        self.runtime.gate.log.write("ask", by="agent", request=str(request), answer="approved" if go else "declined",
+                                    note=request.note or None)
+        if not go:
+            return "declined: Claude did not use the computer%s" % (" (%s)" % request.note if request.note else ""), True
         model = (self.active or {}).get("model") or ""
         alias = model.split(":", 1)[1] if model.startswith("claudecode:") else "opus"
         config = provider.cwd / "screen-mcp.json"
@@ -1735,16 +1755,23 @@ class ChatAgent:
         path = str(args.get("path") or "")
         if call["name"] == "list_folder":
             try:
-                text = await asyncio.to_thread(folderfiles.listing, folder, path)
+                text = await asyncio.to_thread(folderfiles.listing, folder, path, self._kelvins())
             except (ValueError, OSError) as e:   # FolderError is a ValueError
                 return "not read: %s" % (e.strerror if isinstance(e, OSError) and e.strerror else e), True
             return OUTSIDE % ("the names in this chat's folder", text), False
-        text, is_error = await self._read_in(folder, call, provider)
+        text, is_error = await self._read_in(folder, call, provider, self._kelvins())
         return (text, True) if is_error else (OUTSIDE % ("%s, a file in this chat's folder" % path, text), False)
 
-    async def _read_in(self, folder: Any, call: Dict[str, Any], provider: Provider) -> Tuple[str, bool]:
+    def _kelvins(self) -> List[Any]:
+        """Kelvin's own folders, which a chat's folder tools never reach, wherever the chat's folder is
+        (folderfiles.off_limits): Kelvin's folder (the lab config, settings, accounts, cards, everyone's chats) and
+        the chats of the person signed in."""
+        return [f for f in (getattr(self.runtime, "home", None), getattr(self.store, "root", None)) if f]
+
+    async def _read_in(self, folder: Any, call: Dict[str, Any], provider: Provider,
+                       own: Iterable[Any] = ()) -> Tuple[str, bool]:
         """A file in this folder, read (folderfiles.py): pictures go to the person and to a model that sees them, PDF
-        pages whole to a model that reads PDFs (another gets their text)."""
+        pages whole to a model that reads PDFs (another gets their text). own: folders it never reads in."""
         from .. import folderfiles
         args = call["input"] if isinstance(call["input"], dict) else {}
         path = str(args.get("path") or "")
@@ -1752,7 +1779,7 @@ class ChatAgent:
         whole = asked and getattr(provider, "sees_pdfs", False)
         try:
             text, media = await asyncio.to_thread(folderfiles.read, folder, path, args.get("pages") or "",
-                                                  int(args.get("start") or 0), whole)
+                                                  int(args.get("start") or 0), whole, own)
         except (ValueError, OSError) as e:   # FolderError is a ValueError
             return "not read: %s" % (e.strerror if isinstance(e, OSError) and e.strerror else e), True
         if asked and not whole:
@@ -1780,8 +1807,8 @@ class ChatAgent:
         if not isinstance(text, str):
             return "not saved: give the file's whole text as content", True
         rt = self.runtime
-        try:
-            target = folderfiles.inside(folder, path, saving=True)
+        try:   # never Kelvin's own folders (the lab config, settings, accounts, cards, chats) or the lab's records
+            target = folderfiles.inside(folder, path, saving=True, own=self._kelvins(), data=rt.data_dir)
         except folderfiles.FolderError as e:
             return "not saved: %s" % e, True
         loads = sorted({n for n, d in library.code_folders({n: ic.address for n, ic in rt.lab.config.instruments.items()},
@@ -1807,7 +1834,8 @@ class ChatAgent:
             if not go:
                 return "declined: nothing was saved%s" % (" (%s)" % request.note if request.note else ""), True
         try:
-            target, kept = await asyncio.to_thread(folderfiles.save, folder, path, text)
+            target, kept = await asyncio.to_thread(folderfiles.save, folder, path, text, self._kelvins(),
+                                                   rt.data_dir)
         except folderfiles.FolderError as e:
             return "not saved: %s" % e, True
         rt.gate.log.write("file_saved", by="agent", chat=chat["id"], path=str(target), chars=len(text),

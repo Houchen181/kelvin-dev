@@ -27,6 +27,13 @@ UI_HTML = (Path(__file__).parent / "ui.html").read_bytes()
 MAX_BODY = 16 * 1024
 
 
+def who_text(who: Dict[str, Any]) -> str:
+    """A person who answered, in words: their account (when people sign in) and where they answered from, e.g.
+    "Ada (phone Pixel 7)" or "a person (portal)"."""
+    where = ", ".join(str(x) for x in (who.get("channel"), who.get("device")) if x)
+    return "%s%s" % (who.get("account") or "a person", " (%s)" % where if where else "")
+
+
 class WebApprover(Approver):
     """Blocks the gate until a human answers on the page, or declines after `timeout` seconds."""
 
@@ -37,6 +44,11 @@ class WebApprover(Approver):
         self._history: Deque[Dict[str, Any]] = deque(maxlen=20)
         self._seq = 0
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
+        # who declines a request before anyone sees it (asked from the requesting thread): the client that cancelled
+        # the call asking it (LabRuntime.cancel_call). None: it is shown as usual
+        self.vetoes: List[Callable[[], Optional[str]]] = []
+        # where a request acts, shown on its card: SIMULATOR or REAL HARDWARE (LabRuntime.where); None: no label
+        self.where: Optional[Callable[[ApprovalRequest], Optional[str]]] = None
 
     def subscribe(self, listener: Callable[[Dict[str, Any]], None]) -> Callable[[], None]:
         """Call `listener(request)` for every new request (from the requesting thread). Returns unsubscribe."""
@@ -44,14 +56,26 @@ class WebApprover(Approver):
         return lambda: self._listeners.remove(listener) if listener in self._listeners else None
 
     def approve(self, request: ApprovalRequest) -> bool:
+        why = next((w for w in (veto() for veto in list(self.vetoes)) if w), None)
+        try:
+            where = self.where(request) if self.where else None
+        except Exception:
+            where = "REAL HARDWARE"   # unsure: say the instruments may be real
         with self._cv:
             self._seq += 1
             now = time.time()
             entry = {"id": "r%d" % self._seq, "title": request.title, "items": list(request.items),
-                     "created": now, "expires": now + self.timeout, "answer": None, "by": None}
+                     "created": now, "expires": now + self.timeout, "answer": None, "by": None,
+                     "thread": threading.get_ident(), "where": where}
+            if why:   # never shown: nobody is left to act on a yes
+                entry.update(answer=False, by=why, decided=now)
+                self._history.appendleft(entry)
+                request.note = "declined by %s" % why
+                return False
             self._pending[entry["id"]] = entry
             self._cv.notify_all()
-        public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "seconds_left": int(self.timeout)}
+        public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "seconds_left": int(self.timeout),
+                  "where": where}
         for listener in list(self._listeners):
             try:
                 listener(public)
@@ -69,6 +93,9 @@ class WebApprover(Approver):
             self._history.appendleft(entry)
         if entry["by"] == "timeout":
             request.note = "no answer within %.0f s" % self.timeout
+        elif entry.get("who"):   # the record says who answered, from where, and when (reports print it)
+            request.note = "%s by %s at %s" % ("approved" if entry["answer"] else "declined", who_text(entry["who"]),
+                                               time.strftime("%H:%M:%S", time.localtime(entry["decided"])))
         elif entry["by"] != "human":
             request.note = "declined by %s" % entry["by"]
         return bool(entry["answer"])
@@ -89,20 +116,30 @@ class WebApprover(Approver):
             except Exception:
                 pass
 
-    def answer(self, request_id: str, approve: bool, by: str = "human") -> bool:
+    def answer(self, request_id: str, approve: bool, by: str = "human", who: Optional[Dict[str, Any]] = None) -> bool:
+        """A person's answer. who: their account, the channel (portal, phone, approval page) and device."""
         with self._cv:
             entry = self._pending.get(request_id)
             if entry is None or entry["answer"] is not None:
                 return False
-            entry["answer"], entry["by"] = bool(approve), by
+            entry["answer"], entry["by"], entry["who"] = bool(approve), by, who
             self._cv.notify_all()
             return True
 
+    def title_of(self, request_id: str) -> Optional[str]:
+        with self._cv:
+            entry = self._pending.get(request_id)
+            return entry["title"] if entry else None
+
     def decline_all(self, by: str = "stop button") -> int:
+        return self.decline_from(None, by)
+
+    def decline_from(self, thread: Optional[int], by: str) -> int:
+        """Decline the open requests asked from that thread (None: every open request). How many were declined."""
         with self._cv:
             n = 0
             for entry in self._pending.values():
-                if entry["answer"] is None:
+                if entry["answer"] is None and thread in (None, entry.get("thread")):
                     entry["answer"], entry["by"] = False, by
                     n += 1
             self._cv.notify_all()
@@ -125,13 +162,14 @@ class WebApprover(Approver):
         with self._cv:
             now = time.time()
             return [{"id": e["id"], "title": e["title"], "items": e["items"],
-                     "seconds_left": max(0, int(e["expires"] - now))}
+                     "seconds_left": max(0, int(e["expires"] - now)), "where": e.get("where")}
                     for e in self._pending.values() if e["answer"] is None]
 
     def history_list(self) -> List[Dict[str, Any]]:
         with self._cv:
             return [{"title": e["title"], "items": e["items"], "answer": "approved" if e["answer"] else "declined",
-                     "by": e["by"], "at": time.strftime("%H:%M:%S", time.localtime(e["decided"]))}
+                     "by": who_text(e["who"]) if e.get("who") else e["by"], "where": e.get("where"),
+                     "at": time.strftime("%H:%M:%S", time.localtime(e["decided"]))}
                     for e in self._history]
 
 
@@ -219,12 +257,18 @@ class ApprovalServer:
                 except ValueError:
                     return self._json(400, {"error": "bad request"})
                 if self.path == "/api/answer":
-                    ok = server.runtime.approver.answer(str(body.get("id")), bool(body.get("approve")))
+                    answer = getattr(server.runtime, "answer", None)
+                    ok = answer(str(body.get("id")), bool(body.get("approve")), "human (approval page)",
+                                "approval page") if answer else \
+                        server.runtime.approver.answer(str(body.get("id")), bool(body.get("approve")))
                     return self._json(200 if ok else 409, {"ok": ok})
                 if self.path == "/api/mode":
                     try:
                         return self._json(200, server.runtime.set_approval_mode(str(body.get("mode")),
-                                                                               "human (approval page)"))
+                                                                               "human (approval page)",
+                                                                               pin=body.get("pin")))
+                    except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
+                        return self._json(403, {"error": str(e), "pin": True})
                     except ValueError as e:
                         return self._json(400, {"error": str(e)})
                 if self.path == "/api/stop":

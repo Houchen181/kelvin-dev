@@ -1043,3 +1043,16 @@ body.resizing .plot-svg { pointer-events: none; }
   border-bottom: 1px solid var(--line); }
 .env-list .env-what { font-size: 13px; overflow-wrap: anywhere; }
 .env-list .env-what .muted { font-size: 12px; }
+
+/* where a request acts: SIMULATOR or REAL HARDWARE (runtime.where) */
+.approval-title .where { margin-left: auto; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600;
+  letter-spacing: .04em; white-space: nowrap; }
+.approval-title .where.real { background: #b3261e; color: #fff; }
+.approval-title .where.sim { background: #e8eaed; color: #3c4043; }
+@media (prefers-color-scheme: dark) { .approval-title .where.sim { background: #3c4043; color: #e8eaed; } }
+.alert.incident .alert-body span { display: block; }
+
+/* the lab owner's PIN (askPin) */
+.pin-dialog { border: 1px solid var(--border, #ccc); border-radius: 10px; padding: 16px; max-width: 22rem; }
+.pin-dialog input { width: 100%; margin: 8px 0; font-size: 18px; letter-spacing: .2em; }
+.pin-actions { display: flex; gap: 8px; justify-content: flex-end; }

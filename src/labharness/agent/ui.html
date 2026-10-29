@@ -117,7 +117,15 @@ async function api(path, body) {
     headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(res.status);
+  if (!res.ok) {
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* not JSON */ }
+    if (res.status === 403 && data && data.pin && body) {   // the lab owner's PIN: ask, try again
+      const pin = prompt(data.error + "\n\nThe lab owner's PIN:");
+      if (pin) return api(path, Object.assign({}, body, { pin }));
+    }
+    throw new Error((data && data.error) || res.status);
+  }
   return res.json();
 }
 
@@ -137,7 +145,7 @@ function renderPending(list) {
     ok.addEventListener("click", () => answer(r.id, true, [ok, no]));
     no.addEventListener("click", () => answer(r.id, false, [ok, no]));
     box.append(el("div", { class: "request" },
-      el("h3", {}, r.title),
+      el("h3", {}, (r.where ? "[" + r.where + "] " : "") + r.title),
       el("ul", {}, ...r.items.map((i) => el("li", {}, i))),
       el("div", { class: "actions" }, ok, no, el("span", { class: "muted" }, "declines itself in " + r.seconds_left + " s"))));
     if (!seen.has(r.id)) {
@@ -190,8 +198,7 @@ $("mode").addEventListener("change", async (e) => {
   refresh();
 });
 
-$("stop").addEventListener("click", async () => {
-  if (!confirm("Stop the agent's current ramp or plan and decline open requests? Drives stay where they are.")) return;
+$("stop").addEventListener("click", async () => {   // at once: no dialog on the stop path
   try { await api("/api/stop", {}); } catch (e) { alert("Stop failed: " + e.message); }
   refresh();
 });

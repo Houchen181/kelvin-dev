@@ -31,12 +31,14 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "answer_words", "phone_relay", "ask_folder", "text_size",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
-                     "updates", "hub_old_runs", "collection"}
+                     "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
-       "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection"}
+       "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
+       "idle_off_all"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
+IDLE_OFF_MINUTES = 60   # outputs left on this long with nothing happening go to safe (LabRuntime._idle_check)
 MAX_RECENT_FOLDERS = 8   # chats' folders the folder menu offers again
 TEXT_SIZES = (0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)   # the desktop window's zoom, each person's own
 
@@ -59,6 +61,17 @@ def _answer_words(value: str) -> str:
     except ValueError:
         return ""
     return "" if n == ANSWER_WORDS else str(n)
+
+
+def _idle_off(value: str) -> str:
+    """What is stored for the idle switch-off: "off", or minutes from 5 to 1440 ("" for the default)."""
+    if value.lower() in ("off", "0", "no", "false", "never"):
+        return "off"
+    try:
+        n = max(5, min(1440, int(float(value))))
+    except ValueError:
+        return ""
+    return "" if n == IDLE_OFF_MINUTES else str(n)
 
 
 def _load(path: Optional[Path]) -> Dict[str, Any]:
@@ -219,6 +232,10 @@ class Settings:
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "answer_words":  # how long answers may be before Kelvin condenses them (brevity.py)
                 value = _answer_words(value)
+            if name == "idle_off":  # minutes before light left on with nothing happening goes to safe, or off
+                value = _idle_off(value)
+            if name == "idle_off_all":  # other outputs (sources, excitations, RF) too: off unless on
+                value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "text_size":  # the desktop window's zoom (desktop.py), as a factor
                 value = _text_size(value)
             if name == "ask_folder":  # the folder picker opens for each new chat (desktop app): on unless off
@@ -319,6 +336,8 @@ class Settings:
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "claude_code_path": self._user.get("claude_code_path", ""),
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
+            "idle_off": self.idle_off_minutes,
+            "idle_off_all": self._lab.get("idle_off_all") == "on",
         }
 
     @property
@@ -348,6 +367,14 @@ class Settings:
         if value == "off":
             return 0
         return int(value) if value and value.isdigit() else ANSWER_WORDS
+
+    @property
+    def idle_off_minutes(self) -> int:
+        """Minutes before outputs left on with nothing happening go to safe; 0: never."""
+        value = self._lab.get("idle_off")
+        if value == "off":
+            return 0
+        return int(value) if value and str(value).isdigit() else IDLE_OFF_MINUTES
 
     @property
     def updates(self) -> str:

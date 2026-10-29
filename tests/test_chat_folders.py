@@ -76,7 +76,22 @@ def test_runs_in_chat_folders_are_shared_like_the_others(tmp_path):
 # ---------------------------------------------------------------- the portal: picking, showing, opening
 
 pytest.importorskip("starlette")
-from test_web import Scripted, client_for, parts  # noqa: E402,F401
+from test_web import Scripted, client_for  # noqa: E402,F401
+
+
+@pytest.fixture
+def parts(tmp_path):
+    """As on a lab computer: Kelvin's own folder (settings, chats) apart from the folders people choose for chats,
+    which may never be in it (folderfiles.off_limits)."""
+    from labharness import demo_envelope
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    lab = build_virtual_lab(seed=1)
+    home = tmp_path / "Kelvin"
+    return (LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab)),
+            Settings(home / "settings.json"), ChatStore(home / "chats"))
 
 
 def test_the_portal_sets_shows_and_remembers_a_chats_folder(parts, tmp_path):

@@ -27,7 +27,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Route
 
 from .._version import __version__
-from ..accounts import Accounts, cipher_for, has_legacy
+from ..accounts import Accounts, OwnerPin, cipher_for, has_legacy
 from .. import central
 from ..agent.approval import WebApprover
 from ..agent.runtime import SETUP_STEPS, LabRuntime, writable_folder
@@ -46,7 +46,7 @@ from .. import protection
 from .. import rundata
 from ..virtual_lab import (build_lab, builtin_ids, builtin_registry, collection_ids, is_simulated, kelvin_ids,
                            lab_registry, open_home_lab)
-from .agent import Busy, ChatAgent, runs_in
+from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
@@ -197,6 +197,22 @@ def role_of(request: Request) -> str:
     return (request.scope.get("kelvin") or {}).get("role") or "owner"
 
 
+def person(request: Request) -> str:
+    """Who a person's request is from, as the lab's record names them: the Kelvin computer or a paired phone."""
+    device = (request.scope.get("kelvin") or {}).get("device")
+    return "human (phone %s)" % device.get("name") if device else "human (portal)"
+
+
+def channel(request: Request) -> Tuple[str, Optional[str]]:
+    """Where a person's request comes from: ("portal", None) or ("phone", the phone's name)."""
+    device = (request.scope.get("kelvin") or {}).get("device")
+    return ("phone", str(device.get("name") or "")) if device else ("portal", None)
+
+
+STOPPED = ("Stopped: Kelvin's answer, the ramp or run in progress (a run's safe-stop steps run) and the queue; open "
+           "approvals were declined.")
+
+
 SUMMARY_SYSTEM = ("You write the opening of a physics project's master report: two or three short paragraphs "
                   "saying what the project is about, what has been measured on which samples, what was found "
                   "(with the numbers given), and what comes next. Use only the facts given; never invent results "
@@ -260,6 +276,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     envs.cleanup()               # environments removed while their files were in use
     envs.attach(envs.DRIVERS)    # the built-in drivers import their makers' packages from there
     runtime.keep_hands(settings.hands_on())               # a hands-on lock stays on across restarts
+    runtime.owner = OwnerPin(home)                        # the lab owner's PIN, when one is set
     collection = Collection(home)                         # the instrument collection's copy: ~/Kelvin/collection
     collection.notify = lambda title, text: runtime.notifier("setup", title, text)   # an update failing is said
 
@@ -353,6 +370,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     tasks: List[asyncio.Task] = []
 
     def configure_literature() -> None:
+        runtime.idle_off_s = settings.idle_off_minutes * 60 or None     # light left on idle goes to safe after this
+        runtime.idle_off_all = settings.get("idle_off_all") == "on"     # and other outputs too, when chosen
         runtime.literature.enabled = settings.get("literature") != "off"
         runtime.literature.openalex_key = settings.get("openalex_api_key") or ""
         runtime.scan_network = settings.get("scan_network") != "off"   # scans also look on the local network
@@ -374,7 +393,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         configure_notifications()
         configure_literature()
         await start_phone()
-        runtime.monitor.start()
+        runtime.start_watching()   # the watches; what a restart left; outputs left on idle
         runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
         if updater is not None:   # look for a newer Kelvin soon after start, then twice a day
             tasks.append(asyncio.ensure_future(update_loop()))
@@ -395,12 +414,30 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             hub.stopping = True   # a sync in progress stops at its next file
             for t in tasks:
                 t.cancel()
-            runtime.monitor.stop()
+            runtime.stop_watching()
             await remote.stop()
             await agent.close()
 
     def error(status: int, message: str) -> JSONResponse:
         return JSONResponse({"error": message}, status_code=status)
+
+    def needs_owner(body: Any) -> Optional[JSONResponse]:
+        """403 (the portal then asks for it) unless no lab owner's PIN is set or the body has it ({pin})."""
+        why = runtime.owner.check(body.get("pin") if isinstance(body, dict) else None) if runtime.owner else None
+        return JSONResponse({"error": why, "pin": True}, status_code=403) if why else None
+
+    async def owner_pin(request: Request) -> Response:
+        """GET: whether the lab owner's PIN is set. POST {pin, old}: set it, change it, or remove it (pin empty);
+        once one is set, only with it (old). On this computer only (phones never reach this)."""
+        if request.method == "POST":
+            body = await request.json()
+            try:
+                runtime.owner.set(body.get("pin"), body.get("old"))
+            except ValueError as e:
+                return JSONResponse({"error": str(e), "pin": True}, status_code=403 if runtime.owner.is_set else 400)
+            runtime.gate.log.write("owner_pin", by=person(request), account=runtime.user,
+                                   change="set" if runtime.owner.is_set else "removed")
+        return JSONResponse({"set": runtime.owner.is_set})
 
     async def index(request: Request) -> Response:
         # version-stamp the assets so a browser never runs a stale copy after an update
@@ -1107,17 +1144,30 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if project:
             store.set_folder(project, path)
 
+    def chat_folder(raw: Any) -> str:
+        """A folder a person chose for a chat's runs and files, checked: not in Kelvin's own folder (the lab config,
+        settings, accounts, cards and everyone's chats, which a chat's file tools never reach: folderfiles.off_limits),
+        and Kelvin can write there."""
+        from .. import folderfiles
+        text = str(raw or "").strip()
+        given = Path(text).expanduser()
+        if text and given.is_absolute():
+            why = folderfiles.off_limits(given.resolve(), [home, store.root])
+            if why:
+                raise ValueError(why)
+        return str(writable_folder(text))
+
     async def new_chat_folder(body: Dict[str, Any], project: Optional[str]) -> Optional[str]:
         """The folder a new chat saves its runs in: the one the person picked (checked: a problem is theirs to
         see), else the suggested one if Kelvin can write there now (a drive that is away: the data folder)."""
         picked = str(body.get("folder") or "").strip()
         if picked:
-            return str(await asyncio.to_thread(writable_folder, picked))
+            return await asyncio.to_thread(chat_folder, picked)
         suggested = suggested_folder(project)
         if Path(suggested) == runtime.data_dir / "runs":
             return None
         try:
-            return str(await asyncio.to_thread(writable_folder, suggested))
+            return await asyncio.to_thread(chat_folder, suggested)
         except ValueError:
             return None
 
@@ -1167,7 +1217,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                                           "it finishes. Press Stop to end it.")
                     raw = str(body.get("folder") or "").strip()
                     if raw:
-                        data["folder"] = str(await asyncio.to_thread(writable_folder, raw))
+                        data["folder"] = await asyncio.to_thread(chat_folder, raw)
                         keep_folder(data["folder"], store.project_of(chat_id))
                     else:
                         data.pop("folder", None)
@@ -1251,6 +1301,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             fields = {k: body.get(k) for k in ("name", "material", "description", "retired")}
             if "protection" in body:
                 fields["protection"] = protection.normalize(body.get("protection"), runtime.lab)
+                was = next((d.get("protection") for d in store.devices(project_key(request))
+                            if d["id"] == request.path_params["device_id"]), None) or {}
+                if was and fields["protection"] != was:   # lifting or changing a protection: the owner's, when set
+                    refused = needs_owner(body)
+                    if refused:
+                        return refused
             d = store.update_device(project_key(request), request.path_params["device_id"], **fields)
             if "protection" not in body:
                 return JSONResponse(d)
@@ -1281,6 +1337,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         else:
             if role_of(request) == "watch":
                 return error(403, "This phone can lock, not unlock. Unlock on the Kelvin computer.")
+            refused = needs_owner(body)   # before anything changes: the sample mounted, the lock
+            if refused:
+                return refused
             if "device" in body and role_of(request) == "owner":
                 pid = body.get("project") or None
                 try:
@@ -1291,7 +1350,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                         await asyncio.to_thread(runtime.unmount, by)
                 except KeyError as e:
                     return error(404, e.args[0])
-            lines += await asyncio.to_thread(runtime.hands_off, by)
+            try:
+                lines += await asyncio.to_thread(runtime.hands_off, by, body.get("pin"))
+            except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
+                return JSONResponse({"error": str(e), "pin": True}, status_code=403)
         settings.set_hands_on(runtime.hands)
         return JSONResponse({"hands_on": runtime.hands, "lines": lines, "mounted": runtime.mounted_view()})
 
@@ -1341,6 +1403,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if request.method == "POST":
             body = await request.json()
             pid = body.get("project") or None
+            if (runtime.mounted or {}).get("protection"):   # taking out a protected device lifts its protection
+                refused = needs_owner(body)
+                if refused:
+                    return refused
             try:
                 if body.get("device"):
                     caps = (await asyncio.to_thread(runtime.mount, pid, store.find_device(pid, body["device"]),
@@ -1667,6 +1733,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def card_status(request: Request) -> Response:
         body = await request.json()
         card_id, status = str(body.get("id") or ""), str(body.get("status") or "")
+        if status != "draft":   # marked reviewed: its outputs stop asking each time, the owner's call when set
+            refused = needs_owner(body)
+            if refused:
+                return refused
         try:
             if card_id in builtin_ids():   # one of Kelvin's own: reviewed for this lab, kept with its content
                 card = runtime.lab.registry.get(card_id)
@@ -2014,6 +2084,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(409, problem)
         use = body.get("use")
         by = "human (portal)"
+        if use not in ("virtual", "mine"):   # a new lab config, or limits marked reviewed: the owner's, when set
+            refused = needs_owner(body)
+            if refused:
+                return refused
         if body.get("reviewed"):   # a person reviewed the limits of the instruments Kelvin added
             if not lab_file.exists():
                 return error(400, "There is no lab config to review.")
@@ -2042,7 +2116,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     return error(400, "There is no lab config yet; scan for instruments or write one first.")
                 registry = lab_registry(lab_file.parent, runtime.collection)   # Kelvin's, the collection's, the user's
                 load_lab_config(text, registry)   # check it before touching any instrument
-                lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off, True)
+                # opened before connecting: the switch closes the old lab's instruments first and keeps the ones
+                # that are unchanged (runtime.switch_lab), as a camera or a maker's SDK takes one connection
+                lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off, True, True)
                 envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
                 if use != "mine":
                     tmp = lab_file.with_suffix(".tmp")
@@ -2193,7 +2269,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             if not str(body.get("path") or "").strip():   # new chats start in the data folder again
                 keep_folder(None, project)
                 return JSONResponse({"folder": str(runtime.data_dir / "runs")})
-            path = str(await asyncio.to_thread(writable_folder, body.get("path")))
+            path = await asyncio.to_thread(chat_folder, body.get("path"))
         except KeyError as e:
             return error(404, e.args[0])
         except ValueError as e:
@@ -2375,6 +2451,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if runtime.lab_info.get("kind") != "file" or not lab_file.exists():
             return error(409, "Limits are set for your own lab (My instruments); the virtual lab's are fixed.")
         body = await request.json()   # any time, a run or a chat going on too: the gate checks each change against them
+        refused = needs_owner(body)
+        if refused:
+            return refused
         card = runtime.lab.instruments[name].card
         changes: Dict[str, Any] = {}
         for p, lim in (body.get("limits") or {}).items():
@@ -2445,12 +2524,26 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except ValueError as e:
             return error(400, str(e))
 
+    async def hard_stop(chat_id: str, request: Request) -> None:
+        """A typed STOP: this chat's answer and the lab's work, whoever started it, as the Stop for everything."""
+        agent.stop(chat_id)
+        await asyncio.to_thread(runtime.stop, person(request)[:-1] + ", typed STOP)")
+
     async def turn(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
         body = await request.json()
         text = str(body.get("text") or "").strip()
         if not text:
             return error(400, "Say something first.")
+        if typed_stop(text):   # the lab stops now; the model is not asked
+            try:
+                store.load(chat_id)   # only the signed-in person's chats
+            except KeyError as e:
+                return error(404, e.args[0])
+            await hard_stop(chat_id, request)
+            said = [{"type": "note", "text": STOPPED}, {"type": "turn_end", "reason": "stopped"}]
+            return Response("".join(json.dumps(e) + "\n" for e in said), media_type="application/x-ndjson",
+                            headers={"Cache-Control": "no-store"})
         model = str(body.get("model") or "")
         try:
             attached = agent.check_attachments(chat_id, body.get("attachments"))
@@ -2498,6 +2591,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, "Say something first.")
         if len(text) > 20000:
             return error(400, "That message is too long.")
+        if typed_stop(text):   # not for Kelvin's next step: now
+            await hard_stop(request.path_params["chat_id"], request)
+            return JSONResponse({"ok": True, "stopped": True, "message": STOPPED})
         if not agent.steer(request.path_params["chat_id"], text):
             return error(409, "Kelvin isn't working on this chat now: send it as a new message.")
         return JSONResponse({"ok": True})
@@ -2577,19 +2673,42 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return JSONResponse(opinion)
 
     async def stop(request: Request) -> Response:
-        """{chat_id}: stop that chat's answer (and the lab's work when it is that chat's); without one, every chat's."""
+        """{chat_id}: stop that chat's answer (and the lab's work when it is that chat's). Without one, the Stop for
+        everything: every chat's answer and the lab's work (its ramp or run, the queue, open approvals), also when no
+        chat is answering, as a queue runs by itself. {chat_id, lab: true}: that chat's answer and the lab's work (a
+        typed STOP)."""
         try:
             body = await request.json()
         except ValueError:
             body = {}
-        chat_id = body.get("chat_id") if isinstance(body, dict) else None
-        return JSONResponse({"ok": agent.stop(str(chat_id) if chat_id else None)})
+        body = body if isinstance(body, dict) else {}
+        chat_id = body.get("chat_id")
+        stopped = agent.stop(str(chat_id) if chat_id else None)
+        if not chat_id or body.get("lab"):
+            await asyncio.to_thread(runtime.stop, person(request))
+            stopped = True
+        return JSONResponse({"ok": stopped, "message": STOPPED if stopped and (not chat_id or body.get("lab")) else ""})
+
+    async def incident(request: Request) -> Response:
+        """The card Kelvin shows after a restart that left something behind (outputs on, runs or a queue cut short).
+        POST {action: "safe"}: the outputs still on go to safe; {action: "dismiss"}: the card goes."""
+        action = str((await request.json()).get("action") or "")
+        if action == "safe":
+            if role_of(request) == "watch":
+                return error(403, "This phone can watch, not act. Use the Kelvin computer, or Hands on the sample.")
+            lines = await asyncio.to_thread(runtime.incident_safe, person(request))
+            return JSONResponse({"ok": True, "lines": lines})
+        if action == "dismiss":
+            runtime.dismiss_incident(person(request))
+            return JSONResponse({"ok": True})
+        return error(400, "action is safe or dismiss")
 
     async def approval(request: Request) -> Response:
         body = await request.json()
         if body.get("approve") and role_of(request) == "watch":
             return error(403, "This phone can watch and decline, not approve. Approve on the Kelvin computer.")
-        ok = runtime.approver.answer(request.path_params["request_id"], bool(body.get("approve")))
+        ok = runtime.answer(request.path_params["request_id"], bool(body.get("approve")), person(request),
+                            *channel(request))
         return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
     async def state(request: Request) -> Response:
@@ -2618,8 +2737,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     async def approval_mode(request: Request) -> Response:
         """Ask before every drive increase, or auto-approve low-risk ones. People only: no agent tool reaches this."""
         if request.method == "POST":
+            body = await request.json()
             try:
-                return JSONResponse(runtime.set_approval_mode(str((await request.json()).get("mode")), "human (portal)"))
+                return JSONResponse(runtime.set_approval_mode(str(body.get("mode")), "human (portal)",
+                                                              pin=body.get("pin")))
+            except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
+                return JSONResponse({"error": str(e), "pin": True}, status_code=403)
             except ValueError as e:
                 return error(400, str(e))
         return JSONResponse(runtime.approval_mode())
@@ -2689,9 +2812,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except ValueError:
             body = {}
         if isinstance(body, dict) and body.get("queue"):   # the queue too: nothing else starts after this scan
-            runtime.stop("human (portal)")
+            runtime.stop(person(request))
             return JSONResponse({"ok": True})
-        return JSONResponse({"ok": runtime.stop_run()})
+        return JSONResponse({"ok": runtime.stop_run(person(request))})
 
     async def queue(request: Request) -> Response:
         """GET: the scan queue. POST {op, ...}: a person's change to it. start asks for the queue's approval as usual
@@ -2804,6 +2927,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/skills/export/{scope}/{name}", skill_export),
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
+        Route("/api/incident", incident, methods=["POST"]),
+        Route("/api/owner-pin", owner_pin, methods=["GET", "POST"]),
         Route("/api/state", state),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),
         Route("/api/lab", lab_view, methods=["GET", "POST"]),

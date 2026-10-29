@@ -71,8 +71,9 @@ def save_turns(path="kelvin_counter.py", content=TEXT):
             [{"type": "text", "text": "Saved it."}]]
 
 
-def chat_day(tmp_path, provider, folder, answers=(), library_here=False):
+def chat_day(tmp_path, provider, folder, answers=(), library_here=False, home=None):
     rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover(answers), tmp_path / "data")
+    rt.home = home   # Kelvin's own folder, as the app sets it
     if library_here:   # the counter's maker's code is loaded from this chat's folder
         rt.lab.config.instruments["smu"].address = "lib://Dev1/ctr0?env=nidaq&path=%s" % folder
     store = ChatStore(tmp_path / "chats")
@@ -151,3 +152,96 @@ def test_after_reading_a_file_a_person_answers_for_code_an_instrument_loads(tmp_
     assert result["is_error"] and result["content"].startswith("declined: nothing was saved")
     assert not (folder / "kelvin_counter.py").exists()
     assert [e["answer"] for e in events if e["type"] == "ask"] == ["declined"]
+
+
+# --- Kelvin's own folders (field tests: a chat folder at the Kelvin home let write_file replace lab.yaml) ------------
+
+def kelvin_home(tmp_path):
+    """A person's folder with Kelvin's own folder in it, as on a lab computer: C:/Users/me and C:/Users/me/Kelvin."""
+    me = tmp_path / "me"
+    home = me / "Kelvin"
+    for f, text in (("lab.yaml", "lab: mine\n"), ("settings.json", "{}"), ("accounts.json", "[]"),
+                    ("cards/acme.yaml", "id: acme\n"), ("users/bob/chats/c1.json", '{"title": "Bob chat"}')):
+        (home / f).parent.mkdir(parents=True, exist_ok=True)
+        (home / f).write_text(text, encoding="utf-8")
+    return me, home
+
+
+@pytest.mark.parametrize("path", ["Kelvin/lab.yaml", "Kelvin/settings.json", "Kelvin/accounts.json",
+                                  "Kelvin/cards/acme.yaml", "Kelvin/users/bob/chats/c1.json", "Kelvin/new.txt"])
+def test_kelvin_never_saves_or_reads_in_its_own_folder_through_a_chats_folder(tmp_path, path):
+    me, home = kelvin_home(tmp_path)
+    before = (me / path).read_bytes() if (me / path).exists() else None
+    with pytest.raises(FolderError, match="Kelvin's own folder"):
+        folderfiles.save(me, path, "lab: rewritten\n", own=[home])
+    assert ((me / path).read_bytes() if (me / path).exists() else None) == before
+    with pytest.raises(FolderError, match="Kelvin's own folder"):
+        folderfiles.read(me, path, own=[home])
+    with pytest.raises(FolderError, match="Kelvin's own folder"):
+        folderfiles.listing(me, "Kelvin/users", own=[home])
+    assert folderfiles.save(me, "notes.md", "fine\n", own=[home])[0] == (me / "notes.md").resolve()   # the rest works
+    assert "Kelvin/" in folderfiles.listing(me, "", own=[home])
+
+
+@pytest.mark.parametrize("path", ["events.jsonl", "mounted.json", "queue.json", "catalog.sqlite",
+                                  "runs/20261028-101010-sweep/run.h5", "elsewhere/run.h5"])
+def test_kelvin_never_rewrites_the_labs_records(tmp_path, path):
+    data = tmp_path / "Data"   # a chat's folder may be the data folder itself
+    with pytest.raises(FolderError, match="only Kelvin itself writes"):
+        folderfiles.save(data, path, "{}", data=data)
+    assert folderfiles.save(data, "analysis/fit.py", "x = 1\n", data=data)[1] is None
+
+
+def test_in_a_chat_write_file_refuses_the_lab_config_and_read_file_another_persons_chats(tmp_path):
+    me, home = kelvin_home(tmp_path)
+    rt, result, shown, events = chat_day(tmp_path, Scripted(save_turns("Kelvin/lab.yaml", "lab: wide open\n")), me,
+                                         home=home)
+    assert result["is_error"] and "Kelvin's own folder" in result["content"]
+    assert (home / "lab.yaml").read_text(encoding="utf-8") == "lab: mine\n"
+    assert not [e for e in events if e["type"] == "file_saved"]
+    turns = [[{"type": "tool_call", "id": "r1", "name": "read_file", "input": {"path": "Kelvin/users/bob/chats/c1.json"}}],
+             [{"type": "text", "text": "Read it."}]]
+    provider = Scripted(turns)
+    rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover([]), tmp_path / "data2")
+    rt.home = home
+    store = ChatStore(tmp_path / "chats2")
+    agent = ChatAgent(rt, store, build_server(rt), {"scripted": provider})
+    chat = store.create("scripted:m1")
+    chat["folder"] = str(me)
+    store.save(chat)
+
+    async def day():
+        await agent.start()
+        try:
+            agent.claim(chat["id"], "scripted:m1")
+
+            async def emit(e):
+                pass
+            await agent.run_turn(chat["id"], "read bob's chat", "scripted:m1", provider, emit)
+        finally:
+            await agent.close()
+    asyncio.run(day())
+    [read] = [r for m in store.load(chat["id"])["messages"] if m["role"] == "tool" for r in m["results"]]
+    assert read["is_error"] and "Kelvin's own folder" in read["content"] and "Bob chat" not in read["content"]
+
+
+def test_a_chat_folder_in_kelvins_own_folder_is_refused_when_chosen(tmp_path):
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+    from labharness.web.app import create_app
+    from labharness.web.settings import Settings
+    home = tmp_path / "Kelvin"   # the app's folder: next to its settings
+    settings = Settings(home / "settings.json")
+    store = ChatStore(home / "users" / "me" / "chats")
+    rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover([]), tmp_path / "data")
+    client = TestClient(create_app(rt, settings, store, hosts=["testserver"], providers={"scripted": Scripted([])}))
+    h = {"X-Kelvin-Token": settings.access_key}
+    with client:
+        for folder in (home, home / "users" / "bob" / "chats", home / "cards"):
+            r = client.post("/api/chats", json={"model": "scripted:m1", "folder": str(folder)}, headers=h)
+            assert r.status_code == 400 and "Kelvin's own folder" in r.json()["error"]
+            assert client.post("/api/folder", json={"path": str(folder)}, headers=h).status_code == 400
+        chat = client.post("/api/chats", json={"model": "scripted:m1", "folder": str(tmp_path / "work")}, headers=h)
+        assert chat.status_code == 200 and chat.json()["own_folder"]
+        r = client.patch("/api/chats/%s" % chat.json()["id"], json={"folder": str(home / "users" / "bob")}, headers=h)
+        assert r.status_code == 400 and "Kelvin's own folder" in r.json()["error"]

@@ -88,11 +88,17 @@ def test_a_failure_pauses_the_queue_and_leaves_the_rest_waiting(tmp_path):
     assert first.status == "failed" and second.status == "failed"   # FIELD needs an approval nobody gave
 
 
-def test_the_queue_refuses_to_start_when_its_dry_run_fails(tmp_path):
-    rt = runtime(tmp_path, [])
+def test_a_queue_rehearsal_says_what_would_fail_and_never_starts_the_queue(tmp_path):
+    rt = runtime(tmp_path, [])                                  # nobody answers: asking would be an error
     rt.queue.add(SWEEP.replace("plan: gate_sweep", "plan: cold_only\npreconditions: [\"magnet.B > 5\"]"))
-    out = rt.queue_start(dry_run=True)                          # a dry run, because asked for
-    assert out.startswith("the queue did not start") and "precondition" in out and rt.queue.state == "idle"
+    out = rt.queue_start(dry_run=True)                          # a rehearsal, because asked for
+    assert out.startswith("REHEARSAL ONLY") and "would fail" in out and "precondition" in out
+    assert rt.queue.state == "idle" and [i.status for i in rt.queue.items] == ["waiting"]
+    rt.queue.items.clear()
+    rt.queue.add(SWEEP)
+    out = rt.queue_start(dry_run=True)                          # one that would pass: still only a rehearsal
+    assert out.startswith("REHEARSAL ONLY") and "would take ~" in out and rt.queue.state == "idle"
+    assert rt.gate.approver.requests == [] and rt._queue_thread is None
 
 
 def test_stop_pauses_and_chat_tools_answer_while_a_scan_runs(tmp_path):

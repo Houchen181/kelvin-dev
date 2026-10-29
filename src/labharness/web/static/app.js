@@ -92,11 +92,55 @@
       let msg = "HTTP " + res.status, data = null;
       try { data = await res.json(); msg = data.error || msg; } catch (e) { /* not JSON */ }
       if (res.status === 401 && data && data.signin) setTimeout(() => location.reload(), 300);   // signed out elsewhere
+      if (res.status === 403 && data && data.pin && opts.body && !opts.noPin) {   // the lab owner's PIN: ask, try again
+        const pin = await askPin(msg);
+        if (pin) return api(path, Object.assign({}, opts, { body: Object.assign({}, opts.body, { pin }) }));
+      }
       const err = new Error(msg);
       err.data = data;
       throw err;
     }
     return res.json();
+  }
+  // the lab owner's PIN (accounts.py OwnerPin), for what widens Kelvin's reach: limits, the lab config, auto mode,
+  // unlocking Hands on the sample. "" when the person cancels.
+  function askPin(why, label) {
+    return new Promise((resolve) => {
+      const input = h("input", { type: "password", inputmode: "numeric", autocomplete: "off", maxlength: "12",
+                                 "aria-label": label || "Lab owner's PIN" });
+      const cancel = h("button", { class: "btn", type: "button" }, "Cancel");
+      const form = h("form", { class: "pin-form" }, h("p", {}, why), input,
+        h("div", { class: "pin-actions" }, cancel, h("button", { class: "btn primary", type: "submit" }, "OK")));
+      const dlg = h("dialog", { class: "pin-dialog" }, form);
+      document.body.append(dlg);
+      const done = (v) => { if (dlg.open) dlg.close(); dlg.remove(); resolve(v); };
+      form.addEventListener("submit", (e) => { e.preventDefault(); done(input.value.trim()); });
+      cancel.addEventListener("click", () => done(""));
+      dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(""); });
+      dlg.showModal();
+      input.focus();
+    });
+  }
+  async function ownerPinState() {
+    try {
+      const r = await api("/api/owner-pin");
+      $("owner-pin-state").textContent = r.set
+        ? "Set: changing limits or the lab config, turning on auto mode and unlocking Hands on the sample ask for it."
+        : "Not set: anyone at this computer can change limits, turn on auto mode and unlock Hands on the sample.";
+      $("owner-pin-set").textContent = r.set ? "Change…" : "Set a PIN…";
+      $("owner-pin-remove").hidden = !r.set;
+      return r.set;
+    } catch (e) { $("owner-pin-state").textContent = e.message; return false; }
+  }
+  async function ownerPinChange(remove) {
+    const isSet = await ownerPinState();
+    const old = isSet ? await askPin("The lab owner's PIN now:") : "";
+    if (isSet && !old) return;
+    const pin = remove ? "" : await askPin("A new PIN for the lab's owner, 4 to 12 digits:", "New PIN");
+    if (!remove && !pin) return;
+    try { await api("/api/owner-pin", { body: { pin, old }, noPin: true }); toast(remove ? "PIN removed." : "PIN set."); }
+    catch (e) { toast(e.message); }
+    ownerPinState();
   }
 
   // ------------------------------------------------------------------ who is using Kelvin (accounts)
@@ -853,9 +897,9 @@
     const v = {};
     v.state = h("span", { class: "state" });
     v.stop = h("button", { class: "btn small", type: "button" }, "Stop run");
-    v.stop.addEventListener("click", async () => {
-      if (!confirm("Stop this run? The drives it touched go back to safe (or its on_abort steps run).")) return;
-      try { await api("/api/runs/stop", { body: {} }); } catch (e) { toast(e.message); }
+    v.stop.addEventListener("click", async () => {   // at once: a stop never waits behind a dialog
+      try { await api("/api/runs/stop", { body: {} }); toast("Stopping the run: its safe-stop steps run now."); }
+      catch (e) { toast(e.message); }
     });
     v.count = h("span", { class: "rv-count" });
     v.bar = h("i");
@@ -1257,8 +1301,7 @@
     $("hands-text").textContent = "Locked" + (at ? " at " + at : "") + (who && who !== "portal" ? " from " + who : "")
       + ". Everything that reaches the sample stays at safe until you unlock; Kelvin can still read and measure.";
   }
-  async function handsOn() {
-    if (PROT.busy && !confirm("Kelvin is " + PROT.busy + ". Stop it and bring everything that reaches the sample to safe?")) return;
+  async function handsOn() {   // at once, also while Kelvin works: it stops that work (no dialog on the stop path)
     $("hands-on").disabled = true;
     try {
       const r = await api("/api/hands", { body: { on: true } });
@@ -1553,13 +1596,16 @@
     title.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); flip(); } });
   }
 
+  // where a request acts (runtime.where): a request on the simulator once looked just like one on the instruments
+  const whereTag = (where) => where ? h("span", { class: "where " + (where === "SIMULATOR" ? "sim" : "real"),
+    title: where === "SIMULATOR" ? "Only simulated instruments: nothing real moves" : "Real instruments" }, where) : null;
   function makeApproval(ev) {
     const verdict = h("span", { class: "verdict" });
     const count = h("span", { class: "muted small" });
     const yes = h("button", { class: "btn primary", type: "button" }, "Approve");
     const no = h("button", { class: "btn", type: "button" }, "Decline");
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
-    const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title));
+    const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title), whereTag(ev.where));
     const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title,
       h("ul", {}, ...ev.items.map(approvalItem)), actions);
     let left = ev.seconds_left;
@@ -2628,8 +2674,17 @@
     } catch (e) { toast(e.message); return null; }
   }
 
+  // a message that only says stop (web/agent.py typed_stop): Kelvin's answer and the lab's work stop now
+  const TYPED_STOP = /^\s*\/?(?:stop|abort|halt)(?:\s+(?:it|now|everything|all|stop|abort))*\s*[.!]*\s*$/i;
+  async function hardStop() {
+    $("input").value = ""; autosize(); updateSend();
+    try { const r = await api("/api/stop", { body: { chat_id: S.chatId, lab: true } }); toast(r.message || "Stopped."); }
+    catch (e) { toast(e.message); }
+    pollState();
+  }
   async function sendMessage(text) {
     text = text.trim();
+    if (TYPED_STOP.test(text)) return hardStop();
     if (S.streaming) return steerMessage(text);   // attachments wait for the next message
     if (!text && ATT.items.length) text = ATT.items.length > 1 ? "Look at the attached files." : "Look at the attached file.";
     if (!text) return;
@@ -3422,7 +3477,7 @@
     badge.hidden = !s.pending.length;
     if (fresh && !S.labOpen) toggleLab(true);
     showMode(s.approval_mode, s.approval_rule);
-    renderAlerts(s.alarms);
+    renderAlerts(s.alarms, s.incident);
     renderWatches(s.watches || [], s.status);
     notifySystem(s.notices);
     $("lab-name").textContent = s.lab;
@@ -3464,17 +3519,34 @@
     PROT.busy = s.busy;
   }
   // ------------------------------------------------------------------ alarms, watches, notifications
-  function renderAlerts(alarms) {
+  function incidentCard(i) {   // what the last stop left behind: outputs on, runs or a queue cut short (runtime.py)
+    const act = (label, action, primary) => {
+      const b = h("button", { class: "btn small" + (primary ? " primary" : ""), type: "button" }, label);
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try { const r = await api("/api/incident", { body: { action } }); if (r.lines) toast(r.lines.join("; ")); }
+        catch (e) { toast(e.message); }
+        pollState();
+      });
+      return b;
+    };
+    const on = i.outputs.length && !i.safe.length;
+    return h("div", { class: "alert incident" }, icon("warn"), h("div", { class: "alert-body" },
+      h("b", {}, "Kelvin restarted" + (i.at ? " at " + String(i.at).slice(11, 16) : "") + ". Check the lab before you go on:"),
+      ...i.lines.map((l) => h("span", {}, l))),
+      on ? act("Bring the outputs to safe", "safe", true) : null, act("Dismiss", "dismiss", false));
+  }
+  function renderAlerts(alarms, incident) {
     const live = (alarms || []).filter((a) => !a.cleared && !a.acknowledged);
     const box = $("alerts");
-    box.hidden = !live.length;
-    box.replaceChildren(...live.map((a) => {
+    box.hidden = !live.length && !incident;
+    box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...live.map((a) => {
       const ok = h("button", { class: "btn small", type: "button" }, "Got it");
       ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
       return h("div", { class: "alert" }, icon("warn"), h("div", { class: "alert-body" }, h("b", {}, a.text),
         a.actions.length ? h("span", {}, "Kelvin " + a.actions.join("; ")) : null), ok);
     }));
-    document.title = (live.length ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
+    document.title = (live.length || incident ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
   }
   function notifySystem(notices) {
     if (!notices || !notices.length) return;
@@ -4477,7 +4549,7 @@
     "  /describe [name]     parameters, units, limits and safe values",
     "  /manual <words>      search the instrument's manual",
     "  /new                 start a new conversation with Kelvin",
-    "  /stop                stop Kelvin's answer and any run",
+    "  /stop                stop Kelvin's answer, any ramp or run, and the queue",
     "  /clear               clear the screen (Ctrl+L)",
     "",
     "Up/Down: history  ·  Tab: complete  ·  Esc: stop Kelvin's answer  ·  Ctrl+`: show or hide the terminal",
@@ -4691,7 +4763,7 @@
       }
       case "/new": TERM.chatId = null; termLine("your next message starts a new conversation with Kelvin", "dim"); return;
       case "/stop":
-        try { await api("/api/stop", { body: { chat_id: TERM.chatId } }); await api("/api/runs/stop", { body: {} }); termLine("stopped", "dim"); }
+        try { const r = await api("/api/stop", { body: { chat_id: TERM.chatId, lab: true } }); termLine(r.message || "stopped", "dim"); }
         catch (e) { termLine(e.message, "err"); }
         return;
       default:
@@ -4962,6 +5034,12 @@
     $("collection").checked = !S.settings || S.settings.collection !== false;
     loadCollection();
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
+    ownerPinState();
+    const idle = S.settings && S.settings.idle_off !== undefined ? S.settings.idle_off : 60, idleSel = $("idle-off");
+    const idleValue = idle ? String(idle) : "off";
+    if (![...idleSel.options].some((o) => o.value === idleValue)) idleSel.append(h("option", { value: idleValue }, "After " + idle + " minutes"));
+    idleSel.value = idleValue;
+    $("idle-off-all").checked = !!(S.settings && S.settings.idle_off_all);
     $("ask-folder").checked = !S.settings || S.settings.ask_folder !== false;
     $("data-choose").hidden = !hasPicker();
     const reportKinds = (S.settings && S.settings.report_kinds) || ["scan", "device", "project"];
@@ -5176,6 +5254,8 @@
     body.manuals = $("manuals").checked ? "on" : "off";
     body.collection = $("collection").checked ? "on" : "off";
     body.auto_report = $("auto-report").value;
+    body.idle_off = $("idle-off").value;
+    body.idle_off_all = $("idle-off-all").checked ? "on" : "off";
     body.ask_folder = $("ask-folder").checked ? "on" : "off";
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
@@ -5319,6 +5399,8 @@
     showEmpty(true);
     loadNewFolder();
 
+    $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
+    $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));
     $("composer").addEventListener("submit", (e) => {
       e.preventDefault();
       if (S.streaming && !$("input").value.trim()) api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {});

@@ -338,10 +338,9 @@ class AutoSetup:
         tmp.write_text(text, encoding="utf-8")
         tmp.replace(self.lab_file)
         self.settings.update({"lab": "mine"})
-        if not self.can_switch():
-            self._set("done", found=len(matched), message="Found %s and wrote lab.yaml; it opens when Kelvin is idle "
-                      "(or press Use my lab in Lab setup)" % names)
-            return False
+        if not self.can_switch():   # Kelvin is answering: the switch waits for the answer to end (switch_lab idle)
+            self._set("connecting", message="Found %s; Kelvin switches to them when it is next idle" % names,
+                      found=len(matched))
         try:
             lab = build_lab(self.lab_file, None, 0, registry, getattr(self.settings, "switched_off", None))
         except Exception as e:
@@ -349,8 +348,8 @@ class AutoSetup:
                       % (names, profiles._first_line(e)))
             return False
         info = {"kind": "file", "path": str(self.lab_file), "error": None, "has_file": True, "auto": True}
-        try:
-            rt.switch_lab(lab, None, info, "Kelvin auto-setup")
+        try:   # never under an answer in progress: it once ran a whole turn on the virtual lab meanwhile
+            rt.switch_lab(lab, None, info, "Kelvin auto-setup", idle=self.can_switch)
         except RuntimeError as e:
             lab.close()
             self._set("done", found=len(matched), message="Found %s; %s" % (names, e))

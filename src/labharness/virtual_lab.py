@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .cards import Card, CardRegistry, load_card
 from .clock import RealClock, ScaledClock, SimClock
 from .lab import Lab, SwitchedOff
-from .labconfig import Envelope, LabConfig, load_envelope, load_lab_config
+from .labconfig import ConfigError, Envelope, LabConfig, load_envelope, load_lab_config, read_yaml
 from .sim.twin import World, sim_backend_factory
 
 DATA = Path(__file__).parent / "data"
+SET_ASIDE = ("set aside: its entry in lab.yaml has a problem (%s). Kelvin sends it nothing until the entry is fixed "
+             "(Lab, Set up…, then Save and connect); the rest of the lab works")
 INSTALLED = ".kelvin-instruments.json"   # the cards `kic install` (the collection's own tool) copied, by SHA-256
 
 
@@ -143,9 +146,11 @@ def is_simulated(config: LabConfig) -> bool:
 
 
 def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[CardRegistry] = None,
-              switched_off: Optional[SwitchedOff] = None, partial: bool = False, later: bool = False) -> Lab:
+              switched_off: Optional[SwitchedOff] = None, partial: bool = False, later: bool = False,
+              set_aside: Optional[Dict[str, str]] = None) -> Lab:
     """A lab from a lab config whose instruments may be real (VISA/serial addresses) or simulated (sim://).
-    switched_off: the instruments a person switched off in the Lab panel, never connected.
+    switched_off: the instruments a person switched off in the Lab panel, never connected. set_aside: instruments
+    whose entry has a problem, with what (set_aside_problems): in the lab, never connected, so nothing reaches them.
 
     With any real instrument the lab runs on real time: ramps and settling are timed by the clock, so a sped-up
     simulation clock would ramp real hardware too fast. Asking for one is refused."""
@@ -162,6 +167,8 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
     opened = []
 
     def factory(name: str, card: Any, address: str) -> Any:
+        if set_aside and name in set_aside:   # also when reconnected: only a fixed entry and a new lab connect it
+            raise RuntimeError(SET_ASIDE % set_aside[name])
         if address.startswith("sim://"):
             return sim(name, card, address)
         from .adapters import open_backend
@@ -170,11 +177,45 @@ def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[
         return backend
 
     try:
-        return Lab(cfg, registry, factory, clock, world, switched_off, partial, later)
+        lab = Lab(cfg, registry, factory, clock, world, switched_off, partial or bool(set_aside), later)
     except Exception:
         for backend in opened:  # one instrument failed: let go of the ones already opened
             backend.close()
         raise
+    from .instrument import Unavailable
+    for name, why in (set_aside or {}).items():   # said at once, not "connecting"
+        if name in lab.instruments and lab.instruments[name].enabled is False and lab.instruments[name].unavailable:
+            lab.instruments[name].backend = Unavailable(name, SET_ASIDE % why)
+    return lab
+
+
+def set_aside_problems(source: Any, registry: CardRegistry, error: ConfigError) -> Optional[Tuple[Dict[str, Any],
+                                                                                                   Dict[str, str]]]:
+    """A lab config whose only problems are in instruments' own entries (a limit beyond what a changed card now
+    allows, a rate, a guard, an auto rule, a connection setting): the config with each such instrument reduced to its
+    card and address, and what is wrong with each. They join the lab never connected (build_lab set_aside), and the
+    rest of the lab works: one stale limit once sent the whole lab to the virtual lab, saying so only in the log. None
+    when a problem is anywhere else (an unknown card, the interlocks, the watches), as then no lab can be trusted."""
+    try:
+        data, _ = read_yaml(source)
+    except Exception:
+        return None
+    instruments = data.get("instruments") if isinstance(data, dict) else None
+    if not isinstance(instruments, dict):
+        return None
+    why: Dict[str, List[str]] = {}
+    for err in error.errors:
+        m = re.match(r"instruments\.(\w+)\.(limits|rates|auto|guards|connection|vars|trust|added_by)\b", err)
+        if not m or not isinstance(instruments.get(m.group(1)), dict):
+            return None
+        why.setdefault(m.group(1), []).append(err.split(".", 2)[-1])
+    data = dict(data, instruments={name: ({k: v for k, v in d.items() if k in ("card", "address")} if name in why else d)
+                                   for name, d in instruments.items()})
+    try:
+        load_lab_config(data, registry)
+    except ConfigError:
+        return None
+    return data, {name: "; ".join(w) for name, w in why.items()}
 
 
 def demo_envelope(lab: Lab) -> Envelope:
@@ -193,10 +234,20 @@ def open_home_lab(home: Any, choice: str = "auto", speed: float = 10, switched_o
     registry = lab_registry(home, collection)
     if choice != "virtual" and path.exists():
         try:   # an instrument that can't be connected is set aside, with why, and the rest of the lab used
+            config: Any = path
+            aside: Dict[str, str] = {}
+            try:
+                load_lab_config(path, registry)
+            except ConfigError as e:   # a problem in one instrument's entry sets that one aside, not the whole lab
+                found = set_aside_problems(path, registry, e)
+                if found is None:
+                    raise
+                config, aside = found
+                info["set_aside"] = aside
             if not connect:
-                lab = build_lab(path, registry=registry, switched_off=switched_off, later=True)
+                lab = build_lab(config, registry=registry, switched_off=switched_off, later=True, set_aside=aside)
                 return lab, None, dict(info, kind="file")
-            lab = build_lab(path, registry=registry, switched_off=switched_off, partial=True)
+            lab = build_lab(config, registry=registry, switched_off=switched_off, partial=True, set_aside=aside)
             tried = [n for n in lab.instruments if n not in lab.switched_off]
             if tried and len(lab.unavailable) == len(tried):   # none of them: say why, on the virtual lab
                 why = lab.unavailable[tried[0]]
