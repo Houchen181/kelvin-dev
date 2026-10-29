@@ -131,6 +131,8 @@ REVIEW_S = 300            # a second opinion with its lookups
 MAX_ATTACHED_CHARS = 60000   # of an attached PDF's text, in the message
 MAX_SHOWN_CODE = 60000       # of a file shown to the person before it is saved where an instrument loads code
 PICTURE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+# data files a person attaches, each made a run as it is attached (imports.py)
+DATA_KINDS = "CSV, TSV, text and Excel tables, NumPy arrays, TIFF images, BioLogic, Gamry and Arbin files"
 WAIT_S = 120   # the longest wait inside a turn: a wait holds the lab, so longer waits use wake_me
 STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the stop button
 STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
@@ -934,7 +936,7 @@ class ChatAgent:
                        wake: str = "", attachments: Optional[List[Dict[str, Any]]] = None) -> None:
         """Call claim() first. Always releases the claim. wake: Kelvin continuing the chat itself (wakeups.py), in
         words for the person (text is for the model).
-        attachments: pictures and PDFs the person attached, as attach() kept them."""
+        attachments: pictures, PDFs and data files the person attached, as attach() kept them."""
         model_id = model_key.partition(":")[2]
         turn = self.turns.setdefault(chat_id, _Turn({"chat_id": chat_id, "model": model_key}))   # claim() made it
         held = _TURN.set(turn)   # this task's turn, and the tasks it starts
@@ -1949,12 +1951,16 @@ class ChatAgent:
         return out
 
     def attach(self, chat_id: str, name: str, data: bytes) -> Dict[str, Any]:
-        """A picture or PDF the person attached, kept with the chat for their next message: {name, file, mime} and,
-        for a PDF, its text (file) and pages. ValueError: not a kind Kelvin takes, or a PDF without text."""
+        """A picture, PDF or data file the person attached, kept with the chat for their next message: {name, file,
+        mime} and, for a PDF, its text (file) and pages; a data file becomes a run as it is attached (_attach_data).
+        ValueError: not a kind Kelvin takes, a PDF without text, or a data file Kelvin can't read (saying why)."""
+        from .. import imports
         kind = _kind_of(data)
-        if kind is None:
-            raise ValueError("Kelvin takes pictures (PNG, JPEG, GIF, WebP) and PDFs.")
         name = re.sub(r"[\x00-\x1f/\\]+", "_", str(name or "attachment"))[-120:]
+        if kind is None and imports.takes(name, data):
+            return self._attach_data(chat_id, name, data)
+        if kind is None:
+            raise ValueError("Kelvin takes pictures (PNG, JPEG, GIF, WebP), PDFs and data files (%s)." % DATA_KINDS)
         out: Dict[str, Any] = {"name": name, "file": self.store.put_media(chat_id, data, kind), "mime":
                                {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "gif": "image/gif",
                                 "webp": "image/webp"}[kind]}
@@ -1972,6 +1978,27 @@ class ChatAgent:
             out.update(text=self.store.put_media(chat_id, text.encode("utf-8"), "txt"), pages=len(pages))
         return out
 
+    def _attach_data(self, chat_id: str, name: str, data: bytes) -> Dict[str, Any]:
+        """A data file the person attached (a table, a maker's file, a NumPy array, a TIFF), made a run as it is
+        attached (imports.py), filed under this chat as its runs are, and beside whatever works the lab. The file is
+        kept with the chat; what Kelvin says of the run (names and numbers only) goes to the model with the message
+        (summary). ValueError: Kelvin can't read it, saying why."""
+        import tempfile
+        from .. import imports
+        chat = self.store.load(chat_id)
+        with tempfile.TemporaryDirectory(prefix="kelvin-attached-") as folder:
+            path = Path(folder) / (re.sub(r'[<>:"|?*]+', "_", name).strip(" .") or "data")
+            path.write_bytes(data)
+            try:
+                made = self.runtime.import_attached(path, name, self._attribution(chat))
+            except imports.DataError as e:
+                raise ValueError("Not imported: %s" % e)
+            except OSError as e:
+                raise ValueError("Not imported: %s" % (e.strerror or e))
+        return {"name": name, "file": self.store.put_media(chat_id, data, "dat"), "mime": "application/octet-stream",
+                "summary": self.store.put_media(chat_id, made["text"].encode("utf-8"), "txt"), "run": made["run"],
+                "points": made["points"], "frames": made["frames"]}
+
     def check_attachments(self, chat_id: str, items: Any) -> List[Dict[str, Any]]:
         """The attachments a message names, as attach() kept them (only files kept with this chat)."""
         out = []
@@ -1987,6 +2014,16 @@ class ChatAgent:
                     raise KeyError("no text for %s" % one["name"])
                 self.store.media(chat_id, str(a["text"]))
                 one.update(text=str(a["text"]), pages=int(a.get("pages") or 0))
+            elif ext == "dat":   # a data file, a run since it was attached: Kelvin's words for it go to the model
+                if not a.get("summary"):
+                    raise KeyError("no summary for %s" % one["name"])
+                self.store.media(chat_id, str(a["summary"]))
+                try:
+                    points = int(a.get("points") or 0)
+                except (TypeError, ValueError):
+                    points = 0
+                one.update(mime="application/octet-stream", summary=str(a["summary"]), run=str(a.get("run") or "")[:80],
+                           points=points, frames=bool(a.get("frames")))
             out.append(one)
         return out
 
@@ -2035,6 +2072,15 @@ class ChatAgent:
                 m = dict(m)
                 pictures, texts, documents = [], [], []
                 for a in m["attachments"]:
+                    if a.get("summary"):   # a data file, a run since it was attached: Kelvin's own words for it
+                        try:
+                            said = self.store.media(chat["id"], a["summary"]).decode("utf-8", "replace")
+                        except KeyError:
+                            continue
+                        if said.startswith("imported "):   # only what the import said, never another file's text
+                            texts.append("(%s: a data file the person attached, imported as they attached it)\n%s"
+                                         % (a["name"], said))
+                        continue
                     doc = self._document(chat["id"], a) if a.get("text") and whole > 0 and \
                         0 < int(a.get("pages") or 0) <= MAX_PDF_PAGES else None
                     if doc:   # the PDF itself, figures and all, for a model that reads PDFs
