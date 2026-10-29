@@ -3548,6 +3548,11 @@ class LabRuntime:
                 self.catalog.add(self._run_dir(run_id))
             except Exception:
                 pass   # the catalog catches up at its next look at the run folders
+            try:   # data.csv (and each trace's CSV) in the run's folder, always, as Settings says
+                from ..export import write_csv
+                write_csv(self._run_dir(run_id))
+            except Exception as e:
+                self.gate.log.write("export_failed", by="kelvin (automatic)", run=run_id, error=str(e)[:300])
         if not run_id or self.auto_report == "off":
             return []
         out: List[str] = []

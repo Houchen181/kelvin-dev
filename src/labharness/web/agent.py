@@ -251,6 +251,10 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
 # what never works the lab: everything else runs one call at a time across chats, filed under its own chat
 OFF_LAB = LOOKUPS | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe", "save_paper", "make_report",
                      "write_file"}
+# the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
+ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
+LOOKUPS |= ANALYSIS
+OFF_LAB |= ANALYSIS
 MAX_TURNS = 4      # chats answering at once
 LAB_WAIT_S = 10.0  # how long a chat's lab call waits while another chat works the lab, before it says so
 

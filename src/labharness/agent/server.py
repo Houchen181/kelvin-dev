@@ -11,14 +11,14 @@ import json
 import sys
 import webbrowser
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
 
 import anyio
 import anyio.to_thread
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
 
-from .. import carddraft, expr, guide
+from .. import carddraft, datatools, expr, fitting, guide
 from .._version import __version__
 from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
 from ..clock import ScaledClock, SimClock
@@ -144,8 +144,9 @@ You are connected to a physics lab through Kelvin.
     an alarm.
   - When a command or a run fails or is refused, don't try variations to get past it. Say what happened and what you
     suggest, and let the person decide.
-  - Don't write code, scripts or tests, or re-analyse data in code, unless the person asks: use run_plan's analysis,
-    analyze and compute.
+  - Analyse with Kelvin's tools, never by hand or with a script for the person to run: compute (numbers, derived
+    columns), fit_run (fits, kept with the run), plot_runs (figures), export_run (files); run_python only for what
+    these can't do. Don't write test scripts, or redo an analysis to check it.
   - Plan the whole measurement, run it, report. A coarse scan before a fine one is good practice when it saves time;
     the physics decides how many measurements there are, not a habit of testing.
 - Reply to the user briefly: the result first, then the next step."""
@@ -646,6 +647,81 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Re-analyse a recorded run. column: one measured instr.param; model: linear, lorentzian,
         gaussian or exponential to force that fit (default: chosen automatically)."""
         return rt.analyze(run_id, column, model)
+
+    # ---- analysis on kept runs (datatools.py): they read runs and write only their own results, never an instrument
+    @server.tool(annotations=ACT, structured_output=False, description=(
+        "Fit a model to a run's data: its parameters with errors, chi-squared, what to watch, and a picture of the "
+        "fit with its residuals; kept with the run (run.h5: /fits/<name>, with the covariance and residuals). "
+        "model: one of Kelvin's (%s) or your own expression in x, e.g. 'a*exp(-x/tau) + c' (its other names are "
+        "parameters; the run's columns may appear too). x, y: columns or expressions of them (default: the "
+        "innermost swept axis and the first reading); a trace column fits one point's trace (row, default the "
+        "last). where: a condition on the points; x_range: [low, high]; sigma: each point's error (a column, an "
+        "expression or one number), which weights the fit; start: starting values; fix: values held; bounds: "
+        "{name: [low, high]}. phase: the phase column or trace for resonator (y: its magnitude, dB or linear). "
+        "x_values and y_values: numbers you give instead of a run's (Hc2 against T from several runs). A resonance "
+        "recorded in dB is fitted on linear power. name: what to keep it as; keep: false only looks."
+        % ", ".join(fitting.MODELS)))
+    def fit_run(model: str, run_id: str = "last", x: str = "", y: str = "", where: str = "",
+                sigma: Optional[Union[float, str]] = None, start: Optional[Dict[str, float]] = None,
+                fix: Optional[Dict[str, float]] = None, bounds: Optional[Dict[str, List[Optional[float]]]] = None,
+                x_range: Optional[List[Optional[float]]] = None, row: Optional[int] = None, phase: str = "",
+                name: str = "", keep: bool = True, x_values: Optional[List[float]] = None,
+                y_values: Optional[List[float]] = None, x_unit: str = "", y_unit: str = "") -> List[Any]:
+        try:
+            png, text = datatools.fit_run(rt, run_id, model, x, y, where, sigma, start, fix, bounds, x_range, row,
+                                          phase, name, keep, x_values, y_values, x_unit, y_unit)
+        except datatools.ToolError as e:
+            return ["not fitted: %s" % e]
+        return [Image(data=png, format="png"), text] if png else [text]
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def plot_runs(curves: Optional[List[Dict[str, Any]]] = None, title: str = "", x_label: str = "",
+                  y_label: str = "", x_unit: str = "", y_unit: str = "", x_log: bool = False, y_log: bool = False,
+                  x_range: Optional[List[Optional[float]]] = None, y_range: Optional[List[Optional[float]]] = None,
+                  heat_map: Optional[Dict[str, Any]] = None, formats: Optional[List[str]] = None,
+                  name: str = "") -> List[Any]:
+        """Draw a figure from runs, as asked, and save it (PNG; SVG and PDF too with formats): the picture comes
+        back with a caption of its numbers. curves: [{run ('last' or an id), x, y (columns or expressions of them,
+        e.g. 'lockin.X / 1e-6'), unit (the y values' unit: an expression's own, or a prefixed form of a column's,
+        e.g. mV), where, label, group ('outer' or a column: one curve per value), errors (a column or expression
+        for error bars), row (a trace's point), fit (a kept fit's name, drawn dashed), style (line, points,
+        both)}]. Several curves overlay; x_unit converts x (V to mV); x_log, y_log: log axes; x_range, y_range:
+        [low, high]. heat_map: {run, x, y, z, where, unit, log}: a value over two swept axes as color."""
+        try:
+            png, text = datatools.plot_runs(rt, curves, title, x_label, y_label, x_unit, y_unit, x_log, y_log,
+                                            x_range, y_range, heat_map, formats, name)
+        except datatools.ToolError as e:
+            return ["not drawn: %s" % e]
+        return [Image(data=png, format="png"), text] if png else [text]
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def export_run(run_id: str = "last", format: str = "csv") -> str:   # noqa: A002 - the tool's own word
+        """Write a run's data as files other programs open, by code (every digit kept): csv (data.csv with every
+        point, and one CSV per trace), xlsx (Excel: the points, each trace and the run on sheets) or npz (NumPy:
+        every column, trace and camera frame as arrays). They go in the run's folder; the person can also download
+        them from the run's tab in the Runs pane. Say where they went; never copy data out through the chat."""
+        try:
+            return datatools.export_run(rt, run_id, format)
+        except datatools.ToolError as e:
+            return "not exported: %s" % e
+
+    @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
+    def run_python(code: str, runs: Optional[List[str]] = None, timeout_s: float = 60) -> List[Any]:
+        """Run Python on runs' data when compute, fit_run and plot_runs can't do it. It runs in a process of its own
+        with Kelvin's packages (numpy, h5py; scipy, lmfit and matplotlib only if installed: the answer says), in a
+        fresh folder that is the only place it may write. runs: the run ids it may read ('last' by default); in the
+        code, runs[id] (or run, the first) gives data[key] (a column, or a trace as points x samples), units, meta,
+        x(key) for a trace's x values and fits; plot((x, y, 'label'), ..., title=..., y_log=True) draws a figure
+        without matplotlib; np is numpy. What it prints, and the PNG pictures it saves, come back. It can't reach
+        the instruments, the network, other programs or files outside its folder and those runs; it is stopped at
+        timeout_s (at most 600) and by Stop. It guards against mistakes, not against code written to get around
+        it. Report its numbers, never redo them by hand."""
+        try:
+            images, text = datatools.run_python(rt, code, runs, timeout_s)
+        except datatools.ToolError as e:
+            return ["not run: %s" % e]
+        return [Image(data=png, format="png") for png in images] + [text]
 
     @server.tool(annotations=READ, structured_output=False)
     def list_runs(limit: int = 10) -> str:

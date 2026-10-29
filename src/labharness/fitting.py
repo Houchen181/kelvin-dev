@@ -643,7 +643,7 @@ def _gl_hc2() -> Model:
     return Model("gl_hc2", ("Bc2_0", "Tc"), f, "Bc2_0·(1 - (T/Tc)²)", guess,
                  lambda xu, yu: {"Bc2_0": yu or "T", "Tc": xu or "K"},
                  "the upper critical field against temperature, Ginzburg-Landau's empirical parabola (x: T in K, "
-                 "y: Bc2 in T)", lower={"Tc": 0.0})
+                 "y: Bc2 in T)", lower={"Tc": 0.0}, derived=derived)
 
 
 def _whh_h(t: Any) -> Any:

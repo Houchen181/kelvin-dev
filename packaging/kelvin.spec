@@ -60,6 +60,8 @@ datas += [(str(ROOT / "docs" / name), "labharness/data/docs") for name in
 
 # the helper for a maker's library runs as a script, with this app or another Python (labharness/library.py)
 datas.append((str(ROOT / "src" / "labharness" / "data" / "bridge" / "kelvin_bridge.py"), "labharness/data/bridge"))
+# run_python's sandbox runs as a script the same way (labharness/sandbox.py)
+datas.append((str(ROOT / "src" / "labharness" / "data" / "sandbox" / "kelvin_sandbox.py"), "labharness/data/sandbox"))
 
 a = Analysis(
     [str(ROOT / "packaging" / "kelvin_app.py")],
