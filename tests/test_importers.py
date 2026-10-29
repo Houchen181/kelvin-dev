@@ -7,11 +7,11 @@ from datetime import datetime, timedelta
 
 import pytest
 
-import datafiles as D
-from labharness import imports
-from labharness.imports import DataError
-
 np = pytest.importorskip("numpy")
+
+import datafiles as D  # noqa: E402
+from labharness import imports  # noqa: E402
+from labharness.imports import DataError  # noqa: E402
 
 
 def write(path, data):

@@ -60,6 +60,7 @@ def peaks(row):
 # ------------------------------------------------------------------ the card
 
 def test_kelvins_2450_card_has_its_sweeps_as_techniques():
+    pytest.importorskip("numpy")
     card = builtin_registry().get("keithley/2450")
     assert sorted(card.techniques) == ["cv", "lsv"]
     cv = card.techniques["cv"]
@@ -132,6 +133,7 @@ def test_a_technique_never_resets_nor_sends_a_blocked_command():
 def test_a_technique_that_only_listens_runs_without_asking(tmp_path):
     """A scope-like burst capture (drives: false), polled with done: until its status says so, its points counted
     then fetched; on the virtual lab's source-meter, with a stand-in for the capture's commands."""
+    pytest.importorskip("numpy")
     import dataclasses
     from labharness import build_virtual_lab, techniques
     from labharness.clock import SimClock

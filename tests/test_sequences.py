@@ -77,6 +77,7 @@ def flat(spans):
 # ------------------------------------------------------------------ the syntax
 
 def test_a_written_echo_is_the_protocols_echo():
+    pytest.importorskip("numpy")
     prog = pulses.parse(ECHO)
     assert prog.name == "echo_written" and prog.channels == ["mw", "laser", "gate"]
     for tau in (0.0, 2e-6, 37e-6):
@@ -91,6 +92,7 @@ def test_a_written_echo_is_the_protocols_echo():
 
 
 def test_loops_units_and_channels_of_its_own():
+    pytest.importorskip("numpy")
     seq = pulses.parse(XY8).build({"tau": 4e-6, "t_pi": 40e-9})
     x, y = seq.channels["mw_x"], seq.channels["mw_y"]
     assert len(x) == 6 and len(y) == 4                                    # 2 x (x y x y) between the pi/2 pulses
@@ -138,12 +140,14 @@ def test_a_sequence_is_checked_as_it_is_written(text, said):
     ("sequence: x\nsteps: [{wait: tau - 1 ms}, {mw: 1 us}]", "less than nothing"),
 ])
 def test_and_again_at_the_times_it_plays(text, said):
+    pytest.importorskip("numpy")
     prog = pulses.parse(text)
     with pytest.raises(ValueError, match=re.escape(said)):
         prog.build({"tau": 100e-9})
 
 
 def test_what_a_generator_would_refuse():
+    pytest.importorskip("numpy")
     hot = pulses.parse("sequence: hot\nsteps: [{mw_x: 3 us, laser: 1 us}, {mw_y: 3 us}, {wait: 1 us}]").build({})
     assert hot.mw_duty() == pytest.approx(6 / 7)
     assert any("microwave is on 86%" in p for p in pulses.check(hot))
@@ -166,6 +170,7 @@ def rects(svg, color):
 
 
 def test_a_4_ns_pulse_shows_in_the_drawing():
+    pytest.importorskip("numpy")
     seq = pulses.build("rabi", {"tau": 4e-9, "t_wait": 1e-3})              # 4 ns in a 1 ms period
     svg = pulses.svg(seq)
     assert svg.startswith("<svg") and svg.rstrip().endswith("</svg>") and "<title>Timing of rabi" in svg
@@ -183,6 +188,7 @@ def test_a_4_ns_pulse_shows_in_the_drawing():
 def test_the_drawing_is_an_svg_a_browser_reads():
     """The cards show it as <img src="data:image/svg+xml,...">: it must be well-formed XML, with everything inside
     its own size, or the browser shows nothing."""
+    pytest.importorskip("numpy")
     import xml.etree.ElementTree as ET
     from urllib.parse import quote, unquote
     ns = "{http://www.w3.org/2000/svg}"
@@ -202,6 +208,7 @@ def test_the_drawing_is_an_svg_a_browser_reads():
 
 
 def test_the_edges_are_exact():
+    pytest.importorskip("numpy")
     seq = pulses.parse(ECHO).build({"tau": 2e-6, "t_pi": 1e-7})
     assert pulses.lines(seq) == ["laser: 2.22 µs → 5.22 µs", "mw: 0 → 50 ns, 1.05 µs → 1.15 µs, 2.15 µs → 2.2 µs",
                                  "gate: signal 2.22 µs → 2.52 µs, reference 4.92 µs → 5.22 µs"]
@@ -285,6 +292,7 @@ def test_the_runs_card_draws_the_sequence_at_both_ends_of_its_sweep():
 
 
 def test_a_written_sequence_plays_on_the_virtual_generator(library):
+    pytest.importorskip("numpy")
     pulses.register(pulses.parse(XY8))
     lab = build_virtual_lab(clock=SimClock(), seed=3)
     approver = ScriptedApprover([True])
@@ -316,6 +324,7 @@ def streamer():
 
 
 def test_the_pulse_streamer_plays_a_written_sequence_on_its_wired_outputs(streamer, library, tmp_path):
+    pytest.importorskip("numpy")
     pulses.register(pulses.parse(XY8))
     lab = build_lab("""
 lab: NV
@@ -338,6 +347,7 @@ instruments:
 
 
 def test_a_channel_no_output_is_wired_to_is_refused(streamer, library, tmp_path):
+    pytest.importorskip("numpy")
     pulses.register(pulses.parse(XY8))
     lab = build_lab("""
 lab: NV

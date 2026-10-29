@@ -260,6 +260,7 @@ def test_a_stop_from_anywhere_never_waits_for_the_lab(tmp_path):
 def test_a_chat_waiting_for_a_reading_never_asks_the_instrument_a_run_uses(tmp_path, monkeypatch):
     """wake_me's condition is checked in the background: on an instrument a run uses, with the run's own latest
     measurement of it, or not at all until the run ends; on the others, read as any reading is."""
+    pytest.importorskip("mcp")
     from labharness.agent.server import build_server
     from labharness.web.agent import ChatAgent
     from labharness.web.store import ChatStore

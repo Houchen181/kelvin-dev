@@ -275,6 +275,7 @@ measure: [tc.T_sample]
 
 def test_stabilize_logs_while_it_waits_and_the_analysis_takes_the_settled_points(lab, make_engine, tmp_path):
     """F3 #21: stabilize stopped logging while it waited, and nobody could tell when it settled."""
+    pytest.importorskip("numpy")
     engine, gate, approver = make_engine([True])
     report = engine.run("""
 plan: settle_logged

@@ -84,6 +84,7 @@ def test_a_stop_also_ends_the_drive_calls_waiting_behind_the_one_it_stopped(tmp_
 
 def test_a_cancelled_mcp_call_is_declined_and_never_drives(tmp_path):
     """A cancelled call's approval stayed live, and a yes later drove the sample for a client that was gone (P10)."""
+    pytest.importorskip("mcp")
     import asyncio
     from mcp import Client
     from labharness.agent.server import build_server
@@ -187,6 +188,7 @@ def test_the_stop_for_everything_ends_a_queue_that_runs_with_no_chat_answering(t
 @pytest.mark.parametrize("typed", ["STOP", "stop!", "Stop now", "abort", "/stop"])
 def test_typing_stop_in_a_chat_stops_the_lab_at_once_without_asking_the_model(tmp_path, typed):
     """Typing STOP was read by the model at its next step, if ever, while the run went on (P11, P1)."""
+    pytest.importorskip("mcp")
     from labharness.web.agent import typed_stop
     assert typed_stop(typed) and not typed_stop("stop the sweep at 2 V next time") and not typed_stop("unstoppable")
     rt = real_runtime(tmp_path)
@@ -219,6 +221,7 @@ def test_typing_stop_in_a_chat_stops_the_lab_at_once_without_asking_the_model(tm
 
 def test_no_dialog_stands_between_a_person_and_stop():
     """The portal's Stop sat behind a native confirm(), which a browser can suppress: then Stop did nothing (P1)."""
+    pytest.importorskip("starlette")
     from labharness.web.app import STATIC
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     run_stop = js[js.index('v.stop = h("button"'):js.index("v.count = h(")]

@@ -2,7 +2,11 @@
 import math
 import random
 
+import pytest
+
 from labharness.analysis import _fmt_pm, analyze_curve, analyze_run, hysteresis, noise_estimate
+
+pytest.importorskip("numpy")   # the analysis is NumPy's; without it a run says "not analysed"
 
 
 def lorentz(x, c, w, a, b):

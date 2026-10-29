@@ -79,6 +79,7 @@ def engine():
 
 
 def test_cw_odmr_finds_the_resonance(engine):
+    pytest.importorskip("numpy")
     eng, _ = engine
     r = eng.run("""
 plan: cw_odmr
@@ -92,6 +93,7 @@ measure: [counter.rate]
 
 
 def test_rabi_gives_the_pi_time(engine):
+    pytest.importorskip("numpy")
     eng, lab = engine
     r = eng.run("""
 plan: rabi
@@ -122,6 +124,7 @@ def test_the_generator_refuses_a_sequence_that_would_heat(engine):
 
 
 def test_the_oscillation_fit_reads_a_noisy_rabi_curve():
+    pytest.importorskip("numpy")
     rng = random.Random(1)
     xs = [i * 10e-9 for i in range(60)]
     ys = [1 - 0.05 * (1 - math.cos(2 * math.pi * 4e6 * x) * math.exp(-x / 1e-6)) + rng.gauss(0, 0.008) for x in xs]

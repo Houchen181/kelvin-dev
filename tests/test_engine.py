@@ -157,6 +157,7 @@ def test_bad_loop_options_are_refused():
 
 
 def test_run_reports_progress_and_analyses_itself(make_engine, tmp_path):
+    pytest.importorskip("numpy")
     engine, gate, approver = make_engine([True])
     events = []
     engine.progress = events.append
@@ -220,6 +221,7 @@ after: { tc.setpoint: 1.6 }
 
 
 def test_stabilize_gives_up_with_a_warning(lab, make_engine):
+    pytest.importorskip("numpy")
     engine, gate, approver = make_engine([True])
     report = engine.run("""
 plan: impatient
