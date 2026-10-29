@@ -611,3 +611,29 @@ def test_a_trainee_unlocks_with_the_pin_but_never_takes_a_protected_sample_out(l
         assert r.status_code == 200 and runtime.hands is None and runtime.mounted.get("device_name") == "D4"
         unlocked = [e for e in runtime.versions.history(subject="events") if e["what"] == "Hands on the sample unlocked"]
         assert unlocked and unlocked[0]["account"] == "Cy" and unlocked[0]["role"] == "trainee"
+
+
+def test_rolling_a_card_back_never_marks_the_text_in_use_reviewed(lab):
+    """A card's commands change only at reconnect: rolling the file back to a reviewed version must not mark the
+    draft text the instrument still uses as reviewed."""
+    from pathlib import Path
+    client, h, runtime, settings, home, posts = lab
+    with client:
+        sign_in(client, h, "Ada")
+        assert client.post("/api/lab", headers=h, json={"yaml": LAB}).json()["ok"]
+        client.post("/api/owner-pin", headers=h, json={"pin": "2468"})
+        text = Path(runtime.lab.registry.get("keithley/2400").source).read_text(encoding="utf-8")
+        reviewed = text.replace("status: community", "status: lab-verified")
+        draft = text.replace("status: community", "status: draft") + "\n# trying a new trigger\n"
+        r = client.post("/api/cards", headers=h, json={"yaml": reviewed, "version": True, "pin": "2468"})
+        assert r.status_code == 200, r.text
+        assert client.post("/api/cards", headers=h, json={"yaml": draft, "version": True}).status_code == 200
+        runtime.reconnect_instrument("smu", "human")
+        assert runtime.lab.instruments["smu"].card.status == "draft"     # the draft text is in use now
+        first = client.get("/api/config/history?subject=cards", headers=h).json()["entries"][-1]
+        assert first["changes"][0]["text"].startswith("keithley/2400") or first["title"] == "card keithley/2400"
+        r = client.post("/api/config/rollback", headers=h, json={"n": first["n"], "pin": "2468"})
+        assert r.status_code == 200 and r.json()["reconnect"] == ["smu"]
+        assert runtime.lab.instruments["smu"].card.status == "draft"     # until reconnect, still the draft's text
+        runtime.reconnect_instrument("smu", "human")
+        assert runtime.lab.instruments["smu"].card.status == "lab-verified"

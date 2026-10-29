@@ -139,9 +139,15 @@ def routes(runtime: Any, settings: Any, accounts: Any, needs_owner: Callable[...
         except OSError as e:
             return error(500, "Could not put #%d back: %s" % (n, e))
         runtime.refresh_cards(sorted(set(ids)))
-        for inst in runtime.lab.instruments.values():   # a review going back holds at once, as Mark reviewed does
-            if inst.card.id in ids and inst.card.id in runtime.lab.registry:
-                inst.card.status = runtime.lab.registry.get(inst.card.id).status
+        for inst in runtime.lab.instruments.values():
+            if inst.card.id not in ids or inst.card.id not in runtime.lab.registry:
+                continue
+            fresh = runtime.lab.registry.get(inst.card.id).status
+            # a review of Kelvin's own card (the same card) holds at once, as Mark reviewed does; a card of the lab's
+            # own changes its commands only at reconnect, so meanwhile only going back to draft holds at once: its
+            # old text must never pass as reviewed
+            if subject == REVIEWS or fresh == "draft":
+                inst.card.status = fresh
         made = await asyncio.to_thread(runtime.config_changed, by, why, "rollback", n)
         return JSONResponse({"ok": True, "versions": [v["n"] for v in made], "reconnect": sorted(
             name for name, inst in runtime.lab.instruments.items() if inst.card.id in ids and subject != REVIEWS)})
