@@ -112,7 +112,7 @@ Kelvin keeps it up to date by itself. It lets the AI answer questions across all
 
 **Where a run came from, and who did what.** Kelvin's AI reads these rather than guessing:
 - **`run_provenance`:** the plan as it ran; who started it and when (this computer's clock, never the simulated lab's); every setting at the start and the end, with what the plan left changed or couldn't read; the measurement chain; each approval it needed and who gave it (their account, and portal or phone); and the stops, trips and alarms while it ran.
-- **`lab_activity`:** the lab record between two times (a date, a time, today, or "2h" ago), each line with who: a signed-in person and where they answered, Kelvin's AI, a queue or a plan. It reads the lab's instrument log, everyone's, where there is one.
+- **`activity`:** the lab record between two times (a date, a time, today, or "2h" ago), each line with who: a signed-in person and where they answered, Kelvin's AI, a queue or a plan. It reads the lab's instrument log, everyone's, where there is one.
 
 **A device's measurement chain** says what sits between the instruments and the sample, so a run says it whatever changes later:
 ```yaml

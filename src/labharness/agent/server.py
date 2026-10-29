@@ -735,7 +735,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.run_provenance(run_id)
 
     @server.tool(annotations=READ, structured_output=False)
-    def lab_activity(since: str = "", until: str = "", who: str = "", kinds: str = "", limit: int = 60) -> str:
+    def activity(since: str = "", until: str = "", who: str = "", kinds: str = "", limit: int = 60) -> str:
         """Who did what in the lab, and when: the lab record between since and until (2026-10-28T11:00, 11:00,
         today, yesterday, or a while ago such as 2h; default the last 24 h), in this computer's wall-clock time,
         never the simulated lab's. Each line says who: a signed-in person and where they answered, Kelvin's AI, a

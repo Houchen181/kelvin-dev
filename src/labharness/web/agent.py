@@ -247,7 +247,7 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "card_guide", "find_card",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
-           "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "lab_activity"}
+           "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "activity"}
 # what never works the lab: everything else runs one call at a time across chats, filed under its own chat
 OFF_LAB = LOOKUPS | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe", "save_paper", "make_report",
                      "write_file", "measurement_chain"}

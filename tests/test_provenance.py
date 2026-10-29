@@ -1,5 +1,5 @@
 """Provenance for Kelvin's AI (plan item 23): a run's plan, conditions, measurement chain and approvals with who gave
-them (run_provenance); the lab record over a stretch of wall-clock time, attributed (lab_activity); and a device's
+them (run_provenance); the lab record over a stretch of wall-clock time, attributed (activity); and a device's
 measurement chain, stamped into its runs (F2 l10: "run conditions aren't stored", "50 nA rms" for a 6221's 50 nA
 peak; F3: invented gaps and actors, wall and lab time mixed up)."""
 import threading
@@ -95,7 +95,7 @@ def test_a_device_without_a_chain_uses_the_setups(tmp_path):
     assert Chains(rt.data_dir).get(None, None) is None
 
 
-def test_lab_activity_is_attributed_and_in_wall_clock_time(tmp_path):
+def test_activity_is_attributed_and_in_wall_clock_time(tmp_path):
     rt = runtime(tmp_path)
     rt.user = "Ada"
     rt.run(SWEEP)
