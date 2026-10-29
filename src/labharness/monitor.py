@@ -335,58 +335,63 @@ class Monitor:
         that never ended once held a run for 3 h with a current source on, and nobody heard. The alarm clears when
         the reading moves on or gets there, or the set point changes. Only set points Kelvin set since it connected
         are followed, until their reading gets there: a lab at rest never alarms, nor a set point no instrument
-        reaches (0 K, which a stop holds short of)."""
+        reaches (0 K, which a stop holds short of). Never raises: the interlock and error checks after it run anyway."""
         if now - self._last_setpoint_check < SETPOINT_EVERY:
             return
         self._last_setpoint_check = now
-        from .gate import WAIT_STALL_S, _unreachable
-        seen = set()
+        seen: set = set()
         for name, inst in list(self.lab.instruments.items()):
             if not inst.enabled:
                 continue
             for spec in inst.card.params.values():
-                if not (spec.is_drive and spec.ramp == "instrument" and spec.readback and spec.numeric):
-                    continue
-                target = inst._last.get(spec.name)
-                if not _number(target) or (_unreachable(spec) and target <= 0) or not self._applied(inst, spec):
-                    continue
-                key = "%s.%s" % (name, spec.name)
-                seen.add(key)
-                move = self._moves.get(key)
-                if move is None or move.target != float(target):
-                    stalled = self._stalled.pop(key, None)
-                    if stalled is not None:
-                        self._clear(stalled.id, "%s has a new set point (%s)" % (key, spec.show(target)))
-                    move = self._moves[key] = Approach(target, spec.tol, now, rate_per_s(inst, spec), self.stall_s)
-                if move.arrived:
-                    continue   # it got there; a reading that drifts off later is for a watch
-                try:
-                    value = inst.read(spec.readback)
-                except Exception:
-                    continue   # silence is the read failures' job
-                stuck = move.update(value, now)
-                reading = "%s.%s" % (name, spec.readback)
-                if move.there(value):
-                    move.arrived = True
-                    if key in self._stalled:
-                        self._clear(self._stalled.pop(key).id, "%s reached its set point (%s)" % (
-                            reading, spec.show(target)))
-                elif key in self._stalled and stuck < self.stall_s:
-                    self._clear(self._stalled.pop(key).id, "%s is getting closer to %s again (%s)" % (
-                        reading, spec.show(target), self._show(reading, value)))
-                elif key not in self._stalled and stuck >= self.stall_s:
-                    text = "%s has not got closer to %s for %s: it reads %s (set point %s)" % (
-                        reading, spec.show(target), _minutes(stuck),
-                        self._show(reading, value) if _number(value) else repr(value), key)
-                    a = self._stalled[key] = self._new("stall", key, text)
-                    self.gate.log.write("alarm", by="monitor", setpoint=key, text=text)
-                    self.notify("alarm", "Alarm: " + text, "The instrument may be stuck: check its rate, and its "
-                                "helium, heater or compressor. A wait for it ends after %s without progress, and so "
-                                "does a run that ramps it." % _minutes(WAIT_STALL_S))
+                if spec.is_drive and spec.ramp == "instrument" and spec.readback and spec.numeric:
+                    try:
+                        self._follow(name, inst, spec, now, seen)
+                    except Exception:   # one odd instrument must not stop the monitor's other checks
+                        continue
         for key in [k for k in self._moves if k not in seen]:   # switched off, or no longer set by Kelvin
             del self._moves[key]
             if key in self._stalled:
                 self._clear(self._stalled.pop(key).id, "%s is no longer followed" % key)
+
+    def _follow(self, name: str, inst: Any, spec: Any, now: float, seen: set) -> None:
+        """One set point: where its reading is now against where it was going, alarming or clearing as it goes."""
+        from .gate import WAIT_STALL_S, _unreachable
+        target = inst._last.get(spec.name)
+        if not _number(target) or (_unreachable(spec) and target <= 0) or not self._applied(inst, spec):
+            return
+        key = "%s.%s" % (name, spec.name)
+        seen.add(key)
+        move = self._moves.get(key)
+        if move is None or move.target != float(target):
+            stalled = self._stalled.pop(key, None)
+            if stalled is not None:
+                self._clear(stalled.id, "%s has a new set point (%s)" % (key, spec.show(target)))
+            move = self._moves[key] = Approach(target, spec.tol, now, rate_per_s(inst, spec), self.stall_s)
+        if move.arrived:
+            return   # it got there; a reading that drifts off later is for a watch
+        try:
+            value = inst.read(spec.readback)
+        except Exception:
+            return   # silence is the read failures' job
+        stuck = move.update(value, now)
+        reading = "%s.%s" % (name, spec.readback)
+        if move.there(value):
+            move.arrived = True
+            if key in self._stalled:
+                self._clear(self._stalled.pop(key).id, "%s reached its set point (%s)" % (reading, spec.show(target)))
+        elif key in self._stalled and stuck < self.stall_s:
+            self._clear(self._stalled.pop(key).id, "%s is getting closer to %s again (%s)" % (
+                reading, spec.show(target), self._show(reading, value)))
+        elif key not in self._stalled and stuck >= self.stall_s:
+            text = "%s has not got closer to %s for %s: it reads %s (set point %s)" % (
+                reading, spec.show(target), _minutes(stuck),
+                self._show(reading, value) if _number(value) else repr(value), key)
+            self._stalled[key] = self._new("stall", key, text)
+            self.gate.log.write("alarm", by="monitor", setpoint=key, text=text)
+            self.notify("alarm", "Alarm: " + text, "The instrument may be stuck: check its rate, and its helium, heater "
+                        "or compressor. A wait for it ends after %s without progress, and so does a run that ramps "
+                        "it." % _minutes(WAIT_STALL_S))
 
     @staticmethod
     def _applied(inst: Any, spec: Any) -> bool:

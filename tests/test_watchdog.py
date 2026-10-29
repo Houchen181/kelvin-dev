@@ -120,6 +120,21 @@ def test_a_set_point_whose_switch_is_off_is_not_a_stall(lab, tmp_path):
     assert not monitor.alarms and monitor._moves["tc.setpoint"].arrived
 
 
+def test_the_watchdog_never_keeps_the_interlock_check_from_running(lab, tmp_path, monkeypatch):
+    """It runs before the interlock check in each pass: whatever goes wrong in it, that check still runs."""
+    from labharness import monitor as monitor_module
+    gate, monitor, notices = watching(lab, tmp_path, answers=[True])
+    assert gate.set("magnet", "B", 0.5, wait=False).ok   # away from safe: its interlock needs tc.T_sample < 10
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("an odd card")
+    monkeypatch.setattr(monitor_module, "rate_per_s", broken)
+    lab.clock.sleep(5)
+    lab.instruments["tc"].backend.state["T_sample"] = 15.0   # the sample warms: the interlock fails
+    monitor.tick()
+    assert [a.kind for a in monitor.alarms] == ["interlock"]
+
+
 def test_the_approach_counts_progress_beyond_noise_and_slow_ramps():
     way = Approach(2.0, 0.05, 0.0)
     assert way.update(150.0, 0.0) == 0.0
