@@ -5498,6 +5498,10 @@
     $("manuals").checked = !S.settings || S.settings.manuals !== false;
     $("collection").checked = !S.settings || S.settings.collection !== false;
     loadCollection();
+    $("scripts-python").value = (S.settings && S.settings.lab_scripts_python) || "";
+    const scriptsFolder = S.settings && S.settings.lab_scripts;
+    $("scripts-folder").textContent = scriptsFolder ? "Scripts folder: " + scriptsFolder
+      : "No scripts folder yet: name it in Lab → Set up → From your scripts…";
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     ownerPinState();
     rolesState();
@@ -5726,6 +5730,7 @@
     body.auto_cards = $("auto-cards").checked ? "on" : "off";
     body.manuals = $("manuals").checked ? "on" : "off";
     body.collection = $("collection").checked ? "on" : "off";
+    body.lab_scripts_python = $("scripts-python").value.trim();
     body.auto_report = $("auto-report").value;
     body.idle_off = $("idle-off").value;
     body.idle_off_all = $("idle-off-all").checked ? "on" : "off";

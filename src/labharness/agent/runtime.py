@@ -345,6 +345,10 @@ class LabRuntime:
         self.cards_dir: Optional[Path] = None   # the user's own cards (~/Kelvin/cards); set by the app
         self.home: Optional[Path] = None        # ~/Kelvin, where each instrument has its folder; set by the app
         self.collection: Any = None             # the instrument collection (collection.py) while it is switched on
+        # the lab's scripts folder a person named (Set up), the only one run_script runs from, and the Python a person
+        # set for those scripts ("" = the best one found); the app keeps both in Settings, for everyone on this computer
+        self.scripts_folder: Callable[[], Optional[str]] = lambda: None
+        self.scripts_python: Callable[[], str] = lambda: ""
         self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
         self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
         # the data folder a lab keeps its data in when nobody chose one (labfolders.py), given (lab, info); None
@@ -1986,7 +1990,7 @@ class LabRuntime:
         except Exception:   # telling never undoes the change; the history has it
             pass
 
-    def _attribute(self, plan: Plan, project: Optional[str] = None, incognito: Optional[bool] = None,
+    def _attribute(self, plan: Optional[Plan], project: Optional[str] = None, incognito: Optional[bool] = None,
                    unshared: Optional[bool] = None, legacy: bool = False) -> Dict[str, Any]:
         """Which project and sample a run belongs to: the plan's own device:, else the mounted device, else the
         project of the chat that started it (or queued it); runs outside every project go to General. A chat in an
@@ -2009,7 +2013,7 @@ class LabRuntime:
             out["unshared"] = True
         if legacy:
             out["legacy"] = True
-        if plan.device:
+        if plan is not None and plan.device:   # a lab's script (no plan) goes under the mounted device
             dev = next((d for d in info.get("devices") or []
                         if d["id"] == plan.device or d["name"].lower() == plan.device.lower()), None)
             out["device"], out["device_name"] = (dev["id"], dev["name"]) if dev else (None, plan.device)
@@ -3496,6 +3500,108 @@ class LabRuntime:
             taken.append(name)
             item["name"] = name
         return view
+
+    # ------------------------------------------------------------------ the lab's own scripts, run (scriptrun.py)
+
+    def _prepare_script(self, path: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
+                        drives: Optional[Dict[str, Any]] = None) -> Any:
+        """A script from the lab's scripts folder, read and ready (nothing is run, no instrument is asked).
+        scriptrun.ScriptError: why it can't run."""
+        from .. import scriptrun
+        folder = self.scripts_folder()
+        return scriptrun.prepare(self.lab, path, [folder] if folder else [], params=params, args=args, drives=drives,
+                                 python=self.scripts_python() or "")
+
+    def check_script(self, path: str, params: Optional[Dict[str, Any]] = None) -> str:
+        """What running one of the lab's scripts would do, without running it: the Python that runs it, the settings
+        it takes, and the one approval a person would be asked (instruments, drive ranges, what Kelvin can't
+        check)."""
+        from .. import scriptrun
+        try:
+            prep = self._prepare_script(path, params)
+        except scriptrun.ScriptError as e:
+            return "can't run it: %s" % e
+
+        def run() -> str:
+            request, _, problems = scriptrun.approval(self.gate, prep)
+            settings = scriptrun.parameters(prep.original)
+            lines = ["%s in %s" % (prep.name, prep.path.parent)]
+            if settings:
+                lines.append("settings it takes (params): " + "; ".join(p.text() for p in settings))
+            lines += ["will be refused now: " + p for p in problems]
+            lines.append("run_script asks a person once:")
+            lines += ["  " + i for i in request.items]
+            return "\n".join(lines)
+        return self._do("reading script %s" % prep.name, run)
+
+    def run_script(self, path: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
+                   drives: Optional[Dict[str, Any]] = None, mark: Callable[[str], str] = lambda text: text) -> str:
+        """Run one of the lab's scripts as it is, in the lab's Python, with every instrument command through the
+        gate (scriptrun.py): one approval by a person, then its commands; a stopped or failed run sends what it drove
+        back to safe. mark: how the script's own output is marked for the model (text from outside the lab)."""
+        from .. import scriptrun
+        try:
+            prep = self._prepare_script(path, params, args, drives)
+        except scriptrun.ScriptError as e:
+            return "script not run: %s" % e
+        return self._do("running script %s" % prep.name, lambda: self._run_script(prep, mark))
+
+    def _run_script(self, prep: Any, mark: Callable[[str], str]) -> str:
+        from .. import scriptrun
+        gate, lab = self.gate, self.lab
+        names = list(prep.found.instruments)
+        for name in names:
+            away = lab.away(name)
+            if away:
+                return "script not run: %s is %s" % (name, away)
+        request, grants, problems = scriptrun.approval(gate, prep)
+        if problems:
+            gate.log.write("run_refused", by=gate.operator, plan=prep.name, reason="; ".join(problems))
+            return "script not run: refused: " + "; ".join(problems)
+        bad = [r for r in self.engine.preflight(names, fresh=bool(grants)) if not r.ok] if names else []
+        if bad:
+            return "script not run: preflight failed: " + "; ".join(str(r) for r in bad)
+        if gate.auto:
+            request.items.append("Auto mode does not cover this run: a script can't be dry-run first")
+        if not gate.ask(request):
+            gate.log.write("run_declined", by=gate.operator, plan=prep.name)
+            return "declined: script %s not run%s" % (prep.name, " (%s)" % request.note if request.note else "")
+        meta = self._attribute(None)
+
+        def busy(text: str) -> None:
+            self.busy = text
+        with self._device_protection(meta) as held:
+            report = scriptrun.ScriptRun(gate, prep, self.engine.store, grants,
+                                         set(prep.found.unknown) | set(prep.found.libraries), meta,
+                                         self.attribution.get("folder"), busy).execute()
+        for name in names if report.status != "done" else []:
+            self.engine._healthy.pop(name, None)   # checked again before the next run on them
+        made = self._auto_report(report.run_id)
+        self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + prep.name,
+                      report.message[:300])
+        lines = list(held) + [report.message]
+        if report.analysis:
+            lines += self._analysis_lines(report.analysis)
+        elif report.rows:
+            cols = report.columns
+            lines.append("its readings: %d rows of %s%s" % (len(report.rows), ", ".join(
+                m["key"] for m in cols["measures"]), " against " + ", ".join(a["key"] for a in cols["axes"])
+                if cols["axes"] else ""))
+        if report.left:
+            lines.append("left away from safe, as the script left them: " + ", ".join(report.left))
+        lines += ["warning: " + w for w in report.warnings]
+        if report.files:
+            lines.append("files it wrote beside the script: %s%s" % (", ".join(report.files[:10]),
+                                                                     " …" if len(report.files) > 10 else ""))
+        lines.append("saved in %s: script.py (as it ran), output.txt, commands.jsonl%s%s%s" % (
+            report.path, ", run.h5 (its readings)" if report.rows else "",
+            ", " + ", ".join(report.figures) if report.figures else "",
+            " and %s (made automatically)" % " and ".join(made) if made else ""))
+        if report.run_id and report.rows:
+            lines.append("rows: get_run_data(run_id=%r)" % report.run_id)
+        if report.output:
+            lines.append("its output (last lines):\n" + mark("\n".join(report.output)))
+        return "\n".join(lines)
 
     def _saved_card(self, ref: str) -> Any:
         """A card Kelvin has, by its id (Kelvin's own, or one in ~/Kelvin/cards); None if there is none."""

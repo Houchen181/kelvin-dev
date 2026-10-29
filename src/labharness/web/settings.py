@@ -34,11 +34,11 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all",
                      "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
-                     "heartbeat_minutes", "approval_wait"}
+                     "heartbeat_minutes", "approval_wait", "lab_scripts_python"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
-       "idle_off_all", "approval_wait"}
+       "idle_off_all", "approval_wait", "lab_scripts_python"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 IDLE_OFF_MINUTES = 60   # outputs left on this long with nothing happening go to safe (LabRuntime._idle_check)
@@ -436,6 +436,8 @@ class Settings:
                       "from": self._user.get("smtp_from", ""), "to": self._user.get("smtp_to", "")},
             "heartbeat_minutes": int(self.heartbeat_s // 60),
             "approval_wait": int(self.approval_wait_s // 60),   # 0: declined after the first wait, as before
+            "lab_scripts": self.lab_scripts or "",
+            "lab_scripts_python": self.lab_scripts_python,
         }
 
     @property
@@ -646,6 +648,16 @@ class Settings:
 
     def set_lab_scripts(self, folder: str) -> None:
         self._lab["lab_scripts"] = str(folder or "")
+        self._save()
+
+    @property
+    def lab_scripts_python(self) -> str:
+        """The Python a person set for running the lab's scripts (run_script); "" lets Kelvin find one that has what
+        each script imports (scriptrun.python_for)."""
+        return str(self._lab.get("lab_scripts_python") or "")
+
+    def set_lab_scripts_python(self, python: str) -> None:
+        self._lab["lab_scripts_python"] = str(python or "").strip()
         self._save()
 
     def set_phone(self, on: bool, port: int) -> None:

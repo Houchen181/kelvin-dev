@@ -66,6 +66,16 @@ Language models are trained largely on programming, where every step is tested a
   - not try variations to get past a refusal or failure, but stop and say what happened;
   - not write code or re-analyse data unless asked.
 
+### Your lab's own scripts
+
+Kelvin can run one of your lab's measurement scripts as it is (`run_script`), and the script goes through the same gate as Kelvin's own commands:
+- **Only from your scripts folder**, the one a person named in Set up. Kelvin never runs a script from anywhere else. The agent can't change the folder, and doesn't edit your script to change a value: a value it was asked to change goes into a copy for that run.
+- **One approval for the run.** Kelvin reads the script first, without running it, for the lab instruments it opens and the drive values it uses, and asks a person once, as for a plan. A drive whose values the script works out as it runs, or sets through a driver's own API (`smu.source_voltage = v`), is approved anywhere within its limits, and the request says so (the agent can narrow it with the range it read). A script can't be rehearsed on the simulated lab, so a person approves every run, in auto mode too.
+- **Every command through the gate.** The script runs in your lab's own Python with Kelvin's stand-in loaded first. A lab instrument it opens with pyvisa (also through drivers built on it, such as PyMeasure's and QCoDeS's), pyserial or a socket to the instrument's address reaches Kelvin, never the instrument, and Kelvin sends each command through the gate on its own connection. Readings and settings run; drives are checked against the limits, ramped and watched like any other; a change beyond what the person approved asks them, and one beyond the limits is refused.
+- **What Kelvin can't check is asked first.** An instrument that isn't in the lab, and a maker's library that reaches instruments without Kelvin seeing the commands (zhinst, nidaqmx, pythonnet and the like), are named in the approval, or asked about when the script reaches them. A script that reaches hardware through its own DLL calls is beyond what the gate can see.
+- **A refusal, a person's no or Stop ends the script.** It gets an error for the refused command (KelvinRefused; for Stop, KeyboardInterrupt), so its own `finally:` still runs. Those clean-up commands go through the gate too, which then lets only moves toward safe through. A script still running 10 s after its last command is ended, with every process it started. Then every drive it touched goes back to safe, or holds where the lab says so, as for a stopped plan; the same happens when it fails with an error. A script that finishes leaves the instruments as it left them, and Kelvin says which drives it left away from safe.
+- **Never unwatched.** If Kelvin ends while a script runs, the script ends too. It runs without Kelvin's API keys, tokens and passwords.
+
 ### Auto mode
 
 A person can switch approvals from **Ask before drive changes** to **Auto for low-risk steps and runs**, in the portal (next to the model picker) or on the approval page. No agent tool can switch it. Kelvin goes back to asking every time it restarts. Auto mode lets everything simple and safe go ahead without asking: small drive changes, runs and queues, and the requests that change nothing on the sample.
@@ -73,7 +83,7 @@ A person can switch approvals from **Ask before drive changes** to **Auto for lo
 In auto mode, a drive change, a run or a queue goes ahead without asking when all of these hold:
 - Every drive stays within `auto_fraction` (default 25%) of the way from its safe value to its lab limit. Kelvin judges the target's distance from safe, not the step size, so creeping up in small steps doesn't get around the rule.
 - Switches (outputs, ranges) move at most one step from safe.
-- For a run, its dry run finishes cleanly. In auto mode a run is dry-run first, since no person looks at it; a queue is rehearsed on the simulated lab as a whole, in order.
+- For a run, its dry run finishes cleanly. In auto mode a run is dry-run first, since no person looks at it; a queue is rehearsed on the simulated lab as a whole, in order. A run of your lab's own script can't be dry-run, so it always asks.
 - The lab config doesn't exclude the instrument.
 - Kelvin is sure about the instrument: its card has been reviewed, and if Kelvin added it to the lab, its limits have been reviewed too (see "When Kelvin isn't sure, it asks" above).
 - The chat hasn't read text from the web, or a file in its folder, since you last wrote in it ([below](#text-from-outside-the-lab)).

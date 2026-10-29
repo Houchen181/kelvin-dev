@@ -48,6 +48,7 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
 - **Adding them:** tick the ones you want and press **Add the checked ones to the lab config**. They go into the draft with those limits and settings, marked "from your scripts" for you to check; then **Save and connect** as usual.
 - **Recipes:** **Turn the measurement scripts into recipes…** opens a new chat with that request written in. Send it, and Kelvin proposes a recipe for each measurement script (its loops become sweeps, its readings the measure list, its waits the settle times) and keeps each one you agree to.
 - **In a chat:** ask Kelvin to read your scripts and it does the same (`survey_scripts`).
+- **Running them as they are:** Kelvin can also run a script from that folder in your lab's own Python, after you approve the run, with every command it sends to the lab's instruments through the safety gate (`run_script`; see [Your own scripts](data.md#your-own-scripts)). The folder **From your scripts…** reads becomes your lab's scripts folder, the only one Kelvin runs scripts from (Settings → Instruments shows it).
 - **What it skips:** library folders (`site-packages`, `python_libs`, `venv`, `lib`, ...). It reads up to 300 files, each up to 1 MB.
 
 **Limits for one instrument.** In **Set up…**, each instrument of your lab has **Limits…** on its row. It lists the instrument's numeric settings, outputs first, with the card's limits and your lab's.

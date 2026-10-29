@@ -1155,6 +1155,8 @@ class _Collector:
             key = inst.address or ""
             if key and key in by_addr:
                 into = by_addr[key]
+                if inst.library.startswith("driver") and not into.library.startswith("driver"):
+                    into.library = inst.library   # a driver sends commands its text doesn't show: say so
                 into.names += [n for n in inst.names if n not in into.names]
                 into.where += inst.where
                 into.commands += inst.commands

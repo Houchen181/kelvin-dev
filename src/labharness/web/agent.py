@@ -70,7 +70,8 @@ WEB_TOOLS = {"search_papers", "read_paper", "web_search", "read_web_page", "save
 # instruments' replies are marked for the model, nothing more)
 OUTSIDE_TOOLS = {"read_web_page": "a web page", "web_search": "web search results", "search_papers": "paper search "
                  "results", "read_paper": "a paper", "read_file": "a file in the chat's folder",
-                 "survey_scripts": "the lab's scripts"}
+                 "survey_scripts": "the lab's scripts", "check_script": "the lab's scripts",
+                 "run_script": "a lab script's output"}
 COMPARE_STEPS = 8
 MAX_LANES = 3
 PROJECT = """# Project “{name}”
@@ -245,6 +246,7 @@ DEFERRED = {
     "setting up instruments": ["scan_instruments", "find_on_network", "connected_devices", "inspect_address",
                                "inspect_serial", "add_instrument", "reconnect_instrument", "ask_to_switch_on",
                                "survey_scripts"],
+    "running the lab's own scripts": ["run_script", "check_script"],
     "writing and trying cards": ["card_guide", "draft_card", "check_card", "try_card", "save_card", "read_examples",
                                  "find_maker_files", "library_api", "save_manual"],
     "makers' software": ["install_for_instrument", "installed_software", "environments", "remove_environment"],

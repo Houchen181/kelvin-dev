@@ -132,7 +132,10 @@ You are connected to a physics lab through Kelvin.
 - A lab that already runs its instruments from its own scripts (Python, notebooks, MATLAB): survey_scripts on the
   folder the person names reads how it works (addresses, connection settings, commands, the values used, the card
   that fits each instrument) without running anything; set the lab up from it with the person, and offer each
-  measurement script as a recipe.
+  measurement script as a recipe. When the person wants one of their scripts run as it is (from the lab's scripts
+  folder), use run_script: it runs in the lab's own Python with every command it sends through the gate, after one
+  approval, and its readings become a run like a plan's. params changes its settings for that run (check_script
+  lists them); never edit the person's script to change a value.
 - An instrument the scan doesn't find or doesn't identify: find out what it is yourself. find_on_network for one on
   the network whose address nobody knows (it sweeps this computer's networks, or the range named, for the ports
   instruments and their gateways use, and asks each who it is), inspect_address for one at a known address (what its
@@ -406,6 +409,31 @@ def build_server(rt: LabRuntime) -> MCPServer:
         outline of each script (sweeps, waits, readings, files saved) to keep as recipes. Only reads them: nothing
         is run, and nothing is sent to an instrument."""
         return outside(rt, "the lab's scripts", rt.survey_scripts(path))
+
+    @server.tool(annotations=READ, structured_output=False)
+    def check_script(script: str, params: Optional[Dict[str, Any]] = None) -> str:
+        """What run_script would do with one of the lab's own scripts, without running it: the Python that runs it,
+        the settings it takes (its module constants such as VMAX = 5, and main()'s defaults: params changes them
+        for a run), and the one approval a person would be asked (the lab instruments it opens, the drive ranges it
+        uses, what Kelvin can't check). Only to see a script's settings, or when the person asks: run_script checks
+        by itself."""
+        return outside(rt, "the lab's scripts", rt.check_script(script, params or {}))
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def run_script(script: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[str]] = None,
+                   drives: Optional[Dict[str, Any]] = None) -> str:
+        """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:
+        script is its file name or path in the lab's scripts folder (the one the person named in Set up; Kelvin runs
+        nothing from elsewhere). Every command it sends to a lab instrument (pyvisa, pyserial, a socket) goes through
+        the safety gate on Kelvin's own connection: readings and settings run, drives are checked against the
+        limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
+        ranges it uses. params: values for its settings for this run, without editing the file ({"VMAX": 2});
+        args: its command-line arguments; drives: the range of a drive the script works out as it runs, when you
+        know it ({"smu.V": [0, 5]}), else such a drive is approved within its limits. A refusal, a person's no or
+        Stop ends the script (its own finally: still runs), and Kelvin brings what it drove back to safe. Returns
+        what it did, its readings as a run (get_run_data, analyze_run), the files it wrote and its last output."""
+        return rt.run_script(script, params or {}, args or [], drives or {},
+                             mark=lambda text: outside(rt, "the lab's script output", text))
 
     @server.tool(annotations=READ, structured_output=False)
     def try_card(card: str, instrument: str) -> str:
@@ -1000,6 +1028,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--approval-timeout", type=float, default=120, help="seconds before an unanswered request is declined")
     ap.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
     ap.add_argument("--mcp-port", type=int, default=8766, help="port for --transport streamable-http (127.0.0.1 only)")
+    ap.add_argument("--scripts", help="the lab's scripts folder: run_script runs only the scripts in it")
+    ap.add_argument("--scripts-python", default="",
+                    help="the Python that runs them (default: the first found that has what a script imports)")
     args = ap.parse_args(argv)
 
     lab = build_virtual_lab(clock=SimClock() if args.speed == 0 else ScaledClock(args.speed), seed=args.seed)
@@ -1015,6 +1046,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     runtime.owner = OwnerPin(home)   # the lab owner's PIN, when one is set in the app
     runtime.roles = LabRoles(home)   # the lab's roles: nobody signs in here, so with roles a yes takes the PIN
     runtime.lab_memory_dir = home    # the lab's memory, the same notes the app's chats have (labmemory.py)
+    runtime.scripts_folder = lambda: args.scripts
+    runtime.scripts_python = lambda: args.scripts_python
     from .. import envs
     envs.cleanup()
     envs.attach(envs.DRIVERS)   # makers' packages Kelvin installed for its built-in drivers (envs.py)

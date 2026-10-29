@@ -44,7 +44,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 labharness = ["data/*.yaml", "data/*.md", "data/*.json", "data/cards/*.yaml", "data/cards/*/*.yaml", "data/bridge/*.py", "data/sandbox/*.py",
-              "data/skills/*.md", "agent/ui.html", "web/static/*"]
+              "data/scriptshim/*.py", "data/skills/*.md", "agent/ui.html", "web/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

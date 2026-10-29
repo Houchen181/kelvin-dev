@@ -123,6 +123,14 @@ stages:
 - **Each stage runs through the safety gate** like any plan. A stage whose check still fails after its retries ends the recipe, and so does a run that stops. The answer lists each stage's run and whether it passed, with the values kept.
 - **Kept** in the portal per person or per project, shown in the chat when Kelvin keeps it (save_recipe; Settings → Memory and Project settings list them).
 
+## Your own scripts
+
+Ask Kelvin to run one of your lab's scripts ("run sweep.py with VMAX at 2") and it runs it as it is, in your lab's own Python, with every instrument command through the safety gate ([Safety](safety.md#your-labs-own-scripts)). A script's run is a run like a plan's:
+- **Its readings are its rows.** Each reading the script takes from a lab instrument (a query the card knows) goes into the run, with the settings the script had made by then; a new setting starts a new row. So a sweep's readings plot, analyse and report like a plan's (`get_run_data`, `analyze_run`, the run's report), even when the script saves its data its own way.
+- **Its folder** keeps `script.py` (the script exactly as it ran, with any value changed for that run), `output.txt` (what it printed), `commands.jsonl` (every command it sent, with the gate's answer), `run.h5` (its readings), the figures it left open (matplotlib) and the run's reports. Kelvin also lists the files the script wrote beside itself.
+- **Values for one run:** the script's settings are its module constants with a plain value (`VMAX = 5   # top of the sweep, V`) and its `main()`'s defaults. `check_script` lists them, and `params` changes them in the copy that runs, never in your file; `args` gives its command-line arguments.
+- **Which Python:** the one set in **Settings → Instruments → Your lab's scripts**, else the first that has everything the script imports: an environment beside your scripts (`.venv`, `venv` or `env`), this computer's Python, then Kelvin's own (which has numpy, pyvisa and pyserial). Python 3.6 or later. A notebook runs its code cells in order, without its `%` and `!` lines. A MATLAB script doesn't run, but can become a recipe.
+
 ## The queue
 
 Line up scans to run one after another, overnight or while you are away, as in Special Measure's queue. Open **Queue** in the Runs pane, or ask Kelvin ("queue a gate sweep at 2, 5 and 10 K"). An item is a plan, or a step between scans:

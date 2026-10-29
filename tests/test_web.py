@@ -610,6 +610,28 @@ def test_big_projects_recall_only_what_bears_on_the_question():
     assert memory.similarity("gate leaks above 6 V", "gate leaks above 8 V") < memory.SAME
 
 
+def test_the_lab_scripts_folder_and_python_are_a_persons_settings(parts, tmp_path):
+    """run_script runs only from the folder a person read in Set up, with the Python they set (scriptrun.py)."""
+    from labharness.web.app import STATIC
+    runtime, settings, _ = parts
+    scripts = tmp_path / "lab-scripts"
+    scripts.mkdir()
+    (scripts / "sweep.py").write_text('import pyvisa\nsmu = pyvisa.ResourceManager().open_resource("GPIB0::24::INSTR")\n')
+    client, headers = client_for(parts, {"scripted": Scripted([])})
+    with client:
+        assert runtime.scripts_folder() is None and runtime.scripts_python() == ""
+        r = client.post("/api/settings", json={"lab_scripts_python": "  C:/lab/env/python.exe "}, headers=headers)
+        assert r.json()["settings"]["lab_scripts_python"] == "C:/lab/env/python.exe"
+        assert runtime.scripts_python() == "C:/lab/env/python.exe"
+        assert client.post("/api/instruments/scripts", json={"folder": str(scripts)}, headers=headers).status_code == 200
+        assert runtime.scripts_folder() == str(scripts) and settings.lab_scripts == str(scripts)
+        assert client.get("/api/settings", headers=headers).json()["settings"]["lab_scripts"] == str(scripts)
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert 'id="scripts-python"' in html and 'id="scripts-folder"' in html
+    assert 'body.lab_scripts_python = $("scripts-python").value.trim();' in js
+
+
 def test_incognito_is_offered_in_every_chat():
     """The Incognito button stays in the top bar: it once vanished after a chat's first message."""
     import re

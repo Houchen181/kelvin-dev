@@ -273,6 +273,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
     runtime.lab_memory_dir = home                         # the lab's memory, everyone's (labmemory.py)
+    runtime.scripts_folder = lambda: settings.lab_scripts or None   # run_script runs only the scripts in it
+    runtime.scripts_python = lambda: settings.lab_scripts_python
     from .. import envs
     envs.set_home(home)          # the instrument environments Kelvin installs makers' packages into (envs.py)
     envs.cleanup()               # environments removed while their files were in use
@@ -2564,9 +2566,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if not folder:
             return error(400, "Choose the folder with your scripts.")
         try:
-            return JSONResponse(await asyncio.to_thread(runtime.scripts_found, folder))
+            found = await asyncio.to_thread(runtime.scripts_found, folder)
         except (OSError, ValueError) as e:
             return error(400, str(e))
+        if Path(folder).expanduser().is_dir():
+            settings.set_lab_scripts(folder)   # a person's choice: run_script runs the scripts in it from now on
+        return JSONResponse(found)
 
     def limits_view(name: str) -> Dict[str, Any]:
         inst = runtime.lab.instruments[name]

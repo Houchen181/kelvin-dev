@@ -486,6 +486,12 @@
             <span class="hint">Setting up only asks each instrument who it is. On the network, Windows may ask once: allow private networks.</span>
           </div>
           <div class="field">
+            <label class="field-label" for="scripts-python">Your lab's scripts</label>
+            <input id="scripts-python" spellcheck="false" autocomplete="off" placeholder="The Python that runs them (empty: Kelvin finds one)">
+            <span id="scripts-folder" class="hint"></span>
+            <span class="hint">Kelvin runs one when you ask in a chat, after you approve the run.</span>
+          </div>
+          <div class="field">
             <div class="field-row"><span class="field-label">Installed for instruments</span></div>
             <ul id="env-list" class="env-list"><li class="muted small">Nothing yet.</li></ul>
             <span class="hint">Each in its own environment in ~/Kelvin/env. Removing one stops the instruments that use it.</span>

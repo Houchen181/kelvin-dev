@@ -565,7 +565,7 @@ class SafetyGate:
             self._asked = asked
 
     def plan_approval(self, drive_values: Dict[str, List[Any]], forecast: Any = None, asking: bool = False,
-                      whole_path: bool = False, later: Iterable[str] = ()
+                      whole_path: bool = False, later: Iterable[str] = (), noun: str = "plan"
                       ) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
         """For a plan's drive targets: lines to show the human, the ranges to grant, and refusals. forecast: the run
         walked through (forecast.py), for a card that shows every drive it changes, toward safe or inside the envelope
@@ -576,7 +576,8 @@ class SafetyGate:
         anywhere (an item switches an output off, the next switches it on; an abort sends it to safe): every value
         away from safe counts, not only those beyond where the drive is now, so no item asks again in the night.
         later: drives whose interlock a queue item before theirs works on (a cool-down before a field sweep): their
-        interlock is checked when they move, not now, and the line says so."""
+        interlock is checked when they move, not now, and the line says so. noun: what uses the values, as the
+        lines say it (the plan; the script, for a lab's script)."""
         lines: List[Tuple[bool, str]] = []   # (a person approves it, the line)
         grants: Dict[str, Allowed] = {}
         problems: List[str] = []
@@ -584,8 +585,8 @@ class SafetyGate:
 
         def shown(inst: Instrument, spec: ParamSpec, current: Any, values: List[Any], why: str = "") -> List[str]:
             key = "%s.%s" % (inst.name, spec.name)
-            bits = ["%s: now %s, plan uses %s%s" % (key, spec.show(current), Allowed.of(spec, values).show(spec),
-                                                    ", " + why if why else "")]
+            uses = Allowed.of(spec, values).show(spec)
+            bits = ["%s: now %s, %s uses %s%s" % (key, spec.show(current), noun, uses, ", " + why if why else "")]
             if spec.ramp == "gate":
                 bits.append("ramp %s %s/s" % (num(inst.rate(spec.name)), spec.unit))
             detail = forecast.detail(key) if forecast is not None else ""
