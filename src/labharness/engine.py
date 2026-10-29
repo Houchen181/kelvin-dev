@@ -5,7 +5,7 @@ interlocks apply inside plans exactly as they do for direct commands.
 """
 from __future__ import annotations
 
-import itertools
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -16,16 +16,31 @@ from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
-from .instrument import Stopped
-from .plans import Plan, PlanError, Stabilize, Step, load_plan
+from .instrument import InstrumentOff, SensorError, Stopped
+from .monitor import Approach, rate_per_s
+from .plans import MAX_POINTS, Axis, Plan, PlanError, Stabilize, Step, load_plan
 
 # An instrument that passed its health check is checked again only after this long (or after a run on it fails):
 # checked before it is used, as at the bench, not before every scan of a series or a queue.
 HEALTHY_FOR = 600.0
+# A set point in a plan's setup that holds the run longer than this before its first point is said in the report:
+# nothing is measured on the way (a ramp: sweep measures while it ramps).
+LONG_WAIT_S = 120.0
 
 
 class _Abort(Exception):
     pass
+
+
+def _transient(e: BaseException) -> bool:
+    """A fault that can pass, worth a plan's retry: an instrument that didn't answer in time, a garbled reply, a link
+    that dropped for a moment. Not a sensor that says it is faulty, a stop, an instrument switched off, or a bug."""
+    return not isinstance(e, (_Abort, SensorError, Stopped, InstrumentOff, KeyError, TypeError, AttributeError,
+                              NameError))
+
+
+def _num(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 @dataclass
@@ -68,10 +83,20 @@ class RunEngine:
             except Exception:
                 pass  # a broken display must never stop an experiment
 
+    def followed(self, axis: Axis) -> Optional[str]:
+        """The reading a ramp follows (instr.param): its read:, else its card's readback; None when there is none."""
+        if axis.read:
+            return "%s.%s" % axis.read
+        try:
+            readback = self.lab.resolve(axis.key)[1].readback
+        except KeyError:
+            return None
+        return "%s.%s" % (axis.instr, readback) if readback else None
+
     def held(self, plan: Plan, snapshot: Dict[str, Any]) -> Dict[str, str]:
         """The conditions a run was taken in, with units: every drive away from its safe value that the plan
         doesn't sweep, and the temperature and field readings (for the run's card and catalog)."""
-        swept = {a.key for a in plan.axes}
+        swept = {a.key for a in plan.axes} | {self.followed(a) for a in plan.axes if a.kind == "ramp"}
         out: Dict[str, str] = {}
         for name, values in (snapshot or {}).items():
             inst = self.lab.instruments.get(name)
@@ -107,17 +132,24 @@ class RunEngine:
         return out
 
     def columns(self, plan: Plan) -> Dict[str, List[Dict[str, str]]]:
-        """Axis and measured columns with units, as analysis and plots need them."""
+        """Axis and measured columns with units, as analysis and plots need them. A ramp's column is the reading it
+        follows (R against the temperature reached, not against the set point)."""
         def unit(key: str) -> str:
             try:
                 return self.lab.resolve(key)[1].unit
             except KeyError:
                 return ""
-        axes = [{"key": a.key, "unit": "s" if a.kind == "time" else ("" if a.kind == "repeat" else unit(a.key)),
-                 "kind": a.kind} for a in plan.axes]
+        axes = []
+        for a in plan.axes:
+            key = (self.followed(a) or a.key) if a.kind == "ramp" else a.key
+            axes.append({"key": key, "unit": "s" if a.kind == "time" else ("" if a.kind == "repeat" else unit(key)),
+                         "kind": a.kind})
+        ramped = {c["key"] for c in axes if c["kind"] == "ramp"}
         measures = []
         for instr, param in plan.measure:
             key = "%s.%s" % (instr, param)
+            if key in ramped:
+                continue   # it is the ramp's own column, read at every point
             spec = self.lab.resolve(key)[1]
             m = {"key": key, "unit": spec.unit, "kind": "trace" if spec.type == "trace" else
                  "image" if spec.type == "image" else "scalar"}
@@ -200,8 +232,18 @@ class RunEngine:
                 before = len(errors)
                 axis.values = [check_value(inst, spec, v, "sweep") for v in axis.values]
                 del errors[before + 1:]  # one message per axis is enough
+            st = axis.stabilize
+            if spec and st and st.near is not None and self._set_point_of(st) is None and not self._same_unit(
+                    axis.key, st.key):
+                errors.append("sweep.%s.stabilize: near: compares %s with its set point, but neither %s has a set "
+                              "point it reads back nor does %s set one in its unit" % (axis.key, st.key, st.instr,
+                                                                                         axis.key))
+        ramp = plan.ramp
+        if ramp is not None:
+            self._check_ramp(ramp, settable, check_value, errors)
         reads = plan.measure + [(c.instr, c.param) for c in plan.preconditions] \
-            + [(a.stabilize.instr, a.stabilize.param) for a in plan.axes if a.stabilize]
+            + [(a.stabilize.instr, a.stabilize.param) for a in plan.axes if a.stabilize] \
+            + [tuple(k.split(".", 1)) for r in plan.rules() for k in r.keys]
         for instr, param in reads:
             try:
                 _, spec = lab.resolve("%s.%s" % (instr, param))
@@ -209,7 +251,87 @@ class RunEngine:
                     errors.append("%s.%s cannot be read" % (instr, param))
             except KeyError as e:
                 errors.append(e.args[0])
+        if ramp is not None and not errors:
+            ramp.estimate = self._estimate(ramp)
         return errors
+
+    def _check_ramp(self, axis: Axis, settable: Any, check_value: Any, errors: List[str]) -> None:
+        """A ramp sweep's set point, the reading it follows, how close counts as there, and its legs' rates."""
+        where = "sweep.%s" % axis.key
+        inst, spec = settable(axis.instr, axis.param, where)
+        if not spec:
+            return
+        if spec.ramp == "gate" or not spec.numeric:
+            errors.append("%s: %s" % (where, "Kelvin ramps %s itself, a step at a time, so nothing is measured on "
+                                             "the way: sweep it with {from, to, step} instead" % axis.key
+                                      if spec.numeric else "only a number can be ramped"))
+            return
+        before = len(errors)
+        axis.values = [check_value(inst, spec, v, where) for v in axis.values]
+        del errors[before + 1:]
+        for leg, value in zip(axis.segments, axis.values):
+            leg.to = value
+        reading = self.followed(axis)
+        if reading is None:
+            errors.append("%s: say which reading to follow while it ramps (read: instrument.parameter); %s's card "
+                          "names none" % (where, axis.key))
+        else:
+            try:
+                rspec = self.lab.resolve(reading)[1]
+                if rspec.get_cmd is None or not rspec.numeric:
+                    errors.append("%s: %s can't be followed: it is not a reading of a number" % (where, reading))
+            except KeyError as e:
+                errors.append("%s: %s" % (where, e.args[0]))
+        tol = axis.within if axis.within is not None else spec.tol
+        if not tol or tol <= 0:
+            errors.append("%s: say how close to each target counts as there (within: in %s)" % (
+                where, spec.unit or "its unit"))
+        rates = [leg.rate for leg in axis.segments if leg.rate is not None]
+        if rates and not spec.rate_param:
+            errors.append("%s: rate: needs %s's card to name the parameter its rate is set with (rate_param); set the "
+                          "rate in setup: instead" % (where, axis.key))
+        elif rates:
+            rinst, rspec = settable(axis.instr, spec.rate_param, where + ".rate")
+            if rspec:
+                before = len(errors)
+                for leg in axis.segments:
+                    if leg.rate is not None:
+                        leg.rate = check_value(rinst, rspec, leg.rate, where + ".rate")
+                del errors[before + 1:]
+
+    def _estimate(self, axis: Axis) -> Optional[int]:
+        """How many points a ramp records: its legs' ramp times (from the reading now, at each leg's rate or the
+        instrument's) and holds, over its interval; None when a rate or the reading is unknown."""
+        try:
+            inst, spec = self.lab.resolve(axis.key)
+            at = self.lab.read(*self.followed(axis).split(".", 1))
+        except Exception:
+            return None
+        seconds, rate = 0.0, None
+        for leg in axis.segments:
+            rate = leg.rate if leg.rate is not None else rate
+            per_s = rate_per_s(inst, spec, rate)
+            if per_s is None or not _num(at) or not _num(leg.to):
+                return None
+            seconds += abs(leg.to - at) / per_s + leg.hold
+            at = leg.to
+        return int(seconds / axis.every) + len(axis.segments)
+
+    def _set_point_of(self, st: Stabilize) -> Optional[str]:
+        """The set point a stabilize's reading reads back (instr.param), if its instrument has one."""
+        try:
+            inst = self.lab.instrument(st.instr)
+        except KeyError:
+            return None
+        drive = next((p for p in inst.card.params.values() if p.is_drive and p.readback == st.param), None)
+        return "%s.%s" % (st.instr, drive.name) if drive is not None else None
+
+    def _same_unit(self, a: str, b: str) -> bool:
+        try:
+            ua, ub = self.lab.resolve(a)[1].unit, self.lab.resolve(b)[1].unit
+        except KeyError:
+            return False
+        return bool(ua) and ua == ub
 
     def ordered(self, steps: List[Step]) -> List[Step]:
         """Steps in the order they can be applied: a switch that applies other drives to the sample (an output, an
@@ -272,11 +394,22 @@ class RunEngine:
     def drive_values(self, plan: Plan) -> Dict[str, List[Any]]:
         out: Dict[str, List[Any]] = {}
         for key, value in [(s.key, s.value) for s in plan.setup] \
-                + [(a.key, v) for a in plan.instrument_axes for v in a.values] + [(s.key, s.value) for s in plan.after]:
+                + [(a.key, v) for a in plan.instrument_axes for v in a.values] + self._ramp_values(plan) \
+                + [(s.key, s.value) for s in plan.after]:
             _, spec = self.lab.resolve(key)
             if spec.is_drive:
                 out.setdefault(key, []).append(value)
         return out
+
+    def _ramp_values(self, plan: Plan) -> List[Tuple[str, Any]]:
+        """A ramp's targets, and its legs' rates on the card's rate parameter (a drive itself on a magnet supply, so
+        the plan's one approval covers them)."""
+        ramp = plan.ramp
+        if ramp is None:
+            return []
+        rate_param = self.lab.resolve(ramp.key)[1].rate_param
+        return [(ramp.key, v) for v in ramp.values] + [("%s.%s" % (ramp.instr, rate_param), leg.rate)
+                                                        for leg in ramp.segments if leg.rate is not None and rate_param]
 
     def preflight(self, names: Optional[List[str]] = None, fresh: bool = False):
         """Health-check these instruments (all if none are named). One that passed within HEALTHY_FOR seconds is not
@@ -351,7 +484,7 @@ class RunEngine:
             if sim.status == "refused":
                 return self._refuse(plan.name, "refused by %s" % sim.message, sim)
         if items:
-            title = "Run plan %s: %d points" % (plan.name, plan.points)
+            title = "Run plan %s: %s" % (plan.name, self.shape(plan))
             if sim is not None:
                 title += ", ~%s" % _dur(sim.duration_s) if sim.ok else "; %s" % sim.message
             request = ApprovalRequest(title, items)
@@ -375,31 +508,69 @@ class RunEngine:
                 self._healthy.pop(name, None)
         return report
 
+    def shape(self, plan: Plan) -> str:
+        """Its size in words: "21 points"; a ramp says what it does, its points an estimate."""
+        ramp = plan.ramp
+        if ramp is None:
+            return "%d points" % plan.points
+        try:
+            inst, spec = self.lab.resolve(ramp.key)
+            per = inst.spec(spec.rate_param).unit if spec.rate_param else ""
+            legs = ", then ".join(spec.show(leg.to) + (" at %g %s" % (leg.rate, per) if leg.rate is not None else "")
+                                  for leg in ramp.segments)
+        except KeyError:
+            legs = ", then ".join(str(leg.to) for leg in ramp.segments)
+        return "measures every %s while %s ramps to %s (%s points)" % (
+            _dur(ramp.every), ramp.key, legs, "~%d" % plan.points if ramp.estimate else "as many as it takes")
+
     def _refuse(self, name: str, why: str, sim: Optional[RunReport] = None) -> RunReport:
         self.gate.log.write("run_refused", by=self.gate.operator, plan=name, reason=why)
         return RunReport("refused", name, "refused: %s" % why, dry_run=sim)
 
-    def _stabilize(self, st: Stabilize, gen: int, warnings: List[str]) -> None:
-        """Wait until st's reading moves by less than st.within over st.duration (or give up at st.timeout)."""
+    def _stabilize(self, st: Stabilize, gen: int, warnings: List[str], target: Any = None,
+                   record: Optional[Callable[[], Any]] = None) -> Dict[str, Any]:
+        """Wait until st's reading moves by less than st.within over st.duration (or give up at st.timeout, measure
+        anyway and say so). With st.near, it must also be that close to its set point: the one its instrument reads
+        back, else `target` (a sweep's value in the reading's unit); a steady reading short of it, or a frozen dead
+        sensor, has not settled. record: takes a point, every st.every seconds while it waits. Returns when it
+        settled (or didn't), for the run's record."""
         clock, lab = self.lab.clock, self.lab
         t0 = clock.now()
         window: deque = deque()
         spec = lab.resolve(st.key)[1]
+        goal = target
+        if st.near is not None:
+            own = self._set_point_of(st)
+            goal = lab.read(*own.split(".", 1)) if own else target
+        logged = None
         while True:
             now, value = clock.now(), lab.read(st.instr, st.param)
             window.append((now, value))
             while window and now - window[0][0] > st.duration:
                 window.popleft()
             values = [v for _, v in window]
-            if now - t0 >= st.duration and max(values) - min(values) <= st.within:
-                return
+            numbers = all(_num(v) for v in values)
+            swing = max(values) - min(values) if numbers else math.inf
+            close = st.near is None or (_num(goal) and _num(value) and abs(value - goal) <= st.near)
+            if now - t0 >= st.duration and swing <= st.within and close:
+                return {"read": st.key, "settled": True, "after_s": round(now - t0, 3)}
             if now - t0 > st.timeout:
-                warnings.append("%s did not settle within %s in %s (last swing %s); measured anyway"
-                                % (st.key, spec.show(st.within), _dur(st.timeout), spec.show(max(values) - min(values))))
-                return
+                far = "" if close else "; it reads %s, not within %s of %s" % (
+                    spec.show(value) if _num(value) else repr(value), spec.show(st.near),
+                    spec.show(goal) if _num(goal) else "its set point")
+                warnings.append("%s did not settle within %s in %s (last swing %s%s); measured anyway"
+                                % (st.key, spec.show(st.within), _dur(st.timeout),
+                                   spec.show(swing) if numbers else "not a number", far))
+                return {"read": st.key, "settled": False, "after_s": round(now - t0, 3)}
             if self.gate.stop_generation != gen:
                 raise _Abort("stop requested")
-            self.gate._pause(max(0.05, min(2.0, st.duration / 10)), gen)   # a stop wakes it at once
+            pause = max(0.05, min(2.0, st.duration / 10))
+            if record is not None and st.every:
+                if logged is None or now - logged >= st.every - 1e-9:
+                    record()   # a point while it waits, marked stabilizing
+                    logged = now
+                pause = max(0.0, min(pause, logged + st.every - clock.now()))
+            self.gate._pause(pause, gen)   # a stop wakes it at once
 
     def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
                  meta: Optional[Dict[str, Any]] = None, folder: Any = None,
@@ -429,22 +600,224 @@ class RunEngine:
             if not r.ok:
                 raise _Abort(r.message)
 
+        def aim(instr: str, param: str, value: Any) -> None:
+            """A ramp's set point, set without waiting for its reading: the ramp measures while it gets there."""
+            if gate.stop_generation != gen:
+                raise _Abort("stop requested")
+            r = gate._set(instr, param, value, False, "plan:" + plan.name, gen=gen)
+            if not r.ok:
+                raise _Abort(r.message)
+
         def time_left(done: int) -> float:
             wall, lab_t = time.time() - wall0, clock.now() - t0
             if expected_s and lab_t > 0:
                 return max(0.0, expected_s - lab_t) * wall / lab_t
-            return wall / done * (plan.points - done) if done else 0.0
+            return wall / done * max(0, plan.points - done) if done else 0.0
 
         # what the sweep changes again: its axes, and the levels a swept switch parks and puts back
-        swept = {a.key for a in plan.instrument_axes}
-        for a in plan.instrument_axes:
-            swept.update("%s.%s" % (a.instr, d) for d in lab.resolve(a.key)[1].enables)
+        swept = {a.key for a in plan.axes if a.kind in ("instrument", "ramp")}
+        for a in plan.axes:
+            if a.kind in ("instrument", "ramp"):
+                swept.update("%s.%s" % (a.instr, d) for d in lab.resolve(a.key)[1].enables)
+        ramp = plan.ramp
+        followed = self.followed(ramp) if ramp is not None else None   # the reading a ramp follows: its column
+        logs_waits = any(a.stabilize is not None and a.stabilize.every for a in plan.axes)
+        state: Dict[str, Any] = {"last": {}}
+        gaps: List[Dict[str, Any]] = []      # points a plan's retry took again, and the time lost
+        settled: List[Dict[str, Any]] = []   # when each stabilize settled (or didn't)
+        legs: List[Dict[str, Any]] = []      # a ramp's legs: when each began, got there and ended
+        ended: List[str] = []                # why loops ended before their last value (until: or while:)
+
+        def readings(row: Dict[str, Any]) -> None:
+            """One point's reading: a ramp's own reading, the cards' actions, then what the plan measures."""
+            if followed:
+                row[followed] = lab.read(*followed.split(".", 1))
+            for instr, action in plan.trigger:   # the cards' actions: arm, trigger, fire
+                if lab.instrument(instr).simulated:
+                    continue   # a twin has no trigger to fire
+                done = gate.act(instr, action, in_plan=True)
+                if not done.ok:
+                    raise _Abort("%s.%s: %s" % (instr, action, done.message))
+            for instr, param in plan.measure:
+                key = "%s.%s" % (instr, param)
+                if key == followed:
+                    continue   # read already, as the ramp's column
+                row[key] = lab.read(instr, param)
+                mspec = lab.instrument(instr).spec(param)
+                if mspec.axis:  # record the trace's x-axis as it was when measured
+                    row[key + ".axis"] = [lab.read(instr, mspec.axis[0]), lab.read(instr, mspec.axis[1])]
+                elif mspec.axis_step and row[key]:   # an oscilloscope's: origin and the step between points
+                    x0, dx = lab.read(instr, mspec.axis_step[0]), lab.read(instr, mspec.axis_step[1])
+                    row[key + ".axis"] = [x0, x0 + dx * (len(row[key]) - 1)]
+                elif mspec.x_values:   # its x values (a spectrometer's wavelengths), as they were then
+                    row[key + ".x"] = lab.read(instr, mspec.x_values)
+                if mspec.type == "image" and row[key] and rec.path is not None:   # the frame's file
+                    row[key] = frames.keep(row[key], rec.path, key, n)
+
+        def measured(row: Dict[str, Any]) -> float:
+            """readings(row), tried again on a fault that can pass when the plan says retry:. Returns the time lost
+            (0: none). After a fault the instrument may have restarted (a power blip puts its outputs back to their
+            power-on state), so the setup's levels are read back before the point counts: never measured dark."""
+            tries, first, why = 0, None, ""
+            while True:
+                row["t"] = round(clock.now() - t0, 6)
+                try:
+                    readings(row)
+                    break
+                except Exception as e:
+                    if plan.retry is None or tries >= plan.retry.times or not _transient(e):
+                        if tries:
+                            raise _Abort("%s (tried %d times)" % (str(e).splitlines()[0] if str(e) else
+                                                                  type(e).__name__, tries + 1))
+                        raise
+                    tries += 1
+                    first = clock.now() if first is None else first
+                    why = why or (str(e).splitlines()[0][:160] if str(e) else type(e).__name__)
+                    gate.log.write("retry", by=gate.operator, run=rec.run_id, point=n, attempt=tries,
+                                   error=str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
+                    if not lab.stops.sleep(clock, plan.retry.wait, stops) or gate.stop_generation != gen:
+                        raise _Abort("stop requested")
+            if first is None:
+                return 0.0
+            wrong = self.readback_problems(plan.setup, swept)
+            if wrong:
+                raise _Abort("after %s, %s, so the run would not measure at what was approved (did it restart?)"
+                             % (why, "; ".join(wrong)))
+            lost = round(clock.now() - first, 3)
+            gaps.append({"point": n, "t": row["t"], "lost_s": lost, "tries": tries, "error": why})
+            return lost
+
+        def take(at: Dict[str, Any], waiting: bool = False) -> Dict[str, Any]:
+            """Measure and record one point at these loop values; waiting: logged while a stabilize waits."""
+            nonlocal n
+            if n >= MAX_POINTS:
+                raise _Abort("the run has %d points, the most one run keeps" % MAX_POINTS)
+            row: Dict[str, Any] = {"i": n, "t": 0.0}
+            row.update(at)
+            lost = measured(row)
+            if plan.retry is not None:
+                row["gap_s"] = lost   # the time lost to a fault just before this point (0: none)
+            if logs_waits:
+                row["stabilizing"] = 1 if waiting else 0
+            rec.add(row)
+            n += 1
+            state["last"] = row
+            self._emit(event="point", run_id=rec.run_id, done=n, total=max(plan.points, n), row=row,
+                       eta_s=time_left(n))
+            if gate.stop_generation != gen:
+                raise _Abort("stop requested")
+            return row
+
+        def ends(until: Any, while_: Any, row: Dict[str, Any]) -> Optional[str]:
+            """Why a loop ends after this point: its until: holds, or its while: no longer does; also when that can't
+            be told (a reading that isn't a number): a condition nobody can check ends the loop."""
+            def read(instr: str, param: str) -> Any:
+                key = "%s.%s" % (instr, param)
+                return row[key] if key in row else lab.read(instr, param)
+            if until is not None:
+                holds = until.check(read)
+                if holds is None or holds:
+                    return "until %s%s" % (until.text, "" if holds else " could not be told (not a number)")
+            if while_ is not None:
+                holds = while_.check(read)
+                if not holds:
+                    return "while %s %s" % (while_.text, "no longer held" if holds is False else
+                                            "could not be told (not a number)")
+            return None
+
+        def point(at: Dict[str, Any]) -> bool:
+            why = ends(plan.until, plan.while_, take(at))
+            if why:
+                ended.append("%s, at point %d" % (why, n))
+            return not why
+
+        def set_axis(axis: Axis, k: int, v: Any, at: Dict[str, Any]) -> None:
+            if axis.kind == "instrument":
+                apply(axis.instr, axis.param, v)
+                st = axis.stabilize
+                if st:
+                    log = (lambda: take(dict(at, **{axis.key: v}), waiting=True)) if st.every else None
+                    info = self._stabilize(st, gen, warnings, v if self._same_unit(axis.key, st.key) else None, log)
+                    settled.append(dict(info, axis=axis.key, value=v, t=round(clock.now() - t0, 3)))
+                hold = axis.settle_at(k)
+                if not lab.stops.sleep(clock, hold if hold is not None else plan.settle, stops):
+                    raise _Abort("stop requested")   # a stop ends a settle at once
+            elif axis.kind == "time" and v:
+                if not lab.stops.sleep(clock, axis.every, stops):
+                    raise _Abort("stop requested")
+
+        def loop(j: int, at: Dict[str, Any]) -> bool:
+            """Loop j and the ones inside it, at the outer loops' values; False once the plan's until: or while:
+            has ended the whole sweep."""
+            if j == len(plan.axes):
+                return point(at)
+            axis = plan.axes[j]
+            if axis.kind == "ramp":
+                return ramped(axis, at)
+            for k, v in enumerate(axis.values):
+                if not (k and v == axis.values[k - 1]):   # the same value again right after: nothing to set
+                    set_axis(axis, k, v, at)
+                if not loop(j + 1, dict(at, **{axis.key: v})):
+                    return False
+                why = ends(axis.until, axis.while_, state["last"]) if (axis.until or axis.while_) else None
+                if why:   # this loop's other values are skipped; the loops outside it go on
+                    ended.append("%s: %s, at point %d" % (axis.key, why, n))
+                    break
+            return True
+
+        def ramped(axis: Axis, at: Dict[str, Any]) -> bool:
+            """A ramp: each leg's rate and target set without waiting, then a point every axis.every seconds until
+            its reading is within tolerance of the target, and hold: seconds more. A leg whose reading stops getting
+            closer for axis.stall stops the run (fail closed: a stuck cryostat isn't waited on for hours)."""
+            inst, spec = lab.resolve(axis.key)
+            tol = axis.within if axis.within is not None else spec.tol
+            for leg in axis.segments:
+                if leg.rate is not None:
+                    apply(axis.instr, spec.rate_param, leg.rate)
+                aim(axis.instr, axis.param, leg.to)
+                began = clock.now()
+                way = Approach(leg.to, tol, began, rate_per_s(inst, spec, leg.rate), axis.stall or None)
+                info: Dict[str, Any] = {"to": leg.to, "rate": leg.rate, "hold": leg.hold,
+                                        "began_t": round(began - t0, 3)}
+                legs.append(info)
+                due, there = began, None
+                while True:
+                    row = take(at)
+                    now, value = clock.now(), row.get(followed)
+                    stuck = way.update(value, now)
+                    if there is None and way.there(value):
+                        there = now
+                        info["arrived_t"] = round(now - t0, 3)
+                    why = ends(plan.until, plan.while_, row)
+                    if why:
+                        ended.append("%s, at point %d" % (why, n))
+                        info["ended_t"] = round(now - t0, 3)
+                        return False
+                    why = ends(axis.until, axis.while_, row)
+                    if why:   # this ramp is over; the loops outside it go on
+                        ended.append("%s: %s, at point %d" % (axis.key, why, n))
+                        info["ended_t"] = round(now - t0, 3)
+                        return True
+                    if there is not None and now - there >= leg.hold - 1e-9:
+                        break
+                    if there is None and axis.stall and stuck >= axis.stall:
+                        raise _Abort("%s has not got closer to %s for %s (it reads %s): the instrument may be stuck"
+                                     % (followed, spec.show(leg.to), _dur(stuck),
+                                        spec.show(value) if _num(value) else repr(value)))
+                    due = max(due + axis.every, clock.now())
+                    if not lab.stops.sleep(clock, max(0.0, due - clock.now()), stops):
+                        raise _Abort("stop requested")   # a stop ends the wait for the next point at once
+                info["ended_t"] = round(clock.now() - t0, 3)
+            return True
+
         try:
             with gate.preapproved(grants):
                 if gate.stop_generation != gen:   # stopped before it began: not even its setup
                     raise _Abort("stop requested")
                 for step in self.ordered(plan.setup):
+                    began = clock.now()
                     apply(step.instr, step.param, step.value)
+                    self._long_wait(plan, step, clock.now() - began, warnings)
                 wrong = self.readback_problems(plan.setup, swept)
                 if wrong:   # never measure at a level other than the one approved (and shown on the run's card)
                     raise _Abort("before the first point, %s, so the run would not measure at what was approved"
@@ -456,49 +829,7 @@ class RunEngine:
                         measuring[step.instr][step.param] = step.value
                 rec.note(held=self.held(plan, measuring),
                          setup={"%s.%s" % (s.instr, s.param): s.value for s in plan.setup})
-                prev: List[Any] = [None] * len(plan.axes)
-                for combo in itertools.product(*[a.values for a in plan.axes]):
-                    for j, (axis, v) in enumerate(zip(plan.axes, combo)):
-                        if prev[j] is not None and v == prev[j] and all(p == c for p, c in zip(prev[:j], combo[:j])):
-                            continue
-                        if axis.kind == "instrument":
-                            apply(axis.instr, axis.param, v)
-                            if axis.stabilize:
-                                self._stabilize(axis.stabilize, gen, warnings)
-                            if not lab.stops.sleep(clock, axis.settle if axis.settle is not None else plan.settle,
-                                                   stops):
-                                raise _Abort("stop requested")   # a stop ends a settle at once
-                        elif axis.kind == "time" and v:
-                            if not lab.stops.sleep(clock, axis.every, stops):
-                                raise _Abort("stop requested")
-                    prev = list(combo)
-                    row: Dict[str, Any] = {"i": n, "t": round(clock.now() - t0, 6)}
-                    for axis, v in zip(plan.axes, combo):
-                        row[axis.key] = v
-                    for instr, action in plan.trigger:   # the cards' actions: arm, trigger, fire
-                        if lab.instrument(instr).simulated:
-                            continue   # a twin has no trigger to fire
-                        done = gate.act(instr, action, in_plan=True)
-                        if not done.ok:
-                            raise _Abort("%s.%s: %s" % (instr, action, done.message))
-                    for instr, param in plan.measure:
-                        key = "%s.%s" % (instr, param)
-                        row[key] = lab.read(instr, param)
-                        mspec = lab.instrument(instr).spec(param)
-                        if mspec.axis:  # record the trace's x-axis as it was when measured
-                            row[key + ".axis"] = [lab.read(instr, mspec.axis[0]), lab.read(instr, mspec.axis[1])]
-                        elif mspec.axis_step and row[key]:   # an oscilloscope's: origin and the step between points
-                            x0, dx = lab.read(instr, mspec.axis_step[0]), lab.read(instr, mspec.axis_step[1])
-                            row[key + ".axis"] = [x0, x0 + dx * (len(row[key]) - 1)]
-                        elif mspec.x_values:   # its x values (a spectrometer's wavelengths), as they were then
-                            row[key + ".x"] = lab.read(instr, mspec.x_values)
-                        if mspec.type == "image" and row[key] and rec.path is not None:   # the frame's file
-                            row[key] = frames.keep(row[key], rec.path, key, n)
-                    rec.add(row)
-                    n += 1
-                    self._emit(event="point", run_id=rec.run_id, done=n, total=plan.points, row=row, eta_s=time_left(n))
-                    if gate.stop_generation != gen:
-                        raise _Abort("stop requested")
+                loop(0, {})
                 late = self.readback_problems(plan.setup, swept)
                 if late:   # something reset a level during the sweep: the assessment must not say all was well
                     warnings.append("at the end of the sweep %s: points may not have been measured at the approved "
@@ -513,6 +844,11 @@ class RunEngine:
             status, reason = "aborted", "stop requested"
         except Exception as e:
             status, reason = "aborted", "error: %s" % e
+        if gaps:   # the data say where: each such point's gap_s
+            warnings.append("%d reading%s failed for a moment and %s taken again (%s lost in all, marked on %s as "
+                            "gap_s): %s" % (len(gaps), "s" if len(gaps) > 1 else "", "were" if len(gaps) > 1 else "was",
+                                            _dur(sum(g["lost_s"] for g in gaps)),
+                                            "those points" if len(gaps) > 1 else "that point", gaps[0]["error"]))
         cleanup: List[str] = []
         if status == "aborted":
             self._emit(event="phase", run_id=rec.run_id, phase="stopping", eta_s=None)
@@ -524,25 +860,48 @@ class RunEngine:
             pass
         meta = dict(status=status, reason=reason, points=n, planned_points=plan.points,
                     duration_s=round(duration, 3), cleanup=cleanup, warnings=warnings, labharness=__version__)
+        # how it went, where a plan asked for more than a fixed grid: a ramp's legs, each stabilize, the readings
+        # taken again, and the loops its until: or while: ended early
+        meta.update({k: v for k, v in (("legs", legs), ("stabilized", settled), ("gaps", gaps), ("ended", ended)) if v})
         analysis = None
-        if self.analyze and rec.rows:
+        points = [r for r in rec.rows if not r.get("stabilizing")]   # not the ones logged while it waited
+        if self.analyze and points:
             try:
-                analysis = analyze_run(rec.rows, cols["axes"], cols["measures"], meta)
+                analysis = analyze_run(points, cols["axes"], cols["measures"], meta)
                 rec.set_analysis(analysis)
             except Exception as e:  # analysis is a convenience; the data are already safe on disk
                 warnings.append("automatic analysis failed: %s" % e)
         rec.finish(**meta)
         gate.log.write("run_end", by=gate.operator, run=rec.run_id, status=status, reason=reason, points=n,
                        duration_s=round(duration, 3))
-        self._emit(event="end", run_id=rec.run_id, status=status, done=n, total=plan.points)
+        self._emit(event="end", run_id=rec.run_id, status=status, done=n, total=max(plan.points, n))
         if status == "done":
             msg = "run %s done: %d points, %s" % (rec.run_id, n, _dur(duration))
+            if ended:
+                msg += " (ended early: %s)" % "; ".join(ended[:3])
         else:
             msg = "run %s aborted after %d/%d points: %s" % (rec.run_id, n, plan.points, reason)
             if cleanup:
                 msg += "; then " + "; ".join(cleanup)
         return RunReport(status, plan.name, msg, rec.run_id, n, duration, rec.rows,
                          str(rec.path) if rec.path else None, analysis=analysis, warnings=warnings)
+
+    def _long_wait(self, plan: Plan, step: Step, waited: float, warnings: List[str]) -> None:
+        """A set point in setup that the instrument ramps to by itself held a time series until its reading got
+        there: say how long, and that nothing was measured on the way, so the agent learns to write a ramp: sweep when
+        the points on the way are the measurement ("log while it cools" once recorded only at 2 K). A plan that only
+        cools, then measures at the end, wanted the wait."""
+        if waited < LONG_WAIT_S or not any(a.kind == "time" for a in plan.axes):
+            return
+        try:
+            inst, spec = self.lab.resolve(step.key)
+        except KeyError:
+            return
+        if spec.ramp != "instrument" or not spec.readback:
+            return
+        warnings.append("setup: %s waited %s for %s.%s to reach %s before the first point; nothing was measured on "
+                        "the way (a ramp: sweep measures while it ramps)" % (
+                            step.key, _dur(waited), step.instr, spec.readback, spec.show(spec.coerce(step.value))))
 
     def _on_abort(self, plan: Plan) -> List[str]:
         """After a stop or a failure, first every drive the plan touched goes to safe, in its card's safe order, or

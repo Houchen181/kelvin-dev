@@ -9,6 +9,7 @@ like the real lab.
 from __future__ import annotations
 
 import itertools
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -19,7 +20,59 @@ from .instrument import SensorError
 FAILS_BEFORE_ALARM = 3       # consecutive failed reads before "not answering"
 ERROR_CHECK_EVERY = 60.0     # lab seconds between error-queue checks on real instruments
 INTERLOCK_EVERY = 5.0        # lab seconds between checks of the interlocks whose drive is away from safe
+STALL_S = 300.0              # lab seconds a set point's reading may go without getting closer before the alarm
+SETPOINT_EVERY = 15.0        # lab seconds between the set-point watchdog's looks
 _ids = itertools.count(1)
+
+
+class Approach:
+    """A reading on its way to a set point, and how long since it last got closer by more than its noise explains:
+    half the set point's tolerance, or a thousandth of the way still to go, whichever is more (but at most a quarter of
+    what the rate covers in `window`, so a slow ramp still counts as moving). A cryostat or a magnet that stops on
+    the way (out of helium, a heater or compressor that quit) stops getting closer; one ramping slowly doesn't.
+    Shared by the set-point watchdog here, a plan's ramp (engine.py) and the gate's wait for a set point."""
+
+    def __init__(self, target: float, tol: float, now: float, per_s: Optional[float] = None,
+                 window: Optional[float] = None):
+        self.target, self.tol, self.since = float(target), float(tol or 0.0), now
+        self.cap = 0.25 * per_s * window if per_s and window and per_s > 0 else math.inf
+        self.best: Optional[float] = None   # the closest it has been
+        self.last: Any = None
+        self.arrived = False
+
+    def there(self, value: Any) -> bool:
+        return _number(value) and abs(value - self.target) <= self.tol
+
+    def update(self, value: Any, now: float) -> float:
+        """Take in a reading; lab seconds since it last got closer. A reading that isn't a number is no progress."""
+        self.last = value
+        if _number(value):
+            d = abs(value - self.target)
+            margin = min(max(0.5 * self.tol, 1e-3 * (self.best or d)), self.cap)
+            if self.best is None or d < self.best - max(margin, 1e-12):
+                self.best, self.since = d, now
+        return now - self.since
+
+
+def _number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _minutes(seconds: float) -> str:
+    return "%.0f s" % seconds if seconds < 90 else "%.0f min" % (seconds / 60)
+
+
+def rate_per_s(inst: Any, spec: Any, rate: Any = None) -> Optional[float]:
+    """How fast a set point ramps, in its unit per second: `rate` (in its rate parameter's unit), else what its rate
+    parameter reads; None when its card names none or it can't be read."""
+    try:
+        if rate is None and spec.rate_param:
+            rate = inst.read(spec.rate_param)
+    except Exception:
+        return None
+    if not _number(rate) or rate <= 0:
+        return None
+    return float(rate) / (60.0 if spec.rate_per == "min" else 1.0)
 
 
 @dataclass
@@ -90,6 +143,11 @@ class Monitor:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # the set-point watchdog: set points on their way (by drive, instr.param), and how long without getting closer
+        self.stall_s = STALL_S
+        self._moves: Dict[str, Approach] = {}
+        self._stalled: Dict[str, Alarm] = {}
+        self._last_setpoint_check = -1e18
 
     # ------------------------------------------------------------------ watches
 
@@ -195,6 +253,7 @@ class Monitor:
                 w.since = now
             if w.alarm is None and now - w.since >= w.for_s:
                 self._raise_reading(w, value)
+        self._check_setpoints(now)
         self._check_interlocks(now)
         self._check_errors(now)
 
@@ -269,6 +328,82 @@ class Monitor:
             a.actions += [r.message for r in self.gate.abort_to_safe([lock.drive], "monitor")]
             self.gate.log.write("alarm", by="monitor", interlock=lock.drive, text=text, actions=a.actions or None)
             self.notify("alarm", "Alarm: " + text, "; ".join(a.actions))
+
+    def _check_setpoints(self, now: float) -> None:
+        """The set-point watchdog. A set point an instrument ramps to by itself (a cryostat's temperature, a magnet's
+        field) that Kelvin set, whose reading has not got closer to it for stall_s (lab time), raises an alarm: a wait
+        that never ended once held a run for 3 h with a current source on, and nobody heard. The alarm clears when
+        the reading moves on or gets there, or the set point changes. Only set points Kelvin set since it connected
+        are followed, until their reading gets there: a lab at rest never alarms, nor a set point no instrument
+        reaches (0 K, which a stop holds short of). Never raises: the interlock and error checks after it run anyway."""
+        if now - self._last_setpoint_check < SETPOINT_EVERY:
+            return
+        self._last_setpoint_check = now
+        seen: set = set()
+        for name, inst in list(self.lab.instruments.items()):
+            if not inst.enabled:
+                continue
+            for spec in inst.card.params.values():
+                if spec.is_drive and spec.ramp == "instrument" and spec.readback and spec.numeric:
+                    try:
+                        self._follow(name, inst, spec, now, seen)
+                    except Exception:   # one odd instrument must not stop the monitor's other checks
+                        continue
+        for key in [k for k in self._moves if k not in seen]:   # switched off, or no longer set by Kelvin
+            del self._moves[key]
+            if key in self._stalled:
+                self._clear(self._stalled.pop(key).id, "%s is no longer followed" % key)
+
+    def _follow(self, name: str, inst: Any, spec: Any, now: float, seen: set) -> None:
+        """One set point: where its reading is now against where it was going, alarming or clearing as it goes."""
+        from .gate import WAIT_STALL_S, _unreachable
+        target = inst._last.get(spec.name)
+        if not _number(target) or (_unreachable(spec) and target <= 0) or not self._applied(inst, spec):
+            return
+        key = "%s.%s" % (name, spec.name)
+        seen.add(key)
+        move = self._moves.get(key)
+        if move is None or move.target != float(target):
+            stalled = self._stalled.pop(key, None)
+            if stalled is not None:
+                self._clear(stalled.id, "%s has a new set point (%s)" % (key, spec.show(target)))
+            move = self._moves[key] = Approach(target, spec.tol, now, rate_per_s(inst, spec), self.stall_s)
+        if move.arrived:
+            return   # it got there; a reading that drifts off later is for a watch
+        try:
+            value = inst.read(spec.readback)
+        except Exception:
+            return   # silence is the read failures' job
+        stuck = move.update(value, now)
+        reading = "%s.%s" % (name, spec.readback)
+        if move.there(value):
+            move.arrived = True
+            if key in self._stalled:
+                self._clear(self._stalled.pop(key).id, "%s reached its set point (%s)" % (reading, spec.show(target)))
+        elif key in self._stalled and stuck < self.stall_s:
+            self._clear(self._stalled.pop(key).id, "%s is getting closer to %s again (%s)" % (
+                reading, spec.show(target), self._show(reading, value)))
+        elif key not in self._stalled and stuck >= self.stall_s:
+            text = "%s has not got closer to %s for %s: it reads %s (set point %s)" % (
+                reading, spec.show(target), _minutes(stuck),
+                self._show(reading, value) if _number(value) else repr(value), key)
+            self._stalled[key] = self._new("stall", key, text)
+            self.gate.log.write("alarm", by="monitor", setpoint=key, text=text)
+            self.notify("alarm", "Alarm: " + text, "The instrument may be stuck: check its rate, and its helium, heater "
+                        "or compressor. A wait for it ends after %s without progress, and so does a run that ramps "
+                        "it." % _minutes(WAIT_STALL_S))
+
+    @staticmethod
+    def _applied(inst: Any, spec: Any) -> bool:
+        """Whether a set point reaches the sample: no switch it applies through, or that switch away from safe (a
+        controller's setpoint with its heater range off goes nowhere, and isn't a stall). Followed afresh once on."""
+        switch = inst.card.params.get(spec.applies_when) if spec.applies_when else None
+        if switch is None:
+            return True
+        try:
+            return switch.distance(inst.read(switch.name)) > 0
+        except Exception:
+            return False
 
     def _clear(self, alarm_id: str, text: str) -> None:
         for a in self.alarms:

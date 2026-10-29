@@ -19,9 +19,50 @@ measure: [lockin.X, smu.I]
 after: { smu.V: 0, magnet.B: 0 }
 ```
 
-Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points, log: true}` or `{values: [...]}`. A sweep axis can also set its own `settle` and a `stabilize` condition (wait until a reading changes by less than `within` over `for` seconds, up to `timeout`).
+Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points, log: true}` or `{values: [...]}`. A sweep axis can also set:
+- its own `settle`: one number, one per value (`settle: [5, 5, 600]`, mirrored on the way back), or only for the steps that need longer (`settle: {50: 600}`), so a staircase's last step can hold longer than the others;
+- a `stabilize` condition: wait until a reading changes by less than `within` over `for` seconds, up to `timeout` (then it measures anyway and says so). With `near: 0.05` the reading must also be that close to its set point (the one its instrument reads back, else the axis's value), so a steady reading short of it, or a dead sensor, doesn't pass. With `every: 10` a point is recorded every 10 s while it waits, marked `stabilizing: 1` (the settled point has 0; the automatic analysis takes only those). The run keeps when each one settled (`stabilized`);
+- `until:` or `while:` (see [Ending early](#ending-early)).
 
 After a run, Kelvin classifies each measured curve and fits it: a peak or dip (Lorentzian or Gaussian: center, FWHM, height, Q for frequency axes), a straight line (slope, and resistance for I–V), an exponential relaxation (τ), a steady value or no signal. Every number has a one-standard-error uncertainty. It also tracks how the fitted feature changes along an outer loop, and it flags clipping, under-resolved or cut-off features, hysteresis, unsettled readings and stopped runs. The result is saved as `analysis.json` in the run folder; `analyze_run` re-fits a run with a chosen model.
+
+### Measuring while it ramps
+
+A set point the instrument ramps to by itself (a cryostat's temperature, a magnet's field, a stage's position) waits until its reading gets there: in `setup:`, at each value of a stepped sweep, and in `set_value`. Nothing is measured on the way, so a cool-down from 300 K holds the run for half an hour or more. To measure on the way, sweep it with `ramp:`:
+
+```yaml
+plan: RT_cooldown
+setup: { isrc.I: 1.0e-6, isrc.output: on }
+sweep:
+  ppms.T_set:
+    ramp: [{to: 10, rate: 10}, {to: 2, rate: 1, hold: 600}]   # rates in K/min, the unit of the card's T_rate
+    every: 10                                                  # a point every 10 s while it ramps
+measure: [nvm.V]
+after: { isrc.output: off }
+```
+
+- **Each leg** sets its rate (on the card's rate parameter, in its unit; `describe_instrument` shows it) and its target without waiting. It then measures every `every` seconds until the reading (the card's read-back, or `read:`) is within the card's tolerance (or `within:`), goes on for `hold:` seconds more, and moves to the next leg. A bare number is a leg at the rate the instrument has.
+- **The ramp's column is the reading it follows,** so R is recorded and analysed against the temperature reached, not against the set point. The legs are kept with the run (`legs`: when each began, got there and ended).
+- **It is the innermost loop.** Stepped sweeps can go outside it (an R(T) at several fields); `time:` can't go with it.
+- **A ramp that stops getting closer** for `stall:` seconds (600 unless the plan says; `0` never) stops the run as Stop does: its outputs go to safe and its points are kept. The [set-point watchdog](safety.md#watches-and-notifications) also raises an alarm after 5 minutes.
+- **The approval** covers the targets and, where the rate is itself a drive (a magnet supply's), the rates. A drive Kelvin ramps itself, a step at a time (a source's voltage), is swept with `{from, to, step}` instead.
+
+### Ending early
+
+`until:` ends a loop once its condition holds, and `while:` once it no longer does. Both are checked after each point, on that point's readings (anything else is read). A condition compares readings with numbers, also their size (`abs(...)`), joined by `and` or `or`: `"abs(smu.I) > 1e-6"`, `"nvm.V < 1e-6 or ppms.T < 1.9"`.
+- **On a sweep axis,** its remaining values are skipped, and the loops outside it go on.
+- **On a ramp,** the ramp ends. Its set point stays where it was sent; `after:` decides where it goes next.
+- **On `time:`,** the series ends: `time: {every: 10, for: 7200, until: "tc.T_sample < 2.1"}`.
+- **At the top of the plan,** the whole sweep ends, `after:` runs and the run is done, saying what ended it.
+
+A condition whose reading isn't a number (NaN, nothing) ends its loop too, since nobody can tell whether it holds.
+
+### A reading that fails for a moment
+
+With `retry: {times: 3, wait: 10}` (or `retry: 3`), a point whose reading fails in a way that can pass (no answer in time, a garbled reply, a link that dropped) is taken again, `wait` seconds apart.
+- **Before the point counts,** the setup's levels are read back. An instrument that restarted (its output back off after a power blip) stops the run rather than be measured dark.
+- **The gap is marked:** every point has `gap_s`, the time lost to a fault just before it (0 for none), and the run lists the gaps (`gaps`) and says how much time was lost.
+- **Never retried:** a sensor fault, a stop or an instrument switched off. Without `retry:`, a failed reading stops the run.
 
 ## Recipes
 

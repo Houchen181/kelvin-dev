@@ -9,6 +9,7 @@ manual_url: "https://qdusa.com/siteDocs/appNotes/1070-220.pdf"
 notes:
   - "Controlled through MultiPyVu (which Kelvin installs on this computer once a person approves), with its server running on the MultiVu computer; address qd://<that computer>:5000"
   - "MultiVu ramps temperature and field itself; Kelvin sets the rate, then the setpoint, and waits for the reading"
+  - "To measure while it ramps (R(T) on a cool-down, a field sweep), sweep T_set or B_set with ramp: in a plan, e.g. {ramp: [{to: 2, rate: 10}], every: 10} (rate in K/min, or T/s for B_set)"
 requires: [MultiPyVu]
 identify:
   idn: "^Quantum Design,MultiVu"
@@ -32,6 +33,8 @@ parameters:
     readback: T
     tol: 0.05
     timeout: 14400
+    rate_param: T_rate
+    rate_per: min
     description: The approach (fast settle) runs at T_rate
   T_rate:
     label: Temperature rate
@@ -58,6 +61,8 @@ parameters:
     readback: B
     tol: 0.001
     timeout: 14400
+    rate_param: B_rate
+    rate_per: s
     description: Linear approach at B_rate; the vendor limits cover the 16 T PPMS, so set your system's own
   B_rate:
     label: Field rate
