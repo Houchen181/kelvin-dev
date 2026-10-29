@@ -336,21 +336,26 @@ class Monitor:
 
     # ------------------------------------------------------------------ instruments that stop answering
 
-    def mark(self) -> Dict[str, int]:
-        """How many times each instrument has failed to answer so far: compare with lost_since after some work."""
-        return {name: inst.health.losses for name, inst in self.lab.instruments.items()}
+    def mark(self) -> Tuple[float, Dict[str, int]]:
+        """Now, and how many times each instrument has failed to answer so far: give it to lost_since after some
+        work."""
+        return time.time(), {name: inst.health.losses for name, inst in self.lab.instruments.items()}
 
-    def lost_since(self, mark: Dict[str, int]) -> List[Alarm]:
+    def lost_since(self, mark: Tuple[float, Dict[str, int]]) -> List[Alarm]:
         """The instruments that failed to answer since `mark`, when that stopped work nobody was watching (a queue
         item): their alarm goes up now, without waiting for more failed reads, so the pause has its reason in the
-        alarms. One that answers again already (a power blip) is cleared at once; the record keeps that it was out."""
+        alarms. One that answers again already (a power blip) is cleared at once; the record keeps that it was out.
+        One whose alarm went up since `mark` already isn't raised again: one alarm per fault."""
+        t0, losses = mark
         out = []
         for name, inst in list(self.lab.instruments.items()):
             h = inst.health
-            if h.losses <= mark.get(name, 0):
+            if h.losses <= losses.get(name, 0):
                 continue
             with self._lock:
-                a = self._silent.get(name) or self._raise_lost(name, h.lost_text)
+                a = self._silent.get(name) or next((x for x in self.alarms if x.key == name and x.raised >= t0
+                                                    and x.kind in ("silent", "reset")), None) \
+                    or self._raise_lost(name, h.lost_text)
             out.append(a)
         self._check_health()   # one that answers again is cleared; garbled replies latch their fault
         return out
