@@ -845,3 +845,92 @@ def test_a_draft_cards_switch_or_mode_is_read_back_before_it_counts_as_set():
     reg.put(good)
     lab = lab_of(reg, {"cs": {"card": "lab/6221", "address": "GPIB0::12::INSTR"}}, {"cs": Backend()})
     assert SafetyGate(lab, ScriptedApprover([True])).set("cs", "function", "square").ok and source.function == "SQU"
+
+
+# ------------------------------------------------------------------ 19: the first-run scan
+
+
+class Board:
+    """A port the scan opens: an Arduino resets each time (counted), an ANC300's command line echoes."""
+
+    def __init__(self, answer, echo=False, framing=(9600, 8, "none", 1.0)):
+        self.opened, self.answer, self.echo, self.framing = 0, answer, echo, framing
+
+    def open_resource(self, name):
+        self.opened += 1
+        line = SerialLine(self.framing, lambda cmd: self.answer(cmd))
+        if self.echo:
+            original = line.write
+
+            def write(cmd):
+                line.pending.append(cmd)   # the command, echoed first
+                original(cmd)
+            line.write = write
+        return line
+
+
+def test_an_arduino_is_opened_once_and_an_echoing_command_line_still_answers():
+    """l07: the scan reset a student's Arduino hot plate once per framing tried (seven times on COM4, heater off each
+    time); l05: the ANC300's command line echoes, and the echo was taken for its identity."""
+    from labharness.discovery import identify
+    reg = builtin_registry()
+    arduino = Board(lambda cmd: "HEATER-ARDUINO v2" if cmd == "*IDN?" else None)
+    found = identify("ASRL4::INSTR", reg, arduino, usb={"ASRL4::INSTR": "2341:0043"})
+    assert arduino.opened == 1 and found.idn == "HEATER-ARDUINO v2"
+    plain = Board(lambda cmd: None)
+    identify("ASRL5::INSTR", reg, plain, usb={"ASRL5::INSTR": "0403:6001"})   # an FTDI cable: every framing, as before
+    assert plain.opened > 5
+    anc = Board(lambda cmd: "attocube ANC300 controller version 1.1.0-1304 2013-10-17 08:16" if cmd == "ver" else None,
+                echo=True, framing=(38400, 8, "none", 1.0))
+    card = reg.get("attocube/anc300")
+    reg.put(parse_card(dict(card.data, connection={"baud_rate": 38400, "framing": "8N1",
+                                                   "read_termination": "\r\n", "write_termination": "\r\n"})))
+    found = identify("ASRL7::INSTR", reg, anc)
+    assert found.card_id == "attocube/anc300" and found.idn.startswith("attocube ANC300")
+
+
+def test_a_laser_gets_its_own_rating_as_its_limit():
+    """l05, l06: first-run lab configs gave 20 mW and 10 mW OBIS lasers the card's 0.1 W."""
+    from labharness.discovery import instrument_block, rated_limits
+    reg = builtin_registry()
+    obis = reg.get("coherent/obis")
+    assert rated_limits(obis, "Coherent, Inc - OBIS 520nm LX 20mW - V1.0.1 - Dec 14 2010") == {"power": (0.0, 0.02)}
+    assert rated_limits(obis, "Coherent, Inc - OBIS 488nm LX 150mW - V1.0.1") == {}        # beyond the card: as is
+    block = "\n".join(instrument_block({"name": "pump", "card": "coherent/obis", "address": "ASRL8::INSTR",
+                                        "note": "Coherent, Inc - OBIS 520nm LX 20mW - V1.0.1"}, reg))
+    assert "power: [0, 0.02]" in block and "its own rating" in block
+
+
+def test_the_manual_search_passes_over_listing_pages_and_brochures():
+    """l07: the search took a page listing many makers' manuals and a brochure for the 6221's manual. A page of
+    document links is followed, never taken for the manual; a brochure that isn't a command reference is passed over."""
+    pytest.importorskip("pypdf")
+    from labharness import autocard
+    from test_autocard import COMMANDS
+    from test_autosetup import tiny_pdf
+    listing = "https://manuals.example/keithley"
+    brochure = "https://www.maker.example/6221-brochure.pdf"
+    manual = "https://www.maker.example/622x-reference.pdf"
+    links = "".join('<a href="https://manuals.example/m%d.pdf">Manual %d</a>' % (i, i) for i in range(12))
+    pages = {
+        listing: ("<html><body><h1>Keithley manuals: Model 6221, 6220, 2400...</h1><p>%s</p>%s"
+                  '<a href="%s">Model 6221 brochure</a><a href="%s">Model 6221 reference manual</a></body></html>'
+                  % (" ".join(COMMANDS) * 40, links, brochure, manual)).encode(),
+        brochure: tiny_pdf([["Model 6221 Brochure: AC and DC current source", "Data sheet"] + COMMANDS * 2]),
+        manual: tiny_pdf([["Model 6220/6221 Reference Manual"] + COMMANDS * 8]),
+    }
+    m = autocard.find_manual("KEITHLEY INSTRUMENTS INC.", "MODEL 6221", lambda system, prompt: (listing, "m"),
+                             lambda url: pages[url] if url in pages else (_ for _ in ()).throw(OSError("404")))
+    assert m is not None and m["url"] == manual, m and m["url"]
+
+
+def test_the_scan_finds_a_time_tagger_through_its_windows_module(monkeypatch):
+    """Swabian's Windows installer puts TimeTagger on the path, not Swabian.TimeTagger; the driver took either, the
+    scan only the second, and missed the Time Tagger (l05)."""
+    import sys
+    import types
+    from labharness.drivers import discover_swabian
+    monkeypatch.setitem(sys.modules, "Swabian", None)
+    monkeypatch.setitem(sys.modules, "pulsestreamer", None)
+    monkeypatch.setitem(sys.modules, "TimeTagger", types.SimpleNamespace(scanTimeTagger=lambda: ["2138000XYZ"]))
+    assert discover_swabian({}) == [("timetagger://2138000XYZ", "Swabian Instruments,Time Tagger,2138000XYZ")]

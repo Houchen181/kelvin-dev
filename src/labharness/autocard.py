@@ -254,6 +254,16 @@ def page_links(html: str, base: str) -> List[Tuple[str, str]]:
     return docs + rest
 
 
+BROCHURE = re.compile(r"\bbrochure\b|\bdata ?sheet\b|\bproduct (?:flyer|overview|selection guide)\b|\bcatalog(?:ue)?\b",
+                      re.I)
+
+
+def _listing(html: str, base: str) -> bool:
+    """A page that lists documents (a site's manuals for many models, a downloads list): followed for its links,
+    never taken for the manual, however much of the model's name and command-like text its list has (l07)."""
+    return sum(1 for _, u in page_links(html, base) if u.lower().split("?")[0].split("#")[0].endswith(".pdf")) >= 8
+
+
 def pdf_links(html: str, base: str, model: str = "", want: Any = PROGRAMMING_WORDS) -> List[str]:
     """Links on a maker's page that may lead to the model's manual, best first: those naming the model (or its
     series), PDFs, and links that say programming (want: what else to look for) or manual. Pages are followed on the
@@ -346,7 +356,7 @@ def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
             html = data.decode("utf-8", errors="replace")
             from .literature import html_to_text
             pages = [html_to_text(html)]
-            kind = "html"
+            kind = "listing" if _listing(html, url) else "html"
             # a product or downloads page: what it links; a page about this model (or its series): its manuals'
             # pages and PDFs, as on makers' support sites (product -> manuals list -> manual page -> PDF)
             if depth == 0 or (depth < MAX_DEPTH and names_model(pages[0], model)):
@@ -361,8 +371,11 @@ def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
             log("%s: does not name the %s" % (url, model))
             continue
         score = specs_score(pages, model) if document else sum(command_score(p) for p in pages)
-        if kind == "html" and (sum(len(p) for p in pages) < 5000 or score < 15):
+        if kind == "listing" or kind == "html" and (sum(len(p) for p in pages) < 5000 or score < 15):
             continue   # a web page counts only if it is a command reference (or the specifications) itself
+        if kind == "pdf" and not document and score < GOOD and BROCHURE.search(head[:400]):   # its title says so
+            log("%s: a brochure or data sheet, not the command reference" % url)
+            continue
         found = {"url": url, "pages": pages, "score": score, "kind": kind, "data": data}
         if best is None or score > best["score"]:
             best = found

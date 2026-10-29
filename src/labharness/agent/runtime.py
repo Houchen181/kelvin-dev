@@ -2765,9 +2765,9 @@ class LabRuntime:
             items.append("the maker's files from %s, kept in the environment (a Python package among them is "
                          "installed)" % files)
         request = ApprovalRequest("Install on this computer%s?" % (" for " + why if why else ""), items)
-        if not self.gate.auto_simple(request, "installing into one of Kelvin's own environments drives nothing; the "
-                                              "instrument's commands still go through Kelvin's checks") \
-                and not self.gate.ask(request):
+        # a download onto the person's computer is theirs to say yes to (F3 P6: ~71 MB came unasked); the Lab panel's
+        # Install button is that yes already
+        if not by.startswith("human") and not self.gate.ask(request):
             note = " (%s)" % request.note if request.note else ""
             return "declined: nothing installed%s" % note
         try:

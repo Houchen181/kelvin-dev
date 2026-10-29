@@ -654,7 +654,10 @@ def discover_swabian(modules: Optional[Dict[str, Any]] = None) -> List[Tuple[str
         try:
             from Swabian import TimeTagger as tt   # type: ignore
         except ImportError:
-            tt = None
+            try:   # the module Swabian's Windows installer puts on the path, as the driver opens it (l05)
+                import TimeTagger as tt   # type: ignore
+            except ImportError:
+                tt = None
     if tt is not None:
         try:
             for serial in tt.scanTimeTagger():
