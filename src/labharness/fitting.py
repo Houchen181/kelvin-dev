@@ -1051,7 +1051,9 @@ def fit_text(result: Dict[str, Any], what: str = "") -> List[str]:
 
 
 def _attr(v: Any) -> Any:
-    if isinstance(v, (str, bool, int, float)):
+    if isinstance(v, bool):   # as 0 or 1: HDF5 keeps a bool as an enum, which some readers can't convert
+        return int(v)
+    if isinstance(v, (str, int, float)):
         return v
     return json.dumps(v, ensure_ascii=False)
 
