@@ -15,6 +15,7 @@ from . import frames
 from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
+from .forecast import Forecast
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
 from .instrument import Stopped
 from .plans import Plan, PlanError, Stabilize, Step, load_plan
@@ -336,13 +337,16 @@ class RunEngine:
             if not ok:
                 _, spec = self.lab.resolve(cond.key)
                 return self._refuse(plan.name, "precondition %s not met (now %s)" % (cond.text, spec.show(actual)))
-        items, grants, problems = self.gate.plan_approval(drives)
+        forecast = Forecast(self).plan(plan)   # what the run changes, how fast, how long, and what it leaves on
+        items, grants, problems = self.gate.plan_approval(drives, forecast)
         if problems:
             return self._refuse(plan.name, "; ".join(problems))
         firing = ["%s.%s (%s)" % (i, a, self.lab.instruments[i].card.actions[a].label) for i, a in plan.trigger
                   if self.lab.instruments[i].card.actions[a].drives]
         if firing:   # an action that drives the sample at every point: the person approves the run
             items = list(items) + ["At every point, after settling: %s, which drive the sample" % ", ".join(firing)]
+        if items:
+            items = list(items) + forecast.closing()
         sim = None
         # auto mode needs a clean dry run, unless a drive is on an instrument Kelvin isn't sure about (a person asks)
         could_auto = self.gate.auto and not any(self.gate.unsure(self.lab.resolve(k)[0]) for k in grants)
@@ -354,6 +358,8 @@ class RunEngine:
             title = "Run plan %s: %d points" % (plan.name, plan.points)
             if sim is not None:
                 title += ", ~%s" % _dur(sim.duration_s) if sim.ok else "; %s" % sim.message
+            else:   # no dry run: the forecast's ramps, settling and waits
+                title += forecast.duration()
             request = ApprovalRequest(title, items)
             auto, why = self.gate.auto_plan(grants, sim)
             if firing:

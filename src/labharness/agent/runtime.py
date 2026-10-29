@@ -1617,6 +1617,19 @@ class LabRuntime:
                 out.setdefault(key, []).extend(vals)
         return out
 
+    def _queue_forecast(self, items: List[Item]) -> Any:
+        """The waiting items walked through in order, each from where the one before leaves the lab, for the queue's
+        card (forecast.py): every drive and setting, the rates read from the instruments, the duration, the end."""
+        from ..forecast import Forecast
+        forecast = Forecast(self.engine, "the queue")
+        for item in items:
+            if item.kind == "plan":
+                forecast.plan(self._plan(item.text))
+            else:
+                step = load_step(item.text)
+                forecast.step(step.sets, step.stabilize, step.wait)
+        return forecast
+
     def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
         """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong)."""
         from ..gate import SimulationApprover
@@ -1679,16 +1692,17 @@ class LabRuntime:
             problems = check()
             if problems:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
-            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items))
+            forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
+            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast)
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
-            duration = None
+            duration = forecast.seconds or None
             scans = sum(1 for i in items if i.kind == "plan")
             steps = len(items) - scans
             title = "Run the queue: %d scan%s%s%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
-                steps, "" if steps == 1 else "s") if steps else "", ", ~%s" % _dur(duration) if duration else "")
+                steps, "" if steps == 1 else "s") if steps else "", forecast.duration())
             if lines:
-                request = ApprovalRequest(title, lines + [
+                request = ApprovalRequest(title, lines + forecast.action_lines() + forecast.closing() + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
                 covered = False
                 if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk

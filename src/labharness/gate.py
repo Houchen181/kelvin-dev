@@ -545,14 +545,28 @@ class SafetyGate:
             self._grants = old
             self._asked = asked
 
-    def plan_approval(self, drive_values: Dict[str, List[Any]]) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
-        """For a plan's drive targets: lines to show the human, the ranges to grant, and refusals."""
-        items: List[str] = []
+    def plan_approval(self, drive_values: Dict[str, List[Any]],
+                      forecast: Any = None) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
+        """For a plan's drive targets: lines to show the human, the ranges to grant, and refusals. forecast: the run
+        walked through (forecast.py), for a card that shows every drive it changes, toward safe or inside the envelope
+        too, with the rate an instrument moves each at; and that covers a draft card's settings in the plan, which
+        would otherwise ask at every step. The lines are empty when nothing needs a person."""
+        lines: List[Tuple[bool, str]] = []   # (a person approves it, the line)
         grants: Dict[str, Allowed] = {}
         problems: List[str] = []
+
+        def shown(inst: Instrument, spec: ParamSpec, current: Any, values: List[Any], why: str = "") -> List[str]:
+            key = "%s.%s" % (inst.name, spec.name)
+            bits = ["%s: now %s, plan uses %s%s" % (key, spec.show(current), Allowed.of(spec, values).show(spec),
+                                                    ", " + why if why else "")]
+            if spec.ramp == "gate":
+                bits.append("ramp %s %s/s" % (num(inst.rate(spec.name)), spec.unit))
+            detail = forecast.detail(key) if forecast is not None else ""
+            return bits + ([detail] if detail else [])
+
         for key, values in drive_values.items():
             inst, spec = self.lab.resolve(key)
-            current = self._current(inst, spec)
+            current = forecast.start(key) if forecast is not None else self._current(inst, spec)
             if current is None:   # unknown (no read-back): every value but safe counts as driving harder
                 away = [v for v in values if spec.distance(v) > 0]
             else:
@@ -562,6 +576,8 @@ class SafetyGate:
             if toward:   # on a draft card even a change toward safe asks: the plan's one approval covers it
                 away = [v for v in values if current is None or not _same(spec, v, current)]
             if not away:
+                if forecast is not None and key in forecast.changes:   # toward safe: it runs, so it is shown
+                    lines.append((False, "; ".join(shown(inst, spec, current, values, "toward its safe value"))))
                 continue
             problem = None if toward else self._away_problem(inst, spec)   # toward safe: no interlock stops it
             standing = self._standing.get(key)
@@ -573,18 +589,31 @@ class SafetyGate:
             unsure = self.unsure(inst)
             if not unsure and inst.trust == "envelope" and self.envelope and all(self.envelope.covers(key, v)
                                                                                   for v in away):
+                if forecast is not None:
+                    lines.append((False, "; ".join(shown(inst, spec, current, values, "inside the project envelope"))))
                 continue
-            allowed = Allowed.of(spec, values)
-            grants[key] = allowed
-            bits = ["%s: now %s, plan uses %s" % (key, spec.show(current), allowed.show(spec))]
-            if spec.ramp == "gate":
-                bits.append("ramp %s %s/s" % (num(inst.rate(spec.name)), spec.unit))
+            grants[key] = Allowed.of(spec, values)
+            bits = shown(inst, spec, current, values)
             g = self._guard_text(inst, spec)
             if g:
                 bits.append(g)
+            if forecast is not None:
+                bits += self._interlock_text(key)
             if unsure:
                 bits.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
-            items.append("; ".join(bits))
+            lines.append((True, "; ".join(bits)))
+        for key, change in (forecast.settings() if forecast is not None else {}).items():
+            inst, spec = self.lab.resolve(key)
+            if not self._draft(inst):
+                continue   # a setting on a reviewed card only configures: it never asks
+            standing = self._standing.get(key)
+            if standing is not None and all(standing.covers(v) for v in change.values):
+                continue
+            # on a draft card each setting asks (nobody has checked which are drives): this one approval covers them
+            grants[key] = Allowed.of(spec, change.values)
+            lines.append((True, "; ".join(shown(inst, spec, change.start, change.values) + [
+                "Kelvin isn't sure about %s: %s" % (inst.name, self.unsure(inst))])))
+        items = [text for _, text in lines] if any(asks for asks, _ in lines) else []
         return items, grants, problems
 
     # ------------------------------------------------------------------ internals
@@ -620,16 +649,20 @@ class SafetyGate:
                     return self._done(Result(False, "refused", key, value=target, message="refused: " + problem),
                                       "set", by)
             if not spec.is_drive:
+                how = None
                 if inst.card.status == "draft" and not inst.simulated and not _same(spec, current, target):
-                    # nobody has checked this card's measure/drive tags yet: a "setting" might reach the sample
-                    request = ApprovalRequest("Change a setting on %s?" % inst.name, [
-                        "%s: %s → %s. Its card is a draft no one has reviewed yet, so Kelvin can't be sure this "
-                        "only configures the instrument" % (key, spec.show(current), spec.show(target))])
-                    if not self.ask(request):
-                        note = " (%s)" % request.note if request.note else ""
-                        return self._done(Result(False, "declined", key, value=target, message="declined: %s stays %s%s"
-                                                 % (key, spec.show(current), note)), "set", by)
-                res = self._move(inst, spec, current, target, away=False, wait=wait, how=None, gen=gen)
+                    # nobody has checked this card's measure/drive tags yet: a "setting" might reach the sample. The
+                    # plan or queue a person approved covers the settings its card showed (plan_approval)
+                    how = self._covered(inst, spec, target, envelope=False)
+                    if how is None:
+                        request = ApprovalRequest("Change a setting on %s?" % inst.name, [
+                            "%s: %s → %s. Its card is a draft no one has reviewed yet, so Kelvin can't be sure this "
+                            "only configures the instrument" % (key, spec.show(current), spec.show(target))])
+                        if not self.ask(request):
+                            note = " (%s)" % request.note if request.note else ""
+                            return self._done(Result(False, "declined", key, value=target, message=(
+                                "declined: %s stays %s%s" % (key, spec.show(current), note))), "set", by)
+                res = self._move(inst, spec, current, target, away=False, wait=wait, how=how, gen=gen)
             elif current is None and spec.distance(target) == 0:   # unknown, to its safe value: always allowed
                 res = self._move(inst, spec, current, target, away=False, wait=wait, how="to safe", gen=gen)
             elif current is None and spec.ramp == "gate" and spec.numeric:
@@ -855,6 +888,21 @@ class SafetyGate:
             return "envelope"
         return None
 
+    def _interlock_text(self, key: str) -> List[str]:
+        """The interlocks on a drive, with their condition as it reads now, for its card (a heating card once didn't
+        say the field was up, nor that an interlock tied the two)."""
+        out = []
+        for lock in self.lab.config.interlocks:
+            if lock.drive != key:
+                continue
+            try:
+                actual = lock.require.check(self.lab.read)[1]
+                now = self.lab.resolve(lock.require.key)[1].show(actual)
+            except Exception:
+                now = "?"
+            out.append("interlock: needs %s (now %s)" % (lock.require.text, now))
+        return out
+
     def _guard_text(self, inst: Instrument, spec: ParamSpec) -> str:
         parts = []
         for g in inst.guards(spec.name):
@@ -874,12 +922,25 @@ class SafetyGate:
         return None
 
     def _describe_move(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any) -> str:
+        """A change on its card: from and to, how fast (the gate's ramp, or the rate the instrument moves at, read
+        from it) and for how long, and for an output going on, what it applies and how the instrument is set."""
+        from .forecast import applies, mode_words, rate_words, read_now
         bits = ["%s.%s %s → %s" % (inst.name, spec.name, spec.show(current), spec.show(target))]
         eta = self._eta(inst, spec, current, target)
         if spec.ramp == "gate":
             bits.append("ramp %s %s/s (~%s)" % (num(inst.rate(spec.name)), spec.unit, _dur(eta)))
+        elif spec.ramp == "instrument" and spec.numeric:
+            rate, words = rate_words(self, inst, spec)
+            seconds = abs(target - current) / rate if rate and current is not None else None
+            bits.append(words + (", ~%s" % _dur(seconds) if seconds and seconds >= 1 else ""))
         elif eta:
             bits.append("~%s" % _dur(eta))
+        if spec.enables and spec.distance(target) > 0:   # an output going on: it once went on into current mode
+            now = lambda key: read_now(self, key)   # noqa: E731
+            bits.append(applies(inst, spec, now, set(self._asked or {})))
+            mode = mode_words(inst, now)
+            if mode:
+                bits.append(mode)
         g = self._guard_text(inst, spec)
         if g:
             bits.append(g)

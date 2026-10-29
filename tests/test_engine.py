@@ -29,7 +29,8 @@ def test_plan_runs_with_a_single_approval(lab, make_engine, tmp_path):
     assert len(approver.requests) == 1
     request = str(approver.requests[0])
     assert "21 points" in request and "smu.V: now 0 V, plan uses 0 … 5 V" in request
-    assert "smu.output" in request and "lockin.amplitude" not in request  # inside the envelope
+    assert "smu.output" in request
+    assert "lockin.amplitude: now 0 V, plan uses 50 mV, inside the project envelope" in request   # shown, not asked
     assert report.points == 21 and len(report.rows) == 21
     peak = max(report.rows, key=lambda r: r["lockin.X"])
     assert 1.0 <= peak["smu.V"] <= 2.0          # the toy sample's peak sits at 1.5 V
