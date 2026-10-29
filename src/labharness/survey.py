@@ -7,7 +7,7 @@
               its USBTMC interface or its maker's vendor ID even when no driver lets VISA open it, and the survey
               says which driver is missing
     serial    the serial ports the system has (pyserial)
-    GPIB      the GPIB adapters VISA knows
+    GPIB      the GPIB adapters VISA knows (the scan asks behind Prologix adapters itself: discovery.py, prologix.py)
 
 Nothing here sends a command to an instrument: listing only. The scan afterwards asks each one who it is."""
 from __future__ import annotations
@@ -60,6 +60,7 @@ class Survey:
     serial_ports: List[str] = field(default_factory=list)
     usb: List[Dict[str, Any]] = field(default_factory=list)  # instrument-like USB devices
     gpib_adapters: Optional[int] = None
+    prologix: List[str] = field(default_factory=list)       # Prologix adapters the scan asked behind, in words
     libraries: List[str] = field(default_factory=list)      # what makers' programs saw (PICam, LightField), in words
     problems: List[str] = field(default_factory=list)       # things to fix, each with what to do
 
@@ -82,8 +83,9 @@ class Survey:
         usb = ["%s %04x:%04x%s" % (u["maker"] or "device", u["vid"], u["pid"], "" if u["visible"] else " (not openable)")
                for u in self.usb]
         out.append("USB instruments: " + (", ".join(usb) if usb else "none"))
-        if self.gpib_adapters is not None:
-            out.append("GPIB adapters: %s" % (self.gpib_adapters or "none"))
+        if self.gpib_adapters is not None or self.prologix:
+            cards = ["%d in VISA" % self.gpib_adapters] if self.gpib_adapters else []
+            out.append("GPIB adapters: " + ("; ".join(cards + self.prologix) or "none"))
         return out + self.libraries + ["To fix: " + p for p in self.problems]
 
     def as_dict(self) -> Dict[str, Any]:

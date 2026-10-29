@@ -4,7 +4,9 @@ Discovery only asks instruments who they are (*IDN? or the card's own identity q
 so it is safe to run with a sample mounted. Serial ports are tried with each card's own framing (baud rate,
 data bits, parity, terminations) rather than a blind sweep. Instruments the lab already uses are left alone.
 An identity reply no card matches is looked up in the instrument collection (`catalog`, collection.py), which
-names the instrument and says where its maker publishes the manual.
+names the instrument and says where its maker publishes the manual. Behind a Prologix adapter (prologix.py: a GPIB-USB
+found among the serial ports, which answers ++ver, and the adapters the lab's instruments are on), every GPIB address
+is asked *IDN? in turn, as VISA's instruments are on a GPIB card.
 
     python -m labharness.discovery                 # list what is connected
     python -m labharness.discovery --write lab.yaml   # and draft a lab config to review
@@ -345,7 +347,8 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
     """Ask one instrument who it is, and match the answer to a card (or look it up in `catalog`, the instrument
     collection). queries: only these (not on a serial port), for a quick ask where the likely card is known: each one
     opens the address again, which for a network address nobody answers at takes the connect timeout each time."""
-    rm = rm or resource_manager()
+    from .prologix import MANAGER, is_prologix
+    rm = MANAGER if is_prologix(address) else rm or resource_manager()
     found = Found(address)
     tries: List[Tuple[str, Optional[Dict[str, Any]]]]
     vid_pid = (usb if usb is not None else _usb_ids()).get(address) if is_serial(address) else None
@@ -428,16 +431,101 @@ def scan(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]
     return scan_survey(registry, rm, in_lab, timeout_ms, network, catalog)[0]
 
 
+def scan_prologix(adapter: str, registry: CardRegistry, in_lab: Optional[Dict[str, str]] = None, timeout_ms: int = 0,
+                  catalog: Any = None) -> Tuple[List[Found], str]:
+    """The instruments on the GPIB bus behind a Prologix adapter (prologix.py), found as on a GPIB card: each address
+    from 1 to 30 asked *IDN? in turn (++addr, then *IDN?) and its reply matched to a card. One that answers with
+    something else (a reading, an error: an older instrument) is listed without an identity; one in the lab (in_lab,
+    by resource_name) is left alone. ([found], the adapter in words); AdapterError when it can't be reached or is no
+    Prologix, ConnectionError when it is lost on the way."""
+    from . import prologix
+    in_lab = in_lab or {}
+    found: List[Found] = []
+    with prologix.held(adapter) as a:   # the lab's connection to it, if the lab has instruments behind it
+        version = a.connect()
+        for pad in prologix.GPIB_ADDRESSES:
+            address = prologix.Where(a.key, pad).address
+            if address in in_lab:
+                found.append(Found(address, how="already in this lab", in_lab=in_lab[address]))
+                continue
+            try:
+                reply = _ask(prologix.MANAGER, address, "*IDN?", timeout_ms or prologix.SCAN_MS)
+            except TimeoutError:
+                continue   # nothing at this address, or nothing that talks
+            except UnicodeDecodeError:
+                reply = ""
+            got = Found(address, reply)
+            card = match_card(reply, registry) if reply else None
+            if card:
+                got.card_id, got.model, got.kind, got.how = card.id, card.model, card.kind, "identity reply"
+            elif reply:
+                got.how = "no card matches the reply"
+                got = look_up(got, catalog)
+            else:
+                got.how = ("answered *IDN? with something other than who it is (an older instrument may have an identity "
+                           "query of its own, or none): add it with its card")
+            found.append(got)
+    return found, "%s %s" % (version, prologix.place(a.key))
+
+
+def prologix_adapters(in_lab: Dict[str, str], ports: Iterable[str] = ()) -> Dict[str, str]:
+    """The Prologix adapters a scan looks behind: those the lab's instruments are on, and each of these serial ports
+    that answers ++ver as a Prologix GPIB-USB does (prologix.usb_ports; one an instrument of the lab uses is left
+    alone). {adapter: its serial port as VISA lists it, or '' for a GPIB-ETHERNET}."""
+    from . import prologix
+    keys: List[str] = []
+    for address in in_lab:
+        if prologix.is_prologix(address):
+            try:
+                key = prologix.where(address).adapter
+            except ValueError:
+                continue
+            if key not in keys:
+                keys.append(key)
+    for port in ports:
+        key = prologix.adapter_key(port)
+        if key not in keys and resource_name("serial://" + key) not in in_lab and prologix.version_of(key):
+            keys.append(key)
+    return {key: resource_name("serial://" + key) if prologix.on_serial(key) else "" for key in keys}
+
+
+def _look_behind(adapter: str, registry: CardRegistry, in_lab: Dict[str, str], catalog: Any, looked: Any) -> List[Found]:
+    """scan_prologix for a scan, with what it saw (or why it couldn't look) in the survey."""
+    from . import prologix
+    try:
+        found, words = scan_prologix(adapter, registry, in_lab, catalog=catalog)
+    except (AdapterError, OSError) as e:
+        looked.problems.append(str(e).splitlines()[0] if str(e) else "the Prologix %s could not be asked"
+                               % prologix.place(adapter))
+        return []
+    answered = ["GPIB %d" % prologix.where(f.address).pad for f in found if not f.in_lab]
+    looked.prologix.append("%s (%s)" % (words, ", ".join(answered) + " answered" if answered else
+                                        "nothing else on its GPIB bus answered" if found else
+                                        "nothing on its GPIB bus answered"))
+    if not found:
+        looked.problems.append(
+            "Nothing on the GPIB bus behind the Prologix %s answered *IDN? (addresses 1 to 30): check that the "
+            "instruments are switched on and cabled; one that doesn't know *IDN? is added by its address, "
+            "prologix://%s/<its GPIB address>, with its card" % (prologix.place(adapter), prologix.shown(adapter)))
+    return found
+
+
 def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[str, str]] = None,
                 timeout_ms: int = 800, network: bool = True, catalog: Any = None,
-                **survey_options: Any) -> Tuple[List[Found], Any]:
-    """The scan, and what it looked through (survey.py): VISA, the local network, USB, serial ports and GPIB."""
+                prologix_ports: Optional[Iterable[str]] = None, **survey_options: Any) -> Tuple[List[Found], Any]:
+    """The scan, and what it looked through (survey.py): VISA, the local network, USB, serial ports and GPIB, also
+    behind Prologix adapters. prologix_ports: the serial ports that may be a GPIB-USB (prologix.usb_ports, when the
+    VISA is a real one; tests give theirs)."""
+    from . import prologix
     from .adapters import resource_name
-    from .survey import survey
+    from .survey import _is_pyvisa, survey
     rm = rm or resource_manager()
     in_lab = {resource_name(a): n for a, n in (in_lab or {}).items()}
     looked = survey(rm, network=network, **survey_options)
-    resources = list(looked.resources)
+    if prologix_ports is None:
+        prologix_ports = prologix.usb_ports() if _is_pyvisa(rm) else []
+    adapters = prologix_adapters(in_lab, prologix_ports)   # a GPIB-USB's port is asked through it, not as a serial port
+    resources = [r for r in looked.resources if r not in set(adapters.values())]
     usb = _usb_ids()
     out = []
     for name in sorted(set(resources)):
@@ -445,6 +533,8 @@ def scan_survey(registry: CardRegistry, rm: Any = None, in_lab: Optional[Dict[st
             out.append(Found(name, how="already in this lab", in_lab=in_lab[name]))
             continue
         out.append(identify(name, registry, rm, timeout_ms, usb, catalog=catalog))
+    for adapter in adapters:
+        out += _look_behind(adapter, registry, in_lab, catalog, looked)
     from .drivers import MODULES, discover_libraries, discover_swabian, discover_zhinst, library_notes
     # instruments behind vendor software: Zurich Instruments (LabOne), Swabian Pulse Streamers and Time Taggers,
     # NI DAQ cards, Ocean spectrometers, Andor and Basler cameras, Andor spectrographs, attocube ANC350s

@@ -36,7 +36,7 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
     if lab is not None:
         for name, inst in lab.instruments.items():
             if inst.config.address == address and not inst.simulated:
-                if card.library or "://" in address and not address.lower().startswith("serial://"):
+                if card.library or "://" in address and not address.lower().startswith(("serial://", "prologix://")):
                     raise AdapterError("%s is connected in the lab as %s: save this card and use it for %s, or take %s "
                                        "out of the lab config (Lab, Set up) to try another card on it."
                                        % (address, name, name, name))

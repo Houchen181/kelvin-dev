@@ -8,8 +8,9 @@ it. So a script gets what a plan gets:
 
     before   the script is read, never run (scripts.py): the lab instruments it opens and the drive values it uses
              become one approval by a person, like a plan's; what Kelvin can't check is said there (an instrument not
-             in the lab, a maker's library that reaches instruments past the gate). A script can't be rehearsed on the
-             twins, so a person approves every run, in auto mode too.
+             in the lab, the Prologix adapter lab instruments are behind, a maker's library that reaches instruments
+             past the gate). A script can't be rehearsed on the twins, so a person approves every run, in auto mode
+             too.
     while    measurements and settings run; drives are checked against the limits, ramped and watched; a change
              beyond what was approved asks the person, and one beyond the limits is refused. A refusal or a person's
              stop ends the script (its own finally: still runs, through the gate); one that does not end is ended.
@@ -41,6 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
+from . import prologix
 from . import scripts as lab_scripts
 from .adapters import resource_name
 from .eventlog import RunStore
@@ -413,6 +415,31 @@ def lab_name(lab: Any, address: str) -> Optional[str]:
     return None
 
 
+def behind(lab: Any, address: str) -> List[str]:
+    """The lab instruments behind the Prologix adapter at this address (its serial port, or its TCP port): a script that
+    opens the adapter itself and speaks its ++ commands reaches them there, past the gate."""
+    want = canonical(address)
+    names = []
+    for name, ic in lab.config.instruments.items():
+        if prologix.is_prologix(ic.address):
+            try:
+                adapter = prologix.where(ic.address).adapter
+            except ValueError:
+                continue
+            if canonical(prologix.visa_name(adapter)) == want:
+                names.append(name)
+    return names
+
+
+def outside(lab: Any, address: str) -> str:
+    """An address the script opens that is no lab instrument's, and why Kelvin can't check what goes there."""
+    under = behind(lab, address)
+    if under:
+        return ("%s, the Prologix adapter this lab's %s %s behind: commands sent through it skip the safety gate"
+                % (address, ", ".join(under), "is" if len(under) == 1 else "are"))
+    return "%s, which is not in this lab: Kelvin can't check what it sends there" % address
+
+
 @dataclass
 class Found:
     instruments: Dict[str, str] = field(default_factory=dict)   # lab name -> the address the script opens it at
@@ -644,8 +671,7 @@ def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[st
         lines.append("It opens %s; every command goes through the safety gate as it is sent" % ", ".join(
             "%s (%s)" % (n, a) for n, a in found.instruments.items()))
     lines += items + open_lines
-    lines += ["It also opens %s, which is not in this lab: Kelvin can't check what it sends there" % a
-              for a in found.unknown]
+    lines += ["It also opens " + outside(lab, a) for a in found.unknown]
     lines += ["It uses %s, which reaches instruments without Kelvin seeing the commands" % m for m in found.libraries]
     lines += found.notes
     lines.append("A script can't be rehearsed on the simulated lab, so a person approves each run; anything beyond "
@@ -1103,11 +1129,10 @@ class ScriptRun:
                 raise _Refuse("refused: %s is %s" % (name, away))
             self.opened.setdefault(name, address)
             return {"instrument": name}
-        if kind == "socket" or canonical(address) in self.allowed:   # a socket: not a lab instrument at all
-            return {}
+        if canonical(address) in self.allowed or kind == "socket" and not behind(self.lab, address):
+            return {}   # a person allowed it, or a socket that reaches no lab instrument
         request = ApprovalRequest("Let %s open %s?" % (self.prep.name, address), [
-            "%s opens %s, which is not in this lab: Kelvin can't check what it sends there, so it runs as the script "
-            "wrote it" % (self.prep.name, address)])
+            "%s opens %s, so it runs as the script wrote it" % (self.prep.name, outside(self.lab, address))])
         if not self._ask(request):
             raise _Refuse("declined: %s may not open %s%s" % (self.prep.name, address,
                                                                " (%s)" % request.note if request.note else ""))

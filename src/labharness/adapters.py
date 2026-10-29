@@ -10,6 +10,8 @@ Addresses in a lab config:
     USB0::0x05E6::0x2450::04412345::INSTR       USB-TMC
     TCPIP0::192.168.1.20::inst0::INSTR          LAN (VXI-11); TCPIP0::host::5025::SOCKET for raw sockets
     ASRL3::INSTR  or  serial://COM3             RS-232 / USB-serial, with the card's baud rate and framing
+    prologix://192.168.1.50/12                  GPIB address 12 behind a Prologix GPIB-ETHERNET; prologix://COM5/12
+                                                behind a GPIB-USB (prologix.py: Kelvin speaks to the adapter itself)
 
 PyVISA uses the installed VISA (NI-VISA, Keysight IO Libraries) when there is one, else its pure-Python backend
 (pyvisa-py, with pyserial for serial ports). Set KELVIN_VISA_BACKEND (e.g. "@py") to choose.
@@ -80,6 +82,14 @@ def where_and_cause(address: str) -> Tuple[str, str]:
     scheme, sep, rest = address.partition("://")
     if sep and scheme.lower() == "sim":
         return "", ""
+    if sep and scheme.lower() == "prologix":
+        from .prologix import place, where
+        try:
+            at = where(address)
+        except ValueError:
+            return "through a Prologix adapter (%s)" % rest, "cable or power?"
+        return ("on GPIB (address %d) through the Prologix %s" % (at.pad, place(at.adapter)),
+                "cable or power? (or the adapter: unplugged, or held by another program)")
     if sep and scheme.lower() not in ("visa", "serial"):
         where, cause = _SOFTWARE.get(scheme.lower(), ("its maker's software (%s)" % address,
                                                       "is it on, and its maker's software running?"))
@@ -152,6 +162,9 @@ def resource_name(address: str) -> str:
     address = address.strip()
     if address.startswith("visa://"):
         return address[len("visa://"):]
+    if address.lower().startswith("prologix://"):   # not VISA's: one way to write it (prologix.py)
+        from .prologix import canonical
+        return canonical(address)
     m = re.match(r"^serial://(.+)$", address)
     if m:
         port = m.group(1)
@@ -165,10 +178,10 @@ def is_serial(name: str) -> bool:
 
 
 def marks_message_end(name: str) -> bool:
-    """A bus that marks where each reply ends (EOI on GPIB, the end of a USB-TMC or VXI-11/HiSLIP message), unlike a
-    plain socket or a serial line, where only a line end does."""
+    """A bus that marks where each reply ends (EOI on GPIB, also through a Prologix adapter; the end of a USB-TMC or
+    VXI-11/HiSLIP message), unlike a plain socket or a serial line, where only a line end does."""
     name = name.upper()
-    return name.endswith("::INSTR") and not is_serial(name)
+    return name.endswith("::INSTR") and not is_serial(name) or name.startswith("PROLOGIX://")
 
 
 def apply_serial_settings(res: Any, settings: Dict[str, Any]) -> None:
@@ -432,8 +445,12 @@ class VisaBackend:
 
 def open_backend(name: str, card: Card, address: str, rm: Optional[Any] = None,
                  overrides: Optional[Dict[str, Any]] = None) -> Any:
-    """VISA for addresses like GPIB0::24::INSTR or serial://COM3; a vendor driver for zhinst:// or qd://."""
+    """VISA for addresses like GPIB0::24::INSTR or serial://COM3; Kelvin's own Prologix support for prologix://; a
+    vendor driver for zhinst:// or qd://."""
     from .drivers import is_driver_address, open_driver
+    from .prologix import MANAGER, is_prologix
     if is_driver_address(address):
         return open_driver(name, card, address)
+    if is_prologix(address):   # GPIB through the adapter: VISA isn't needed, and doesn't know these addresses
+        return VisaBackend(name, card, address, rm if rm is not None else MANAGER, overrides)
     return VisaBackend(name, card, address, rm, overrides)

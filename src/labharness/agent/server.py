@@ -565,8 +565,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def scan_instruments() -> str:
-        """Find instruments connected to this computer (GPIB, USB, LAN, serial) and match them to cards. It only
-        asks each instrument who it is. add_instrument adds one the person asked for."""
+        """Find instruments connected to this computer (GPIB, also behind a Prologix GPIB-USB adapter; USB, LAN,
+        serial) and match them to cards. It only asks each instrument who it is. add_instrument adds one the person
+        asked for."""
         return rt.scan()
 
     @server.tool(annotations=READ, structured_output=False)
@@ -574,7 +575,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """What an address on the lab's network answers, for an instrument the scan didn't find or didn't
         identify: the ports instruments use, what each says (its *IDN? reply where it speaks SCPI, a web page's
         title, a greeting, a Jupyter or Pyro server on a board), its LXI identification, the matching card and the
-        address to use. address: an IP address or host name, optionally :port. Local networks only; only looks."""
+        address to use. address: an IP address or host name, optionally :port. Local networks only; only looks. A
+        Prologix GPIB adapter (prologix://<its address>, <address>:1234, or a GPIB-USB's prologix://COM5): who is at
+        each GPIB address behind it."""
         return outside(rt, "what a network address answered", rt.inspect_address(address))
 
     @server.tool(annotations=READ, structured_output=False)
@@ -582,9 +585,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Find instruments on the local network whose address nobody knows: those that announce themselves (mDNS,
         as LXI instruments do, and a VXI-11 broadcast), and every address of this computer's networks with a port
         open that instruments or their gateways use (VXI-11, HiSLIP, SCPI sockets, Modbus, Prologix GPIB-ETHERNET,
-        serial device servers). Each is asked who it is (*IDN?, its LXI page) and matched to a card; what answered
-        can then go to try_card and add_instrument. network: a local range to sweep instead (192.168.1.0/24 or
-        192.168.1.*, at most a /22); empty: this computer's own networks. Takes up to half a minute; only looks."""
+        serial device servers). Each is asked who it is (*IDN?, its LXI page; behind a Prologix, every GPIB address)
+        and matched to a card; what answered can then go to try_card and add_instrument. network: a local range to
+        sweep instead (192.168.1.0/24 or 192.168.1.*, at most a /22); empty: this computer's own networks. Takes up to
+        half a minute, and about 12 s more for each Prologix; only looks."""
         return outside(rt, "what addresses on the network answered", rt.find_on_network(network))
 
     @server.tool(annotations=READ, structured_output=False)

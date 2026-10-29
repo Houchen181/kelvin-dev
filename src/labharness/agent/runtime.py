@@ -3843,14 +3843,24 @@ class LabRuntime:
     def inspect_address(self, address: str) -> str:
         """What a network address answers: the ports instruments use, what each says (its *IDN? reply where it
         speaks SCPI, a web page's title, a greeting), the matching card and the address to use. Local networks only;
-        an instrument already in the lab keeps its connection (only its web page is looked at)."""
-        from .. import probe
+        an instrument already in the lab keeps its connection (only its web page is looked at). Behind a Prologix
+        GPIB-ETHERNET (its port 1234 answers, or prologix://<address>): the instruments on its GPIB bus."""
+        from .. import probe, prologix
         from ..discovery import identify, match_card
+        if prologix.is_prologix(address):
+            try:
+                adapter = prologix.adapter_of(address)
+            except ValueError as e:
+                return str(e)
+            if prologix.on_serial(adapter):   # a GPIB-USB's
+                return self.behind_prologix(adapter)
         try:
-            host, _ = probe.host_of(address)
+            host, port = probe.host_of(address)
             ip = probe.local_ip(host)
         except ValueError as e:
             return str(e)
+        if prologix.is_prologix(address) or port == prologix.PORT:
+            return self.behind_prologix("%s:%d" % (ip, port or prologix.PORT))
         in_lab = {name: ic.address for name, ic in self.lab.config.instruments.items()
                   if probe.host_of(ic.address)[0] in (host, ip)}
         ports = [p for p in probe.PORTS if p[1] in ("http", "https")] if in_lab else None
@@ -3893,6 +3903,8 @@ class LabRuntime:
             lines.append("Check the address (the instrument's front panel or its maker's program shows it), that it "
                          "is switched on, and that this computer is on its network (connected_devices lists this "
                          "computer's networks). An instrument on a port of its own: inspect_address <address>:<port>.")
+        if any(f["port"] == prologix.PORT for f in res["found"]):   # a GPIB-ETHERNET: who is on its GPIB bus
+            lines.append(self.behind_prologix("%s:%d" % (ip, prologix.PORT)))
         for resource in found_here:
             if resource not in self.last_found:
                 self.last_found.append(resource)   # found here: try_card and add_instrument may use it
@@ -3906,9 +3918,9 @@ class LabRuntime:
         speak SCPI; an instrument already in the lab is left alone."""
         import concurrent.futures
         import ipaddress
-        from .. import probe
-        from ..adapters import resource_name
-        from ..discovery import Found, identify, look_up, match_card
+        from .. import probe, prologix
+        from ..adapters import AdapterError, resource_name
+        from ..discovery import Found, identify, look_up, match_card, scan_prologix
         from ..survey import network_adverts
         adapters = probe.network_adapters()
         try:
@@ -3940,6 +3952,7 @@ class LabRuntime:
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                 said = dict(zip(hosts, pool.map(lambda ip: probe.identify_host(ip, ports[ip]), hosts)))
             visa = [(r, probe.host_of(r)[0]) for r, _ in adverts if probe.host_of(r)[0] not in in_lab]
+            gpib: List[str] = []   # Prologix GPIB-ETHERNETs: who is on the GPIB bus behind each
             for ip in hosts:
                 for f in said[ip]["found"]:
                     if f.get("idn"):
@@ -3949,6 +3962,8 @@ class LabRuntime:
                         keep(ip, got if card else look_up(got, self.collection))
                     elif f["port"] in (111, 4880) and all(host != ip for _, host in visa):
                         visa.append(("TCPIP0::%s::%s::INSTR" % (ip, "inst0" if f["port"] == 111 else "hislip0"), ip))
+                    elif f["port"] == prologix.PORT:
+                        gpib.append(ip)
             for resource, host in visa[:8]:   # VXI-11 and HiSLIP answer through VISA, one at a time
                 if host in found:
                     continue   # it said who it is on a socket already
@@ -3958,6 +3973,17 @@ class LabRuntime:
                     continue
                 if got.idn:
                     keep(host, got)
+            listed = {resource_name(ic.address): n for n, ic in self.lab.config.instruments.items()}
+            for ip in gpib:   # each GPIB address asked in turn: about 12 s an adapter, one adapter at a time
+                self.busy = "asking who is behind the Prologix at %s" % ip
+                try:
+                    behind, _ = scan_prologix("%s:%d" % (ip, prologix.PORT), self.lab.registry, listed,
+                                              catalog=self.collection)
+                except (AdapterError, OSError):
+                    continue   # no Prologix after all (it didn't answer ++ver), or another program has it
+                for got in behind:
+                    if got.idn and not got.in_lab:
+                        keep(ip, got)
         finally:
             self.busy = None
 
@@ -4002,6 +4028,36 @@ class LabRuntime:
                             answered=everyone or None, found=[g.address for h in everyone for g in found.get(h, [])]
                             or None)
         return "\n".join(lines)
+
+    def behind_prologix(self, adapter: str) -> str:
+        """The instruments on the GPIB bus behind a Prologix adapter (a GPIB-ETHERNET's host[:port], a GPIB-USB's
+        serial port): each GPIB address asked who it is (++addr, then *IDN?) and matched to a card, kept for try_card
+        and add_instrument. An instrument already in the lab is left alone."""
+        from .. import prologix
+        from ..adapters import AdapterError, resource_name
+        from ..discovery import scan_prologix
+
+        def run() -> str:
+            in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
+            try:
+                found, words = scan_prologix(adapter, self.lab.registry, in_lab, catalog=self.collection)
+            except (AdapterError, OSError) as e:
+                return str(e).splitlines()[0] if str(e) else "the Prologix %s could not be asked" % adapter
+            lines = ["%s: %s" % (words, "each GPIB address from 1 to 30 asked who it is" if found else
+                                 "nothing on its GPIB bus answered *IDN? (addresses 1 to 30). Check that the instruments "
+                                 "are switched on and cabled; one that doesn't know *IDN? is added by its address and "
+                                 "card: add_instrument prologix://%s/<its GPIB address> with card"
+                                 % prologix.shown(prologix.adapter_of(adapter)))]
+            for f in found:
+                lines.append("- %s%s" % (f.line(), "" if f.in_lab else ": add_instrument %s" % f.address if f.card_id
+                                         else ": draft_card %s" % f.address if f.idn else ""))
+                if f.in_lab:
+                    continue
+                self.found_info[resource_name(f.address)] = dict(vars(f))
+                if f.address not in self.last_found:
+                    self.last_found.append(f.address)   # found here: try_card and add_instrument may use it
+            return "\n".join(lines)
+        return self._do("looking behind the Prologix adapter %s" % adapter, run)
 
     def inspect_serial(self, port: str, query: str = "*IDN?", baud: int = 0) -> str:
         """What an instrument on a serial port is: what it sends by itself (some stream readings), then its answer
