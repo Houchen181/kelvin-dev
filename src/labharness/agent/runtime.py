@@ -2574,13 +2574,14 @@ class LabRuntime:
     def lab_memory_brief(self, keep: str = "remember_for_lab") -> str:
         """The lab's memory as every chat (and every agent's instructions) has it: what to do with it, its notes
         within the brief's budget, the measurement chain on record, and how many notes lab_memory has besides.
-        keep: how this client keeps a note. "" when the lab's memory is empty and no chain is on record."""
+        keep: how this client keeps a note ("": it keeps none). "" when the lab's memory is empty and no chain is on
+        record."""
         from .. import labmemory as lm
         notes, chain = self.lab_notes(), self._chain_line()
         if not notes and not chain:
             return ""
         shown, left = lm.brief(notes, self.lab.instruments)
-        out = [lm.SECTION.format(keep=keep)] + shown + ([chain] if chain else [])
+        out = [lm.head(keep)] + shown + ([chain] if chain else [])
         if left:
             out.append("%d more note%s: lab_memory looks them up, by instrument or by words." % (
                 left, "" if left == 1 else "s"))

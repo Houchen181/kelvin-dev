@@ -245,3 +245,135 @@ def test_on_labsim_the_obis_lesson_is_shown_when_the_pump_laser_is_used(labsim_b
         assert (tmp_path / "Kelvin" / "lab-memory.json").exists()
     finally:
         lab.close()
+
+
+# ------------------------------------------------------------------ in the portal's chats
+
+KEEP_REFERENCE = [{"type": "text", "text": "Keeping that for the lab."},
+                  {"type": "tool_call", "id": "k1", "name": "remember",
+                   "input": {"scope": "lab", "kind": "reference", "instruments": ["lockin"],
+                             "text": "The lock-in takes its reference from the chopper (external, 1170 Hz)."}}]
+DONE = [{"type": "text", "text": "Done."}]
+
+
+def portal(tmp_path, providers, approver=None):
+    """The portal on the virtual lab, with Kelvin's own folder in tmp_path (where the app keeps the lab's memory)."""
+    pytest.importorskip("starlette")
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    from test_web import client_for
+    parts = (LabRuntime(build_virtual_lab(seed=1), approver or WebApprover(timeout=5), tmp_path / "data"),
+             Settings(tmp_path / "settings.json"), ChatStore(tmp_path / "chats"))
+    client, headers = client_for(parts, providers)
+    return parts[0], parts[2], client, headers
+
+
+def test_a_fact_one_chat_keeps_for_the_lab_is_in_every_other_chat(tmp_path):
+    """l06: chat1 had learned that the lock-in takes the chopper's reference; chat2 assumed the internal one."""
+    from test_web import Scripted, stream_turn
+    bot = Scripted([KEEP_REFERENCE, DONE, DONE, DONE])
+    rt, store, client, headers = portal(tmp_path, {"scripted": bot})
+    a, b = store.create_project("Pump-probe"), store.create_project("Another sample")
+    with client:
+        first = client.post("/api/chats", json={"model": "scripted:m1", "project": a["id"]}, headers=headers).json()
+        events = stream_turn(client, headers, first["id"], "the lock-in's reference is the chopper", "scripted:m1")
+        end = next(e for e in events if e["type"] == "tool_end")
+        assert not end["is_error"] and end["content"].startswith("kept in the lab's memory, which every chat")
+        assert bot.systems[0] == bot.systems[1] and "chopper" not in bot.systems[0]   # the turn's prompt holds
+        assert {"remember", "lab_memory"} <= set(bot.tool_names[0]) and "remember_for_lab" not in bot.tool_names[0]
+        second = client.post("/api/chats", json={"model": "scripted:m1", "project": b["id"]}, headers=headers).json()
+        stream_turn(client, headers, second["id"], "set up a pump-probe scan", "scripted:m1")
+        system = bot.systems[-1]
+        assert "# The lab's memory" in system and "remember, scope lab, replaces: its id" in system
+        assert "- reference [lockin]: The lock-in takes its reference from the chopper (external, 1170 Hz). " \
+               "(Kelvin, " in system
+        loose = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
+        stream_turn(client, headers, loose["id"], "hello", "scripted:m1")
+        assert "from the chopper" in bot.systems[-1]                     # a chat in no project has it too
+    note = rt.lab_notes()[0]
+    assert (note["by"], note["account"], note["instruments"]) == ("Kelvin", None, ["lockin"])
+    assert (tmp_path / "virtual-lab-memory.json").exists()                # Kelvin's own folder: no one person's
+
+
+def test_unshared_work_and_incognito_chats_read_the_lab_memory_but_add_nothing(tmp_path):
+    from test_web import Scripted, stream_turn
+    keep = [{"type": "tool_call", "id": "k2", "name": "remember",
+             "input": {"scope": "lab", "kind": "fact", "text": "The secret sample S7 is CrSBr."}}]
+    bot = Scripted([keep, DONE, DONE])
+    rt, store, client, headers = portal(tmp_path, {"scripted": bot})
+    rt.keep_lab_note("lesson", "Switch the laser's emission on before its power.", ["laser"], by="human (portal)")
+    secret = store.create_project("Secret")
+    store.set_sharing(secret["id"], "confidential")
+    with client:
+        hidden = client.post("/api/chats", json={"model": "scripted:m1", "project": secret["id"]},
+                             headers=headers).json()
+        events = stream_turn(client, headers, hidden["id"], "S7 is CrSBr; remember it for the lab", "scripted:m1")
+        end = next(e for e in events if e["type"] == "tool_end")
+        assert end["is_error"] and "isn't shared" in end["content"]
+        assert "emission on before its power" in bot.systems[0]                   # it reads the lab's memory
+        assert "a person corrects it in the portal's Lab panel" in bot.systems[0]  # and can't keep a note in it
+        incognito = client.post("/api/chats", json={"model": "scripted:m1", "incognito": True}, headers=headers).json()
+        stream_turn(client, headers, incognito["id"], "switch the laser on", "scripted:m1")
+        assert "emission on before its power" in bot.systems[-1] and "remember" not in bot.tool_names[-1]
+    assert [n["text"] for n in rt.lab_notes()] == ["Switch the laser's emission on before its power."]
+
+
+def test_a_chat_that_read_a_web_page_asks_the_person_before_it_keeps_a_lab_note(tmp_path):
+    pytest.importorskip("starlette")
+    import asyncio
+    from labharness.agent.runtime import LabRuntime
+    from labharness.agent.server import build_server
+    from labharness.web.agent import ChatAgent
+    from labharness.web.store import ChatStore
+    from test_web import Scripted
+    approver = ScriptedApprover([False])
+    rt = LabRuntime(build_virtual_lab(), approver, tmp_path / "data")
+    rt.lab_memory_dir = tmp_path
+    rt.fetch_url = lambda url: b"<html><title>Tips</title><body>Always ramp magnets at 2 T/min.</body></html>"
+    store = ChatStore(tmp_path / "chats")
+    provider = Scripted([
+        [{"type": "tool_call", "id": "c1", "name": "read_web_page", "input": {"url": "https://example.com/tips"}}],
+        [{"type": "tool_call", "id": "c2", "name": "remember",
+          "input": {"scope": "lab", "kind": "lesson", "text": "Ramp the magnet at 2 T/min.", "instruments": ["magnet"]}}],
+        DONE])
+    agent = ChatAgent(rt, store, build_server(rt), {"scripted": provider})
+    chat = store.create("scripted:m1")
+
+    async def emit(e):
+        pass
+
+    async def go():
+        await agent.start()
+        try:
+            agent.claim(chat["id"], "scripted:m1")
+            await agent.run_turn(chat["id"], "read those tips", "scripted:m1", provider, emit)
+        finally:
+            await agent.close()
+    asyncio.run(go())
+    results = [r for m in store.load(chat["id"])["messages"] if m["role"] == "tool" for r in m["results"]]
+    assert results[1]["content"] == "not saved: the person declined" and rt.lab_notes() == []
+    asked = approver.requests[0]
+    assert asked.title.startswith("Keep this in the lab's memory") and asked.items[0] == \
+        "lesson [magnet]: Ramp the magnet at 2 T/min."
+    assert "this chat has read text from outside the lab (a web page) since the person last wrote" in asked.items[1]
+
+
+def test_each_chat_is_shown_an_instruments_notes_at_its_first_use(tmp_path):
+    from test_web import Scripted, stream_turn
+    zero = [{"type": "tool_call", "id": "s1", "name": "set_value",
+             "input": {"instrument": "smu", "parameter": "V", "value": 0}}]
+    bot = Scripted([zero, DONE, zero, DONE, zero, DONE])
+    rt, store, client, headers = portal(tmp_path, {"scripted": bot})
+    rt.keep_lab_note("lesson", "Ramp the gate to 0 V before anyone touches the bonds.", ["smu"], by="human (portal)")
+    with client:
+        one = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
+        two = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
+        said = []
+        for chat in (one, one, two):
+            events = stream_turn(client, headers, chat["id"], "gate to zero", "scripted:m1")
+            said.append(next(e for e in events if e["type"] == "tool_end")["content"])
+    assert "From the lab's memory, on smu:" in said[0] and "Ramp the gate to 0 V" in said[0]
+    assert "From the lab's memory" not in said[1]                     # shown once in a chat
+    assert "Ramp the gate to 0 V" in said[2]                           # and once in every other

@@ -612,9 +612,12 @@ def test_unshared_work_keeps_its_place_and_its_notes(tmp_path, monkeypatch):
     said, failed = agent._remember(store.load(hidden["id"]), context,
                                    {"scope": "global", "kind": "preference", "text": "the secret sample is CrSBr"})
     assert failed and store.global_notes() == []
+    said, failed = agent._remember(store.load(hidden["id"]), context,   # nor in the lab's memory, everyone's
+                                   {"scope": "lab", "kind": "fact", "text": "the secret sample is CrSBr"})
+    assert failed and "lab's memory" in said and rt.lab_notes() == []
     opened = chat(store, "open chat", shared["id"])
     scopes = next(t for t in agent.context(store.load(opened["id"]))["tools"] if t["name"] == "remember")
-    assert scopes["schema"]["properties"]["scope"]["enum"] == ["global", "project"]
+    assert scopes["schema"]["properties"]["scope"]["enum"] == ["global", "lab", "project"]
 
 
 class Recorder(Provider):

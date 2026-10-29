@@ -50,13 +50,19 @@ FILE = "lab-memory.json"
 VIRTUAL_FILE = "virtual-lab-memory.json"
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _lock = threading.Lock()   # one writer at a time (the runtime opens the file anew for each call)
-# the brief's head, in every chat's prompt and every agent's instructions; keep: how that client keeps a note
+# the brief's head, in every chat's prompt and every agent's instructions (head())
 SECTION = """# The lab's memory
 What people and Kelvin keep about this lab, for every chat, everyone here and every agent: how it is wired, where
 references come from, what excites the sample, lessons learned. Each note says who wrote it and when. Follow them
 unless the person says otherwise; a person's note outranks Kelvin's. If one looks out of date or disagrees with what
-you see, say so, and correct it ({keep}, replaces: its id) once the person confirms. lab_memory looks up every note,
-and describe_instrument shows an instrument's."""
+you see, {fix}. lab_memory looks up every note, and describe_instrument shows an instrument's."""
+
+
+def head(keep: str = "") -> str:
+    """The brief's head. keep: how this client keeps a note ("" when it keeps none: an incognito chat, unshared
+    work, learning switched off)."""
+    return SECTION.format(fix="say so, and correct it (%s, replaces: its id) once the person confirms" % keep if keep
+                          else "say so: a person corrects it in the portal's Lab panel")
 
 
 class LabMemoryError(ValueError):
