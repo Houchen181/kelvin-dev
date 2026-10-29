@@ -325,7 +325,8 @@ class SerialLine:
 
     def ok(self):
         parity = str(getattr(self.parity, "name", self.parity)).lower()
-        return (self.baud_rate, self.data_bits, parity, self.stop_bits) == self.framing
+        stop = {"one": 1.0, "one_and_a_half": 1.5, "two": 2.0}.get(getattr(self.stop_bits, "name", None), self.stop_bits)
+        return (self.baud_rate, self.data_bits, parity, stop) == self.framing   # PyVISA's constants, or plain numbers
 
     def write(self, cmd):
         self.sent.append(cmd)
@@ -417,6 +418,24 @@ def test_the_smc100_card_identifies_homes_and_waits_for_a_move():
     assert gate.raw("stage", "1PW1").action == "refused"                       # configuration state: never
     assert gate.raw("stage", "1SR30").action == "refused"                      # its software limits: never
     assert gate.set("stage", "position", 30).action == "refused"               # the lab's travel
+
+
+def test_a_move_the_smc100_refuses_fails_at_once():
+    """Cards to gate: before homing the SMC100 refuses a move (1TEH), and Kelvin waited out the card's whole 63 s
+    timeout for it. With the card's busy status and the gate's error check after the write, the refusal comes back at
+    once, and the next good move isn't blamed for it."""
+    reg = builtin_registry()
+    state, line = smc100()
+    lab = lab_of(reg, {"stage": {"card": "newport/smc100", "address": "ASRL6::INSTR", "limits": {"position": [0, 25]}}},
+                 {"stage": VisaBackend("stage", reg.get("newport/smc100"), "ASRL6::INSTR", OneLine(line))})
+    assert lab.health_check()[0].ok
+    gate = SafetyGate(lab, ScriptedApprover([True] * 3))
+    start = lab.clock.now()
+    r = gate.set("stage", "position", 5.0)
+    assert not r.ok and "1TEH" in r.message and lab.clock.now() - start < 5, r.message
+    assert gate.act("stage", "home").ok
+    r = gate.set("stage", "position", 12.0)
+    assert r.ok, r.message
 
 
 def test_the_tpg36x_card_reads_both_gauges_with_their_status():
