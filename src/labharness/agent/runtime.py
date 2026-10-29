@@ -1015,7 +1015,9 @@ class LabRuntime:
         (and group), marked accepted (by whom, when, which model), in run.h5; then the run's scan report is written
         again, so it shows the fit that was accepted rather than the automatic one."""
         stamp = {"by": by, "at": datetime.now().isoformat(timespec="seconds"), "model": model or "chosen automatically"}
-        fresh = [dict(s, accepted=stamp) for s in new.get("series") or []]
+        fresh = [dict(s, accepted=stamp) for s in new.get("series") or [] if s.get("fit") or s.get("results")]
+        if not fresh:
+            return "nothing kept: this analysis fitted nothing to keep"
         done = {(s.get("y"), s.get("group")) for s in fresh}
         merged = dict(kept, series=[s for s in kept.get("series") or [] if (s.get("y"), s.get("group")) not in done]
                       + fresh)

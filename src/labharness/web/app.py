@@ -3098,9 +3098,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     accounts = None if (args.no_accounts or args.data_dir) else Accounts(home)   # people sign in (accounts.py)
     if accounts is not None:
         data_dir, problem = home / "lab", None   # until someone signs in
-    else:   # a data folder chosen in Settings, else the lab's own (and the next lab's, when the lab changes)
+    else:   # a data folder chosen in Settings, else (or while it can't be written) the lab's own
         data_dir, problem = (Path(args.data_dir), None) if args.data_dir else data_folder_for(
-            settings, home, None if settings.get("data_dir") else lab_data_folder(home, lab, info, args.lab))
+            settings, home, lab_data_folder(home, lab, info, args.lab))
     runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), data_dir, envelope)
     runtime.data_problem = problem
     if accounts is None and not args.data_dir:
