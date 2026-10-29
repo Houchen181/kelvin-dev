@@ -18,21 +18,17 @@ python -m venv .venv
 .venv/Scripts/kelvin
 ```
 
-The last command opens `http://127.0.0.1:8770` in your browser. Bookmark that link: the access key after `#` stays the same between restarts. To try the portal without an API key, add `--demo`; this gives you a scripted model that is not AI (try *sweep the gate* or *map gate against field*). The virtual lab runs at 10× real time so you can watch runs; `--speed 0` makes it instant. Add `--lab my_lab.yaml` to load a different simulated lab (for example many instruments at once); the format is `src/labharness/data/virtual_lab.yaml`.
+The last command opens `http://127.0.0.1:8770` in your browser. Bookmark that link: the access key after `#` stays the same between restarts. Kelvin opens the lab set up in `~/Kelvin/lab.yaml` (none yet: a lab with no instruments, until **Lab** → **Set up…** finds them); a model needs an API key, the ChatGPT plan or, from source, Claude Code. Kelvin has no virtual lab and no scripted demo model (removed 2026-10-29). The tests have their own simulated lab, `tests/simlab` (`build_virtual_lab()`, its cards, lab config and toy physics), which is never shipped.
 
-## Try the core without an agent
+## Run the tests
 
-Requires Python ≥ 3.9 and PyYAML. No hardware is needed.
-
-```bash
-python examples/demo.py
-```
+Requires Python ≥ 3.9 and PyYAML. No hardware is needed: the tests run on `tests/simlab`, a simulated lab of common instruments.
 
 ```bash
 python -m pytest
 ```
 
-Run `python examples/demo.py --ask` to answer the approval requests yourself. If a pytest plugin installed elsewhere breaks collection, set `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
+If a pytest plugin installed elsewhere breaks collection, set `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
 
 ## Working together
 
@@ -97,7 +93,7 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/sim/` | Twins that answer the card's own commands, plus a toy sample |
 | `src/labharness/agent/` | MCP server (`server.py`), plain-text tool answers (`runtime.py`), approval page (`approval.py`, `ui.html`) |
 | `src/labharness/web/` | The portal: web API (`app.py`), chat loop (`agent.py`), short answers (`brevity.py`), one module per model provider (`providers/`), chats and settings, browser UI and the logo (`static/`) |
-| `src/labharness/data/` | Cards for the virtual lab, its lab config and a demo envelope; `card_versions.json`, every version of the cards Kelvin brings |
+| `src/labharness/data/` | Kelvin's own instrument cards (`cards/instruments/`); `card_versions.json`, every version of the cards Kelvin brings; the portal's map and Kelvin's skills |
 | `src/labharness/hub/` | The Kelvin hub: online accounts across labs and the work Kelvins share (`db.py`), its web server and API (`server.py`, `kelvin-hub`), and a Kelvin's side of it (`client.py`; in the portal, `web/hubsync.py`: Settings → Account → Kelvin hub, and the background sync). See [hub.md](hub.md) |
 | `src/labharness/desktop.py` | The desktop app: the portal in a native window, one copy at a time, `--self-test` |
 | `packaging/` | PyInstaller recipe (`kelvin.spec`), Windows installer (`kelvin.iss`), app icons (`make_icons.py`, `icons/`, and the iPhone app's) |

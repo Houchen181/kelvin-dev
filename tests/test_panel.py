@@ -1,5 +1,6 @@
 """What the lab panel shows: readable labels, readings vs outputs vs settings, and each instrument's state."""
-from labharness import ScriptedApprover, build_virtual_lab, demo_envelope
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab, demo_envelope
 from labharness.agent.runtime import LabRuntime
 
 

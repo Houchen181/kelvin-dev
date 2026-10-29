@@ -210,7 +210,7 @@ def user_cards(cards_dir: Optional[Path], collection_ids: Iterable[str] = ()) ->
     """The user's own cards, with any problems (a broken file is listed, not skipped silently). "kelvins": the lab's
     version of one of Kelvin's cards (under its id), which replaces Kelvin's in this lab. collection_ids: the ids the
     instrument collection has cards for, which Kelvin uses instead of a draft of the same id."""
-    from .virtual_lab import builtin_ids
+    from .homelab import builtin_ids
     out = []
     if not cards_dir or not Path(cards_dir).is_dir():
         return out

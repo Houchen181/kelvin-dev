@@ -6,8 +6,8 @@ import threading
 
 import pytest
 
-from labharness import (EventLog, RunEngine, RunStore, SafetyGate, ScriptedApprover, build_virtual_lab, cardlang,
-                        demo_envelope)
+from labharness import EventLog, RunEngine, RunStore, SafetyGate, ScriptedApprover, cardlang
+from simlab import build_virtual_lab, demo_envelope
 
 COOL_AND_SWEEP = """
 plan: cool_and_sweep

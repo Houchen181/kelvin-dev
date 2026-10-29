@@ -339,7 +339,7 @@ def test_the_portal_the_phone_and_the_approval_page_show_the_same_card(tmp_path)
     import threading
     import pytest
     pytest.importorskip("mcp")
-    from labharness import build_virtual_lab
+    from simlab import build_virtual_lab
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=10), tmp_path / "data")
@@ -532,7 +532,7 @@ instruments:
 
 
 def labsim_lab(tmp_path, text):
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     (tmp_path / "lab.yaml").write_text(text, encoding="utf-8")
     lab = build_lab(tmp_path / "lab.yaml", partial=True)
     assert lab.unavailable == {}, lab.unavailable

@@ -9,12 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from labharness import EventLog, SafetyGate, ScriptedApprover, build_virtual_lab, pulses
+from labharness import EventLog, SafetyGate, ScriptedApprover, pulses
+from simlab import build_virtual_lab
 from labharness.clock import SimClock
 from labharness.drivers import MODULES, PLAYING
 from labharness.engine import RunEngine
 from labharness.gate import ApprovalRequest
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 
 from test_pulse_drivers import FakePulseStreamer, pulsestreamer
 
@@ -365,7 +366,7 @@ instruments:
 
 def test_kelvin_writes_shows_and_saves_a_sequence(tmp_path, library):
     pytest.importorskip("mcp")
-    from labharness import demo_envelope
+    from simlab import demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     lab = build_virtual_lab(seed=1)

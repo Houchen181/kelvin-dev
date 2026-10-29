@@ -127,14 +127,12 @@ def test_the_start_up_scan_says_why_and_logs_it(tmp_path, caplog):
             status = AutoSetup(rt, FakeSettings(), tmp_path).run()
         assert status["message"].startswith("No instruments are connected to this computer")
         assert any(line.startswith("VISA: Bus") for line in status["lines"])
-        assert rt.last_survey["reason"] == status["message"] and rt.lab_info["kind"] == "virtual"
+        assert rt.last_survey["reason"] == status["message"] and rt.lab_info["kind"] == "none"
         logged = caplog.text
         assert "Instrument scan (start)" in logged and "VISA: Bus" in logged and "Instrument setup: No instruments" in logged
 
         off = AutoSetup(rt, FakeSettings(auto_setup="off"), tmp_path, scan=lambda: pytest.fail("switched off")).run()
         assert "switched off in Settings" in off["message"]
-        chosen = AutoSetup(rt, FakeSettings(lab="virtual"), tmp_path, scan=lambda: pytest.fail("they chose it")).run()
-        assert chosen["message"] == "You chose the virtual lab in Lab setup"
     finally:
         set_resource_manager(None)
 

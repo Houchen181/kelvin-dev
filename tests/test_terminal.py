@@ -110,14 +110,14 @@ def test_kelvin_starts_on_the_chosen_folder_or_says_why_not(tmp_path):
     from labharness.web.app import data_folder_for
     from labharness.web.settings import Settings
     settings = Settings(tmp_path / "settings.json")
-    assert data_folder_for(settings, tmp_path) == (tmp_path / "virtual-lab", None)
+    assert data_folder_for(settings, tmp_path) == (tmp_path / "lab", None)
     settings.set_data_dir(str(tmp_path / "chosen"))
     assert data_folder_for(settings, tmp_path) == (tmp_path / "chosen", None)
     blocked = tmp_path / "blocked"
     blocked.write_text("a file, not a folder", encoding="utf-8")
     settings.set_data_dir(str(blocked))
     folder, problem = data_folder_for(Settings(tmp_path / "settings.json"), tmp_path)
-    assert folder == tmp_path / "virtual-lab" and "can't be written" in problem
+    assert folder == tmp_path / "lab" and "can't be written" in problem
     settings.update({"data_dir": str(tmp_path / "sneaky")})                        # only through the runtime
     assert settings.get("data_dir") == str(blocked)
 

@@ -9,7 +9,8 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from labharness import ScriptedApprover, build_virtual_lab  # noqa: E402
+from labharness import ScriptedApprover  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.analysis import analyze_curve, analyze_run  # noqa: E402
 
 B = {"key": "magnet.B", "unit": "T", "kind": "instrument"}

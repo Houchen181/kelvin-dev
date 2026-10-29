@@ -8,7 +8,8 @@ import threading
 
 import pytest
 
-from labharness import build_virtual_lab, probe
+from labharness import probe
+from simlab import build_virtual_lab
 
 NET = "192.168.77.0/24"
 OWN = "192.168.77.10"

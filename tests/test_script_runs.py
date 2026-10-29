@@ -20,7 +20,7 @@ from labharness.gate import SafetyGate, ScriptedApprover
 from labharness.lab import Lab
 from labharness.labconfig import load_lab_config
 from labharness.sim.twin import World, sim_backend_factory
-from labharness.virtual_lab import builtin_registry
+from labharness.homelab import builtin_registry
 
 LAB = """
 lab: Script lab

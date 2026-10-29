@@ -4,7 +4,7 @@ model: Virtual Superconducting Magnet Supply
 vendor: Kelvin (simulated)
 kind: magnet-supply
 status: community
-twin: labharness.sim.twins:MagnetSupplyTwin
+twin: simlab.twins:MagnetSupplyTwin
 identify:
   idn: "^VIRTUAL,MAGNET"
   example: "VIRTUAL,MAGNET-SUPPLY,SN0004,1.0"

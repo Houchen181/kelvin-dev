@@ -9,7 +9,7 @@ from labharness import EventLog, SafetyGate, ScriptedApprover, builtin_registry,
 from labharness.adapters import set_resource_manager
 from labharness.discovery import match_card
 from labharness.drivers import MODULES, discover_libraries
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 
 
 def gate_for(lab, tmp_path, answers=()):

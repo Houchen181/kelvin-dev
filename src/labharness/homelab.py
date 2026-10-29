@@ -1,4 +1,9 @@
-"""The virtual lab: common instruments, all simulated, ready to try with no hardware."""
+"""The lab an installed Kelvin controls, and the cards it can use.
+
+The person's own lab config (lab.yaml in Kelvin's folder) names their instruments, each with its card and address.
+Until there is one, Kelvin has a lab with no instruments: Lab, Set up… finds them (Kelvin has no virtual lab of
+simulated instruments; a plan's rehearsal runs on generic twins of the lab's own instruments, Lab.make_twin).
+"""
 from __future__ import annotations
 
 import hashlib
@@ -8,12 +13,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .cards import Card, CardRegistry, load_card
-from .clock import RealClock, ScaledClock, SimClock
+from .clock import RealClock, SimClock
 from .lab import Lab, SwitchedOff
-from .labconfig import ConfigError, Envelope, LabConfig, load_envelope, load_lab_config, read_yaml
+from .labconfig import ConfigError, Envelope, LabConfig, load_lab_config, read_yaml
 from .sim.twin import World, sim_backend_factory
 
 DATA = Path(__file__).parent / "data"
+NO_LAB = "My lab"   # the name of the lab Kelvin has before a person sets theirs up
 SET_ASIDE = ("set aside: its entry in lab.yaml has a problem (%s). Kelvin sends it nothing until the entry is fixed "
              "(Lab, Set up…, then Save and connect); the rest of the lab works")
 INSTALLED = ".kelvin-instruments.json"   # the cards `kic install` (the collection's own tool) copied, by SHA-256
@@ -132,17 +138,15 @@ def card_now(lab: Lab, name: str, home: Any = None, collection: Any = None) -> O
     return card
 
 
-def build_virtual_lab(clock: Any = None, seed: int = 0, config: Optional[Any] = None,
-                      registry: Optional[CardRegistry] = None, switched_off: Optional[SwitchedOff] = None) -> Lab:
-    clock = clock or SimClock()
-    registry = registry or builtin_registry()
-    cfg = load_lab_config(config or DATA / "virtual_lab.yaml", registry)
-    world = World(clock, seed)
-    return Lab(cfg, registry, sim_backend_factory(world), clock, world, switched_off)
-
-
 def is_simulated(config: LabConfig) -> bool:
-    return all(ic.address.startswith("sim://") for ic in config.instruments.values())
+    """Every instrument simulated (sim://, as in tests). A lab with none is not: it runs on real time."""
+    return bool(config.instruments) and all(ic.address.startswith("sim://") for ic in config.instruments.values())
+
+
+def empty_lab(registry: Optional[CardRegistry] = None, switched_off: Optional[SwitchedOff] = None,
+              name: str = NO_LAB) -> Lab:
+    """A lab with no instruments yet: what Kelvin controls before a person sets theirs up (Lab, Set up…)."""
+    return build_lab({"lab": name, "instruments": {}}, registry=registry, switched_off=switched_off)
 
 
 def build_lab(config: Any, clock: Any = None, seed: int = 0, registry: Optional[CardRegistry] = None,
@@ -194,7 +198,7 @@ def set_aside_problems(source: Any, registry: CardRegistry, error: ConfigError) 
     """A lab config whose only problems are in instruments' own entries (a limit beyond what a changed card now
     allows, a rate, a guard, an auto rule, a connection setting): the config with each such instrument reduced to its
     card and address, and what is wrong with each. They join the lab never connected (build_lab set_aside), and the
-    rest of the lab works: one stale limit once sent the whole lab to the virtual lab, saying so only in the log. None
+    rest of the lab works: one stale limit once kept the whole lab from opening, saying so only in the log. None
     when a problem is anywhere else (an unknown card, the interlocks, the watches), as then no lab can be trusted."""
     try:
         data, _ = read_yaml(source)
@@ -218,22 +222,19 @@ def set_aside_problems(source: Any, registry: CardRegistry, error: ConfigError) 
     return data, {name: "; ".join(w) for name, w in why.items()}
 
 
-def demo_envelope(lab: Lab) -> Envelope:
-    return load_envelope(DATA / "demo_project.yaml", lab.config, lab.registry)
-
-
-def open_home_lab(home: Any, choice: str = "auto", speed: float = 10, switched_off: Optional[SwitchedOff] = None,
-                  collection: Any = None, connect: bool = True) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
-    """The lab an installed Kelvin controls: the user's own lab.yaml in `home` if there is one (unless they chose
-    the virtual lab), otherwise the virtual lab at `speed`x real time. If the user's lab cannot be connected, Kelvin
-    still starts, on the virtual lab, and says why. `collection`: the instrument collection, when it is on.
-    connect=False: the user's lab opens at once, its instruments connected afterwards in the background
-    (LabRuntime.connect_pending), each one that can't be set aside with why."""
+def open_home_lab(home: Any, switched_off: Optional[SwitchedOff] = None, collection: Any = None,
+                  connect: bool = True) -> Tuple[Lab, Optional[Envelope], Dict[str, Any]]:
+    """The lab an installed Kelvin controls: the person's own lab.yaml in `home`. An instrument that can't be
+    connected (also every one of them) stays in the lab, unavailable with why; one whose entry has a problem is set
+    aside. With no lab.yaml, or one Kelvin can't read at all, a lab with no instruments, and info["error"] says why;
+    Lab, Set up… sets theirs up. `collection`: the instrument collection, when it is on. connect=False: the lab opens
+    at once, its instruments connected afterwards in the background (LabRuntime.connect_pending).
+    info["kind"]: "file" (the lab.yaml) or "none"."""
     path = Path(home) / "lab.yaml"
-    info: Dict[str, Any] = {"kind": "virtual", "path": str(path), "error": None, "has_file": path.exists()}
+    info: Dict[str, Any] = {"kind": "none", "path": str(path), "error": None, "has_file": path.exists()}
     registry = lab_registry(home, collection)
-    if choice != "virtual" and path.exists():
-        try:   # an instrument that can't be connected is set aside, with why, and the rest of the lab used
+    if path.exists():
+        try:   # an instrument whose entry has a problem is set aside, with why, and the rest of the lab used
             config: Any = path
             aside: Dict[str, str] = {}
             try:
@@ -244,22 +245,12 @@ def open_home_lab(home: Any, choice: str = "auto", speed: float = 10, switched_o
                     raise
                 config, aside = found
                 info["set_aside"] = aside
-            if not connect:
-                lab = build_lab(config, registry=registry, switched_off=switched_off, later=True, set_aside=aside)
-                return lab, None, dict(info, kind="file")
-            lab = build_lab(config, registry=registry, switched_off=switched_off, partial=True, set_aside=aside)
-            tried = [n for n in lab.instruments if n not in lab.switched_off]
-            if tried and len(lab.unavailable) == len(tried):   # none of them: say why, on the virtual lab
-                why = lab.unavailable[tried[0]]
-                lab.close()
-                raise RuntimeError("%s: %s" % (tried[0], why) if len(tried) == 1 else
-                                   "none of its instruments could be connected (%s: %s)" % (tried[0], why))
+            lab = build_lab(config, registry=registry, switched_off=switched_off, partial=connect, later=not connect,
+                            set_aside=aside)
             return lab, None, dict(info, kind="file")
         except Exception as e:
             from . import envs
             info["install"] = envs.needed(str(e))   # a maker's package missing: the Lab panel offers to install it
-            info["error"] = "Your lab (%s) could not be connected: %s" % (path.name,
-                                                                         envs.for_people(str(e).splitlines()[0]))
-    lab = build_virtual_lab(clock=ScaledClock(speed) if speed else SimClock(), registry=registry,
-                            switched_off=switched_off)
-    return lab, demo_envelope(lab), info
+            info["error"] = "Your lab (%s) could not be opened: %s" % (path.name,
+                                                                      envs.for_people(str(e).splitlines()[0]))
+    return empty_lab(registry, switched_off), None, info

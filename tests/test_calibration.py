@@ -6,7 +6,8 @@ import threading
 import pytest
 from labsim_bench import labsim_bench  # noqa: F401  (the fixture)
 
-from labharness import build_virtual_lab, profiles
+from labharness import profiles
+from simlab import build_virtual_lab
 
 TODAY = datetime.date(2026, 10, 29)
 
@@ -132,7 +133,7 @@ def test_on_labsim_the_2400s_calibration_is_its_own_and_its_cards_say_when_it_is
     import threading as th
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     labsim_bench("transport")
     (tmp_path / "lab.yaml").write_text(TRANSPORT, encoding="utf-8")
     lab = build_lab(tmp_path / "lab.yaml", partial=True)

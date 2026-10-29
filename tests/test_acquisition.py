@@ -6,7 +6,7 @@ import pytest
 from labharness import RunEngine, SafetyGate, ScriptedApprover, EventLog
 from labharness.adapters import set_resource_manager
 from labharness.cards import CardError, parse_card
-from labharness.virtual_lab import build_lab, lab_registry
+from labharness.homelab import build_lab, lab_registry
 from labharness.yamlio import load_yaml
 
 DMM = """card: 1

@@ -4,7 +4,8 @@ import csv
 
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.reports import kinds
 from test_reports import check_pdf, check_pptx, pdf_strings
 

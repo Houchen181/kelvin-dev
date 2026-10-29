@@ -8,7 +8,7 @@ pytest.importorskip("starlette")
 pytest.importorskip("mcp")
 
 from labharness.labconfig import ConfigError, load_lab_config  # noqa: E402
-from labharness.virtual_lab import builtin_registry, lab_registry  # noqa: E402
+from labharness.homelab import builtin_registry, lab_registry  # noqa: E402
 from test_web import client_for, parts  # noqa: E402,F401
 
 LAB = """

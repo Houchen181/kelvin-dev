@@ -18,9 +18,9 @@ Each note keeps who wrote it and when (a person at the portal, Kelvin in someone
 it said before each change. People add, change and delete notes in the portal's Lab panel; Kelvin keeps them with
 remember (scope lab) and corrects one by its id. Every change goes into the lab's record.
 
-The memory is the lab's, not a person's: it is kept in Kelvin's own folder (lab-memory.json for the lab in lab.yaml,
-virtual-lab-memory.json for the virtual lab, so practising never writes into the real lab's), where everyone who signs
-in on this computer, every chat and every agent reads the same notes.
+The memory is the lab's, not a person's: it is kept in Kelvin's own folder (lab-memory.json), where everyone who signs
+in on this computer, every chat and every agent reads the same notes. (An older Kelvin kept its virtual lab's apart,
+in virtual-lab-memory.json; Kelvin has no virtual lab now.)
 
 Every chat sees a brief of it (BRIEF_CHARS at most): lessons first, then wiring, references, excitations and other
 facts; notes on the lab's own instruments before notes on instruments it no longer has, the newest first; and how many
@@ -50,7 +50,6 @@ AT_USE = 5          # notes shown with an instrument's use; shared_memory has th
 AT_USE_HEAD = "From the lab's memory, on "   # how those notes start, at the end of a tool's answer
 ON_CARD = 3         # lessons shown on an approval card
 FILE = "lab-memory.json"
-VIRTUAL_FILE = "virtual-lab-memory.json"
 _NAME = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _lock = threading.Lock()   # one writer at a time (the runtime opens the file anew for each call)
 # the brief's head, in every chat's prompt and every agent's instructions (head())
@@ -79,9 +78,9 @@ class LabMemoryError(ValueError):
     """What is wrong with a note, or with the memory's file, in words."""
 
 
-def path_for(folder: Any, virtual: bool) -> Path:
-    """Where a lab keeps its memory: the virtual lab's apart from the lab in lab.yaml."""
-    return Path(folder) / (VIRTUAL_FILE if virtual else FILE)
+def path_for(folder: Any) -> Path:
+    """Where the lab keeps its memory."""
+    return Path(folder) / FILE
 
 
 def kind_of(kind: Any) -> str:

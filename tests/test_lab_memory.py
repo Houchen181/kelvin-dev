@@ -11,7 +11,8 @@ import pytest
 
 from labsim_bench import labsim_bench  # noqa: F401  (the fixture)
 
-from labharness import ScriptedApprover, build_virtual_lab
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab
 from labharness import labmemory as lm
 
 
@@ -43,7 +44,7 @@ def call(rt, *calls):
 # ------------------------------------------------------------------ the notes themselves
 
 def test_a_note_keeps_who_wrote_it_when_and_what_it_said_before(tmp_path):
-    mem = lm.LabMemory(lm.path_for(tmp_path, virtual=False))
+    mem = lm.LabMemory(lm.path_for(tmp_path))
     note, what = mem.add("wiring", "The mixing chamber thermometer is  channel A of the LS350.", "mxc.T_A",
                          by="Kelvin", account="ada")
     assert what == "saved" and note["text"] == "The mixing chamber thermometer is channel A of the LS350."
@@ -124,13 +125,13 @@ def test_the_brief_keeps_to_its_budget_with_lessons_first(tmp_path):
     assert shown[3].startswith("- fact") and "Cable 39 " in shown[3]                       # then the newest
 
 
-def test_the_virtual_lab_keeps_a_memory_of_its_own(tmp_path):
+def test_the_lab_keeps_one_memory_and_an_old_virtual_labs_isnt_read(tmp_path):
+    """An older Kelvin kept its virtual lab's practice notes apart (virtual-lab-memory.json); there is no virtual lab
+    now, and those notes never reach the lab's."""
     rt = runtime(tmp_path)
-    assert rt.lab_info["kind"] == "virtual"
-    rt.keep_lab_note("lesson", "Practice note: the simulated magnet quenches above 9 T.", ["magnet"], by="Kelvin")
-    assert (tmp_path / "Kelvin" / "virtual-lab-memory.json").exists()
-    rt.lab_info = dict(rt.lab_info, kind="file")          # Kelvin controls the lab in lab.yaml now
-    assert rt.lab_notes() == [] and rt.lab_memory_brief() == ""   # practising never writes into the real lab's
+    (tmp_path / "Kelvin").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Kelvin" / "virtual-lab-memory.json").write_text('{"notes": []}', encoding="utf-8")
+    assert rt.lab_notes() == [] and rt.lab_memory_brief() == ""
     stamp = rt.lab_memory_stamp()
     rt.keep_lab_note("wiring", "The lock-in's reference comes from the chopper.", ["lockin"], by="human (portal)")
     assert (tmp_path / "Kelvin" / "lab-memory.json").exists() and rt.lab_memory_stamp() != stamp
@@ -158,7 +159,7 @@ def test_every_agent_starts_with_the_lab_memory_and_looks_up_the_rest(tmp_path):
     assert "Measurement chain (the setup's, recorded by agent" in brief and "lockin.X: gain 100" in brief
     looked, on_laser, words = call(rt, ("shared_memory", {}), ("shared_memory", {"instrument": "laser"}),
                                    ("shared_memory", {"query": "where does the lock-in's reference come from?"}))
-    assert "the virtual lab: 2 notes" in looked and "Measurement chains on record" in looked
+    assert "this lab (Virtual Lab): 2 notes" in looked and "Measurement chains on record" in looked
     assert "- the setup (recorded by agent" in looked
     assert "on laser: 1 note" in on_laser and "reference" not in on_laser
     assert words.count("\n- ") == 1 and "chopper" in words
@@ -227,7 +228,7 @@ instruments:
 def test_on_labsim_the_obis_lesson_is_shown_when_the_pump_laser_is_used(labsim_bench, tmp_path):
     """l06: chat3's night queue set each OBIS's power before its emission again. Kept for the lab, the lesson comes
     with the pump laser itself, on hardware Kelvin takes for real."""
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     labsim_bench("pumpprobe")
     (tmp_path / "lab.yaml").write_text(PUMP, encoding="utf-8")
     lab = build_lab(tmp_path / "lab.yaml", partial=True)
@@ -258,7 +259,7 @@ DONE = [{"type": "text", "text": "Done."}]
 
 
 def portal(tmp_path, providers, approver=None):
-    """The portal on the virtual lab, with Kelvin's own folder in tmp_path (where the app keeps the lab's memory)."""
+    """The portal on the test lab, with Kelvin's own folder in tmp_path (where the app keeps the lab's memory)."""
     pytest.importorskip("starlette")
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
@@ -295,7 +296,7 @@ def test_a_fact_one_chat_keeps_for_the_lab_is_in_every_other_chat(tmp_path):
         assert "from the chopper" in bot.systems[-1]                     # a chat in no project has it too
     note = rt.lab_notes()[0]
     assert (note["by"], note["account"], note["instruments"]) == ("Kelvin", None, ["lockin"])
-    assert (tmp_path / "virtual-lab-memory.json").exists()                # Kelvin's own folder: no one person's
+    assert (tmp_path / "lab-memory.json").exists()                # Kelvin's own folder: no one person's
 
 
 def test_unshared_work_reads_the_lab_memory_but_adds_nothing_and_incognito_reads_none(tmp_path):
@@ -420,7 +421,7 @@ def test_people_keep_change_and_delete_notes_in_the_lab_panel(tmp_path):
     rt.user = "ada"                                                    # who is signed in
     with client:
         empty = client.get("/api/lab-memory", headers=headers).json()
-        assert empty["notes"] == [] and empty["virtual"] is True and "lesson" in empty["kinds"]
+        assert empty["notes"] == [] and "lesson" in empty["kinds"]
         stamp = client.get("/api/state", headers=headers).json()["lab_memory"]
         kept = client.post("/api/lab-memory", headers=headers, json={
             "kind": "wiring", "text": "The mixing chamber is channel A of the LS350.",

@@ -7,7 +7,8 @@ pytest.importorskip("mcp")
 
 from starlette.testclient import TestClient  # noqa: E402
 
-from labharness import build_virtual_lab, guide  # noqa: E402
+from labharness import guide  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.agent.approval import WebApprover  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.web.app import create_app  # noqa: E402
@@ -55,7 +56,7 @@ def test_the_checklist_says_what_is_left_and_where_to_do_it(portal, tmp_path):
         r = client.get("/api/checklist", headers=headers).json()
         items = {i["key"]: i for i in r["items"]}
         assert list(items) == ["lab", "instruments", "limits", "pin", "phone", "data"]
-        assert not items["lab"]["done"] and "virtual lab" in items["lab"]["detail"]
+        assert not items["lab"]["done"] and items["lab"]["detail"].startswith("No instruments yet")
         assert not items["instruments"]["done"] and not items["limits"]["done"]
         assert not items["pin"]["done"] and "Lab owner's PIN" in items["pin"]["detail"]
         assert not items["phone"]["done"] and items["phone"]["action"] == "phone"

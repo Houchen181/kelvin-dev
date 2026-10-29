@@ -411,7 +411,7 @@ def _watch_rule(w: Dict[str, Any]) -> str:
 def lab_changes(old_text: Optional[str], new_text: Optional[str]) -> List[Dict[str, Any]]:
     """What changed between two versions of the lab config, in words, with what widens Kelvin's reach marked."""
     if new_text is None:
-        return [_change("the lab config was deleted (Kelvin opens the virtual lab until there is one)")]
+        return [_change("the lab config was deleted (Kelvin has no instruments until there is one)")]
     old, new = _yaml(old_text) if old_text is not None else {}, _yaml(new_text)
     if isinstance(new, _Broken):
         return [_change("the lab config can't be read as YAML now; Kelvin keeps using what it loaded before")]

@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from labharness import build_virtual_lab
+from simlab import build_virtual_lab
 from labharness.gate import ApprovalRequest
 
 pytest.importorskip("mcp")

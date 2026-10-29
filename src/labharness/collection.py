@@ -18,7 +18,7 @@ this computer so they work offline.
 - Said, not only logged: a sync that fails, or leaves files out, tells the portal once (notify), as it starts to.
 - Offline: everything is read from the copy here. Only sync() goes to the network, and Kelvin calls it only while
   the collection is switched on in Settings. Switched off, Kelvin leaves the copy alone and uses its own cards.
-- Cards (virtual_lab.lab_registry): a collection card replaces Kelvin's own card with the same id (a fix, or a lab's
+- Cards (homelab.lab_registry): a collection card replaces Kelvin's own card with the same id (a fix, or a lab's
   check on hardware), except a copy of one of Kelvin's own versions of that card (data/card_versions.json): that is
   the collection catching up with a newer Kelvin. Nothing replaces a card a person reviewed on this computer.
   Collection cards keep their status, so a draft stays simulation-only on real hardware.

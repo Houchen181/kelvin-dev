@@ -7,12 +7,12 @@ import time
 
 import pytest
 
-from labharness import build_virtual_lab
+from simlab import build_virtual_lab
 from labharness.clock import RealClock
 from labharness.gate import ScriptedApprover
 from labharness.lab import Lab
 from labharness.labconfig import load_lab_config
-from labharness.virtual_lab import builtin_registry, open_home_lab
+from labharness.homelab import builtin_registry, open_home_lab
 
 pytest.importorskip("mcp")
 from labharness.agent.runtime import LabRuntime  # noqa: E402
@@ -77,7 +77,7 @@ def test_one_instruments_bad_limit_sets_it_aside_and_the_rest_of_the_lab_works(t
         "lab: bench\ninstruments:\n"
         "  smu: {card: virtual/source-meter, address: 'sim://smu', limits: {V: [-500, 500]}}\n"
         "  lockin: {card: virtual/lock-in, address: 'sim://lockin'}\n", encoding="utf-8")
-    lab, _, info = open_home_lab(tmp_path, "auto", 0, collection=None)
+    lab, _, info = open_home_lab(tmp_path, collection=None)
     assert info["kind"] == "file" and lab.config.name == "bench"     # not the virtual lab
     assert info["set_aside"] == {"smu": "limits.V: [-500, 500] exceeds vendor limits [-210, 210]; for a wider range, "
                                          "make this lab's version of the card virtual/source-meter with the "
@@ -89,16 +89,16 @@ def test_one_instruments_bad_limit_sets_it_aside_and_the_rest_of_the_lab_works(t
         lab.reconnect("smu")                                           # only a fixed entry connects it
     rt = LabRuntime(lab, ScriptedApprover([]), tmp_path / "data")
     assert "smu: set aside" in rt.lab_status() and "refused" in rt.set("smu", "V", 1)
-    lab, _, info = open_home_lab(tmp_path, "auto", 0, collection=None, connect=False)   # the app's way: later
+    lab, _, info = open_home_lab(tmp_path, collection=None, connect=False)   # the app's way: later
     assert lab.unavailable["smu"].startswith("set aside") and "smu" not in lab.connecting
 
 
-def test_a_problem_outside_the_instruments_entries_still_opens_the_virtual_lab(tmp_path):
+def test_a_problem_outside_the_instruments_entries_leaves_no_instruments_and_says_why(tmp_path):
     (tmp_path / "lab.yaml").write_text(
         "lab: bench\ninstruments:\n  smu: {card: virtual/source-meter, address: 'sim://smu'}\n"
         "interlocks:\n  - {drive: smu.V, requires: 'nothere.T < 5'}\n", encoding="utf-8")
-    lab, _, info = open_home_lab(tmp_path, "auto", 0, collection=None)
-    assert info["kind"] == "virtual" and info["error"]
+    lab, _, info = open_home_lab(tmp_path, collection=None)
+    assert info["kind"] == "none" and info["error"] and not lab.instruments
 
 
 def test_the_first_run_switch_waits_until_kelvin_is_idle(tmp_path):

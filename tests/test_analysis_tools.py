@@ -15,7 +15,8 @@ import pytest
 np = pytest.importorskip("numpy")
 h5py = pytest.importorskip("h5py")
 
-from labharness import ScriptedApprover, build_virtual_lab, datatools, export, fitting, rundata  # noqa: E402
+from labharness import ScriptedApprover, datatools, export, fitting, rundata  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 
 GATE = ("plan: gate\nsetup: {lockin.amplitude: 0.05, smu.output: on}\nsweep: {smu.V: {from: 0, to: 3, points: 61}}\n"

@@ -10,14 +10,15 @@ import urllib.error
 import pytest
 import yaml
 
-from labharness import autocard, build_virtual_lab, builtin_registry, carddraft, demo_envelope, load_plan
+from labharness import autocard, builtin_registry, carddraft, load_plan
+from simlab import build_virtual_lab, demo_envelope
 from labharness.adapters import set_resource_manager
 from labharness.collection import API, COMMIT, FILE, REPO, Collection, adapt, own_versions, text_sha256
 from labharness.discovery import identify
 from labharness.gate import SafetyGate, ScriptedApprover
 from labharness.survey import Survey, reason
 from labharness.updater import REPOS
-from labharness.virtual_lab import DATA, INSTALLED, build_lab, collection_ids, kelvin_ids, lab_registry
+from labharness.homelab import DATA, INSTALLED, build_lab, collection_ids, kelvin_ids, lab_registry
 from labharness.yamlio import load_yaml
 from test_hardware import Bus, Device
 

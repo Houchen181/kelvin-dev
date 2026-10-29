@@ -13,7 +13,8 @@ pytest.importorskip("websockets")
 pytest.importorskip("starlette")
 uvicorn = pytest.importorskip("uvicorn")
 
-from labharness import boards, build_virtual_lab  # noqa: E402
+from labharness import boards  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.gate import ScriptedApprover  # noqa: E402
 
 NAMESERVER = {"content": {"cells": [

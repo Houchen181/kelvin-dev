@@ -5,7 +5,8 @@ safe too (field test: Stop didn't end a PPMS cool-down for ten minutes)."""
 import threading
 import time
 
-from labharness import RunEngine, SafetyGate, ScriptedApprover, build_virtual_lab
+from labharness import RunEngine, SafetyGate, ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.clock import RealClock
 
 TRIPS = """

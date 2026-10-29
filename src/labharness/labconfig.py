@@ -141,9 +141,9 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
 
     if not isinstance(data, dict):
         raise ConfigError(src, ["a lab config must be a mapping"])
-    raw_instruments = data.get("instruments")
-    if not isinstance(raw_instruments, dict) or not raw_instruments:
-        raise ConfigError(src, ["instruments: at least one instrument is required"])
+    raw_instruments = data.get("instruments") or {}   # none yet: a lab whose instruments are still to be set up
+    if not isinstance(raw_instruments, dict):
+        raise ConfigError(src, ["instruments: each instrument's name, with its card and address"])
 
     instruments: Dict[str, InstrumentConfig] = {}
     cards: Dict[str, Card] = {}

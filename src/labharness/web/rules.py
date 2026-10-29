@@ -9,7 +9,6 @@ import re
 from typing import Any, Dict, Iterable, Optional
 
 PROVIDERS = {"anthropic": "Claude", "openai": "GPT", "gemini": "Gemini", "local": "local models"}
-ALWAYS = {"demo"}   # the scripted demo model: nothing leaves the computer
 OPEN = {"providers": None, "literature": True}
 
 
@@ -50,7 +49,7 @@ def restrictive(rules: Optional[Dict[str, Any]]) -> bool:
 def allows(rules: Optional[Dict[str, Any]], model_key: str) -> bool:
     provider = str(model_key).partition(":")[0]
     r = normalize(rules)
-    return provider in ALWAYS or r["providers"] is None or provider in r["providers"]
+    return r["providers"] is None or provider in r["providers"]
 
 
 def describe(rules: Optional[Dict[str, Any]]) -> str:

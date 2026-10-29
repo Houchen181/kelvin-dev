@@ -1,6 +1,21 @@
 import pytest
 
-from labharness import EventLog, RunEngine, RunStore, SafetyGate, ScriptedApprover, build_virtual_lab, demo_envelope
+import labharness
+import simlab
+from labharness import EventLog, RunEngine, RunStore, SafetyGate, ScriptedApprover, homelab
+from simlab import build_virtual_lab, demo_envelope
+
+# The tests' simulated lab (tests/simlab) has cards of its own, ids virtual/...: for the tests, Kelvin's own cards include
+# them, as the app's did before it lost its virtual lab (2026-10-29). The app ships none of them (test_no_virtual_lab.py).
+_KELVINS_OWN = homelab.builtin_registry
+
+
+def _with_the_test_labs_cards():
+    return simlab.lab_cards(_KELVINS_OWN())
+
+
+homelab.builtin_registry = labharness.builtin_registry = _with_the_test_labs_cards
+homelab._BUILTIN_IDS = None
 
 
 @pytest.fixture(autouse=True)

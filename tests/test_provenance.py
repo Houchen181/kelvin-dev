@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.chain import ChainError, Chains, derived, excitation_current, parse
 from labharness.provenance import activity, when
 

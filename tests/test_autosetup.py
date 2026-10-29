@@ -6,13 +6,13 @@ import time
 
 import pytest
 
-from labharness import build_virtual_lab, builtin_registry, demo_envelope, profiles
+from labharness import builtin_registry, profiles
 from labharness.adapters import AdapterError, set_resource_manager
 from labharness.autosetup import AutoSetup, draft_found, reviewed
 from labharness.cards import CardError, parse_card
 from labharness.gate import SafetyGate, ScriptedApprover
 from labharness.labconfig import ConfigError, load_lab_config
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab, empty_lab
 from test_hardware import Bus, Device
 
 
@@ -212,8 +212,7 @@ def runtime_for(tmp_path):
     pytest.importorskip("mcp")
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
-    lab = build_virtual_lab(seed=1)
-    rt = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
+    rt = LabRuntime(empty_lab(), WebApprover(timeout=5), tmp_path / "data")   # no instruments set up yet
     rt.home = tmp_path
     return rt
 
@@ -232,7 +231,7 @@ def test_first_start_sets_up_every_instrument_it_knows(tmp_path, bench, pdf):
     assert status["state"] == "done", status
     assert rt.lab_info["kind"] == "file" and rt.lab_info["auto"]
     assert sorted(rt.lab.config.unreviewed()) == ["lockin", "smu", "tc"] and status["unreviewed"]
-    assert settings["lab"] == "mine" and "added_by: kelvin" in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
+    assert "added_by: kelvin" in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
     assert rt.setup_status is setup.status and "3 instruments set up" in status["message"]
     assert any(n["kind"] == "setup" for n in rt.notifier.notices)
 
@@ -261,21 +260,19 @@ def test_first_start_sets_up_every_instrument_it_knows(tmp_path, bench, pdf):
     assert (tmp_path / "lab.yaml").read_text(encoding="utf-8") == before
 
 
-def test_nothing_to_set_up_leaves_the_virtual_lab(tmp_path):
+def test_nothing_to_set_up_leaves_the_lab_without_instruments(tmp_path):
     rt = runtime_for(tmp_path)
     unknown = [{"address": "GPIB0::5::INSTR", "idn": "ACME,WIDGET", "card_id": None, "how": "no card matches"}]
     status = AutoSetup(rt, FakeSettings(), tmp_path, scan=lambda: unknown).run()
-    assert "no card" in status["message"] and rt.lab_info["kind"] == "virtual" and not (tmp_path / "lab.yaml").exists()
+    assert "no card" in status["message"] and rt.lab_info["kind"] == "none" and not (tmp_path / "lab.yaml").exists()
 
     def no_visa():
         raise AdapterError("no VISA library")
     assert "could not look for instruments" in AutoSetup(rt, FakeSettings(), tmp_path, scan=no_visa).run()["message"]
-    chose = AutoSetup(rt, FakeSettings(lab="virtual"), tmp_path, scan=lambda: pytest.fail("they chose the virtual lab"))
-    assert chose.run()["state"] == "done" and rt.lab_info["kind"] == "virtual"
 
 
 def test_while_kelvin_is_busy_the_found_lab_opens_at_the_next_idle_moment(tmp_path, bench):
-    """It once switched under the person's first answer (a whole turn ran on the virtual lab), or not at all."""
+    """It once switched under the person's first answer (a whole turn ran on the lab it left), or not at all."""
     rt = runtime_for(tmp_path)
     settings = FakeSettings()
     answering = iter([True] * 4)                                          # the first answer takes a moment
@@ -283,7 +280,7 @@ def test_while_kelvin_is_busy_the_found_lab_opens_at_the_next_idle_moment(tmp_pa
                       can_switch=lambda: not next(answering, False))
     status = setup.run()
     assert rt.lab_info["kind"] == "file" and next(answering, None) is None   # switched once the answer ended
-    assert (tmp_path / "lab.yaml").exists() and settings["lab"] == "mine" and status["state"] == "done"
+    assert (tmp_path / "lab.yaml").exists() and status["state"] == "done"
 
 
 def test_portal_sets_up_on_start_and_a_person_reviews_the_limits(tmp_path, bench, pdf, monkeypatch):
@@ -359,8 +356,12 @@ def test_kelvin_can_read_the_folders_over_mcp(tmp_path):
     pytest.importorskip("mcp")
     import anyio
     from mcp import Client
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import INSTRUCTIONS, build_server
-    rt = runtime_for(tmp_path)
+    from simlab import build_virtual_lab
+    rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=5), tmp_path / "data")   # the test lab's lock-in
+    rt.home = tmp_path
 
     async def tools():
         async with Client(build_server(rt)) as client:

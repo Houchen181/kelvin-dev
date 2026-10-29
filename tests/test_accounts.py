@@ -11,7 +11,7 @@ pytest.importorskip("httpx")
 
 from starlette.testclient import TestClient  # noqa: E402
 
-from labharness import build_virtual_lab, demo_envelope  # noqa: E402
+from simlab import build_virtual_lab, demo_envelope  # noqa: E402
 from labharness.agent.approval import WebApprover  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.web.app import create_app  # noqa: E402
@@ -70,7 +70,7 @@ def test_settings_split_between_the_computer_and_each_person(tmp_path):
     s = Settings(lab_file)
     s.adopt(tmp_path / "users" / "ada" / "settings.json")   # the first account takes over the old keys
     lab = json.loads(lab_file.read_text())
-    assert "anthropic_api_key" not in lab and lab["lab"] == "virtual" and lab["access_key"]
+    assert "anthropic_api_key" not in lab and lab["access_key"]   # an old "lab" choice (the virtual lab) is no setting now
     s.use(tmp_path / "users" / "ada" / "settings.json")
     assert s.get("anthropic_api_key") == "sk-old" and s.get("default_model") == "x"
     s.update({"openai_api_key": "sk-ada", "auto_setup": "off"})

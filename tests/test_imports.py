@@ -68,7 +68,8 @@ def test_lightfield_spe_spectra_with_their_wavelengths(tmp_path):
 def test_two_spectra_in_one_run_to_subtract(tmp_path):
     pytest.importorskip("mcp")
     pytest.importorskip("numpy")
-    from labharness import ScriptedApprover, build_virtual_lab
+    from labharness import ScriptedApprover
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover([]), tmp_path / "data")
     wl = [920.0, 920.5, 921.0, 921.5]

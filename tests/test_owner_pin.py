@@ -3,7 +3,7 @@ mode or unlock Hands on the sample, and Kelvin explained the clicks to a student
 Kelvin's reach over the instruments needs it, and narrowing never does."""
 import pytest
 
-from labharness import build_virtual_lab
+from simlab import build_virtual_lab
 from labharness.accounts import OwnerPin
 
 pytest.importorskip("mcp")

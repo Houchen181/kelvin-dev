@@ -1,14 +1,15 @@
-"""Setting up real instruments from the portal: scan, draft a lab config, save and connect, switch back."""
+"""Setting up real instruments from the portal: scan, draft a lab config, save and connect, connect again."""
 import pytest
 
 pytest.importorskip("starlette")
 pytest.importorskip("mcp")
 
-from labharness import build_virtual_lab, builtin_registry, demo_envelope  # noqa: E402
+from labharness import builtin_registry  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.adapters import set_resource_manager  # noqa: E402
 from labharness.agent.approval import WebApprover  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
-from labharness.virtual_lab import build_lab, open_home_lab  # noqa: E402
+from labharness.homelab import build_lab, empty_lab, open_home_lab  # noqa: E402
 from labharness.web.settings import Settings  # noqa: E402
 from labharness.web.store import ChatStore  # noqa: E402
 from test_hardware import Bus, Device  # noqa: E402
@@ -20,8 +21,7 @@ def bench(tmp_path):
     bus = Bus({"GPIB0::24::INSTR": Device("keithley/2400", name="k"), "GPIB0::8::INSTR": Device("srs/sr830", name="l"),
                "ASRL9::INSTR": Device(silent=True)})
     set_resource_manager(bus)
-    lab = build_virtual_lab(seed=1)
-    runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
+    runtime = LabRuntime(empty_lab(), WebApprover(timeout=5), tmp_path / "data")   # no instruments set up yet
     parts = (runtime, Settings(tmp_path / "settings.json"), ChatStore(tmp_path / "chats"))
     yield parts, bus, tmp_path
     set_resource_manager(None)
@@ -32,9 +32,8 @@ def test_scan_draft_save_and_connect(bench):
     client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
     with client:
         view = client.get("/api/lab", headers=headers).json()
-        assert view["info"]["kind"] == "virtual" and view["yaml"] == ""
+        assert view["info"]["kind"] == "none" and view["yaml"] == ""
         assert {"keithley/2400", "srs/sr830", "lakeshore/336"} <= {c["id"] for c in view["cards"]}
-        assert not any(c["id"].startswith("virtual/") for c in view["cards"])
 
         found = {f["address"]: f for f in client.post("/api/instruments/scan", json={}, headers=headers).json()["found"]}
         assert found["GPIB0::24::INSTR"]["card_id"] == "keithley/2400" and found["GPIB0::24::INSTR"]["suggested"] == "smu"
@@ -58,16 +57,14 @@ def test_scan_draft_save_and_connect(bench):
         text = text.replace('"serial://COM9"', '"ASRL9::INSTR"')
         r = client.post("/api/lab", json={"yaml": text}, headers=headers).json()
         assert r["ok"] and r["info"]["kind"] == "file" and all("ok" in line for line in r["health"]), r
-        assert (home / "lab.yaml").read_text(encoding="utf-8") == text and settings.get("lab") == "mine"
+        assert (home / "lab.yaml").read_text(encoding="utf-8") == text
         state = client.get("/api/state", headers=headers).json()
         assert state["simulated"] is False and state["lab_info"]["kind"] == "file"
         assert set(state["status"]) == {"smu", "smu2", "pre"}
         assert any("now controlling My lab" in e for e in state["events"])
         assert runtime.gate.auto is False                                            # approvals ask again
 
-        r = client.post("/api/lab", json={"use": "virtual"}, headers=headers).json()
-        assert r["info"]["kind"] == "virtual" and client.get("/api/state", headers=headers).json()["simulated"] is True
-        r = client.post("/api/lab", json={"use": "mine"}, headers=headers).json()
+        r = client.post("/api/lab", json={"use": "mine"}, headers=headers).json()   # lab.yaml as it is, again
         assert r["info"]["kind"] == "file" and r["name"] == "My lab"
 
 
@@ -77,7 +74,7 @@ def test_switching_waits_for_kelvin_to_be_idle(bench):
     with client:
         from labharness.web.agent import _Turn
         client.app.app.state.agent.turns["x"] = _Turn({"chat_id": "x", "model": "m"})   # Kelvin answering a chat
-        assert client.post("/api/lab", json={"use": "virtual"}, headers=headers).status_code == 409
+        assert client.post("/api/lab", json={"use": "mine"}, headers=headers).status_code == 409
         assert client.post("/api/instruments/scan", json={}, headers=headers).status_code == 409
         del client.app.app.state.agent.turns["x"]
 
@@ -91,15 +88,14 @@ def test_health_check_catches_the_wrong_instrument_at_an_address(bench):
     assert all("?" in c for c in bus.devices["GPIB0::8::INSTR"].sent)          # it only asked
 
 
-def test_a_broken_home_lab_falls_back_to_the_virtual_lab(tmp_path):
+def test_a_home_lab_whose_instrument_cant_connect_stays_the_persons_lab(tmp_path):
     set_resource_manager(Bus({}))
     try:
         (tmp_path / "lab.yaml").write_text("lab: x\ninstruments:\n  smu: {card: keithley/2400, address: 'GPIB0::3::INSTR'}\n",
                                            encoding="utf-8")
         lab, envelope, info = open_home_lab(tmp_path)
-        assert info["kind"] == "virtual" and "could not be connected" in info["error"] and envelope is not None
-        lab, envelope, info = open_home_lab(tmp_path, "virtual")
-        assert info["kind"] == "virtual" and info["error"] is None and info["has_file"] is True
+        assert info["kind"] == "file" and not info["error"] and envelope is None
+        assert list(lab.instruments) == ["smu"] and "smu" in lab.unavailable   # not connected, with why
     finally:
         set_resource_manager(None)
 

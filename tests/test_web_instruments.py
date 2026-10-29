@@ -12,7 +12,7 @@ import pytest
 from labharness import EventLog, SafetyGate, ScriptedApprover
 from labharness.adapters import AdapterError
 from labharness.drivers import MODULES
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 
 
 def gate_for(lab, tmp_path, answers=()):

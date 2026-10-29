@@ -4,7 +4,7 @@ model: Virtual Photon Counter (APD and gated counter)
 vendor: Kelvin (simulated)
 kind: photon-counter
 status: community
-twin: labharness.sim.nv:PhotonCounterTwin
+twin: simlab.nv:PhotonCounterTwin
 identify:
   idn: "^VIRTUAL,PHOTON-COUNTER"
   example: "VIRTUAL,PHOTON-COUNTER,SN0010,1.0"

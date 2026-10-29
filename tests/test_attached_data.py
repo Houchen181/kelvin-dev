@@ -12,7 +12,8 @@ pytest.importorskip("mcp")
 np = pytest.importorskip("numpy")
 
 import datafiles as D  # noqa: E402
-from labharness import build_virtual_lab, rundata  # noqa: E402
+from labharness import rundata  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.gate import ScriptedApprover  # noqa: E402

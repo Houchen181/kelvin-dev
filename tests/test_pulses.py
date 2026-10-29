@@ -4,11 +4,12 @@ import random
 
 import pytest
 
-from labharness import analysis, build_virtual_lab, pulses
+from labharness import analysis, pulses
+from simlab import build_virtual_lab
 from labharness.clock import SimClock
 from labharness.engine import RunEngine
 from labharness.gate import SafetyGate, ScriptedApprover
-from labharness.sim import nv
+from simlab import nv
 
 
 def test_each_protocol_has_the_right_timing():
@@ -138,7 +139,7 @@ def test_the_oscillation_fit_reads_a_noisy_rabi_curve():
 
 def test_kelvin_shows_a_sequence_before_playing_it(tmp_path):
     pytest.importorskip("mcp")
-    from labharness import demo_envelope
+    from simlab import demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import INSTRUCTIONS

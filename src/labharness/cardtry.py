@@ -37,8 +37,9 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
         for name, inst in lab.instruments.items():
             if inst.config.address == address and not inst.simulated:
                 if card.library or "://" in address and not address.lower().startswith("serial://"):
-                    raise AdapterError("%s is connected in the lab as %s. Switch to the virtual lab (Lab, Set up) to "
-                                       "try another card on it, or save this card and use it for %s." % (address, name, name))
+                    raise AdapterError("%s is connected in the lab as %s: save this card and use it for %s, or take %s "
+                                       "out of the lab config (Lab, Set up) to try another card on it."
+                                       % (address, name, name, name))
                 reuse = inst.backend   # a text instrument: ask it through the connection the lab already has
     if reuse is None and address.startswith("sim://"):
         raise AdapterError("%s is a simulated instrument; try the card on a real address" % address)

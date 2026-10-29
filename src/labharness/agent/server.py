@@ -1,7 +1,8 @@
 """MCP server: lets Claude, GPT, Gemini or any MCP client drive a lab through the safety gate.
 
-    python -m labharness.agent                     # virtual lab over stdio, opens the approval page
-    python -m labharness.agent --speed 10          # virtual lab in real time ×10 instead of instant
+    python -m labharness.agent                     # the lab set up in ~/Kelvin (lab.yaml) over stdio, with the
+                                                   # approval page; refused while the Kelvin app runs (one Kelvin
+                                                   # per computer: it holds the instruments)
 """
 from __future__ import annotations
 
@@ -21,10 +22,9 @@ from mcp.types import ToolAnnotations
 from .. import carddraft, datatools, expr, fitting, guide
 from .._version import __version__
 from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
-from ..clock import ScaledClock, SimClock
 from ..collection import Collection
 from ..labconfig import load_envelope
-from ..virtual_lab import build_virtual_lab, demo_envelope
+from ..homelab import open_home_lab
 from .approval import ApprovalServer, WebApprover
 from .runtime import ClientCall, LabRuntime
 
@@ -1016,12 +1016,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
 def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m labharness.agent", description=__doc__.splitlines()[0])
-    ap.add_argument("--data-dir", help="event log and run folders (default: ~/Kelvin/virtual-lab; once people have "
-                                       "accounts in the app, ~/Kelvin/agents, so no one's own folder)")
-    ap.add_argument("--envelope", help="project envelope YAML (default: the demo envelope)")
-    ap.add_argument("--no-envelope", action="store_true", help="ask for every drive increase")
-    ap.add_argument("--speed", type=float, default=0, help="0 = instant simulated time (default); N = N× real time")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--data-dir", help="event log and run folders (default: ~/Kelvin/agents, so no one's own folder)")
+    ap.add_argument("--envelope", help="a project envelope YAML: drive increases inside it on instruments with "
+                                       "trust: envelope run without asking (default: none, every one asks)")
     ap.add_argument("--ui-port", type=int, default=8765, help="approval page port (a free one is used if busy)")
     ap.add_argument("--no-browser", action="store_true", help="do not open the approval page")
     ap.add_argument("--ui-url-file", help="also write the approval page URL to this file (kiosks, tests)")
@@ -1033,14 +1030,22 @@ def main(argv: Optional[List[str]] = None) -> None:
                     help="the Python that runs them (default: the first found that has what a script imports)")
     args = ap.parse_args(argv)
 
-    lab = build_virtual_lab(clock=SimClock() if args.speed == 0 else ScaledClock(args.speed), seed=args.seed)
-    envelope = None
-    if not args.no_envelope:
-        envelope = load_envelope(args.envelope, lab.config, lab.registry) if args.envelope else demo_envelope(lab)
-    approver = WebApprover(timeout=args.approval_timeout)
     home = Path.home() / "Kelvin"
-    data_dir = args.data_dir or home / ("agents" if (home / "accounts.json").exists() else "virtual-lab")
-    runtime = LabRuntime(lab, approver, data_dir, envelope)
+    from ..desktop import _running_copy
+    if _running_copy(home / "app.json"):   # one Kelvin per computer: the app holds the lab's instruments
+        sys.exit("Kelvin: the Kelvin app is running and controls the lab; close it to work the lab over MCP, or "
+                 "ask in the app's chats")
+    try:   # the instrument collection's cards and experiments, from the copy the app keeps (never fetched here)
+        off = json.loads((home / "settings.json").read_text(encoding="utf-8")).get("collection") == "off"
+    except (OSError, ValueError, AttributeError):
+        off = False
+    collection = None if off else Collection(home)
+    from ..web.settings import Settings
+    lab, _, info = open_home_lab(home, Settings(home / "settings.json").switched_off, collection)
+    envelope = load_envelope(args.envelope, lab.config, lab.registry) if args.envelope else None
+    approver = WebApprover(timeout=args.approval_timeout)
+    runtime = LabRuntime(lab, approver, args.data_dir or home / "agents", envelope)
+    runtime.lab_info = info
     runtime.cards_dir = Path.home() / "Kelvin" / "cards"
     from ..accounts import LabRoles, OwnerPin
     runtime.owner = OwnerPin(home)   # the lab owner's PIN, when one is set in the app
@@ -1051,11 +1056,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     from .. import envs
     envs.cleanup()
     envs.attach(envs.DRIVERS)   # makers' packages Kelvin installed for its built-in drivers (envs.py)
-    try:   # the instrument collection's experiments, from the copy the app keeps (this server never fetches it)
-        off = json.loads((home / "settings.json").read_text(encoding="utf-8")).get("collection") == "off"
-    except (OSError, ValueError, AttributeError):
-        off = False
-    runtime.collection = None if off else Collection(home)
+    runtime.collection = collection
     runtime.start_watching()   # the watches; what a restart left; outputs left on idle
     runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
     ui = ApprovalServer(runtime, port=args.ui_port).start()

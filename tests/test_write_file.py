@@ -57,7 +57,7 @@ def test_the_folders_instruments_load_code_from(tmp_path):
 # --- in a chat ------------------------------------------------------------------------------------------------------
 
 pytest.importorskip("mcp")
-from labharness import build_virtual_lab  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.gate import ScriptedApprover  # noqa: E402

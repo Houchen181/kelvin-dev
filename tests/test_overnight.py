@@ -3,7 +3,8 @@ instrument paused the queue with a raw VISA code and no alarm; garbled replies f
 alerts needed a third-party webhook). Each check reproduces what testers met, on the virtual lab, a fake bus or labsim."""
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.monitor import Watch
 
 SWEEP = """plan: {name}

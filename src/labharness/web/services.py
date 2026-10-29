@@ -10,7 +10,7 @@ import re
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
-BUILT_IN = {"anthropic", "openai", "gemini", "local", "demo"}
+BUILT_IN = {"anthropic", "openai", "gemini", "local"}
 MAX_SERVICES = 12
 
 # id: name, base URL, where the model list is (if not base/models), which listed models to leave out, whether only

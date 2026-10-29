@@ -4,7 +4,8 @@ import os
 
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.eventlog import NAME_MAX, RUN_NAME, RunFolderError, RunStore, run_name
 from test_reports import check_pdf, pdf_strings
 
@@ -205,15 +206,14 @@ def test_the_fits_fit_run_keeps_are_in_the_runs_reports_with_who_kept_them_and_w
 
 
 def test_each_lab_keeps_its_data_in_a_folder_named_after_it(tmp_path):
-    """F2 l05, l08, l09: a real lab's runs sat under ~/Kelvin/virtual-lab. The virtual lab keeps that folder; a lab
-    of real instruments gets its own, named after it, recorded so a renamed lab keeps it; nothing moves."""
+    """F2 l05, l08, l09: a real lab's runs sat under ~/Kelvin/virtual-lab. A lab gets its own folder, named after
+    it, recorded so a renamed lab keeps it; nothing moves, and the old virtual-lab's runs are still found."""
     from labharness import labfolders
     home = tmp_path / "Kelvin"
-    assert labfolders.folder_for(home, "Virtual Lab", True) == home / "virtual-lab"
-    mine = labfolders.folder_for(home, "Confocal B114: emitters", False, key="C:/K/lab.yaml")
+    mine = labfolders.folder_for(home, "Confocal B114: emitters", key="C:/K/lab.yaml")
     assert mine == home / "labs" / "Confocal_B114_emitters"
-    assert labfolders.folder_for(home, "Confocal B115", False, key="C:/K/lab.yaml") == mine   # renamed: same folder
-    other = labfolders.folder_for(home, "Confocal B114: emitters", False, key="D:/other/lab.yaml")
+    assert labfolders.folder_for(home, "Confocal B115", key="C:/K/lab.yaml") == mine   # renamed: same folder
+    other = labfolders.folder_for(home, "Confocal B114: emitters", key="D:/other/lab.yaml")
     assert other == home / "labs" / "Confocal_B114_emitters_2"                                  # never shared
     assert labfolders.safe_name("CON") == "lab_CON" and labfolders.safe_name("  ") == "lab"
     assert set(labfolders.all_folders(home)) == {home / "virtual-lab", mine, other}
@@ -227,13 +227,13 @@ def test_a_lab_that_measured_into_virtual_lab_keeps_it(tmp_path):
     rec = RunStore(home / "virtual-lab" / "runs").create("rt_check", {"plan": "rt_check"}, "agent")
     rec.meta.update(lab="My lab", simulated=False)
     rec.finish(status="done", points=0)
-    assert labfolders.folder_for(home, "My lab", False, key="k1") == home / "virtual-lab"
-    assert labfolders.folder_for(home, "Another lab", False, key="k2") == home / "labs" / "Another_lab"
+    assert labfolders.folder_for(home, "My lab", key="k1") == home / "virtual-lab"
+    assert labfolders.folder_for(home, "Another lab", key="k2") == home / "labs" / "Another_lab"
 
 
 def test_switching_to_a_lab_switches_to_its_folder_and_old_links_still_work(tmp_path):
-    """The first-run set-up switches from the virtual lab to the person's own mid-session: from then on its runs go
-    to the lab's own folder, while the virtual lab's runs and reports are still found by their ids and names."""
+    """A switch to another lab mid-session (the first run's set-up): from then on runs go to the lab's own folder,
+    while the old folder's runs and reports (here virtual-lab, where an older Kelvin kept them) are still found."""
     from labharness.agent.runtime import LabRuntime
     pytest.importorskip("mcp")
     home = tmp_path / "Kelvin"
@@ -262,6 +262,5 @@ def test_the_app_names_a_real_labs_folder_after_it(tmp_path):
     from labharness.web.app import lab_data_folder
     home = tmp_path / "Kelvin"
     lab = build_virtual_lab(seed=1)
-    assert lab_data_folder(home, lab, {"kind": "virtual", "path": str(home / "lab.yaml")}) == home / "virtual-lab"
     lab.config.name = "My lab"
     assert lab_data_folder(home, lab, {"kind": "file", "path": str(home / "lab.yaml")}) == home / "labs" / "My_lab"

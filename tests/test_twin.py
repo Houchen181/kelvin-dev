@@ -11,7 +11,7 @@ from labharness.engine import RunEngine
 from labharness.eventlog import EventLog
 from labharness.gate import SafetyGate, SimulationApprover
 from labharness.sim.twin import World, make_twin_backend
-from labharness.virtual_lab import build_virtual_lab
+from simlab import build_virtual_lab
 
 RAMPS = {
     "card": 1, "id": "test/ramps", "model": "Ramps", "kind": "magnet-supply", "status": "community",

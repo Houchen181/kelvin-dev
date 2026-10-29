@@ -12,11 +12,12 @@ import anyio  # noqa: E402
 
 from mcp import Client  # noqa: E402
 
-from labharness import ScriptedApprover, build_virtual_lab, frames, pictures  # noqa: E402
+from labharness import ScriptedApprover, frames, pictures  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.drivers import MODULES  # noqa: E402
-from labharness.virtual_lab import build_lab  # noqa: E402
+from labharness.homelab import build_lab  # noqa: E402
 from test_more_instruments import CAM_LAB, FakePylon  # noqa: E402
 
 

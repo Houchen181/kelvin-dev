@@ -1,14 +1,16 @@
 """Switching an instrument off in the Lab panel: Kelvin sends it nothing at all until a person switches it on."""
 import pytest
 
-from labharness import ScriptedApprover, demo_envelope
+from labharness import ScriptedApprover
+from simlab import demo_envelope
 from labharness.agent.runtime import LabRuntime, event_line
 from labharness.clock import SimClock
 from labharness.instrument import OffBackend
 from labharness.lab import Lab
 from labharness.labconfig import load_lab_config
 from labharness.sim.twin import World, sim_backend_factory
-from labharness.virtual_lab import DATA, build_virtual_lab, builtin_registry
+from labharness.homelab import builtin_registry
+from simlab import DATA, build_virtual_lab
 
 SWEEP = """plan: gate_sweep
 setup: { lockin.amplitude: 0.05, smu.output: on }

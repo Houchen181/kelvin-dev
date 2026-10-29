@@ -117,7 +117,7 @@ def test_no_empty_tool_list_is_sent():
 
 def test_services_in_the_portal(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
-    from labharness import build_virtual_lab, demo_envelope
+    from simlab import build_virtual_lab, demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     from labharness.web.app import create_app
@@ -130,7 +130,7 @@ def test_services_in_the_portal(tmp_path, monkeypatch):
     lab = build_virtual_lab(seed=1)
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
     settings = Settings(tmp_path / "settings.json")
-    app = create_app(runtime, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"], demo=True)
+    app = create_app(runtime, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"])
     headers = {"X-Kelvin-Token": settings.access_key}
     with TestClient(app) as client:
         r = client.get("/api/services", headers=headers).json()

@@ -14,12 +14,12 @@ from .gate import (ApprovalRequest, Approver, ConsoleApprover, DenyAll, Result, 
 from .lab import HealthResult, Lab
 from .labconfig import ConfigError, Envelope, LabConfig, load_envelope, load_lab_config
 from .plans import Plan, PlanError, load_plan
-from .virtual_lab import build_virtual_lab, builtin_registry, demo_envelope
+from .homelab import build_lab, builtin_registry, empty_lab, open_home_lab
 
 __all__ = [
     "__version__", "ApprovalRequest", "Approver", "Card", "CardError", "CardRegistry", "ConfigError",
     "ConsoleApprover", "DenyAll", "Envelope", "EventLog", "HealthResult", "Lab", "LabConfig", "ParamSpec",
     "Plan", "PlanError", "RealClock", "Result", "RunEngine", "RunReport", "RunStore", "SafetyGate",
-    "ScriptedApprover", "SimClock", "SimulationApprover", "build_virtual_lab", "builtin_registry",
-    "demo_envelope", "load_card", "load_envelope", "load_lab_config", "load_plan", "parse_card",
+    "ScriptedApprover", "SimClock", "SimulationApprover", "build_lab", "builtin_registry", "empty_lab",
+    "load_card", "load_envelope", "load_lab_config", "load_plan", "open_home_lab", "parse_card",
 ]

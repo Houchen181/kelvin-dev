@@ -10,7 +10,7 @@ from labharness.cards import CardError
 from labharness.discovery import draft_from, scan
 from labharness.drivers import MODULES, open_driver, parse_command
 from labharness.labconfig import ConfigError, load_lab_config
-from labharness.virtual_lab import build_lab, builtin_registry
+from labharness.homelab import build_lab, builtin_registry
 from labharness.clock import SimClock
 from labharness.sim.twin import World, make_twin_backend
 from test_hardware import Bus, Device

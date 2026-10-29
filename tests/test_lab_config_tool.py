@@ -10,7 +10,7 @@ anyio = pytest.importorskip("anyio")
 
 from mcp import Client  # noqa: E402
 
-from labharness import build_virtual_lab  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.discovery import instrument_text, set_limits  # noqa: E402

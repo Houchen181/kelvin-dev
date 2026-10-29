@@ -4,7 +4,7 @@ import urllib.parse
 
 import pytest
 
-from labharness import build_virtual_lab, demo_envelope
+from simlab import build_virtual_lab, demo_envelope
 from labharness.agent.approval import WebApprover
 from labharness.agent.runtime import LabRuntime
 from labharness.literature import Literature, Paper, html_to_text, merge, parse_arxiv, parse_openalex

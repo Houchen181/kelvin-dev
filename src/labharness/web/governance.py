@@ -86,8 +86,8 @@ def routes(runtime: Any, settings: Any, accounts: Any, needs_owner: Callable[...
         why = "rolled back to #%d%s" % (n, ": " + " ".join(str(body.get("why")).split()) if body.get("why") else "")
         if subject == LAB:
             if text is None:
-                return error(400, "In #%d there was no lab config. To leave your instruments, choose the virtual lab "
-                                  "in Lab setup." % n)
+                return error(400, "In #%d there was no lab config. To take instruments out, delete their entries in "
+                                  "Lab setup." % n)
             try:
                 if text == runtime.versions.now(LAB):
                     return error(409, "The lab config is #%d's already." % n)

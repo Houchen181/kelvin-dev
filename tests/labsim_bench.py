@@ -281,7 +281,7 @@ def labsim_lab(labsim_offline, tmp_path: Path, monkeypatch: Any):
     bench's instruments are named as in its bench file; ctl(bench, ...) makes faults. Put back after the test."""
     pytest.importorskip("pyvisa")
     from labharness import adapters
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     monkeypatch.syspath_prepend(str(SHIMS))
     before = getattr(adapters, "_rm", None)
     built: List[Any] = []

@@ -2,7 +2,8 @@
 its runs."""
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab, rundata
+from labharness import ScriptedApprover, rundata
+from simlab import build_virtual_lab
 from labharness.eventlog import RunStore
 
 SWEEP = """plan: gate_sweep

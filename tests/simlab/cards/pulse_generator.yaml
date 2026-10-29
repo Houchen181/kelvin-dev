@@ -4,7 +4,7 @@ model: Virtual Pulse Generator (AOM, MW switch, counter gate)
 vendor: Kelvin (simulated)
 kind: pulse-generator
 status: community
-twin: labharness.sim.nv:PulseGeneratorTwin
+twin: simlab.nv:PulseGeneratorTwin
 identify:
   idn: "^VIRTUAL,PULSE-GENERATOR"
   example: "VIRTUAL,PULSE-GENERATOR,SN0008,1.0"

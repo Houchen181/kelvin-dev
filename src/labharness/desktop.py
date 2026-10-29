@@ -1,7 +1,6 @@
 """Kelvin as a desktop app: the portal in its own window, no terminal needed.
 
     kelvin-app                 # what the installer's shortcut runs
-    kelvin-app --no-demo       # hide the scripted demo model
     kelvin-app --browser       # use the default browser instead of a window
     kelvin-app --self-test     # start, check that the portal answers, exit (used by the release builds)
 
@@ -109,7 +108,8 @@ def _self_test(port: int, key: str) -> int:
     from . import library
     bridge_ok = library.self_test()   # the helper for makers' libraries starts (Kelvin.exe --bridge) and answers
     page_ok = page_ok and bridge_ok
-    ok = page_ok and bool(boot.get("lab")) and any(g["models"] for g in boot["models"]["groups"])
+    # the models' list loads (the services are packaged); a fresh install has no key yet, so none need be offered
+    ok = page_ok and bool(boot.get("lab")) and isinstance((boot.get("models") or {}).get("groups"), list)
     extra = ""
     if os.environ.get("KELVIN_SELFTEST_ENVS") == "1":   # the release builds, which have the network (envs.py)
         from . import envs
@@ -200,7 +200,6 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(prog="kelvin-app", description="Kelvin, the coolest cat in the lab")
     ap.add_argument("--home", default=str(HOME), help="where Kelvin keeps its data (default: ~/Kelvin)")
-    ap.add_argument("--no-demo", action="store_true", help="hide the scripted demo model")
     ap.add_argument("--browser", action="store_true", help="open in the default browser instead of a window")
     ap.add_argument("--self-test", action="store_true", help="start, check the portal, exit")
     ap.add_argument("--no-setup", action="store_true", help="do not look for connected instruments on start")
@@ -248,7 +247,7 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     from .agent.approval import WebApprover
     from .agent.runtime import LabRuntime
     from .collection import Collection
-    from .virtual_lab import open_home_lab
+    from .homelab import open_home_lab
     from .web.app import create_app
     from .web.settings import Settings
     from .web.store import ChatStore
@@ -274,18 +273,17 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     import uvicorn
 
     port = args.port or _free_port()
-    # the user's own instruments (lab.yaml) if they set them up, else the virtual lab at 10x real time; with the
-    # instrument collection's cards (the copy here) unless it is switched off. The user's instruments are connected
-    # once the window is open (the instrument setup does it, saying which), as that can take minutes
+    # the person's own instruments (lab.yaml), none until they set them up; with the instrument collection's cards
+    # (the copy here) unless it is switched off. The instruments are connected once the window is open (the
+    # instrument setup does it, saying which), as that can take minutes
     collection = Collection(home) if settings.get("collection") != "off" else None
-    lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", 10, settings.switched_off, collection,
-                                        connect=False)
+    lab, envelope, info = open_home_lab(home, settings.switched_off, collection, connect=False)
     # people sign in, each to their own data folder; until someone does, what happens is the lab's (~/Kelvin/lab).
     # The self-test checks the app, not a person, so it runs without accounts.
     accounts = None if args.self_test else Accounts(home)
     if accounts is None:
         from .web.app import data_folder_for
-        data_dir, problem = data_folder_for(settings, home)   # the folder chosen in Settings, else ~/Kelvin/virtual-lab
+        data_dir, problem = data_folder_for(settings, home)   # the folder chosen in Settings, else the lab's own
     else:
         data_dir, problem = home / "lab", None
     runtime = LabRuntime(lab, WebApprover(timeout=300), data_dir, envelope)
@@ -293,8 +291,8 @@ def _run(args: argparse.Namespace, home: Path) -> int:
     runtime.lab_info = info
     quit_event = threading.Event()
     closer: dict = {"fn": None}
-    chats = home / ("virtual-lab" if accounts is None else "lab") / "chats"
-    app = create_app(runtime, settings, ChatStore(chats, create=accounts is None), demo=not args.no_demo,
+    chats = home / "lab" / "chats"
+    app = create_app(runtime, settings, ChatStore(chats, create=accounts is None),
                      auto_setup=not (args.self_test or args.no_setup),   # set up connected instruments on start
                      hosts=("127.0.0.1:%d" % port, "localhost:%d" % port),
                      on_quit=quit_event.set if args.browser else None, accounts=accounts, updater=updater,

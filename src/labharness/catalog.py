@@ -40,7 +40,7 @@ CREATE INDEX IF NOT EXISTS results_run ON results (run_id);
 """
 SCHEMA_TEXT = """runs: one row per finished run. run_id, plan (its name), status (done, aborted, interrupted),
   started and finished (ISO local time, e.g. 2026-10-24T15:30:12.123), duration_s, points, planned_points,
-  project and project_name, device and device_name (the sample), lab, simulated (1 for the virtual lab),
+  project and project_name, device and device_name (the sample), lab, simulated (1 for a lab of simulated instruments),
   operator, user, swept and measured (comma-separated column keys), assessment (the automatic analysis' verdict),
   reason (why it stopped early), card (the run's card as JSON: json_extract(card, '$.held') and so on).
 columns: one row per column of each run. run_id, key (instrument.parameter, or i and t), role (axis, measured,

@@ -2,7 +2,8 @@
 source itself, source ranges that change only at zero, and the hands-on-the-sample lock."""
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab
 from labharness import protection
 
 GATE = {"gates": [{"drive": "smu.V", "dielectric": "hBN", "thickness_nm": 20, "leak": "smu.I"}]}
@@ -251,7 +252,7 @@ def test_kelvin_reads_protection_but_never_lifts_it(tmp_path):
 def test_a_yokogawa_gate_and_a_keithley_are_capped_too(tmp_path):
     pytest.importorskip("mcp")
     from labharness.agent.runtime import LabRuntime
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     lab = build_lab("lab: Gate bench\ninstruments:\n  gs: { card: yokogawa/gs200, address: \"sim://gs\" }\n"
                     "  k: { card: keithley/2400, address: \"sim://k\" }\n")
     rt = LabRuntime(lab, ScriptedApprover([True] * 20), tmp_path / "data", None)

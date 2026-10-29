@@ -5,10 +5,11 @@ import math
 
 import pytest
 
-from labharness import EventLog, RunEngine, RunStore, SafetyGate, ScriptedApprover, build_virtual_lab
+from labharness import EventLog, RunEngine, RunStore, SafetyGate, ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.cards import CardError, parse_card
 from labharness.sim.twin import Twin
-from labharness.virtual_lab import builtin_registry
+from labharness.homelab import builtin_registry
 
 
 def delay_card(**status):

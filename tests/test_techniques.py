@@ -37,7 +37,7 @@ def randles_sevcik(rate):
 
 
 def lab_on(tmp_path, extra=""):
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     (tmp_path / "lab.yaml").write_text(LAB % extra, encoding="utf-8")
     return build_lab(tmp_path / "lab.yaml", partial=True)
 
@@ -135,7 +135,8 @@ def test_a_technique_that_only_listens_runs_without_asking(tmp_path):
     then fetched; on the virtual lab's source-meter, with a stand-in for the capture's commands."""
     pytest.importorskip("numpy")
     import dataclasses
-    from labharness import build_virtual_lab, techniques
+    from labharness import techniques
+    from simlab import build_virtual_lab
     from labharness.clock import SimClock
     lab = build_virtual_lab(clock=SimClock(), seed=1)
     smu = lab.instruments["smu"]

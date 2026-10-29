@@ -145,7 +145,11 @@ def test_a_chat_searches_the_web_and_a_confidential_project_does_not(tmp_path):
 
 
 def test_read_a_page_then_keep_the_manual(tmp_path):
-    rt = runtime_for(tmp_path)
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    from simlab import build_virtual_lab
+    rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=5), tmp_path / "data")   # the test lab's smu
+    rt.home = tmp_path
     manual = tiny_pdf(MANUAL)
     pages = {"https://www.acme.example/support/w9000":
              b'<html><body><h1>Widget 9000 support</h1><p>Downloads for the Widget 9000.</p>'

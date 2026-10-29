@@ -4,7 +4,8 @@ import pytest
 
 pytest.importorskip("numpy")
 
-from labharness import ScriptedApprover, build_virtual_lab, recipes  # noqa: E402
+from labharness import ScriptedApprover, recipes  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 
 GATE = """recipe: Find Gate Peak

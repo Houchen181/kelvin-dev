@@ -391,7 +391,7 @@ def test_the_agent_is_told_a_set_point_waits_and_how_to_measure_on_the_way(tmp_p
     pytest.importorskip("mcp")
     anyio = pytest.importorskip("anyio")
     from mcp import Client
-    from labharness import build_virtual_lab, demo_envelope
+    from simlab import build_virtual_lab, demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import INSTRUCTIONS, build_server

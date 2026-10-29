@@ -15,7 +15,7 @@ pytest.importorskip("httpx")
 from starlette.testclient import TestClient  # noqa: E402
 
 import labharness.web.app as web_app  # noqa: E402
-from labharness import build_virtual_lab, demo_envelope  # noqa: E402
+from simlab import build_virtual_lab, demo_envelope  # noqa: E402
 from labharness.accounts import Accounts  # noqa: E402
 from labharness.agent.approval import WebApprover  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
@@ -90,7 +90,7 @@ def portal(tmp_path, monkeypatch, browser, accounts=None, calls=None, providers=
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
     settings = Settings(tmp_path / "settings.json")
     store = ChatStore(tmp_path / "lab" / "chats" if accounts else tmp_path / "chats", create=not accounts)
-    guard = web_app.create_app(runtime, settings, store, hosts=["testserver"], demo=True, accounts=accounts,
+    guard = web_app.create_app(runtime, settings, store, hosts=["testserver"], accounts=accounts,
                                providers=providers)
     guard.app.state.hub.http = through(browser, calls)
     return SimpleNamespace(client=TestClient(guard), h={"X-Kelvin-Token": settings.access_key}, runtime=runtime,

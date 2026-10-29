@@ -13,7 +13,7 @@ from labharness.discovery import draft_lab_config, identify, match_card, scan
 from labharness.gate import SafetyGate, ScriptedApprover
 from labharness.labconfig import ConfigError, load_lab_config
 from labharness.sim.twin import World, make_twin_backend
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 
 
 class Device:

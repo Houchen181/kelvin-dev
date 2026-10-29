@@ -2,7 +2,8 @@
 upgraded, the catalog of every run, and the AI's tools to find runs and compute from them."""
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab, rundata
+from labharness import ScriptedApprover, rundata
+from simlab import build_virtual_lab
 
 SWEEP = """
 plan: gate_sweep

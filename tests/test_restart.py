@@ -6,7 +6,8 @@ import time
 
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab, rundata
+from labharness import ScriptedApprover, rundata
+from simlab import build_virtual_lab
 
 pytest.importorskip("mcp")
 from labharness.agent.runtime import LabRuntime  # noqa: E402

@@ -95,10 +95,6 @@ def test_a_persons_limits_for_one_instrument(bench):
     (runtime, settings, store), bus, home = bench
     client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
     with client:
-        virtual = next(iter(runtime.lab.instruments))
-        assert client.get("/api/instruments/%s/limits" % virtual, headers=headers).json()["editable"] is False
-        r = client.post("/api/instruments/%s/limits" % virtual, json={"limits": {}}, headers=headers)
-        assert r.status_code == 409                                   # the virtual lab's are fixed
         assert client.post("/api/lab", json={"yaml": LAB}, headers=headers).json()["ok"]
         assert client.get("/api/instruments/nope/limits", headers=headers).status_code == 404
 
@@ -148,7 +144,7 @@ def test_kelvin_reads_the_scripts_as_text_from_outside_the_lab(tmp_path):
 
 
 def test_the_cards_matched_against_follow_the_labs_cards_folder(tmp_path):
-    from labharness import build_virtual_lab
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     from labharness.gate import ScriptedApprover
     from test_add_instrument import WIDGET

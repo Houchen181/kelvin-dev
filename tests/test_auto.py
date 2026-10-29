@@ -148,7 +148,8 @@ instruments:
 
 def test_a_cryostat_without_physics_twin_dry_runs_and_auto_mode_covers_small_steps(tmp_path):
     pytest.importorskip("mcp")
-    from labharness import ScriptedApprover, build_virtual_lab
+    from labharness import ScriptedApprover
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     from labharness.sim.twin import GenericTwin
     lab = build_virtual_lab(config=ATTODRY)

@@ -12,7 +12,7 @@ Kelvin's lab tools are an MCP server, so Claude Code, Codex, Gemini CLI or anoth
 .venv/Scripts/kelvin-mcp
 ```
 
-By default the server starts the virtual lab in instant simulated time. Use `--speed 10` for 10× real time. Event logs and run folders go to `~/Kelvin/virtual-lab`, or to `~/Kelvin/agents` once people have accounts in the app, so they land in no one's own folder; `--data-dir` chooses another. The server also opens the **approval page** in your browser; its URL, which includes an access key, is printed on the server's stderr.
+The server controls the lab set up in `~/Kelvin/lab.yaml` (none yet: a lab with no instruments; set them up in the Kelvin app). It won't start while the Kelvin app is running, since the app holds the instruments: one Kelvin per computer. Event logs and run folders go to `~/Kelvin/agents`, so they land in no one's own folder; `--data-dir` chooses another. `--envelope` names a project envelope (drive increases inside it on instruments with `trust: envelope` run without asking); by default every drive increase asks. The server also opens the **approval page** in your browser; its URL, which includes an access key, is printed on the server's stderr.
 
 On the approval page you can:
 - **Approve or decline** what the agent asks for. An unanswered request is declined after 120 s (`--approval-timeout`). No MCP tool can answer approvals. Nobody signs in here, so in a lab with roles ([safety.md](safety.md#lab-roles)) each yes takes the lab owner's PIN, and auto mode stays off.
@@ -52,7 +52,7 @@ Text from outside the lab (web pages, papers, manuals, instruments' replies) com
 
 ## The lab's memory
 
-What people and Kelvin learned about the lab is kept for every chat in the portal, everyone who signs in on the computer and every agent over MCP: how it is wired (which channel reads the mixing chamber), where references come from (the lock-in takes the chopper's), what excites the sample and whether it is stated rms or peak, and lessons learned at the bench ("switch each OBIS's emission on before its power"). It is kept in Kelvin's own folder: `~/Kelvin/lab-memory.json` for the lab in `lab.yaml`, `~/Kelvin/virtual-lab-memory.json` for the virtual lab, which the MCP server runs, so its agents share the virtual lab's notes with the portal's chats on it.
+What people and Kelvin learned about the lab is kept for every chat in the portal, everyone who signs in on the computer and every agent over MCP: how it is wired (which channel reads the mixing chamber), where references come from (the lock-in takes the chopper's), what excites the sample and whether it is stated rms or peak, and lessons learned at the bench ("switch each OBIS's emission on before its power"). It is kept in Kelvin's own folder, `~/Kelvin/lab-memory.json`, so the MCP server's agents share the lab's notes with the portal's chats.
 
 - **In the server's instructions:** a short brief of it, as it was when the server started (each stdio session starts its own server): lessons first, then wiring, references, excitations and other facts, within about 1200 characters, and the measurement chain on record. `shared_memory` has the rest, and the latest.
 - **When an instrument is used:** `describe_instrument` ends with the notes on that instrument; `set_value`, `send_raw`, `do_action` and `run_plan` add them the first time the server uses it, and again once a note's text changes. Approval cards show the lessons on the instruments they name, for the person who answers.

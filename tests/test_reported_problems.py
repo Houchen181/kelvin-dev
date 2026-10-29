@@ -6,7 +6,8 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from labharness import ScriptedApprover, build_virtual_lab  # noqa: E402
+from labharness import ScriptedApprover  # noqa: E402
+from simlab import build_virtual_lab  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 
 

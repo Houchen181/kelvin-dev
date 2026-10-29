@@ -501,7 +501,7 @@ def test_a_draft_for_a_model_kelvins_card_does_not_fit_gets_its_own_id(tmp_path)
     draft for one takes keithley/6220, with the 6220's own identity, and never Kelvin's id or its instruments."""
     import re
     from labharness import autocard
-    from labharness.virtual_lab import kelvin_ids
+    from labharness.homelab import kelvin_ids
     entry = {"id": "keithley/6221", "maker": "Keithley (Tektronix)", "model": "6221", "kind": "current-source",
              "name": "Keithley 6221 AC and DC current source",
              "identify": {"idn": "^KEITHLEY INSTRUMENTS INC\\.,\\s*MODEL 622[01],"},
@@ -575,7 +575,7 @@ def test_reconnecting_an_instrument_uses_its_card_as_it_is_now(tmp_path, plate):
     from disk, and connects again when its connection settings changed."""
     pytest.importorskip("mcp")
     from labharness.agent.runtime import LabRuntime
-    from labharness.virtual_lab import build_lab, lab_registry
+    from labharness.homelab import build_lab, lab_registry
     sent, state = plate
     lab = build_lab(tmp_path / "lab.yaml", registry=lab_registry(tmp_path))
     rt = LabRuntime(lab, ScriptedApprover([]), tmp_path / "data")
@@ -649,7 +649,7 @@ def test_kelvin_uses_its_card_before_drafting_or_shadowing_one(tmp_path):
     save_card takes a Kelvin card's id only when asked to make this lab's version (version: true)."""
     pytest.importorskip("mcp")
     from pathlib import Path
-    from labharness import build_virtual_lab
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")
     rt.home, rt.cards_dir, rt.collection = tmp_path, tmp_path / "cards", Catalog()

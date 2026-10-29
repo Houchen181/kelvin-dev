@@ -251,7 +251,7 @@ class Lab:
                         out.append(HealthResult(name, False, problems))
                         continue
                     if not re.search(card.idn_pattern, idn, re.I):
-                        from .virtual_lab import builtin_ids
+                        from .homelab import builtin_ids
                         problems.append("identity %r does not match card %s (wrong address or instrument? If it is "
                                         "a variant the card doesn't know, %s)" % (idn[:80], card.id, (
                                             "make this lab's version of the card with its identity: Lab, Cards…, "

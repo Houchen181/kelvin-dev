@@ -41,7 +41,8 @@ def test_the_portal_model_has_the_map_and_kelvin_help(tmp_path):
     pytest.importorskip("mcp")
     import anyio
     from mcp import Client
-    from labharness import ScriptedApprover, build_virtual_lab
+    from labharness import ScriptedApprover
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import INSTRUCTIONS, build_server
     from labharness.web.agent import SYSTEM
@@ -57,7 +58,8 @@ def test_the_portal_model_has_the_map_and_kelvin_help(tmp_path):
 
 def test_the_lab_panel_names_instruments_on_draft_cards(tmp_path):
     pytest.importorskip("mcp")
-    from labharness import ScriptedApprover, build_virtual_lab
+    from labharness import ScriptedApprover
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     lab = build_virtual_lab()
     rt = LabRuntime(lab, ScriptedApprover([]), tmp_path / "data")
@@ -70,10 +72,11 @@ def test_the_lab_panel_names_instruments_on_draft_cards(tmp_path):
 def test_a_person_reviews_one_of_kelvins_own_draft_cards(tmp_path):
     pytest.importorskip("starlette")
     pytest.importorskip("mcp")
-    from labharness import build_virtual_lab, carddraft
+    from labharness import carddraft
+    from simlab import build_virtual_lab
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
-    from labharness.virtual_lab import lab_registry
+    from labharness.homelab import lab_registry
     from labharness.web.settings import Settings
     from labharness.web.store import ChatStore
     from test_web import client_for

@@ -338,7 +338,7 @@ class LabRuntime:
         self._catalog: Optional["Catalog"] = None    # every run in the data folder (catalog.py); see .catalog
         self._tidy_lock = threading.Lock()
         self._live_lock = threading.Lock()
-        self.lab_info: Dict[str, Any] = {"kind": "virtual" if all(i.simulated for i in lab.instruments.values()) else "file",
+        self.lab_info: Dict[str, Any] = {"kind": "file" if lab.instruments else "none",   # open_home_lab's, in the app
                                          "path": None, "error": None, "has_file": False}
         self.notifier = Notifier()
         self.literature = Literature()
@@ -1010,7 +1010,7 @@ class LabRuntime:
 
     def where(self, request: ApprovalRequest) -> Optional[str]:
         """Where a request acts, for its card: SIMULATOR when every instrument it names is a simulated one, else
-        REAL HARDWARE (a request asked in the virtual lab once looked just like one on the instruments). None for a
+        REAL HARDWARE (a request asked on simulated instruments once looked just like one on real ones). None for a
         request that names no instrument (installing a package, saving a file)."""
         text = " ".join([request.title] + [str(i) for i in request.items])
         named = [inst for name, inst in self.lab.instruments.items()
@@ -2786,10 +2786,9 @@ class LabRuntime:
     # ------------------------------------------------------------------ the lab's memory (labmemory.py)
 
     def _lab_memory(self) -> Any:
-        """The memory of the lab Kelvin controls now: in Kelvin's own folder, everyone's; the virtual lab's apart from
-        the lab in lab.yaml."""
+        """The memory of the lab Kelvin controls: in Kelvin's own folder, everyone's."""
         from ..labmemory import LabMemory, path_for
-        return LabMemory(path_for(self.lab_memory_dir or self.data_dir, self.lab_info.get("kind") != "file"))
+        return LabMemory(path_for(self.lab_memory_dir or self.data_dir))
 
     def lab_memory_stamp(self) -> str:
         """Changes when the lab's memory does, or when Kelvin controls another lab: the Lab panel reloads it then."""
@@ -2842,7 +2841,7 @@ class LabRuntime:
         from .. import labmemory as lm
         from ..chain import Chains, lines
         notes = self.lab_notes()
-        lab = "the virtual lab" if self.lab_info.get("kind") != "file" else "this lab (%s)" % self.lab.config.name
+        lab = "this lab (%s)" % self.lab.config.name
         query, instrument = str(query or "").strip(), str(instrument or "").strip()
         if instrument:
             found = lm.for_instruments(notes, [instrument])
@@ -3357,7 +3356,7 @@ class LabRuntime:
         their manuals: what to look up before writing a card. Only reads Kelvin's files."""
         from ..collection import manuals
         from ..discovery import find_cards
-        from ..virtual_lab import builtin_ids, lab_registry
+        from ..homelab import builtin_ids, lab_registry
         registry = lab_registry(self.home, self.collection) if self.home is not None else self.lab.registry
         found = find_cards(query, registry, self.collection)
         mine = str(self.cards_dir).replace("\\", "/") if self.cards_dir is not None else None
@@ -3408,7 +3407,7 @@ class LabRuntime:
     def script_cards(self) -> Any:
         """Every card Kelvin can use here, to match the lab's scripts against: Kelvin's own and the lab's. Kept
         while the lab's cards folder stays as it was, as reading every card takes a second. Only read from."""
-        from ..virtual_lab import lab_registry
+        from ..homelab import lab_registry
         if self.home is None:
             return self.lab.registry
         folder = Path(self.home) / "cards"
@@ -3605,7 +3604,7 @@ class LabRuntime:
 
     def _saved_card(self, ref: str) -> Any:
         """A card Kelvin has, by its id (Kelvin's own, or one in ~/Kelvin/cards); None if there is none."""
-        from ..virtual_lab import lab_registry
+        from ..homelab import lab_registry
         for registry in [self.lab.registry] + ([lab_registry(self.home)] if self.home is not None else []):
             try:
                 return registry.get(ref)
@@ -3662,7 +3661,7 @@ class LabRuntime:
         (l07's Mercury draft, which lacked the card's set_reply, broke a run)."""
         if self.cards_dir is None:
             return "not saved: this Kelvin has no folder for your cards"
-        from ..virtual_lab import builtin_ids, kelvin_ids
+        from ..homelab import builtin_ids, kelvin_ids
         try:
             card, path, warnings = carddraft.save(self.cards_dir, text, kelvin_ids(self.collection), by,
                                                   version=version)
@@ -3695,7 +3694,7 @@ class LabRuntime:
         if found.get("card_id"):
             return "%s already matches card %s (%s): add_instrument" % (address, found["card_id"], found.get("model"))
         from ..discovery import cards_named, match_card
-        from ..virtual_lab import lab_registry
+        from ..homelab import lab_registry
         registry = lab_registry(self.home, self.collection) if self.home is not None else self.lab.registry
         have = [c for c in [match_card(idn, registry) if idn else None] if c is not None]
         if not have and not idn and maker.strip() and model.strip():
@@ -4263,7 +4262,7 @@ class LabRuntime:
         """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package
         installed, the instrument switched on or plugged in), with its card as it is on disk now: a card fixed since
         it connected is used from now on (lab.Lab.reconnect). Connecting changes nothing on it."""
-        from ..virtual_lab import card_now
+        from ..homelab import card_now
         inst = self.lab.instruments.get(name)
         if inst is None:
             return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
@@ -4443,13 +4442,13 @@ class LabRuntime:
                        card_vars: Optional[Dict[str, str]] = None, by: str = "agent") -> str:
         """Kelvin adds an instrument connected to this computer to the lab (lab.yaml), marked added_by: kelvin, and
         connects it; the others stay connected as they are. It reads and configures at once; until a person reviews
-        its limits, every output change on it asks them. An address the last scan did not find asks first; moving
-        Kelvin off a virtual lab the person chose asks too."""
+        its limits, every output change on it asks them. An address the last scan did not find is approved by Kelvin
+        itself (it connects and reads); a program to run asks a person in Lab setup."""
         from ..adapters import AdapterError, resource_name
         from ..cards import CONNECTION_KEYS
         from ..discovery import Found, add_to_config, card_for
         from ..labconfig import ConfigError, load_lab_config
-        from ..virtual_lab import build_lab, lab_registry
+        from ..homelab import build_lab, lab_registry
         if self.home is None:
             return "not added: this Kelvin keeps no lab config (the Kelvin app does)"
         address = (address or "").strip()
@@ -4531,19 +4530,16 @@ class LabRuntime:
                             "library with install_for_instrument and use lib://<address>?env=<environment>")
                 asks.append("Kelvin's last scan did not find an instrument at %s. Kelvin would connect to it as %s "
                             "(%s) and read it." % (address, new, the_card.model))
-            if not on_file and lab_file.exists() and not self.lab_info.get("error"):
-                asks.append("Kelvin is on the virtual lab, as you chose; adding %s moves it to your instruments "
-                            "(%s)." % (new, ", ".join(sorted(cfg.instruments))))
             if asks:
                 request = ApprovalRequest("Add %s to the lab?" % new, asks + [
                     "Every output change on it still asks you until you review its limits."])
-                simple = len(asks) == 1 and on_file   # only an address the scan missed: it connects and reads
+                simple = len(asks) == 1   # only an address the scan missed: it connects and reads
                 if not (simple and self.gate.auto_simple(request, "adding an instrument connects it and reads it; "
                                                                   "every output change on it still asks")) \
                         and not self.gate.ask(request):
                     note = " (%s)" % request.note if request.note else ""
                     return "declined: the person did not want %s added%s" % (new, note)
-            try:   # on the person's lab: connect just this one; from the virtual lab: their whole lab, with it
+            try:   # on the person's lab: connect just this one; from no lab yet: their lab, with it
                 lab = self.lab if on_file else build_lab(new_text, None, 0, registry, self.switched_off_for)
                 if on_file:
                     lab.add(ic, the_card)
@@ -4609,9 +4605,9 @@ class LabRuntime:
 
     def refresh_cards(self, ids: Iterable[str]) -> None:
         """After cards changed (the user's, or a new copy of the collection): the card the lab's registry has for each
-        of these ids, by the same layers a lab is opened with (virtual_lab.lab_registry). Instruments already
+        of these ids, by the same layers a lab is opened with (homelab.lab_registry). Instruments already
         connected keep theirs until the lab is opened again."""
-        from ..virtual_lab import lab_registry
+        from ..homelab import lab_registry
         ids = list(ids)
         if not ids:
             return
@@ -5431,7 +5427,7 @@ class LabRuntime:
 
     def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human",
                    idle: Optional[Callable[[], bool]] = None) -> List[str]:
-        """Control another lab (the user's instruments, or the virtual lab). Refused while a plan runs. The approval
+        """Control another lab (the person's lab config, saved or changed). Refused while a plan runs. The approval
         mode goes back to asking, and the new lab is health-checked right away.
         A lab opened before connecting (build_lab later=True) takes over the connections of the instruments it has
         unchanged (same address, card, connection and names), and the old lab's other instruments are closed before
@@ -5552,7 +5548,7 @@ class LabRuntime:
         rule = ("drive changes, runs and queues go ahead without asking when every drive stays within %.0f%% of the way "
                 "from its safe value to its lab limit and switches move at most one step from safe; runs and queues "
                 "also need a clean dry run. Instruments Kelvin isn't sure about, code on boards, switching an "
-                "instrument on and leaving a virtual lab you chose still ask (what drives nothing, such as installs, "
+                "instrument on still ask (what drives nothing, such as installs, "
                 "skills and saved files, never waits for you in either mode)"
                 % (100 * cfg.auto_fraction))
         if ranges:

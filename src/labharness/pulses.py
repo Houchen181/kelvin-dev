@@ -1,7 +1,7 @@
 """Pulse sequences for spin experiments (NV centres, and atoms or ions with an AOM and a microwave or RF drive): the
 timing on each channel of a pulse generator, built from a named protocol and a few times, or written out in the
-sequence syntax below, and checked before anything plays. Pulse Streamer, PulseBlaster, an AWG's markers and the
-virtual lab's generator all play the same Sequence.
+sequence syntax below, and checked before anything plays. Pulse Streamer, PulseBlaster, an AWG's markers and a
+simulated generator (in tests) all play the same Sequence.
 
 Channels (the wiring; the lab config names which output is which):
     laser   the AOM (or the laser's modulation input) that switches the excitation light
@@ -843,7 +843,7 @@ def is_generator(inst: Any) -> bool:
 
 def limits_of(inst: Any) -> Dict[str, float]:
     """The checks a generator's sequences must pass: its driver's (resolution, max_mw_duty, max_segments, as its
-    card's on_connect set them), else the lab's defaults; the virtual one's max_mw_duty."""
+    card's on_connect set them), else the lab's defaults; a simulated one's max_mw_duty."""
     backend = getattr(inst, "backend", None)
     own = getattr(backend, "limits", None)
     out = dict(LIMITS)

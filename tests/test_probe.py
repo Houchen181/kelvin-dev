@@ -6,7 +6,8 @@ import threading
 
 import pytest
 
-from labharness import build_virtual_lab, probe
+from labharness import probe
+from simlab import build_virtual_lab
 
 
 class Server:

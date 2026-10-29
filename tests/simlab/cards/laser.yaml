@@ -4,7 +4,7 @@ model: Virtual CW Laser with Shutter
 vendor: Kelvin (simulated)
 kind: laser
 status: community
-twin: labharness.sim.twins:LaserTwin
+twin: simlab.twins:LaserTwin
 identify:
   idn: "^VIRTUAL,LASER"
   example: "VIRTUAL,LASER,SN0006,1.0"

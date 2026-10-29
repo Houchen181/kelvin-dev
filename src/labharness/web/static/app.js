@@ -2565,7 +2565,7 @@
   const providerName = (id) => PROVIDER_NAMES[id] || ((S.groups || []).find((g) => g.provider === id) || {}).label || id;
   function providerChoices(chosen) {   // the built-in kinds, every service set up, and any the rules still name
     const ids = Object.keys(PROVIDER_NAMES);
-    for (const g of S.groups || []) if (g.provider !== "demo" && !ids.includes(g.provider)) ids.push(g.provider);
+    for (const g of S.groups || []) if (!ids.includes(g.provider)) ids.push(g.provider);
     for (const p of chosen || []) if (!ids.includes(p)) ids.push(p);
     return ids.map((id) => [id, id === "local" ? "Local models" : providerName(id)]);
   }
@@ -2581,7 +2581,7 @@
     const p = SIDE.newProject && S.projects.find((x) => x.id === SIDE.newProject);
     return p ? p.rules || null : null;
   }
-  const modelAllowed = (key, rules) => !rules || !rules.providers || key.split(":")[0] === "demo" || rules.providers.includes(key.split(":")[0]);
+  const modelAllowed = (key, rules) => !rules || !rules.providers || rules.providers.includes(key.split(":")[0]);
   function applyRules() {   // grey out the models this chat may not use, and say why
     const rules = currentRules();
     const sel = $("model");
@@ -3609,7 +3609,7 @@
       title: inst.model + " · " + stateText + (head ? " · " + head.label + " " + head.value : "") },
       h("span", { class: "inst-icon" }, icon(ICONS[inst.kind] ? inst.kind : "instrument")),
       h("span", { class: "inst-id" }, inst.name),
-      h("span", { class: "inst-model" }, inst.model.replace(/^Virtual\s+/, "")),
+      h("span", { class: "inst-model" }, inst.model),
       h("span", { class: "inst-headline" }, hv, hu ? h("span", { class: "hu" }, hu) : null),
       count, chev);
     row.addEventListener("click", () => {
@@ -3677,7 +3677,7 @@
       b.setAttribute("aria-pressed", String(on));
     }
     $("lab-status").replaceChildren(...(shown.length ? shown.map(instrumentRow)
-      : [h("div", { class: "inst-empty" }, PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.")]));
+      : [h("div", { class: "inst-empty" }, !all.length ? "None yet." : PANEL.activeOnly && !q ? "Nothing is active." : "No instrument matches.")]));
   }
 
   // ------------------------------------------------------------------ chats Kelvin continues later (wake_me)
@@ -3753,12 +3753,11 @@
     if (s.lab_memory && s.lab_memory !== LABMEM.stamp) { LABMEM.stamp = s.lab_memory; loadLabMemory(); }
     notifySystem(s.notices);
     $("lab-name").textContent = s.lab;
-    $("sim-tag").hidden = !s.simulated;
     const problem = s.lab_info && s.lab_info.error;
     const missing = problem ? [] : (s.unavailable || []);
     $("lab-problem").hidden = !problem && !missing.length;
     if (problem || missing.length) {
-      const text = problem ? problem + " Kelvin is using the virtual lab meanwhile."
+      const text = problem ? problem
         : "Not connected: " + missing.map((m) => m.name + " (" + m.why + ")").join("; ") + " The rest of your lab is connected.";
       if ($("lab-problem").dataset.text !== text) {   // the install button keeps its state between polls
         $("lab-problem").dataset.text = text;
@@ -3881,7 +3880,7 @@
   function renderLabMemory(r) {
     LABMEM.stamp = r.stamp;
     const day = (iso) => { const d = new Date(iso); return isNaN(d) ? String(iso || "").slice(0, 10) : d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }); };
-    $("labmem-summary").textContent = r.notes.length ? r.notes.length + (r.notes.length === 1 ? " note" : " notes") + (r.virtual ? " · virtual lab" : "") : "";
+    $("labmem-summary").textContent = r.notes.length ? r.notes.length + (r.notes.length === 1 ? " note" : " notes") : "";
     $("labmem-list").replaceChildren(...(r.notes.length ? r.notes.map((n) => {
       const said = n.who + ", " + day(n.at) + (n.edited ? " · changed by " + n.edited_who + ", " + day(n.edited.at) : "");
       const before = (n.before || []).map((b) => b.text).join("\n");
@@ -3936,8 +3935,7 @@
   }
   function showLabState(info, name) {
     const mine = info && info.kind === "file";
-    for (const b of document.querySelectorAll("#lab-seg button")) b.classList.toggle("on", (b.dataset.use === "mine") === mine);
-    $("lab-now").textContent = "Kelvin now controls " + (name || "the lab") + (mine ? "" : " (simulated)") + ".";
+    $("lab-now").textContent = mine ? "Kelvin controls " + (name || "the lab") + "." : "No instruments yet.";
   }
   // ------------------------------------------------------------------ the user's own instrument cards
   const CARDS = { editing: null, version: false };   // version: the lab's version of one of Kelvin's cards
@@ -4252,9 +4250,9 @@
     else queueBadge(q);
   }
 
-  // ------------------------------------------------------------------ why Kelvin is on the virtual lab
-  function whyVirtual(s) {
-    if (!s.simulated) return null;
+  // ------------------------------------------------------------------ why the lab has no instruments yet
+  function whyEmpty(s) {
+    if ((s.instruments || []).length) return null;
     const setup = s.setup || {};
     if (s.lab_info && s.lab_info.error) return null;   // the lab-problem callout says why
     if (SETUP_BUSY.has(setup.state)) return null;        // "Setting up instruments…" shows instead
@@ -4264,9 +4262,9 @@
     return { text, lines };
   }
   function showWhy(s) {
-    const why = whyVirtual(s);
+    const why = whyEmpty(s);
     $("lab-why").hidden = !why;
-    document.querySelector(".lab-chip").title = why ? "On the virtual lab: " + why.text : "The lab this portal controls";
+    document.querySelector(".lab-chip").title = why ? "No instruments yet: " + why.text : "The lab this portal controls";
     if (!why) return;
     $("lab-why-text").textContent = why.text;
     $("lab-why-details").hidden = !why.lines.length;
@@ -4411,7 +4409,7 @@
     const msg = h("span", { class: "muted small" });
     box.append(h("p", { class: "hint" }, r.rows.length
       ? "What " + name + " may reach. Empty: the card's limits." +
-        (r.editable ? "" : " The virtual lab's limits are fixed; your own lab's are set here.")
+        (r.editable ? "" : " They are set in the lab config, which there isn't yet.")
       : name + " has no numeric setting to limit."), ...rows);
     if (r.editable && r.rows.length) {
       const reviewed = h("input", { type: "checkbox" });   // the person ticks it themselves
@@ -4831,7 +4829,7 @@
   async function connectLab(body) {
     const save = $("lab-save");
     save.disabled = true;
-    $("lab-msg").textContent = body.use === "virtual" ? "Switching to the virtual lab…" : "Connecting and checking every instrument…";
+    $("lab-msg").textContent = "Connecting and checking every instrument…";
     $("lab-health").hidden = true;
     try {
       const r = await api("/api/lab", { body });
@@ -5821,9 +5819,9 @@
 
   const SUGGESTIONS = [
     ["Check the lab", "What is on, and is anything away from safe?"],
-    ["Sweep the gate", "Sweep the gate from 0 to 5 V, record the lock-in signal, and tell me where it peaks."],
-    ["Measure Rabi oscillations", "Find the NV resonance with CW ODMR, then measure Rabi oscillations to get the π time."],
+    ["Set up my instruments", "Find the instruments connected to this computer and set them up."],
     ["Plan an experiment", "Plan how to measure the field dependence of the resistance at base temperature."],
+    ["Look at my data", "Plot my latest run and tell me what you see."],
   ];
 
   // ------------------------------------------------------------------ start
@@ -5861,8 +5859,7 @@
     S.chats = boot.chats;
     S.projects = boot.projects || [];
     $("lab-name").textContent = boot.lab;
-    $("sim-tag").hidden = !boot.simulated;
-    S.labSub = boot.lab + (boot.simulated ? " (simulated)" : "");
+    S.labSub = boot.lab;
     $("empty-sub").textContent = S.labSub;
     $("toggle-incognito").addEventListener("click", toggleIncognito);
     applyIncognito();
@@ -6057,13 +6054,6 @@
     $("lab-why-details").addEventListener("click", toggleWhyDetails);
     $("lab-why-setup").addEventListener("click", openLabSetup);
     document.querySelector(".lab-chip").addEventListener("click", () => toggleLab(true));
-    for (const b of document.querySelectorAll("#lab-seg button")) {
-      b.addEventListener("click", () => {
-        if (b.classList.contains("on")) return;
-        if (b.dataset.use === "mine" && !$("lab-yaml").value.trim()) { $("lab-msg").textContent = "Set up your instruments first: scan, or add one by address."; return; }
-        connectLab({ use: b.dataset.use });
-      });
-    }
     $("new-chat").addEventListener("click", () => newChat(null, true));
     $("folder-btn").addEventListener("click", (e) => { e.stopPropagation(); folderMenu(); });
     $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });

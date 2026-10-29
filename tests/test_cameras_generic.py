@@ -8,7 +8,7 @@ import pytest
 
 from labharness import EventLog, SafetyGate, ScriptedApprover, drivers
 from labharness.adapters import AdapterError
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 
 np = pytest.importorskip("numpy")
 

@@ -3,7 +3,8 @@ import json
 
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab, rundata
+from labharness import ScriptedApprover, rundata
+from simlab import build_virtual_lab
 
 LOOK = """plan: look
 repeat: 3
@@ -83,7 +84,7 @@ from test_web import Scripted, client_for  # noqa: E402,F401
 def parts(tmp_path):
     """As on a lab computer: Kelvin's own folder (settings, chats) apart from the folders people choose for chats,
     which may never be in it (folderfiles.off_limits)."""
-    from labharness import demo_envelope
+    from simlab import demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     from labharness.web.settings import Settings

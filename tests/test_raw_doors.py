@@ -3,7 +3,8 @@ into the oxide; 'CONF:FIELD:UNITS 0' switched a magnet to kG; 'conf:field:targ 5
 value, rate or interlock, one click from bypassing the interlock; *CAL? was not blocked)."""
 import pytest
 
-from labharness import EventLog, SafetyGate, ScriptedApprover, build_virtual_lab
+from labharness import EventLog, SafetyGate, ScriptedApprover
+from simlab import build_virtual_lab
 
 MAGNET_LAB = """
 lab: side doors

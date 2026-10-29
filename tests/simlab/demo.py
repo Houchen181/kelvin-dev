@@ -1,14 +1,12 @@
-"""A scripted stand-in for a model, so the portal can be tried without an API key.
-
-It is not AI: it matches a few keywords and calls the real lab tools.
-"""
+"""A scripted stand-in for a model, for the tests on the test lab (simlab): it is not AI, it matches a few keywords
+and calls the lab tools. Test-only: Kelvin itself has no demo model (2026-10-29)."""
 from __future__ import annotations
 
 import asyncio
 import re
 from typing import Any, Dict, List
 
-from .base import Emit, ModelInfo, Provider, TurnResult
+from labharness.web.providers.base import Emit, ModelInfo, Provider, TurnResult
 
 GATE_SWEEP = """plan: gate_sweep
 setup: { lockin.amplitude: 0.05, lockin.tc: 0.1, smu.output: on }

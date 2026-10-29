@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 
 import pytest
 
-from labharness import build_virtual_lab, demo_envelope
+from simlab import build_virtual_lab, demo_envelope
 from labharness.agent.approval import WebApprover
 from labharness.agent.runtime import LabRuntime
 from labharness.reports.chart import Chart, Series, layout, scale_of, tick_labels, ticks

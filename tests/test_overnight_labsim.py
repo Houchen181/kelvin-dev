@@ -47,7 +47,7 @@ def night(labsim_bench, tmp_path, monkeypatch):
     from labharness import monitor
     from labharness.agent.runtime import LabRuntime
     from labharness.gate import ScriptedApprover
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     for name, seconds in (("ERROR_CHECK_EVERY", 2.0), ("ALIVE_EVERY", 2.0), ("RESET_EVERY", 1.0),
                           ("GARBLE_CLEAR_S", 6.0)):
         monkeypatch.setattr(monitor, name, seconds, raising=False)

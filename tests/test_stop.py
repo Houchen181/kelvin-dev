@@ -6,7 +6,8 @@ import time
 
 import pytest
 
-from labharness import RunEngine, SafetyGate, ScriptedApprover, build_virtual_lab
+from labharness import RunEngine, SafetyGate, ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.clock import RealClock, SimClock, Stops
 
 
@@ -39,7 +40,7 @@ def test_a_stop_ends_a_run_waiting_between_its_points():
 
 def test_kelvins_wait_ends_at_a_stop(tmp_path):
     pytest.importorskip("mcp")
-    from labharness import demo_envelope
+    from simlab import demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     lab = build_virtual_lab(clock=RealClock(), seed=1)

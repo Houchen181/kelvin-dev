@@ -29,7 +29,7 @@ def test_auto_mode_asks_after_the_model_read_outside_text(make_gate, monkeypatch
 
 def test_tools_mark_outside_text(tmp_path):
     pytest.importorskip("mcp")
-    from labharness import build_virtual_lab
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import outside
     from labharness.gate import ScriptedApprover
@@ -46,7 +46,7 @@ def test_tools_mark_outside_text(tmp_path):
 def test_a_chat_that_reads_a_web_page_keeps_auto_mode_asking(tmp_path):
     pytest.importorskip("starlette")
     import asyncio
-    from labharness import build_virtual_lab
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import build_server
     from labharness.gate import ScriptedApprover
@@ -85,7 +85,7 @@ def test_a_chat_that_reads_a_web_page_keeps_auto_mode_asking(tmp_path):
 def test_auto_mode_goes_on_once_the_person_writes_again(tmp_path):
     pytest.importorskip("starlette")
     import asyncio
-    from labharness import build_virtual_lab
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import build_server
     from labharness.gate import ScriptedApprover
@@ -128,7 +128,8 @@ def test_auto_mode_goes_on_once_the_person_writes_again(tmp_path):
 
 def test_kelvins_own_notice_is_not_outside_text(tmp_path):
     pytest.importorskip("mcp")
-    from labharness import ScriptedApprover, build_virtual_lab
+    from labharness import ScriptedApprover
+    from simlab import build_virtual_lab
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import outside
     rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")

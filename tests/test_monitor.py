@@ -6,14 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from labharness import build_virtual_lab, builtin_registry, demo_envelope
+from labharness import builtin_registry
+from simlab import build_virtual_lab, demo_envelope
 from labharness.agent.approval import WebApprover
 from labharness.agent.runtime import LabRuntime
 from labharness.labconfig import ConfigError, load_lab_config
 from labharness.monitor import FAILS_BEFORE_ALARM, Monitor, Watch
 from labharness.notify import Notifier, webhook_request
 
-VIRTUAL_LAB = Path(__file__).resolve().parents[1] / "src" / "labharness" / "data" / "virtual_lab.yaml"
+VIRTUAL_LAB = Path(__file__).resolve().parent / "simlab" / "virtual_lab.yaml"
 
 
 def hold(lab, temperature, dt=0.0):

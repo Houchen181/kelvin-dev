@@ -7,7 +7,7 @@ import pytest
 from labharness import EventLog, SafetyGate, ScriptedApprover, builtin_registry, frames
 from labharness.adapters import AdapterError
 from labharness.drivers import MODULES
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 
 from test_more_instruments import FakePicamDLL, _out
 

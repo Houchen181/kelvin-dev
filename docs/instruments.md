@@ -9,10 +9,10 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
 **Kelvin sets up what it finds.** The first time the desktop app starts (and on every start until you have a lab of your own), Kelvin asks each connected instrument who it is. If any match a card, it connects them right away:
 - **Your lab's scripts help:** during that first setup, Kelvin asks whether your lab runs its instruments from scripts (Python, notebooks or MATLAB) and, if so, for their folder. It reads them and never runs them. If the answer comes before it writes your lab config, Kelvin names each instrument as your scripts do, takes the values they use as its limits (marked "from your scripts", for you to check), and adds an instrument the scan saw but that said nothing to who-are-you (as serial devices often don't) when your scripts surely say what it is, with their connection settings. An instrument that answered with a reply no card matches still gets its card written from its manual. If the answer comes later, **Set up…** opens on what the scripts add once the setup is done: instruments to add, and **Use these limits** for those already in your lab.
 - **Asking until you review the limits.** Kelvin writes `~/Kelvin/lab.yaml` with the instruments it found, each marked `added_by: kelvin`. Readings and measurement settings work at once. Their limits are the maker's maximums, so until you check them in **Set up…** and press **Limits reviewed**, Kelvin asks you before every output change on them (voltage, current, field, temperature, laser power), with a line saying why, and neither auto mode nor a project envelope covers them. **Limits reviewed** takes the marks out of the lab config; nothing is reconnected. Labs from older versions marked `observe_only: true` work the same way.
-- **Instruments you name.** Say "the Keithley 2450 on GPIB 18 is connected" or "use the lock-in I just plugged in" in a chat, and Kelvin sets it up itself: it scans, picks the matching card (or finds the maker's manual online and writes a draft card, then tries it), adds the instrument to your lab marked `added_by: kelvin`, connects just that one (the others stay connected as they are), and tells you. It asks you first only for an address the scan didn't find, or to move from the virtual lab you chose to your instruments. It stops and tells you what it needs when it can't go on by itself: a setting on the instrument (remote control, its address, a list of allowed computers), the maker's software or driver, or a manual that isn't public (choose its PDF).
+- **Instruments you name.** Say "the Keithley 2450 on GPIB 18 is connected" or "use the lock-in I just plugged in" in a chat, and Kelvin sets it up itself: it scans, picks the matching card (or finds the maker's manual online and writes a draft card, then tries it), adds the instrument to your lab marked `added_by: kelvin`, connects just that one (the others stay connected as they are), and tells you. An address the scan didn't find is added too: connecting reads it and drives nothing. It stops and tells you what it needs when it can't go on by itself: a setting on the instrument (remote control, its address, a list of allowed computers), the maker's software or driver, or a manual that isn't public (choose its PDF).
 - **Switched-off instruments.** An instrument you switched off in the Lab panel stays off. When Kelvin needs it, it asks you to switch it on and says why; it is switched on only if you say yes.
 - **Instruments that can't be connected.** One instrument that can't be connected (its maker's package missing, switched off at the wall, unplugged) no longer takes your whole lab to the virtual one: the Lab panel marks it **not connected** and says why, with an Install button when a package is missing, and the rest of your lab works. Kelvin sends it nothing, and plans that use it, and drives guarded by its readings, are refused. Once it is fixed, switch it on in the Lab panel, or Kelvin connects it (`reconnect_instrument`; an install connects the instruments it was for by itself).
-- **An instrument whose entry in `lab.yaml` has a problem** (a limit beyond what its card allows after the card changed, a rate, a guard, a connection setting) is **set aside** when Kelvin starts: it is in the lab, marked not connected with what is wrong, Kelvin sends it nothing (reconnecting doesn't help), and the rest of your lab works. Fix its entry in **Set up…** and **Save and connect**. A problem outside the instruments' own entries (interlocks, watches, an unknown card) still opens the virtual lab, saying why.
+- **An instrument whose entry in `lab.yaml` has a problem** (a limit beyond what its card allows after the card changed, a rate, a guard, a connection setting) is **set aside** when Kelvin starts: it is in the lab, marked not connected with what is wrong, Kelvin sends it nothing (reconnecting doesn't help), and the rest of your lab works. Fix its entry in **Set up…** and **Save and connect**. A problem outside the instruments' own entries (interlocks, watches, an unknown card) leaves the lab with no instruments, saying why, until it is fixed.
 - **Kelvin opens before your instruments connect.** Connecting can take minutes, so the app opens at once on your lab and connects its instruments in the background, one after another; you can sign in and use Kelvin meanwhile ([portal.md](portal.md#signing-in)). Until one is connected, the Lab panel shows it as connecting, and Kelvin says so when asked to use it. One that can't be connected is marked **not connected** with why, as above; Kelvin stays on your lab even when none connect.
 - **A folder for each instrument** in `~/Kelvin/instruments/<name>/`:
   - `instrument.json`: who it is (maker, model, serial number and firmware from its identity reply), its address, the connection settings it answered with (such as 57600 baud, 7 data bits, odd parity), and where its manual came from.
@@ -28,12 +28,13 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
 - **USB:** every device, through Kelvin's own libusb. An instrument is recognised by its USB test-and-measurement interface or its maker's ID. If no driver lets Kelvin open it, the scan names it and the driver to install.
 - **Serial ports and GPIB adapters.**
 
-**Why Kelvin is on the virtual lab.** While Kelvin is on the virtual lab, the Lab panel says why:
+**No instruments yet.** Until your instruments are set up, the Lab panel says **No instruments yet.** and why:
 - No instruments are connected to this computer (Kelvin has to run on the computer the instruments are plugged into).
 - An instrument answered, but Kelvin has no card for it yet.
 - A USB instrument needs a driver.
 - Looking at start-up is switched off.
-- You chose the virtual lab.
+
+Kelvin has no virtual lab of simulated instruments. A plan's rehearsal (`simulate_plan`, a dry run) runs on simulated copies of your own instruments, made from their cards.
 
 **What Kelvin looked through** lists each place it searched, and so do **Scan** in **Set up…** and Kelvin's `scan_instruments` tool. Every start-up scan is also written to `~/Kelvin/kelvin.log`.
 
@@ -58,7 +59,7 @@ Kelvin talks to instruments over VISA: GPIB, USB-TMC, LAN and RS-232 / USB-seria
 - **Only people:** Kelvin can't change limits. Only a person can, here or in the lab config.
 - **Where a limit comes from:** an instrument's limits are its card's range, narrowed where your lab's `limits:` or a mounted device's protection say so. When Kelvin refuses a value, it says which of these it hit, and it can read your lab config (`lab_config`) to show you what the file says, including where the file differs from what Kelvin uses until you press **Save and connect**.
 
-Kelvin opens on your lab from then on. You can switch back to the virtual lab at any time. If your lab can't be connected at start-up, Kelvin opens the virtual lab and says why. Kelvin only switches labs while it is idle, and approvals go back to asking. When it switches, the instruments the new lab has unchanged keep their connection, and the old lab's others are closed before the new lab opens its own, since a camera or a maker's SDK takes one connection at a time. The first time it finds your instruments, Kelvin switches to them only once it is idle: never in the middle of an answer.
+Kelvin opens on your lab from then on. An instrument that can't be connected at start-up stays in the lab, marked not connected with why (and an **Install** button when a maker's package is missing); a lab config Kelvin can't read leaves the lab with no instruments until you fix it in **Set up…**. Kelvin only switches labs while it is idle, and approvals go back to asking. When it switches, the instruments the new lab has unchanged keep their connection, and the old lab's others are closed before the new lab opens its own, since a camera or a maker's SDK takes one connection at a time. The first time it finds your instruments, Kelvin switches to them only once it is idle: never in the middle of an answer.
 
 From a terminal:
 
@@ -88,7 +89,7 @@ The scan only asks each instrument who it is (`*IDN?`, or the card's own identit
 | Photon counting | Swabian Time Tagger (Time Tagger 20, Ultra, X) |
 | Networked lasers | M Squared SolsTiS, Light Conversion PHAROS, TOPTICA DLC pro (draft) |
 
-Real hardware gets the same gate as the virtual lab, and a few protections of its own:
+Real hardware gets the safety gate, and a few protections of its own:
 - **Measuring never powers anything up.** On some source-meters a reading command switches the output on, so those readings are only taken while the output is already on (`read_when`).
 - **No speed-up on real time.** A lab with any real instrument runs on real time, so ramps keep their rates.
 - **Risky commands stay locked.** Commands that change what readings mean, or that bypass the instrument's own protection, are blocked in the card: sensor curves, coil constants, persistent-switch heaters, current limits, and DMM resistance modes that push current into a device.
@@ -162,7 +163,7 @@ What Kelvin does not send: the PHAROS's start, standby and preset actions, its p
 
 **Names that differ between installations.** A card can declare variables, such as a Mercury iTC's sensor UID or a lock-in's demodulator. Set them per instrument with `vars`. The draft lab config lists them with their defaults so you can check them, and values may only contain letters, digits and `. _ + -`, so nothing can be slipped into a command.
 
-A lab can mix real and simulated instruments, and override a card's connection settings per instrument:
+A lab can override a card's connection settings per instrument:
 
 ```yaml
 lab: Cryostat 2
@@ -237,11 +238,10 @@ steps:                             # in order; each starts where the one before 
 - **Channels** are `laser`, `mw`, `gate` and any other the generator's wiring names: the Pulse Streamer and PulseBlaster cards have `mw_x`, `mw_y` and `aux` outputs in their `vars` (`none`: not wired). Every channel named `mw` or `mw_...` counts as microwave for the duty-cycle limit. The gate's windows alternate signal and reference unless each says which it is. A sequence that uses a channel no output is wired to is refused: it would play without it.
 - **Checked twice:** as it is written (names, channels, loops, every expression) and at the times it will play (a negative wait, a pulse before its step, two pulses that overlap on one channel, the generator's resolution, the duty cycle, the PulseBlaster's 4096 instructions).
 - Kelvin writes one with `show_sequence` until its checks pass, then keeps it with `save_sequence`, in the lab's data folder (`sequences/`, which moves with the data folder). A sequence a generator is playing isn't replaced under it.
-- The virtual lab's generator plays written sequences too, but its NV centre only follows the six protocols' physics: a written sequence there checks the procedure and timing, not the spin's response.
 
 The usual order is CW ODMR to find the resonance at a low microwave power, then Rabi for the π time, then pulsed ODMR, Ramsey, echo or T1. Kelvin fits the Rabi oscillation and reports the π time.
 
-The virtual lab has an NV center, a pulse generator, a microwave source and a photon counter to try this on. A real setup names which output goes where, in the pulse generator's `vars`:
+A setup names which output goes where, in the pulse generator's `vars`:
 
 ```yaml
 lab: NV setup
@@ -436,7 +436,7 @@ More that a card can say:
   - Its commands may use only its own names (`{start}`), never set a parameter of the card (the output, the source level), and never change what the gate keeps to itself (the source's function, protection, units, calibration). The card is refused when it is read otherwise.
   - A technique that drives the sample (`drives: true`, the default; `false` for one that only listens, such as a scope's capture) is on the run's one card, with each level, rate and how long it takes, and that Kelvin can't ramp or watch guards inside it. A person approves it; auto mode never does. A queue's card shows each scan's techniques and covers them for the night.
   - A stop ends the wait at once, sends its `abort` commands, and takes the drives the plan touched back to safe. An error the instrument reports during it fails the point rather than keeping its buffer as if it were good.
-  - On the simulated lab (a dry run) a technique takes its time and records nothing.
+  - In a rehearsal (a dry run on the lab's simulated copies) a technique takes its time and records nothing.
 - **Waveforms from oscilloscopes:** `axis: { origin: xorig, step: xinc }` gives each point's time from the first point's time and the step between points, as scopes report them (`:WAV:XORigin?`, `:WAV:XINCrement?`). A trace whose reply starts with an IEEE 488.2 block header (`#800012345...`) is read as it comes. One sent as binary numbers (BYTE or WORD format) says `binary: uint8` or `binary: int16` (`int16 little` when the lowest byte comes first). `y: "(raw - yref) * yinc + yorig"` turns the digitizer's levels into volts with the instrument's own scale readings, as its manual gives the formula; it may use the card's readable parameters, numbers and functions such as `clip`.
 - **A maker's Python package without example scripts:** `library_api` lists its classes and functions with their arguments and documentation, read in Kelvin's helper process without calling anything, so a library card can be written from it.
 - **`acquires: true`:** the reading runs an acquisition, so Kelvin takes it only when asked or measured.

@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from labharness import build_virtual_lab
+from simlab import build_virtual_lab
 from labharness.accounts import Accounts, LabRoles, OwnerPin, RoleRefused
 from labharness.configversions import (OUTSIDE, ConfigVersions, card_changes, lab_changes, review_changes)
 from labharness.gate import ApprovalRequest
@@ -559,7 +559,7 @@ def test_on_labsim_a_trainees_gate_voltage_waits_for_an_operator(labsim_bench, t
     """The field tests' student, on instruments Kelvin takes for real (labsim's transport bench): the gate's 2400
     moves away from safe only once an operator confirms the trainee's yes, and the record says who confirmed it."""
     labsim_bench("transport")
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     (tmp_path / "lab.yaml").write_text(TRANSPORT, encoding="utf-8")
     lab = build_lab(tmp_path / "lab.yaml", partial=True)
     try:

@@ -4,7 +4,8 @@ import time
 
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.plans import PlanError
 from labharness.scanqueue import ScanQueue, load_step, parse_item
 

@@ -9,7 +9,8 @@ pytest.importorskip("httpx")
 
 from starlette.testclient import TestClient  # noqa: E402
 
-from labharness import build_virtual_lab, central, demo_envelope  # noqa: E402
+from labharness import central  # noqa: E402
+from simlab import build_virtual_lab, demo_envelope  # noqa: E402
 from labharness.accounts import Accounts  # noqa: E402
 from labharness.agent.approval import WebApprover  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402

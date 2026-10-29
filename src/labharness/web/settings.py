@@ -28,7 +28,7 @@ ENV = {
 SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key", "smtp_password", "heartbeat"}
 # secrets Kelvin keeps itself, never shown or set from the browser: the Kelvin hub's token (hubsync.py)
 SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
-EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
+EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "answer_words", "phone_relay", "ask_folder", "text_size", "card_language", "checklist",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
@@ -36,7 +36,7 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
                      "heartbeat_minutes", "approval_wait", "lab_scripts_python"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
-LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
+LAB = {"access_key", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
        "idle_off_all", "approval_wait", "lab_scripts_python"}
 
@@ -61,14 +61,13 @@ BRIDGE = {"claude-sonnet-5-5": "sonnet", "claude-opus-5-5": "opus", "claude-haik
 
 def default_model(keys: List[str], chosen: Optional[str] = "") -> Optional[str]:
     """The model a new chat starts with, of the keys the services offer now: the one chosen in Settings while it is
-    offered, else Claude Opus (DEFAULT_MODELS), else the first real model, else the scripted demo (None: none)."""
+    offered, else Claude Opus (DEFAULT_MODELS), else the first one (None: none)."""
     if chosen and chosen in keys:
         return chosen
     for key in DEFAULT_MODELS:
         if key in keys:
             return key
-    real = [k for k in keys if not k.startswith("demo:")]
-    return (real or list(keys) or [None])[0]
+    return (list(keys) or [None])[0]
 
 
 def resolve_model(key: str, available: Any) -> str:
@@ -323,8 +322,6 @@ class Settings:
             if name == "report_kinds":  # which reports Kelvin keeps up to date: scan, device, project (all by default)
                 kept = [k for k in ("scan", "device", "project") if k in value.split(",")]
                 value = "" if len(kept) == 3 else ",".join(kept) or "none"
-            if name == "lab":  # which lab to open: the user's lab.yaml ("mine") or the virtual lab
-                value = value if value in ("mine", "virtual") else ""
             if name == "webhook" and value and not value.startswith(("https://", "http://")):
                 raise ValueError("The notification webhook must be an http(s) URL.")
             if name == "heartbeat" and value and not value.startswith(("https://", "http://")):

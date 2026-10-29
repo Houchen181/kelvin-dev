@@ -670,7 +670,7 @@ def set_limits(text: str, name: str, limits: Dict[str, Optional[Sequence[float]]
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    from .virtual_lab import builtin_registry
+    from .homelab import builtin_registry
     ap = argparse.ArgumentParser(prog="kelvin-scan", description="Find connected instruments and match them to cards.")
     ap.add_argument("--write", metavar="LAB_YAML", help="also draft a lab config with what was found")
     ap.add_argument("--timeout", type=int, default=800, help="ms to wait for each identity reply")

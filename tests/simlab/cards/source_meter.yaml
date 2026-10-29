@@ -4,7 +4,7 @@ model: Virtual Source-Meter
 vendor: Kelvin (simulated)
 kind: source-meter
 status: community
-twin: labharness.sim.twins:SourceMeterTwin
+twin: simlab.twins:SourceMeterTwin
 identify:
   idn: "^VIRTUAL,SOURCE-METER"
   example: "VIRTUAL,SOURCE-METER,SN0001,1.0"

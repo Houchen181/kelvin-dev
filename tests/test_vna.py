@@ -16,7 +16,7 @@ import pytest
 from labharness import RunEngine, SafetyGate, ScriptedApprover
 from labharness.adapters import set_resource_manager
 from labharness.cards import BINARY_REPLY, CardError, parse_card, plot_points, thin, trace_numbers
-from labharness.virtual_lab import build_lab, lab_registry
+from labharness.homelab import build_lab, lab_registry
 from labharness.yamlio import load_yaml
 
 F0, KAPPA = 4.0e9, 2.0e6   # the stand-in's resonance: a dip at 4 GHz, 2 MHz wide
@@ -482,7 +482,7 @@ def test_the_run_view_and_live_view_carry_no_nan(tmp_path):
     pytest.importorskip("httpx")
     pytest.importorskip("mcp")
     from starlette.testclient import TestClient
-    from labharness import build_virtual_lab, demo_envelope
+    from simlab import build_virtual_lab, demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     from labharness.web.app import create_app

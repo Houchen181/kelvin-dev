@@ -7,7 +7,7 @@ import pytest
 
 from labharness import EventLog, SafetyGate, ScriptedApprover
 from labharness.adapters import set_resource_manager
-from labharness.virtual_lab import lab_registry, open_home_lab
+from labharness.homelab import lab_registry, open_home_lab
 from test_hardware import Bus, Device
 
 BENCH = """lab: Bench
@@ -34,7 +34,7 @@ def bench(tmp_path):
 
 
 def test_the_rest_of_the_lab_works_when_one_instrument_cant_connect(bench, tmp_path):
-    lab, envelope, info = open_home_lab(tmp_path, "auto", 0)
+    lab, envelope, info = open_home_lab(tmp_path)
     try:
         assert info["kind"] == "file" and info["error"] is None
         assert list(lab.unavailable) == ["lockin"] and "VI_ERROR_RSRC_NFOUND" in lab.unavailable["lockin"]
@@ -58,12 +58,13 @@ def test_the_rest_of_the_lab_works_when_one_instrument_cant_connect(bench, tmp_p
         lab.close()
 
 
-def test_a_lab_none_of_whose_instruments_connect_stays_on_the_virtual_lab(tmp_path):
+def test_a_lab_none_of_whose_instruments_connect_stays_the_persons_lab(tmp_path):
     set_resource_manager(Bus({}))
     try:
         (tmp_path / "lab.yaml").write_text(BENCH, encoding="utf-8")
-        lab, _, info = open_home_lab(tmp_path, "auto", 0)
-        assert info["kind"] == "virtual" and "none of its instruments could be connected" in info["error"]
+        lab, _, info = open_home_lab(tmp_path)
+        assert info["kind"] == "file" and not info["error"]               # each instrument says why it isn't there
+        assert set(lab.unavailable) == set(lab.instruments) and all(lab.unavailable.values())
         lab.close()
     finally:
         set_resource_manager(None)
@@ -72,7 +73,7 @@ def test_a_lab_none_of_whose_instruments_connect_stays_on_the_virtual_lab(tmp_pa
 def test_kelvin_reconnects_an_instrument_once_it_is_fixed(bench, tmp_path):
     pytest.importorskip("mcp")
     from labharness.agent.runtime import LabRuntime
-    lab, _, info = open_home_lab(tmp_path, "auto", 0)
+    lab, _, info = open_home_lab(tmp_path)
     rt = LabRuntime(lab, ScriptedApprover([]), tmp_path / "data")
     rt.lab_info = info
     try:
@@ -94,7 +95,7 @@ def test_kelvin_reconnects_an_instrument_once_it_is_fixed(bench, tmp_path):
 
 
 def test_a_person_may_switch_off_an_instrument_that_isnt_connected(bench, tmp_path):
-    lab, _, _ = open_home_lab(tmp_path, "auto", 0)
+    lab, _, _ = open_home_lab(tmp_path)
     try:
         lab.switch("lockin", False)
         assert lab.unavailable == {} and lab.switched_off == ["lockin"]
@@ -109,7 +110,7 @@ def test_an_install_connects_the_instruments_it_was_missing_for(bench, tmp_path,
     from labharness import envs
     from labharness.agent.runtime import LabRuntime
     from test_envs import FakeUv, PYPI
-    lab, _, _ = open_home_lab(tmp_path, "auto", 0)
+    lab, _, _ = open_home_lab(tmp_path)
     from labharness.instrument import Unavailable
     lab.instruments["lockin"].backend = Unavailable("lockin", "lockin: " + envs.missing("qick", "Pyro4"))
     rt = LabRuntime(lab, ScriptedApprover([True]), tmp_path / "data")

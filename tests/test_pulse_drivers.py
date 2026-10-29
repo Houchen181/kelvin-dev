@@ -7,7 +7,7 @@ import pytest
 from labharness import EventLog, SafetyGate, ScriptedApprover, pulses
 from labharness.adapters import AdapterError
 from labharness.drivers import MODULES, PLAYING, TimeTagger, discover_swabian
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 
 
 # ------------------------------------------------------------------ fake vendor libraries

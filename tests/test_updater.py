@@ -127,7 +127,7 @@ def test_the_portal_installs_only_when_nothing_runs(tmp_path):
     pytest.importorskip("starlette")
     pytest.importorskip("mcp")
     from starlette.testclient import TestClient
-    from labharness import build_virtual_lab, demo_envelope
+    from simlab import build_virtual_lab, demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     from labharness.web.app import create_app

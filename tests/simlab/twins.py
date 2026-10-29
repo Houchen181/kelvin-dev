@@ -1,4 +1,4 @@
-"""Twins with simple physics for the virtual lab's common instruments.
+"""Twins with simple physics for the test lab's common instruments (simlab: the tests' simulated lab).
 
 The physics is a toy: it is there so procedures (limits, order, timing,
 guards, data shape) can be exercised, not to predict a real sample.
@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 from typing import List
 
-from .twin import Twin
+from labharness.sim.twin import Twin
 
 
 class SourceMeterTwin(Twin):

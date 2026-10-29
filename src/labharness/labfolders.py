@@ -1,8 +1,8 @@
 """Which folder each lab keeps its data in (its runs, its record and its reports), when nobody chose one.
 
-The virtual lab (and a demo lab of simulated instruments) keeps ~/Kelvin/virtual-lab. Any other lab gets a folder of
-its own named after it, ~/Kelvin/labs/<its name>: real measurements never land under virtual-lab again (F2 l05, l08,
-l09: a real lab's data sat there, and people took them for simulated).
+Each lab gets a folder of its own named after it, ~/Kelvin/labs/<its name>. ~/Kelvin/virtual-lab is where an older
+Kelvin kept its virtual lab's data (Kelvin has no virtual lab since 2026-10-29) and, before that, some real labs'
+(F2 l05, l08, l09: people took them for simulated); its runs and reports are still found.
 
 Nothing is ever moved or renamed. A lab whose data are already somewhere keeps them there: a lab that has measured
 into virtual-lab before (an older Kelvin did that) goes on using it. The folder each lab uses is recorded
@@ -94,12 +94,10 @@ def _measured_there(folder: Path, lab_name: str) -> bool:
     return False
 
 
-def folder_for(home: Any, lab_name: str, simulated: bool, key: Optional[str] = None, record: bool = True) -> Path:
+def folder_for(home: Any, lab_name: str, key: Optional[str] = None, record: bool = True) -> Path:
     """The data folder of a lab, by the rules in the module's docstring. key: what the lab is known by across a
     rename (its config file); its name when there is none. record: note the choice (False only looks)."""
     home = Path(home)
-    if simulated:
-        return home / VIRTUAL
     key = str(key or "name:" + str(lab_name))
     with _lock:
         data = _read(home)
@@ -125,7 +123,8 @@ def folder_for(home: Any, lab_name: str, simulated: bool, key: Optional[str] = N
 
 
 def all_folders(home: Any) -> list:
-    """Every lab's data folder this Kelvin knows of (virtual-lab first): where earlier reports and runs are found."""
+    """Every lab's data folder this Kelvin knows of (the old virtual-lab first): where earlier reports and runs are
+    found."""
     home = Path(home)
     out = [home / VIRTUAL]
     for v in (_read(home).get("labs") or {}).values():

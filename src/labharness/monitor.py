@@ -8,8 +8,7 @@ check that each real instrument still answers): which instrument, on which bus, 
 doesn't answer on GPIB (address 7): cable or power?"). It clears when the instrument answers again. Replies that
 arrive garbled are one comms fault, latched: raised once, cleared only after its replies have been clean for a while.
 
-Durations are in lab time (the lab clock), so the virtual lab at 10x real time and tests on a simulated clock behave
-like the real lab.
+Durations are in lab time (the lab clock), so tests on a simulated clock behave like the real lab.
 """
 from __future__ import annotations
 

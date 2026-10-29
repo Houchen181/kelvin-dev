@@ -4,7 +4,7 @@ model: Virtual Linear Stage (delay line)
 vendor: Kelvin (simulated)
 kind: motion-stage
 status: community
-twin: labharness.sim.twins:MotionStageTwin
+twin: simlab.twins:MotionStageTwin
 identify:
   idn: "^VIRTUAL,STAGE"
   example: "VIRTUAL,STAGE,SN0007,1.0"

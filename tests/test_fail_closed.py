@@ -6,7 +6,7 @@ import math
 from labharness.conditions import parse_condition
 from labharness.labconfig import Interlock
 from labharness.monitor import Monitor, Watch
-from labharness.virtual_lab import builtin_registry
+from labharness.homelab import builtin_registry
 
 
 def open_sensor(lab):

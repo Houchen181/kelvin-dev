@@ -4,7 +4,7 @@ model: Virtual Temperature Controller
 vendor: Kelvin (simulated)
 kind: temperature-controller
 status: community
-twin: labharness.sim.twins:TemperatureControllerTwin
+twin: simlab.twins:TemperatureControllerTwin
 identify:
   idn: "^VIRTUAL,TEMPERATURE"
   example: "VIRTUAL,TEMPERATURE-CONTROLLER,SN0003,1.0"

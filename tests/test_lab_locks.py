@@ -9,7 +9,8 @@ import time
 
 import pytest
 
-from labharness import ScriptedApprover, build_virtual_lab
+from labharness import ScriptedApprover
+from simlab import build_virtual_lab
 from labharness.clock import ScaledClock
 from labharness.lablock import HELD, SLOW, LabLock
 from labsim_bench import labsim_bench  # noqa: F401  (the fixture)
@@ -338,7 +339,7 @@ def test_a_second_chat_reads_the_gauge_and_edits_the_queue_while_a_scan_runs(lab
     from test_web import DONE, Scripted, emitter
     from labharness.agent.runtime import LabRuntime
     from labharness.agent.server import build_server
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     from labharness.web import agent as agent_module
     from labharness.web.agent import ChatAgent
     from labharness.web.store import ChatStore

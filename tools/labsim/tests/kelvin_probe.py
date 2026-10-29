@@ -2,7 +2,7 @@
    LABSIM_HOME=... KELVIN_VISA_BACKEND=@labsim PYTHONPATH=<labsim>/shims;<labsim>;<kelvin src>;<pyvisa> python kelvin_probe.py lab.yaml"""
 import sys
 import time
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 
 t0 = time.time()
 lab = build_lab(sys.argv[1], partial=True)

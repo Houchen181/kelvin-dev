@@ -126,7 +126,7 @@ def test_a_stalled_move_away_from_safe_is_held_where_it_got_to(lab, tmp_path, mo
     """Its guards are watched only while Kelvin waits. When a wait away from safe gives up (no progress for 10 min, or
     its time is up), the set point is held at the reading, as a stop does: a magnet that frees itself later doesn't
     go on to 1 T unwatched."""
-    from labharness.sim.twins import MagnetSupplyTwin
+    from simlab.twins import MagnetSupplyTwin
     move = MagnetSupplyTwin.evolve   # it sticks at 0.3 T on the way up
     monkeypatch.setattr(MagnetSupplyTwin, "evolve",
                         lambda self, dt: None if self.state["B"] > self.state["B_actual"] >= 0.3 else move(self, dt))

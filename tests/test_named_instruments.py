@@ -13,7 +13,7 @@ from labharness.gate import SafetyGate, ScriptedApprover
 from labharness.instrument import Instrument
 from labharness.labconfig import InstrumentConfig
 from labharness.scpi import Template, is_query
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 from test_hardware import Bus, Device, Resource
 
 pytest.importorskip("pypdf")

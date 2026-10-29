@@ -28,7 +28,7 @@ def confocal(labsim_bench, tmp_path, monkeypatch):
     """The confocal bench with its makers' libraries, Andor's spectrograph DLL among them, and a Kelvin lab on it."""
     import ctypes
     from labharness import spectra
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     bench = labsim_bench("confocal", sdk=True)
     monkeypatch.setattr(ctypes, "WinDLL", ctypes.WinDLL)   # put back after the test
     monkeypatch.setattr(ctypes, "windll", ctypes.windll)

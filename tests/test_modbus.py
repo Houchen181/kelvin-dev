@@ -9,7 +9,7 @@ import pytest
 from labharness import EventLog, SafetyGate, ScriptedApprover, drivers
 from labharness.adapters import AdapterError
 from labharness.modbus import crc16, parse
-from labharness.virtual_lab import build_lab, lab_registry
+from labharness.homelab import build_lab, lab_registry
 
 COMPRESSOR = """card: 1
 id: acme/cp-1

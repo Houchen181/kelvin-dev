@@ -2,7 +2,7 @@
 import pytest
 
 from labharness import carddraft
-from labharness.virtual_lab import lab_registry
+from labharness.homelab import lab_registry
 
 pytest.importorskip("starlette")
 pytest.importorskip("mcp")
@@ -26,7 +26,6 @@ def test_rule_sets_only_get_stricter():
     assert merged == {"providers": ["local"], "literature": False}
     assert rules.merge(None, {"providers": None}) == {"providers": None, "literature": True}
     assert rules.allows(LOCAL_ONLY, "local:llama") and not rules.allows(LOCAL_ONLY, "anthropic:claude")
-    assert rules.allows(LOCAL_ONLY, "demo:demo")                      # the scripted demo never leaves the computer
     assert rules.describe(LOCAL_ONLY) == "only local models may see it; no literature search"
     assert rules.describe(None) == "any model" and not rules.restrictive(None) and rules.restrictive(LOCAL_ONLY)
 

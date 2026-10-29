@@ -4,7 +4,7 @@ model: Virtual Lock-in Amplifier
 vendor: Kelvin (simulated)
 kind: lock-in
 status: community
-twin: labharness.sim.twins:LockInTwin
+twin: simlab.twins:LockInTwin
 identify:
   idn: "^VIRTUAL,LOCK-IN"
   example: "VIRTUAL,LOCK-IN,SN0002,1.0"

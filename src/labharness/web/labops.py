@@ -36,8 +36,7 @@ def checklist(runtime: Any, settings: Any, home: Any) -> List[Dict[str, Any]]:
     item("lab", "Your lab is set up", mine,
          "Kelvin controls %s: %d instrument%s of your own." % (lab.config.name, len(real), "" if len(real) == 1
                                                                  else "s") if mine else
-         "Kelvin is on the virtual lab, whose instruments are simulated. Lab → Set up… finds your own instruments "
-         "and writes the lab config.", "lab")
+         "No instruments yet: Lab → Set up… finds yours and writes the lab config.", "lab")
 
     missing = sorted(n for n in lab.unavailable if n in real)
     drafts = sorted(n for n, i in real.items() if i.enabled and i.card.status == "draft")
@@ -74,12 +73,12 @@ def checklist(runtime: Any, settings: Any, home: Any) -> List[Dict[str, Any]]:
          "None yet: pair one in Settings → Phone, so a request or an alarm in the night reaches you.", "phone")
 
     data = Path(runtime.data_dir)
-    default = Path(home) / "virtual-lab"
-    chosen = data.resolve() != default.resolve()
+    old = Path(home) / "virtual-lab"   # an older Kelvin's virtual lab's folder, which the first account took over
+    chosen = data.resolve() != old.resolve()
     item("data", "Data folder", chosen,
          "Runs, the lab record and reports are saved in %s." % data if chosen else
-         "Runs are saved in %s, the virtual lab's folder. Choose your own (a lab server or a synced drive works) in "
-         "Settings → Data & reports." % data, "data")
+         "Runs are saved in %s, the old virtual lab's folder. Choose your own in Settings → Data & reports." % data,
+         "data")
     return out
 
 

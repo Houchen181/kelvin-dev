@@ -1,18 +1,19 @@
 """Kelvin sets up an instrument someone names, by itself: finds it, writes its card from the manual if it has none,
 adds it to the lab marked as added by Kelvin (every output change on it asks a person until they review its limits),
-and asks a person only where it isn't sure: an address the scan didn't find, leaving a virtual lab they chose,
-switching on an instrument they switched off."""
+and asks a person only where it isn't sure: switching on an instrument they switched off, a program to run (an
+address the scan didn't find, Kelvin approves itself: connecting reads it and drives nothing)."""
 import json
 
 import pytest
 
-from labharness import build_virtual_lab, builtin_registry
+from labharness import builtin_registry
+from simlab import build_virtual_lab
 from labharness.adapters import set_resource_manager
 from labharness.carddraft import save as save_card
 from labharness.discovery import add_to_config, instrument_block
 from labharness.gate import ScriptedApprover
 from labharness.labconfig import load_lab_config, same_setup
-from labharness.virtual_lab import build_lab, lab_registry
+from labharness.homelab import build_lab, empty_lab, lab_registry
 from test_hardware import Bus, Device
 
 SMU_ONLY = """lab: Bench
@@ -116,25 +117,12 @@ def test_kelvin_adds_a_named_instrument_and_asks_before_its_outputs(tmp_path, be
                                   lab_registry(tmp_path)).unreviewed()) == ["lockin", "lockin2"]
 
 
-def test_from_the_virtual_lab_kelvin_moves_to_the_persons_instruments(tmp_path, bench):
-    rt = runtime_on(tmp_path, build_virtual_lab(seed=1, registry=lab_registry(tmp_path)), "virtual")   # no lab yet
+def test_from_no_lab_yet_kelvin_adds_the_persons_first_instrument(tmp_path, bench):
+    rt = runtime_on(tmp_path, empty_lab(lab_registry(tmp_path)), "none")   # no lab yet: no instruments
     rt.scan()
-    assert rt.add_instrument("GPIB0::24::INSTR").startswith("added smu")
+    assert rt.add_instrument("GPIB0::24::INSTR").startswith("added smu")   # the scan found it: nobody is asked
     assert rt.lab_info["kind"] == "file" and list(rt.lab.instruments) == ["smu"]
     assert "added_by: kelvin" in (tmp_path / "lab.yaml").read_text(encoding="utf-8")
-
-    chose = tmp_path / "chose-virtual"
-    chose.mkdir()
-    (chose / "lab.yaml").write_text(LOCKIN_ONLY, encoding="utf-8")
-    rt = runtime_on(chose, build_virtual_lab(seed=1, registry=lab_registry(chose)), "virtual")
-    rt.scan()
-    rt.gate.approver = ScriptedApprover([False, True])
-    assert rt.add_instrument("GPIB0::24::INSTR").startswith("declined")
-    asked = str(rt.gate.approver.requests[0])
-    assert "on the virtual lab, as you chose" in asked and "(lockin, smu)" in asked
-    assert rt.lab_info["kind"] == "virtual" and (chose / "lab.yaml").read_text(encoding="utf-8") == LOCKIN_ONLY
-    assert rt.add_instrument("GPIB0::24::INSTR").startswith("added smu")
-    assert rt.lab_info["kind"] == "file" and sorted(rt.lab.instruments) == ["lockin", "smu"]
     assert rt.lab.config.unreviewed() == ["smu"]
 
 
@@ -201,7 +189,7 @@ def test_try_card_at_an_address_the_scan_did_not_find_reads_without_asking(tmp_p
 
 
 def test_kelvin_asks_to_switch_on_an_instrument_a_person_switched_off(tmp_path):
-    rt = runtime_on(tmp_path, build_virtual_lab(seed=1, switched_off=lambda name: ["lockin"]), "virtual")
+    rt = runtime_on(tmp_path, build_virtual_lab(seed=1, switched_off=lambda name: ["lockin"]), "file")
     changed = []
     rt.lab_changed = changed.append
     assert "ask_to_switch_on asks the person" in rt.lab_status()
@@ -263,7 +251,6 @@ def test_the_app_keeps_what_kelvin_changed(tmp_path):
     assert rt.ask_to_switch_on("lockin", "to read the signal").startswith("lockin is on again")
     assert settings.switched_off(rt.lab.config.name) == []                  # kept across restarts
     rt.lab_changed("added")
-    assert settings.get("lab") == "mine"
 
 
 def test_an_address_that_names_a_program_is_a_persons_to_add(tmp_path, bench):
@@ -320,7 +307,7 @@ def test_in_a_chat_kelvin_sets_up_an_instrument_it_has_no_card_for(tmp_path, ben
     assert "matches the card" in ends["try_card"]["content"]
     assert ends["add_instrument"]["content"].startswith("added smu2 (ACME Widget 9000 source, card acme/widget-9000, a draft)")
     assert rt.lab.instruments["smu2"].card.status == "draft" and rt.lab.config.unreviewed() == ["smu2"]
-    assert (tmp_path / "instruments" / "smu2" / "manual.pdf").exists() and settings.get("lab") == "mine"
+    assert (tmp_path / "instruments" / "smu2" / "manual.pdf").exists()
     assert not any(e["type"] == "approval" for e in events)
 
 

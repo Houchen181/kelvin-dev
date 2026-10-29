@@ -131,7 +131,7 @@ instruments:
 
 def test_a_kelvin_lab_on_a_labsim_bench(labsim_bench, tmp_path):
     """The fixture's example: a Kelvin lab built from a lab config, on simulated instruments it takes for real."""
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     bench = labsim_bench("transport")
     (tmp_path / "lab.yaml").write_text(LAB, encoding="utf-8")
     lab = build_lab(tmp_path / "lab.yaml", partial=True)
@@ -159,7 +159,7 @@ instruments:
 
 def test_a_kelvin_lab_on_a_bench_with_a_makers_library(labsim_bench, tmp_path):
     """sdk=True: Kelvin's qd/multivu card opens MultiPyVu, which is labsim's stand-in talking to the bench's PPMS."""
-    from labharness.virtual_lab import build_lab
+    from labharness.homelab import build_lab
     labsim_bench("ppms", sdk=True)
     (tmp_path / "lab.yaml").write_text(PPMS_LAB, encoding="utf-8")
     lab = build_lab(tmp_path / "lab.yaml", partial=True)

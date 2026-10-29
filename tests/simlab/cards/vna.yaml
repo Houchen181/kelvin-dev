@@ -4,7 +4,7 @@ model: Virtual Vector Network Analyzer
 vendor: Kelvin (simulated)
 kind: vna
 status: community
-twin: labharness.sim.twins:VNATwin
+twin: simlab.twins:VNATwin
 identify:
   idn: "^VIRTUAL,VNA"
   example: "VIRTUAL,VNA,SN0005,1.0"

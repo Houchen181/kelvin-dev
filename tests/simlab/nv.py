@@ -1,4 +1,4 @@
-"""A diamond with NV centres for the virtual lab: what a photon counter sees under each pulse protocol.
+"""A diamond with NV centres for the test lab: what a photon counter sees under each pulse protocol.
 
 The physics is a fair caricature of an NV ensemble, there to exercise the procedure (CW ODMR, then Rabi for the pi
 time, then pulsed ODMR, Ramsey, echo, T1) with realistic numbers:
@@ -12,8 +12,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Optional, Tuple
 
-from .. import pulses
-from .twin import Twin
+from labharness import pulses
+from labharness.sim.twin import Twin
 
 D, E, GAMMA = 2.870e9, 2e6, 28.0e9
 RABI_0DBM = 5e6

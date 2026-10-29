@@ -1,7 +1,6 @@
 """The Kelvin portal: a chat web app (like the Claude or ChatGPT website) wired to the lab.
 
-    python -m labharness.web            # virtual lab, opens http://127.0.0.1:8770
-    python -m labharness.web --demo     # adds a scripted model so it works without an API key
+    python -m labharness.web            # the lab set up in ~/Kelvin (lab.yaml), at http://127.0.0.1:8770
 """
 from __future__ import annotations
 
@@ -38,15 +37,13 @@ from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
 from ..cards import plot_points, trace_x
 from .. import autocard
 from .. import profiles
-from ..clock import ScaledClock, SimClock
 from ..collection import Collection
 from ..discovery import add_to_config, instrument_key, listed as config_lists, set_limits
 from ..labconfig import ConfigError, load_lab_config, same_setup
 from .. import carddraft
 from .. import protection
 from .. import rundata
-from ..virtual_lab import (build_lab, builtin_ids, builtin_registry, collection_ids, is_simulated, kelvin_ids,
-                           lab_registry, open_home_lab)
+from ..homelab import build_lab, builtin_ids, collection_ids, kelvin_ids, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import labops, review, rules as rulebook
 from .chatgpt import SignIn, SignInError
@@ -77,7 +74,7 @@ LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api
 COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
 
 
-def make_providers(settings: Settings, demo: bool = False, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
+def make_providers(settings: Settings, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
     from .providers.anthropic_provider import AnthropicProvider
     from .providers.gemini_provider import GeminiProvider
     from .providers.openai_provider import OpenAIProvider
@@ -107,9 +104,6 @@ def make_providers(settings: Settings, demo: bool = False, signin: Optional[Sign
         if cli:
             from .providers.claudecode_provider import ClaudeCodeProvider
             providers["claudecode"] = ClaudeCodeProvider([cli], claudecode.workdir(Path(settings.path).parent))
-    if demo:
-        from .providers.demo import DemoProvider
-        providers["demo"] = DemoProvider()
     return providers
 
 
@@ -250,7 +244,7 @@ def open_path(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
-def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, demo: bool = False,
+def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None,
                auto_setup: bool = False, accounts: Optional[Accounts] = None, updater: Any = None,
@@ -262,7 +256,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     reads the copy it has."""
     signin = SignIn(Path(settings.path).parent)   # Sign in with ChatGPT (chatgpt.json next to the settings)
     hub = HubLink(settings, store, lambda: runtime.data_dir)   # the Kelvin hub: the person's account across labs
-    agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, demo, signin), settings)
+    agent = ChatAgent(runtime, store, build_server(runtime), providers or make_providers(settings, signin), settings)
     runtime.project_info = agent.project_info            # reports: names, devices, notes, reading lists
     runtime.project_chat_runs = agent.project_chat_runs
     runtime.project_ids = lambda: [None] + [p["id"] for p in store.projects()]
@@ -292,7 +286,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return collection if settings.get("collection") != "off" else None
 
     runtime.collection = collection_on()
-    default_data = home / "virtual-lab"                   # runs, record and reports unless the user chose a folder
+    default_data = home / "lab"                           # runs, record and reports unless the user chose a folder
     loop_ref: Dict[str, Any] = {}
     session: Dict[str, Any] = {"user": None}              # who is signed in (with accounts); everyone is equal
     nobody = home / "lab"                                 # the record of what happens while nobody is signed in
@@ -303,8 +297,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return accounts.data_dir(session["user"]) if accounts is not None and session["user"] else default_data
 
     async def card_model() -> str:
-        """The model that writes cards: the default one (Settings' choice, else Claude Opus), never the demo."""
-        keys = [m["key"] for g in (await agent.models())["groups"] if g["provider"] != "demo" for m in g["models"]]
+        """The model that writes cards: the default one (Settings' choice, else Claude Opus)."""
+        keys = [m["key"] for g in (await agent.models())["groups"] for m in g["models"]]
         key = default_model(keys, agent.model_key(settings.get("default_model") or ""))
         if key:
             return key
@@ -372,10 +366,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         """Kelvin changed the lab itself: keep it in Settings; an instrument it added gets its folder, settings and
         manual."""
         settings.set_switched_off(runtime.lab.config.name, runtime.lab.switched_off)
-        if what == "added":
-            settings.update({"lab": "mine"})
-            if auto_setup:
-                setup.start("lab changed")
+        if what == "added" and auto_setup:
+            setup.start("lab changed")
 
     runtime.lab_changed = lab_changed
     runtime.switched_off_for = settings.switched_off
@@ -829,7 +821,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         store.use(accounts.chats_dir(account))
         signin.use(accounts.dir(account), cipher)
         if providers is None:
-            agent.providers = make_providers(settings, demo, signin)
+            agent.providers = make_providers(settings, signin)
         configure_notifications()
         configure_literature()
         session["user"] = account
@@ -846,7 +838,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         settings.use(None)
         signin.use(nobody)
         if providers is None:
-            agent.providers = make_providers(settings, demo, signin)
+            agent.providers = make_providers(settings, signin)
         try:
             runtime.use_user(None, nobody)
             configure_notifications()
@@ -1583,7 +1575,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     def rebuild_providers() -> None:
         if providers is None:
-            agent.providers = make_providers(settings, demo, signin)
+            agent.providers = make_providers(settings, signin)
 
     async def chatgpt_view(request: Request) -> Response:
         return JSONResponse(signin.status())
@@ -1698,7 +1690,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             except ValueError as e:
                 return error(400, str(e))
             if providers is None:
-                agent.providers = make_providers(settings, demo, signin)
+                agent.providers = make_providers(settings, signin)
         models = await agent.models()
         return JSONResponse(dict(defaults_of(models), services=settings.service_views(), presets=presets_view(),
                                  models=models))
@@ -1709,7 +1701,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except KeyError as e:
             return error(404, e.args[0])
         if providers is None:
-            agent.providers = make_providers(settings, demo, signin)
+            agent.providers = make_providers(settings, signin)
         models = await agent.models()
         return JSONResponse(dict(defaults_of(models), services=settings.service_views(), models=models))
 
@@ -2154,7 +2146,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         from .. import labmemory
         notes = labmemory.ordered(runtime.lab_notes(), runtime.lab.instruments)   # as the chats' brief has them
         return {"notes": [labmemory.view(n) for n in notes], "kinds": list(labmemory.KINDS),
-                "stamp": runtime.lab_memory_stamp(), "virtual": runtime.lab_info.get("kind") != "file", "said": said}
+                "stamp": runtime.lab_memory_stamp(), "said": said}
 
     async def lab_memory_view(request: Request) -> Response:
         """GET: the lab's memory for the Lab panel, every note with who wrote it and when (labmemory.py). POST {kind,
@@ -2201,12 +2193,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def lab_view(request: Request) -> Response:
         """GET: which lab Kelvin controls, the user's lab config and the instrument cards.
-        POST {yaml, why}: check, save and connect the user's lab. POST {use: "virtual" | "mine"}: switch."""
+        POST {yaml, why}: check, save and connect the user's lab. POST {use: "mine"}: connect lab.yaml again."""
         if request.method == "GET":
             await asyncio.to_thread(runtime.config_noticed)   # an edit made by hand is kept as its own change first
             cards = [{"id": c.id, "model": c.model, "kind": c.kind, "vendor": c.vendor, "status": c.status,
                       "identifies": bool(c.idn_pattern)}
-                     for c in sorted(runtime.lab.registry, key=lambda c: (c.kind, c.id)) if not c.id.startswith("virtual/")]
+                     for c in sorted(runtime.lab.registry, key=lambda c: (c.kind, c.id))]
             return JSONResponse({"name": runtime.lab.config.name, "info": runtime.lab_info, "cards": cards,
                                  "yaml": lab_file.read_text(encoding="utf-8") if lab_file.exists() else "",
                                  "unreviewed": runtime.lab.config.unreviewed(), "setup": setup.status,
@@ -2224,7 +2216,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if problem:
             return error(409, problem)
         use = body.get("use")
-        if use not in ("virtual", "mine"):   # a new lab config, or limits marked reviewed: the owner's, when set
+        if use != "mine":   # a new lab config, or limits marked reviewed: the owner's, when set
             refused = needs_owner(body)
             if refused:
                 return refused
@@ -2247,26 +2239,22 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                                          "health": [], "unreviewed": [], "versions": [v["n"] for v in made]})
             body, use, by = {"yaml": text}, None, "human (portal, reviewed)"
         try:
-            if use == "virtual":
-                lab, envelope, info = await asyncio.to_thread(open_home_lab, lab_file.parent, "virtual", 10,
-                                                              settings.switched_off, runtime.collection)
-            else:
-                text = str(body.get("yaml") or "") if use != "mine" else (
-                    lab_file.read_text(encoding="utf-8") if lab_file.exists() else "")
-                if not text.strip():
-                    return error(400, "There is no lab config yet; scan for instruments or write one first.")
-                registry = lab_registry(lab_file.parent, runtime.collection)   # Kelvin's, the collection's, the user's
-                load_lab_config(text, registry)   # check it before touching any instrument
-                # opened before connecting: the switch closes the old lab's instruments first and keeps the ones
-                # that are unchanged (runtime.switch_lab), as a camera or a maker's SDK takes one connection
-                lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off, True, True)
-                envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
-                if use != "mine":
-                    tmp = lab_file.with_suffix(".tmp")
-                    tmp.write_text(text, encoding="utf-8")
-                    tmp.replace(lab_file)
-                    made = await asyncio.to_thread(runtime.config_changed, by, why, "rollback" if rollback else
-                                                   "reviewed" if by.endswith("reviewed)") else "config", rollback)
+            text = str(body.get("yaml") or "") if use != "mine" else (
+                lab_file.read_text(encoding="utf-8") if lab_file.exists() else "")
+            if not text.strip():
+                return error(400, "There is no lab config yet; scan for instruments or write one first.")
+            registry = lab_registry(lab_file.parent, runtime.collection)   # Kelvin's, the collection's, the user's
+            load_lab_config(text, registry)   # check it before touching any instrument
+            # opened before connecting: the switch closes the old lab's instruments first and keeps the ones
+            # that are unchanged (runtime.switch_lab), as a camera or a maker's SDK takes one connection
+            lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off, True, True)
+            envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
+            if use != "mine":
+                tmp = lab_file.with_suffix(".tmp")
+                tmp.write_text(text, encoding="utf-8")
+                tmp.replace(lab_file)
+                made = await asyncio.to_thread(runtime.config_changed, by, why, "rollback" if rollback else
+                                               "reviewed" if by.endswith("reviewed)") else "config", rollback)
         except ConfigError as e:
             return error(400, "The lab config has problems: " + "; ".join(e.errors[:6]))
         except (AdapterError, OSError, ValueError) as e:
@@ -2278,8 +2266,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         except RuntimeError as e:
             lab.close()
             return error(409, str(e))
-        settings.update({"lab": "virtual" if use == "virtual" else "mine"})
-        if use != "virtual" and auto_setup:   # give new instruments their folders, settings and manuals
+        if auto_setup:   # give new instruments their folders, settings and manuals
             setup.start("lab changed")
         return JSONResponse({"ok": True, "name": lab.config.name, "info": runtime.lab_info, "health": health,
                              "unreviewed": lab.config.unreviewed(), "versions": [v["n"] for v in made]})
@@ -2596,7 +2583,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if request.method == "GET":
             return JSONResponse(limits_view(name))
         if runtime.lab_info.get("kind") != "file" or not lab_file.exists():
-            return error(409, "Limits are set for your own lab (My instruments); the virtual lab's are fixed.")
+            return error(409, "Limits are set in your lab config: there is none yet (Lab, Set up…).")
         body = await request.json()   # any time, a run or a chat going on too: the gate checks each change against them
         refused = needs_owner(body)
         if refused:
@@ -2919,7 +2906,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             configure_literature()
             if collection_on() is not None and not was_on and loop_ref.get("collection") is not None:
                 loop_ref["collection"].set()   # switched on: fetch it now
-            agent.providers = make_providers(settings, demo, signin) if providers is None else providers
+            agent.providers = make_providers(settings, signin) if providers is None else providers
             relay_wake()   # phones through the hub may have been switched on or off
         models = await agent.models()
         return JSONResponse(dict(defaults_of(models), settings=settings.public(), models=models))
@@ -3165,7 +3152,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             signin.use(nobody)
             runtime.use_user(None, nobody)
             if providers is None:
-                agent.providers = make_providers(settings, demo, signin)
+                agent.providers = make_providers(settings, signin)
     else:   # one person, as before accounts
         hub.use(home)
     def paired_with(token: str) -> Optional[str]:
@@ -3211,19 +3198,17 @@ def suggested_name() -> str:
 
 def lab_data_folder(home: Path, lab: Any, info: Optional[Dict[str, Any]] = None, key: Optional[str] = None,
                     record: bool = True) -> Path:
-    """The folder a lab keeps its data in when nobody chose one: virtual-lab for the virtual lab, else its own,
-    named after it (labfolders.py). info: the lab's open_home_lab info (its kind and config file)."""
+    """The folder a lab keeps its data in when nobody chose one: its own, named after it (labfolders.py). info:
+    the lab's open_home_lab info (its config file)."""
     from .. import labfolders
-    info = info or {}
-    virtual = info.get("kind") == "virtual" if info.get("kind") else all(i.simulated for i in lab.instruments.values())
-    where = info.get("path") or key
-    return labfolders.folder_for(home, lab.config.name, virtual, str(Path(where).resolve()) if where else None,
+    where = (info or {}).get("path") or key
+    return labfolders.folder_for(home, lab.config.name, str(Path(where).resolve()) if where else None,
                                  record=record)
 
 
 def data_folder_for(settings: Settings, home: Path, default: Optional[Path] = None) -> Any:
     """The data folder the user chose in Settings, if Kelvin can write there now; otherwise the default, and why."""
-    default = default or home / "virtual-lab"
+    default = default or home / "lab"
     chosen = settings.get("data_dir")
     if not chosen:
         return default, None
@@ -3244,14 +3229,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m labharness.web", description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--data-dir", help="runs, the lab record and reports (default: the folder chosen in Settings, "
-                                       "else ~/Kelvin/virtual-lab)")
+                                       "else the lab's own)")
     ap.add_argument("--settings", default=str(Path.home() / "Kelvin" / "settings.json"))
-    ap.add_argument("--speed", type=float, default=10,
-                    help="virtual lab time: N× real time (default 10, so runs can be watched); 0 = instant")
-    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--approval-timeout", type=float, default=300)
-    ap.add_argument("--demo", action="store_true", help="add a scripted model so the portal works without an API key")
-    ap.add_argument("--lab", help="lab config YAML using sim:// instruments (default: the built-in virtual lab)")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--no-setup", action="store_true", help="do not look for connected instruments on start")
     ap.add_argument("--no-accounts", action="store_true",
@@ -3260,34 +3240,27 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     settings = Settings(args.settings)
     home = Path(args.settings).parent
-    info = None
-    if args.lab:  # an explicit lab config: simulated ones run at --speed, real ones on real time
-        simulated = is_simulated(load_lab_config(args.lab, builtin_registry()))
-        lab = build_lab(args.lab, clock=(SimClock() if args.speed == 0 else ScaledClock(args.speed)) if simulated else None,
-                        seed=args.seed, switched_off=settings.switched_off)
-        envelope = None
-    else:   # the user's lab.yaml next to the settings, if they have one; otherwise the virtual lab
-        lab, envelope, info = open_home_lab(home, settings.get("lab") or "auto", args.speed, settings.switched_off,
-                                            Collection(home) if settings.get("collection") != "off" else None,
-                                            connect=False)   # connected once the portal is up
+    # the person's lab.yaml next to the settings; none yet: a lab with no instruments until Set up finds them
+    lab, envelope, info = open_home_lab(home, settings.switched_off,
+                                        Collection(home) if settings.get("collection") != "off" else None,
+                                        connect=False)   # connected once the portal is up
     accounts = None if (args.no_accounts or args.data_dir) else Accounts(home)   # people sign in (accounts.py)
     if accounts is not None:
         data_dir, problem = home / "lab", None   # until someone signs in
     else:   # a data folder chosen in Settings, else (or while it can't be written) the lab's own
         data_dir, problem = (Path(args.data_dir), None) if args.data_dir else data_folder_for(
-            settings, home, lab_data_folder(home, lab, info, args.lab))
+            settings, home, lab_data_folder(home, lab, info))
     runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), data_dir, envelope)
     runtime.data_problem = problem
     if accounts is None and not args.data_dir:
         runtime.lab_folder = lambda new, about: None if settings.get("data_dir") else lab_data_folder(home, new, about)
-    if info:
-        runtime.lab_info = info
+    runtime.lab_info = info
     if accounts is not None:
         store = ChatStore(home / "lab" / "chats", create=False)
     else:
-        store = ChatStore(Path(args.data_dir or home / "virtual-lab") / "chats")
+        store = ChatStore(Path(args.data_dir or home / "lab") / "chats")
     hosts = ("127.0.0.1:%d" % args.port, "localhost:%d" % args.port)
-    app = create_app(runtime, settings, store, demo=args.demo, hosts=hosts, auto_setup=not (args.no_setup or args.lab),
+    app = create_app(runtime, settings, store, hosts=hosts, auto_setup=not args.no_setup,
                      accounts=accounts, sync_collection=True)
     url = "http://127.0.0.1:%d/#%s" % (args.port, settings.access_key)
     print("Kelvin portal: %s" % url, file=sys.stderr, flush=True)

@@ -10,7 +10,7 @@ from labharness import EventLog, SafetyGate, ScriptedApprover, builtin_registry
 from labharness.adapters import AdapterError
 from labharness.cards import CardError, parse_card
 from labharness.library import Bridge, bridge_command
-from labharness.virtual_lab import build_lab, lab_registry
+from labharness.homelab import build_lab, lab_registry
 from labharness.yamlio import load_yaml
 
 VENDOR = '''

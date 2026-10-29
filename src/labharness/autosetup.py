@@ -148,7 +148,7 @@ class AutoSetup:
         return out
 
     def _done(self, message: str, **more: Any) -> Dict[str, Any]:
-        """Finish, saying why (the Lab panel shows it while Kelvin is on the virtual lab), and log it."""
+        """Finish, saying why (the Lab panel shows it while the lab has no instruments), and log it."""
         looked = self.runtime.last_survey if more.get("lines") is not None else None
         if looked:
             for line in looked.get("lines") or []:
@@ -169,7 +169,7 @@ class AutoSetup:
             user_lab = rt.lab_info.get("kind") == "file"
             if reason == "start" and self.settings.get("auto_setup") == "off":
                 return self._done("Looking for instruments when Kelvin starts is switched off in Settings")
-            if not user_lab and not self.lab_file.exists() and self.settings.get("lab") != "virtual":
+            if not user_lab and not self.lab_file.exists():
                 self.first = True
                 self._set("scanning", message="Looking for connected instruments (asking each who it is)")
                 log.info("Instrument scan (%s): looking for connected instruments", reason)
@@ -201,9 +201,7 @@ class AutoSetup:
                     return self.status
                 user_lab = True
             if not user_lab:
-                why = rt.lab_info.get("error") or ("You chose the virtual lab in Lab setup" if self.lab_file.exists()
-                                                    or self.settings.get("lab") == "virtual" else "")
-                return self._done(why or "Using the virtual lab")
+                return self._done(rt.lab_info.get("error") or "No instruments set up yet")
             names = sorted(n for n, i in rt.lab.instruments.items() if not i.simulated and i.enabled)
             self._set("reading", message="Reading the settings of %s" % ", ".join(names),
                       instruments=names, unreviewed=rt.lab.config.unreviewed())
@@ -261,7 +259,7 @@ class AutoSetup:
         if coll is None or not unknown:
             return []
         from .discovery import Found, match_card
-        from .virtual_lab import lab_registry
+        from .homelab import lab_registry
         self._set("drafting", message="Bringing Kelvin's instrument collection up to date first: its cards, and where "
                                       "the makers publish their manuals")
         try:
@@ -327,7 +325,7 @@ class AutoSetup:
 
     def _connect(self, matched: List[Dict[str, Any]]) -> bool:
         """Write the observed lab and connect to it. False (and a status saying why) if that is not possible now."""
-        from .virtual_lab import build_lab, lab_registry
+        from .homelab import build_lab, lab_registry
         rt = self.runtime
         registry = lab_registry(self.home, rt.collection)
         text = draft_found(matched, registry)
@@ -340,7 +338,6 @@ class AutoSetup:
         changed = getattr(rt, "config_changed", None)   # kept in the lab's config history (configversions.py)
         if changed is not None:
             changed("Kelvin (setup)", "set up the instruments it found: %s" % names, "setup")
-        self.settings.update({"lab": "mine"})
         if not self.can_switch():   # Kelvin is answering: the switch waits for the answer to end (switch_lab idle)
             self._set("connecting", message="Found %s; Kelvin switches to them when it is next idle" % names,
                       found=len(matched))
@@ -351,7 +348,7 @@ class AutoSetup:
                       % (names, profiles._first_line(e)))
             return False
         info = {"kind": "file", "path": str(self.lab_file), "error": None, "has_file": True, "auto": True}
-        try:   # never under an answer in progress: it once ran a whole turn on the virtual lab meanwhile
+        try:   # never under an answer in progress: it once ran a whole turn on the lab it left meanwhile
             rt.switch_lab(lab, None, info, "Kelvin auto-setup", idle=self.can_switch)
         except RuntimeError as e:
             lab.close()

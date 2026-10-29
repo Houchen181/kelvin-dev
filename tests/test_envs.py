@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from labharness import build_virtual_lab, builtin_registry, envs
+from labharness import builtin_registry, envs
+from simlab import build_virtual_lab
 from labharness.adapters import AdapterError
 from labharness.cards import CardError, parse_card
 from labharness.gate import ScriptedApprover
@@ -268,12 +269,13 @@ def test_a_lab_that_cant_connect_for_a_missing_package_offers_the_install(tmp_pa
     import importlib.util
     if importlib.util.find_spec("qick") is not None:
         pytest.skip("qick is installed here, so the board would be reached")
-    from labharness.virtual_lab import open_home_lab
+    from labharness.homelab import open_home_lab
     (tmp_path / "lab.yaml").write_text(QICK_LAB, encoding="utf-8")
-    lab, _, info = open_home_lab(tmp_path, "auto", 0)
+    lab, _, info = open_home_lab(tmp_path)
     try:
-        assert info["kind"] == "virtual" and "could not be connected" in info["error"]
-        assert info["install"] == {"env": "drivers", "packages": ["qick", "Pyro4"]}
+        assert info["kind"] == "file" and len(lab.unavailable) == 1      # the lab stays; the board says why
+        why = next(iter(lab.unavailable.values()))
+        assert envs.needed(why) == {"env": "drivers", "packages": ["qick", "Pyro4"]}   # the Lab panel's Install
     finally:
         lab.close()
 

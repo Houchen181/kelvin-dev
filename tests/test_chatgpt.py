@@ -261,7 +261,7 @@ def test_chatgpt_falls_back_to_plain_tools_and_reports_limits(tmp_path):
 
 def test_chatgpt_in_the_portal(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
-    from labharness import build_virtual_lab, demo_envelope
+    from simlab import build_virtual_lab, demo_envelope
     from labharness.agent.approval import WebApprover
     from labharness.agent.runtime import LabRuntime
     import labharness.web.app as web_app
@@ -276,7 +276,7 @@ def test_chatgpt_in_the_portal(tmp_path, monkeypatch):
     lab = build_virtual_lab(seed=1)
     runtime = LabRuntime(lab, WebApprover(timeout=5), tmp_path / "data", demo_envelope(lab))
     settings = Settings(tmp_path / "settings.json")
-    guard = web_app.create_app(runtime, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"], demo=True)
+    guard = web_app.create_app(runtime, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"])
     auth = OpenAIAuth()
     guard.app.state.signin.http = auth
     headers = {"X-Kelvin-Token": settings.access_key}

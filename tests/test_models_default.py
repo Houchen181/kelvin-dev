@@ -11,7 +11,7 @@ pytest.importorskip("httpx")
 
 from starlette.testclient import TestClient  # noqa: E402
 
-from labharness import build_virtual_lab, demo_envelope  # noqa: E402
+from simlab import build_virtual_lab, demo_envelope  # noqa: E402
 from labharness.agent.approval import WebApprover  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.web.app import create_app  # noqa: E402
@@ -76,8 +76,7 @@ def test_opus_is_the_default_wherever_it_is_listed():
     bridge = ["claudecode:sonnet", "claudecode:haiku", "claudecode:opus"]
     assert default_model(bridge) == "claudecode:opus"
     assert default_model(["anthropic:claude-opus-5-5"] + bridge) == "anthropic:claude-opus-5-5"
-    assert default_model(["demo:demo", "openai:gpt-5"]) == "openai:gpt-5"   # a real model before the scripted one
-    assert default_model(["demo:demo"]) == "demo:demo" and default_model([]) is None
+    assert default_model(["openai:gpt-5"]) == "openai:gpt-5" and default_model([]) is None
 
 
 def test_the_portal_starts_new_chats_on_opus_and_settings_can_change_it(parts):

@@ -8,7 +8,7 @@ from labharness import builtin_registry, carddraft
 from labharness.adapters import AdapterError, set_resource_manager
 from labharness.cards import parse_card
 from labharness.cardtry import summary, try_card
-from labharness.virtual_lab import build_lab
+from labharness.homelab import build_lab
 from labharness.yamlio import load_yaml
 from test_hardware import Bus, Device
 
