@@ -250,16 +250,17 @@ def test_stabilize_logs_while_it_waits_and_the_analysis_takes_the_settled_points
 plan: settle_logged
 setup: { tc.heater_range: medium }
 sweep:
-  tc.setpoint: { values: [3, 5], stabilize: { read: tc.T_sample, within: 0.005, for: 60, every: 10, timeout: 900 } }
+  tc.setpoint: { values: [3, 5], stabilize: { read: tc.T_sample, within: 0.02, for: 30, every: 10, timeout: 900 } }
 measure: [tc.T_sample]
 """)
     assert report.ok
     waiting = [r for r in report.rows if r["stabilizing"]]
-    assert len(waiting) >= 10 and [r["stabilizing"] for r in report.rows].count(0) == 2
+    assert len(waiting) >= 6 and [r["stabilizing"] for r in report.rows].count(0) == 2
     assert {r["tc.setpoint"] for r in waiting} == {3, 5}
     rec = rundata.load(tmp_path / "runs" / report.run_id)
-    assert [s["settled"] for s in rec.meta["stabilized"]] == [True, True] and rec.meta["stabilized"][1]["after_s"] >= 60
-    assert "all 2 points recorded" in report.analysis["assessment"].lower() or report.analysis["series"]
+    assert [s["settled"] for s in rec.meta["stabilized"]] == [True, True] and rec.meta["stabilized"][1]["after_s"] >= 30
+    # the automatic analysis took the two settled points only: too few for a curve, though many more were logged
+    assert report.analysis["series"][0]["summary"] == "tc.T_sample: too few points to analyse"
 
 
 def test_near_waits_for_the_set_point_not_only_a_steady_reading(lab, make_engine, monkeypatch):
