@@ -13,7 +13,11 @@ ends; Kelvin's VISA resource manager, pyserial and the import path are put back 
 (Kelvin's [hardware] extras); without it the test is skipped.
 
 labsim_offline(bench) gives a bench's world and instruments in this process instead, with no server: time passes
-only when advance() says so, which suits an instrument's own physics."""
+only when advance() says so, which suits an instrument's own physics.
+
+labsim_lab(bench, lab_yaml) puts a Kelvin lab on such an offline bench: Kelvin's VISA and the makers' libraries reach
+it in this process, and the lab's clock is the bench's own (BenchClock), so bench time passes only while Kelvin waits.
+A 30-minute cool-down then takes seconds, with Kelvin's adapters, cards and gate as on the real thing."""
 from __future__ import annotations
 
 import json
@@ -185,3 +189,114 @@ def advance(bench: Any, seconds: float, dt: float = 0.05) -> None:
         for inst in bench.instruments.values():
             if inst.powered:
                 inst.tick(dt, now)
+
+
+def ctl(bench: Any, cmd: str, *args: Any) -> Dict[str, Any]:
+    """A control command (fault, power, set ...) on a running bench (Bench.ctl) or an offline one."""
+    if isinstance(bench, Bench):
+        return bench.ctl(cmd, *args)
+    r = bench.dispatch({"op": "ctl", "cmd": cmd, "args": [str(a) for a in args]}, set())
+    if "err" in r:
+        raise RuntimeError(r.get("msg") or r["err"])
+    return r
+
+
+class BenchClock:
+    """A Kelvin lab's clock that is an offline bench's: now() is bench time, and sleep() lets the bench's world and
+    instruments move on by that much (in steps of dt, the last one shorter), as the server's ticker would. at(s, fn)
+    does fn once s more seconds of bench time have passed: a fault in the middle of something Kelvin waits on."""
+    simulated = False   # Kelvin treats the instruments as real ones; only the time is the bench's
+
+    def __init__(self, bench: Any, dt: float = 0.25) -> None:
+        self.bench, self.dt, self.t = bench, dt, 0.0
+        self._due: List[Any] = []
+
+    def now(self) -> float:
+        return self.t
+
+    def at(self, seconds: float, fn: Any) -> None:
+        self._due.append((self.t + seconds, fn))
+
+    def sleep(self, seconds: float) -> None:
+        while seconds > 1e-9:
+            d = min(self.dt, seconds)
+            with self.bench.cond:
+                self.bench.world.step(d)
+                now = time.monotonic()
+                for inst in self.bench.instruments.values():
+                    if inst.powered:
+                        inst.tick(d, now)
+            seconds -= d
+            self.t += d
+            for due in [x for x in self._due if x[0] <= self.t + 1e-9]:
+                self._due.remove(due)
+                due[1]()
+
+
+class _InProcess:
+    """labsim's link to its server, for a server in this process (an offline bench): each request is handled at once."""
+    bench: Any = None
+
+    def __init__(self, folder: Any = None) -> None:
+        self.mine: set = set()
+
+    def call(self, op: str, **kw: Any) -> Dict[str, Any]:
+        kw["op"] = op
+        return type(self).bench.dispatch(kw, self.mine)
+
+    def must(self, op: str, **kw: Any) -> Dict[str, Any]:
+        from labsim.link import LabsimError
+        r = self.call(op, **kw)
+        if "err" in r:
+            raise LabsimError(r["err"], r.get("msg") or r["err"])
+        return r
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture
+def labsim_lab(labsim_offline, tmp_path: Path, monkeypatch: Any):
+    """labsim_lab(bench, lab_yaml) -> (lab, offline bench): a Kelvin lab built from lab_yaml (its text) on the bench,
+    in this process. Kelvin's VISA (@labsim) and the makers' libraries (labsim's stand-ins) reach the bench through an
+    in-process link, and the lab's clock is the bench's (BenchClock): bench time passes only while Kelvin waits. The
+    bench's instruments are named as in its bench file; ctl(bench, ...) makes faults. Put back after the test."""
+    pytest.importorskip("pyvisa")
+    from labharness import adapters
+    from labharness.virtual_lab import build_lab
+    monkeypatch.syspath_prepend(str(SHIMS))
+    before = getattr(adapters, "_rm", None)
+    built: List[Any] = []
+
+    def make(bench_name: str, lab_yaml: str) -> Any:
+        bench = labsim_offline(bench_name)
+        import labsim.link
+        import labsim.sdkclient
+        import pyvisa_labsim.highlevel
+        link = type("Link", (_InProcess,), {"bench": bench})
+        monkeypatch.setattr(pyvisa_labsim.highlevel, "Link", link)
+        monkeypatch.setattr(labsim.link, "Link", link)
+        monkeypatch.setattr(labsim.sdkclient, "shared", lambda: link())
+        monkeypatch.setenv("KELVIN_VISA_BACKEND", "@labsim")
+        monkeypatch.setenv("LABSIM_HOME", str(tmp_path / "labsim-offline"))
+        adapters.set_resource_manager(None)   # one made afresh, on this bench
+        path = tmp_path / "lab.yaml"
+        path.write_text(lab_yaml, encoding="utf-8")
+        lab = build_lab(path, partial=True)
+        lab.clock = BenchClock(bench)
+        built.append(lab)
+        return lab, bench
+
+    yield make
+    for lab in built:
+        lab.close()
+    rm = getattr(adapters, "_rm", None)
+    if rm is not None and rm is not before:
+        try:
+            rm.close()
+        except Exception:
+            pass
+    adapters.set_resource_manager(before)
+    for name, module in list(sys.modules.items()):   # the stand-ins go, so later tests see this computer's own
+        if str(getattr(module, "__file__", None) or "").startswith(str(SHIMS)):
+            del sys.modules[name]

@@ -202,6 +202,7 @@ def _unreachable(spec: ParamSpec) -> bool:
 
 OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
 ARRIVED_SETTLE = 5.0   # lab seconds a reading may take to settle once its stage's status says the move is over
+WAIT_STALL_S = 600.0   # a wait for a set point ends once its reading has not got closer for this long (lab seconds)
 
 
 class SafetyGate:
@@ -1042,17 +1043,25 @@ class SafetyGate:
         wait, toward safe too (a PPMS cooling down held a stopped run for ten minutes): away from safe the set point is
         held where the reading is; toward safe it goes on there by itself, and only the waiting ends. arrived: its
         status already says the move is over, so the reading only settles: a stage that stopped short isn't waited for
-        until the move's whole timeout."""
+        until the move's whole timeout. A reading that stops getting closer for WAIT_STALL_S ends the wait too (a PPMS
+        that stalled on its way held a run, its current source on, for hours): monitor.Approach tells."""
+        from .monitor import Approach, rate_per_s
         clock = self.lab.clock
         key = "%s.%s" % (inst.name, spec.name)
         eta = self._eta(inst, spec, current, target)
         timeout = ARRIVED_SETTLE if arrived else 1.5 * eta + 60 if eta else spec.timeout
         poll = max(0.1, min(5.0, (eta or 10.0) / 50))
         t0 = clock.now()
+        way = None if arrived else Approach(target, spec.tol, t0, rate_per_s(inst, spec), WAIT_STALL_S)
         while True:
             val = inst.read(spec.readback)
             if abs(val - target) <= spec.tol:
                 return None
+            if way is not None and way.update(val, clock.now()) >= WAIT_STALL_S:
+                return Result(False, "timeout", key, value=val, message=(
+                    "%s: %s has not got closer to %s for %s (it reads %s): the instrument may be stuck, so Kelvin "
+                    "stopped waiting" % (key, spec.readback, spec.show(target), _dur(clock.now() - way.since),
+                                         spec.show(val))))
             if watch:
                 trip = self._guard_trip(inst, spec)
                 if trip:
