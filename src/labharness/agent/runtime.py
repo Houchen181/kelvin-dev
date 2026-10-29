@@ -1765,7 +1765,10 @@ class LabRuntime:
                     break
                 q.mark(item, "running")
                 position = q.items.index(item) + 1
+            lost = self.monitor.mark()
             ok, message = self._queue_item(item, position, grants, by)
+            if not ok:   # an instrument that stopped answering ended it: its alarm goes up now, with the pause
+                self.monitor.lost_since(lost)
             with q.lock:   # a person's stop of the scan is never an error to go on after
                 if not ok and q.state == "running" and (q.on_error == "pause" or item.status == "stopped"):
                     q.state, q.reason = "pausing", "%s: %s" % (item.name, message)

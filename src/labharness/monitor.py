@@ -3,6 +3,10 @@ errors. A watch only reads. When it trips it raises an alarm once (and clears it
 people (see notify.py), and, for watches written in the lab config, can stop the running plan and send named drives to
 their safe values - the only kind of change it may make.
 
+An instrument that stops answering raises one alarm in plain words, whoever met it (a watch, a run, the monitor's own
+check that each real instrument still answers): which instrument, on which bus, what to check ("nvm (Keithley 2182A)
+doesn't answer on GPIB (address 7): cable or power?"). It clears when the instrument answers again.
+
 Durations are in lab time (the lab clock), so the virtual lab at 10x real time and tests on a simulated clock behave
 like the real lab.
 """
@@ -14,12 +18,20 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .instrument import SensorError
+from .instrument import InstrumentLost, SensorError
 
-FAILS_BEFORE_ALARM = 3       # consecutive failed reads before "not answering"
+FAILS_BEFORE_ALARM = 3       # failed exchanges in a row before "doesn't answer" (one that can't reach it at all: one)
 ERROR_CHECK_EVERY = 60.0     # lab seconds between error-queue checks on real instruments
-INTERLOCK_EVERY = 5.0        # lab seconds between checks of the interlocks whose drive is away from safe
+ALIVE_EVERY = 20.0           # lab seconds between checks that each real instrument answers, while a run or queue goes
+RESET_EVERY = 5.0            # lab seconds between checks that the outputs the running plan switched on are still on
+INTERLOCK_EVERY = 5.0       # lab seconds between checks of the interlocks whose drive is away from safe
 _ids = itertools.count(1)
+
+
+def _since(t: float) -> str:
+    """How long ago a wall time was, in words: "40 s", "3 min", "2.5 h"."""
+    s = max(0.0, time.time() - t)
+    return "%.0f s" % s if s < 90 else "%.0f min" % (s / 60) if s < 5400 else "%.1f h" % (s / 3600)
 
 
 @dataclass
@@ -82,9 +94,14 @@ class Monitor:
         self.watches: Dict[str, Watch] = {}
         self.alarms: List[Alarm] = []        # newest first, active and cleared
         self._fails: Dict[str, int] = {}
-        self._silent: Dict[str, Alarm] = {}
+        self._unreadable: Dict[str, Alarm] = {}   # a watch's reading that fails though its instrument answers
+        self._silent: Dict[str, Alarm] = {}       # instruments that don't answer (from their health)
+        self._reset: Dict[str, Alarm] = {}        # outputs found off under a running plan (a power cut resets them)
         self._errors: Dict[str, Alarm] = {}
         self._last_error_check: Dict[str, float] = {}
+        self._last_alive_check: Dict[str, float] = {}
+        self._last_reset_check: Dict[str, float] = {}
+        self._suspect: Dict[str, float] = {}      # output switches read off under a running plan once: since when
         self._last_interlock_check = -1e18
         self._broken: Dict[int, Alarm] = {}   # interlocks found broken (by their place in the lab config)
         self._lock = threading.RLock()
@@ -197,6 +214,8 @@ class Monitor:
                 self._raise_reading(w, value)
         self._check_interlocks(now)
         self._check_errors(now)
+        self._check_alive(now)
+        self._check_health()
 
     # ------------------------------------------------------------------ alarms
 
@@ -278,22 +297,154 @@ class Monitor:
                 self.notify("alarm_cleared", "Cleared: " + text, "")
 
     def _failed(self, instr: str, e: Exception) -> None:
+        """A watch's reading failed. One its instrument didn't answer is that instrument's health, which
+        _check_health says once for everyone who met it; any other failure (a reply its card can't read) alarms after
+        a few tries as a reading that can't be had."""
+        if isinstance(e, InstrumentLost):
+            return
         self._fails[instr] = self._fails.get(instr, 0) + 1
-        if self._fails[instr] >= FAILS_BEFORE_ALARM and instr not in self._silent:
-            text = "%s is not answering (%s)" % (instr, str(e).splitlines()[0][:100] if str(e) else type(e).__name__)
+        if self._fails[instr] >= FAILS_BEFORE_ALARM and instr not in self._unreadable:
+            text = "%s can't be read (%s)" % (instr, str(e).splitlines()[0][:160] if str(e) else type(e).__name__)
             a = self._new("silent", instr, text)
-            self._silent[instr] = a
+            self._unreadable[instr] = a
             self.gate.log.write("alarm", by="monitor", text=text)
-            self.notify("alarm", "Alarm: " + text, "Check its cable and power; plans that use it will refuse to start.")
+            self.notify("alarm", "Alarm: " + text, "It answers, but not with a reading its card can read: check the "
+                                                   "card (Lab → Cards…) and the instrument's settings.")
 
     def _answered(self, instr: str) -> None:
         self._fails[instr] = 0
-        a = self._silent.pop(instr, None)
+        a = self._unreadable.pop(instr, None)
         if a is not None:
-            self._clear(a.id, "%s answers again" % instr)
+            self._clear(a.id, "%s can be read again" % instr)
+
+    # ------------------------------------------------------------------ instruments that stop answering
+
+    def mark(self) -> Dict[str, int]:
+        """How many times each instrument has failed to answer so far: compare with lost_since after some work."""
+        return {name: inst.health.losses for name, inst in self.lab.instruments.items()}
+
+    def lost_since(self, mark: Dict[str, int]) -> List[Alarm]:
+        """The instruments that failed to answer since `mark`, when that stopped work nobody was watching (a queue
+        item): their alarm goes up now, without waiting for more failed reads, so the pause has its reason in the
+        alarms. One that answers again already (a power blip) is cleared at once; the record keeps that it was out."""
+        out = []
+        for name, inst in list(self.lab.instruments.items()):
+            h = inst.health
+            if h.losses <= mark.get(name, 0):
+                continue
+            with self._lock:
+                a = self._silent.get(name) or self._raise_lost(name, h.lost_text)
+            out.append(a)
+            if h.fails == 0:
+                self._check_health()
+        return out
+
+    def _raise_lost(self, name: str, text: str) -> Alarm:
+        a = self._new("silent", name, text)
+        self._silent[name] = a
+        self.gate.log.write("alarm", by="monitor", instrument=name, text=text)
+        self.notify("alarm", "Alarm: " + text, "Runs that use it stop, and plans refuse to start, until it answers "
+                                               "again.")
+        return a
+
+    def _check_health(self) -> None:
+        """The instruments' health, from every exchange with them whoever made it (a watch, a run, a set, this
+        monitor): one alarm per instrument that doesn't answer, after FAILS_BEFORE_ALARM in a row, or at once when the
+        bus says it can't be reached at all (nothing listens on GPIB, a pulled USB cable); cleared when it answers."""
+        for name, inst in list(self.lab.instruments.items()):
+            h = inst.health
+            with self._lock:
+                on = self._silent.get(name)
+                if on is None and inst.enabled and h.fails and (h.gone or h.fails >= FAILS_BEFORE_ALARM):
+                    self._raise_lost(name, h.lost_text)
+                elif on is not None and h.fails == 0:
+                    del self._silent[name]
+                    self._clear(on.id, "%s answers again (it didn't for %s)%s" % (
+                        name, _since(on.raised), "; a power cut puts an instrument back to its power-on settings "
+                        "(outputs off), so check them before going on" if any(s.enables for s in inst.card.drives)
+                        else ""))
+
+    def _check_alive(self, now: float) -> None:
+        """While a plan or a queue item runs, each real instrument is asked to answer every ALIVE_EVERY (lab time): an
+        instrument nothing read (a voltmeter during a cool-down) was unplugged for minutes with no alarm. The question
+        disturbs nothing: its identity query on the bus, or for a maker's software (whose identity it answers by
+        itself) its headline reading. Its health takes the answer (_check_health). Also, an output this run switched
+        on that reads off now: the instrument restarted (a power cut puts it back to its power-on settings) or someone
+        switched it off, and the run would go on measuring with it off."""
+        asked = getattr(self.gate, "_asked", None)   # the drive levels the running plan or queue item set
+        if asked is None:   # no plan runs: the next one is watched afresh (an alarm for a restart stays till Got it)
+            self._suspect.clear()
+            self._reset.clear()
+            return
+        asked = dict(asked)
+        for name, inst in list(self.lab.instruments.items()):
+            if inst.simulated or not inst.enabled:
+                continue
+            if now - self._last_alive_check.get(name, -1e18) >= ALIVE_EVERY:
+                self._last_alive_check[name] = now
+                probe = self._probe(inst)
+                try:
+                    if probe is not None:
+                        probe()
+                except Exception:
+                    continue   # its health says it, if it didn't answer
+            if now - self._last_reset_check.get(name, -1e18) >= RESET_EVERY:
+                self._last_reset_check[name] = now
+                self._check_reset(name, inst, asked, now)
+
+    def _probe(self, inst: Any) -> Optional[Callable[[], Any]]:
+        if inst.card.idn_pattern and not hasattr(inst.backend, "identity"):
+            return lambda: inst.query_raw(inst.card.idn_query)
+        param = inst.card.headline
+        if param is None:
+            param = next((s.name for s in inst.card.params.values() if s.kind == "measure" and s.get_cmd is not None
+                          and s.type not in ("trace", "image") and not s.acquires and not s.get_before
+                          and s.read_when is None), None)
+        return (lambda: inst.read(param)) if param else None
+
+    def _check_reset(self, name: str, inst: Any, asked: Dict[str, Any], t: float) -> None:
+        """An output switch the running plan turned on that reads off twice, RESET_EVERY apart (a laser takes a moment
+        to follow): one alarm, and the plan stops."""
+        mine = [(k.split(".", 1)[1], v) for k, v in asked.items() if k.split(".", 1)[0] == name]
+        switches = [(p, v) for p, v in mine if inst.card.params.get(p) is not None and inst.card.params[p].enables
+                    and inst.card.params[p].distance(v) > 0]
+        for param, value in switches:
+            spec = inst.card.params[param]
+            try:
+                now = inst.read(param)
+            except Exception:
+                return   # its health says it, if it didn't answer
+            if now is None or spec.distance(now) > 0:
+                self._suspect.pop("%s.%s" % (name, param), None)
+                continue
+            first = self._suspect.setdefault("%s.%s" % (name, param), t)
+            if t - first < RESET_EVERY:
+                continue   # off once: it may still be following
+            with self._lock:
+                if name in self._reset:
+                    return
+                recent = self._silent.get(name) or next((a for a in self.alarms if a.kind == "silent" and a.key == name
+                                                         and time.time() - a.raised < 600), None)
+                text = "%s.%s is %s, though the running plan switched it %s: %s restarted (a power cut puts it back to " \
+                       "its power-on settings) or someone switched it off" % (name, param, spec.show(now),
+                                                                           spec.show(value), name)
+                if recent is not None:   # the same fault as its alarm for not answering: said there, not again
+                    recent.text += "; it came back with %s.%s %s (it restarted)" % (name, param, spec.show(now))
+                    a = recent
+                else:
+                    a = self._new("reset", name, text)
+                self._reset[name] = a
+            self.gate.request_abort()
+            a.actions.append("stopped the running plan, which would have gone on measuring with %s.%s %s"
+                             % (name, param, spec.show(now)))
+            self.gate.log.write("alarm", by="monitor", instrument=name, text=a.text, actions=a.actions)
+            if recent is None:
+                self.notify("alarm", "Alarm: " + text, "; ".join(a.actions))
+            return
 
     def _check_errors(self, now: float) -> None:
-        """Real instruments' own error queues, once a minute (lab time)."""
+        """Real instruments' own error queues, once a minute (lab time). That it answered or didn't goes into its
+        health."""
         for name, inst in self.lab.instruments.items():
             if inst.simulated or inst.card.error_query is None or not inst.enabled:
                 continue
@@ -303,7 +454,7 @@ class Monitor:
             try:   # the whole queue, so it never overflows (-350) while one error a minute is read
                 errs, _ = inst.drain_errors()
             except Exception:
-                continue  # silence is the read failures' job
+                continue  # one it didn't answer is its health's (_check_health)
             err = errs[0] if errs else None
             if err and name not in self._errors:
                 text = "%s reports an error: %s%s" % (name, err, " (and %d more)" % (len(set(errs)) - 1)

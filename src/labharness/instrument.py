@@ -6,8 +6,12 @@ and the run engine call them; the agent never gets an Instrument.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .adapters import lost_kind, short_code, short_model, where_and_cause
 from .cards import BINARY_REPLY, Card, ParamSpec
 from .clock import Stops
 from .labconfig import Guard, InstrumentConfig
@@ -29,6 +33,37 @@ class SensorError(RuntimeError):
     """The instrument answered, but the reading isn't one: its card's status query flags it, or it is outside what it
     can be (an open thermometer's 0 K). Raised instead of returning it, so a guard trips, an interlock fails and a
     run stops rather than taking it for a value."""
+
+
+class InstrumentLost(RuntimeError):
+    """The instrument didn't answer, or can't be reached at all, said in plain words: which one, on which bus, and what
+    to check ("nvm (Keithley 2182A) doesn't answer on GPIB (address 7): cable or power? [VI_ERROR_NLISTENERS]").
+    A run that met it stopped with these words, not a raw VISA code; the error it came from is its __cause__."""
+
+
+@dataclass
+class Health:
+    """How an instrument has been answering, kept by every exchange with it (Instrument._io), whoever made it: a run,
+    a set, the monitor. The monitor turns it into alarms; a run that stopped on a failure leaves it here for them."""
+    fails: int = 0                       # exchanges in a row that got no answer
+    gone: bool = False                   # the latest says it can't be reached at all (not only slow to answer)
+    losses: int = 0                      # exchanges that got no answer since Kelvin connected it
+    lost_text: str = ""                  # the latest, in plain words
+    lost_at: Optional[float] = None      # when it last didn't answer (wall time)
+    answered_at: Optional[float] = None  # when it last answered
+
+    def __post_init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def failed(self, gone: bool, text: str) -> None:
+        with self._lock:
+            self.fails += 1
+            self.losses += 1
+            self.gone, self.lost_text, self.lost_at = gone, text, time.time()
+
+    def answered(self) -> None:
+        with self._lock:
+            self.fails, self.gone, self.answered_at = 0, False, time.time()
 
 
 class OffBackend:
@@ -76,6 +111,33 @@ class Instrument:
         self.device_limits: Dict[str, Tuple[float, float]] = {}
         self.device_rates: Dict[str, float] = {}
         self.device_guards: Dict[str, List[Guard]] = {}
+        self.health = Health()   # how it has been answering: the monitor's instrument-loss alarms read it
+
+    def _io(self, fn: Callable[..., Any], *args: Any, alive: bool = True) -> Any:
+        """One exchange with the instrument, kept in its health. No answer, or no connection, is raised in plain words
+        (InstrumentLost: which instrument, on which bus, what to check), wherever it happens; any other error (a
+        command it refused, a card's mistake) passes as it is. alive=False: an answer that doesn't show it is there
+        (a maker's driver says its identity by itself)."""
+        try:
+            out = fn(*args)
+        except (InstrumentOff, Stopped, InstrumentLost):
+            raise
+        except Exception as e:
+            kind = lost_kind(e)
+            if kind is None:
+                raise
+            self.health.failed(kind == "gone", self.loss_text(e))
+            raise InstrumentLost(self.health.lost_text) from e
+        if alive:
+            self.health.answered()
+        return out
+
+    def loss_text(self, e: BaseException) -> str:
+        """It doesn't answer, in words: "nvm (Keithley 2182A) doesn't answer on GPIB (address 7): cable or power?
+        [VI_ERROR_NLISTENERS]"."""
+        where, cause = where_and_cause(self.config.address)
+        return "%s (%s) doesn't answer%s%s [%s]" % (self.name, short_model(self.card.model), " " + where if where else "",
+                                                    ": " + cause if cause else "", short_code(e))
 
     @property
     def simulated(self) -> bool:
@@ -114,7 +176,7 @@ class Instrument:
             return self._acquire(spec)
         if spec.type == "trace":
             return self._trace(spec)
-        value = spec.from_wire(self.backend.query(spec.get_cmd.render()))
+        value = spec.from_wire(self._io(self.backend.query, spec.get_cmd.render()))
         if spec.status_cmd is not None or spec.plausible is not None:
             self._vouch(spec, value)
         return value
@@ -122,7 +184,7 @@ class Instrument:
     def _vouch(self, spec: ParamSpec, value: Any) -> None:
         """SensorError unless the card's status query says the reading is valid and it is plausible."""
         if spec.status_cmd is not None:
-            reply = self.backend.query(spec.status_cmd.render()).strip()
+            reply = self._io(self.backend.query, spec.status_cmd.render()).strip()
             if not re.search(spec.status_ok, reply):
                 raise SensorError("%s.%s: the instrument flags this reading (%s → %s): the sensor may be open, shorted "
                                   "or out of its range" % (self.name, spec.name, spec.status_cmd.render(), reply))
@@ -150,14 +212,14 @@ class Instrument:
                 if self.stops.since(start):
                     raise Stopped("%s.%s: stopped by a person before the instrument was done" % (self.name, spec.name))
                 if not is_query(c, bool(self.card.connection.get("enq"))):
-                    self.backend.write(c)
+                    self._io(self.backend.write, c)
                 elif waiting is not None and spec.wait_s:   # *OPC?: answers when the acquisition is done
-                    waiting(c, spec.wait_s, lambda: self.stops.since(start))   # or a stop ends the wait
+                    self._io(waiting, c, spec.wait_s, lambda: self.stops.since(start))   # or a stop ends the wait
                 else:
-                    self.backend.query(c)
+                    self._io(self.backend.query, c)
             if spec.type == "trace":
                 return self._trace(spec)
-            return spec.from_wire(self.backend.query(spec.get_cmd.render()))
+            return spec.from_wire(self._io(self.backend.query, spec.get_cmd.render()))
         finally:
             if spec.wait_s and before is not None:
                 try:
@@ -174,9 +236,9 @@ class Instrument:
         said = []
         for c in action.send:
             if is_query(c, bool(self.card.connection.get("enq"))):
-                said.append(self.backend.query(c).strip())
+                said.append(self._io(self.backend.query, c).strip())
             else:
-                self.backend.write(c)
+                self._io(self.backend.write, c)
         return said
 
     def _trace(self, spec: ParamSpec) -> List[float]:
@@ -185,11 +247,11 @@ class Instrument:
         per point) and the instrument's own scale readings."""
         command = spec.get_cmd.render()
         if spec.binary and hasattr(self.backend, "query_binary"):
-            values = self.backend.query_binary(command, spec.binary)
+            values = self._io(self.backend.query_binary, command, spec.binary)
         else:
             query = getattr(self.backend, "query_trace", self.backend.query)   # a reply of many lines, read whole
             try:
-                values = spec.from_wire(query(command))
+                values = spec.from_wire(self._io(query, command))
             except ValueError as e:
                 if str(e) == BINARY_REPLY and hasattr(self.backend, "drain"):
                     self.backend.drain()   # the rest of the block would be taken for the next replies
@@ -216,20 +278,22 @@ class Instrument:
 
     def write(self, param: str, value: Any) -> None:
         spec = self.spec(param)
-        self.backend.write(spec.set_cmd.render(spec.to_wire(value)))
+        self._io(self.backend.write, spec.set_cmd.render(spec.to_wire(value)))
         self._last[param] = value
 
     def query_raw(self, command: str) -> str:
-        return self.backend.query(command)
+        # a maker's driver says its identity itself, without asking the instrument: that shows nothing about it
+        local = hasattr(self.backend, "identity") and command.strip().upper() in ("*IDN?", self.card.idn_query.upper())
+        return self._io(self.backend.query, command, alive=not local)
 
     def write_raw(self, command: str) -> None:
-        self.backend.write(command)
+        self._io(self.backend.write, command)
 
     def instrument_error(self) -> Optional[str]:
         """The first queued instrument error, or None."""
         if self.card.error_query is None:
             return None
-        resp = self.backend.query(self.card.error_query.render()).strip()
+        resp = self._io(self.backend.query, self.card.error_query.render()).strip()
         if self.card.no_error and re.search(self.card.no_error, resp):   # the card's own no-error reply: 1TE@ (SMC100)
             return None
         return None if re.match(r"^\+?0+\s*(,|$)", resp) else resp   # "0,No error", 0 (SRS LERR?), 0000 (Pfeiffer ERR)

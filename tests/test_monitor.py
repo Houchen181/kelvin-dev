@@ -102,12 +102,13 @@ def test_an_instrument_that_stops_answering_alarms_after_a_few_tries(lab, make_g
         monitor.tick()
     assert not monitor.alarms                                      # one bad read is not an outage
     monitor.tick()
-    assert monitor.alarms[0].kind == "silent" and "lockin is not answering" in monitor.alarms[0].text
+    assert monitor.alarms[0].kind == "silent"
+    assert monitor.alarms[0].text == "lockin (Virtual Lock-in Amplifier) doesn't answer [lockin: offline]"
     monitor.tick()
     assert len(monitor.alarms) == 1
     lab.instruments["lockin"].backend.fault = None
     monitor.tick()
-    assert monitor.alarms[0].cleared and notices[-1] == ("alarm_cleared", "Cleared: lockin answers again")
+    assert monitor.alarms[0].cleared and notices[-1][1].startswith("Cleared: lockin answers again (it didn't for ")
 
 
 def test_the_lab_owners_watch_stops_the_run_and_turns_the_laser_off(runtime):
