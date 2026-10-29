@@ -165,6 +165,9 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "card %s saved (%s)" % (e.get("card"), e.get("status"))
     elif kind == "report":
         text = "report %s (%s run%s)" % (e.get("name"), e.get("runs"), "" if e.get("runs") == 1 else "s")
+    elif kind == "chain":
+        text = "measurement chain of %s %s" % (e.get("device") or "the setup", "removed" if e.get("removed")
+                                               else "recorded")
     elif kind == "lab_changed":
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
     elif kind == "instrument_switched":
@@ -1497,6 +1500,7 @@ class LabRuntime:
             dev = next((d for d in info.get("devices") or []
                         if d["id"] == plan.device or d["name"].lower() == plan.device.lower()), None)
             out["device"], out["device_name"] = (dev["id"], dev["name"]) if dev else (None, plan.device)
+        self._stamp_chain(out)
         return out
 
     def queue_show(self) -> str:
@@ -2046,6 +2050,87 @@ class LabRuntime:
 
     def events(self, n: int = 20) -> str:
         return "\n".join(event_line(e) for e in tail_events(self.events_path, max(1, min(int(n), 200)))) or "no events yet"
+
+    # ------------------------------------------------------------------ provenance and measurement chains
+
+    def run_provenance(self, run_id: str) -> str:
+        """A run's plan as it ran, its conditions at the start and the end, its measurement chain, every approval it
+        needed with who gave it, and the stops, trips and alarms while it ran (provenance.py). Files only."""
+        from .. import provenance
+        try:
+            d = self._run_dir(run_id)
+            return provenance.run_provenance(d, self.lab, self.gate.log.events(),
+                                             [f["name"] for f in self.run_files(run_id)])
+        except (KeyError, OSError, ValueError) as e:
+            return "cannot read %s: %s" % (run_id, e.args[0] if e.args else e)
+
+    def activity(self, since: str = "", until: str = "", who: str = "", kinds: str = "", limit: int = 60) -> str:
+        """The lab record over a stretch of wall-clock time, each event with who did it: the lab's instrument log
+        (everyone's, with who was signed in) where there is one, else this person's record."""
+        from .. import provenance
+        shared = Path(self.shared_log) if self.shared_log else None
+        paths = [shared] if shared is not None and shared.exists() else [self.events_path]
+        try:
+            return provenance.activity(provenance.read_events(paths), since, until, who, kinds, limit)
+        except ValueError as e:
+            return "no activity read: %s" % e
+
+    def _chain_device(self, device: str) -> Tuple[Optional[str], Optional[str]]:
+        """(id, name) of a device named in a chat (in the mounted device's project), or of the mounted one."""
+        m = self.mounted or {}
+        if not device:
+            return m.get("device"), m.get("device_name")
+        wanted = device.strip().lower()
+        for pid in dict.fromkeys([m.get("project"), self.attribution.get("project")] + list(self.project_ids())):
+            for d in self.project_info(pid).get("devices") or []:
+                if wanted in (str(d.get("id") or "").lower(), str(d.get("name") or "").lower()):
+                    return d.get("id"), d.get("name")
+        return None, device.strip()
+
+    def measurement_chain(self, device: str = "", chain: Any = None, by: str = "agent", remove: bool = False) -> str:
+        """Read, record or remove a device's measurement chain (chain.py): device by name (default the mounted one;
+        "setup" for the setup's own, which a device without one of its own uses). Recorded chains are stamped into
+        every run of that device from then on."""
+        from ..chain import ChainError, Chains, lines, parse
+        store = Chains(self.data_dir)
+        dev_id, dev_name = (None, None) if device.strip().lower() == "setup" else self._chain_device(device)
+        whose = dev_name or "the setup"
+        if remove:
+            gone = store.remove(dev_id, dev_name)
+            if gone:
+                self.gate.log.write("chain", by=by, device=dev_name, removed=True)
+            return ("removed the measurement chain of %s" % whose) if gone else "%s has no chain of its own" % whose
+        if chain not in (None, "", {}):
+            try:
+                kept = parse(chain)
+            except ChainError as e:
+                return "not recorded: %s" % e
+            unknown = [k for k in [kept.get("excitation", {}).get("source")] + list(kept.get("readings") or {})
+                       if k and self._spec(k) is None]
+            store.put(kept, dev_id, dev_name, by)
+            self.gate.log.write("chain", by=by, device=dev_name, chain=kept)
+            return "\n".join(["recorded the measurement chain of %s; every run of it from now on carries it:" % whose]
+                             + ["  " + line for line in lines(kept)]
+                             + (["note: %s %s not in this lab now" % (", ".join(unknown), "is" if len(unknown) == 1
+                                                                       else "are")] if unknown else []))
+        found = store.get(dev_id, dev_name)
+        if found is None:
+            return ("no measurement chain for %s yet. Ask the person how it is wired (the excitation, whether its "
+                    "amplitude is peak or rms, a series resistor, preamplifier gains) and record it" % whose)
+        head = "measurement chain of %s%s (recorded by %s, %s):" % (
+            whose, " (the setup's: it has none of its own)" if found["of"] == "setup" and dev_name else "",
+            found.get("by") or "?", found.get("at") or "?")
+        return "\n".join([head] + ["  " + line for line in lines(found["chain"])])
+
+    def _stamp_chain(self, meta: Dict[str, Any]) -> None:
+        """A run carries the measurement chain of its device (or the setup's) as it was when it ran."""
+        try:
+            from ..chain import Chains
+            found = Chains(self.data_dir).get(meta.get("device"), meta.get("device_name"))
+        except Exception:
+            return
+        if found:
+            meta["chain"], meta["chain_of"] = found["chain"], found["of"]
 
     # ------------------------------------------------------------------ for the approval page
 

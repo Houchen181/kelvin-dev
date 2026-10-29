@@ -682,7 +682,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def describe_run(run_id: str) -> str:
         """One run in brief, before reading its numbers: what it swept and measured (units, ranges, quantities), the
         conditions held, the fitted results with uncertainties, the assessment and issues, the plan as it ran and
-        its files."""
+        its files. Every setting at its start and end, its approvals and who gave them: run_provenance."""
         return rt.describe_run(run_id)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -720,6 +720,35 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def recent_events(n: int = 20) -> str:
         """The last n entries of the lab's event log (commands, approvals, trips, runs)."""
         return rt.events(n)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def run_provenance(run_id: str) -> str:
+        """Where a run came from, from what Kelvin kept (never guess it): the plan as it ran; who started it and
+        when (this computer's clock); the instrument settings at the start and the end (every one is kept in
+        run.h5); the measurement chain (the excitation, peak or rms, series resistor, gains); every approval it
+        needed and who gave it (account, portal or phone); and the stops, trips and alarms while it ran."""
+        return rt.run_provenance(run_id)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def lab_activity(since: str = "", until: str = "", who: str = "", kinds: str = "", limit: int = 60) -> str:
+        """Who did what in the lab, and when: the lab record between since and until (2026-10-28T11:00, 11:00,
+        today, yesterday, or a while ago such as 2h; default the last 24 h), in this computer's wall-clock time,
+        never the simulated lab's. Each line says who: a signed-in person and where they answered, Kelvin's AI, a
+        queue or a plan. who: only that actor (a name, agent, human, phone...); kinds: approvals, stops, runs,
+        settings, alarms, lab, people, or event types, comma-separated. Use it rather than inferring who did what."""
+        return rt.activity(since, until, who, kinds, limit)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def measurement_chain(device: str = "", chain: Optional[Dict[str, Any]] = None, remove: bool = False) -> str:
+        """A device's measurement chain: what sits between the instruments and the sample. Without chain: read it.
+        With chain: record it, as the person said (never assume a convention): {excitation: {source:
+        iac.amplitude, form: peak|rms|peak-to-peak|dc (how that instrument states it: a 6221's AC amplitude is its
+        peak, a lock-in's sine out is rms), series_resistor: ohms (a voltage through a resistor; leave out for a
+        current source)}, readings: {li_xx.X: {gain: 100, name: R_xx}}, notes: wiring, filters, reference}. Every
+        run of the device carries it from then on; reports plot the named readings as resistance (V / gain /
+        I_rms). device: its name (default the mounted one); "setup" for the setup's own, which a device without one
+        uses. remove: forget the device's chain."""
+        return rt.measurement_chain(device, chain, by="agent", remove=remove)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable

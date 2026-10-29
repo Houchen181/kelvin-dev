@@ -247,10 +247,10 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "card_guide", "find_card",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
-           "use_skill", "read_skill_file", "survey_scripts"}
+           "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "lab_activity"}
 # what never works the lab: everything else runs one call at a time across chats, filed under its own chat
 OFF_LAB = LOOKUPS | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe", "save_paper", "make_report",
-                     "write_file"}
+                     "write_file", "measurement_chain"}
 MAX_TURNS = 4      # chats answering at once
 LAB_WAIT_S = 10.0  # how long a chat's lab call waits while another chat works the lab, before it says so
 
