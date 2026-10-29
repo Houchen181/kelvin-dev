@@ -188,16 +188,16 @@ def _ranges(indices: List[int]) -> str:
 
 
 def read(folder: Any, path: Any, pages: Any = "", start: int = 0, figures: bool = False,
-         own: Iterable[Any] = ()) -> Tuple[str, Media]:
+         own: Iterable[Any] = (), most: int = MAX_PDF_PAGES) -> Tuple[str, Media]:
     """A file in the chat's folder: (what to tell the model, the pictures or PDF pages to show it). Never one in
-    Kelvin's own folders (own: off_limits)."""
+    Kelvin's own folders (own: off_limits). most: a PDF's pages shown at once (figures)."""
     target = inside(folder, path, own=own)
     if not target.is_file():
         raise FolderError("there is no file %s in this chat's folder (list_folder shows what is there)" % path)
     shown = target.relative_to(Path(folder).resolve()).as_posix()
     ext, size = target.suffix.lower(), target.stat().st_size
     if ext == ".pdf":
-        return _pdf(target, shown, pages, max(0, int(start or 0)), figures)
+        return _pdf(target, shown, pages, max(0, int(start or 0)), figures, most)
     if ext in PICTURES:
         if size > MAX_PICTURE_BYTES:
             raise FolderError("%s is %s, more than a model takes (%s): a smaller copy or a crop would do"
@@ -224,7 +224,8 @@ def read(folder: Any, path: Any, pages: Any = "", start: int = 0, figures: bool 
         "; more from start=%d" % (start + MAX_CHARS) if more else ", to the end", chunk)), []
 
 
-def _pdf(target: Path, shown: str, pages: Any, start: int, figures: bool) -> Tuple[str, Media]:
+def _pdf(target: Path, shown: str, pages: Any, start: int, figures: bool,
+         most: int = MAX_PDF_PAGES) -> Tuple[str, Media]:
     try:
         from pypdf import PdfReader, PdfWriter
     except ImportError:
@@ -239,7 +240,7 @@ def _pdf(target: Path, shown: str, pages: Any, start: int, figures: bool) -> Tup
         raise FolderError("Kelvin could not open %s as a PDF (%s)" % (shown, str(e).splitlines()[0] if str(e) else e))
     chosen = page_numbers(pages, count)
     if figures:   # the pages themselves, as one smaller PDF
-        some = chosen[:MAX_PDF_PAGES]
+        some = chosen[:most]
         writer = PdfWriter()
         for i in some:
             writer.add_page(reader.pages[i])
@@ -281,3 +282,45 @@ def _pdf(target: Path, shown: str, pages: Any, start: int, figures: bool) -> Tup
         within = max(0, end - bounds[k][1]) if k < len(bounds) else 0
         tail = "; more from pages='%s'%s" % (_ranges(rest).replace(" ", ""), " start=%d" % within if within else "")
     return "%s, %d pages; the text of pages %s%s\n%s" % (shown, count, _ranges(seen), tail, chunk), []
+
+
+def figure_pages(data: bytes, most: int) -> Tuple[List[int], bytes]:
+    """The pages of a PDF that hold figures (the first `most`, 0-based) and those pages as one smaller PDF; ([], b"")
+    when none does. A figure is a picture of some size, or a drawing placed whole and big: a form, which is how LaTeX
+    and word processors place a figure made as a PDF (_has_figure)."""
+    from pypdf import PdfReader, PdfWriter
+    logging.getLogger("pypdf").setLevel(logging.ERROR)
+    reader = PdfReader(io.BytesIO(data))
+    if reader.is_encrypted:
+        reader.decrypt("")
+    chosen = [i for i, page in enumerate(reader.pages) if _has_figure(page)][:most]
+    if not chosen:
+        return [], b""
+    writer = PdfWriter()
+    for i in chosen:
+        writer.add_page(reader.pages[i])
+    buf = io.BytesIO()
+    writer.write(buf)
+    return chosen, buf.getvalue()
+
+
+def _has_figure(page: Any) -> bool:
+    """A picture at least 150 pixels square, or a form covering a twentieth of the page (not a logo in a corner)."""
+    def value(v: Any) -> Any:
+        return v.get_object() if hasattr(v, "get_object") else v
+    try:
+        resources = value(page.get("/Resources")) or {}
+        placed = value(resources.get("/XObject")) or {}
+        area = abs(float(page.mediabox.width) * float(page.mediabox.height)) or 1.0
+        for ref in placed.values():
+            x = value(ref)
+            kind = x.get("/Subtype")
+            if kind == "/Image" and float(value(x.get("/Width", 0))) * float(value(x.get("/Height", 0))) >= 150 ** 2:
+                return True
+            if kind == "/Form":
+                b = [float(value(v)) for v in value(x.get("/BBox", [0, 0, 0, 0]))]
+                if len(b) == 4 and abs((b[2] - b[0]) * (b[3] - b[1])) >= area / 20:
+                    return True
+    except Exception:   # a page Kelvin can't look into: its text still goes
+        return False
+    return False

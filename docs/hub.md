@@ -87,6 +87,17 @@ On the Kelvin's socket, text frames are JSON: the Kelvin's `{"t": "hello", "name
 
 The hub needs the `websockets` package for this (the `hub` extra brings it), and its proxy must pass WebSockets through: Cloudflare Tunnel and Tailscale Funnel do.
 
+## For signed-in Kelvins
+
+Two things the hub does for a Kelvin where someone is signed in with their Kelvin account, so that no Kelvin needs them itself (`hub/drawing.py`; Kelvin's side `web/vision.py` and `web/agent.py`):
+
+- **Which models see pictures:** `GET /api/models/pictures` answers, for each of Kelvin's ready-made services (OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI), the models that take pictures and those that don't. The hub reads them from [models.dev](https://models.dev), a public list of models, at most once a day, and keeps them in `model-pictures.json`. When models.dev can't be read, the hub keeps what it has and tries again an hour later. Each Kelvin fetches the list once a day ([portal.md](portal.md#in-the-portal)).
+- **PDF pages drawn as pictures:** `POST /api/pdf/pages`, for a chat whose model sees pictures but can't read PDFs. Kelvin sends only the pages that model needs (at most 6), as one small PDF, and gets back one PNG per page.
+  - **What never goes:** pages from incognito chats or from unpublished, confidential or model-limited projects. Those chats get the pages' text.
+  - **Nothing kept:** the hub draws in memory and answers; it keeps and logs nothing of the pages.
+  - **Its own process:** `hub/pdfdraw.py` draws with pypdfium2 (PDFium, Chrome's PDF engine) in a separate process, so a broken or hostile PDF can't stop the hub. Limits: 10 MB in, 8 pages, 60 seconds, 1600 pixels on a page's longest side. One person has at most 3 drawings and syncs running at once.
+  - **Without pypdfium2:** the hub answers 501, and Kelvin gives the model the pages' text. The `hub` extra brings pypdfium2; the Kelvin app never does.
+
 ## Connecting a Kelvin
 
 Sharing work, switched off for now. This works like Kelvin's Sign in with ChatGPT, with the hub as the sign-in page:
@@ -143,7 +154,7 @@ Settings → **Account** → Kelvin hub (`web/hubsync.py`, routes in `web/app.py
 
 ## Running it
 
-From a checkout with the `web` (or `hub`) extra installed:
+From a checkout with the `hub` extra installed (the `web` extra runs it too, but without drawing PDF pages):
 
 ```bash
 .venv/Scripts/kelvin-hub --home C:/path/to/hub-data
@@ -179,6 +190,7 @@ The hub's folder:
 | `outbox/` | Mail the hub would have sent, while no SMTP server is set |
 | `terms.html`, `privacy.html` | Optional: your own terms and privacy notice, replacing the built-in drafts |
 | `hub.log` | Sign-ins, connections, syncs and errors by account number; never addresses, passwords or tokens |
+| `model-pictures.json` | Which models see pictures, from models.dev, read again once a day |
 
 **Backups:** the daily copy covers the database only. Back up `files/` with the rest of the machine.
 
@@ -232,7 +244,9 @@ Kelvin accepts a hub address on the internet only with https.
 
 | Call | What it does |
 |---|---|
-| `GET /api/health` | `{"ok": true, "hub": version}` |
+| `GET /api/health` | `{"ok": true, "hub": version, "draws_pdfs"}` |
+| `GET /api/models/pictures` | A signed-in Kelvin's: `{"at", "services": {"opencode": {"yes": [...], "no": [...]}, ...}}` |
+| `POST /api/pdf/pages` | A signed-in Kelvin's: PDF pages as the raw body → `{"pages": [{"mime": "image/png", "data"}]}`. 403 until new terms are agreed to, 413 over 10 MB, 422 when they can't be drawn, 429 with 3 already running, 501 without pypdfium2 |
 | `POST /api/signin` | Kelvin's sign-in: `{"email", "password", "installation"}` → `{"access_token", "user", "needs_consent", "account_url"}` |
 | `POST /api/register` | Kelvin's Create account: `{"name", "email", "password", "consent": true, "orcid"?, "installation"}` → as `signin` |
 | `POST /api/reset` | `{"email"}`: mail a reset link → always `{"ok": true}` |

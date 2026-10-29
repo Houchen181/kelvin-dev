@@ -555,6 +555,20 @@ class Settings:
         self._user["services"] = kept
         self._save()
 
+    def service_pictures(self, service_id: str, value: Any) -> None:
+        """Whether a service's models see pictures: "on", "off", or "" (model by model, vision.py)."""
+        from .services import pictures_of
+        value = pictures_of(value)
+        services = self.services
+        found = next((s for s in services if s["id"] == service_id), None)
+        if found is None:
+            raise KeyError("no service %r" % service_id)
+        found.pop("pictures", None)
+        if value:
+            found["pictures"] = value
+        self._user["services"] = services
+        self._save()
+
     # ------------------------------------------------------------------ paired phones (see remote.py): each person's
 
     @property

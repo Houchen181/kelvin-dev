@@ -15,6 +15,7 @@ import base64
 import contextvars
 import copy
 import json
+import math
 import re
 import sys
 import time
@@ -30,7 +31,7 @@ from ..agent.server import INSTRUCTIONS, OUTSIDE
 from ..folderfiles import MAX_PDF_PAGES
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
-from .providers.base import Emit, ModelInfo, Provider, text_of
+from .providers.base import Emit, ModelInfo, Provider, sees_images, text_of
 from . import brevity, compaction, memory, review, rules as rulebook
 from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
 from .wakeups import WAKE_ME, Waker
@@ -140,9 +141,15 @@ MAX_STEPS = 25
 MAX_PICTURES = 8          # the latest pictures a model sees again at each step; older ones by their captions
 MAX_DOCUMENTS = 2         # and the latest PDFs it reads whole (read_file's pages, PDFs the person attached)
 REVIEW_S = 300            # a second opinion with its lookups
-MAX_ATTACHED_CHARS = 60000   # of an attached PDF's text, in the message
+MAX_ATTACHED_CHARS = 60000   # of an attached PDF's or text file's text, in the message
+MAX_DRAWN = 6                # PDF pages the Kelvin hub draws at once, for a model that sees pictures but not PDFs
+MAX_TEXT_BYTES = 2 * 2 ** 20  # of a text file a person attaches (a script, a notebook, notes)
 MAX_SHOWN_CODE = 60000       # of a file shown to the person before it is saved where an instrument loads code
 PICTURE_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+# text files a person attaches, given to the model as text: scripts, notebooks, notes, settings (never run)
+TEXT_FILES = {".py", ".pyw", ".ipynb", ".m", ".jl", ".r", ".c", ".h", ".cpp", ".hpp", ".cs", ".java", ".js",
+              ".ts", ".sh", ".ps1", ".bat", ".cmd", ".vb", ".bas", ".ino", ".pro", ".ipf", ".tex", ".bib", ".md",
+              ".rst", ".log", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml", ".html", ".htm"}
 # data files a person attaches, each made a run as it is attached (imports.py)
 DATA_KINDS = "CSV, TSV, text and Excel tables, NumPy arrays, TIFF images, BioLogic, Gamry and Arbin files"
 WAIT_S = 120   # the longest wait inside a turn: a wait holds the lab, so longer waits use wake_me
@@ -222,6 +229,32 @@ def _kind_of(data: bytes) -> Optional[str]:
     if data[:5] == b"%PDF-":
         return "pdf"
     return None
+
+
+def notebook_text(raw: str, name: str = "the notebook") -> str:
+    """A Jupyter notebook as text: its cells in order, code and notes, without their saved outputs (pictures and
+    tables a run left in it). ValueError: not a notebook."""
+    try:
+        cells = json.loads(raw).get("cells")
+        if not isinstance(cells, list):
+            raise ValueError
+    except (ValueError, AttributeError):
+        raise ValueError("%s is not a Jupyter notebook Kelvin can read" % name)
+    out = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        source = cell.get("source") or ""
+        source = "".join(source) if isinstance(source, list) else str(source)
+        out.append("# %%%%%s\n%s" % ("" if cell.get("cell_type") == "code" else " [%s]" % cell.get("cell_type"),
+                                    source.rstrip()))
+    return "\n\n".join(out)
+
+
+def _why(e: BaseException) -> str:
+    """An error in a few words: its first line."""
+    text = str(e).strip()
+    return text.splitlines()[0] if text else type(e).__name__
 
 
 def run_id_of(text: str) -> Optional[str]:
@@ -454,6 +487,7 @@ class ChatAgent:
         self.read_only: set = set()
         self._images: Dict[str, List[Tuple[str, bytes]]] = {}   # pictures a tool call returned, by call id, until kept
         self._documents: Dict[str, List[Tuple[str, bytes]]] = {}   # and PDF pages to read whole: (name, bytes)
+        self.draw: Optional[Any] = None   # PDF pages -> [(mime, picture)], drawn by the Kelvin hub (app.py)
         self._steer: Dict[str, List[str]] = {}   # what the person wrote while Kelvin worked, by chat, until read
         self.waker = Waker(self)   # chats continued later (wake_me), when the time or the lab says
         self.know = Know(store)    # skills and recipes (skills.py)
@@ -994,10 +1028,13 @@ class ChatAgent:
             chat["model"] = model_key
             self.store.save(chat)
             context = self.context(chat)  # fixed for the whole turn, so every step reuses the cached prefix
+            context["model"] = model_id   # what its tools show the model: pictures, PDF pages (read_file)
             await emit({"type": "turn_start", "model": model_key, "title": chat["title"], "chat_id": chat_id,
                         "from": len(chat["messages"]) - 1})   # where this turn begins in the chat: its message
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
+            if attachments and await self._draw_attached(chat, message, provider, model_id, emit):
+                self.store.save(chat)
             for _ in range(MAX_STEPS):
                 if not await self._step(chat, provider, model_id, context, emit):
                     return
@@ -1088,7 +1125,7 @@ class ChatAgent:
                                                     "stays here, and Kelvin can still search it."})
         self._stream_task = asyncio.ensure_future(
             provider.stream(model_id, context["system"],
-                            self._pictures(chat, brevity.with_reminder(history, self._budget()), provider),
+                            self._pictures(chat, brevity.with_reminder(history, self._budget()), provider, model_id),
                             context["tools"], relay))
         try:
             result = await self._stream_task
@@ -1199,7 +1236,7 @@ class ChatAgent:
             named, problem = self._named_recipe(chat, context, call)   # a kept recipe, by its name
             return _without_opinion((await self._call(named, emit)) if named else (problem, True))
         if name in ("list_folder", "read_file"):
-            return _without_opinion(await self._folder_file(chat, provider, call))
+            return _without_opinion(await self._folder_file(chat, provider, call, context.get("model", "")))
         if name == "write_file":
             return _without_opinion(await self._write_file(chat, call, emit))
         if name == "read_skill_file":
@@ -1452,7 +1489,7 @@ class ChatAgent:
         (review.REVIEW_TOOLS; never a camera, never a change): (its answer, how many lookups it made)."""
         tools = [t for t in self.tools if t["name"] in review.REVIEW_TOOLS and t["name"] in self.read_only]
         allowed = {t["name"] for t in tools}
-        sees = getattr(provider, "sees_images", False)
+        sees = sees_images(provider, model_id)
         history: List[Dict[str, Any]] = [{"role": "user", "text": prompt}]
         lookups = 0
 
@@ -1607,7 +1644,8 @@ class ChatAgent:
         try:
             for _ in range(COMPARE_STEPS):
                 result = await provider.stream(model_id, system, self._pictures(
-                    {"id": chat_id}, brevity.with_reminder(base + out, self._budget()), provider), tools, lane_emit)
+                    {"id": chat_id}, brevity.with_reminder(base + out, self._budget()), provider, model_id), tools,
+                    lane_emit)
                 out.append({"role": "assistant", "provider": provider.name, "model": result.model or model_id,
                             "blocks": result.blocks, "raw": result.raw})
                 if result.stop_reason != "tool_calls":
@@ -1815,10 +1853,11 @@ class ChatAgent:
 
     # ------------------------------------------------------------------ the chat's folder (folderfiles.py)
 
-    async def _folder_file(self, chat: Dict[str, Any], provider: Provider, call: Dict[str, Any]) -> Tuple[str, bool]:
+    async def _folder_file(self, chat: Dict[str, Any], provider: Provider, call: Dict[str, Any],
+                           model: str = "") -> Tuple[str, bool]:
         """list_folder and read_file, only in the folder the person chose for this chat. What they read is marked as
         text from outside the lab; pictures go to the person and to a model that sees them, PDF pages whole to a
-        model that reads PDFs (another gets their text)."""
+        model that reads PDFs, or as pictures to one that sees pictures (another gets their text)."""
         from .. import folderfiles
         folder = chat.get("folder")
         if not folder:
@@ -1832,7 +1871,7 @@ class ChatAgent:
             except (ValueError, OSError) as e:   # FolderError is a ValueError
                 return "not read: %s" % (e.strerror if isinstance(e, OSError) and e.strerror else e), True
             return OUTSIDE % ("the names in this chat's folder", text), False
-        text, is_error = await self._read_in(folder, call, provider, self._kelvins())
+        text, is_error = await self._read_in(folder, call, provider, self._kelvins(), model, chat)
         return (text, True) if is_error else (OUTSIDE % ("%s, a file in this chat's folder" % path, text), False)
 
     def _kelvins(self) -> List[Any]:
@@ -1841,22 +1880,35 @@ class ChatAgent:
         the chats of the person signed in."""
         return [f for f in (getattr(self.runtime, "home", None), getattr(self.store, "root", None)) if f]
 
-    async def _read_in(self, folder: Any, call: Dict[str, Any], provider: Provider,
-                       own: Iterable[Any] = ()) -> Tuple[str, bool]:
+    async def _read_in(self, folder: Any, call: Dict[str, Any], provider: Provider, own: Iterable[Any] = (),
+                       model: str = "", chat: Optional[Dict[str, Any]] = None) -> Tuple[str, bool]:
         """A file in this folder, read (folderfiles.py): pictures go to the person and to a model that sees them, PDF
-        pages whole to a model that reads PDFs (another gets their text). own: folders it never reads in."""
+        pages whole to a model that reads PDFs, or drawn as pictures by the Kelvin hub for one that sees pictures
+        (_draws_for); another model gets their text. own: folders it never reads in."""
         from .. import folderfiles
         args = call["input"] if isinstance(call["input"], dict) else {}
-        path = str(args.get("path") or "")
+        path, pages = str(args.get("path") or ""), args.get("pages") or ""
         asked = bool(args.get("figures"))
         whole = asked and getattr(provider, "sees_pdfs", False)
+        drawn = asked and not whole and self._draws_for(chat, provider, model)
         try:
-            text, media = await asyncio.to_thread(folderfiles.read, folder, path, args.get("pages") or "",
-                                                  int(args.get("start") or 0), whole, own)
+            start = int(args.get("start") or 0)
+            text, media = await asyncio.to_thread(folderfiles.read, folder, path, pages, start, whole or drawn, own,
+                                                  MAX_DRAWN if drawn else MAX_PDF_PAGES)
+            pdf = [data for mime, data in media if mime == folderfiles.PDF] if drawn else []
+            if pdf:
+                try:
+                    media = await asyncio.to_thread(self.draw, pdf[0])
+                    if not media:
+                        raise ValueError("the hub drew no pages")
+                    text = text.replace(", shown whole", ", shown as pictures")
+                except Exception as e:   # the hub can't draw them now: their text, as for any model
+                    text, media = await asyncio.to_thread(folderfiles.read, folder, path, pages, start, False, own)
+                    text += "\n(the pages couldn't be drawn as pictures (%s), so these are their text)" % _why(e)
+            elif asked and not whole and not drawn:
+                text += "\n(this model can't see a PDF's pages, so these are their text)"
         except (ValueError, OSError) as e:   # FolderError is a ValueError
             return "not read: %s" % (e.strerror if isinstance(e, OSError) and e.strerror else e), True
-        if asked and not whole:
-            text += "\n(this model can't see a PDF's pages, so these are their text)"
         pictures = [(mime, data) for mime, data in media if mime in PICTURE_TYPES]
         if pictures:   # kept with the chat by the caller, like look_at's plots
             self._images[call["id"]] = pictures
@@ -1941,7 +1993,7 @@ class ChatAgent:
             return "no skill %r here" % args.get("skill"), True
         if item.folder is None or not item.files:
             return "the skill %s comes with no files" % item.name, True
-        return await self._read_in(item.folder, call, provider)
+        return await self._read_in(item.folder, call, provider, (), context.get("model", ""), chat)
 
     def _keep_documents(self, chat_id: str, call_id: str) -> List[Dict[str, str]]:
         """The PDF pages a tool call returned, kept with the chat: [{file, mime, name}]."""
@@ -1979,17 +2031,69 @@ class ChatAgent:
                 pass
         return out
 
+    def _draws_for(self, chat: Optional[Dict[str, Any]], provider: Provider, model: str) -> bool:
+        """Whether PDF pages go to the Kelvin hub to be drawn as pictures for this model: one that sees pictures but
+        can't read PDFs, in a chat whose work may leave this computer (_stays_here)."""
+        return (self.draw is not None and chat is not None and not getattr(provider, "sees_pdfs", False)
+                and sees_images(provider, model) and not self._stays_here(chat))
+
+    def _stays_here(self, chat: Dict[str, Any]) -> bool:
+        """An incognito chat, or unshared work (the chat's own marks, or its project's): none of it goes to the hub."""
+        if chat.get("incognito") or unshared(chat):
+            return True
+        pid = self.store.project_of(chat["id"]) if chat.get("id") else None
+        if not pid or pid == "general":
+            return False
+        try:
+            return unshared(self.store.project(pid))
+        except KeyError:
+            return True   # a project that is gone: Kelvin can't tell whether it was shared
+
+    async def _draw_attached(self, chat: Dict[str, Any], message: Dict[str, Any], provider: Provider, model: str,
+                             emit: Emit) -> bool:
+        """For a model that sees pictures but can't read PDFs: the pages with figures of each PDF the person attached
+        (the first MAX_DRAWN), drawn as pictures by the Kelvin hub and kept with the chat; the model gets them with
+        the PDF's text. True if the message changed."""
+        from .. import folderfiles
+        pdfs = [a for a in message.get("attachments") or [] if a.get("mime") == "application/pdf" and "drawn" not in a]
+        if not pdfs or not self._draws_for(chat, provider, model):
+            return False
+        changed = False
+        for a in pdfs:
+            try:
+                pages, pdf = await asyncio.to_thread(folderfiles.figure_pages, self.store.media(chat["id"], a["file"]),
+                                                     MAX_DRAWN)
+                pictures = await asyncio.to_thread(self.draw, pdf) if pages else []
+            except Exception as e:   # the hub can't draw them now: the model reads the PDF's text, as before
+                await emit({"type": "note", "text": "%s: its figures couldn't be drawn as pictures (%s), so the "
+                                                    "model gets its text." % (a["name"], _why(e))})
+                continue
+            a["drawn"] = [{"file": self.store.put_media(chat["id"], data, PICTURE_TYPES[mime]), "mime": mime,
+                           "page": page + 1} for (mime, data), page in zip(pictures, pages) if mime in PICTURE_TYPES]
+            changed = True
+        return changed
+
     def attach(self, chat_id: str, name: str, data: bytes) -> Dict[str, Any]:
-        """A picture, PDF or data file the person attached, kept with the chat for their next message: {name, file,
-        mime} and, for a PDF, its text (file) and pages; a data file becomes a run as it is attached (_attach_data).
-        ValueError: not a kind Kelvin takes, a PDF without text, or a data file Kelvin can't read (saying why)."""
+        """A picture, PDF, data file or text file the person attached, kept with the chat for their next message:
+        {name, file, mime} and, for a PDF, its text (file) and pages; a data file becomes a run as it is attached
+        (_attach_data); a text file (a script, a notebook, notes) is given to the model as text (_attach_text).
+        ValueError: not a kind Kelvin takes, a PDF without text, or a file Kelvin can't read (saying why)."""
         from .. import imports
         kind = _kind_of(data)
         name = re.sub(r"[\x00-\x1f/\\]+", "_", str(name or "attachment"))[-120:]
+        suffix = Path(name).suffix.lower()
+        if kind is None and suffix in TEXT_FILES:
+            return self._attach_text(chat_id, name, data)
         if kind is None and imports.takes(name, data):
-            return self._attach_data(chat_id, name, data)
+            try:
+                return self._attach_data(chat_id, name, data)
+            except ValueError:
+                if suffix != ".txt":
+                    raise
+                return self._attach_text(chat_id, name, data)   # not a table: notes
         if kind is None:
-            raise ValueError("Kelvin takes pictures (PNG, JPEG, GIF, WebP), PDFs and data files (%s)." % DATA_KINDS)
+            raise ValueError("Kelvin takes pictures (PNG, JPEG, GIF, WebP), PDFs, data files (%s) and text files "
+                             "(scripts, notebooks, notes)." % DATA_KINDS)
         out: Dict[str, Any] = {"name": name, "file": self.store.put_media(chat_id, data, kind), "mime":
                                {"pdf": "application/pdf", "png": "image/png", "jpg": "image/jpeg", "gif": "image/gif",
                                 "webp": "image/webp"}[kind]}
@@ -2006,6 +2110,24 @@ class ChatAgent:
                 raise ValueError("This PDF has almost no text (a scan?): attach pictures of its pages instead.")
             out.update(text=self.store.put_media(chat_id, text.encode("utf-8"), "txt"), pages=len(pages))
         return out
+
+    def _attach_text(self, chat_id: str, name: str, data: bytes) -> Dict[str, Any]:
+        """A text file the person attached: a script, a notebook (its cells, without their saved outputs), notes or
+        settings. Its text goes to the model with the message, marked as from outside the lab; nothing runs it."""
+        from .. import imports
+        if len(data) > MAX_TEXT_BYTES:
+            raise ValueError("%s is %d MB; Kelvin takes text files up to %d MB" % (
+                name, math.ceil(len(data) / 2 ** 20), MAX_TEXT_BYTES // 2 ** 20))
+        try:
+            text = imports.text_of(data, name)
+        except imports.DataError:
+            raise ValueError("%s is not a text file" % name)
+        if name.lower().endswith(".ipynb"):
+            text = notebook_text(text, name)
+        if not text.strip():
+            raise ValueError("%s is empty" % name)
+        file = self.store.put_media(chat_id, text.encode("utf-8"), "txt")
+        return {"name": name, "file": file, "mime": "text/plain", "text": file}
 
     def _attach_data(self, chat_id: str, name: str, data: bytes) -> Dict[str, Any]:
         """A data file the person attached (a table, a maker's file, a NumPy array, a TIFF), made a run as it is
@@ -2053,6 +2175,8 @@ class ChatAgent:
                     points = 0
                 one.update(mime="application/octet-stream", summary=str(a["summary"]), run=str(a.get("run") or "")[:80],
                            points=points, frames=bool(a.get("frames")))
+            elif ext == "txt":   # a text file: the file is its text
+                one.update(mime="text/plain", text=one["file"])
             out.append(one)
         return out
 
@@ -2062,13 +2186,15 @@ class ChatAgent:
         except (KeyError, OSError):
             return None
 
-    def _pictures(self, chat: Dict[str, Any], history: List[Dict[str, Any]], provider: Provider) -> List[Dict[str, Any]]:
+    def _pictures(self, chat: Dict[str, Any], history: List[Dict[str, Any]], provider: Provider,
+                  model: str = "") -> List[Dict[str, Any]]:
         """The history as the model gets it: the latest pictures inline (for a model that sees them; captions
-        otherwise), and the text of PDFs the person attached. The chat itself keeps only the files' names."""
+        otherwise), and the text of PDFs and text files the person attached, with a PDF's pages that the hub drew
+        (_draw_attached). The chat itself keeps only the files' names."""
         if not any(m.get("attachments") or (m["role"] == "tool" and any(r.get("images") or r.get("documents")
                                                                          for r in m["results"])) for m in history):
             return history
-        sees = getattr(provider, "sees_images", False)
+        sees = sees_images(provider, model)
         left = MAX_PICTURES if sees else 0
         whole = MAX_DOCUMENTS if getattr(provider, "sees_pdfs", False) else 0
         out: List[Dict[str, Any]] = []
@@ -2110,6 +2236,16 @@ class ChatAgent:
                             texts.append("(%s: a data file the person attached, imported as they attached it)\n%s"
                                          % (a["name"], said))
                         continue
+                    if a.get("mime") == "text/plain":   # a script, a notebook, notes: its text, for every model
+                        try:
+                            body = self.store.media(chat["id"], a["text"]).decode("utf-8", "replace")
+                        except KeyError:
+                            continue
+                        if len(body) > MAX_ATTACHED_CHARS:
+                            body = body[:MAX_ATTACHED_CHARS] + "\n… (the rest is not shown: %d characters in all)" \
+                                % len(body)
+                        texts.append(OUTSIDE % ("%s, a file the person attached" % a["name"], body))
+                        continue
                     doc = self._document(chat["id"], a) if a.get("text") and whole > 0 and \
                         0 < int(a.get("pages") or 0) <= MAX_PDF_PAGES else None
                     if doc:   # the PDF itself, figures and all, for a model that reads PDFs
@@ -2125,8 +2261,16 @@ class ChatAgent:
                         if len(body) > MAX_ATTACHED_CHARS:
                             body = body[:MAX_ATTACHED_CHARS] + "\n… (the rest of its %d pages is not shown)" % a.get(
                                 "pages", 0)
-                        texts.append(OUTSIDE % ("%s, a PDF the person attached (its text; figures are not "
-                                                "included)" % a["name"], body))
+                        drawn = []   # its pages with figures, as the hub drew them
+                        for d in (a.get("drawn") or []) if sees else []:
+                            p = self._picture(chat["id"], d) if left > 0 else None
+                            if p:
+                                pictures.append(p)
+                                left -= 1
+                                drawn.append(str(d.get("page")))
+                        texts.append(OUTSIDE % ("%s, a PDF the person attached (its text; %s)" % (
+                            a["name"], "page%s %s also as pictures" % ("s" if len(drawn) > 1 else "", ", ".join(drawn))
+                            if drawn else "figures are not included"), body))
                     elif a["mime"].startswith("image/"):
                         p = self._picture(chat["id"], a) if left > 0 else None
                         if p:

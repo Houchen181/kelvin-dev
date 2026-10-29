@@ -106,8 +106,8 @@ def test_attached_photos_and_pdfs(tmp_path):
 
     def attach(agent, chat_id):
         out = [agent.attach(chat_id, "wiring.png", photo), agent.attach(chat_id, "sheet.pdf", sheet)]
-        with pytest.raises(ValueError):
-            agent.attach(chat_id, "notes.txt", b"just text")
+        with pytest.raises(ValueError):   # notes.txt is taken as text now (test_attached_files); bytes aren't
+            agent.attach(chat_id, "firmware.bin", b"\x00\x01just bytes")
         return agent.check_attachments(chat_id, out)
     provider = Seeing([[{"type": "text", "text": "The wiring looks right."}]])
     seen = []

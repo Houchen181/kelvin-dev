@@ -2891,14 +2891,17 @@
     return next;
   }
 
-  // ------------------------------------------------------------------ attached pictures, PDFs and data files
+  // ------------------------------------------------------------------ attached pictures, PDFs, data and text files
   const ATT = { items: [] };
   // data files: each becomes a run as it is attached, which Kelvin's tools read (imports.py)
   const DATA_FILE = /\.(csv|tsv|txt|dat|asc|xlsx|xlsm|mpt|mpr|dta|npy|npz|tiff?|spe)$/i;
   const isData = (f) => DATA_FILE.test(f.name || "");
+  // text files: scripts, notebooks, notes and settings, given to the model as text (agent.py TEXT_FILES)
+  const TEXT_FILE = /\.(pyw?|ipynb|m|jl|r|c|h|cpp|hpp|cs|java|js|ts|sh|ps1|bat|cmd|vb|bas|ino|pro|ipf|tex|bib|md|rst|log|json|ya?ml|toml|ini|cfg|conf|xml|html?)$/i;
+  const isText = (f) => TEXT_FILE.test(f.name || "");
   function addFiles(list) {
     for (const f of list) {
-      if (!isData(f) && !/^image\//.test(f.type) && f.type !== "application/pdf") { toast((f.name || "That file") + ": Kelvin takes pictures, PDFs and data files (CSV, Excel, NumPy, TIFF, BioLogic, Gamry, Arbin)."); continue; }
+      if (!isData(f) && !isText(f) && !/^image\//.test(f.type) && f.type !== "application/pdf") { toast((f.name || "That file") + ": Kelvin takes pictures, PDFs, data files (CSV, Excel, NumPy, TIFF…) and text files (scripts, notebooks, notes)."); continue; }
       if (ATT.items.length >= 10) { toast("Up to 10 files with one message."); break; }
       ATT.items.push(f);
     }
@@ -2914,7 +2917,7 @@
     updateSend();
   }
   async function shrink(file) {   // a phone's photo is megabytes; models read about 1600 pixels across
-    if (isData(file) || file.type === "application/pdf" || file.type === "image/gif") return file;   // a TIFF's numbers stay as they are
+    if (isData(file) || isText(file) || file.type === "application/pdf" || file.type === "image/gif") return file;   // a TIFF's numbers stay as they are
     let bmp;
     try { bmp = await createImageBitmap(file); } catch (e) { throw new Error((file.name || "The picture") + ": Kelvin can't read this picture. Save it as JPEG or PNG."); }
     const scale = Math.min(1, 1568 / Math.max(bmp.width, bmp.height));
@@ -3340,9 +3343,18 @@
         try { const r = await api("/api/services/" + s.id + "/test", { body: {} }); out.textContent = (r.ok ? "Works: " : "Problem: ") + r.message; }
         catch (e) { out.textContent = e.message; }
       });
+      // do its models see pictures: auto (Kelvin finds out, model by model: web/vision.py), or the person says
+      const pictures = h("select", { class: "svc-pictures", "aria-label": "Pictures for " + s.name,
+        title: "Auto: Kelvin finds out which of its models see pictures" },
+        new Option("Pictures: auto", ""), new Option("Pictures: on", "on"), new Option("Pictures: off", "off"));
+      pictures.value = s.pictures || "";
+      pictures.addEventListener("change", async () => {
+        try { const r = await api("/api/services/" + s.id, { method: "PATCH", body: { pictures: pictures.value } }); renderServices(r.services); }
+        catch (e) { $("svc-hint").textContent = e.message; pictures.value = s.pictures || ""; }
+      });
       return h("li", { class: "memory-note" }, h("span", { class: "memory-kind" }, "service"),
         h("div", { class: "memory-body" }, h("span", {}, s.name), out),
-        h("span", { class: "card-actions" }, test),
+        h("span", { class: "card-actions" }, pictures, test),
         rowButton("trash", "Remove " + s.name, async () => {
           if (!confirm("Remove " + s.name + " and its key from Kelvin?")) return;
           try { const r = await api("/api/services/" + s.id, { method: "DELETE" }); renderServices(r.services); refreshModels(r); }

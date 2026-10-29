@@ -1,7 +1,8 @@
 """GPT models, local models behind any OpenAI-compatible server (Ollama, vLLM, LM Studio), and other services that
 speak the same API (OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI, gateways; see services.py).
 
-Uses the Chat Completions API, which all of them speak.
+Uses the Chat Completions API, which all of them speak. Pictures go to OpenAI's own models, and to other services'
+models that see them, model by model (vision.py); one that refuses a picture gets the message without it.
 """
 from __future__ import annotations
 
@@ -17,6 +18,37 @@ from .base import (DOCUMENTS_NOTE, PICTURES_NOTE, Emit, ModelInfo, Provider, Tur
 
 _SKIP = ("audio", "realtime", "tts", "transcribe", "image", "search", "embedding", "instruct", "moderation",
          "dall-e", "whisper", "davinci", "babbage")
+REFUSALS = (400, 404, 415, 422)   # how services say a model takes no pictures (OpenRouter: 404, no such endpoint)
+# what such a refusal says (DeepSeek: unknown variant `image_url`; vLLM: not a multimodal model), unlike a request
+# that was only too long: a model is remembered as seeing no pictures only for these
+PICTURE_WORDS = ("image", "vision", "multimodal", "multi-modal", "modalit", "picture", "visual")
+REFUSED_NOTE = "This model can't see pictures, so they weren't shown to it."
+LEFT_OUT_NOTE = "The service refused this message with its pictures, so they weren't shown to the model this time."
+
+
+def _has_pictures(messages: List[Dict[str, Any]]) -> bool:
+    return any(isinstance(m.get("content"), list) and any(p.get("type") == "image_url" for p in m["content"])
+               for m in messages)
+
+
+def _about_pictures(e: Exception) -> bool:
+    said = "%s %s" % (e, json.dumps(getattr(e, "body", None), default=str))
+    return any(w in said.lower() for w in PICTURE_WORDS)
+
+
+def _without_pictures(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The request again for a model that refused its pictures: each message says how many it doesn't show."""
+    out = []
+    for m in messages:
+        parts = m.get("content")
+        n = sum(1 for p in parts if p.get("type") == "image_url") if isinstance(parts, list) else 0
+        if n:
+            kept = [p for p in parts if p.get("type") != "image_url"] + [{"type": "text", "text": "(%s not shown: "
+                    "the model didn't take pictures)" % ("a picture" if n == 1 else "%d pictures" % n)}]
+            m = dict(m, content=kept if any(p.get("type") != "text" for p in kept)
+                     else "\n\n".join(p["text"] for p in kept))
+        out.append(m)
+    return out
 
 
 def _file(doc: Dict[str, str]) -> Dict[str, Any]:
@@ -79,7 +111,10 @@ class OpenAIProvider(Provider):
     def __init__(self, name: str, label: str, api_key: Optional[str], base_url: Optional[str] = None,
                  models: Optional[List[str]] = None, models_url: Optional[str] = None, exclude: Iterable[str] = (),
                  tools_only: bool = False, headers: Optional[Dict[str, str]] = None,
-                 fetch: Callable[[str, Optional[str]], Any] = _fetch_json):
+                 fetch: Callable[[str, Optional[str]], Any] = _fetch_json, preset: str = "", pictures: str = "",
+                 vision: Any = None):
+        """preset: the service Kelvin knows it as (services.py; for the hub's list of models that see pictures).
+        pictures: the person's switch for the service, "on" or "off" ("": model by model). vision: vision.Vision."""
         self.name, self.label = name, label
         self._static = [m for m in (models or []) if m]
         self.models_url = models_url
@@ -93,8 +128,22 @@ class OpenAIProvider(Provider):
                                              default_headers=headers or None)
         self._cache: Optional[List[ModelInfo]] = None
         self.can_search = name == "openai" and not base_url   # OpenAI's own web search (local services have none)
-        self.sees_images = name == "openai" and not base_url  # other services may serve models that don't
+        self.sees_images = name == "openai" and not base_url  # all of OpenAI's own; another service's, model by model
         self.sees_pdfs = self.sees_images                    # OpenAI's models read PDFs as files
+        self.preset = preset or name
+        self.pictures = pictures if pictures in ("on", "off") else ""
+        self.vision = vision
+        self._inputs: Dict[str, bool] = {}   # what the service's own list says: does the model take pictures?
+
+    def model_sees_images(self, model: str) -> bool:
+        """Whether Kelvin sends this model pictures (vision.py): unknown ones get them, and fall back if they refuse."""
+        if self.sees_images or self.pictures:
+            return self.sees_images or self.pictures == "on"
+        if self.vision is not None and self.vision.refused(self.name, model):
+            return False
+        if model in self._inputs:
+            return self._inputs[model]
+        return (self.vision.hub_says(self.preset, model) if self.vision is not None else None) is not False
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """OpenAI's web search (the Responses API's web_search tool): the pages it cited, with its notes."""
@@ -135,6 +184,10 @@ class OpenAIProvider(Provider):
                 supported = getattr(m, "supported_parameters", None)
                 if self.tools_only and supported is not None and "tools" not in supported:
                     continue   # Kelvin works through tools; a model that cannot call them is no use here
+                arch = getattr(m, "architecture", None)   # OpenRouter's: the inputs each model takes
+                inputs = arch.get("input_modalities") if isinstance(arch, dict) else None
+                if isinstance(inputs, list):
+                    self._inputs[mid] = "image" in inputs
                 found.append((getattr(m, "created", 0) or 0, mid))
             ordered = sorted(found, reverse=True)
             if self.name not in ("openai", "local"):
@@ -148,7 +201,19 @@ class OpenAIProvider(Provider):
         if tools:   # an empty list is refused by OpenAI and others: leave it out (e.g. for a second opinion)
             request["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                                   "parameters": t["schema"]}} for t in tools]
-        response = await self.client.chat.completions.create(**request)
+        left_out = ""
+        try:
+            response = await self.client.chat.completions.create(**request)
+        except openai.APIStatusError as e:   # a model that takes no pictures: the same request without them
+            if e.status_code not in REFUSALS or self.sees_images or not _has_pictures(request["messages"]):
+                raise
+            request["messages"] = _without_pictures(request["messages"])
+            response = await self.client.chat.completions.create(**request)   # its own error, if it fails too
+            left_out = LEFT_OUT_NOTE
+            if _about_pictures(e):   # it said so: remembered, so the model gets captions from now on
+                left_out = REFUSED_NOTE
+                if self.vision is not None:
+                    self.vision.refuse(self.name, model)
         text: List[str] = []
         calls: Dict[int, Dict[str, str]] = {}
         finish = None
@@ -191,4 +256,6 @@ class OpenAIProvider(Provider):
             result.stop_reason, result.note = "refusal", "The model declined this request."
         elif result.tool_calls:
             result.stop_reason = "tool_calls"
+        if left_out:
+            result.note = "%s %s" % (result.note, left_out) if result.note else left_out
         return result

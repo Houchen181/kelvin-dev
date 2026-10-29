@@ -52,7 +52,7 @@ from .qr import QR
 from .relay import RelayLink
 from .remote import (API as PHONE_API, ROLES, Remote, addresses, allow_through_firewall, allowed, firewall_state,
                      pairing_link, remote_host_ok)
-from .providers.base import Provider
+from .providers.base import Provider, sees_images
 from .settings import Settings, default_model
 from .store import ChatStore
 
@@ -84,17 +84,24 @@ def make_providers(settings: Settings, signin: Optional[SignIn] = None) -> Dict[
         "openai": OpenAIProvider("openai", "GPT", settings.get("openai_api_key")),
         "gemini": GeminiProvider(settings.get("gemini_api_key")),
     }
+    from .vision import Vision
+
+    def hub() -> Optional[Tuple[str, str]]:   # the hub's list of models that see pictures, for a person signed in
+        token, address = settings.get("account_token"), settings.account_hub or central.DEFAULT_HUB
+        return (address, token) if token and address else None
+    vision = Vision(Path(settings.path).parent if settings.path else None, hub)
     if settings.get("local_base_url"):
         models = [m.strip() for m in (settings.get("local_models") or "").split(",")]
         providers["local"] = OpenAIProvider("local", "Local", settings.get("local_api_key"),
-                                            base_url=settings.get("local_base_url"), models=models)
+                                            base_url=settings.get("local_base_url"), models=models, vision=vision)
     from .services import PRESETS
     for s in settings.services:   # OpenRouter, OpenCode, DeepSeek... each under its own name
         p = PRESETS.get(s.get("preset", "custom"), PRESETS["custom"])
         providers[s["id"]] = OpenAIProvider(
             s["id"], s["name"], settings.service_key(s), base_url=s["base_url"],
             models=[m.strip() for m in (s.get("models") or "").split(",")], models_url=p.get("models_url"),
-            exclude=p.get("exclude", ()), tools_only=p.get("tools_only", False), headers=p.get("headers"))
+            exclude=p.get("exclude", ()), tools_only=p.get("tools_only", False), headers=p.get("headers"),
+            preset=s.get("preset", "custom"), pictures=s.get("pictures", ""), vision=vision)
     if signin is not None and signin.status()["plan"]:   # ChatGPT models on the user's ChatGPT plan
         from .providers.chatgpt_provider import ChatGPTProvider
         providers["chatgpt"] = ChatGPTProvider(signin)
@@ -223,11 +230,11 @@ def shown(message: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def unseen_pictures(provider: Provider, attached: List[Dict[str, Any]]) -> Optional[str]:
-    """What to tell a person who sends pictures to a model that can't see them (most local models): said as they
-    send them, not learnt from an answer about a picture the model never saw."""
+def unseen_pictures(provider: Provider, model: str, attached: List[Dict[str, Any]]) -> Optional[str]:
+    """What to tell a person who sends pictures to a model that can't see them (vision.py): said as they send
+    them, not learnt from an answer about a picture the model never saw."""
     names = [str(a.get("name") or "the picture") for a in attached if str(a.get("mime") or "").startswith("image/")]
-    if not names or getattr(provider, "sees_images", False):
+    if not names or sees_images(provider, model):
         return None
     return ("The model can't see pictures through %s: it gets only the name of %s. To have a model look at %s, pick "
             "one that sees pictures (such as Claude, GPT or Gemini with an API key)."
@@ -678,6 +685,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """People sign in with their central Kelvin account, once this computer knows the hub (else local
         accounts, as before)."""
         return accounts is not None and bool(hub_address())
+
+    def draw_pages(pdf: bytes) -> List[Tuple[str, bytes]]:
+        """A PDF's pages as pictures, drawn by the Kelvin hub (which keeps nothing), for a model that sees pictures
+        but can't read PDFs (agent.py). RuntimeError: no one is signed in to the hub, or it can't draw them now."""
+        token = settings.get("account_token") if central_on() else None
+        if not token:
+            raise RuntimeError("Kelvin isn't signed in to the Kelvin hub")
+        try:
+            return central.Central(hub_address()).draw_pages(token, pdf)
+        except (central.Unreachable, central.CentralError) as e:
+            raise RuntimeError(str(e))
+
+    agent.draw = draw_pages
 
     def central_sign_in(email: str, password: str, link: Optional[str] = None, link_password: str = "",
                         old_password: str = "", answer: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -1696,10 +1716,17 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                                  models=models))
 
     async def service_view(request: Request) -> Response:
+        """DELETE: remove the service. PATCH {pictures: "on", "off" or "" (model by model)}: do its models see
+        pictures."""
         try:
-            settings.remove_service(request.path_params["service_id"])
+            if request.method == "PATCH":
+                settings.service_pictures(request.path_params["service_id"], (await request.json()).get("pictures"))
+            else:
+                settings.remove_service(request.path_params["service_id"])
         except KeyError as e:
             return error(404, e.args[0])
+        except (ValueError, AttributeError) as e:
+            return error(400, str(e))
         if providers is None:
             agent.providers = make_providers(settings, signin)
         models = await agent.models()
@@ -2693,7 +2720,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         except (KeyError, ValueError) as e:
             return error(400, e.args[0])
         queue: asyncio.Queue = asyncio.Queue()
-        unseen = unseen_pictures(provider, attached)
+        unseen = unseen_pictures(provider, model.partition(":")[2], attached)
 
         async def emit(event: Dict[str, Any]) -> None:
             await queue.put(event)
@@ -3034,7 +3061,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/hub/disconnect", hub_disconnect, methods=["POST"]),
         Route("/api/hub/sync", hub_sync, methods=["POST"]),
         Route("/api/services", services_view, methods=["GET", "POST"]),
-        Route("/api/services/{service_id}", service_view, methods=["DELETE"]),
+        Route("/api/services/{service_id}", service_view, methods=["DELETE", "PATCH"]),
         Route("/api/services/{service_id}/test", service_test, methods=["POST"]),
         Route("/api/cards", cards_view, methods=["GET", "POST"]),
         Route("/api/cards/check", card_check, methods=["POST"]),

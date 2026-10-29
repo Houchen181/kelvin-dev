@@ -63,6 +63,13 @@ class Provider:
         raise NotImplementedError
 
 
+def sees_images(provider: Any, model: str) -> bool:
+    """Whether this model takes pictures: model by model where a service's models differ (model_sees_images,
+    vision.py), else all of the provider's models or none (sees_images)."""
+    check = getattr(provider, "model_sees_images", None)
+    return bool(check(model)) if callable(check) else bool(getattr(provider, "sees_images", False))
+
+
 def data_url(image: Dict[str, str]) -> str:
     return "data:%s;base64,%s" % (image["mime"], image["data"])
 

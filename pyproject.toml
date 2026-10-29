@@ -27,7 +27,8 @@ ocean = ["seabreeze"]           # Ocean Insight spectrometers
 basler = ["pypylon"]            # Basler cameras
 pylablib = ["pylablib"]         # attocube ANC300/ANC350, Andor Shamrock/Kymera spectrographs
 desktop = ["kelvin-lab[web,hardware]", "pywebview>=5"]
-hub = ["starlette", "uvicorn", "websockets>=13"]  # the Kelvin hub server (accounts, the phones' relay): `kelvin-hub`
+hub = ["starlette", "uvicorn", "websockets>=13",  # the Kelvin hub server (accounts, the phones' relay): `kelvin-hub`
+       "pypdfium2>=4"]   # draws PDF pages as pictures for Kelvins (hub/pdfdraw.py); never in the app
 dev = ["pytest>=6", "httpx", "pypdf>=4"]
 
 [project.scripts]

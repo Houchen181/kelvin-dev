@@ -707,6 +707,8 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .service-form input, .service-form select { min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 8px;
   background: var(--raised); color: var(--text); font-size: 13.5px; }
 .service-form input[readonly] { color: var(--muted); }
+.svc-pictures { border: 1px solid transparent; background: none; border-radius: 8px; padding: 3px 4px; color: var(--text-2); font-size: 13px; cursor: pointer; }
+.svc-pictures:hover { background: var(--hover); }
 @media (max-width: 560px) { .service-form { grid-template-columns: 1fr; } .service-form > * { grid-column: auto !important; } }
 a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .chatgpt-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 4px; }

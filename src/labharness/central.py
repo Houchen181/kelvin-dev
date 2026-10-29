@@ -8,15 +8,19 @@ Kelvin asks the hub (the computer's hub address, Settings) to check the email an
 A password changed elsewhere (another computer, or a reset by mail) takes effect here the next time Kelvin reaches
 the hub. Keys sealed with the old password stay unreadable unless the person gives the old one once.
 
-Only accounts: Kelvin shares no data with the hub from here (that is web/hubsync.py, switched off for now)."""
+Accounts, and two things for chats: the hub's list of models that see pictures (web/vision.py), and PDF pages it draws
+as pictures for a model that sees pictures but can't read PDFs, which it keeps nothing of (web/agent.py: never pages
+from incognito chats or unshared work). Kelvin shares no data with the hub from here (that is web/hubsync.py, switched
+off for now)."""
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import socket
 import ssl
 from http.client import HTTPException
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ._version import __version__
 from .hub import client
@@ -27,6 +31,7 @@ NETWORK = (OSError, HTTPException, ValueError)   # the hub can't be reached, or 
 # when it moves to its permanent server, an update changes this (and Account.defaultHub in the iPhone app). Settings
 # (account_hub) can name another, for development.
 DEFAULT_HUB = "https://kelvin.tail269ee5.ts.net"
+PICTURE_KINDS = {"image/png": b"\x89PNG\r\n\x1a\n", "image/jpeg": b"\xff\xd8\xff"}   # what the hub's drawn pages are
 
 Http = Callable[..., Tuple[int, Any]]
 
@@ -86,11 +91,15 @@ class Central:
     def _post(self, path: str, body: Dict[str, Any], token: Optional[str] = None,
               missing: Optional[str] = None) -> Dict[str, Any]:
         """missing: what to say when the hub doesn't have this yet (an older hub answers 404)."""
-        headers = {"Content-Type": "application/json"}
+        return self._send("POST", path, json.dumps(body).encode("utf-8"), token, "application/json", missing)
+
+    def _send(self, method: str, path: str, data: Optional[bytes], token: Optional[str] = None,
+              kind: str = "application/json", missing: Optional[str] = None) -> Dict[str, Any]:
+        headers = {"Content-Type": kind} if data is not None else {}
         if token:
             headers["Authorization"] = "Bearer %s" % token
         try:
-            status, answer = self.http("POST", self.base_url + path, json.dumps(body).encode("utf-8"), headers)
+            status, answer = self.http(method, self.base_url + path, data, headers)
         except NETWORK as e:
             log.warning("the Kelvin hub %s: %r", self.base_url, e)   # all of it, in kelvin.log
             raise Unreachable("Kelvin can't reach the Kelvin hub: %s" % why(e))
@@ -98,9 +107,33 @@ class Central:
             return answer
         if status == 404 and missing:
             raise CentralError(missing, 404)
+        if status == 501 and isinstance(answer, dict) and answer.get("error"):   # a hub that can't do this one thing
+            raise CentralError(str(answer["error"]), 501, answer)
         if status == 404 or status >= 500 or not isinstance(answer, dict):   # not a hub, or not up (a tunnel's 530...)
             raise Unreachable("The Kelvin hub isn't answering (%s)." % status)
         raise CentralError(str(answer.get("error") or "The hub said no (%s)." % status), status, answer)
+
+    def pictures(self, token: str) -> Dict[str, Any]:
+        """Which models see pictures, service by service: {"services": {"opencode": {"yes": [...], "no": [...]}}}
+        (web/vision.py)."""
+        return self._send("GET", "/api/models/pictures", None, token,
+                          missing="This Kelvin hub has no list of models that see pictures yet.")
+
+    def draw_pages(self, token: str, pdf: bytes) -> List[Tuple[str, bytes]]:
+        """A PDF's pages drawn as pictures by the hub, which keeps nothing: [(mime, bytes)], one per page."""
+        answer = self._send("POST", "/api/pdf/pages", pdf, token, "application/pdf",
+                            missing="This Kelvin hub can't draw PDF pages yet.")
+        out = []
+        for page in answer.get("pages") or []:
+            mime = page.get("mime") if isinstance(page, dict) else None
+            try:
+                data = base64.b64decode(page.get("data") or "", validate=True) if mime in PICTURE_KINDS else b""
+            except ValueError:
+                data = b""
+            if not data.startswith(PICTURE_KINDS.get(mime, b"\0")):
+                raise CentralError("The hub's pictures of the pages weren't pictures.", 502)
+            out.append((mime, data))
+        return out
 
     def sign_in(self, email: str, password: str, installation: str) -> Dict[str, Any]:
         return self._post("/api/signin", {"email": email, "password": password, "installation": kelvin(installation)})

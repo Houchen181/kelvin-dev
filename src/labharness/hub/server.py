@@ -42,6 +42,7 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Redire
 from starlette.routing import Route
 
 from .._version import __version__
+from . import drawing
 from . import relay as relaying
 from .db import DEFAULTS, SESSION_TTL, Busy, Hub, HubError, TooMuch, installation, loopback, log, previous_ids
 
@@ -126,6 +127,8 @@ your labs, the Kelvins you connected, and what they share: normal projects, unfi
 conversations, and runs with their files.</li>
 <li><b>What it never receives:</b> unpublished, confidential or model-limited projects, incognito chats, API keys,
 and ChatGPT or Claude Code sign-ins.</li>
+<li><b>PDF pages to draw:</b> when your chat's model sees pictures but can't read PDFs, Kelvin sends the hub the
+pages it needs, from shared work only, and gets them back as pictures. The hub keeps nothing of them.</li>
 <li><b>Who sees your shared work:</b> you, and the members of the lab it was shared in while you are a member too.
 Leaving a lab takes your work out of its view.</li>
 <li><b>Records:</b> the hub logs sign-ins, connections and changes, with the IP address, for security.</li>
@@ -139,7 +142,8 @@ TERMS_ACCOUNTS = """<p class="note"><b>Draft.</b> The Kelvin team must review th
 public.</p>
 <ul class="plain">
 <li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer.</li>
-<li>Your work stays on your computers: the hub receives no chats, projects, runs or data.</li>
+<li>Your work stays on your computers: the hub receives no chats, projects, runs or data, except PDF pages Kelvin
+asks it to draw as pictures, which it keeps nothing of.</li>
 <li>The Kelvin team runs the hub and may disable an account that abuses it.</li>
 <li>The hub is provided as it is, without warranty.</li>
 </ul>"""
@@ -151,6 +155,9 @@ the public.</p>
 the computers you sign in to Kelvin on: their name, operating system and Kelvin version, and when.</li>
 <li><b>What it never receives:</b> your work (chats, projects, runs, data), API keys, and ChatGPT or Claude Code
 sign-ins. They stay on your computers.</li>
+<li><b>PDF pages to draw:</b> the one exception. When your chat's model sees pictures but can't read PDFs, Kelvin
+sends the hub the pages it needs (never from incognito chats or unpublished, confidential or model-limited projects)
+and gets them back as pictures. The hub keeps nothing of them.</li>
 <li><b>Who sees your account:</b> you, and the Kelvin team, who run the hub. No other user does.</li>
 <li><b>Records:</b> the hub logs sign-ins and changes, with the IP address, for security.</li>
 <li><b>Your rights:</b> download your account with <b>Export</b>, and delete it with <b>Delete account</b>, both on
@@ -280,8 +287,9 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     operator_tries = Limiter(5, 900)
     operators: Dict[str, Dict[str, Any]] = {}   # operator sessions, in memory: a restart asks for the key again
     exported: Dict[int, float] = {}            # when each person last exported
-    in_flight: Dict[int, int] = {}             # each person's syncs and uploads running now
+    in_flight: Dict[int, int] = {}             # each person's syncs, uploads and drawings running now
     heavy_limit: Dict[str, Any] = {}           # the limiter for syncs and uploads, made on the event loop
+    pictures = drawing.PictureList(hub.home)   # which models see pictures (models.dev, once a day)
 
     # ------------------------------------------------------------------ helpers
 
@@ -910,7 +918,37 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     # ------------------------------------------------------------------ the API for connected Kelvins
 
     async def health(request: Request) -> Response:
-        return JSONResponse({"ok": True, "hub": __version__})
+        return JSONResponse({"ok": True, "hub": __version__, "draws_pdfs": drawing.can_draw()})
+
+    async def model_pictures(request: Request) -> Response:
+        """Which models see pictures, service by service, for a signed-in Kelvin (drawing.py):
+        {"at", "services": {"opencode": {"yes": [...], "no": [...]}, ...}}."""
+        if await app_of(request) is None:
+            return api_error("not connected", 401)
+        return JSONResponse(await call(pictures.current))
+
+    async def pdf_pages(request: Request) -> Response:
+        """A signed-in Kelvin's PDF pages (only those a model needs) drawn as pictures, for a model that sees pictures
+        but can't read PDFs: {"pages": [{"mime", "data"}]}. In a process of its own; the hub keeps nothing."""
+        app = await app_of(request)
+        if app is None:
+            return api_error("not connected", 401)
+        if hub.needs_consent(app["user"]):
+            return api_error("The hub's terms changed. Agree to them at %s/consent first." % hub.base_url, 403)
+        if not drawing.can_draw():
+            return api_error("This hub can't draw PDF pages (pypdfium2 isn't installed there).", 501)
+        user_id = app["user"]["id"]
+        if not take_turn(user_id):
+            return api_error("Too many at once from this account; try again in a moment.", 429)
+        try:
+            pages = await heavy(drawing.draw, await read_body(request, drawing.MAX_PDF))
+        except TooMuch as err:
+            return api_error(str(err), err.status)
+        except drawing.DrawError as err:
+            return api_error(str(err), 422)
+        finally:
+            end_turn(user_id)
+        return JSONResponse({"pages": pages})
 
     async def token(request: Request) -> Response:
         app = await app_of(request)
@@ -1402,6 +1440,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/api/password", api_password, methods=["POST"]),
         Route("/api/signout", api_signout, methods=["POST"]),
         Route("/api/account/delete", api_account_delete, methods=["POST"]),
+        Route("/api/models/pictures", model_pictures),
+        Route("/api/pdf/pages", pdf_pages, methods=["POST"]),
         *relay_routes,
         Route("/api/me", sharing_only(me)),
         Route("/api/sync", sharing_only(sync), methods=["POST"]),

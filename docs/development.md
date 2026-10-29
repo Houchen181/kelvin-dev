@@ -92,9 +92,9 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/eventlog.py` | Append-only event log; one folder per run (plan, snapshots, data, meta) |
 | `src/labharness/sim/` | Twins that answer the card's own commands, plus a toy sample |
 | `src/labharness/agent/` | MCP server (`server.py`), plain-text tool answers (`runtime.py`), approval page (`approval.py`, `ui.html`) |
-| `src/labharness/web/` | The portal: web API (`app.py`), chat loop (`agent.py`), short answers (`brevity.py`), one module per model provider (`providers/`), chats and settings, browser UI and the logo (`static/`) |
+| `src/labharness/web/` | The portal: web API (`app.py`), chat loop (`agent.py`), short answers (`brevity.py`), one module per model provider (`providers/`), which models see pictures (`vision.py`), chats and settings, browser UI and the logo (`static/`) |
 | `src/labharness/data/` | Kelvin's own instrument cards (`cards/instruments/`); `card_versions.json`, every version of the cards Kelvin brings; the portal's map and Kelvin's skills |
-| `src/labharness/hub/` | The Kelvin hub: online accounts across labs and the work Kelvins share (`db.py`), its web server and API (`server.py`, `kelvin-hub`), and a Kelvin's side of it (`client.py`; in the portal, `web/hubsync.py`: Settings → Account → Kelvin hub, and the background sync). See [hub.md](hub.md) |
+| `src/labharness/hub/` | The Kelvin hub: online accounts across labs and the work Kelvins share (`db.py`), its web server and API (`server.py`, `kelvin-hub`), the list of models that see pictures and PDF pages drawn as pictures (`drawing.py`, `pdfdraw.py`), and a Kelvin's side of it (`client.py`; in the portal, `web/hubsync.py`: Settings → Account → Kelvin hub, and the background sync). See [hub.md](hub.md) |
 | `src/labharness/desktop.py` | The desktop app: the portal in a native window, one copy at a time, `--self-test` |
 | `packaging/` | PyInstaller recipe (`kelvin.spec`), Windows installer (`kelvin.iss`), app icons (`make_icons.py`, `icons/`, and the iPhone app's) |
 | `ios/` | Kelvin for iPhone: SwiftUI app, the KelvinKit package, XcodeGen spec. See [ios.md](ios.md) |

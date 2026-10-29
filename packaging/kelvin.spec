@@ -75,7 +75,9 @@ a = Analysis(
     excludes=["tkinter", "pytest", "PyInstaller",
               # makers' instrument libraries, whatever this computer has installed: Kelvin installs them on demand
               "seabreeze", "pypylon", "pylablib", "nidaqmx", "zhinst", "MultiPyVu", "qick", "Pyro4",
-              "pulsestreamer", "spinapi", "TimeTagger", "Swabian", "scipy", "pandas"],
+              "pulsestreamer", "spinapi", "TimeTagger", "Swabian", "scipy", "pandas",
+              # the hub draws PDF pages for Kelvins (hub/pdfdraw.py): the app itself never does
+              "pypdfium2", "pypdfium2_raw"],
     noarchive=False,
 )
 # pypylon brings Basler's image-processing plugins (vTools, ~230 MB); Kelvin only grabs frames, so they stay out

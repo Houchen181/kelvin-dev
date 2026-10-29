@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 BUILT_IN = {"anthropic", "openai", "gemini", "local"}
 MAX_SERVICES = 12
+PICTURES = ("", "on", "off")   # does the service's model see pictures: model by model (vision.py), or the person says
 
 # id: name, base URL, where the model list is (if not base/models), which listed models to leave out, whether only
 # models that report tool support are shown, the environment variable a key may come from, a hint.
@@ -61,8 +62,15 @@ def check_url(url: str) -> str:
     return url
 
 
+def pictures_of(value: Any) -> str:
+    value = str(value or "")
+    if value not in PICTURES:
+        raise ValueError("pictures must be on, off or empty (model by model)")
+    return value
+
+
 def make(entry: Dict[str, Any], taken: List[str]) -> Dict[str, Any]:
-    """A checked service entry from the form: {preset, name, base_url, api_key, models}."""
+    """A checked service entry from the form: {preset, name, base_url, api_key, models, pictures}."""
     preset = str(entry.get("preset") or "custom")
     if preset not in PRESETS:
         raise ValueError("unknown service %r" % preset)
@@ -78,13 +86,16 @@ def make(entry: Dict[str, Any], taken: List[str]) -> Dict[str, Any]:
     key = str(entry.get("api_key") or "").strip()
     if not key and urllib.parse.urlparse(url).scheme == "https":
         raise ValueError("%s needs an API key" % name)
-    return {"id": sid, "preset": preset, "name": name, "base_url": url, "models": models, "api_key": key}
+    out = {"id": sid, "preset": preset, "name": name, "base_url": url, "models": models, "api_key": key}
+    pictures = pictures_of(entry.get("pictures"))
+    return dict(out, pictures=pictures) if pictures else out
 
 
 def view(entry: Dict[str, Any], key_from: Optional[str]) -> Dict[str, Any]:
     """What the browser may see: never the key."""
     return {"id": entry["id"], "preset": entry.get("preset", "custom"), "name": entry["name"],
-            "base_url": entry["base_url"], "models": entry.get("models", ""), "key": key_from}
+            "base_url": entry["base_url"], "models": entry.get("models", ""), "key": key_from,
+            "pictures": entry.get("pictures", "")}
 
 
 def presets_view() -> List[Dict[str, Any]]:
