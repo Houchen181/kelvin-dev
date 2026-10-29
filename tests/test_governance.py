@@ -516,6 +516,20 @@ def test_kelvins_own_changes_are_kept_as_its_own(lab):
         assert top["changes"][0]["text"].startswith("nvm added") and not top["safety"]   # Kelvin's mark: it asks
 
 
+def test_uninstalling_takes_the_pin_the_roles_and_the_history_too(tmp_path):
+    from labharness.uninstall import remove_data
+    home = tmp_path / "Kelvin"
+    acc, pin, roles = accounts_with_roles(home)
+    pin.set("2468")
+    roles.set({"Ada": "owner"}, pin, "2468", "Ada", acc)
+    roles.set_notify({"webhook": "https://ntfy.sh/secret", "email": {"password": "smtp-secret"}}, pin, "2468", "Ada")
+    (home / "lab.yaml").write_text(LAB, encoding="utf-8")
+    ConfigVersions(home).notice()
+    remove_data(home, revoke=False)
+    for gone in ("owner.json", "roles.json", "config-history", "accounts.json", "lab.yaml"):
+        assert not (home / gone).exists(), gone                         # the owner's copied secrets go with them
+
+
 def test_the_portal_asks_who_confirms_and_shows_the_history_and_the_roles():
     from labharness.web.app import STATIC
     js = (STATIC / "app.js").read_text(encoding="utf-8")
