@@ -411,6 +411,8 @@ def _run(flow: Flow, run: RunPart, number: int) -> None:
         rows.append(("Set up", "; ".join(run.setup)))
     if run.changes:
         rows.append(("Left changed", "; ".join(run.changes)))
+    if run.unread:
+        rows.append(("Not read at the end", "; ".join(run.unread)))
     rows.append(("Started by", run.operator))
     flow.heading("Conditions", 10, MUTED, before=4)
     flow.kv(rows)

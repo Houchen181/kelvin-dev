@@ -1,8 +1,10 @@
 """The lab notebook's raw record: an append-only event log and per-run folders (each run's data: rundata.py)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import os
 import re
 import threading
 from datetime import datetime
@@ -156,6 +158,24 @@ class RunRecord:
 
 
 RUN_NAME = re.compile(r"^\d{8}-\d{6}-[\w.-]*$")   # a run's folder is its id, as RunStore names it
+NAME_MAX = 40      # characters of the plan's name in a run's folder name; a longer name is cut and hashed
+PATH_MAX = 259     # Windows' longest path (MAX_PATH less its terminating NUL), unless long paths are switched on
+INSIDE_MAX = 48    # the longest name Kelvin writes inside a run's folder: frames/00001_<reading>.npy, report.pptx
+
+
+class RunFolderError(OSError):
+    """A run's folder couldn't be made, so the run did not start (nothing was set); the message says why in words."""
+
+
+def run_name(plan_name: str, most: int = NAME_MAX) -> str:
+    """The plan's part of a run's folder name: letters, digits and . _ - only, at most `most` characters. A longer
+    one keeps its start and a short hash of the whole name, so two long names stay apart (a 70-character plan title
+    once made a folder Windows could not create: l09, l10)."""
+    safe = re.sub(r"[^\w.-]+", "_", plan_name)
+    if len(safe) <= most:
+        return safe
+    digest = hashlib.sha1(plan_name.encode("utf-8")).hexdigest()[:6]
+    return (safe[:max(0, most - 7)].rstrip("._-") + "-" + digest).lstrip("-")
 
 
 class RunFolders:
@@ -235,22 +255,46 @@ class RunStore:
         self.root = Path(root) if root else None
         self.folders = folders
 
-    def create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None) -> RunRecord:
-        root = Path(folder) if folder and self.root else self.root
-        base = "%s-%s" % (datetime.now().strftime("%Y%m%d-%H%M%S"), re.sub(r"[^\w.-]+", "_", plan_name))
+    def _run_id(self, root: Optional[Path], plan_name: str) -> str:
+        """date-time-plan, the plan's part short enough that the run's folder and every file Kelvin keeps in it fit
+        in a Windows path (a deep data folder leaves less room: the plan's part shrinks to a hash, then goes)."""
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        most = NAME_MAX
+        if root is not None and os.name == "nt":
+            room = PATH_MAX - len(str(root)) - len(stamp) - 4 - INSIDE_MAX   # "\", "-", and "-2" for a taken name
+            most = min(most, max(0, room))
+        name = run_name(plan_name, most) if most >= 7 else ""
+        base = "%s-%s" % (stamp, name)
         run_id, n = base, 1
         while root and ((root / run_id).exists() or (self.folders is not None and self.folders.find(run_id))):
             n += 1
             run_id = "%s-%d" % (base, n)
+        return run_id
+
+    def create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None) -> RunRecord:
+        root = Path(folder) if folder and self.root else self.root
+        run_id = self._run_id(root, plan_name)
         if root is None or root == self.root:
-            return RunRecord(run_id, root / run_id if root else None, plan, operator)
+            return self._record(run_id, root / run_id if root else None, plan, operator)
         try:
             rec = RunRecord(run_id, root / run_id, plan, operator)
         except OSError as e:   # the chat's folder is away (a drive, a server): the run still keeps its data
-            rec = RunRecord(run_id, self.root / run_id, plan, operator)
+            run_id = self._run_id(self.root, plan_name)   # the data folder may be deeper than the chat's
+            rec = self._record(run_id, self.root / run_id, plan, operator)
             rec.moved = "the chat's folder %s could not be written (%s), so this run is in %s" % (
                 root, e.strerror or e, rec.path)
             return rec
         if self.folders is not None:
             self.folders.remember(root)
         return rec
+
+    @staticmethod
+    def _record(run_id: str, path: Optional[Path], plan: Dict[str, Any], operator: str) -> RunRecord:
+        try:
+            return RunRecord(run_id, path, plan, operator)
+        except OSError as e:   # nowhere to keep the run: it doesn't start, and says why (never a bare "tool error")
+            too_long = os.name == "nt" and path is not None and len(str(path)) + INSIDE_MAX > PATH_MAX
+            raise RunFolderError("Kelvin could not make the run's folder %s (%s)%s, so the run did not start and "
+                                 "nothing was set" % (path, e.strerror or e, (
+                                     ": the data folder's path is too long for Windows; choose a shorter one in "
+                                     "Settings, Data folder") if too_long else "")) from e

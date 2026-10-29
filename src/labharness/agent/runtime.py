@@ -23,7 +23,7 @@ import yaml
 from .. import frames
 from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
-from ..eventlog import EventLog, RunFolders, RunStore
+from ..eventlog import EventLog, RunFolderError, RunFolders, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, ConfigError, Envelope, load_lab_config
@@ -856,8 +856,11 @@ class LabRuntime:
         except PlanError as e:
             return "invalid plan: %s" % e, None
         meta = self._attribute(plan)
-        with self._device_protection(meta) as held:
-            report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"))
+        try:
+            with self._device_protection(meta) as held:
+                report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"))
+        except RunFolderError as e:   # nowhere to keep it: said in words, not a bare tool error (l09, l10)
+            return "not run: %s" % e, None
         made = self._auto_report(report.run_id)
         if report.run_id:
             summary = (report.analysis or {}).get("assessment") or report.message

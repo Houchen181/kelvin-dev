@@ -413,7 +413,7 @@ def _run_slides(run: RunPart, footer: str, start: int) -> List[Slide]:
                start + len(slides), footer)
     left: List[Para] = []
     for label, items in (("Swept", run.sweep), ("Measured", [", ".join(run.measured)] if run.measured else []),
-                         ("Set up", run.setup), ("Left changed", run.changes)):
+                         ("Set up", run.setup), ("Left changed", run.changes), ("Not read at the end", run.unread)):
         if items:
             left.append([(label, {"bold": True, "color": MUTED})])
             left += [_clip(i, 110) for i in items[:6]]

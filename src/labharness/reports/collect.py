@@ -56,6 +56,23 @@ def _numbers(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _unread(v: Any) -> bool:
+    """A setting the snapshot couldn't read: an instrument that stopped answering leaves "ERROR: ..." in its place."""
+    return v is None or isinstance(v, list) or (isinstance(v, str) and v.startswith("ERROR"))
+
+
+def _away_from_safe(spec: Optional[ParamSpec], v: Any) -> Optional[bool]:
+    """Whether a drive's recorded value is away from its safe value; None when that can't be told: not a drive, not
+    read (an error), or a reply the card doesn't know (a garbled one). A run cut short by a lost instrument has all
+    of these in its end snapshot, and its report must still be written (l08, l09: every aborted run's failed)."""
+    if spec is None or not spec.is_drive or _unread(v) or (spec.type == "bool" and not isinstance(v, (bool, int))):
+        return None
+    try:
+        return spec.distance(v) > 0
+    except (TypeError, ValueError):
+        return None
+
+
 class Collector:
     """Turns run ids into report parts. `lab` resolves units and safe values; `columns` gives a run's axes and
     measured columns (None when the run's instruments are not in this lab any more); `event_line` formats events."""
@@ -132,6 +149,7 @@ class Collector:
         part.away = self._away(start)
         part.found = self._found(start, plan)
         part.changes = self._changes(start, end)
+        part.unread = self._unread_at_end(end)
         t0, t1 = meta.get("started"), meta.get("finished")
         if t0:
             part.events = [self._line(e) for e in events if e.get("type") in RUN_EVENT_TYPES
@@ -251,11 +269,10 @@ class Collector:
                 continue
             parts = []
             for name, v in values.items():
-                if isinstance(v, list) or v is None or (isinstance(v, str) and v.startswith("ERROR")):
+                if _unread(v):
                     continue
                 key = "%s.%s" % (inst, name)
-                spec = self._spec(key)
-                away = spec is not None and spec.is_drive and spec.distance(v) > 0
+                away = _away_from_safe(self._spec(key), v)
                 parts.append("%s %s%s" % (name, self._show(key, v), "*" if away else ""))
             out.append((inst, ", ".join(parts)))
         return out
@@ -289,11 +306,8 @@ class Collector:
         out = []
         for inst, values in snapshot.items():
             for name, v in (values.items() if isinstance(values, dict) else []):
-                if isinstance(v, list) or v is None or (isinstance(v, str) and v.startswith("ERROR")):
-                    continue
                 key = "%s.%s" % (inst, name)
-                spec = self._spec(key)
-                if spec is not None and spec.is_drive and spec.distance(v) > 0:
+                if _away_from_safe(self._spec(key), v):
                     out.append("%s %s" % (key, self._show(key, v)))
         return out
 
@@ -304,12 +318,24 @@ class Collector:
                 continue
             for name, v in values.items():
                 key = "%s.%s" % (inst, name)
-                spec = self._spec(key)
-                if spec is None or not spec.is_drive:
-                    continue
                 before = (start.get(inst) or {}).get(name)
-                if before != v and spec.distance(v) > 0:
+                if before != v and _away_from_safe(self._spec(key), v):
                     out.append("%s %s → %s" % (key, self._show(key, before), self._show(key, v)))
+        return out
+
+    def _unread_at_end(self, end: Dict[str, Any]) -> List[str]:
+        """The instruments whose drives the end snapshot couldn't read, with why: where the run left them is not
+        known (an instrument unplugged or switched off mid-run)."""
+        out = []
+        for inst, values in end.items():
+            if not isinstance(values, dict):
+                continue
+            lost = [(name, v) for name, v in values.items()
+                    if isinstance(v, str) and v.startswith("ERROR")
+                    and getattr(self._spec("%s.%s" % (inst, name)), "is_drive", False)]
+            if lost:
+                why = lost[0][1][len("ERROR"):].lstrip(": ")
+                out.append("%s %s (%s)" % (inst, ", ".join(n for n, _ in lost), why[:120]))
         return out
 
     # ------------------------------------------------------------------ the whole report
