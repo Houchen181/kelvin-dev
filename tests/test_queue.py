@@ -116,7 +116,8 @@ def test_stop_pauses_and_chat_tools_answer_while_a_scan_runs(tmp_path):
     threading.Thread(target=hold, daemon=True).start()
     held.wait(2)
     t0 = time.time()
-    assert "running the queue" in rt.lab_status() and time.time() - t0 < 2.9
+    status = rt.lab_status()   # at once: what the scan holds isn't asked, its latest values are shown
+    assert time.time() - t0 < 2.9 and "busy now: the queue" in status and "smu (not read now" in status
 
 
 def test_queues_are_saved_and_loaded(tmp_path):

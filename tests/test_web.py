@@ -240,10 +240,12 @@ def test_stop_button_ends_a_running_turn(parts):
 
 def test_stop_ends_a_turn_whose_tool_an_instrument_holds_up(parts, monkeypatch):
     """An instrument that stops answering holds a tool call in its thread: the stop button still ends the turn at
-    once, and a later request answers that Kelvin is busy instead of hanging the chat."""
+    once, and a later request answers at once with what it can read, saying which instrument hasn't answered,
+    instead of hanging the chat."""
     from labharness.agent import runtime as runtime_module
     runtime, _, store = parts
     monkeypatch.setattr(runtime_module, "BUSY_WAIT_S", 0.5)
+    monkeypatch.setattr(runtime_module, "READ_WAIT_S", 1.0)
     release = threading.Event()
     backend = runtime.lab.instruments["smu"].backend
     query = backend.query
@@ -271,7 +273,7 @@ def test_stop_ends_a_turn_whose_tool_an_instrument_holds_up(parts, monkeypatch):
             t0 = time.time()
             await asyncio.wait_for(task, 3)
             stopped_in = time.time() - t0
-            busy = await asyncio.to_thread(runtime.lab_status)   # the hung call still holds the lab
+            busy = await asyncio.to_thread(runtime.lab_status)   # the hung call still reads the source
             return events, stopped_in, busy, agent.active
         finally:
             release.set()
@@ -281,7 +283,8 @@ def test_stop_ends_a_turn_whose_tool_an_instrument_holds_up(parts, monkeypatch):
     assert stopped_in < 2 and events[-1] == {"type": "turn_end", "reason": "stopped"} and active is None
     end = next(e for e in events if e["type"] == "tool_end")
     assert end["is_error"] and end["content"].startswith("stopped: the person pressed stop")
-    assert busy.startswith("Kelvin is still busy with reading status")
+    assert "\nsmu (not read now: another reading of it has waited 1 s for its answer" in busy, busy
+    assert "\nlockin: " in busy   # the others are read
 
 
 LOOK_PLAN = "plan: look\nrepeat: 3\nmeasure: [lockin.X]\n"
@@ -328,6 +331,8 @@ def test_two_chats_answer_at_once_and_each_run_is_filed_under_its_own(parts, tmp
 
 
 def test_a_chat_waits_for_another_chats_lab_call_then_says_so(parts, monkeypatch):
+    """Changes to the lab go one chat's call at a time; a reading from another chat meanwhile still answers, with
+    the latest values of the instrument the change uses (lablock.py)."""
     from labharness.web import agent as agent_module
     from labharness.web.agent import Busy
     runtime, _, store = parts
@@ -340,9 +345,13 @@ def test_a_chat_waits_for_another_chats_lab_call_then_says_so(parts, monkeypatch
         release.wait(20)
         return query(cmd, *a, **k)
     monkeypatch.setattr(backend, "query", hung)
-    status = [{"type": "tool_call", "id": "s1", "name": "lab_status", "input": {}}]
+    change = [{"type": "tool_call", "id": "s1", "name": "set_value",
+               "input": {"instrument": "smu", "parameter": "V", "value": 0.1}}]
+    other = [{"type": "tool_call", "id": "s2", "name": "set_value",
+              "input": {"instrument": "lockin", "parameter": "amplitude", "value": 0.02}}]
+    status = [{"type": "tool_call", "id": "s3", "name": "lab_status", "input": {}}]
     talk = [{"type": "text", "text": "Just talking."}]
-    providers = {"a": Scripted([status, DONE]), "b": Scripted([status, DONE]), "c": Scripted([talk])}
+    providers = {"a": Scripted([change, DONE]), "b": Scripted([other, status, DONE]), "c": Scripted([talk])}
 
     async def main():
         agent = ChatAgent(runtime, store, build_server(runtime), providers)
@@ -371,8 +380,10 @@ def test_a_chat_waits_for_another_chats_lab_call_then_says_so(parts, monkeypatch
             await agent.close()
 
     events, ids, waiting, stopped_b, stopped_a = anyio.run(main)
-    b_end = next(e for e in events[ids["b"]] if e["type"] == "tool_end")
+    b_end, b_status = [e for e in events[ids["b"]] if e["type"] == "tool_end"]
     assert b_end["content"].startswith("not run: another conversation (“how is the lab?”) is working the lab")
+    assert "\nsmu (not read now: it is in use: setting smu.V" in b_status["content"], b_status["content"]
+    assert "\nlockin: " in b_status["content"]   # read now, beside A's change
     assert events[ids["c"]][-1] == {"type": "turn_end", "reason": "end"}   # talking needs no lab
     assert waiting and not stopped_b and stopped_a   # B had finished; A's stop ends A
     assert events[ids["a"]][-1] == {"type": "turn_end", "reason": "stopped"}

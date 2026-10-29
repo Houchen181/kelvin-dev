@@ -92,6 +92,10 @@ You are connected to a physics lab through Kelvin.
   between them (step: name, set: {...}, stabilize: {read, within, for, timeout}, wait: seconds), then queue_start.
   A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
   queued and roughly how long it takes; queue_show follows it.
+- Kelvin changes the lab one thing at a time, from any chat or client. While a run, a queue scan or another change
+  goes on, readings, lookups, the queue and watches still work: an instrument that work uses isn't asked, and
+  lab_status and get_value give its latest values with how old they are. When the person asks you to stop, call
+  stop_run: it ends the run, ramp or queue scan at once, whoever started it.
 - When the person names an instrument connected to this computer, or wants to use one the lab doesn't have yet,
   set it up yourself: scan_instruments to find it; if a card matched, add_instrument; if none did, find_card by its
   maker and model (Kelvin's own cards, the collection's and the lab's: one that fits is used as it is, never drafted
@@ -202,7 +206,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def lab_status() -> str:
-        """Every instrument's current values. * marks drives away from their safe value."""
+        """Every instrument's current values. * marks drives away from their safe value. An instrument a run (or
+        another change in progress) uses isn't asked meanwhile: its latest values, with how old each is."""
         return rt.lab_status()
 
     @server.tool(annotations=READ, structured_output=False)
@@ -241,7 +246,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def get_value(instrument: str, parameter: str) -> str:
-        """Read one parameter (a trace is summarized; record traces with a plan to keep them)."""
+        """Read one parameter (a trace is summarized; record traces with a plan to keep them). While a run uses the
+        instrument, its latest value instead (the run's last point), with how old it is."""
         return rt.get(instrument, parameter)
 
     @server.tool(annotations=ACT, structured_output=False)
@@ -628,6 +634,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def queue_pause() -> str:
         """Pause the queue after the item that is running (the Stop button ends that item too)."""
         return rt.queue_pause()
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def stop_run(reason: str = "") -> str:
+        """Stop what the lab is doing now, as the person's Stop button does, when they ask you to stop (in any chat,
+        whoever started it): the running plan or queue scan ends and the drives it touched go to safe (or hold where
+        the lab config says), the queue stops after it, a ramp or wait ends where it is, and open approval cards are
+        declined. It works at once, also while another chat's run holds the lab. reason: the person's words."""
+        return rt.stop_work(reason)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
