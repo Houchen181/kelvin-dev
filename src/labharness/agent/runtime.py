@@ -127,8 +127,15 @@ def event_line(e: Dict[str, Any]) -> str:
     elif kind == "answer":
         from .approval import who_text
         text = "%s %s: %s" % (who_text({"account": e.get("account"), "channel": e.get("channel"),
-                                        "device": e.get("device")}), e.get("answer"), e.get("request"))
+                                        "device": e.get("device"), "vouched": e.get("vouched")}),
+                              e.get("answer"), e.get("request"))
         return "%s %s" % (t, text)
+    elif kind == "config_version":   # the lab's config history (configversions.py)
+        text = "%s #%s%s: %s" % (e.get("title"), e.get("version"), " (rollback to #%s)" % e["rollback"]
+                                 if e.get("rollback") else "", "; ".join(e.get("changes") or []) or "changed")
+    elif kind == "lab_roles":
+        text = "lab roles: %s" % (", ".join("%s %s" % kv for kv in sorted((e.get("roles") or {}).items()))
+                                  or "none (everyone equal)")
     elif kind == "run_start":
         text = "run %s started, %s points" % (e.get("run"), e.get("points"))
     elif kind == "run_end":
@@ -1001,19 +1008,26 @@ class LabRuntime:
         return profiles.card_lines(self.home, named)
 
     def answer(self, request_id: str, approve: bool, by: str = "human", channel: str = "portal",
-               device: Optional[str] = None) -> bool:
+               device: Optional[str] = None, approver: Any = None, pin: Any = None) -> bool:
         """A person's answer to a request, kept with who they are: their account (the person signed in), where they
         answered (portal, phone, approval page) and the device, so the record and the reports never take a person's
-        yes for the agent's. False when the request is no longer open."""
-        who = {"account": self.user, "channel": channel, "device": device}
+        yes for the agent's. False when the request is no longer open. With roles, a trainee's yes needs an operator
+        or the owner to confirm it (approver: {name, password}, or the owner's pin); PermissionError says why not.
+        A no never does."""
+        who: Dict[str, Any] = {"account": self.user, "channel": channel, "device": device}
         title = getattr(self.approver, "title_of", lambda _: None)(request_id)
+        # a request no longer open asks nothing (no password tried for nothing); one that can't tell, asks
+        if approve and (title is not None or not hasattr(self.approver, "title_of")):
+            vouched = self.vouched(approver, pin)
+            if vouched:
+                who["vouched"] = vouched
         try:
             ok = self.approver.answer(request_id, approve, by, who)
         except TypeError:   # an approver that takes no account of who
             ok = self.approver.answer(request_id, approve)
         if ok:
             self.gate.log.write("answer", by=by, request=title, answer="approved" if approve else "declined",
-                                account=self.user, channel=channel, device=device)
+                                account=self.user, channel=channel, device=device, vouched=who.get("vouched"))
         return ok
 
     def stop(self, by: str = "human", note: str = "") -> int:
@@ -1859,7 +1873,99 @@ class LabRuntime:
             self.hands = None
             self.lab.hands_on = None
             self.gate.log.write("hands_off", by=by)
+        self.audit_event("Hands on the sample unlocked", by)
         return self._write_caps(by)
+
+    # ------------------------------------------------------------------ governance: roles, config history, the owner
+
+    versions: Any = None   # the lab's config history (configversions.ConfigVersions); set by the app
+    roles: Any = None      # the lab's roles, on top of the owner's PIN (accounts.LabRoles); set by the app
+    accounts: Any = None   # the accounts on this computer (accounts.Accounts): an operator's password for a trainee
+
+    def role(self) -> Optional[str]:
+        """The signed-in person's role in this lab: None while it has no roles (everyone as before), else owner,
+        operator or trainee (a person the owner gave no role, and nobody signed in, are trainees)."""
+        return self.roles.role(self.user) if self.roles is not None else None
+
+    def not_for_trainees(self, what: str) -> None:
+        """PermissionError for a trainee: limits, the lab config, the cards' limits and reviews and auto mode are an
+        operator's or the owner's (accounts.LabRoles)."""
+        if self.role() == "trainee":
+            from ..accounts import RoleRefused, trainee_refusal
+            raise RoleRefused(trainee_refusal(what))
+
+    def vouched(self, approver: Any = None, pin: Any = None) -> Optional[Dict[str, Any]]:
+        """None when the person's own yes counts (no roles, an operator or the owner). For a trainee: who confirms
+        it, checked (accounts.LabRoles.vouch: an operator's or the owner's password, or the owner's PIN), or
+        PermissionError saying why not."""
+        if self.role() != "trainee":
+            return None
+        given = approver if isinstance(approver, dict) else {}
+        return self.roles.vouch(self.accounts, self.owner, given.get("name"), given.get("password"), pin)
+
+    def config_changed(self, by: str, why: str = "", kind: str = "",
+                       rollback: Optional[int] = None) -> List[Dict[str, Any]]:
+        """After the lab config or the lab's cards changed: each changed file kept as a version in the lab's config
+        history (configversions.py), with who (by, and the account signed in with its role), when and why. A change
+        that widens Kelvin's reach is said in the lab's record and goes to the owner. Returns the new versions."""
+        if self.versions is None:
+            return []
+        try:
+            made = self.versions.sync(by, self.user, self.role(), why, kind, rollback=rollback)
+        except OSError as e:   # the change stands; the record says the history missed it
+            self.gate.log.write("config_history", by=by, problem=str(e)[:200])
+            return []
+        self._kept_versions(made, by, why)
+        return made
+
+    def config_noticed(self) -> List[Dict[str, Any]]:
+        """The lab config and cards as they are now, against the history: an edit made outside Kelvin (by hand) is
+        kept as a version of its own, and told to the owner when it widens Kelvin's reach; the first time, the files
+        as Kelvin found them. Called when Kelvin starts and when the lab config or its history is opened."""
+        if self.versions is None:
+            return []
+        try:
+            made = self.versions.notice()
+        except OSError:
+            return []
+        self._kept_versions([v for v in made if v.get("kind") != "first"], "outside Kelvin", "")
+        return made
+
+    def _kept_versions(self, made: List[Dict[str, Any]], by: str, why: str) -> None:
+        for v in made:
+            self.gate.log.write("config_version", by=by, version=v["n"], file=v["subject"], title=v.get("title"),
+                                kind=v.get("kind"), why=why or None, rollback=v.get("rollback"),
+                                changes=[c["text"] for c in v["changes"]][:20])
+        widened = [c["text"] for v in made for c in v["changes"] if c["safety"]]   # each names its card
+        if widened:
+            self._tell_owner(widened, by, why, [v["n"] for v in made])
+
+    def audit_event(self, what: str, by: str, why: str = "", widens: bool = True, **fields: Any) -> None:
+        """A change to who may do what that is no file's (auto mode on, Hands on the sample unlocked, the lab's
+        roles, the owner's PIN): kept in the config history's record; told to the owner when it widens Kelvin's
+        reach."""
+        if self.versions is not None:
+            try:
+                self.versions.event(what, by, self.user, self.role(), why, widens, **fields)
+            except OSError:
+                pass
+        if widens:
+            self._tell_owner([what], by, why)
+
+    def _tell_owner(self, lines: List[str], by: str, why: str = "", versions: Optional[List[int]] = None) -> None:
+        """A safety change, to the lab owner wherever they set (notify.Notifier.tell_owner) and the in-app list."""
+        role = self.role()
+        person = "%s%s, %s" % (self.user, " (%s)" % role if role else "", by) if self.user else by
+        title = "%s: %s%s" % (self.lab.config.name, lines[0], " (and %d more)" % (len(lines) - 1)
+                              if len(lines) > 1 else "")
+        text = "\n".join(["By %s at %s:" % (person, time.strftime("%H:%M"))] + ["- " + line for line in lines[:12]]
+                         + (["Why: " + why] if why else [])
+                         + ["Kelvin keeps every version: Settings, Instruments, Lab config history%s."
+                            % (" (#%s)" % ", #".join(map(str, versions)) if versions else "")])
+        try:
+            self.notifier.tell_owner(title[:200], text[:1500])
+        except Exception:   # telling never undoes the change; the history has it
+            pass
 
     def _attribute(self, plan: Plan, project: Optional[str] = None, incognito: Optional[bool] = None,
                    unshared: Optional[bool] = None, legacy: bool = False) -> Dict[str, Any]:
@@ -3127,6 +3233,7 @@ class LabRuntime:
             return "not saved: %s" % e
         self.refresh_cards([card.id])
         self.gate.log.write("card", by=by, card=card.id, status=card.status, file=path.name)
+        self.config_changed(by, "saved card %s" % card.id, "card")
         users = sorted(n for n, i in self.lab.instruments.items() if i.card.id == card.id)
         return "\n".join(["saved %s card %s as %s%s. try_card it on the instrument, then add_instrument%s. Until a "
                           "person marks it reviewed (Lab, Cards…), every setting and output change on it asks them."
@@ -3927,6 +4034,7 @@ class LabRuntime:
             except (ConfigError, ValueError, StopIteration, yaml.YAMLError):
                 undo()
                 return "not added: the lab config changed while Kelvin was adding it; try again"
+            self.config_changed("Kelvin (%s)" % by, "added %s at %s" % (new, address), "added")
             if not on_file:
                 info = {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
                 try:
@@ -4912,14 +5020,18 @@ class LabRuntime:
 
     def set_approval_mode(self, mode: str, by: str = "human", pin: Any = None) -> Dict[str, Any]:
         """Only the portal and the approval page call this; no agent tool can. It resets to ask on every start.
-        Turning auto mode on needs the owner's PIN when one is set (PermissionError); back to asking never does."""
+        Turning auto mode on needs the owner's PIN when one is set (PermissionError); back to asking never does.
+        With roles, it is not for a trainee (accounts.LabRoles), and the owner is told when it goes on."""
         if mode not in ("ask", "auto"):
             raise ValueError("mode must be ask or auto")
         if mode == "auto" and not self.gate.auto:
+            self.not_for_trainees("Auto mode")
             self.owner_check(pin)
         if (mode == "auto") != self.gate.auto:
             self.gate.auto = mode == "auto"
             self.gate.log.write("approval_mode", by=by, mode=mode)
+            if mode == "auto":
+                self.audit_event("auto mode on", by)
         return self.approval_mode()
 
     def ui_state(self) -> Dict[str, Any]:

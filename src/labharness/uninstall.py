@@ -1,7 +1,8 @@
 """What uninstalling Kelvin removes, and what it keeps (Kelvin.exe --remove-data; the Windows uninstaller runs it).
 
 Removed, Kelvin's own:  settings and API keys, the ChatGPT sign-in (revoked with OpenAI first), chats, projects and
-                        memory, the accounts, the lab config, your instrument cards, the instrument folders with their
+                        memory, the accounts, the lab owner's PIN and the lab's roles (with the copy of the owner's
+                        notification settings), the lab config and its history, your instrument cards, the instrument folders with their
                         manuals, the manuals Kelvin kept, what it installed for instruments (its environments, uv and
                         their Pythons), the app's log, lock file and window cache. With accounts, each person's too.
 Kept, your measurements: every run folder, the record of commands and approvals (events.jsonl) and reports, in
@@ -21,6 +22,7 @@ from typing import Any, Dict, List
 
 HARNESS = ("settings.json", "chatgpt.json", "app.json", "kelvin.log", "lab.yaml", "lab.tmp", "settings.tmp",
            "webview", "instruments", "cards", "accounts.json", "accounts.tmp",
+           "owner.json", "owner.tmp", "roles.json", "roles.tmp", "config-history",   # the PIN, roles, config history
            "manuals", "env", "tools")   # manuals Kelvin kept; instrument environments, uv and their Pythons (envs.py)
 DATA_HARNESS = ("chats",)                       # in the default data folder: the conversations, projects and memory
 PERSON = ("settings.json", "settings.tmp", "chatgpt.json", "chatgpt.tmp", "chats")   # in each ~/Kelvin/users/<name>

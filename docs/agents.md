@@ -15,7 +15,7 @@ Kelvin's lab tools are an MCP server, so Claude Code, Codex, Gemini CLI or anoth
 By default the server starts the virtual lab in instant simulated time. Use `--speed 10` for 10× real time. Event logs and run folders go to `~/Kelvin/virtual-lab`, or to `~/Kelvin/agents` once people have accounts in the app, so they land in no one's own folder; `--data-dir` chooses another. The server also opens the **approval page** in your browser; its URL, which includes an access key, is printed on the server's stderr.
 
 On the approval page you can:
-- **Approve or decline** what the agent asks for. An unanswered request is declined after 120 s (`--approval-timeout`). No MCP tool can answer approvals.
+- **Approve or decline** what the agent asks for. An unanswered request is declined after 120 s (`--approval-timeout`). No MCP tool can answer approvals. Nobody signs in here, so in a lab with roles ([safety.md](safety.md#lab-roles)) each yes takes the lab owner's PIN, and auto mode stays off.
 - **Watch** every instrument (drives away from safe are highlighted) and the activity log.
 - **Press Stop.** This declines open requests and stops the agent's current ramp or plan, and the queue. Drives stay where they are; a stopped plan brings the drives it touched to safe (or holds them where the lab config says hold), then runs its own `on_abort` steps. It works even while an instrument holds Kelvin up: a sweep the instrument is still taking, a settle or a wait ends within a second, and in the portal the chat's step ends at once. Calls the agent made that were still waiting for the lab are not run: they answer that a person pressed Stop.
 

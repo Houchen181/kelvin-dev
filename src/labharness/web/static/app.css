@@ -1087,3 +1087,26 @@ body.resizing .plot-svg { pointer-events: none; }
 .cal-row { display: flex; flex-wrap: wrap; gap: 8px 12px; }
 .cal-field { display: grid; gap: 2px; font-size: 13px; font-weight: 400; flex: 1 1 140px; }
 .approval-title .card-lang { font-size: 11.5px; margin-left: 6px; white-space: nowrap; }
+
+/* the lab's roles and its config history (web/governance.py) */
+.roles-list { list-style: none; margin: 6px 0; padding: 0; display: grid; gap: 6px; }
+.role-row { display: flex; gap: 10px; align-items: center; }
+.role-row span { min-width: 9rem; }
+.pin-dialog select { width: 100%; margin-top: 8px; }
+.lim-why { flex: 1 1 14rem; min-width: 10rem; }
+#lab-why { width: 100%; margin-top: 6px; }
+.history-filters { gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.history-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; max-height: 60vh; overflow: auto; }
+.history-list > li { padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.history-list > li:last-child { border-bottom: 0; }
+.history-list > li.widens { border-left: 3px solid var(--warn-line); }
+.hist-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.hist-head time { color: var(--muted); font-size: 12px; }
+.hist-head .tag { color: var(--warn); border-color: var(--warn-line); }
+.hist-changes { margin: 4px 0; padding-left: 18px; }
+.hist-changes li.widens { color: var(--warn); }
+.hist-actions { display: flex; gap: 12px; margin-top: 4px; }
+.diff { background: var(--code); border-radius: 8px; padding: 8px 10px; overflow: auto; max-height: 40vh; font-size: 12px; white-space: pre; }
+.diff .add { color: var(--ok); }
+.diff .del { color: var(--danger); }
+.diff .hunk { color: var(--muted); }

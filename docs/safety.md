@@ -97,7 +97,43 @@ instruments:
 
 ### The lab owner's PIN
 
-Everyone at the computer is equal, unless the lab sets an owner's PIN (Settings → **Instruments** → **Lab owner's PIN**, 4 to 12 digits; changing or removing it takes it). Once it is set, what widens Kelvin's reach over the instruments asks for it: changing an instrument's limits or saving the lab config (its interlocks and watches), marking limits or a card reviewed, turning on auto mode (also on the approval page), unlocking **Hands on the sample**, and lifting or changing a device's protection, including taking a protected device out. Narrowing never does: going back to asking, **Hands on the sample**, Stop, protecting a device, a card back to draft. Five wrong tries lock it for five minutes. Kelvin keeps a salted hash of it in `~/Kelvin/owner.json`; no agent tool reaches any of this. Roles (owner, operator, trainee) come later.
+Everyone at the computer is equal, unless the lab sets an owner's PIN (Settings → **Instruments** → **Lab owner's PIN**, 4 to 12 digits; changing or removing it takes it). Once it is set, what widens Kelvin's reach over the instruments asks for it: changing an instrument's limits or saving the lab config (its interlocks and watches), marking limits or a card reviewed, saving a card with a wider limit, safe value or rate than the card it replaces (Kelvin's own, for the lab's version of one), saving a reviewed card with other commands, or deleting a reviewed card, rolling any of these back to a version that widens ([below](#the-lab-configs-history)), turning on auto mode (also on the approval page), unlocking **Hands on the sample**, and lifting or changing a device's protection, including taking a protected device out. Narrowing never does: going back to asking, **Hands on the sample**, Stop, protecting a device, a card back to draft. Five wrong tries lock it for five minutes. Kelvin keeps a salted hash of it in `~/Kelvin/owner.json`; no agent tool reaches any of this. On top of the PIN, the owner can give people roles.
+
+### Lab roles
+
+A lab with an owner's PIN can give people roles: **owner**, **operator** and **trainee** (Settings → **Instruments** → **Lab roles**, by an owner signed in, with the PIN). Without roles, Kelvin is as described above.
+
+| | Trainee | Operator | Owner |
+|---|---|---|---|
+| Read, measure, run what needs no yes; Stop, decline, **Hands on the sample** | yes | yes | yes |
+| Say yes to a request: a drive away from safe, a run, a queue, anything Kelvin asks a person | with an operator or the owner, at the card | yes | yes |
+| Turn on auto mode | no | with the PIN | with the PIN |
+| Change limits, the lab config, a card's limits or review; roll them back; lift a device's protection | no | with the PIN | with the PIN |
+| Unlock **Hands on the sample** | with the PIN | with the PIN | with the PIN |
+| Change the roles, and where the owner hears of safety changes | no | no | with the PIN |
+
+- **Whoever has no role is a trainee:** an account made after the roles were given, until the owner gives it one.
+- **A trainee's yes, confirmed.** When a trainee approves, the card asks who confirms: an operator or the owner picks their name and types their own account's password, or the owner types the PIN. An account without a password can't confirm, since anyone could give its name. Five wrong tries lock it for five minutes. The record and the reports name both: *approved by Cy (portal) with Ben (operator) at 14:02:11*. A no is anyone's. A trainee's phone can decline but not approve; a queue an operator approved at the card before leaving runs the night on that one approval.
+- **What a trainee can't do at all**, PIN or not: an operator or the owner signs in to do it. A trainee who learnt the PIN still can't widen the lab.
+- **Auto mode** goes back to asking when anyone signs in, and when the owner makes the person signed in a trainee.
+- **The PIN stays while there are roles:** give no one a role first, then remove it. At least one person is an owner, and while one is, only an owner changes the roles.
+- **Nobody signed in:** Kelvin as an MCP server ([agents.md](agents.md)) has no accounts, so with roles every yes on its approval page takes the owner's PIN, and auto mode stays off there.
+- **Not a wall.** The roles are kept in `~/Kelvin/roles.json`. Whoever can edit this computer's files can delete it (the history below still shows what was done); a file Kelvin can't read makes everyone a trainee until the owner gives the roles again.
+
+### The lab config's history
+
+Every change to the lab config (`lab.yaml`: limits, rates, guards, interlocks, watches, auto rules) and to the lab's own cards (their limits, safe values and blocked commands, and which of Kelvin's cards the lab reviewed) is kept as a version: who (the account and its role, and how: the portal, Kelvin itself, the setup), when, why (a line the person may write when saving) and what changed, in words. **widens** marks a change that widened Kelvin's reach: a limit widened or taken out, a rate raised, an interlock, guard or watch taken out or loosened, `auto: never` dropped, `auto_fraction` raised, an instrument added without Kelvin's mark, limits or a card marked reviewed, a card's safe value changed. What the files alone can't judge counts as widening.
+- **Where:** Settings → **Instruments** → **Lab config history…**, or **History…** beside the lab config in Lab setup. It filters by what (the lab config, the cards, auto mode and the like), by who, and to what widened. **Diff** shows a version against the one before it.
+- **Roll back** puts an earlier version back as a change of its own, kept as a new version that names the one it put back. The lab config is saved and connected as **Save and connect** does, with the PIN; a card needs the PIN when going back widens it. A trainee can't roll back.
+- **Edits by hand** (a text editor on `lab.yaml`) are kept as changes made outside Kelvin the next time Kelvin looks: when it starts, and when the lab config, the cards or the history is opened.
+- **Also kept:** auto mode turned on, **Hands on the sample** unlocked, the roles, the PIN set or removed, and where the owner hears of safety changes.
+- **On disk:** `~/Kelvin/config-history/`, with `audit.jsonl` (a line each) and each version's text. Kelvin only adds to it.
+
+### The owner hears of safety changes
+
+A change that widens Kelvin's reach (above), auto mode turned on, **Hands on the sample** unlocked or the PIN removed goes to the lab owner, whoever made it: *Bench: smu.V: limits widened, [-5, 5] → [-150, 150]*, by whom, when, why, and the version's number.
+- **Where:** the owner, signed in, presses **Where my notifications go** (Settings → **Instruments**, with the PIN). Kelvin keeps a copy of their own webhook and email settings (Settings → **Notifications**) for this, readable on this computer, so the notices reach the owner while someone else is signed in. **Stop** forgets the copy.
+- Everyone sees them in the app's list, and anyone can tick **Safety changes** among their own notifications.
 
 ## Protecting the sample
 

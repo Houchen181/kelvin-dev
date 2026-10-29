@@ -337,6 +337,9 @@ class AutoSetup:
         tmp.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(text, encoding="utf-8")
         tmp.replace(self.lab_file)
+        changed = getattr(rt, "config_changed", None)   # kept in the lab's config history (configversions.py)
+        if changed is not None:
+            changed("Kelvin (setup)", "set up the instruments it found: %s" % names, "setup")
         self.settings.update({"lab": "mine"})
         if not self.can_switch():   # Kelvin is answering: the switch waits for the answer to end (switch_lab idle)
             self._set("connecting", message="Found %s; Kelvin switches to them when it is next idle" % names,
