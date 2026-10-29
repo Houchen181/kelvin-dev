@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import contextlib
 import csv
-import inspect
 import io
 import json
 import math
@@ -1796,13 +1795,11 @@ class LabRuntime:
         from ..engine import _Abort
         step, q = load_step(item.text), self.queue
         gen = self.gate.stop_generation
-        # a stop ends the step's waits for its set points too (a cool-down), with a gate that takes the item's start
-        since = {"gen": gen} if "gen" in inspect.signature(self.gate._set).parameters else {}
         for instr, param, value in step.sets:
             if self.gate.stop_generation != gen:
                 q.mark(item, "stopped", "stopped before %s.%s was set" % (instr, param))
                 return False, "stopped"
-            r = self.gate._set(instr, param, value, True, "queue:" + item.name, **since)
+            r = self.gate._set(instr, param, value, True, "queue:" + item.name, gen=gen)   # a stop ends its waits too
             if not r.ok:   # a person's stop in the middle of it is a stop, not a failure to go on after
                 stopped = self.gate.stop_generation != gen
                 q.mark(item, "stopped" if stopped else "failed", r.message)
