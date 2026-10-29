@@ -1295,9 +1295,10 @@ class LabRuntime:
     def _accept_fit(self, run_id: str, kept: Dict[str, Any], new: Dict[str, Any], model: Optional[str],
                     by: str) -> str:
         """Keep a re-analysis's fits as the run's own: each of its series replaces the kept one for the same column
-        (and group), marked accepted (by whom, when, which model), in run.h5; then the run's scan report is written
-        again, so it shows the fit that was accepted rather than the automatic one."""
-        stamp = {"by": by, "at": datetime.now().isoformat(timespec="seconds"), "model": model or "chosen automatically"}
+        (and group), marked accepted (by whom, for which person signed in, when, which model), in run.h5; then the
+        run's scan report is written again, so it shows the fit that was accepted rather than the automatic one."""
+        stamp = {"by": by, "account": self.user, "at": datetime.now().isoformat(timespec="seconds"),
+                 "model": model or "chosen automatically"}
         fresh = [dict(s, accepted=stamp) for s in new.get("series") or [] if s.get("fit") or s.get("results")]
         if not fresh:
             return "nothing kept: this analysis fitted nothing to keep"

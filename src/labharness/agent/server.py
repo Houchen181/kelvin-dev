@@ -685,13 +685,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
                     accept: bool = False) -> str:
         """Re-analyse a recorded run. column: one measured instr.param; model: linear, lorentzian,
         gaussian or exponential to force that fit (default: chosen automatically). accept: once the person agrees
-        this is the right fit, keep it as the run's own (in run.h5); its report shows it from then on."""
+        this is the right fit, make it the run's result (in run.h5), in place of the automatic one; its reports
+        show it as the run's fit from then on (fit_run's kept fits are shown beside it)."""
         return rt.analyze(run_id, column, model, accept=accept)
 
     # ---- analysis on kept runs (datatools.py): they read runs and write only their own results, never an instrument
     @server.tool(annotations=ACT, structured_output=False, description=(
         "Fit a model to a run's data: its parameters with errors, chi-squared, what to watch, and a picture of the "
-        "fit with its residuals; kept with the run (run.h5: /fits/<name>, with the covariance and residuals). "
+        "fit with its residuals; kept with the run (run.h5: /fits/<name>, with the covariance and residuals), and "
+        "shown in its reports with who kept it and when (analyze_run with accept makes a fit the run's result). "
         "model: one of Kelvin's (%s) or your own expression in x, e.g. 'a*exp(-x/tau) + c' (its other names are "
         "parameters; the run's columns may appear too). x, y: columns or expressions of them (default: the "
         "innermost swept axis and the first reading); a trace column fits one point's trace (row, default the "

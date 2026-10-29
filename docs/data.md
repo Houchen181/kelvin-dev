@@ -186,7 +186,7 @@ notes: 10 MOhm bias resistor on the sine out       # or series_resistor: 10e6 un
 
 Kelvin's AI analyses with its own tools rather than handing you a script to run. None of them waits for the lab, so they work while a run is going.
 
-- **Fits (`fit_run`).** Kelvin's models, or your own expression in `x` (`a*exp(-x/tau) + c`: every other name is a parameter, and the run's columns may appear too), fitted with weights (`sigma`: a column, an expression or one number), a window (`where`, `x_range`), starting values, bounds and parameters held fixed (`fix`). The answer gives each parameter with its error, chi-squared and its reduced value, R², warnings (no convergence, a parameter at its bound, parameters the data can't tell apart, residuals that run in long stretches), and a picture of the fit with its residuals. The fit is kept in the run's `run.h5` under `fits/<name>`, with its covariance and residuals; fitting again under the same name replaces it. Kelvin's models:
+- **Fits (`fit_run`).** Kelvin's models, or your own expression in `x` (`a*exp(-x/tau) + c`: every other name is a parameter, and the run's columns may appear too), fitted with weights (`sigma`: a column, an expression or one number), a window (`where`, `x_range`), starting values, bounds and parameters held fixed (`fix`). The answer gives each parameter with its error, chi-squared and its reduced value, R², warnings (no convergence, a parameter at its bound, parameters the data can't tell apart, residuals that run in long stretches), and a picture of the fit with its residuals. The fit is kept in the run's `run.h5` under `fits/<name>`, with its covariance, its residuals and who kept it and when, and the run's reports show it ([kept and accepted fits](#kept-and-accepted-fits)); fitting again under the same name replaces it. Kelvin's models:
   - peaks and decays: `linear`, `lorentzian`, `gaussian`, `double_lorentzian`, `exponential`, `stretched_exponential`, `biexponential`, `damped_cosine` (Rabi and Ramsey; its envelope's power `n` is held at 1 unless you free it; 2 is Gaussian);
   - `exp_irf` and `biexp_irf`: decays starting at `t0`, convolved with a Gaussian instrument response of FWHM `irf` (pump-probe, time-resolved photoluminescence);
   - `resonator`: a notch-type resonator's S21 with the cable delay, after Probst et al., Rev. Sci. Instrum. 86, 024706 (2015): `fr`, the loaded `Ql`, `|Qc|`, the mismatch angle `phi`, and from them `Qi`. Give the phase (`phase`, in degrees or radians) with the magnitude (dB or linear) for the full circle fit; with the magnitude alone, the delay drops out;
@@ -217,6 +217,14 @@ Next to the run folders sit `events.jsonl`, your record of every command, readin
 - **If the folder can't be written to when you sign in** (a network drive that is offline, say), Kelvin saves to your own folder meanwhile and tells you in Settings.
 - **What stays in `~/Kelvin`:** chats, settings, API keys and instrument folders.
 - **From a terminal:** `kelvin --data-dir <folder>` overrides the setting, for one person without sign-in.
+
+### Kept and accepted fits
+
+A run's fits after it was measured are of two kinds, and its reports show both.
+- **Kept** (`fit_run`): each fit is kept with the run in its `run.h5` (`fits/<name>`; `keep: false` only looks), with the model and how it was asked for (window, weights, held values), its values with their errors, the covariance and residuals, and who kept it and when: the agent, for the person signed in when people sign in. A run keeps as many as are made; fitting again under a name replaces that one. The run's reports draw each (its points with the model dashed) beside its values, newest first, saying who kept it and when; past four, the rest are listed by name. The run's scan report is written again when one is kept.
+- **Accepted** (`analyze_run` with `accept`, once the person agrees the fit is right): the re-analysis becomes the run's own result for that column, in place of the automatic one. The run's plots and results table show it, marked "accepted by ... on ..." with its window and reduced chi-squared, and the device and master reports follow it across runs (trends, key results).
+
+A kept fit leaves the run's result as it was. To make a fit the result, re-analyse the run with the model you chose and accept that.
 
 ### Data from other programs
 
@@ -281,7 +289,7 @@ Work outside every project goes to a **General** project.
 **Reports of runs you choose.** For a different selection or your own words:
 - **In a chat:** "make a report of today's runs for my advisor". Kelvin's `make_report` covers the runs started in this conversation, or in all of the project's conversations, unless you name runs, a day, or the last N. It also rewrites a master or device report on request (`kind` project or device).
 - **The length you ask for:** "one page" (`pages: 1`) gives one page: the report leaves out detail, least needed first (the plans, the conditions tables and the lab log, then all but each run's result and first plot, then the runs as a table), and says it was shortened; each run's own report keeps the rest. A deck keeps the summary and each run's result slide.
-- **The fit you accept:** once a fit is chosen and the person agrees (`analyze_run` with `accept`), it is kept as the run's own in `run.h5`, with who accepted it and when, and the run's scan report is written again to show it (with its window and reduced chi-squared, where the fit has them).
+- **Fits:** a run's report shows its accepted fit as its result, and the other fits kept with it, each with who kept or accepted it and when ([kept and accepted fits](#kept-and-accepted-fits)).
 - **In the Runs pane:** **Report…** opens the library of every report above, and below it makes a report of this run, the project's or chat's runs, today's runs, or the last five. These go to `reports/custom/`.
 
 **Settings → Reports** chooses PDF, PowerPoint or both (the default), or **Only when I ask**, and which of the three kinds Kelvin keeps up to date. The data (`run.h5`) is always written. A report that can't be written never fails the run; the lab record notes it.

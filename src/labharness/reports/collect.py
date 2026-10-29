@@ -15,6 +15,7 @@ from .model import Report, RunPart
 
 MAX_CHARTS = 5
 MAX_GROUPS = 8
+MAX_KEPT = 4    # kept fits a run's report draws, the newest first; the rest are listed (run.h5 has them all)
 LOG_TYPES = {"ask", "run_start", "run_end", "run_refused", "run_declined", "trip", "alarm", "alarm_cleared", "stop",
              "lab_changed", "approval_mode", "preflight"}
 RUN_EVENT_TYPES = {"ask", "trip", "alarm", "alarm_cleared", "stop"}
@@ -56,6 +57,18 @@ def _numbers(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _stamp(by: Any, account: Any, when: Any) -> str:
+    """Who kept or accepted a run's fit and when: "by agent for ada on Oct 29, 03:12" (account: the person signed in,
+    when people sign in)."""
+    when = str(when or "")
+    try:
+        at = datetime.fromisoformat(when)
+        when = at.strftime("%b %d").replace(" 0", " ") + at.strftime(", %H:%M")
+    except ValueError:
+        pass
+    return "by %s%s%s" % (by or "?", " for %s" % account if account else "", " on " + when if when else "")
+
+
 def _fit_words(s: Dict[str, Any]) -> str:
     """A fit's model, and what makes it reproducible where the run kept it: who accepted it and when, its window and
     its reduced chi-squared (a fit chosen after the run is the one its report shows: F3 P5 P7 P8 P12)."""
@@ -63,13 +76,7 @@ def _fit_words(s: Dict[str, Any]) -> str:
     bits = [str(fit.get("model") or "model")]
     acc = s.get("accepted")
     if isinstance(acc, dict):
-        when = str(acc.get("at") or "")
-        try:
-            at = datetime.fromisoformat(when)
-            when = at.strftime("%b %d").replace(" 0", " ") + at.strftime(", %H:%M")
-        except ValueError:
-            pass
-        bits.append("accepted by %s%s" % (acc.get("by") or "?", " on " + when if when else ""))
+        bits.append("accepted " + _stamp(acc.get("by"), acc.get("account"), acc.get("at")))
     window = fit.get("window")
     if isinstance(window, (list, tuple)) and len(window) == 2:
         bits.append("window %s to %s" % (num(window[0]), num(window[1])) if all(map(_numbers, window)) else
@@ -168,6 +175,9 @@ class Collector:
         start = rec.snapshots.get("start") or {}
         part.charts = self._charts(rows, cols, plan, analysis, self._derived(meta, plan, start, rec.columns))
         part.results = self._results(analysis)
+        kept_charts, kept_tables = self._kept(d)   # after the run's own result: the fits someone kept besides
+        part.charts += kept_charts
+        part.results += kept_tables
         end = rec.snapshots.get("end") or {}
         part.conditions = self._conditions(start)
         part.away = self._away(start)
@@ -314,6 +324,63 @@ class Collector:
             first = series[0]
             tables.append(Table([""] + names, rows, "%s vs %s (%s)" % (y, first.get("x") or "", first.get("kind", ""))))
         return tables
+
+    def _kept(self, folder: Path) -> Tuple[List[Chart], List[Table]]:
+        """The fits kept with the run (fit_run: run.h5 /fits/<name>), the newest first: each one's points as fitted,
+        with the model dashed, and its values with their errors, saying who kept it and when. The accepted fit
+        (analyze_run with accept) is the run's own result, in its plots and results above; these are the fits someone
+        kept besides it. More than MAX_KEPT: the others are listed."""
+        try:
+            from .. import fitting
+            kept = list(reversed(fitting.stored(folder, with_data=True)))
+        except Exception:   # no h5py, or run.h5 can't be read just now: the report goes on without them
+            return [], []
+        charts: List[Chart] = []
+        tables: List[Table] = []
+        for f in kept[:MAX_KEPT]:
+            try:
+                chart, table = self._kept_fit(f, fitting)
+            except Exception:   # a fit that can't be drawn never loses the report
+                continue
+            charts.append(chart)
+            tables.append(table)
+        if len(kept) > MAX_KEPT:
+            tables.append(Table(["Fit", "Model", "Kept"], [
+                [str(f.get("name")), str(f.get("model") or ""), _stamp(f.get("by"), f.get("account"), f.get("stored"))]
+                for f in kept[MAX_KEPT:]], "Other fits kept with the run (in run.h5)"))
+        return charts, tables
+
+    @staticmethod
+    def _kept_fit(f: Dict[str, Any], fitting: Any) -> Tuple[Chart, Table]:
+        """One kept fit: a plot of its points with the model dashed, and a table of its values, each titled by its
+        name (the slides pair them by it)."""
+        spec = f.get("spec") if isinstance(f.get("spec"), dict) else {}
+        name, model = str(f.get("name") or "fit"), str(f.get("model") or "model")
+        x_key, y_key = str(spec.get("x") or "x"), str(spec.get("y") or name)
+        who = "kept " + _stamp(f.get("by"), f.get("account"), f.get("stored"))
+        chi2 = f.get("chi2_red")
+        title = "Kept fit “%s”" % name
+        xs, ys = fitting.kept_points(f)
+        fx, fy = fitting.kept_curve(f)
+        chart = Chart(title, x_key, str(f.get("x_unit") or ""), str(f.get("y_unit") or ""),
+                      [Series(y_key, xs, ys), Series("fit", fx, fy, fit=True)],
+                      "Dashed: the %s fit “%s”, %s%s." % (model, name, who, "; reduced chi-squared %s" % num(chi2)
+                                                          if _numbers(chi2) else ""))
+        held = set(f.get("held") or [])
+        rows = [[str(p), fitting.fmt(v, e, u or "") + (" (held)" if p in held else "")]
+                for p, v, e, u in zip(f.get("params") or [], f.get("values") or [], f.get("errors") or [],
+                                      f.get("units") or [])]
+        rows += [[str(d.get("name")), fitting.fmt(d.get("value"), d.get("error"), d.get("unit") or "")]
+                 for d in f.get("derived") or [] if isinstance(d, dict)]
+        if _numbers(chi2):
+            rows.append(["reduced chi-squared", num(chi2)])
+        window = ["where %s" % spec["where"]] if spec.get("where") else []
+        if isinstance(spec.get("x_range"), list):   # [low, high], either end open
+            lo, hi = (list(spec["x_range"]) + [None, None])[:2]
+            window.append("%s from %s to %s" % (x_key, num(lo) if _numbers(lo) else "its start",
+                                                num(hi) if _numbers(hi) else "its end"))
+        rows.append(["points", "%s%s" % (f.get("n", len(xs)), " (%s)" % "; ".join(window) if window else "")])
+        return chart, Table(["Quantity", "Value"], rows, "%s vs %s: %s fit, %s" % (title, x_key, model, who))
 
     def _conditions(self, snapshot: Dict[str, Any]) -> List[Tuple[str, str]]:
         out = []

@@ -7,6 +7,7 @@ run_python's files into its scratch folder."""
 from __future__ import annotations
 
 import re
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -267,7 +268,9 @@ def fit_run(rt: Any, run_id: str = "last", model: str = "", x: str = "", y: str 
 
 
 def _keep_fit(rt: Any, src: Source, model: Any, result: Dict[str, Any], name: str, spec: Dict[str, Any]) -> str:
-    """The fit into the run's run.h5, where a run that has finished keeps it."""
+    """The fit into the run's run.h5, where a run that has finished keeps it, with who kept it (the agent, for the
+    person signed in) and when; then the run's scan report is written again, so it shows the fit (kept fits are the
+    run's other fits: the accepted one, analyze_run's, is its result)."""
     from . import fitting
     folder = src.folder
     if not (folder / rundata.RUN_FILE).exists() or not rundata.have_h5():
@@ -275,13 +278,30 @@ def _keep_fit(rt: Any, src: Source, model: Any, result: Dict[str, Any], name: st
     if rundata.being_recorded(folder):
         return "not kept: the run is still being measured; fit it again once it has finished to keep the fit"
     default = "%s %s" % (spec.get("y") or "", result["model"] if result["model"] != "expression" else "model")
+    account = getattr(rt, "user", None)
     try:
-        kept = fitting.store(folder, name or default.strip(), result, spec)
+        kept = fitting.store(folder, name or default.strip(), result, spec, by="agent", account=account)
     except Exception as e:
         return "not kept: %s" % e
-    rt.gate.log.write("fit_kept", by="agent", run=src.run_id, fit=kept, model=result["model"])
+    rt.gate.log.write("fit_kept", by="agent", account=account, run=src.run_id, fit=kept, model=result["model"])
     return "kept in %s as /fits/%s (with its covariance and residuals); fit_run again with the same name replaces " \
-           "it" % (folder / rundata.RUN_FILE, kept)
+           "it%s" % (folder / rundata.RUN_FILE, kept, _report_again(rt, src.run_id))
+
+
+_REPORTS = threading.Lock()   # a run's scan report, written again by one fit at a time (two may be kept at once)
+
+
+def _report_again(rt: Any, run_id: str) -> str:
+    """The run's scan report written again with its kept fits, where Kelvin keeps scan reports up to date. Never
+    fails the fit: it is kept whatever happens to the report."""
+    if "scan" not in getattr(rt, "report_kinds", ()) or getattr(rt, "auto_report", "off") == "off":
+        return ""
+    try:
+        with _REPORTS:
+            made = rt.write_scan_report(run_id)
+    except Exception as e:
+        return "; its scan report was not written again: %s" % (str(e).splitlines()[0][:160] if str(e) else e)
+    return "; its scan report shows it now (%s)" % ", ".join(made) if made else ""
 
 # ------------------------------------------------------------------ plot_runs
 
@@ -305,7 +325,7 @@ def plot_runs(rt: Any, curves: Optional[List[Dict[str, Any]]] = None, title: str
               name: str = "") -> Tuple[Optional[bytes], str]:
     """The plot_runs tool: (the figure as PNG, its caption and the files it was saved as)."""
     from . import plotting
-    from .fitting import stored
+    from .fitting import kept_curve, stored
     from .reports.chart import FIT
     np = _np()
     curves = list(curves or [])
@@ -373,7 +393,7 @@ def plot_runs(rt: Any, curves: Optional[List[Dict[str, Any]]] = None, title: str
             if f is None:
                 raise ToolError("%s keeps no fit %r (it keeps: %s)" % (src.run_id, spec["fit"], ", ".join(fits) or
                                                                        "none"))
-            fx, fy = _fit_curve(f)
+            fx, fy = kept_curve(f)
             drawn.append(plotting.Curve(np.asarray(fx) * xfactor, np.asarray(fy) * factor, "%s fit" % f.get("model"),
                                         FIT, "fit"))
         xs_seen.append(xn)
@@ -420,30 +440,6 @@ def plot_runs(rt: Any, curves: Optional[List[Dict[str, Any]]] = None, title: str
         saved.append(str(path))
     rt.gate.log.write("figure", by="agent", files=[Path(s).name for s in saved])
     return png, plotting.caption(fig) + "\nsaved: " + "; ".join(saved)
-
-
-def _fit_curve(f: Dict[str, Any]) -> Tuple[Any, Any]:
-    """A kept fit drawn: the model over its points' range when Kelvin can rebuild it, else at its points."""
-    from . import fitting
-    np = _np()
-    x = np.asarray(f.get("x") or [], dtype=float)
-    fy = np.asarray(f.get("fit") or [], dtype=float)
-    try:
-        if f.get("model") in fitting.MODELS:
-            m = fitting.MODELS[f["model"]]()
-        elif f.get("model") == "expression":
-            m = fitting.expression_model(f["formula"])
-        else:
-            raise KeyError(f.get("model"))
-        if len(m.params) != len(f.get("params") or []) or m.complex:
-            raise KeyError("shape")
-        result = {"x": x.tolist(), "fit": fy.tolist(), "x_start": f.get("x_start"),
-                  "params": [{"name": k, "value": v} for k, v in zip(f["params"], f["values"])]}
-        return fitting.curve(m, result)
-    except (KeyError, ValueError, TypeError, fitting.FitError):
-        if fy.ndim == 2:
-            fy = np.hypot(fy[:, 0], fy[:, 1])
-        return x.tolist(), fy.tolist()
 
 
 def _heat(rt: Any, spec: Dict[str, Any]) -> Tuple[Any, str, str, str, str]:
