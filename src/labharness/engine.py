@@ -392,21 +392,24 @@ class RunEngine:
         return out
 
     def drive_values(self, plan: Plan) -> Dict[str, List[Any]]:
-        """Every value the plan sets a drive to: its setup, sweeps, ramp targets (and their rates, where the rate is
-        a drive, as a magnet supply's is), and after."""
-        pairs = [(s.key, s.value) for s in plan.setup] + [(a.key, v) for a in plan.instrument_axes for v in a.values]
-        ramp = plan.ramp
-        if ramp is not None:
-            pairs += [(ramp.key, v) for v in ramp.values]
-            rate_param = self.lab.resolve(ramp.key)[1].rate_param
-            pairs += [("%s.%s" % (ramp.instr, rate_param), leg.rate) for leg in ramp.segments
-                      if leg.rate is not None and rate_param]
         out: Dict[str, List[Any]] = {}
-        for key, value in pairs + [(s.key, s.value) for s in plan.after]:
+        for key, value in [(s.key, s.value) for s in plan.setup] \
+                + [(a.key, v) for a in plan.instrument_axes for v in a.values] + self._ramp_values(plan) \
+                + [(s.key, s.value) for s in plan.after]:
             _, spec = self.lab.resolve(key)
             if spec.is_drive:
                 out.setdefault(key, []).append(value)
         return out
+
+    def _ramp_values(self, plan: Plan) -> List[Tuple[str, Any]]:
+        """A ramp's targets, and its legs' rates on the card's rate parameter (a drive itself on a magnet supply, so
+        the plan's one approval covers them)."""
+        ramp = plan.ramp
+        if ramp is None:
+            return []
+        rate_param = self.lab.resolve(ramp.key)[1].rate_param
+        return [(ramp.key, v) for v in ramp.values] + [("%s.%s" % (ramp.instr, rate_param), leg.rate)
+                                                        for leg in ramp.segments if leg.rate is not None and rate_param]
 
     def preflight(self, names: Optional[List[str]] = None, fresh: bool = False):
         """Health-check these instruments (all if none are named). One that passed within HEALTHY_FOR seconds is not
@@ -590,10 +593,18 @@ class RunEngine:
         status, reason, n = "done", None, 0
         warnings: List[str] = [rec.moved] if getattr(rec, "moved", None) else []
 
-        def apply(instr: str, param: str, value: Any, wait: bool = True) -> None:
+        def apply(instr: str, param: str, value: Any) -> None:
             if gate.stop_generation != gen:   # a stop that came between steps (or while the run was starting)
                 raise _Abort("stop requested")
-            r = gate._set(instr, param, value, wait, "plan:" + plan.name, gen=gen)   # one during it ends its waits
+            r = gate._set(instr, param, value, True, "plan:" + plan.name, gen=gen)   # and one during it ends its waits
+            if not r.ok:
+                raise _Abort(r.message)
+
+        def aim(instr: str, param: str, value: Any) -> None:
+            """A ramp's set point, set without waiting for its reading: the ramp measures while it gets there."""
+            if gate.stop_generation != gen:
+                raise _Abort("stop requested")
+            r = gate._set(instr, param, value, False, "plan:" + plan.name, gen=gen)
             if not r.ok:
                 raise _Abort(r.message)
 
@@ -763,7 +774,7 @@ class RunEngine:
             for leg in axis.segments:
                 if leg.rate is not None:
                     apply(axis.instr, spec.rate_param, leg.rate)
-                apply(axis.instr, axis.param, leg.to, wait=False)
+                aim(axis.instr, axis.param, leg.to)
                 began = clock.now()
                 way = Approach(leg.to, tol, began, rate_per_s(inst, spec, leg.rate), axis.stall or None)
                 info: Dict[str, Any] = {"to": leg.to, "rate": leg.rate, "hold": leg.hold,

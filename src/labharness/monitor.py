@@ -140,13 +140,14 @@ class Monitor:
         self._last_error_check: Dict[str, float] = {}
         self._last_interlock_check = -1e18
         self._broken: Dict[int, Alarm] = {}   # interlocks found broken (by their place in the lab config)
-        self.stall_s = STALL_S                # the set-point watchdog: how long without getting closer
-        self._moves: Dict[str, Approach] = {}   # set points on their way, by drive (instr.param)
-        self._stalled: Dict[str, Alarm] = {}
-        self._last_setpoint_check = -1e18
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # the set-point watchdog: set points on their way (by drive, instr.param), and how long without getting closer
+        self.stall_s = STALL_S
+        self._moves: Dict[str, Approach] = {}
+        self._stalled: Dict[str, Alarm] = {}
+        self._last_setpoint_check = -1e18
 
     # ------------------------------------------------------------------ watches
 
@@ -252,8 +253,8 @@ class Monitor:
                 w.since = now
             if w.alarm is None and now - w.since >= w.for_s:
                 self._raise_reading(w, value)
-        self._check_interlocks(now)
         self._check_setpoints(now)
+        self._check_interlocks(now)
         self._check_errors(now)
 
     # ------------------------------------------------------------------ alarms
