@@ -193,8 +193,12 @@ class Waker:
                 return "the run or queue has finished"
             return "it has waited %s; the run or queue is still going" % _dur(now - w.created) if now >= w.due else None
         lab = self.agent.runtime.lab
-        try:
-            ok, value = w.condition.check(lab.read)
+        try:   # never a command between a run's own: the run's latest measurement of it, or wait
+            value, why = self.agent.runtime.reading_now(w.condition.key)
+            if why is not None:
+                return None if now < w.due else "it has waited %s, and %s isn't read now (%s)" % (
+                    _dur(now - w.created), w.condition.key, why)
+            ok, value = w.condition.check(lambda instr, param: value)
         except Exception as e:   # a reading failed: say so rather than wait forever
             return "%s could not be read (%s)" % (w.condition.key, str(e).splitlines()[0] if str(e) else e)
         shown = lab.resolve(w.condition.key)[1].show(value)

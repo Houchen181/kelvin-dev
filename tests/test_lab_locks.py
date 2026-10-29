@@ -256,6 +256,43 @@ def test_a_stop_from_anywhere_never_waits_for_the_lab(tmp_path):
     assert any("agent (in “fan”)" in line and "stop" in line for line in rt.events(5).splitlines())
 
 
+
+def test_a_chat_waiting_for_a_reading_never_asks_the_instrument_a_run_uses(tmp_path, monkeypatch):
+    """wake_me's condition is checked in the background: on an instrument a run uses, with the run's own latest
+    measurement of it, or not at all until the run ends; on the others, read as any reading is."""
+    from labharness.agent.server import build_server
+    from labharness.web.agent import ChatAgent
+    from labharness.web.store import ChatStore
+    rt = runtime(tmp_path, [])
+    store = ChatStore(tmp_path / "chats")
+    waker = ChatAgent(rt, store, build_server(rt), {}).waker
+    chat = store.create("scripted:m1")
+    sent = spy(monkeypatch, rt.lab, ["lockin"])
+    holding, done = threading.Event(), threading.Event()
+
+    def run():   # a run that uses the lock-in, and has just measured its X
+        with rt.lock, rt.lock.only(["lockin"]):
+            rt._keep_point({"lockin.X": 2.5e-6}, set())
+            holding.set()
+            done.wait(10)
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    assert holding.wait(5)
+    try:
+        waker.add(chat["id"], {"until": "lockin.X > 1e-6", "note": "fit the peak"})
+        assert waker._check(waker.pending[chat["id"]]).startswith("lockin.X > 1e-6 is reached (now 2.5")   # the run's
+        waker.add(chat["id"], {"until": "lockin.amplitude > 0.5", "note": "x", "within_hours": 1})
+        w = waker.pending[chat["id"]]
+        assert waker._check(w) is None   # the run doesn't measure it: not asked, and the chat waits
+        w.due = 0
+        assert "lockin.amplitude isn't read now (it is in use" in waker._check(w)
+        waker.add(chat["id"], {"until": "tc.T_sample < 300", "note": "x"})
+        assert waker._check(waker.pending[chat["id"]]).startswith("tc.T_sample < 300 is reached")   # read now
+    finally:
+        done.set()
+        t.join(5)
+    assert sent == []
+
 # ---------------------------------------------------------------------- the plan's check, on labsim
 
 PUMP_PROBE = """lab: labsim pump-probe

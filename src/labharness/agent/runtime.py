@@ -525,6 +525,19 @@ class LabRuntime:
         return "%s = %s, %s %s ago (not read now: %s)" % (key, spec.show(value) if spec else value, how,
                                                           _dur(time.time() - when), why)
 
+    def reading_now(self, key: str, fresh_s: float = 120.0) -> Tuple[Any, Optional[str]]:
+        """One reading for a check in the background (a chat waiting for a condition): (its value, None), read now;
+        while the work changing the lab uses the instrument, the run's own latest measurement of it if it has one from
+        the last fresh_s seconds, never a command; else (None, why not)."""
+        instr, _, param = key.partition(".")
+        with self._reading(instr, 1.0) as why:
+            if why is None:
+                return self.lab.read(instr, param), None
+        got = self._kept(instr).get(param)
+        if got is not None and got[2] == "measured by the run" and time.time() - got[1] <= fresh_s:
+            return got[0], None
+        return None, why
+
     def held_by(self) -> str:
         """What has the lab now, in words: the running plan and how far it is, an approval card waiting for a person,
         the queue, or what Kelvin is doing."""
@@ -1118,7 +1131,8 @@ class LabRuntime:
         with self._device_protection(meta) as held, \
                 self.lock.only(self._involved(self._uses(plan_text, plan.requires))):   # the rest stay readable
             report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"))
-        made = self._auto_report(report.run_id)
+        with self.lock.only([]):   # writing its report uses no instrument: all of them can be read meanwhile
+            made = self._auto_report(report.run_id)
         if report.run_id:
             summary = (report.analysis or {}).get("assessment") or report.message
             self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
@@ -2044,7 +2058,8 @@ class LabRuntime:
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
                         q.mark(item, status, report.message if status != "done" else "", report.run_id)
-                        self._auto_report(report.run_id)
+                        with self.lock.only([]):   # its report uses no instrument
+                            self._auto_report(report.run_id)
                         return status == "done", report.message
                     with self.lock.only(uses):
                         return self._queue_step(item)
