@@ -255,6 +255,15 @@ def test_the_portal_the_phone_and_the_approval_page_show_the_same_card(tmp_path)
     worker.join(30)
     assert done and done[0].startswith("declined")
 
+
+def test_the_agent_is_told_to_put_a_runs_prep_in_its_setup():
+    import pytest
+    pytest.importorskip("mcp")
+    from labharness.agent.server import INSTRUCTIONS
+    text = " ".join(INSTRUCTIONS.split())
+    assert "One run, one approval: what a run needs set up first goes in its plan's setup, not in set_value or " \
+           "do_action calls before it" in text and "isrc.wave_start: run" in text
+
 # ------------------------------------------------------------------ on labsim: instruments Kelvin takes for real
 
 TRANSPORT = """lab: labsim transport
