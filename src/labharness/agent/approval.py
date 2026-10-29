@@ -33,9 +33,15 @@ def _minutes(seconds: float) -> str:
 
 def who_text(who: Dict[str, Any]) -> str:
     """A person who answered, in words: their account (when people sign in) and where they answered from, e.g.
-    "Ada (phone Pixel 7)" or "a person (portal)"."""
+    "Ada (phone Pixel 7)" or "a person (portal)"; with roles, who confirmed a trainee's yes: "Ada (portal) with
+    Ben (operator)" or "... with the lab owner's PIN"."""
     where = ", ".join(str(x) for x in (who.get("channel"), who.get("device")) if x)
-    return "%s%s" % (who.get("account") or "a person", " (%s)" % where if where else "")
+    text = "%s%s" % (who.get("account") or "a person", " (%s)" % where if where else "")
+    vouched = who.get("vouched")
+    if isinstance(vouched, dict):
+        text += " with %s" % ("the lab owner's PIN" if vouched.get("pin") else "%s (%s)" % (
+            vouched.get("account"), vouched.get("role") or "operator"))
+    return text
 
 
 class WebApprover(Approver):
@@ -295,17 +301,21 @@ class ApprovalServer:
                     return self._json(400, {"error": "bad request"})
                 if self.path == "/api/answer":
                     answer = getattr(server.runtime, "answer", None)
-                    ok = answer(str(body.get("id")), bool(body.get("approve")), "human (approval page)",
-                                "approval page") if answer else \
-                        server.runtime.approver.answer(str(body.get("id")), bool(body.get("approve")))
+                    try:   # nobody signs in here: with roles, a yes takes the owner's PIN (accounts.LabRoles)
+                        ok = answer(str(body.get("id")), bool(body.get("approve")), "human (approval page)",
+                                    "approval page", pin=body.get("pin")) if answer else \
+                            server.runtime.approver.answer(str(body.get("id")), bool(body.get("approve")))
+                    except PermissionError as e:
+                        return self._json(403, {"error": str(e), "pin": True})
                     return self._json(200 if ok else 409, {"ok": ok})
                 if self.path == "/api/mode":
                     try:
                         return self._json(200, server.runtime.set_approval_mode(str(body.get("mode")),
                                                                                "human (approval page)",
                                                                                pin=body.get("pin")))
-                    except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
-                        return self._json(403, {"error": str(e), "pin": True})
+                    except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin), or the lab's roles
+                        role = type(e).__name__ == "RoleRefused"
+                        return self._json(403, {"error": str(e)} if role else {"error": str(e), "pin": True})
                     except ValueError as e:
                         return self._json(400, {"error": str(e)})
                 if self.path == "/api/stop":

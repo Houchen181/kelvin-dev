@@ -27,7 +27,8 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Respon
 from starlette.routing import Route
 
 from .._version import __version__
-from ..accounts import Accounts, OwnerPin, cipher_for, has_legacy
+from ..accounts import Accounts, LabRoles, OwnerPin, RoleRefused, cipher_for, has_legacy
+from ..configversions import ConfigVersions, widens as config_widens
 from .. import central
 from ..agent.approval import WebApprover
 from ..agent.runtime import SETUP_STEPS, LabRuntime, writable_folder
@@ -277,6 +278,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     envs.attach(envs.DRIVERS)    # the built-in drivers import their makers' packages from there
     runtime.keep_hands(settings.hands_on())               # a hands-on lock stays on across restarts
     runtime.owner = OwnerPin(home)                        # the lab owner's PIN, when one is set
+    runtime.roles = LabRoles(home)                        # the lab's roles on top of it, if the owner gave any
+    runtime.accounts = accounts                           # an operator confirms a trainee's yes with their password
+    runtime.versions = ConfigVersions(home)               # every version of the lab config and the lab's cards
     collection = Collection(home)                         # the instrument collection's copy: ~/Kelvin/collection
     collection.notify = lambda title, text: runtime.notifier("setup", title, text)   # an update failing is said
 
@@ -345,6 +349,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                                log=lambda m: setup_log.info("  %s", m), search=search_web, catalog=runtime.collection)
         if r.get("path"):   # usable at once in Lab setup, like a card a person saves
             runtime.refresh_cards([r["card_id"]])
+            runtime.config_changed("Kelvin (setup)", "wrote a draft card for %s" % (found.get("model") or
+                                                                                    r["card_id"]), "card")
         return r
 
     def sync_collection() -> Dict[str, Any]:
@@ -390,6 +396,13 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         runtime.notifier.phones = lambda: bool(settings.devices)   # a paired phone sees requests and alarms
         if hasattr(runtime.approver, "escalate_s"):   # a request nobody answered here waits this long for the phone
             runtime.approver.escalate_s = settings.approval_wait_s
+        from ..notify import email_from   # where the lab owner hears of safety changes, whoever is signed in
+        target = runtime.roles.notify_target()
+        try:
+            mail = target.get("email") if isinstance(target.get("email"), dict) else None
+            runtime.notifier.configure_owner(target.get("webhook"), email_from(**mail) if mail else None)
+        except (TypeError, ValueError):
+            runtime.notifier.configure_owner(None, None)
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
@@ -398,6 +411,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         tasks.append(asyncio.ensure_future(agent.waker.run()))   # chats continued later (wakeups.py)
         configure_notifications()
         configure_literature()
+        await asyncio.to_thread(runtime.config_noticed)   # the lab config and cards as they are, in their history
         await start_phone()
         runtime.start_watching()   # the watches; what a restart left; outputs left on idle
         runtime.tidy_later()   # runs a crash ended, and runs from before run.h5, kept as run.h5 and catalogued
@@ -427,22 +441,39 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     def error(status: int, message: str) -> JSONResponse:
         return JSONResponse({"error": message}, status_code=status)
 
-    def needs_owner(body: Any) -> Optional[JSONResponse]:
-        """403 (the portal then asks for it) unless no lab owner's PIN is set or the body has it ({pin})."""
+    def needs_owner(body: Any, what: Optional[str] = "Changing limits or the lab config",
+                    owner: bool = True) -> Optional[JSONResponse]:
+        """403 (the portal then asks for it) unless no lab owner's PIN is set or the body has it ({pin}). With the
+        lab's roles, a trainee is refused whatever the PIN (what: the change, in words; None: anyone, with the
+        PIN). owner=False: the roles only."""
+        try:
+            if what:
+                runtime.not_for_trainees(what)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e), "role": "trainee"}, status_code=403)
+        if not owner:
+            return None
         why = runtime.owner.check(body.get("pin") if isinstance(body, dict) else None) if runtime.owner else None
         return JSONResponse({"error": why, "pin": True}, status_code=403) if why else None
 
     async def owner_pin(request: Request) -> Response:
         """GET: whether the lab owner's PIN is set. POST {pin, old}: set it, change it, or remove it (pin empty);
-        once one is set, only with it (old). On this computer only (phones never reach this)."""
+        once one is set, only with it (old). Not removed while the lab has roles, which change with it. On this
+        computer only (phones never reach this)."""
         if request.method == "POST":
             body = await request.json()
+            if not str(body.get("pin") or "").strip() and runtime.roles.on:
+                return error(409, "The lab has roles, and they change with the PIN: give no one a role first "
+                                  "(Lab roles, below), then remove the PIN.")
             try:
                 runtime.owner.set(body.get("pin"), body.get("old"))
             except ValueError as e:
                 return JSONResponse({"error": str(e), "pin": True}, status_code=403 if runtime.owner.is_set else 400)
             runtime.gate.log.write("owner_pin", by=person(request), account=runtime.user,
                                    change="set" if runtime.owner.is_set else "removed")
+            await asyncio.to_thread(runtime.audit_event, "the lab owner's PIN %s" % (
+                "set" if runtime.owner.is_set else "removed: anyone may change limits, auto mode and Hands on"),
+                person(request), "", not runtime.owner.is_set)
         return JSONResponse({"set": runtime.owner.is_set})
 
     async def index(request: Request) -> Response:
@@ -1310,7 +1341,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 was = next((d.get("protection") for d in store.devices(project_key(request))
                             if d["id"] == request.path_params["device_id"]), None) or {}
                 if was and fields["protection"] != was:   # lifting or changing a protection: the owner's, when set
-                    refused = needs_owner(body)
+                    refused = needs_owner(body, "Lifting or changing a device's protection")
                     if refused:
                         return refused
             d = store.update_device(project_key(request), request.path_params["device_id"], **fields)
@@ -1343,7 +1374,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         else:
             if role_of(request) == "watch":
                 return error(403, "This phone can lock, not unlock. Unlock on the Kelvin computer.")
-            refused = needs_owner(body)   # before anything changes: the sample mounted, the lock
+            refused = needs_owner(body, None)   # before anything changes: the sample mounted, the lock
             if refused:
                 return refused
             if "device" in body and role_of(request) == "owner":
@@ -1410,7 +1441,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             body = await request.json()
             pid = body.get("project") or None
             if (runtime.mounted or {}).get("protection"):   # taking out a protected device lifts its protection
-                refused = needs_owner(body)
+                refused = needs_owner(body, "Taking out a protected device")
                 if refused:
                     return refused
             try:
@@ -1693,22 +1724,48 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     # ------------------------------------------------------------------ the user's own instrument cards
 
     async def cards_view(request: Request) -> Response:
-        """GET: the user's cards. POST {yaml, replace}: check and keep one (a person may set any status)."""
+        """GET: the user's cards. POST {yaml, replace, why}: check and keep one (a person may set any status). A card
+        that widens a limit, a safe value or a rate, or comes marked reviewed, against the card it replaces (Kelvin's
+        own, for the lab's version of one), is the owner's, as a lab limit is: the PIN, and never a trainee's."""
         if request.method == "GET":
+            await asyncio.to_thread(runtime.config_noticed)
             return JSONResponse({"cards": carddraft.user_cards(runtime.cards_dir, collection_ids(runtime.collection)),
                                  "folder": str(runtime.cards_dir), "kelvins": kelvins_cards()})
         body = await request.json()
+        text = str(body.get("yaml") or "")
+        new = carddraft.check(text)[0]
+        if new is not None and runtime.cards_dir is not None:
+            refused = None
+            if config_widens("cards/" + carddraft.file_for(new.id), card_before(new.id), text):
+                refused = needs_owner(body, "Widening a card's limits or marking it reviewed")
+            if refused:
+                return refused
         try:
-            card, path, warnings = carddraft.save(runtime.cards_dir, str(body.get("yaml") or ""),
-                                                  kelvin_ids(runtime.collection), "human",
+            card, path, warnings = carddraft.save(runtime.cards_dir, text, kelvin_ids(runtime.collection), "human",
                                                   str(body.get("replace") or "") or None, bool(body.get("version")))
         except ValueError as e:
             return error(400, str(e))
         runtime.refresh_cards([card.id] + ([str(body["replace"])] if body.get("replace") else []))
         runtime.gate.log.write("card", by="human", card=card.id, status=card.status, file=path.name)
+        made = await asyncio.to_thread(runtime.config_changed, "human (portal)",
+                                       " ".join(str(body.get("why") or "").split())[:300], "card")
         return JSONResponse({"id": card.id, "file": path.name, "status": card.status, "warnings": warnings,
                              "kelvins": card.id in builtin_ids(), "reconnect": sorted(
-                                 n for n, i in runtime.lab.instruments.items() if i.card.id == card.id)})
+                                 n for n, i in runtime.lab.instruments.items() if i.card.id == card.id),
+                             "versions": [v["n"] for v in made]})
+
+    def card_before(card_id: str) -> Optional[str]:
+        """The card a person's card of this id replaces, as text: the lab's own, else the one Kelvin uses for it
+        (its own or the collection's); None for a new one."""
+        path = runtime.cards_dir / carddraft.file_for(card_id)
+        try:
+            if path.exists():
+                return path.read_text(encoding="utf-8")
+            if card_id in runtime.lab.registry:
+                return Path(runtime.lab.registry.get(card_id).source).read_text(encoding="utf-8")
+        except (OSError, TypeError, UnicodeDecodeError):
+            pass
+        return None
 
     async def card_check(request: Request) -> Response:
         card, problems, warnings = carddraft.check(str((await request.json()).get("yaml") or ""))
@@ -1740,7 +1797,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         body = await request.json()
         card_id, status = str(body.get("id") or ""), str(body.get("status") or "")
         if status != "draft":   # marked reviewed: its outputs stop asking each time, the owner's call when set
-            refused = needs_owner(body)
+            refused = needs_owner(body, "Marking a card reviewed")
             if refused:
                 return refused
         try:
@@ -1760,14 +1817,26 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             if inst.card.id == card.id:
                 inst.card.status = card.status
         runtime.gate.log.write("card", by="human", card=card.id, status=card.status)
+        await asyncio.to_thread(runtime.config_changed, "human (portal)", "card %s marked %s" % (card.id, status),
+                                "card")
         return JSONResponse({"id": card.id, "status": card.status})
 
     async def card_delete(request: Request) -> Response:
-        card_id = str((await request.json()).get("id") or "")
+        """POST {id}: delete one of the lab's cards. A reviewed one is the owner's to delete (the PIN, and never a
+        trainee's): Kelvin's own card of that id, or the collection's, may then apply with wider limits."""
+        body = await request.json()
+        card_id = str(body.get("id") or "")
+        mine = runtime.cards_dir is not None and (runtime.cards_dir / carddraft.file_for(card_id)).exists()
+        was = card_before(card_id) if mine else None
+        if was is not None and config_widens("cards/" + carddraft.file_for(card_id), was, None):
+            refused = needs_owner(body, "Deleting a reviewed card")
+            if refused:
+                return refused
         try:
             carddraft.delete(runtime.cards_dir, card_id)
         except KeyError as e:
             return error(404, e.args[0])
+        await asyncio.to_thread(runtime.config_changed, "human (portal)", "card %s deleted" % card_id, "card")
         # the collection's or Kelvin's own card of that id again (with a person's review of it), if there is one
         runtime.refresh_cards([card_id])
         return JSONResponse({"ok": True, "reconnect": sorted(n for n, i in runtime.lab.instruments.items()
@@ -2093,8 +2162,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def lab_view(request: Request) -> Response:
         """GET: which lab Kelvin controls, the user's lab config and the instrument cards.
-        POST {yaml}: check, save and connect the user's lab. POST {use: "virtual" | "mine"}: switch."""
+        POST {yaml, why}: check, save and connect the user's lab. POST {use: "virtual" | "mine"}: switch."""
         if request.method == "GET":
+            await asyncio.to_thread(runtime.config_noticed)   # an edit made by hand is kept as its own change first
             cards = [{"id": c.id, "model": c.model, "kind": c.kind, "vendor": c.vendor, "status": c.status,
                       "identifies": bool(c.idn_pattern)}
                      for c in sorted(runtime.lab.registry, key=lambda c: (c.kind, c.id)) if not c.id.startswith("virtual/")]
@@ -2102,12 +2172,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                                  "yaml": lab_file.read_text(encoding="utf-8") if lab_file.exists() else "",
                                  "unreviewed": runtime.lab.config.unreviewed(), "setup": setup.status,
                                  "folders": instrument_folders()})
-        body = await request.json()
+        return await lab_post(await request.json())
+
+    async def lab_post(body: Dict[str, Any], by: str = "human (portal)", why: str = "",
+                       rollback: Optional[int] = None) -> Response:
+        """A lab config saved and connected (POST /api/lab), or put back from its history (governance.py: a
+        rollback is a change like any other). Each change to the file is kept in the lab's config history with who
+        and why (configversions.py)."""
+        why = why or " ".join(str(body.get("why") or "").split())[:300]
+        made: List[Dict[str, Any]] = []
         problem = busy_problem()
         if problem:
             return error(409, problem)
         use = body.get("use")
-        by = "human (portal)"
         if use not in ("virtual", "mine"):   # a new lab config, or limits marked reviewed: the owner's, when set
             refused = needs_owner(body)
             if refused:
@@ -2125,9 +2202,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     tmp = lab_file.with_suffix(".tmp")
                     tmp.write_text(text, encoding="utf-8")
                     tmp.replace(lab_file)
+                    made = await asyncio.to_thread(runtime.config_changed, by, why, "reviewed")
                     await asyncio.to_thread(runtime.mark_reviewed, "human (portal)")
                     return JSONResponse({"ok": True, "name": runtime.lab.config.name, "info": runtime.lab_info,
-                                         "health": [], "unreviewed": []})
+                                         "health": [], "unreviewed": [], "versions": [v["n"] for v in made]})
             body, use, by = {"yaml": text}, None, "human (portal, reviewed)"
         try:
             if use == "virtual":
@@ -2148,6 +2226,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     tmp = lab_file.with_suffix(".tmp")
                     tmp.write_text(text, encoding="utf-8")
                     tmp.replace(lab_file)
+                    made = await asyncio.to_thread(runtime.config_changed, by, why, "rollback" if rollback else
+                                                   "reviewed" if by.endswith("reviewed)") else "config", rollback)
         except ConfigError as e:
             return error(400, "The lab config has problems: " + "; ".join(e.errors[:6]))
         except (AdapterError, OSError, ValueError) as e:
@@ -2163,7 +2243,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if use != "virtual" and auto_setup:   # give new instruments their folders, settings and manuals
             setup.start("lab changed")
         return JSONResponse({"ok": True, "name": lab.config.name, "info": runtime.lab_info, "health": health,
-                             "unreviewed": lab.config.unreviewed()})
+                             "unreviewed": lab.config.unreviewed(), "versions": [v["n"] for v in made]})
 
     async def lab_install(request: Request) -> Response:
         """POST {env, packages}: install the makers' packages the lab's instruments need, from the Install button
@@ -2508,7 +2588,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             ic.added_by = ""
         runtime.gate.log.write("limits", by="human (portal)", instrument=name,
                                limits={p: list(v) for p, v in ic.limits.items()}, reviewed=reviewed)
-        return JSONResponse(limits_view(name))
+        made = await asyncio.to_thread(runtime.config_changed, "human (portal)",
+                                       " ".join(str(body.get("why") or "").split())[:300], "limits")
+        return JSONResponse(dict(limits_view(name), versions=[v["n"] for v in made]))
 
     async def wake_view(request: Request) -> Response:
         """DELETE: the person cancels the chat's wake-up (Kelvin would have continued it later)."""
@@ -2728,11 +2810,17 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return error(400, "action is safe or dismiss")
 
     async def approval(request: Request) -> Response:
+        """POST {approve, approver: {name, password}, pin}: a person's answer. With the lab's roles, a trainee's yes
+        takes an operator's or the owner's password, or the owner's PIN (403 {approver: true} asks for them)."""
         body = await request.json()
         if body.get("approve") and role_of(request) == "watch":
             return error(403, "This phone can watch and decline, not approve. Approve on the Kelvin computer.")
-        ok = runtime.answer(request.path_params["request_id"], bool(body.get("approve")), person(request),
-                            *channel(request))
+        try:
+            ok = await asyncio.to_thread(runtime.answer, request.path_params["request_id"], bool(body.get("approve")),
+                                         person(request), *channel(request), body.get("approver"), body.get("pin"))
+        except PermissionError as e:   # a trainee's yes, not confirmed (accounts.LabRoles.vouch)
+            return JSONResponse({"error": str(e), "approver": True, "approvers": runtime.roles.approvers(),
+                                 "pin_set": bool(runtime.owner and runtime.owner.is_set)}, status_code=403)
         return JSONResponse({"ok": ok}, status_code=200 if ok else 409)
 
     async def state(request: Request) -> Response:
@@ -2765,6 +2853,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             try:
                 return JSONResponse(runtime.set_approval_mode(str(body.get("mode")), "human (portal)",
                                                               pin=body.get("pin")))
+            except RoleRefused as e:   # the lab's roles: not a trainee's, PIN or not
+                return JSONResponse({"error": str(e), "role": "trainee"}, status_code=403)
             except PermissionError as e:   # the lab owner's PIN (accounts.OwnerPin)
                 return JSONResponse({"error": str(e), "pin": True}, status_code=403)
             except ValueError as e:
@@ -3004,6 +3094,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/runs/{run_id}/export", run_export),
         Route("/static/{name}", static),
     ]
+    from . import governance   # the config history (audit view, rollback), the lab's roles, the owner's notices
+    routes += governance.routes(runtime, settings, accounts, needs_owner, lab_post, person, configure_notifications,
+                                busy_problem)
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.agent = agent
     app.state.remote = remote

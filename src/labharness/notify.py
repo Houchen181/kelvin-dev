@@ -8,6 +8,10 @@ phone without any third-party service. Nothing is sent anywhere unless the user 
 A heartbeat URL (healthchecks.io, Uptime Kuma's push monitor, or anything that alerts when pings stop) is pinged every
 few minutes while Kelvin is running and watching the lab: when Kelvin or the computer stops in the night, the pings
 stop, and that service tells someone. It is told nothing about the lab.
+
+Safety changes (a limit widened, an interlock taken out, auto mode on, Hands on the sample unlocked, a card's limits
+changed: configversions.py) also go to the lab owner, whoever is signed in: to the webhook and email the owner chose
+for them (accounts.LabRoles.notify_target), as well as to the signed-in person's own when they ticked them.
 """
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
-KINDS = ("alarm", "alarm_cleared", "approval", "run")
+KINDS = ("alarm", "alarm_cleared", "approval", "run", "safety")
 DEFAULT_KINDS = ("alarm", "run")
 SECURITY = ("starttls", "ssl", "none")
 HEARTBEAT_S = 300.0   # seconds between heartbeat pings, unless set otherwise
@@ -140,6 +144,9 @@ class Notifier:
         self._lock = threading.Lock()
         self._beat_wake = threading.Event()
         self._beat_thread: Optional[threading.Thread] = None
+        # where the lab owner hears of safety changes, whoever is signed in (configure_owner): a webhook, an email
+        self.owner_webhook: Optional[str] = None
+        self.owner_email: Optional[Email] = None
 
     def configure(self, webhook: Optional[str], kinds: Optional[Iterable[str]] = None, email: Optional[Email] = None,
                   heartbeat: Optional[str] = None, heartbeat_s: Optional[float] = None) -> None:
@@ -182,6 +189,32 @@ class Notifier:
         with self._lock:
             return [n for n in self.notices if n["id"] > after]
 
+    # ------------------------------------------------------------------ the lab owner, told of safety changes
+
+    def configure_owner(self, webhook: Optional[str], email: Optional[Email]) -> None:
+        """Where the lab owner hears of safety changes (None, None: nowhere but the in-app list)."""
+        url = (webhook or "").strip()
+        if url and not url.startswith(("https://", "http://")):
+            raise ValueError("the owner's webhook must be an http(s) URL")
+        self.owner_webhook, self.owner_email = url or None, email
+
+    def tell_owner(self, title: str, text: str = "") -> Dict[str, Any]:
+        """A safety change: in the in-app list, to the owner's webhook and email (always, when the owner set them),
+        and to the signed-in person's own when they ticked safety changes (never twice to the same place)."""
+        notice = {"id": next(_ids), "kind": "safety", "title": title, "text": text, "at": time.time()}
+        with self._lock:
+            self.notices.append(notice)
+        if self.owner_webhook or self.owner_email:
+            self._send(title, text, url=self.owner_webhook, email=self.owner_email)
+        if "safety" in self.kinds and (self.webhook or self.email):
+            same_mail = self.email is not None and self.owner_email is not None and \
+                sorted(self.email.to) == sorted(self.owner_email.to)
+            url = self.webhook if self.webhook != self.owner_webhook else None
+            email = None if same_mail else self.email
+            if url or email:
+                self._send(title, text, url=url, email=email)
+        return notice
+
     def test(self) -> str:
         if not (self.webhook or self.email or self.heartbeat):
             return "no webhook, email or heartbeat set"
@@ -194,8 +227,9 @@ class Notifier:
             said.append("heartbeat: " + (self.beat_error or "pinged"))
         return "; ".join(said)
 
-    def _send(self, title: str, text: str, wait: bool = False) -> None:
-        url, email = self.webhook, self.email
+    def _send(self, title: str, text: str, wait: bool = False, **to: Any) -> None:
+        """Post to the webhook and mail the email account (to: url=, email= instead of the person's own)."""
+        url, email = (to.get("url"), to.get("email")) if to else (self.webhook, self.email)
         problems: List[str] = []
 
         def go() -> None:

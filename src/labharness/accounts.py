@@ -2,12 +2,14 @@
 
 Everyone is equal: there is no administrator. Anyone at the computer can create an account; each account protects
 itself with an optional password. An optional lab-owner PIN (OwnerPin) guards what widens Kelvin's reach over the
-instruments: limits and the lab config, auto mode, unlocking Hands on the sample. What is shared is the physical setup: the instruments (lab.yaml, cards, instrument
+instruments: limits and the lab config, auto mode, unlocking Hands on the sample. On top of it the owner may give
+people roles (LabRoles: owner, operator, trainee); until then, everyone is equal. What is shared is the physical setup: the instruments (lab.yaml, cards, instrument
 folders) and the instrument log, which records every command with the name of the person who sent it.
 
     ~/Kelvin/
       settings.json              this computer: which lab, instrument set-up switches, the portal's access key
       accounts.json              the accounts: name, folder, password hash
+      owner.json, roles.json     the lab owner's PIN (a salted hash), and the lab's roles, if the owner gave any
       instrument-log.jsonl       every event from everyone, each with its user
       lab.yaml, cards/, instruments/
       users/<name>/
@@ -264,8 +266,8 @@ class OwnerPin:
     """The lab owner's PIN, optional, kept on this computer (~/Kelvin/owner.json, a salted hash). Once it is set, a
     person gives it to widen what Kelvin may do with the instruments: change limits or the lab config (its interlocks
     and watches), turn on auto mode, unlock Hands on the sample. Narrowing never needs it (lowering a limit through
-    the config still does, as the config can't tell). Not a sign-in: everyone is otherwise equal at the computer. The
-    full roles model (owner, operator, trainee) comes later."""
+    the config still does, as the config can't tell). Not a sign-in: everyone is otherwise equal at the computer, unless the
+    owner gives people roles (LabRoles), which build on this PIN."""
     TRIES = 5            # wrong PINs before it locks for a while
     LOCKED_S = 300.0
 
@@ -324,3 +326,187 @@ class OwnerPin:
         tmp.write_text(json.dumps({"salt": salt.hex(), "hash": _hash(new, salt), "iterations": ITERATIONS,
                                    "set": time.strftime("%Y-%m-%dT%H:%M:%S")}), encoding="utf-8")
         os.replace(tmp, self.path)
+
+
+ROLES = ("owner", "operator", "trainee")
+NEEDS_YES = ("a trainee's yes needs an operator or the lab owner: their name and password on this computer, or the "
+             "owner's PIN")
+
+
+class RoleRefused(PermissionError):
+    """Not for this person's role in the lab, whatever PIN they give (unlike OwnerPin's refusals)."""
+
+
+def trainee_refusal(what: str) -> str:
+    """Why a trainee can't do what widens Kelvin's reach, in words for the person."""
+    return ("%s is not for a trainee in this lab: an operator or the lab owner signs in to do it (Settings, "
+            "Instruments, Lab roles)" % what)
+
+
+class LabRoles:
+    """The lab's roles, on top of the owner's PIN (OwnerPin): owner, operator and trainee. Optional, and off until the
+    owner gives people roles; then they are kept in ~/Kelvin/roles.json. Off, Kelvin is as before: everyone equal,
+    the PIN guarding what widens Kelvin's reach. On:
+    - an operator or an owner works as everyone did before (the PIN still guards limits, the lab config, auto mode
+      and unlocking Hands on the sample);
+    - a trainee's yes on a request (a drive away from safe, a run, a queue, anything Kelvin asks a person) needs an
+      operator or the owner to confirm it at the card: their account's password, or the owner's PIN;
+    - limits, the lab config, the cards' limits and reviews, rolling the config back and auto mode are not for a
+      trainee at all, PIN or not: an operator or the owner signs in to do them;
+    - only an owner, signed in and with the PIN, changes the roles and where the owner hears of safety changes.
+    Whoever the owner gave no role (an account made later) is a trainee, and so is a person Kelvin can't name (its
+    approval page as an MCP server, where nobody signs in). The PIN must be set for roles, and stays while they are
+    on. Not a wall: whoever can edit this computer's files can delete roles.json, and the lab's record shows that."""
+    TRIES = 5            # wrong passwords or PINs for a trainee's yes before it locks for a while
+    LOCKED_S = 300.0
+
+    def __init__(self, home: Any):
+        self.path = Path(home) / "roles.json"
+        self._wrong: List[float] = []
+        self._lock = threading.Lock()
+
+    def _data(self) -> Dict[str, Any]:
+        """The file's contents; {"unreadable": True} for a file that is there but can't be read (then everyone is a
+        trainee until the owner gives the roles again: a broken file must not lift them)."""
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except (OSError, UnicodeDecodeError):
+            return {"unreadable": True}
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return {"unreadable": True}
+        return data if isinstance(data, dict) else {"unreadable": True}
+
+    def _write(self, data: Dict[str, Any]) -> None:
+        data.pop("unreadable", None)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=1, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def all(self) -> Dict[str, str]:
+        """Each account the owner gave a role, with it: {} while the lab has no roles."""
+        roles = self._data().get("roles")
+        return {str(k): str(v) for k, v in roles.items() if v in ROLES} if isinstance(roles, dict) else {}
+
+    @property
+    def on(self) -> bool:
+        return bool(self.all()) or bool(self._data().get("unreadable"))
+
+    def role(self, name: Optional[str]) -> Optional[str]:
+        """None while the lab has no roles; else this person's: the one the owner gave, or trainee (nobody named,
+        or an account the owner gave none)."""
+        if not self.on:
+            return None
+        mine = str(name or "").strip().lower()
+        return next((r for n, r in self.all().items() if mine and n.lower() == mine), "trainee")
+
+    def approvers(self) -> List[str]:
+        """Who may confirm a trainee's yes: the operators and owners, by name."""
+        return sorted(n for n, r in self.all().items() if r in ("owner", "operator"))
+
+    def _may_change(self, owner: Optional[OwnerPin], pin: Any, signed_in: Optional[str]) -> None:
+        """Roles and the owner's notices change with the owner's PIN, which must be set; once there are roles, only
+        by an owner signed in (unless no account has the owner role any more: then the PIN alone)."""
+        if owner is None or not owner.is_set:
+            raise ValueError("Set the lab owner's PIN first: roles change with it.")
+        why = owner.check(pin)
+        if why:
+            raise PermissionError(why)
+        owners = [n for n, r in self.all().items() if r == "owner"]
+        if owners and self.role(signed_in) != "owner":
+            raise PermissionError("only the lab's owner changes this: %s signs in to do it" % " or ".join(owners))
+
+    def set(self, roles: Dict[str, Any], owner: Optional[OwnerPin], pin: Any, signed_in: Optional[str],
+            accounts: Optional["Accounts"] = None) -> Dict[str, str]:
+        """Give people their roles ({} or all empty: no roles, everyone equal again). Each name is an account on this
+        computer, and at least one is the owner. ValueError and PermissionError say why not."""
+        out: Dict[str, str] = {}
+        for name, role in (roles or {}).items():
+            if role in (None, "", "none"):
+                continue
+            if role not in ROLES:
+                raise ValueError("a role is owner, operator or trainee, not %r" % role)
+            if accounts is not None:
+                try:
+                    name = accounts.find(name)["name"]
+                except KeyError:
+                    raise ValueError("there is no account %r on this computer" % name) from None
+            out[str(name)] = str(role)
+        if out and "owner" not in out.values():
+            raise ValueError("Give at least one person the owner's role: the owner changes the roles.")
+        self._may_change(owner, pin, signed_in)
+        with self._lock:
+            data = self._data()
+            data.update(roles=out, changed=time.strftime("%Y-%m-%dT%H:%M:%S"), by=signed_in or None)
+            self._write(data)
+        return out
+
+    # ------------------------------------------------------------------ a trainee's yes, confirmed
+
+    def vouch(self, accounts: Optional["Accounts"], owner: Optional[OwnerPin], name: Any = None,
+              password: Any = None, pin: Any = None) -> Dict[str, Any]:
+        """Who confirms a trainee's yes, checked: {"account", "role"} for an operator or the owner with their
+        account's password here, {"pin": True} for the owner's PIN. PermissionError says why not. Wrong tries lock it
+        for a while, as the PIN does."""
+        if pin:
+            if owner is None or not owner.is_set:   # no PIN set: check() would take anything
+                raise PermissionError("there is no lab owner's PIN on this computer; " + NEEDS_YES)
+            why = owner.check(pin)
+            if why:
+                raise PermissionError(why)
+            return {"pin": True}
+        name = str(name or "").strip()
+        if not name:
+            raise PermissionError(NEEDS_YES)
+        with self._lock:
+            now = time.monotonic()
+            self._wrong = [t for t in self._wrong if now - t < self.LOCKED_S]
+            if len(self._wrong) >= self.TRIES:
+                raise PermissionError("too many wrong passwords: try again in %d minutes" % max(
+                    1, round((self.LOCKED_S - (now - self._wrong[0])) / 60)))
+        try:
+            account = accounts.find(name) if accounts is not None else None
+        except KeyError:
+            account = None
+        role = self.role(account["name"]) if account else None
+        if account is None or role not in ("owner", "operator"):
+            self._wrong_try()
+            raise PermissionError("%s is not an operator or the owner of this lab" % name)
+        if not account.get("hash"):   # anyone could give the name: an account without a password proves nothing
+            raise PermissionError("%s has no password on this computer, so Kelvin can't tell it is them: they set "
+                                  "one in Settings, Account (or the owner gives the PIN)" % account["name"])
+        if not accounts.matches(account["name"], str(password or "")):
+            self._wrong_try()
+            raise PermissionError("that is not %s's password" % account["name"])
+        with self._lock:
+            self._wrong.clear()
+        return {"account": account["name"], "role": role}
+
+    def _wrong_try(self) -> None:
+        with self._lock:
+            self._wrong.append(time.monotonic())
+
+    # ------------------------------------------------------------------ where the owner hears of safety changes
+
+    def notify_target(self) -> Dict[str, Any]:
+        """Where the owner is told of safety changes, whoever is signed in: {"webhook": url, "email": {...}} (the
+        email as notify.email_from takes it), or {} while the owner set none."""
+        target = self._data().get("notify")
+        return target if isinstance(target, dict) else {}
+
+    def set_notify(self, target: Optional[Dict[str, Any]], owner: Optional[OwnerPin], pin: Any,
+                   signed_in: Optional[str]) -> None:
+        """Keep (or, with None, forget) where the owner hears of safety changes: a copy of the owner's own
+        notification settings, readable on this computer, so they reach the owner while someone else is signed in."""
+        self._may_change(owner, pin, signed_in)
+        with self._lock:
+            data = self._data()
+            if target:
+                data["notify"] = dict(target, set=time.strftime("%Y-%m-%dT%H:%M:%S"), by=signed_in or None)
+            else:
+                data.pop("notify", None)
+            self._write(data)
