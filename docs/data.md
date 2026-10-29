@@ -219,10 +219,24 @@ Next to the run folders sit `events.jsonl`, your record of every command, readin
 
 ### Data from other programs
 
-Spectra and tables that Kelvin didn't measure can become runs, so Kelvin's tools work on them: its card, its numbers, `compute`, its plots, reports and the automatic fits. In a chat: "compare the two PL spectra in C:\Data\PL" or "import these files".
-- **What it reads:** tables (CSV, TSV, text, with or without a header row; `Wavelength (nm)` gives the column its unit) and LightField's .spe files (each frame's rows summed per column, frames averaged, the wavelengths from the file's calibration). LightField's long CSV export is summed the same way.
+Data that Kelvin didn't measure can become runs, so Kelvin's tools work on them: its card, its numbers, `compute`, `look_at`, `plot_runs`, `fit_run`, `run_python` and reports. In a chat: "compare the two PL spectra in C:\Data\PL", "import these files", or attach the file with the paperclip.
+
+| What | Read as |
+|---|---|
+| **Tables:** CSV, TSV, text | The row just above the numbers names the columns, after any lines of settings an instrument writes first. `Wavelength (nm)`, `I [nA]`, `time/s` or a row of units under the names, such as `(sec)`, give the units. Dates and times become seconds from the first, and the note says when that was. A decimal comma is read. Text columns are left out, and rows whose x isn't a number are skipped; the notes say so. A long table of a 2-D scan (`gate, field, R` with the gate held while the field runs) becomes a 2-D run, which `look_at` shows as a map. |
+| **Excel** (.xlsx) | The first sheet with numbers, read as a table. Kelvin needs no Excel. An old .xls: save it as .xlsx or CSV first. |
+| **Arbin** CSV or Excel export (MITS Pro, MITS 7 and 8) | On the test time. An Excel export's Channel sheets are read one after another. Arbin's own .res database isn't read: export the test as Excel or CSV. |
+| **BioLogic** EC-Lab .mpt (text) | A voltammogram on its potential (Ewe), an impedance spectrum on its frequency, anything else on time. `-Im(Z)` is `minus_im_z`, `|Z|` `abs_z`, `<I>` `i_mean`. The note gives the technique, the start, and the electrode's area and active mass. |
+| **BioLogic** EC-Lab .mpr (binary) | Only when Kelvin is sure of its layout. BioLogic doesn't publish it, so Kelvin reads the column types the open-source reader galvani lists. It checks that the points fill the file exactly and that time runs forward. Otherwise it refuses, with a word to export .mpt from EC-Lab, rather than read numbers that may be shifted. |
+| **Gamry** .dta | A voltammogram's cycles one after another (column `curve`), on its potential; an impedance spectrum on its frequency; anything else on time. The open-circuit stretch before a measurement is left out, and said. |
+| **LightField** .spe and its long CSV | Each frame's rows summed per column, frames averaged, the wavelengths from the file's calibration. |
+| **NumPy** .npy, .npz | 1-D: a column. 2-D and narrow: a table, with x its first column when that runs one way. 2-D and wide: a camera frame. 3-D: a stack of frames. A record array: its named fields. A .npz: its 1-D arrays of one length side by side. Arrays of Python objects are never loaded. |
+| **TIFF** (.tif, .tiff, BigTIFF too) | A camera frame, or a stack of them: a point per frame, kept as a camera's frames are. A stack also gets each frame's mean and maximum. `look_at` shows the last frame, or any by its number (`frame: 3`, from 0); `run_python` reads them all from run.h5's `/frames/`. Read: 8 to 64-bit gray or RGB, in strips or tiles, uncompressed, LZW, Deflate or PackBits. JPEG-compressed TIFFs are refused, so save them another way. |
+
 - **Several files at once** go side by side into one run when they share their x values, so `compute` can normalise or subtract them: `f_004_sample.counts - f_003_silicon.counts`.
-- **Only numbers are read;** names become column names (starting with a letter). The run is kept like any other (in the chat's folder, if it has one), marked as imported, with the files it came from.
+- **Attached in a chat:** a data file you attach becomes a run as you attach it, filed with the chat's runs (in its folder, if it has one), even while a run holds the lab: an import touches no instrument. The chip under your message says how many points or frames it has, and the AI is told the run's id and columns. A file Kelvin can't read is refused at once, saying why. Attachments go up to 40 MB; for a bigger file, give Kelvin its full path.
+- **Fits:** the automatic fits run on tables and spectra. They don't run on electrochemistry, a cycler's record or frames: they are made for Kelvin's own sweeps, and on such data they mislead (a voltammogram's set point "linear in its potential"). Use `fit_run` with the model you choose.
+- **Only numbers are read.** The AI gets names only as column names (letters, digits and _) and units only when they are a unit's few characters. A maker's settings reach it only in Kelvin's own words: the technique, the start, an area. Comments, sample notes and text columns stay in the file. The run is kept like any other, marked as imported, with the files it came from.
 
 ### Each chat's folder
 
