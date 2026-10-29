@@ -1057,11 +1057,6 @@ class SafetyGate:
             val = inst.read(spec.readback)
             if abs(val - target) <= spec.tol:
                 return None
-            if way is not None and way.update(val, clock.now()) >= WAIT_STALL_S:
-                return Result(False, "timeout", key, value=val, message=(
-                    "%s: %s has not got closer to %s for %s (it reads %s): the instrument may be stuck, so Kelvin "
-                    "stopped waiting" % (key, spec.readback, spec.show(target), _dur(clock.now() - way.since),
-                                         spec.show(val))))
             if watch:
                 trip = self._guard_trip(inst, spec)
                 if trip:
@@ -1073,14 +1068,28 @@ class SafetyGate:
                                   message="%s stopped at %s (stop requested)" % (key, spec.show(val)))
                 return Result(False, "stopped", key, value=val, message="%s: stopped waiting at %s (stop requested); "
                               "it goes on to %s by itself" % (key, spec.show(val), spec.show(target)))
+            if way is not None and way.update(val, clock.now()) >= WAIT_STALL_S:
+                return Result(False, "timeout", key, value=val, message=(
+                    "%s: %s has not got closer to %s for %s (it reads %s): the instrument may be stuck, so Kelvin "
+                    "stopped waiting%s" % (key, spec.readback, spec.show(target), _dur(clock.now() - way.since),
+                                           spec.show(val), self._held_at(inst, spec, val, watch))))
             if clock.now() - t0 > timeout:
                 if arrived:
                     return Result(False, "error", key, value=val, message=(
                         "%s: its status says the move is over, but %s is %s, not %s: it stopped short or refused the "
                         "move" % (key, spec.readback, spec.show(val), spec.show(target))))
-                return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)" % (
-                    key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
+                return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)%s" % (
+                    key, spec.readback, spec.show(val), _dur(timeout), spec.show(target),
+                    self._held_at(inst, spec, val, watch)))
             self._pause(poll, gen)   # a stop wakes it at once
+
+    def _held_at(self, inst: Instrument, spec: ParamSpec, val: Any, away: bool) -> str:
+        """A wait that gives up on a move away from safe (no progress, or its time is up) leaves it where it got to,
+        as a stop does: its guards are watched only while Kelvin waits, so it must not go on by itself unwatched."""
+        if not away:
+            return ""
+        inst.write(spec.name, val)
+        return "; held at %s" % spec.show(val)
 
     def _arrive(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any, gen: int) -> Optional[Result]:
         """Follow a move the instrument makes by itself (a stage, a piezo) until its card's status says it is there:

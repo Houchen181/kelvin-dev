@@ -1,6 +1,8 @@
 """The set-point watchdog (plan item 9): a set point an instrument ramps to by itself whose reading stops getting
 closer raises an alarm, and a wait for it ends, instead of holding a run for hours with nobody told. The field
 tests' check runs on labsim: a PPMS that stalls on a cool-down raises an alarm within 10 minutes."""
+import pytest
+
 from labsim_bench import ctl, labsim_lab, labsim_offline  # noqa: F401  (the fixtures)
 
 from labharness import EventLog, SafetyGate, ScriptedApprover
@@ -118,6 +120,25 @@ def test_a_set_point_whose_switch_is_off_is_not_a_stall(lab, tmp_path):
     assert gate.set("tc", "heater_range", "low").ok
     run_for(lab, monitor, 3 * 60, step=15)
     assert not monitor.alarms and monitor._moves["tc.setpoint"].arrived
+
+
+def test_a_stalled_move_away_from_safe_is_held_where_it_got_to(lab, tmp_path, monkeypatch):
+    """Its guards are watched only while Kelvin waits. When a wait away from safe gives up (no progress for 10 min, or
+    its time is up), the set point is held at the reading, as a stop does: a magnet that frees itself later doesn't
+    go on to 1 T unwatched."""
+    from labharness.sim.twins import MagnetSupplyTwin
+    move = MagnetSupplyTwin.evolve   # it sticks at 0.3 T on the way up
+    monkeypatch.setattr(MagnetSupplyTwin, "evolve",
+                        lambda self, dt: None if self.state["B"] > self.state["B_actual"] >= 0.3 else move(self, dt))
+    gate, monitor, notices = watching(lab, tmp_path, answers=[True, True, True])
+    assert gate.set("magnet", "rate", 0.05).ok            # 20 min to 1 T: a stall ends the wait before its time does
+    r = gate.set("magnet", "B", 1)
+    assert not r.ok and "B_actual has not got closer to 1 T for 10.0 min" in r.message
+    assert "held at 300 mT" in r.message and lab.read("magnet", "B") == pytest.approx(0.3, abs=0.01)
+    assert gate.set("magnet", "B", 0).ok and gate.set("magnet", "rate", 0.2).ok   # 5 min to 1 T: its time is up first
+    r = gate.set("magnet", "B", 1)
+    assert not r.ok and "B_actual is 300 mT after 8.5 min (target 1 T); held at 300 mT" in r.message
+    assert lab.read("magnet", "B") == pytest.approx(0.3, abs=0.01)
 
 
 def test_the_watchdog_never_keeps_the_interlock_check_from_running(lab, tmp_path, monkeypatch):
