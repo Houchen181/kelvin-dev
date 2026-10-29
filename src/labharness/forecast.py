@@ -183,6 +183,7 @@ class Forecast:
         self.asked: List[str] = []              # the card's lines a person approves (gate.plan_approval sets them)
         self._asked: Dict[str, Any] = {}        # the levels the plan being walked has set (a switch puts them back)
         self._untimed: Dict[str, None] = {}     # keys moved at a rate Kelvin can't tell, in order: not in the time
+        self._on_stop: Dict[str, List[Any]] = {}   # the settings plans' on_abort make after a stop (a queue covers them)
         self._rates: Dict[str, List[Tuple[str, str]]] = {}   # each instrument-ramped key's rates: (shown, from where)
         self._name = "the plan"                 # the plan being walked
 
@@ -346,9 +347,9 @@ class Forecast:
                 self.slow_reads.append("%s.%s" % (instr, param))
 
     def _after_a_stop(self, plan: Any) -> None:
-        """The settings a plan's on_abort sets after a stop (its drives go on the card from engine.drive_values or a
-        queue's whole path): values the run may set, for a queue's card (settings(every=True)), so a stop in the night
-        doesn't ask about a draft card's setting in its clean-up. Nothing is walked: a stop is not the run's path."""
+        """The settings a plan's on_abort makes after a stop (its drives are a queue's whole path already): kept apart
+        from the run's own values, for a queue's card (settings(every=True)), so a stop in the night doesn't ask about
+        a draft card's setting in its clean-up. Nothing is walked: a stop is not the run's path."""
         for step in getattr(plan, "on_abort", None) or []:
             if action_of(self.lab, step.instr, step.param) is not None:
                 continue
@@ -359,7 +360,7 @@ class Forecast:
                 continue
             if not spec.is_drive:
                 self.start(step.key)
-                self.uses.setdefault(step.key, []).append(value)
+                self._on_stop.setdefault(step.key, []).append(value)
 
     def _unknown_axis(self, axis: Any) -> None:
         """A kind of sweep this walk doesn't know: the drive it names is shown with its values, its time unknown."""
@@ -535,15 +536,19 @@ class Forecast:
 
     def settings(self, every: bool = False) -> Dict[str, Change]:
         """The settings (not drives) the run changes: on a draft card each asks, so the run's card covers them.
-        every: also those it only sets to what they are now, for a queue's card (its whole path): in the night an item
-        may find one changed (at the front panel), and setting it back must not ask."""
+        every: also those it only sets to what they are now, and those an on_abort sets after a stop, for a queue's
+        card (its whole path): in the night an item may find one changed (at the front panel), and setting it back, or
+        a clean-up after a trip, must not ask."""
         out = self._kind(False)
-        for key, used in self.uses.items() if every else ():
+        for key in (list(self.uses) + [k for k in self._on_stop if k not in self.uses]) if every else ():
             try:
-                if key not in out and not self.lab.resolve(key)[1].is_drive:
-                    out[key] = self.changes.get(key) or Change(key, self.before.get(key), used)
+                if self.lab.resolve(key)[1].is_drive:
+                    continue
             except KeyError:
                 continue
+            values = self.uses.get(key, []) + self._on_stop.get(key, [])
+            if key not in out or len(values) > len(out[key].values):   # every value it may set, after a stop too
+                out[key] = Change(key, out[key].start if key in out else self.before.get(key), values)
         return out
 
     def detail(self, key: str) -> str:
