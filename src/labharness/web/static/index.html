@@ -549,9 +549,9 @@
           <div class="field">
             <label for="smtp-host">Also send by email <span class="muted">(your institution's or provider's mail server, SMTP)</span></label>
             <div class="field-row">
-              <input id="smtp-host" type="text" autocomplete="off" spellcheck="false" placeholder="smtp.example.edu" aria-label="Mail server">
-              <input id="smtp-port" type="text" inputmode="numeric" maxlength="5" size="5" placeholder="587" aria-label="Port">
-              <select id="smtp-security" aria-label="Connection security">
+              <input id="smtp-host" type="text" autocomplete="off" spellcheck="false" placeholder="smtp.example.edu" aria-label="Mail server" style="flex: 4 1 0">
+              <input id="smtp-port" type="text" inputmode="numeric" maxlength="5" placeholder="587" aria-label="Port" style="flex: 1 1 0">
+              <select id="smtp-security" aria-label="Connection security" style="flex: 2 1 0">
                 <option value="starttls">STARTTLS</option>
                 <option value="ssl">SSL</option>
                 <option value="none">None</option>
