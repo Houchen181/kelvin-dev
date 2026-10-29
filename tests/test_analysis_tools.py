@@ -100,6 +100,34 @@ def test_resonator_circle_fit_with_cable_delay():
     assert {p["name"]: p["value"] for p in r["params"]}["Ql"] == pytest.approx(1e4, rel=0.02)
 
 
+def test_a_labsim_resonators_q_from_what_its_pna_reports(monkeypatch):
+    """labsim's cQED chip (field test l04): its notch at 7.613 GHz has Qc 1.2e5 and Qi 9e5 behind a 58 ns cable
+    delay. The PNA reports dB and degrees. A Lorentzian on the dB values gave Q 2.4 times too high; Kelvin's
+    automatic analysis (linear power) and fit_run's circle fit give the loaded Q, |Qc|, Qi and the delay."""
+    from labsim_bench import LABSIM
+    monkeypatch.syspath_prepend(str(LABSIM))
+    from labsim.world import Chip
+    from labharness.analysis import analyze_curve, fit as normalised_fit
+    chip = Chip({})
+    f = np.linspace(7.613e9 - 0.5e6, 7.613e9 + 0.5e6, 801)
+    z = chip.s21(f, 0.0, 0.0, 0.012)
+    g = rng()
+    z = z + chip.noise_rel(0.0, 1e3) * np.abs(z).mean() * (g.normal(size=f.size) + 1j * g.normal(size=f.size))
+    db, deg = 20 * np.log10(np.abs(z)), np.degrees(np.angle(z))
+    ql = 1 / (1 / 9.0e5 + 1 / 1.2e5)                       # the chip's own, at this power (its TLS loss saturated)
+    on_db = normalised_fit("lorentzian", f, db)
+    assert on_db["values"][2] / on_db["values"][3] > 2 * ql   # the old way
+    s = analyze_curve(f.tolist(), db.tolist(), "frequency", "vna.S21", "Hz", "dB")
+    q = next(r for r in s["results"] if r["name"].startswith("Q"))
+    assert q["num"] == pytest.approx(ql, rel=0.03)
+    r = fitting.fit(fitting.MODELS["resonator"](), f, 10 ** (db / 20) * np.exp(1j * np.radians(deg)), x_unit="Hz")
+    v = {p["name"]: p["value"] for p in r["params"]}
+    assert v["Ql"] == pytest.approx(ql, rel=0.01) and v["Qc"] == pytest.approx(1.2e5, rel=0.01)
+    assert v["tau"] == pytest.approx(58e-9, rel=0.01) and v["phi"] == pytest.approx(0.05, abs=0.01)
+    qi = next(d["value"] for d in r["derived"] if d["name"].startswith("Qi"))
+    assert qi == pytest.approx(9.0e5, rel=0.03)
+
+
 def test_biexponential_convolved_with_the_instrument_response():
     t = np.linspace(-20e-12, 400e-12, 600)
     m = fitting.MODELS["biexp_irf"]()
