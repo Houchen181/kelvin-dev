@@ -9,6 +9,8 @@ instrument's mode. An approved plan covers each of its in-limit steps, on a draf
 up first (an excitation started, a laser on) goes in its setup, on that same card."""
 import re
 
+from labsim_bench import labsim_bench  # noqa: F401  (the fixture)
+
 from labharness import load_plan
 from labharness.cards import Action
 
@@ -163,3 +165,56 @@ def test_a_queue_card_shows_its_duration_and_where_the_queue_leaves_the_lab(tmp_
     assert "magnet.B: now 0 T, plan uses 0 … 1 T; at" in text, text
     assert "At the end it leaves lockin.amplitude 50 mV and smu.output on; back at safe: smu.V 0 V, magnet.B 0 T" \
         in text, text
+
+
+# ------------------------------------------------------------------ on labsim: instruments Kelvin takes for real
+
+TRANSPORT = """lab: labsim transport
+instruments:
+  gate:
+    card: keithley/2400
+    address: "GPIB0::24::INSTR"
+    limits: { V: [-5, 5], compliance_I: [1e-09, 1e-06] }
+  isrc:
+    card: keithley/6221
+    address: "GPIB0::12::INSTR"
+    limits: { I: [-1e-06, 1e-06], wave_amplitude: [2e-12, 1e-06], wave_offset: [-1e-07, 1e-07], compliance_V: [0.1, 10] }
+  li_xx:
+    card: srs/sr830
+    address: "GPIB0::8::INSTR"
+    limits: { amplitude: [0.004, 1] }
+"""
+
+
+def labsim_lab(tmp_path, text):
+    from labharness.virtual_lab import build_lab
+    (tmp_path / "lab.yaml").write_text(text, encoding="utf-8")
+    lab = build_lab(tmp_path / "lab.yaml", partial=True)
+    assert lab.unavailable == {}, lab.unavailable
+    return lab
+
+
+def labsim_engine(lab, answers, tmp_path):
+    from labharness import EventLog, RunEngine, RunStore, SafetyGate, ScriptedApprover
+    approver = ScriptedApprover(answers)
+    gate = SafetyGate(lab, approver, EventLog(tmp_path / "events.jsonl", lab.clock))
+    return RunEngine(gate, RunStore(tmp_path / "runs")), gate, approver
+
+
+def test_on_labsim_an_output_on_card_says_the_2400_now_sources_current(labsim_bench, tmp_path):
+    """l08: someone had put the gate's 2400 into current mode; the card said only "output off → on", and 10 µA went
+    into the back gate."""
+    labsim_bench("transport")
+    lab = labsim_lab(tmp_path, TRANSPORT)
+    try:
+        engine, gate, approver = labsim_engine(lab, [False, False], tmp_path)
+        assert gate.set("gate", "output", True).action == "declined"
+        assert "gate: source function voltage" in card(approver)
+        lab.instruments["gate"].write_raw(":SOUR:FUNC CURR")    # at the front panel, past Kelvin
+        assert gate.set("gate", "output", True).action == "declined"
+        text = card(approver, 1)
+        assert "gate.output off → on; it applies gate.V at 0 V (its safe value, set first) and gate.compliance_I at " \
+               "1 nA (its safe value, set first); gate: source function current" in text, text
+        assert lab.read("gate", "output") is False
+    finally:
+        lab.close()

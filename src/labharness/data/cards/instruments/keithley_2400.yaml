@@ -66,6 +66,13 @@ parameters:
     safe: off
     enables: [V, compliance_I]
     description: Connects the source to the device
+  source_function:
+    label: Source function
+    kind: measure
+    type: enum
+    get: ":SOURce:FUNCtion[:MODE]?"
+    values: { voltage: VOLTage, current: CURRent, memory: MEMory }
+    description: What the output applies, read only. This card's levels are the voltage source's; a 2400 switched to current from its front panel sources its current level instead, so a card that switches the output on says which it is.
   I:
     label: Current
     kind: measure
