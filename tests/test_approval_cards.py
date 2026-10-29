@@ -415,6 +415,16 @@ def test_a_ramp_leg_without_a_rate_goes_at_the_rate_the_instrument_is_set_to(lab
     assert "magnet.B: now 0 T, plan uses 0 … 500 mT; at 0.4 T/min (the plan sets magnet.rate), ~2.5 min" in text, text
 
 
+def test_a_ramp_whose_rate_nobody_can_read_says_so(lab, make_engine):
+    engine, gate, approver = make_engine([False])
+    engine.run("plan: warm\nsetup: {tc.heater_range: medium}\nsweep: {tc.setpoint: {ramp: 5, every: 10}}\n"
+               "measure: [tc.T_sample]\n")
+    title, text = approver.requests[0].title, card(approver)
+    assert title == "Run plan warm: measures every 10 s while tc.setpoint ramps to 5 K (as many points as it takes), " \
+                    "time not known", title
+    assert "Not in its time: tc.setpoint's ramp (its card gives no rate Kelvin can read)" in text, text
+
+
 def test_a_ramps_rate_on_a_magnet_supply_is_a_drive_asked_with_the_run(lab, make_engine):
     """A supply's ramp rate is a drive (a fast ramp risks a quench): its legs' rates are asked with the field, and
     the card says where the run leaves it (it said everything was back at safe, with the rate left at 0.25 T/min)."""
