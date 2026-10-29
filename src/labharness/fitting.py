@@ -1115,7 +1115,7 @@ def stored(folder: Path, with_data: bool = False) -> List[Dict[str, Any]]:
             for k, v in g.attrs.items():
                 if isinstance(v, bytes):
                     v = v.decode("utf-8")
-                if isinstance(v, str) and v[:1] in "[{":
+                if isinstance(v, str) and v[:1] in ("[", "{"):
                     try:
                         v = json.loads(v)
                     except ValueError:

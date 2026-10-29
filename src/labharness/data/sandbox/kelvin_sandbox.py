@@ -210,6 +210,18 @@ def _guard_h5py(scratch, runs):
     h5f.open, h5f.create = guarded_open, guarded_create
 
 
+def _value(v):
+    """An attribute as kept: lists and dicts were written as JSON text."""
+    if isinstance(v, bytes):
+        v = v.decode("utf-8", "replace")
+    if isinstance(v, str) and v[:1] in ("[", "{"):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return v
+    return v.item() if hasattr(v, "item") else v
+
+
 class Run:
     """A run's data, read-only. data[key]: a column (1-D, one value per point) or a trace (2-D: points x samples,
     NaN-padded); x(key): a trace's x values (2-D); units[key]; meta: the run (plan, status, times...); fits: the fits
@@ -246,7 +258,7 @@ class Run:
                         self.units[k] = str(ds.attrs.get("unit", ""))
                         self.units[k + " x"] = str(ds.attrs.get("x_unit", ""))
                 for name, g in f.get("fits", {}).items():
-                    item = {k: (json.loads(v) if isinstance(v, str) and v[:1] in "[{" else v) for k, v in g.attrs.items()}
+                    item = {k: _value(v) for k, v in g.attrs.items()}
                     item.update({k: g[k][()] for k in g})
                     self.fits[name] = item
         else:

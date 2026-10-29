@@ -292,13 +292,15 @@ def test_a_heat_map_and_a_kept_fit(rt):
 def test_run_python_computes_on_a_runs_data_and_shows_its_pictures(rt):
     assert "done" in rt.run(GATE)
     run_id = last(rt)
+    datatools.fit_run(rt, run_id, "lorentzian", y="lockin.X", name="peak")   # a kept fit reads back too
     code = ("x, y = run['smu.V'], run['lockin.X']\n"
             "print('peak at %.2f V' % x[np.argmax(y)])\n"
             "print(run.units['lockin.X'], len(run.keys()))\n"
+            "print('kept:', run.fits['peak']['model'], run.fits['peak']['covariance'].shape)\n"
             "plot((x, y, 'X'), title='X')\n"
             "open('result.txt', 'w').write('ok')\n")
     images, text = datatools.run_python(rt, code, [run_id])
-    assert "finished" in text and "peak at 1.5" in text and "V 5" in text
+    assert "finished" in text and "peak at 1.5" in text and "V 5" in text and "kept: lorentzian (4, 4)" in text
     assert len(images) == 1 and images[0][:8] == b"\x89PNG\r\n\x1a\n"
     assert "result.txt" in text and "plot-1.png" in text
     folder = re.search(r"its folder: (.*)", text).group(1)
