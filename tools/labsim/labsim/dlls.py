@@ -24,7 +24,10 @@ def _value(a: Any) -> Any:
 
 
 def _store(a: Any, v: Any) -> None:
-    if isinstance(a, ctypes.Array):
+    if isinstance(a, ctypes.Array) and a._type_ is not ctypes.c_char:   # an array of numbers (a calibration)
+        for i, x in enumerate(list(v)[: len(a)]):
+            a[i] = x
+    elif isinstance(a, ctypes.Array):
         a.value = str(v).encode()[: len(a) - 1]
     elif type(a).__name__ == "CArgObject":
         a._obj.value = v

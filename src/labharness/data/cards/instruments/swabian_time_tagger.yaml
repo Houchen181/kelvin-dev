@@ -1,14 +1,15 @@
 card: 1
 id: swabian/time-tagger
-model: Swabian Instruments Time Tagger (20, Ultra, X) as a gated photon counter
+model: Swabian Instruments Time Tagger (20, Ultra, X) as a gated photon counter and for g2
 vendor: Swabian Instruments
 kind: photon-counter
 status: community
-manual: "Time Tagger documentation, event counting (GatedCounter, Countrate)"
+manual: "Time Tagger documentation, event counting (GatedCounter, Countrate) and time-difference histograms (Correlation)"
 manual_url: "https://www.swabianinstruments.com/static/documentation/TimeTagger/api/measurements/event_counting.html"
 notes:
   - "Address timetagger://<serial, or empty for the first>?click=1&gate=2 (inputs, 1-based: the detector, and the pulse generator's gate; &level=0.5 sets both trigger levels in volts). Needs Swabian-TimeTagger, which Kelvin installs on this computer once a person approves, and the Opal Kelly USB driver (Swabian's installer, run by a person)."
   - "Counts the detector in the gate windows: a signal window, then a reference window, each period. Kelvin finds which comes first from the generator's own timing, and reads both from one acquisition."
+  - "g2 (Hanbury Brown-Twiss, two detectors behind a beam splitter): give the second detector's input in the address, &click2=2. g2 correlates the two for the integration time (normalised to uncorrelated light, over g2_bins bins of g2_binwidth around zero delay); g2_zero, g2_zero_err and g2_tau come from fitting that correlation with A(1 - rho exp(-|t - t0|/tc)): g2(0) = 1 - rho with its 1-sigma error, and tc. g2(0) below 0.5 says a single emitter. Measure g2 with them in the same plan, and the fit is of that correlation."
 requires: [Swabian-TimeTagger]
 identify:
   idn: "^Swabian Instruments,Time Tagger"
@@ -42,5 +43,49 @@ parameters:
     kind: measure
     unit: counts/s
     get: "GET rate"
+  g2:
+    label: g2, coincidences normalised to uncorrelated light
+    kind: measure
+    type: trace
+    get: "GET g2"
+    axis: {values: g2_delay}
+  g2_delay:
+    label: Delay between the detectors
+    kind: measure
+    type: trace
+    unit: s
+    get: "GET g2_delay"
+  g2_zero:
+    label: g2(0), fitted
+    kind: measure
+    get: "GET g2_zero"
+    acquires: true
+  g2_zero_err:
+    label: g2(0) uncertainty (1 sigma)
+    kind: measure
+    get: "GET g2_zero_err"
+    acquires: true
+  g2_tau:
+    label: Antibunching time, fitted
+    kind: measure
+    unit: s
+    get: "GET g2_tau"
+    acquires: true
+  g2_binwidth:
+    label: g2 bin width
+    kind: measure
+    unit: s
+    set: "SET g2_binwidth {value}"
+    get: "GET g2_binwidth"
+    limits: [1.0e-12, 1.0e-6]
+    default: 1.0e-10
+  g2_bins:
+    label: g2 bins
+    kind: measure
+    type: int
+    set: "SET g2_bins {value}"
+    get: "GET g2_bins"
+    limits: [10, 100000]
+    default: 1000
 display:
   headline: rate

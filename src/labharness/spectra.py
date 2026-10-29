@@ -14,6 +14,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import threading
 import time
 import urllib.parse
 from typing import Any, List, Optional, Tuple
@@ -141,10 +142,68 @@ SHAMROCK_OK = 20202
 SLITS = {"input_side": 1, "input_direct": 2, "output_side": 3, "output_direct": 4}
 INPUT_FLIPPER, OUTPUT_FLIPPER = 1, 2
 SHUTTER_OPEN = 1   # 0 closed, 1 open, 2 BNC
-_shamrock_users = [0]   # spectrographs open: the library is initialized once for all (a scan leaves it alone meanwhile)
+# who has Andor's spectrograph library open: a spectrograph in the lab, and a CCD reading its calibration. It is
+# initialized once for all (a scan leaves it alone meanwhile), called one call at a time, and closed by the last
+_shamrock_users = [0]
+_shamrock_lib: List[Any] = []
+SHAMROCK_LOCK = threading.RLock()
 
 
 def load_shamrock() -> Any:
+    """Andor's spectrograph library, loaded once, its calls declared (load_shamrock_dll)."""
+    with SHAMROCK_LOCK:
+        if not _shamrock_lib:
+            _shamrock_lib.append(load_shamrock_dll())
+        return _shamrock_lib[0]
+
+
+def open_shamrock(lib: Any) -> None:
+    """One more user of the library: the first initializes it (Andor's link; it sets nothing on a spectrograph)."""
+    with SHAMROCK_LOCK:
+        if not _shamrock_users[0]:
+            code = lib.ShamrockInitialize(b"")
+            if code != SHAMROCK_OK:
+                raise AdapterError("Andor's spectrograph library did not start (code %s): is Solis open?" % code)
+        _shamrock_users[0] += 1
+
+
+def close_shamrock(lib: Any) -> None:
+    with SHAMROCK_LOCK:
+        _shamrock_users[0] = max(0, _shamrock_users[0] - 1)
+        if not _shamrock_users[0]:
+            try:
+                lib.ShamrockClose()
+            except Exception:
+                pass
+
+
+def shamrock_count(lib: Any) -> int:
+    n = ctypes.c_int()
+    with SHAMROCK_LOCK:
+        code = lib.ShamrockGetNumberDevices(ctypes.byref(n))
+    if code != SHAMROCK_OK:
+        raise AdapterError("Andor's spectrograph library could not count its spectrographs (code %s)" % code)
+    return n.value
+
+
+def calibration(lib: Any, idx: int, pixels: int, pixel_um: float) -> List[float]:
+    """Each pixel column's wavelength (nm) on a detector of `pixels` columns `pixel_um` wide, at the spectrograph's
+    present grating and centre (Andor's ShamrockGetCalibration). Host-side arithmetic: the spectrograph doesn't move."""
+    values = (ctypes.c_float * pixels)()
+    with SHAMROCK_LOCK:
+        for fn, args in (("ShamrockSetNumberPixels", (idx, int(pixels))),
+                         ("ShamrockSetPixelWidth", (idx, ctypes.c_float(float(pixel_um)))),
+                         ("ShamrockGetCalibration", (idx, values, int(pixels)))):
+            code = getattr(lib, fn)(*args)
+            if code != SHAMROCK_OK:
+                raise AdapterError("Andor %s failed (code %s)" % (fn.replace("Shamrock", ""), code))
+    out = [float(v) for v in values]
+    if not any(out) or len(set(out)) < 2:   # the library answers zeros when it has no calibration (a mirror, no grating)
+        raise AdapterError("the spectrograph gave no wavelength calibration (grating at zero order, or none fitted)")
+    return out
+
+
+def load_shamrock_dll() -> Any:
     """Andor's spectrograph library, from Solis or the Andor SDK (or wherever Windows finds it), its calls declared."""
     if sys.platform != "win32" or not hasattr(ctypes, "WinDLL"):
         raise AdapterError("Andor's spectrograph library runs on Windows")
@@ -172,7 +231,9 @@ def load_shamrock() -> Any:
                      ("ShamrockGetGrating", [i, p(i)]), ("ShamrockSetGrating", [i, i]),
                      ("ShamrockGetAutoSlitWidth", [i, i, p(f)]), ("ShamrockSetAutoSlitWidth", [i, i, f]),
                      ("ShamrockGetShutter", [i, p(i)]), ("ShamrockSetShutter", [i, i]),
-                     ("ShamrockGetFlipperMirror", [i, i, p(i)]), ("ShamrockSetFlipperMirror", [i, i, i])):
+                     ("ShamrockGetFlipperMirror", [i, i, p(i)]), ("ShamrockSetFlipperMirror", [i, i, i]),
+                     ("ShamrockSetNumberPixels", [i, i]), ("ShamrockSetPixelWidth", [i, f]),
+                     ("ShamrockGetCalibration", [i, p(f), i])):
         func = getattr(lib, fn)
         func.argtypes, func.restype = args, ctypes.c_uint
     return lib
@@ -190,9 +251,10 @@ class AndorSpectrograph(DriverBackend):
         except ValueError:
             raise AdapterError("%s: a spectrograph address is shamrock://<index>, e.g. shamrock://0" % name)
         self.lib = module if module is not None else load_shamrock()
-        if not _shamrock_users[0]:
-            self._call("ShamrockInitialize", b"")   # opens Andor's link; sets nothing on the spectrograph
-        _shamrock_users[0] += 1
+        try:
+            open_shamrock(self.lib)   # opens Andor's link; sets nothing on the spectrograph
+        except AdapterError as e:
+            raise AdapterError("%s: %s" % (name, e)) from e
         n = ctypes.c_int()
         try:
             self._call("ShamrockGetNumberDevices", ctypes.byref(n))
@@ -203,7 +265,8 @@ class AndorSpectrograph(DriverBackend):
             raise
 
     def _call(self, fn: str, *args: Any) -> None:
-        code = getattr(self.lib, fn)(*args)
+        with SHAMROCK_LOCK:
+            code = getattr(self.lib, fn)(*args)
         if code != SHAMROCK_OK:
             raise AdapterError("%s: Andor %s failed (code %s)" % (self.name, fn.replace("Shamrock", ""), code))
 
@@ -250,12 +313,7 @@ class AndorSpectrograph(DriverBackend):
             return "Andor,Shamrock,%d" % self.idx
 
     def close(self) -> None:
-        _shamrock_users[0] = max(0, _shamrock_users[0] - 1)
-        if not _shamrock_users[0]:
-            try:
-                self.lib.ShamrockClose()
-            except Exception:
-                pass
+        close_shamrock(self.lib)
 
 
 def discover_shamrock(module: Any = None) -> List[Tuple[str, str]]:
@@ -266,17 +324,20 @@ def discover_shamrock(module: Any = None) -> List[Tuple[str, str]]:
         lib = module if module is not None else load_shamrock()
     except Exception:   # not installed here (or not Windows): nothing to list
         return []
-    try:
-        if lib.ShamrockInitialize(b"") != SHAMROCK_OK:
+    with SHAMROCK_LOCK:
+        if _shamrock_users[0]:
             return []
-        n = ctypes.c_int()
-        if lib.ShamrockGetNumberDevices(ctypes.byref(n)) != SHAMROCK_OK:
-            return []
-        return [("shamrock://%d" % i, "Andor,Shamrock,%d" % i) for i in range(n.value)]
-    except Exception:
-        return []
-    finally:
         try:
-            lib.ShamrockClose()
+            if lib.ShamrockInitialize(b"") != SHAMROCK_OK:
+                return []
+            n = ctypes.c_int()
+            if lib.ShamrockGetNumberDevices(ctypes.byref(n)) != SHAMROCK_OK:
+                return []
+            return [("shamrock://%d" % i, "Andor,Shamrock,%d" % i) for i in range(n.value)]
         except Exception:
-            pass
+            return []
+        finally:
+            try:
+                lib.ShamrockClose()
+            except Exception:
+                pass

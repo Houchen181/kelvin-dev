@@ -515,6 +515,8 @@ class Server:
             v: Any = float(value)
         except ValueError:
             v = {"true": True, "false": False, "none": None}.get(value.lower(), value)
+            if value.strip()[:1] in "[{":   # a list or a mapping: `set optics.fine [35.0, 55.0, 23.7]`
+                v = json.loads(value)
         head, _, attr = path.partition(".")
         target = {"cryo": self.world.cryo, "cryostat": self.world.cryo, "magnet": self.world.magnet,
                   "sample": self.world.sample, "chip": self.world.chip, "optics": self.world.optics,

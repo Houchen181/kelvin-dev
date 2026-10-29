@@ -23,7 +23,7 @@ import yaml
 from .. import frames
 from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
-from ..eventlog import EventLog, RunFolders, RunStore
+from ..eventlog import EventLog, RunFolderError, RunFolders, RunStore
 from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
 from ..lab import Lab
 from ..labconfig import Allowed, ConfigError, Envelope, load_lab_config
@@ -165,6 +165,9 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "card %s saved (%s)" % (e.get("card"), e.get("status"))
     elif kind == "report":
         text = "report %s (%s run%s)" % (e.get("name"), e.get("runs"), "" if e.get("runs") == 1 else "s")
+    elif kind == "chain":
+        text = "measurement chain of %s %s" % (e.get("device") or "the setup", "removed" if e.get("removed")
+                                               else "recorded")
     elif kind == "lab_changed":
         text = "now controlling %s (%s)" % (e.get("lab"), ", ".join(e.get("instruments") or []))
     elif kind == "instrument_switched":
@@ -295,6 +298,9 @@ class LabRuntime:
         self.collection: Any = None             # the instrument collection (collection.py) while it is switched on
         self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
         self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
+        # the data folder a lab keeps its data in when nobody chose one (labfolders.py), given (lab, info); None
+        # leaves the folder as it is. The app sets it where no person or account has a folder of their own
+        self.lab_folder: Optional[Callable[[Lab, Dict[str, Any]], Optional[Path]]] = None
         self.scan_network = True                    # scans also look on the local network (a Settings switch)
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
@@ -862,8 +868,11 @@ class LabRuntime:
         except PlanError as e:
             return "invalid plan: %s" % e, None
         meta = self._attribute(plan)
-        with self._device_protection(meta) as held:
-            report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"))
+        try:
+            with self._device_protection(meta) as held:
+                report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"))
+        except RunFolderError as e:   # nowhere to keep it: said in words, not a bare tool error (l09, l10)
+            return "not run: %s" % e, None
         made = self._auto_report(report.run_id)
         if report.run_id:
             summary = (report.analysis or {}).get("assessment") or report.message
@@ -985,8 +994,10 @@ class LabRuntime:
                 lines.append("%s [%s]: %s" % (label, s["kind"], "; ".join("%s %s" % (r["name"], r["value"]) for r in s["results"][:5])))
         return lines
 
-    def analyze(self, run_id: str, column: Optional[str] = None, model: Optional[str] = None) -> str:
-        """Re-analyse a recorded run, optionally one column and/or with a chosen fit model."""
+    def analyze(self, run_id: str, column: Optional[str] = None, model: Optional[str] = None,
+                accept: bool = False, by: str = "agent") -> str:
+        """Re-analyse a recorded run, optionally one column and/or with a chosen fit model. accept: keep these fits
+        as the run's (in run.h5), and its scan report shows them."""
         from ..analysis import MODELS, analyze_run
         if model and model not in MODELS and model != "linear":
             return "unknown model %r (choose: linear, %s)" % (model, ", ".join(MODELS))
@@ -999,7 +1010,40 @@ class LabRuntime:
         if column and column not in [m["key"] for m in cols["measures"]]:
             return "unknown column %r (have: %s)" % (column, ", ".join(m["key"] for m in cols["measures"]))
         a = analyze_run(rows, cols["axes"], cols["measures"], meta, force=model, only=column)
-        return "\n".join(["%s: %d rows" % (run_id, len(rows))] + self._analysis_lines(a))
+        lines = ["%s: %d rows" % (run_id, len(rows))] + self._analysis_lines(a)
+        if accept:
+            lines.append(self._accept_fit(run_id, rec.analysis or {}, a, model, by))
+        return "\n".join(lines)
+
+    def _accept_fit(self, run_id: str, kept: Dict[str, Any], new: Dict[str, Any], model: Optional[str],
+                    by: str) -> str:
+        """Keep a re-analysis's fits as the run's own: each of its series replaces the kept one for the same column
+        (and group), marked accepted (by whom, when, which model), in run.h5; then the run's scan report is written
+        again, so it shows the fit that was accepted rather than the automatic one."""
+        stamp = {"by": by, "at": datetime.now().isoformat(timespec="seconds"), "model": model or "chosen automatically"}
+        fresh = [dict(s, accepted=stamp) for s in new.get("series") or [] if s.get("fit") or s.get("results")]
+        if not fresh:
+            return "nothing kept: this analysis fitted nothing to keep"
+        done = {(s.get("y"), s.get("group")) for s in fresh}
+        merged = dict(kept, series=[s for s in kept.get("series") or [] if (s.get("y"), s.get("group")) not in done]
+                      + fresh)
+        if not kept.get("series"):
+            merged.update(assessment=new.get("assessment", ""), next=new.get("next", ""))
+        d = self._run_dir(run_id)
+        try:
+            rundata.set_analysis(d, merged)
+        except (OSError, ValueError) as e:
+            return "not kept: %s" % e
+        self.gate.log.write("fit_accepted", by=by, run=run_id, model=stamp["model"],
+                            columns=sorted({str(s.get("y")) for s in fresh}))
+        made = []
+        if "scan" in self.report_kinds and self.auto_report != "off":
+            try:
+                made = self.write_scan_report(run_id)
+            except Exception as e:   # the fit is kept whatever happens to the report
+                return "kept as the run's fit; its report was not written again: %s" % e
+        return "kept as the run's fit (in run.h5)%s" % (
+            "; its scan report shows it now (%s)" % ", ".join(made) if made else "")
 
     def _preview(self, plan: Plan, rows: List[Dict[str, Any]]) -> List[str]:
         if not rows:
@@ -1500,6 +1544,7 @@ class LabRuntime:
             dev = next((d for d in info.get("devices") or []
                         if d["id"] == plan.device or d["name"].lower() == plan.device.lower()), None)
             out["device"], out["device_name"] = (dev["id"], dev["name"]) if dev else (None, plan.device)
+        self._stamp_chain(out)
         return out
 
     def queue_show(self) -> str:
@@ -2067,6 +2112,87 @@ class LabRuntime:
 
     def events(self, n: int = 20) -> str:
         return "\n".join(event_line(e) for e in tail_events(self.events_path, max(1, min(int(n), 200)))) or "no events yet"
+
+    # ------------------------------------------------------------------ provenance and measurement chains
+
+    def run_provenance(self, run_id: str) -> str:
+        """A run's plan as it ran, its conditions at the start and the end, its measurement chain, every approval it
+        needed with who gave it, and the stops, trips and alarms while it ran (provenance.py). Files only."""
+        from .. import provenance
+        try:
+            d = self._run_dir(run_id)
+            return provenance.run_provenance(d, self.lab, self.gate.log.events(),
+                                             [f["name"] for f in self.run_files(run_id)])
+        except (KeyError, OSError, ValueError) as e:
+            return "cannot read %s: %s" % (run_id, e.args[0] if e.args else e)
+
+    def activity(self, since: str = "", until: str = "", who: str = "", kinds: str = "", limit: int = 60) -> str:
+        """The lab record over a stretch of wall-clock time, each event with who did it: the lab's instrument log
+        (everyone's, with who was signed in) where there is one, else this person's record."""
+        from .. import provenance
+        shared = Path(self.shared_log) if self.shared_log else None
+        paths = [shared] if shared is not None and shared.exists() else [self.events_path]
+        try:
+            return provenance.activity(provenance.read_events(paths), since, until, who, kinds, limit)
+        except ValueError as e:
+            return "no activity read: %s" % e
+
+    def _chain_device(self, device: str) -> Tuple[Optional[str], Optional[str]]:
+        """(id, name) of a device named in a chat (in the mounted device's project), or of the mounted one."""
+        m = self.mounted or {}
+        if not device:
+            return m.get("device"), m.get("device_name")
+        wanted = device.strip().lower()
+        for pid in dict.fromkeys([m.get("project"), self.attribution.get("project")] + list(self.project_ids())):
+            for d in self.project_info(pid).get("devices") or []:
+                if wanted in (str(d.get("id") or "").lower(), str(d.get("name") or "").lower()):
+                    return d.get("id"), d.get("name")
+        return None, device.strip()
+
+    def measurement_chain(self, device: str = "", chain: Any = None, by: str = "agent", remove: bool = False) -> str:
+        """Read, record or remove a device's measurement chain (chain.py): device by name (default the mounted one;
+        "setup" for the setup's own, which a device without one of its own uses). Recorded chains are stamped into
+        every run of that device from then on."""
+        from ..chain import ChainError, Chains, lines, parse
+        store = Chains(self.data_dir)
+        dev_id, dev_name = (None, None) if device.strip().lower() == "setup" else self._chain_device(device)
+        whose = dev_name or "the setup"
+        if remove:
+            gone = store.remove(dev_id, dev_name)
+            if gone:
+                self.gate.log.write("chain", by=by, device=dev_name, removed=True)
+            return ("removed the measurement chain of %s" % whose) if gone else "%s has no chain of its own" % whose
+        if chain not in (None, "", {}):
+            try:
+                kept = parse(chain)
+            except ChainError as e:
+                return "not recorded: %s" % e
+            unknown = [k for k in [kept.get("excitation", {}).get("source")] + list(kept.get("readings") or {})
+                       if k and self._spec(k) is None]
+            store.put(kept, dev_id, dev_name, by)
+            self.gate.log.write("chain", by=by, device=dev_name, chain=kept)
+            return "\n".join(["recorded the measurement chain of %s; every run of it from now on carries it:" % whose]
+                             + ["  " + line for line in lines(kept)]
+                             + (["note: %s %s not in this lab now" % (", ".join(unknown), "is" if len(unknown) == 1
+                                                                       else "are")] if unknown else []))
+        found = store.get(dev_id, dev_name)
+        if found is None:
+            return ("no measurement chain for %s yet. Ask the person how it is wired (the excitation, whether its "
+                    "amplitude is peak or rms, a series resistor, preamplifier gains) and record it" % whose)
+        head = "measurement chain of %s%s (recorded by %s, %s):" % (
+            whose, " (the setup's: it has none of its own)" if found["of"] == "setup" and dev_name else "",
+            found.get("by") or "?", found.get("at") or "?")
+        return "\n".join([head] + ["  " + line for line in lines(found["chain"])])
+
+    def _stamp_chain(self, meta: Dict[str, Any]) -> None:
+        """A run carries the measurement chain of its device (or the setup's) as it was when it ran."""
+        try:
+            from ..chain import Chains
+            found = Chains(self.data_dir).get(meta.get("device"), meta.get("device_name"))
+        except Exception:
+            return
+        if found:
+            meta["chain"], meta["chain_of"] = found["chain"], found["of"]
 
     # ------------------------------------------------------------------ for the approval page
 
@@ -3525,9 +3651,10 @@ class LabRuntime:
 
     def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
                notes: Any = (), by: str = "human", references: Any = (), folder: Optional[Path] = None,
-               name: str = "", log: bool = True) -> List[Dict[str, Any]]:
+               name: str = "", log: bool = True, pages: int = 0) -> List[Dict[str, Any]]:
         """Write a report of these runs (oldest first) as PDF and/or PowerPoint into reports/ (or folder, as
-        name.pdf / name.pptx). Reads only files: it never talks to an instrument, so it can run while a plan runs."""
+        name.pdf / name.pptx). Reads only files: it never talks to an instrument, so it can run while a plan runs.
+        pages: at most this many pages (slides), as asked; it leaves out detail until it fits."""
         if not run_ids:
             raise ValueError("no runs to report")
         fmts = ["pdf", "pptx"] if fmt == "both" else [fmt]
@@ -3554,7 +3681,7 @@ class LabRuntime:
         out = []
         for f in fmts:
             path = target / ("%s.%s" % (base, f))
-            n = write_pdf(report, path) if f == "pdf" else write_pptx(report, path)
+            n = write_pdf(report, path, pages) if f == "pdf" else write_pptx(report, path, pages)
             try:
                 shown = path.relative_to(self.reports_dir).as_posix()
             except ValueError:
@@ -3790,7 +3917,7 @@ class LabRuntime:
     def make_report(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
                     summary: str = "", fmt: str = "pdf", notes: Any = (), by: str = "agent",
                     references: Any = (), kind: str = "runs", device: str = "",
-                    project: Optional[str] = None) -> str:
+                    project: Optional[str] = None, pages: int = 0) -> str:
         """The make_report tool's answer. kind runs (default): the runs chosen, or today's, or else the latest.
         kind project: the project's master report, rewritten now; device: that sample's report; scan: a run's own."""
         if kind in ("project", "device"):
@@ -3830,7 +3957,7 @@ class LabRuntime:
         if not ids:
             return "no report: no runs %s" % ("on %s" % day if day else "yet")
         try:
-            files = self.report(ids, title, summary, fmt, notes, by, references)
+            files = self.report(ids, title, summary, fmt, notes, by, references, pages=max(0, int(pages or 0)))
         except (ValueError, OSError) as e:
             return "no report: %s" % e
         lines = ["report: %s (%d run%s, %s)" % (f["name"], len(ids), "" if len(ids) == 1 else "s",
@@ -3857,9 +3984,46 @@ class LabRuntime:
                 any(not re.fullmatch(r"[\w.-]+", p) or p.startswith(".") for p in parts):
             raise KeyError("no report %r" % name)
         path = self.reports_dir.joinpath(*parts)
-        if not path.is_file():
-            raise KeyError("no report %r" % name)
+        if not path.is_file():   # a report a lab made before it switched folders (labfolders.py): still found
+            from .. import labfolders
+            earlier = labfolders.all_folders(self.home) if self.home is not None else []
+            path = next((p for p in (f / "reports" / Path(*parts) for f in earlier) if p.is_file()), None)
+            if path is None:
+                raise KeyError("no report %r" % name)
         return path
+
+    def _follow_lab_folder(self, lab: Lab, info: Dict[str, Any], by: str) -> None:
+        """Switching labs, where nobody chose a data folder: the lab's own folder takes the runs, the record, the
+        reports and the queue from now on (labfolders.py). Nothing moves: the earlier folder's runs are still found
+        by their ids, and its reports by their names (report_path)."""
+        if self.lab_folder is None:
+            return
+        try:
+            new = self.lab_folder(lab, info)
+        except Exception:
+            return
+        if new is None or Path(new).resolve() == self.data_dir.resolve():
+            return
+        try:
+            new = writable_folder(new)
+        except ValueError as e:   # the lab's folder can't be written: its data stay where they are, said in Settings
+            self.data_problem = str(e)
+            return
+        old = self.data_dir
+        later = RunFolders(new)
+        for f in ([old / "runs"] if (old / "runs").is_dir() else []) + RunFolders(old).chat_folders():
+            later.remember(f)
+        self.gate.log.write("data_folder", by=by, moved_to=str(new), note="%s keeps its data there; what is here "
+                            "stays here" % lab.config.name)
+        self.data_dir = new
+        frames.FOLDER = new / "frames"
+        self.events_path = new / "events.jsonl"
+        self.queue = ScanQueue(new / "queue.json")   # each lab's queue in its own folder (the old one stays there)
+        if self.mounted:
+            (new / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
+        self._save_alarms()
+        self._new_log().write("data_folder", by=by, previous=str(old), lab=lab.config.name)
+        self.tidy_later()
 
     # ------------------------------------------------------------------ watching instruments
 
@@ -4233,6 +4397,7 @@ class LabRuntime:
                 except Exception:
                     pass
             self.lab = lab
+            self._follow_lab_folder(lab, info, by)
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
             self.engine = RunEngine(self.gate, self._store())
             self.engine.progress = self._on_progress

@@ -254,6 +254,8 @@ def scan_document(part: RunPart, d: Digest, files: Iterable[str], lab: str, simu
         facts.append(("Also not at safe", "; ".join(elsewhere)))
     if part.changes:
         facts.append(("Left changed", "; ".join(part.changes)))
+    if part.unread:   # an instrument lost mid-run: where it was left is not known, and the report says so
+        facts.append(("Not read at the end", "; ".join(part.unread)))
     conditions = Section("Conditions", facts=facts)
     events = Section("Approvals and alarms", facts=list(part.events))
     files = set(files)

@@ -16,7 +16,7 @@ from labharness import claudecode, screen  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
 from labharness.web.agent import ChatAgent  # noqa: E402
 from labharness.web.app import create_app, make_providers  # noqa: E402
-from labharness.web.providers.claudecode_provider import (ClaudeCodeProvider, Shown, parse, read,  # noqa: E402
+from labharness.web.providers.claudecode_provider import (ASK, ClaudeCodeProvider, Shown, parse, read,  # noqa: E402
                                                           transcript)
 from labharness.web.settings import Settings  # noqa: E402
 from test_web import Scripted, human, parts  # noqa: E402,F401
@@ -301,26 +301,78 @@ class Seeing(Scripted):
     sees_images = True
 
 
-def test_a_picture_sent_to_the_bridge_is_said_to_go_unseen(parts, monkeypatch):
-    """F1/F3: people attached wiring photos and plots; the bridge model got only their names and said so late."""
-    from test_web import client_for
-    replies(monkeypatch, "I can only read the file name.")
-    client, headers = client_for(parts, {"claudecode": ClaudeCodeProvider(["claude"], parts[2].root),
-                                         "scripted": Seeing([[{"type": "text", "text": "A clean bias tee."}]])})
+class Blind(Scripted):
+    name, label = "blind", "Blind"
 
-    def send(model):
-        chat = client.post("/api/chats", json={"model": model}, headers=headers).json()
-        photo = client.post("/api/chats/%s/attachments" % chat["id"], content=screen.png(b"\xff" * 48, 4, 4),
-                            headers=dict(headers, **{"X-File-Name": "wiring.png"})).json()
-        with client.stream("POST", "/api/chats/%s/turn" % chat["id"], headers=headers,
-                           json={"text": "is this wired right?", "model": model, "attachments": [photo]}) as r:
-            assert r.status_code == 200
-            return [json.loads(line) for line in r.iter_lines() if line.strip()]
-    events = send("claudecode:sonnet")
+
+def send_photo(client, headers, model):
+    chat = client.post("/api/chats", json={"model": model}, headers=headers).json()
+    photo = client.post("/api/chats/%s/attachments" % chat["id"], content=screen.png(b"\xff" * 48, 4, 4),
+                        headers=dict(headers, **{"X-File-Name": "wiring.png"})).json()
+    with client.stream("POST", "/api/chats/%s/turn" % chat["id"], headers=headers,
+                       json={"text": "is this wired right?", "model": model, "attachments": [photo]}) as r:
+        assert r.status_code == 200
+        return [json.loads(line) for line in r.iter_lines() if line.strip()]
+
+
+def test_a_picture_sent_to_a_model_that_cant_see_is_said_to_go_unseen(parts):
+    """F1/F3: people attached wiring photos and plots, and a model that got only their names said so late."""
+    from test_web import client_for
+    client, headers = client_for(parts, {"blind": Blind([[{"type": "text", "text": "I see a file name."}]]),
+                                         "scripted": Seeing([[{"type": "text", "text": "A clean bias tee."}]])})
+    events = send_photo(client, headers, "blind:m1")
     assert [e["type"] for e in events][:2] == ["turn_start", "note"]   # before the model's answer
-    assert events[1]["text"].startswith("The model can't see pictures through Claude Code: it gets only the name "
+    assert events[1]["text"].startswith("The model can't see pictures through Blind: it gets only the name "
                                         "of wiring.png.")
-    assert not [e for e in send("scripted:m1") if e["type"] == "note"]   # a model that sees it: nothing to say
+    assert not [e for e in send_photo(client, headers, "scripted:m1") if e["type"] == "note"]   # one that sees it
+
+
+def test_the_bridge_passes_pictures_to_claude(parts, monkeypatch, tmp_path):
+    """F1, F2, F3 (all twelve personas): the bridge model saw no attached picture and none of Kelvin's own plots.
+    A conversation with pictures goes to `claude -p` as one stream-json message, each picture as an image block where
+    it came; without pictures, as the plain transcript it always was."""
+    from test_web import client_for
+    log = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    client, headers = client_for(parts, {"claudecode": ClaudeCodeProvider(FAKE, parts[2].root)})
+    events = send_photo(client, headers, "claudecode:sonnet")
+    assert not [e for e in events if e["type"] == "note"]                 # no "can't see pictures" any more
+    assert "I see 1 picture." in "".join(e.get("delta") or "" for e in events if e["type"] == "text")
+    call = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    a = call["args"]
+    assert a[:3] == ["-p", "--input-format", "stream-json"] and ASK not in a   # the request is in the message
+    message = json.loads(call["stdin"])
+    content = message["message"]["content"]
+    assert [b["type"] for b in content] == ["text", "image", "text"]
+    assert content[0]["text"].endswith("is this wired right?\n")             # the picture inside the person's message
+    assert content[1]["source"]["media_type"] == "image/png" and content[2]["text"].startswith("</message>")
+    assert content[2]["text"].endswith(ASK)
+
+
+def test_kelvins_own_plots_reach_the_bridge_model(tmp_path, monkeypatch):
+    log = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    provider = ClaudeCodeProvider(FAKE, tmp_path)
+    plot = {"mime": "image/png", "data": "iVBORw0KGgo="}
+    history = [{"role": "user", "text": "How does the last sweep look?"},
+               {"role": "assistant", "blocks": [{"type": "tool_call", "id": "c1", "name": "look_at",
+                                                 "input": {"run_id": "last"}}]},
+               {"role": "tool", "results": [{"id": "c1", "name": "look_at", "content": "smu.I vs smu.V: 41 points",
+                                             "is_error": False, "images": [plot, plot]}]}]
+
+    async def emit(e):
+        pass
+    result = run(provider.stream("sonnet", "You are Kelvin.", history, [], emit))
+    assert result.blocks == [{"type": "text", "text": "I see 2 pictures."}]
+    content = json.loads(json.loads(log.read_text(encoding="utf-8"))["stdin"])["message"]["content"]
+    assert [b["type"] for b in content] == ["text", "image", "image", "text"]
+    assert content[0]["text"].endswith('<tool_result name="look_at" error="false">\nsmu.I vs smu.V: 41 points\n')
+    assert content[3]["text"].startswith("</tool_result>")
+    log.unlink()
+    run(provider.stream("sonnet", "You are Kelvin.", history[:1], [], emit))   # no pictures: plain text, as before
+    call = json.loads(log.read_text(encoding="utf-8"))
+    assert call["args"][:2] == ["-p", ASK] and "--input-format" not in call["args"]
+    assert call["stdin"].startswith("<conversation>")
 
 
 def test_a_chat_turn_through_claude_code(tmp_path, monkeypatch):

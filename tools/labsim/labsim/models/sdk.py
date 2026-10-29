@@ -208,6 +208,9 @@ class AndorSdk2Camera(SdkDevice):
     def do_GetCameraSerialNumber(self):
         return (self.OK, int(self.serial_no)) if self.initialized else (20075, 0)
 
+    def do_GetPixelSize(self):
+        return (self.OK, 26.0, 26.0) if self.initialized else (20075, 0.0, 0.0)
+
     def do_SetTemperature(self, t: int) -> int:
         if not self.initialized:
             return 20075
@@ -341,6 +344,7 @@ class Shamrock(SdkDevice):
     def reset(self) -> None:
         self.wavelength, self.grating, self.slit_um, self.shutter, self.flipper = 700.0, 2, 100.0, 1, 0
         self.busy_until = 0.0
+        self.pixels, self.pixel_um = 0, 0.0   # the detector the calibration is for: set by the program, as in Andor's
 
     def status(self):
         return {"center_nm": self.wavelength, "grating_l_mm": self.GRATINGS[self.grating], "slit_um": self.slit_um}
@@ -394,6 +398,31 @@ class Shamrock(SdkDevice):
 
     def do_GetSerialNumber(self) -> Tuple[int, str]:
         return self.OK, self.serial_no
+
+    def do_SetNumberPixels(self, n: int) -> int:
+        if not 0 < int(n) <= 65536:
+            return 20249
+        self.pixels = int(n)
+        return self.OK
+
+    def do_GetNumberPixels(self) -> Tuple[int, int]:
+        return self.OK, self.pixels
+
+    def do_SetPixelWidth(self, um: float) -> int:
+        if not 0 < float(um) <= 100:
+            return 20249
+        self.pixel_um = float(um)
+        return self.OK
+
+    def do_GetPixelWidth(self) -> Tuple[int, float]:
+        return self.OK, self.pixel_um
+
+    def do_GetCalibration(self, n: int) -> Tuple[int, List[float]]:
+        """Each pixel's wavelength for the detector set with SetNumberPixels and SetPixelWidth (zeros until both are
+        set, as Andor's library gives)."""
+        if not self.pixels or not self.pixel_um:
+            return self.OK, [0.0] * int(n)
+        return self.OK, self.calibration(self.pixels, self.pixel_um).tolist()[: int(n)]
 
 
 class OceanSpectrometer(SdkDevice):

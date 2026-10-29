@@ -384,24 +384,28 @@ class Flow:
 STATUS_COLOR = {"done": "1a7f37", "aborted": "b42318", "refused": "b42318"}
 
 
-def _run(flow: Flow, run: RunPart, number: int) -> None:
-    flow.heading("%d. %s" % (number, run.plan), 13, before=14)
-    flow.para("%s  \u00b7  %s  \u00b7  %s points  \u00b7  %s  \u00b7  run %s" % (
+def _run(flow: Flow, run: RunPart, number: int, detail: int = 0) -> None:
+    """One run's section. detail 0 is all of it; each level up leaves out more (a shorter report, as asked)."""
+    flow.heading("%d. %s" % (number, run.plan), 13 if detail < 3 else 11, before=14 if detail < 3 else 8)
+    flow.para("%s  ·  %s  ·  %s points  ·  %s  ·  run %s" % (
         run.status.upper(), run.when, run.points, run.duration, run.run_id), 8.5, "regular", MUTED, gap=6)
     if run.reason and run.status != "done":
         flow.para("Stopped: " + run.reason, 9.5, "bold", STATUS_COLOR.get(run.status, INK))
     if run.assessment:
-        flow.para(run.assessment, 10)
-    if run.next:
+        flow.para(run.assessment if detail < 3 else _sentences(run.assessment, 2), 10)
+    if run.next and detail < 2:
         flow.para("Next: " + run.next, 9.5, "italic", MUTED)
-    flow.charts(run.charts)
-    for t in run.results:
+    flow.charts(run.charts if detail < 2 else run.charts[:2] if detail == 2 else run.charts[:1],
+                height=190 if detail < 3 else 150)
+    for t in run.results if detail < 3 else run.results[:1]:
         flow.table(t)
-    if run.issues:
+    if run.issues and detail < 3:
         flow.heading("Issues", 10, MUTED, before=4)
         for issue in run.issues:
-            flow.para(issue, 9, bullet="\u2022", gap=1)
+            flow.para(issue, 9, bullet="•", gap=1)
         flow.space(4)
+    if detail >= 3:
+        return
     rows = []
     if run.sweep:
         rows.append(("Swept", "; ".join(run.sweep)))
@@ -411,56 +415,91 @@ def _run(flow: Flow, run: RunPart, number: int) -> None:
         rows.append(("Set up", "; ".join(run.setup)))
     if run.changes:
         rows.append(("Left changed", "; ".join(run.changes)))
+    if run.unread:
+        rows.append(("Not read at the end", "; ".join(run.unread)))
     rows.append(("Started by", run.operator))
     flow.heading("Conditions", 10, MUTED, before=4)
     flow.kv(rows)
-    if run.conditions:
+    if run.conditions and detail < 2:
         flow.table(Table(["Instrument", "At the start (* = drive away from safe)"], [list(c) for c in run.conditions]), 8)
     if run.events:
         flow.heading("Approvals and alarms", 10, MUTED, before=2)
-        flow.kv(run.events, 8.5, key_w=60)
-    if run.plan_text:
+        flow.kv(run.events if detail < 2 else run.events[:6], 8.5, key_w=60)
+    if run.plan_text and detail < 1:
         flow.heading("Plan", 10, MUTED, before=2)
         flow.code(run.plan_text)
 
 
-def write_pdf(report: Report, path: Path) -> int:
-    """Write the report; returns the number of pages."""
+def _sentences(text: str, n: int) -> str:
+    parts = str(text).split(". ")
+    return ". ".join(parts[:n]).rstrip(".") + "." if len(parts) > n else text
+
+
+DETAILS = 7   # how far a report shortens itself to the length asked for (detail 0 to 6)
+
+
+def _layout(report: Report, detail: int, pages: int) -> Flow:
+    """The report on pages, at a level of detail: 0 all of it; 1 no plans; 2 no conditions tables or lab log,
+    two plots a run; 3 each run in brief (its result, one plot); 4 the runs as a table and their first plots;
+    5 the runs in one line each; 6 the summary's first paragraph and the table of runs."""
     flow = Flow(report.title)
     flow.y += 16
     flow.c.text(MARGIN, flow.y, report.title, 22, "bold")
     flow.y += 18
     flow.c.text(MARGIN, flow.y, report.subtitle, 10.5, color=MUTED)
     flow.y += 14
-    flow.c.text(MARGIN, flow.y, "%s%s  \u00b7  made with Kelvin %s" % (
+    flow.c.text(MARGIN, flow.y, "%s%s  ·  made with Kelvin %s" % (
         report.lab, " (simulated instruments)" if report.simulated else "", report.created), 8.5, color=MUTED)
     flow.y += 8
     flow.rule()
-    if report.summary:
+    if detail:
+        flow.para("Shortened to %d page%s, as asked: each run's own report (report.pdf in its folder) and its data "
+                  "(run.h5) have the rest." % (pages, "" if pages == 1 else "s"), 8.5, "italic", MUTED, gap=4)
+    summary = report.summary if detail < 6 else report.summary[:1]
+    if summary:
         flow.heading("Summary", 12, before=6)
-        for p in report.summary:
-            flow.para(p, 10.5, gap=6)
-    flow.heading("Runs" if report.summary else "Summary", 12, before=6)
-    for line in report.run_lines:
-        flow.para(line, 9.5, bullet="\u2022", gap=2)
+        for p in summary:
+            flow.para(p if detail < 6 else _sentences(p, 3), 10.5, gap=6)
+    flow.heading("Runs" if summary else "Summary", 12, before=6)
+    if detail < 6:
+        for line in report.run_lines:
+            flow.para(line, 9.5, bullet="•", gap=2)
     if report.runs:
         flow.space(4)
-        flow.table(Table(["#", "Run", "When", "Points", "Status"],
-                         [[str(i), r.plan, r.when, r.points, r.status] for i, r in enumerate(report.runs, 1)]))
-    if report.notes:
+        rows = [[str(i), r.plan, r.when, r.points, r.status] for i, r in enumerate(report.runs, 1)]
+        if detail == DETAILS - 1 and len(rows) > 30:
+            rows = rows[:30] + [["", "... and %d more runs" % (len(rows) - 30), "", "", ""]]
+        flow.table(Table(["#", "Run", "When", "Points", "Status"], rows))
+    if report.notes and detail < 4:
         flow.heading("Project notes", 12, before=6)
         for kind, text in report.notes:
-            flow.para("%s: %s" % (kind.capitalize(), text), 9.5, bullet="\u2022", gap=2)
-    for i, run in enumerate(report.runs, 1):
-        flow.rule()
-        _run(flow, run, i)
-    if report.references:
+            flow.para("%s: %s" % (kind.capitalize(), text), 9.5, bullet="•", gap=2)
+    if detail == 4:   # the runs' first plots, side by side, under the table
+        firsts = [r.charts[0] for r in report.runs if r.charts][:4]
+        if firsts:
+            flow.charts(firsts, height=150)
+    elif detail < 4:
+        for i, run in enumerate(report.runs, 1):
+            flow.rule()
+            _run(flow, run, i, detail)
+    if report.references and detail < 3:
         flow.rule()
         flow.heading("References", 12, before=6)
         for i, ref in enumerate(report.references, 1):
             flow.para(ref, 9, bullet="[%d]" % i, gap=2, indent=0)
-    if report.log:
+    if report.log and detail < 2:
         flow.rule()
         flow.heading("Lab log", 12, before=6)
-        flow.kv(report.log, 8.5, key_w=78)
+        flow.kv(report.log if detail == 0 else report.log[-30:], 8.5, key_w=78)
+    return flow
+
+
+def write_pdf(report: Report, path: Path, pages: int = 0) -> int:
+    """Write the report; returns the number of pages. pages: at most this many, as asked ("a one-page summary"):
+    it leaves out detail, least needed first, until it fits (F2 l10, F3 P8: "one page" came out at 5 to 22)."""
+    flow = _layout(report, 0, pages)
+    detail = 0
+    while pages and len(flow.pages) > pages and detail < DETAILS - 1:
+        detail += 1
+        flow = _layout(report, detail, pages)
     return flow.finish(path, report.subtitle)

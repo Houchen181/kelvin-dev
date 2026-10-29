@@ -452,14 +452,17 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def make_report(runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
-                    summary: str = "", format: str = "pdf", kind: str = "runs", device: str = "") -> str:
+                    summary: str = "", format: str = "pdf", kind: str = "runs", device: str = "",
+                    pages: int = 0) -> str:
         """Reports. Kelvin already keeps three up to date by itself: each run's scan report (in its folder), each
         device's report and each project's master report. kind project: rewrite the project's master report now
         (summary, if given, becomes its opening, in your own words); device: rewrite that sample's report; scan: a
         run's own report again. kind runs (default): a separate report of the runs chosen by id, by day (YYYY-MM-DD,
         today, yesterday) or the last N (default today's), with summary as its opening, for sharing a selection.
-        Only facts from the runs and the conversation; no speculation."""
-        return rt.make_report(runs, day, last, title, summary, format, kind=kind, device=device)
+        pages: the length the person asked for ("one page": 1), in pages or slides; the report leaves out detail
+        until it fits, and each run's own report keeps the rest. Only facts from the runs and the conversation; no
+        speculation."""
+        return rt.make_report(runs, day, last, title, summary, format, kind=kind, device=device, pages=pages)
 
     @server.tool(annotations=READ, structured_output=False)
     def scan_instruments() -> str:
@@ -663,11 +666,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Add a saved queue's items to the end of the queue."""
         return rt.queue_load(name)
 
-    @server.tool(annotations=READ, structured_output=False)
-    def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None) -> str:
+    @server.tool(annotations=ACT, structured_output=False)   # accept writes the run's fits (never an instrument)
+    def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None,
+                    accept: bool = False) -> str:
         """Re-analyse a recorded run. column: one measured instr.param; model: linear, lorentzian,
-        gaussian or exponential to force that fit (default: chosen automatically)."""
-        return rt.analyze(run_id, column, model)
+        gaussian or exponential to force that fit (default: chosen automatically). accept: once the person agrees
+        this is the right fit, keep it as the run's own (in run.h5); its report shows it from then on."""
+        return rt.analyze(run_id, column, model, accept=accept)
 
     # ---- analysis on kept runs (datatools.py): they read runs and write only their own results, never an instrument
     @server.tool(annotations=ACT, structured_output=False, description=(
@@ -779,7 +784,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def describe_run(run_id: str) -> str:
         """One run in brief, before reading its numbers: what it swept and measured (units, ranges, quantities), the
         conditions held, the fitted results with uncertainties, the assessment and issues, the plan as it ran and
-        its files."""
+        its files. Every setting at its start and end, its approvals and who gave them: run_provenance."""
         return rt.describe_run(run_id)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -817,6 +822,35 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def recent_events(n: int = 20) -> str:
         """The last n entries of the lab's event log (commands, approvals, trips, runs)."""
         return rt.events(n)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def run_provenance(run_id: str) -> str:
+        """Where a run came from, from what Kelvin kept (never guess it): the plan as it ran; who started it and
+        when (this computer's clock); the instrument settings at the start and the end (every one is kept in
+        run.h5); the measurement chain (the excitation, peak or rms, series resistor, gains); every approval it
+        needed and who gave it (account, portal or phone); and the stops, trips and alarms while it ran."""
+        return rt.run_provenance(run_id)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def activity(since: str = "", until: str = "", who: str = "", kinds: str = "", limit: int = 60) -> str:
+        """Who did what in the lab, and when: the lab record between since and until (2026-10-28T11:00, 11:00,
+        today, yesterday, or a while ago such as 2h; default the last 24 h), in this computer's wall-clock time,
+        never the simulated lab's. Each line says who: a signed-in person and where they answered, Kelvin's AI, a
+        queue or a plan. who: only that actor (a name, agent, human, phone...); kinds: approvals, stops, runs,
+        settings, alarms, lab, people, or event types, comma-separated. Use it rather than inferring who did what."""
+        return rt.activity(since, until, who, kinds, limit)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def measurement_chain(device: str = "", chain: Optional[Dict[str, Any]] = None, remove: bool = False) -> str:
+        """A device's measurement chain: what sits between the instruments and the sample. Without chain: read it.
+        With chain: record it, as the person said (never assume a convention): {excitation: {source:
+        iac.amplitude, form: peak|rms|peak-to-peak|dc (how that instrument states it: a 6221's AC amplitude is its
+        peak, a lock-in's sine out is rms), series_resistor: ohms (a voltage through a resistor; leave out for a
+        current source)}, readings: {li_xx.X: {gain: 100, name: R_xx}}, notes: wiring, filters, reference}. Every
+        run of the device carries it from then on; reports plot the named readings as resistance (V / gain /
+        I_rms). device: its name (default the mounted one); "setup" for the setup's own, which a device without one
+        uses. remove: forget the device's chain."""
+        return rt.measurement_chain(device, chain, by="agent", remove=remove)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable

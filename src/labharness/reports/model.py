@@ -30,6 +30,7 @@ class RunPart:
     away: List[str] = field(default_factory=list)                     # drives away from safe at the start
     found: List[Tuple[str, str]] = field(default_factory=list)        # the plan's instruments: settings it left alone
     changes: List[str] = field(default_factory=list)                  # drives that ended somewhere else
+    unread: List[str] = field(default_factory=list)                   # drives the end couldn't read: where, unknown
     events: List[Tuple[str, str]] = field(default_factory=list)       # time, approvals, trips, alarms
 
 

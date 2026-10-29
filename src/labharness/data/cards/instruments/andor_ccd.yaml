@@ -9,7 +9,8 @@ notes:
   - "Address andor://<index>?sdk=2 (andor://0?sdk=2). Needs Andor's SDK2 and its pyAndorSDK2 (pip install it from the SDK's Python folder). Close Solis first: one program at a time."
   - "Draft: written from Andor's SDK2 functions without a camera at hand. Check each reading against Solis before relying on it, then mark it reviewed."
   - "Andor's SDK2 starts every session from its own defaults (cooler off): that is the SDK's doing; Kelvin sets nothing more until asked. Each frame or spectrum is a single scan, set up just before it."
-  - "Spectrum is a full vertical binning readout (one value per column), for Newton and iDus cameras on a spectrograph; its x axis is the column."
+  - "Spectrum is a full vertical binning readout (one value per column), for Newton and iDus cameras on a spectrograph. Its x axis is each column's wavelength in nm, from the spectrograph's own calibration (Andor's ShamrockGetCalibration, at its grating and centre wavelength when the spectrum is taken): the only Andor spectrograph on this computer, or the one the address names (andor://0?sdk=2&spectrograph=1). A camera on no spectrograph: &spectrograph=none, and spectrum_pixels gives its spectrum by column. Where the SDK can't say the pixel width, give it: &pixel_um=26."
+  - "Mean, max and sum are of a frame (an image readout); peak and peak_wavelength are of the latest spectrum."
   - "Turn the cooler off and let the camera warm above -20 C before quitting Kelvin: with the cooler on, Kelvin leaves Andor's session open rather than shut it down cold."
 identify:
   idn: "^Andor,(DU|DV|DZ|DX|iXon|Newton|iDus|Luca|Clara)"
@@ -27,20 +28,47 @@ parameters:
     type: trace
     unit: counts
     get: "GET spectrum"
+    axis: {values: wavelengths}
+  wavelengths:
+    label: Wavelength of each column
+    kind: measure
+    type: trace
+    unit: nm
+    get: "GET wavelengths"
+    description: From the spectrograph's calibration at its grating and centre wavelength now
+  spectrum_pixels:
+    label: Spectrum by column (no wavelength axis)
+    kind: measure
+    type: trace
+    unit: counts
+    get: "GET spectrum_pixels"
+    description: For a camera on no spectrograph; x is the column number
+  peak:
+    label: Spectrum peak
+    kind: measure
+    unit: counts
+    get: "GET peak"
+    acquires: true
+  peak_wavelength:
+    label: Spectrum peak wavelength
+    kind: measure
+    unit: nm
+    get: "GET peak_wavelength"
+    acquires: true
   mean:
-    label: Mean
+    label: Frame mean
     kind: measure
     unit: counts
     get: "GET mean"
     acquires: true
   max:
-    label: Max
+    label: Frame max
     kind: measure
     unit: counts
     get: "GET max"
     acquires: true
   sum:
-    label: Sum
+    label: Frame sum
     kind: measure
     unit: counts
     get: "GET sum"

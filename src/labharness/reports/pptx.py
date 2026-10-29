@@ -413,7 +413,7 @@ def _run_slides(run: RunPart, footer: str, start: int) -> List[Slide]:
                start + len(slides), footer)
     left: List[Para] = []
     for label, items in (("Swept", run.sweep), ("Measured", [", ".join(run.measured)] if run.measured else []),
-                         ("Set up", run.setup), ("Left changed", run.changes)):
+                         ("Set up", run.setup), ("Left changed", run.changes), ("Not read at the end", run.unread)):
         if items:
             left.append([(label, {"bold": True, "color": MUTED})])
             left += [_clip(i, 110) for i in items[:6]]
@@ -431,9 +431,22 @@ def _run_slides(run: RunPart, footer: str, start: int) -> List[Slide]:
     return slides
 
 
-def write_pptx(report: Report, path: Path) -> int:
-    """Write the report as slides; returns the number of slides."""
+def write_pptx(report: Report, path: Path, pages: int = 0) -> int:
+    """Write the report as slides; returns the number of slides. pages: at most this many slides, as asked: then
+    only the summary and each run's result slide (as many as fit), each run's other slides left to its own report."""
+    slides = _deck(report)
+    if pages and len(slides) > pages:
+        slides = _deck(report, brief=pages)[:pages]
+    save_slides(slides, path, report.title)
+    return len(slides)
+
+
+def _deck(report: Report, brief: int = 0) -> List[Slide]:
     slides: List[Slide] = []
+    if brief and brief < 3:   # a slide or two: the summary says it all
+        s = Slide()
+        _summary(s, report, 1, report.title)
+        return [s]
     s = Slide()
     s.rect(0, 0, SLIDE_W, SLIDE_H, "F3F5F8")
     s.rect(0, 0, 10, SLIDE_H, ACCENT)
@@ -446,20 +459,10 @@ def write_pptx(report: Report, path: Path) -> int:
     footer = report.title
 
     s = Slide()
-    y = _frame(s, "Summary", report.subtitle, 2, footer)
-    paras: List[Para] = [p for p in report.summary]
-    bullets = report.run_lines[:8]
-    if paras:
-        width = SLIDE_W - 2 * M
-        lines = sum(max(1, -(-int(measure(p, 16)) // int(width))) for p in paras)
-        height = min(200.0, lines * 16 * 1.25 + 8 * len(paras))
-        s.text(M, y, width, height, paras, 16, space=6, shrink=True, name="Summary")
-        y += height + 18
-    s.text(M, y, SLIDE_W - 2 * M, SLIDE_H - y - 40, bullets or ["No runs."], 14 if paras else 16, bullet=True,
-           space=6, shrink=True, name="Runs")
+    _summary(s, report, 2, footer)
     slides.append(s)
 
-    if report.notes:
+    if report.notes and not brief:
         s = Slide()
         y = _frame(s, "Project notes", "decisions, procedures, quirks and results kept in this project",
                    len(slides) + 1, footer)
@@ -469,7 +472,10 @@ def write_pptx(report: Report, path: Path) -> int:
         slides.append(s)
 
     for run in report.runs:
-        slides += _run_slides(run, footer, len(slides) + 1)
+        mine = _run_slides(run, footer, len(slides) + 1)
+        slides += mine[:1] if brief else mine
+    if brief:
+        return slides
 
     if report.references:
         s = Slide()
@@ -486,5 +492,18 @@ def write_pptx(report: Report, path: Path) -> int:
                [[(t + "   ", {"color": MUTED, "mono": True}), (_clip(text, 130), {})] for t, text in rows],
                11, space=2, shrink=True, name="Log")
         slides.append(s)
-    save_slides(slides, path, report.title)
-    return len(slides)
+    return slides
+
+
+def _summary(s: Slide, report: Report, number: int, footer: str) -> None:
+    y = _frame(s, "Summary", report.subtitle, number, footer)
+    paras: List[Para] = [p for p in report.summary]
+    bullets = report.run_lines[:8]
+    if paras:
+        width = SLIDE_W - 2 * M
+        lines = sum(max(1, -(-int(measure(p, 16)) // int(width))) for p in paras)
+        height = min(200.0, lines * 16 * 1.25 + 8 * len(paras))
+        s.text(M, y, width, height, paras, 16, space=6, shrink=True, name="Summary")
+        y += height + 18
+    s.text(M, y, SLIDE_W - 2 * M, SLIDE_H - y - 40, bullets or ["No runs."], 14 if paras else 16, bullet=True,
+           space=6, shrink=True, name="Runs")

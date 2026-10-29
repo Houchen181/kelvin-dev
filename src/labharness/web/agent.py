@@ -247,10 +247,10 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "card_guide", "find_card",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
-           "use_skill", "read_skill_file", "survey_scripts"}
+           "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "activity"}
 # what never works the lab: everything else runs one call at a time across chats, filed under its own chat
 OFF_LAB = LOOKUPS | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe", "save_paper", "make_report",
-                     "write_file"}
+                     "write_file", "measurement_chain"}
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
 LOOKUPS |= ANALYSIS
@@ -872,10 +872,14 @@ class ChatAgent:
         kind = str(args.get("kind") or "runs")
         if kind == "project" and args.get("summary"):   # Kelvin's words open the master report until rewritten
             self.store.set_summary(project["id"] if project else None, str(args["summary"]))
+        try:
+            pages = max(0, int(args.get("pages") or 0))
+        except (TypeError, ValueError):
+            return "no report: pages must be a whole number", True
         text = await asyncio.to_thread(self.runtime.make_report, runs, day, last, title, str(args.get("summary") or ""),
                                        str(args.get("format") or "pdf"), self.report_notes(project), "agent",
                                        self.report_references(project), kind, str(args.get("device") or ""),
-                                       project["id"] if project else None)
+                                       project["id"] if project else None, pages)
         return text, text.startswith("no report")
 
     # ------------------------------------------------------------------ turns
