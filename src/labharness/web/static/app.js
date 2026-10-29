@@ -1150,7 +1150,21 @@
       b.addEventListener("click", () => get(fmt, label + " file"));
       return b;
     });
-    return h("span", { class: "run-downloads" }, h("span", { class: "hint" }, "Download data:"), ...choices);
+    const eln = h("button", { class: "btn small ghost", type: "button", title: "The run's record as Markdown with its plots, for a lab notebook (ELN)" }, "Lab notebook");
+    eln.addEventListener("click", () => fetchDownload("/api/runs/" + encodeURIComponent(runId) + "/eln", runId + ".zip", "lab notebook record"));
+    return h("span", { class: "run-downloads" }, h("span", { class: "hint" }, "Download data:"), ...choices, eln);
+  }
+  // a file Kelvin's code writes, downloaded with the access key (its name from its Content-Disposition)
+  async function fetchDownload(url, fallback, what) {
+    try {
+      const res = await fetch(url, { headers: { "X-Kelvin-Token": token } });
+      if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).error) || "HTTP " + res.status);
+      const named = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "");
+      const href = URL.createObjectURL(await res.blob());
+      const a = h("a", { href, download: named ? named[1] : fallback });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 30000);
+    } catch (e) { toast("Could not download the " + what + ": " + e.message); }
   }
 
   // ------------------------------------------------------------------ reports
@@ -1192,6 +1206,7 @@
     sel.replaceChildren(...opts.map(([v, label]) => new Option(label, v)));
     $("report-files").hidden = true;
     $("report-msg").textContent = "";
+    if (!$("eln-day").value) { const d = new Date(); $("eln-day").value = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
     $("report-dialog").showModal();
     loadLibrary();
   }
@@ -1600,13 +1615,48 @@
   const approvalItem = (i) => h("li", {}, String(i).includes("\n") ? h("pre", { class: "approval-code" }, i) : i);
   // auto mode approved this without asking: show what ran and why, like an answered request
   function autoApproval(ev) {
-    const title = h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title));
-    const el = h("div", { class: "approval done auto", role: "group", "aria-label": ev.title }, title,
-      h("ul", {}, ...ev.items.map(approvalItem)),
-      h("div", { class: "approval-actions" }, h("span", { class: "verdict auto" }, "Auto-approved"),
+    const text = h("span", {}, ev.title), list = h("ul", {}, ...ev.items.map(approvalItem));
+    const title = h("div", { class: "approval-title" }, icon("check"), text);
+    const el = h("div", { class: "approval done auto", role: "group", "aria-label": ev.title }, title, list,
+      h("div", { class: "approval-actions" }, h("span", { class: "verdict auto" }, cardSay("Auto-approved")),
         h("span", { class: "muted small" }, (ev.reasons || []).join("; "))));
     foldable(el, title);
+    localizeCard(ev, { title: text, list, where: null });
     return el;
+  }
+  // a card in the language the person reads cards in (Settings → Display; cardlang.py), translated as it is shown:
+  // the card itself, what is approved and the record stay as Kelvin wrote them, and English is one click away
+  const CARD_UI = { "zh-Hans": { "Approve": "批准", "Decline": "拒绝", "Approved": "已批准", "Declined": "已拒绝",
+    "Already closed": "已关闭", "Closed": "已关闭", "Auto-approved": "自动批准", english: "English", shown: "中文",
+    declines: (n) => n + " 秒后自动拒绝" } };
+  function cardWords() { return CARD_UI[(S.settings && S.settings.card_language) || ""] || null; }
+  function cardSay(text) { const w = cardWords(); return (w && typeof w[text] === "string") ? w[text] : text; }
+  async function localizeCard(ev, parts) {
+    const lang = S.settings && S.settings.card_language;
+    if (!lang) return;
+    let shown = ev.shown;
+    if (!shown) {
+      try { shown = await api("/api/cardtext", { body: { title: ev.title, items: ev.items, where: ev.where, language: lang } }); }
+      catch (e) { return; }   // it stays as Kelvin wrote it
+    }
+    const english = { title: ev.title, items: ev.items, where: ev.where };
+    const put = (c) => {
+      parts.title.textContent = c.title;
+      parts.list.replaceChildren(...c.items.map(approvalItem));
+      if (parts.where && c.where) parts.where.textContent = c.where;
+    };
+    put(shown);
+    const words = cardWords() || {};
+    let inEnglish = false;
+    const flip = h("button", { class: "link soft card-lang", type: "button", title: "The card as Kelvin wrote it" }, words.english || "English");
+    flip.addEventListener("click", (e) => {
+      e.stopPropagation();
+      inEnglish = !inEnglish;
+      put(inEnglish ? english : shown);
+      flip.textContent = inEnglish ? (words.shown || lang) : (words.english || "English");
+    });
+    flip.addEventListener("keydown", (e) => e.stopPropagation());
+    parts.title.after(flip);
   }
   // a decided request shows one line; its title opens and closes the details
   function foldable(el, title) {
@@ -1625,21 +1675,23 @@
   function makeApproval(ev) {
     const verdict = h("span", { class: "verdict" });
     const count = h("span", { class: "muted small" });
-    const yes = h("button", { class: "btn primary", type: "button" }, "Approve");
-    const no = h("button", { class: "btn", type: "button" }, "Decline");
+    const yes = h("button", { class: "btn primary", type: "button" }, cardSay("Approve"));
+    const no = h("button", { class: "btn", type: "button" }, cardSay("Decline"));
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
-    const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title), whereTag(ev.where));
-    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title,
-      h("ul", {}, ...ev.items.map(approvalItem)), actions);
+    const text = h("span", {}, ev.title), where = whereTag(ev.where), list = h("ul", {}, ...ev.items.map(approvalItem));
+    const title = h("div", { class: "approval-title" }, icon("hand"), text, where);
+    const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title, list, actions);
+    localizeCard(ev, { title: text, list, where });
     let left = ev.seconds_left;
-    const tick = () => { count.textContent = left > 0 ? "Declines itself in " + left + " s" : ""; left -= 1; };
+    const words = cardWords();
+    const tick = () => { count.textContent = left > 0 ? (words ? words.declines(left) : "Declines itself in " + left + " s") : ""; left -= 1; };
     tick();
     const timer = setInterval(tick, 1000);
     const card = {
       el, decided: false,
       close(text, good) {
         clearInterval(timer);
-        if (!card.decided) { verdict.textContent = text; verdict.className = "verdict " + (good ? "yes" : "no"); }
+        if (!card.decided) { verdict.textContent = cardSay(text); verdict.className = "verdict " + (good ? "yes" : "no"); }
         actions.replaceChildren(verdict);
         if (!el.classList.contains("done")) foldable(el, title);
         el.classList.add("done");
@@ -2489,6 +2541,7 @@
     closeSidebar();
     applyIncognito();
     if (ask) askFolder(); else loadNewFolder();
+    loadStartChecklist();
     $("input").focus();
   }
 
@@ -4087,6 +4140,11 @@
       const limitsBtn = act("Limits…", () => editLimits(f.name, li, limitsBtn));
       limitsBtn.classList.add("limits-btn");
       li.querySelector(".folder-manual").append(limitsBtn);
+      const calTag = h("span", { class: "cal-state" });
+      showCalibration(calTag, f.calibration);
+      li.querySelector(".folder-who").append(calTag);
+      const calBtn = act("Calibration…", () => editCalibration(f.name, li, calBtn, calTag));
+      li.querySelector(".folder-manual").append(calBtn);
       return li;
     }));
   }
@@ -4145,6 +4203,63 @@
       box.append(foot);
     }
     li.append(box);
+  }
+  // an instrument's calibration as a person records it: due date and certificate (health_check and cards warn)
+  function showCalibration(tag, cal) {
+    const st = (cal && cal.state) || { state: "none" };
+    tag.className = "cal-state " + st.state;
+    tag.textContent = st.state === "none" ? "No calibration on record" : "Calibration " + st.words;
+    tag.title = st.serial || "";
+  }
+  async function editCalibration(name, li, btn, tag) {
+    const open = li.querySelector(".cal-editor");
+    if (open) { open.remove(); btn.setAttribute("aria-expanded", "false"); return; }
+    let r;
+    try { r = await api("/api/instruments/" + encodeURIComponent(name) + "/calibration"); } catch (e) { $("lab-msg").textContent = e.message; return; }
+    btn.setAttribute("aria-expanded", "true");
+    const rec = r.record || {};
+    const field = (label, input) => h("label", { class: "cal-field" }, h("span", { class: "muted small" }, label), input);
+    const calibrated = h("input", { type: "date" }), due = h("input", { type: "date" });
+    const cert = h("input", { type: "text", maxlength: "200", placeholder: "Its number" });
+    const by = h("input", { type: "text", maxlength: "200", placeholder: "Who calibrated it (optional)" });
+    const file = h("input", { type: "file", accept: ".pdf,.png,.jpg,.jpeg" });
+    const msg = h("span", { class: "muted small" });
+    const save = h("button", { class: "btn small primary", type: "button" }, "Save calibration");
+    const said = h("p", { class: "hint" }, r.state.state === "none" ? "No calibration on record yet. Kelvin warns in its health check and on approval cards once one is out of date. " :
+      "On record: " + r.state.words + (rec.serial ? ", serial " + rec.serial : "") + (rec.by ? ", recorded by " + rec.by : "") +
+      (r.earlier ? " (" + r.earlier + " earlier, kept)" : "") + ". ");
+    if (rec.file) {
+      const see = h("button", { class: "link soft", type: "button" }, "Open the certificate");
+      see.addEventListener("click", () => fetchDownload("/api/instruments/" + encodeURIComponent(name) + "/calibration/certificate?file=" + encodeURIComponent(rec.file), rec.file, "certificate"));
+      said.append(see);
+    }
+    save.addEventListener("click", async () => {
+      if (!due.value) { msg.textContent = "Give the date it is due again."; return; }
+      save.disabled = true;
+      msg.textContent = "Saving…";
+      try {
+        let kept = "";
+        const chosen = file.files && file.files[0];
+        if (chosen) {
+          const res = await fetch("/api/instruments/" + encodeURIComponent(name) + "/calibration/certificate",
+            { method: "PUT", headers: { "X-Kelvin-Token": token, "X-File-Name": encodeURIComponent(chosen.name) }, body: chosen });
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(j.error || "HTTP " + res.status);
+          kept = j.file;
+        }
+        const out = await api("/api/instruments/" + encodeURIComponent(name) + "/calibration",
+          { body: { calibrated: calibrated.value, due: due.value, certificate: cert.value.trim(), provider: by.value.trim(), file: kept } });
+        showCalibration(tag, out);
+        said.firstChild.textContent = "On record: " + out.state.words + (out.record.serial ? ", serial " + out.record.serial : "") +
+          (out.earlier ? " (" + out.earlier + " earlier, kept)" : "") + ". ";
+        msg.textContent = "Saved: " + name + " calibration " + out.state.words + ".";
+      } catch (e) { msg.textContent = e.message; }
+      finally { save.disabled = false; }
+    });
+    li.append(h("div", { class: "cal-editor" }, said,
+      h("div", { class: "cal-row" }, field("Calibrated on", calibrated), field("Due again", due), field("Certificate", cert), field("Calibrated by", by)),
+      h("div", { class: "cal-row" }, field("Certificate file: a PDF, or a photo of it (optional)", file)),
+      h("div", { class: "lim-foot" }, save, msg)));
   }
   async function openInstrument(name, what) {
     try { await api("/api/instruments/" + encodeURIComponent(name) + "/open", { body: { what } }); } catch (e) { $("lab-msg").textContent = e.message; }
@@ -4973,6 +5088,74 @@
     } catch (e) { showDataFolder(e.message, true); dataPathChanged(); }
   }
 
+  // ------------------------------------------------------------------ Help and the first-run checklist (labops.py)
+  const CHECK_ACTIONS = {
+    lab: () => openLabSetup(),
+    cards: () => openCards(),
+    pin: () => { openSettings(); settingsPage("instruments"); },
+    phone: () => { openSettings(); settingsPage("phone"); },
+    data: () => { openSettings(); settingsPage("data"); },
+  };
+  function renderChecklist(box, r, onStart) {
+    const head = h("div", { class: "check-head" }, h("b", {}, "Getting started: " + r.done + " of " + r.total + " done"));
+    if (onStart) {
+      const hide = h("button", { class: "link soft", type: "button" }, "Hide");
+      hide.addEventListener("click", async () => {
+        box.hidden = true;
+        try { await api("/api/checklist", { body: { hidden: true } }); toast("Hidden. Help keeps the checklist."); } catch (e) { toast(e.message); }
+      });
+      head.append(hide);
+    }
+    box.replaceChildren(head, h("ul", { class: "check-list" }, ...r.items.map((it) => {
+      const go = h("button", { class: "link soft", type: "button" }, it.done ? "Change" : "Do it");
+      go.addEventListener("click", () => { if ($("help-dialog").open) $("help-dialog").close(); (CHECK_ACTIONS[it.action] || (() => {}))(); });
+      return h("li", { class: "check-item" + (it.done ? " done" : "") },
+        h("span", { class: "check-mark", "aria-hidden": "true" }, it.done ? "✓" : ""),
+        h("div", { class: "check-body" }, h("b", {}, it.title), h("span", { class: "muted small" }, it.detail)), go);
+    })));
+  }
+  async function loadStartChecklist() {   // on the start screen until it is all done, or hidden
+    const box = $("checklist-box");
+    let r;
+    try { r = await api("/api/checklist"); } catch (e) { box.hidden = true; return; }
+    box.hidden = r.hidden || r.done === r.total;
+    if (!box.hidden) renderChecklist(box, r, true);
+  }
+  async function openHelp() {
+    $("help-dialog").showModal();
+    $("help-q").focus();
+    try { renderChecklist($("help-checklist"), await api("/api/checklist"), false); }
+    catch (e) { $("help-checklist").textContent = e.message; }
+    if ($("help-topics").childElementCount) return;
+    try {
+      const groups = new Map();
+      for (const t of (await api("/api/help")).topics) { if (!groups.has(t.doc)) groups.set(t.doc, []); groups.get(t.doc).push(t); }
+      $("help-topics").replaceChildren(...[...groups].map(([doc, items]) => h("div", { class: "help-doc" }, h("b", {}, doc),
+        h("div", { class: "help-links" }, ...items.map((t) => {
+          const b = h("button", { class: "link soft", type: "button" }, t.title);
+          b.addEventListener("click", () => helpShow("section=" + encodeURIComponent(t.where), t.where));
+          return b;
+        })))));
+    } catch (e) { $("help-topics").textContent = e.message; }
+  }
+  async function helpShow(query, where) {
+    const box = $("help-results");
+    box.hidden = false;
+    box.replaceChildren(h("p", { class: "muted small" }, "Looking…"));
+    try {
+      const r = await api("/api/help?" + query);
+      const found = r.passages || [{ where, text: r.text }];
+      box.replaceChildren(...(found.length ? found.map((p) => h("div", { class: "help-passage" },
+        h("div", { class: "muted small" }, p.where), h("div", { class: "md", html: md(p.text) })))
+        : [h("p", { class: "muted small" }, "Nothing in Kelvin's help about that. Ask Kelvin in a chat: it can look further.")]));
+      box.scrollIntoView({ block: "nearest" });
+    } catch (e) { box.replaceChildren(h("p", { class: "muted small" }, e.message)); }
+  }
+  function helpSearch() {
+    const q = $("help-q").value.trim();
+    if (q) helpShow("q=" + encodeURIComponent(q));
+  }
+
   // ------------------------------------------------------------------ settings
   function fillModels(select, groups, selected, allowEmpty) {
     select.replaceChildren();
@@ -5065,6 +5248,7 @@
     length.value = chosen;
     $("global-instructions").value = (S.settings && S.settings.instructions) || "";
     $("learn").checked = !S.settings || S.settings.learn !== false;
+    $("card-language").value = (S.settings && S.settings.card_language) || "";
     $("hub-old-runs").checked = !!(S.settings && S.settings.hub_old_runs);
     $("literature").checked = !S.settings || S.settings.literature !== false;
     $("auto-setup").checked = !S.settings || S.settings.auto_setup !== false;
@@ -5291,6 +5475,7 @@
     body.reviewer = $("reviewer").value;
     body.answer_words = $("answer-words").value;
     body.instructions = $("global-instructions").value;
+    body.card_language = $("card-language").value;
     body.learn = $("learn").checked ? "on" : "off";
     body.hub_old_runs = $("hub-old-runs").checked ? "on" : "off";
     body.literature = $("literature").checked ? "on" : "off";
@@ -5449,7 +5634,13 @@
     renderChats();
     showEmpty(true);
     loadNewFolder();
+    loadStartChecklist();
 
+    $("open-help").addEventListener("click", () => openHelp());
+    $("help-go").addEventListener("click", helpSearch);
+    $("help-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); helpSearch(); } });
+    $("eln-day-go").addEventListener("click", () => fetchDownload("/api/eln?day=" + encodeURIComponent($("eln-day").value || "today"),
+      ($("eln-day").value || "today") + "-lab-record.zip", "day's lab notebook record"));
     $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
     $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));
     $("composer").addEventListener("submit", (e) => {
