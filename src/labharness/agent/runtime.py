@@ -1626,8 +1626,7 @@ class LabRuntime:
             if item.kind == "plan":
                 forecast.plan(self._plan(item.text))
             else:
-                step = load_step(item.text)
-                forecast.step(step.sets, step.stabilize, step.wait)
+                forecast.queue_step(load_step(item.text))
         return forecast
 
     def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
@@ -1694,7 +1693,8 @@ class LabRuntime:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
             forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
             starting = forecast.driving_actions()     # a waveform its scans start: on this card, approved with it
-            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast, bool(starting))
+            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast=forecast,
+                                                              asking=bool(starting))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
             duration = forecast.seconds or None

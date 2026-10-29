@@ -36,7 +36,8 @@ def test_a_plan_card_shows_every_drive_it_changes_the_duration_and_what_it_leave
     assert report.status == "declined"
     text = card(approver)
     title = approver.requests[0].title
-    assert title.startswith("Run plan cool_and_sweep: 5 points, ~"), title          # how long, without a dry run
+    # how long, without a dry run: at least, since tc.setpoint's ramp has no rate to read
+    assert title == "Run plan cool_and_sweep: 5 points, at least ~13 s", title
     assert "tc.setpoint: now 20 K, plan uses 4 K, toward its safe value" in text     # cooling is on the card too
     assert "smu.compliance_I: now 100 µA, plan uses 1 µA, toward its safe value" in text
     assert "smu.output: now off, plan uses on; it applies smu.V and smu.compliance_I" in text
@@ -165,6 +166,48 @@ def test_a_queue_card_shows_its_duration_and_where_the_queue_leaves_the_lab(tmp_
     assert "magnet.B: now 0 T, plan uses 0 … 1 T; at" in text, text
     assert "At the end it leaves lockin.amplitude 50 mV and smu.output on; back at safe: smu.V 0 V, magnet.B 0 T" \
         in text, text
+
+
+
+def test_a_part_of_a_plan_the_forecast_does_not_know_is_shown_with_its_time_unknown(lab, make_engine):
+    """Newer plan steps (a ramp sweep, until:) must never break a card: the drive is shown, its time unknown."""
+    from labharness.plans import Axis
+    engine, gate, approver = make_engine([False])
+    plan = load_plan(COOL_AND_SWEEP.replace("tc.setpoint: 4, ", ""))
+    plan.axes.insert(0, Axis("tc", "setpoint", [2.0], kind="ramp"))     # a kind this forecast doesn't know
+    plan.source["until"] = "tc.T_sample < 2.5"
+    assert engine.run(plan).status == "declined"
+    text, title = card(approver), approver.requests[0].title
+    assert title.endswith(", at least ~13 s"), title
+    assert "tc.setpoint: now 1.6 K, plan uses 2 K" in text, text
+    assert "Not in the ~13 s: tc.setpoint's ramp sweep; cool_and_sweep's until" in text, text
+
+
+def test_a_forecast_that_fails_never_loses_the_card(lab, make_engine, monkeypatch):
+    from labharness.forecast import Forecast
+    engine, gate, approver = make_engine([False])
+
+    def broken(self, plan, axis, outer):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(Forecast, "_axis", broken)
+    assert engine.run(COOL_AND_SWEEP).status == "declined"
+    text = card(approver)
+    assert "smu.V: now 0 V, plan uses 0 … 2 V; ramp 0.5 V/s" in text      # the gate's own lines are all there
+    assert "the rest of cool_and_sweep (boom)" in text, text
+    assert "at least ~" in approver.requests[0].title or "time not known" in approver.requests[0].title
+
+
+def test_a_queue_step_part_the_forecast_does_not_know_is_shown(lab, make_engine):
+    import dataclasses
+    from labharness.forecast import Forecast
+    from labharness.scanqueue import Step
+    engine, gate, approver = make_engine([])
+
+    @dataclasses.dataclass
+    class Later(Step):
+        until: str = ""
+    f = Forecast(engine, "the queue").queue_step(Later("cool", [("tc", "setpoint", 0.0)], None, 30, "tc.T_sample < 2"))
+    assert f.seconds == 30 and "cool's until" in f.not_counted() and f.duration() == ", at least ~30 s"
 
 
 # ------------------------------------------------------------------ on labsim: instruments Kelvin takes for real

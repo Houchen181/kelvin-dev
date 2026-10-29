@@ -625,8 +625,14 @@ class SafetyGate:
             grants[key] = Allowed.of(spec, change.values)
             lines.append((True, "; ".join(shown(inst, spec, change.start, change.values) + [
                 "Kelvin isn't sure about %s: %s" % (inst.name, self.unsure(inst))])))
+        for key, change in (forecast.drives() if forecast is not None else {}).items():
+            if key not in drive_values:   # a drive in a part of the run these values don't list: shown all the same
+                inst, spec = self.lab.resolve(key)
+                lines.append((False, "; ".join(shown(inst, spec, change.start, change.values))))
         # what the person approves first (a phone's notice shows the first line), then what else the run changes
         items = [text for asks, text in lines if asks] + [text for asks, text in lines if not asks]
+        if forecast is not None:
+            forecast.asked = [text for asks, text in lines if asks]
         return items if asking or any(asks for asks, _ in lines) else [], grants, problems
 
     # ------------------------------------------------------------------ internals

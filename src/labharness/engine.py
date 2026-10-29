@@ -356,7 +356,7 @@ class RunEngine:
         # set-up that drives the sample (a waveform started) is on this card, not a card of its own; a queue's card
         # that showed it covers it
         starting = [k for k in forecast.driving_actions() if not self.gate.action_covered(k)]
-        items, grants, problems = self.gate.plan_approval(drives, forecast, bool(firing or starting))
+        items, grants, problems = self.gate.plan_approval(drives, forecast=forecast, asking=bool(firing or starting))
         if problems:
             return self._refuse(plan.name, "; ".join(problems))
         if firing:   # an action that drives the sample at every point: the person approves the run

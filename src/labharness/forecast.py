@@ -9,6 +9,7 @@ before saying yes. Its duration counts ramps, settling and waits; what it can't 
 tell, a stabilize that may wait longer, readings that take their own time) the card says."""
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -17,6 +18,9 @@ from .gate import _dur, _same
 
 # what a plan step that names one of the card's actions says: run it, once (a waveform started, a stage homed)
 RUN_WORDS = {"run", "start", "do", "go", "yes", "on", "true", "1"}
+# the parts of a plan this walk knows; another (a newer kind of step or condition) is shown with its time unknown
+PLAN_KEYS = {"plan", "description", "device", "requires", "preconditions", "setup", "sweep", "repeat", "time", "settle",
+             "measure", "after", "on_abort", "trigger"}
 # words in a setting's name or label that say it decides how an output applies its levels
 _MODE_WORDS = ("function", "func", "mode", "wave", "shape", "source", "polarity")
 
@@ -158,6 +162,8 @@ class Forecast:
         self.waits: List[str] = []              # stabilize waits: counted at their least, may take longer
         self.slow_reads: List[str] = []         # readings that take their own time (traces, frames, acquisitions)
         self.actions: List[Tuple[str, str, str]] = []   # (setup or after, instrument, action), run once
+        self.unknown: List[str] = []            # parts of the run the walk doesn't know: shown, their time unknown
+        self.asked: List[str] = []              # the card's lines a person approves (gate.plan_approval sets them)
         self._asked: Dict[str, Any] = {}        # the levels the plan being walked has set (a switch puts them back)
 
     # ------------------------------------------------------------------ the walk
@@ -259,8 +265,20 @@ class Forecast:
 
     def plan(self, plan: Any) -> "Forecast":
         """A plan as the engine runs it: its setup (switches before the levels they apply), its sweep, its after
-        steps. Readings that take their own time are noted, not counted."""
+        steps. Readings that take their own time are noted, not counted. A part of the plan this walk doesn't know (a
+        newer kind of step or condition) never stops the card: it is shown, and its time is unknown."""
         self._asked = {}
+        try:
+            self._walk(plan)
+        except Exception as e:   # the card still shows what the gate found; the time is the walk's so far
+            self.unknown.append("the rest of %s (%s)" % (getattr(plan, "name", "the plan"),
+                                                         str(e).splitlines()[0][:120] if str(e) else type(e).__name__))
+        self.unknown += ["%s's %s" % (getattr(plan, "name", "the plan"), key)
+                         for key in getattr(plan, "source", None) or {} if key not in PLAN_KEYS]
+        self._asked = {}
+        return self
+
+    def _walk(self, plan: Any) -> None:
         for key in [s.key for s in plan.setup] + [a.key for a in plan.instrument_axes] + [s.key for s in plan.after]:
             self._note(key)
         for step in self.engine.ordered(plan.setup):
@@ -270,8 +288,11 @@ class Forecast:
             n = len(axis.values)
             if axis.kind == "instrument":
                 self._axis(plan, axis, outer)
-            elif axis.kind == "time" and n > 1:   # it waits `every` before each of its points but the first
-                self.seconds += outer * (n - 1) * axis.every
+            elif axis.kind == "time":
+                if n > 1:   # it waits `every` before each of its points but the first
+                    self.seconds += outer * (n - 1) * axis.every
+            elif axis.kind != "repeat":
+                self._unknown_axis(axis)
             outer *= max(n, 1)
         for step in plan.after:
             self._step(step.instr, step.param, step.value, "after")
@@ -282,8 +303,18 @@ class Forecast:
                 continue
             if spec.type in ("trace", "image") or spec.acquires or spec.get_before:
                 self.slow_reads.append("%s.%s" % (instr, param))
-        self._asked = {}
-        return self
+
+    def _unknown_axis(self, axis: Any) -> None:
+        """A kind of sweep this walk doesn't know: the drive it names is shown with its values, its time unknown."""
+        key = "%s.%s" % (axis.instr, axis.param) if getattr(axis, "instr", "") else getattr(axis, "key", "") or ""
+        try:
+            inst, spec = self.lab.resolve(key)
+            self._note(key)
+            for v in getattr(axis, "values", None) or []:
+                self._record(inst, spec, spec.coerce(v), 0.0, timed=False)
+        except Exception:
+            pass
+        self.unknown.append("%s's %s sweep" % (key or "a drive", getattr(axis, "kind", "new")))
 
     def _axis(self, plan: Any, axis: Any, outer: int) -> None:
         """A sweep axis: set at each of its values once per pass, a pass for every point of the axes outside it, each
@@ -317,6 +348,19 @@ class Forecast:
             self._record(inst, spec, v, t if k == 0 else 0.0, timed)
         if spec.is_drive:
             self._asked[axis.key] = values[-1]
+
+    def queue_step(self, step: Any) -> "Forecast":
+        """A queue step (scanqueue.Step) between scans. A part of it this walk doesn't know is shown, its time
+        unknown."""
+        known = {"name", "sets", "stabilize", "wait"}
+        for f in dataclasses.fields(step) if dataclasses.is_dataclass(step) else []:
+            if f.name not in known and getattr(step, f.name) not in (None, False, 0, "", [], {}, ()):
+                self.unknown.append("%s's %s" % (getattr(step, "name", "a step"), f.name))
+        try:
+            return self.step(step.sets, step.stabilize, step.wait)
+        except Exception:
+            self.unknown.append("%s" % getattr(step, "name", "a step"))
+            return self
 
     def step(self, sets: List[Tuple[str, str, Any]], stabilize: Any = None, wait: float = 0.0) -> "Forecast":
         """A queue step between scans: its settings in order, its stabilize (counted at its least) and its wait."""
@@ -356,7 +400,13 @@ class Forecast:
     def detail(self, key: str) -> str:
         """What a line on the card adds for this drive or setting: the rate the instrument moves it at, read from the
         instrument (or as the run sets it), and for how long; for a switch going on, what it applies and how the
-        instrument is set to apply it."""
+        instrument is set to apply it. Never more than the line, whatever goes wrong."""
+        try:
+            return self._detail(key)
+        except Exception:
+            return ""
+
+    def _detail(self, key: str) -> str:
         change = self.changes.get(key)
         if change is None:
             return ""
@@ -396,8 +446,18 @@ class Forecast:
 
     def closing(self) -> List[str]:
         """The card's last lines: drives whose switch stays off (they never reach the sample), what the run leaves on
-        and what is back at safe when it ends, and what its duration doesn't count."""
+        and what is back at safe when it ends, and what its duration doesn't count. A card is never lost to them."""
         lines: List[str] = []
+        for part in (self._dark, self._end, self._uncounted):
+            try:
+                lines += part()
+            except Exception:
+                continue
+        return lines
+
+    def _dark(self) -> List[str]:
+        """Drives the run sets away from safe whose switch is off and stays off: they never reach the sample (a queue
+        swept a gate whose output was off, and its card didn't say)."""
         dark: Dict[str, List[str]] = {}
         started = {key.split(".")[0] for key in self.driving_actions()}   # an action it runs may switch it on
         for key, change in self.drives().items():
@@ -410,10 +470,15 @@ class Forecast:
             on_later = skey in self.changes and any(switch.distance(v) > 0 for v in self.changes[skey].values)
             if state is not None and switch.distance(state) == 0 and not on_later:
                 dark.setdefault(skey, []).append(key)
+        out = []
         for skey, keys in dark.items():
             switch = self.lab.resolve(skey)[1]
-            lines.append("%s is %s, and %s doesn't switch it on: %s won't reach the sample" % (
+            out.append("%s is %s, and %s doesn't switch it on: %s won't reach the sample" % (
                 skey, switch.show(switch.safe), self.who, _and(keys)))
+        return out
+
+    def _end(self) -> List[str]:
+        """What the run leaves away from safe when it ends, and what is back at safe."""
         away, safe = [], []
         for key in self.drives():
             spec = self.lab.resolve(key)[1]
@@ -428,21 +493,34 @@ class Forecast:
             if where == "after":
                 label = getattr(action_of(self.lab, instr, name), "label", "") or name
                 ends.append("%sit runs %s.%s (%s)" % ("then " if ends else "", instr, name, label))
-        if ends:
-            lines.append("At the end " + "; ".join(ends))
+        return ["At the end " + "; ".join(ends)] if ends else []
+
+    def not_counted(self) -> List[str]:
+        """What the duration leaves out: a ramp at a rate Kelvin can't read, stabilize waits beyond their least,
+        readings that take their own time, and parts of the run the walk doesn't know."""
         missing = []
         for key, change in self.changes.items():
-            if change.untimed:
+            if change.untimed and not any(u.startswith(key + "'s ") for u in self.unknown):
                 why = self.rate(*self.lab.resolve(key))[1]
                 missing.append("%s's ramp (%s)" % (key, why[why.find("(") + 1:-1] if "(" in why else why))
         missing += self.waits
         if self.slow_reads:
             missing.append("the time reading %s takes" % _and(self.slow_reads))
-        if missing:
-            lines.append("Not in %s: %s" % ("the ~" + _dur(self.seconds) if self.seconds >= 1 else "its duration",
-                                             "; ".join(missing)))
-        return lines
+        return missing + self.unknown
+
+    def _uncounted(self) -> List[str]:
+        missing = self.not_counted()
+        if not missing:
+            return []
+        return ["Not in %s: %s" % ("the ~" + _dur(self.seconds) if self.seconds >= 1 else "its time", "; ".join(missing))]
 
     def duration(self) -> str:
-        """", ~13 min" for a card's title; "" when the run takes no time Kelvin can count."""
-        return ", ~%s" % _dur(self.seconds) if self.seconds >= 1 else ""
+        """For a card's title: ", ~13 min"; ", at least ~13 min" when something isn't counted (not_counted); ", time
+        not known" when nothing is; "" for a run that takes no time Kelvin knows of."""
+        try:
+            missing = bool(self.not_counted())
+        except Exception:
+            missing = True
+        if self.seconds >= 1:
+            return (", at least ~%s" if missing else ", ~%s") % _dur(self.seconds)
+        return ", time not known" if missing else ""
