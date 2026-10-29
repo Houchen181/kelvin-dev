@@ -24,7 +24,7 @@ in on this computer, every chat and every agent reads the same notes.
 
 Every chat sees a brief of it (BRIEF_CHARS at most): lessons first, then wiring, references, excitations and other
 facts; notes on the lab's own instruments before notes on instruments it no longer has, the newest first; and how many
-it left out, which lab_memory looks up."""
+it left out, which shared_memory looks up."""
 from __future__ import annotations
 
 import json
@@ -44,7 +44,7 @@ MAX_NOTES = 200
 MAX_TIES = 8        # instruments one note is tied to
 MAX_BEFORE = 5      # earlier versions kept with a note
 BRIEF_CHARS = 1200  # the notes in every chat's prompt (about 300 tokens); the rest is one lookup away
-AT_USE = 5          # notes shown with an instrument's use; lab_memory has the rest
+AT_USE = 5          # notes shown with an instrument's use; shared_memory has the rest
 ON_CARD = 3         # lessons shown on an approval card
 FILE = "lab-memory.json"
 VIRTUAL_FILE = "virtual-lab-memory.json"
@@ -55,7 +55,7 @@ SECTION = """# The lab's memory
 What people and Kelvin keep about this lab, for every chat, everyone here and every agent: how it is wired, where
 references come from, what excites the sample, lessons learned. Each note says who wrote it and when. Follow them
 unless the person says otherwise; a person's note outranks Kelvin's. If one looks out of date or disagrees with what
-you see, {fix}. lab_memory looks up every note, and describe_instrument shows an instrument's."""
+you see, {fix}. shared_memory looks up every note, and describe_instrument shows an instrument's."""
 
 
 def head(keep: str = "") -> str:
@@ -179,7 +179,7 @@ def _newest_first(notes: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def ordered(notes: Iterable[Dict[str, Any]], instruments: Iterable[str] = ()) -> List[Dict[str, Any]]:
-    """The notes in the order chats, lab_memory and the Lab panel show them: lessons first, then wiring, references,
+    """The notes in the order chats, shared_memory and the Lab panel show them: lessons first, then wiring, references,
     excitations and other facts; within a kind, notes on the lab's own instruments (or on none) before notes on
     instruments it doesn't have, the newest first."""
     here = {str(i).lower() for i in instruments}
@@ -191,7 +191,7 @@ def ordered(notes: Iterable[Dict[str, Any]], instruments: Iterable[str] = ()) ->
 def brief(notes: Sequence[Dict[str, Any]], instruments: Iterable[str] = (),
           budget: int = BRIEF_CHARS) -> Tuple[List[str], int]:
     """The notes every chat sees in its prompt, in order (ordered), as lines within `budget` characters, and how many
-    were left out. A note that doesn't fit is left for lab_memory, and a shorter one after it may still fit."""
+    were left out. A note that doesn't fit is left for shared_memory, and a shorter one after it may still fit."""
     picked: List[str] = []
     used = 0
     for n in ordered(notes, instruments):

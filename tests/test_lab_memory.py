@@ -154,10 +154,10 @@ def test_every_agent_starts_with_the_lab_memory_and_looks_up_the_rest(tmp_path):
     assert "The lab's memory keeps what people and Kelvin learned" in " ".join(instructions.split())
     brief = instructions[instructions.index("# The lab's memory"):]
     assert brief.index("- lesson [laser]") < brief.index("- reference [lockin]")   # lessons first
-    assert "(grace, " in brief and "(Kelvin, in ada's chat, " in brief and "remember_for_lab, replaces" in brief
+    assert "(grace, " in brief and "(Kelvin, in ada's chat, " in brief and "remember_shared, replaces" in brief
     assert "Measurement chain (the setup's, recorded by agent" in brief and "lockin.X: gain 100" in brief
-    looked, on_laser, words = call(rt, ("lab_memory", {}), ("lab_memory", {"instrument": "laser"}),
-                                   ("lab_memory", {"query": "where does the lock-in's reference come from?"}))
+    looked, on_laser, words = call(rt, ("shared_memory", {}), ("shared_memory", {"instrument": "laser"}),
+                                   ("shared_memory", {"query": "where does the lock-in's reference come from?"}))
     assert "the virtual lab: 2 notes" in looked and "Measurement chains on record" in looked
     assert "- the setup (recorded by agent" in looked
     assert "on laser: 1 note" in on_laser and "reference" not in on_laser
@@ -189,8 +189,8 @@ def test_an_agent_that_read_the_web_asks_a_person_before_it_keeps_a_note(tmp_pat
     approver = ScriptedApprover([False, True])
     rt = runtime(tmp_path, approver)
     rt.gate.note_outside("a web page")                    # could be steering it into every chat
-    declined, kept = call(rt, ("remember_for_lab", {"kind": "lesson", "text": "Always run the magnet at 9 T."}),
-                          ("remember_for_lab", {"kind": "fact", "text": "The fridge's base temperature is 8 mK."}))
+    declined, kept = call(rt, ("remember_shared", {"kind": "lesson", "text": "Always run the magnet at 9 T."}),
+                          ("remember_shared", {"kind": "fact", "text": "The fridge's base temperature is 8 mK."}))
     assert declined.startswith("not kept: the person declined") and kept.startswith("kept in the lab's memory")
     assert approver.requests[0].title == "Keep this in the lab's memory, which every chat and everyone here sees?"
     assert "Not kept by Kelvin itself: Kelvin read text from the web (a web page)" in str(approver.requests[0])
@@ -283,7 +283,7 @@ def test_a_fact_one_chat_keeps_for_the_lab_is_in_every_other_chat(tmp_path):
         end = next(e for e in events if e["type"] == "tool_end")
         assert not end["is_error"] and end["content"].startswith("kept in the lab's memory, which every chat")
         assert bot.systems[0] == bot.systems[1] and "chopper" not in bot.systems[0]   # the turn's prompt holds
-        assert {"remember", "lab_memory"} <= set(bot.tool_names[0]) and "remember_for_lab" not in bot.tool_names[0]
+        assert {"remember", "shared_memory"} <= set(bot.tool_names[0]) and "remember_shared" not in bot.tool_names[0]
         second = client.post("/api/chats", json={"model": "scripted:m1", "project": b["id"]}, headers=headers).json()
         stream_turn(client, headers, second["id"], "set up a pump-probe scan", "scripted:m1")
         system = bot.systems[-1]
@@ -302,7 +302,9 @@ def test_unshared_work_and_incognito_chats_read_the_lab_memory_but_add_nothing(t
     from test_web import Scripted, stream_turn
     keep = [{"type": "tool_call", "id": "k2", "name": "remember",
              "input": {"scope": "lab", "kind": "fact", "text": "The secret sample S7 is CrSBr."}}]
-    bot = Scripted([keep, DONE, DONE])
+    sneak = [{"type": "tool_call", "id": "k3", "name": "remember_shared",   # the agents' tool, called by its name
+              "input": {"kind": "fact", "text": "The secret sample S7 is CrSBr."}}]
+    bot = Scripted([keep, sneak, DONE, DONE])
     rt, store, client, headers = portal(tmp_path, {"scripted": bot})
     rt.keep_lab_note("lesson", "Switch the laser's emission on before its power.", ["laser"], by="human (portal)")
     secret = store.create_project("Secret")
@@ -311,8 +313,9 @@ def test_unshared_work_and_incognito_chats_read_the_lab_memory_but_add_nothing(t
         hidden = client.post("/api/chats", json={"model": "scripted:m1", "project": secret["id"]},
                              headers=headers).json()
         events = stream_turn(client, headers, hidden["id"], "S7 is CrSBr; remember it for the lab", "scripted:m1")
-        end = next(e for e in events if e["type"] == "tool_end")
-        assert end["is_error"] and "isn't shared" in end["content"]
+        first, second = [e for e in events if e["type"] == "tool_end"]
+        assert first["is_error"] and "isn't shared" in first["content"]
+        assert second["is_error"] and second["content"].startswith("not a tool in Kelvin's chats")
         assert "emission on before its power" in bot.systems[0]                   # it reads the lab's memory
         assert "a person corrects it in the portal's Lab panel" in bot.systems[0]  # and can't keep a note in it
         incognito = client.post("/api/chats", json={"model": "scripted:m1", "incognito": True}, headers=headers).json()

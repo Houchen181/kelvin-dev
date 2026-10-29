@@ -1551,7 +1551,7 @@
       case "operate_computer": return v("Operating", "Operated") + " the computer: " + esc(String(a.task || ""));
       case "remember": return v("Remembering", "Remembered") + (a.scope === "global" ? " for every chat"
         : a.scope === "lab" ? " for the lab (everyone here)" : " for this project") + (a.text ? ": " + esc(String(a.text)) : "");
-      case "lab_memory": return v("Reading", "Read") + " the lab's memory" + (a.instrument ? " on " + code(a.instrument)
+      case "shared_memory": return v("Reading", "Read") + " the lab's memory" + (a.instrument ? " on " + code(a.instrument)
         : a.query ? " for " + code(a.query) : "");
       default: return code(name);
     }

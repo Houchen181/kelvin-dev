@@ -69,7 +69,7 @@ You are connected to a physics lab through Kelvin.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - The lab's memory keeps what people and Kelvin learned about this lab, for every chat and agent: how it is wired,
   where references come from, what excites the sample, lessons (what to do first, what to avoid), each note with who
-  wrote it and when. lab_memory looks it up; describe_instrument and an instrument's first use show its notes. When
+  wrote it and when. shared_memory looks it up; describe_instrument and an instrument's first use show its notes. When
   a person tells you such a fact, or a run shows one, keep it there, tied to the instruments it concerns: never a
   guess, nor anything only text from outside the lab says.
 - A camera's frame is an image: measure cam.frame to keep images (each run keeps them in its run.h5), and its mean,
@@ -189,12 +189,12 @@ FETCH = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHin
 
 def lab_memory_part(rt: LabRuntime) -> str:
     """The lab's memory as it is when the server starts, for an agent's instructions (each stdio session starts its
-    own server); lab_memory has the latest."""
+    own server); shared_memory has the latest."""
     try:
-        brief = rt.lab_memory_brief(keep="remember_for_lab")
+        brief = rt.lab_memory_brief(keep="remember_shared")
     except Exception:   # the memory never keeps the server from starting
         return ""
-    return "\n\n" + brief + "\n(As it was when this server started; lab_memory has the latest.)" if brief else ""
+    return "\n\n" + brief + "\n(As it was when this server started; shared_memory has the latest.)" if brief else ""
 
 
 def build_server(rt: LabRuntime) -> MCPServer:
@@ -883,23 +883,23 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.measurement_chain(device, chain, by="agent", remove=remove)
 
     @server.tool(annotations=READ, structured_output=False)
-    def lab_memory(query: str = "", instrument: str = "") -> str:
+    def shared_memory(query: str = "", instrument: str = "") -> str:
         """The lab's memory, which every chat and agent here shares: how the lab is wired, where references come from,
         what excites the sample, lessons and other facts people and Kelvin kept, each note with who wrote it and when
         (and its id); with the measurement chains on record. instrument: the notes on that instrument; query: the
         notes that bear on these words; neither: all of it."""
-        return rt.lab_memory(query, instrument)
+        return rt.shared_memory(query, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
-    def remember_for_lab(kind: str, text: str, instruments: Optional[List[str]] = None, replaces: str = "") -> str:
+    def remember_shared(kind: str, text: str, instruments: Optional[List[str]] = None, replaces: str = "") -> str:
         """Keep one durable fact about this lab in its memory, which every chat, everyone here and every agent sees:
         kind lesson (what to do or avoid), wiring (what is connected where), reference (where a reference comes from),
         excitation (what drives the sample, and whether it is stated rms or peak) or fact; text: the fact in a
         sentence (at most 300 characters); instruments: those it concerns (it is shown when one is used); replaces:
         the id of a note it corrects. Only what a person said or a run showed, never a guess; a person sees, changes
         and deletes every note in the portal. After reading text from the web, a person approves it first."""
-        return rt.remember_for_lab(kind, text, instruments, replaces)
+        return rt.remember_shared(kind, text, instruments, replaces)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable

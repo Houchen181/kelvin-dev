@@ -259,10 +259,10 @@ LOOKUPS = {"find_runs", "describe_run", "get_run_data", "compute", "get_trace", 
            "card_guide", "find_card", "experiment_guide", "look_at", "watches", "queue_show",
            "check_card", "read_examples", "find_maker_files", "library_api", "installed_software", "environments",
            "search_papers", "read_paper", "read_web_page", "web_search", "read_file", "list_folder", "chat_history",
-           "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "activity", "lab_memory"}
-# agents over MCP keep a note in the lab's memory with remember_for_lab; the portal's chats with remember (scope lab),
+           "use_skill", "read_skill_file", "survey_scripts", "run_provenance", "activity", "shared_memory"}
+# agents over MCP keep a note in the lab's memory with remember_shared; the portal's chats with remember (scope lab),
 # which knows whose chat it is and asks the person after the chat read text from outside the lab
-MCP_ONLY = {"remember_for_lab"}
+MCP_ONLY = {"remember_shared"}
 # readings: beside another chat's change to the lab, as an instrument that change uses isn't asked (its latest values
 # instead: LabRuntime._reading)
 READINGS = {"lab_status", "get_value", "health_check", "show_sequence"}
@@ -1203,6 +1203,8 @@ class ChatAgent:
             if isinstance(args, dict) and args.get("scope") == "lab" and not context.get("private"):
                 return _without_opinion(await self._remember_lab(chat, call, emit))
             return _without_opinion(self._remember(chat, context, args))
+        if name in MCP_ONLY:   # an agent's over MCP: a chat that calls one by name never gets past its own rules
+            return "not a tool in Kelvin's chats: keep a fact about the lab with remember, scope lab", True, None
         if name == "wake_me" and not chat.get("incognito"):
             return _without_opinion(self.waker.add(chat["id"], args))
         if name == "wait" and _seconds(args) > WAIT_S:   # other chats would wait too

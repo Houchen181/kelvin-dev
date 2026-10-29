@@ -2571,9 +2571,9 @@ class LabRuntime:
                                                                   "; ".join(lines(found["chain"])))
         return text if len(text) <= 500 else text[:497] + "…"
 
-    def lab_memory_brief(self, keep: str = "remember_for_lab") -> str:
+    def lab_memory_brief(self, keep: str = "remember_shared") -> str:
         """The lab's memory as every chat (and every agent's instructions) has it: what to do with it, its notes
-        within the brief's budget, the measurement chain on record, and how many notes lab_memory has besides.
+        within the brief's budget, the measurement chain on record, and how many notes shared_memory has besides.
         keep: how this client keeps a note ("": it keeps none). "" when the lab's memory is empty and no chain is on
         record."""
         from .. import labmemory as lm
@@ -2583,12 +2583,12 @@ class LabRuntime:
         shown, left = lm.brief(notes, self.lab.instruments)
         out = [lm.head(keep)] + shown + ([chain] if chain else [])
         if left:
-            out.append("%d more note%s: lab_memory looks them up, by instrument or by words." % (
+            out.append("%d more note%s: shared_memory looks them up, by instrument or by words." % (
                 left, "" if left == 1 else "s"))
         return "\n".join(out)
 
-    def lab_memory(self, query: str = "", instrument: str = "") -> str:
-        """lab_memory: the lab's memory, each note with who wrote it and when: all of it, the notes on an instrument,
+    def shared_memory(self, query: str = "", instrument: str = "") -> str:
+        """shared_memory: the lab's memory, each note with who wrote it and when: all of it, the notes on an instrument,
         or those that bear on the words; with the measurement chains on record."""
         from .. import labmemory as lm
         from ..chain import Chains, lines
@@ -2664,9 +2664,9 @@ class LabRuntime:
                        "the measurement chain (measurement_chain), which every run of the device carries.")
         return "\n".join(out), False
 
-    def remember_for_lab(self, kind: Any, text: Any, instruments: Any = None, replaces: str = "",
+    def remember_shared(self, kind: Any, text: Any, instruments: Any = None, replaces: str = "",
                          by: str = "agent", account: Optional[str] = None) -> str:
-        """remember_for_lab (an agent over MCP): keep a note at once; or, when the agent read text from the web in the
+        """remember_shared (an agent over MCP): keep a note at once; or, when the agent read text from the web in the
         last minutes (which could be steering it into every chat), once a person approves."""
         from ..labmemory import LabMemoryError
         try:
@@ -2719,7 +2719,7 @@ class LabRuntime:
         on = [name for name in names if lm.for_instruments(shown, [name])]   # only the instruments it has notes on
         out = ["", "From the lab's memory, on %s:" % ", ".join(on)] + [lm.line(n) for n in shown]
         if len(notes) > lm.AT_USE:
-            out.append("(%d more: lab_memory with the instrument)" % (len(notes) - lm.AT_USE))
+            out.append("(%d more: shared_memory with the instrument)" % (len(notes) - lm.AT_USE))
         return "\n".join(out)
 
     def lab_lessons_for(self, request: ApprovalRequest) -> List[str]:
