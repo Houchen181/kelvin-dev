@@ -121,6 +121,36 @@ def test_a_source_that_restarted_is_never_measured_dark(labsim_lab, tmp_path):
     assert all(abs(r["nvm.V"]) > 1e-4 for r in report.rows)   # every point kept was measured with the current on
 
 
+RT_STEPS = """
+plan: rt_steps
+setup: { isrc.I: 1.0e-6, isrc.output: on }
+sweep:
+  ppms.T_set: { ramp: [{to: 290, rate: 10}, {to: 280, rate: 5, hold: 60}], every: 10 }
+measure: [nvm.V]
+after: { isrc.output: off }
+"""
+
+
+def test_a_ramps_card_counts_its_legs_and_a_draft_cards_rates_ask_once(labsim_lab, tmp_path):
+    """The run's card counts each leg of a ramp (it said "time not counted"). The PPMS's rate is a setting, not a
+    drive: on a draft card each leg's rate asked again in the middle of the ramp, outside the run's one card."""
+    import re
+    lab, bench = labsim_lab("ppms", PPMS_LAB)
+    lab.instruments["ppms"].card.status = "draft"          # the lab's own draft of the card, not yet reviewed
+    engine, gate, approver = engine_on(lab, tmp_path)
+    report = engine.run(RT_STEPS)
+    assert report.ok, report.message
+    assert len(approver.requests) == 1, [str(r) for r in approver.requests]
+    title, text = approver.requests[0].title, str(approver.requests[0])
+    # from 300 K: 10 K at 10 K/min, 10 K at 5 K/min, then its 60 s hold: 4 min, a point every 10 s
+    assert re.search(r"ramps to 290 K at 10 K/min, then 280 K at 5 K/min \(~2\d points\), ~4\.\d min$", title), title
+    assert re.search(r"ppms\.T_set: now [\d.]+ K, plan uses 280 … 290 K; at 10 K/min, then 5 K/min \(the plan sets "
+                     r"ppms\.T_rate\), ~3\.\d min; Kelvin isn't sure about ppms", text), text
+    assert re.search(r"ppms\.T_rate: now [\d.]+ K/min, plan uses 5 … 10 K/min; Kelvin isn't sure about ppms", text), text
+    # the sample lags the set point and settles into each target (as on a real PPMS): about half a minute a leg more
+    assert 240 <= report.duration_s <= 330 and report.rows[-1]["ppms.T"] == pytest.approx(280, abs=0.5)
+
+
 # ------------------------------------------------------------------ ramps on the virtual lab
 
 FIELD_RAMP = """

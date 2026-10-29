@@ -55,7 +55,8 @@ after: { isrc.output: off }
 - **The ramp's column is the reading it follows,** so R is recorded and analysed against the temperature reached, not against the set point. The legs are kept with the run (`legs`: when each began, got there and ended).
 - **It is the innermost loop.** Stepped sweeps can go outside it (an R(T) at several fields); `time:` can't go with it.
 - **A ramp that stops getting closer** for `stall:` seconds (600 unless the plan says; `0` never) stops the run as Stop does: its outputs go to safe and its points are kept. The [set-point watchdog](safety.md#watches-and-notifications) also raises an alarm after 5 minutes.
-- **The approval** covers the targets and, where the rate is itself a drive (a magnet supply's), the rates. A drive Kelvin ramps itself, a step at a time (a source's voltage), is swept with `{from, to, step}` instead.
+- **The approval** covers the targets and, where the rate is itself a drive (a magnet supply's), the rates; on a draft card, the rates set as a setting (a PPMS's `T_rate`) too. A drive Kelvin ramps itself, a step at a time (a source's voltage), is swept with `{from, to, step}` instead.
+- **Its card counts each leg** as the distance over its rate (the leg's own, else the rate the plan or the instrument has set) plus its hold, from where the reading is, in every pass of the loops outside it, and the ramp's points as about that time over `every`. A sample that lags its set point near each target takes a little longer.
 
 ### Ending early
 

@@ -9,6 +9,7 @@ instrument's mode. An approved plan covers each of its in-limit steps, on a draf
 up first (an excitation started, a laser on) goes in its setup, on that same card."""
 import re
 
+import pytest
 from labsim_bench import labsim_bench  # noqa: F401  (the fixture)
 
 from labharness import load_plan
@@ -208,18 +209,18 @@ def test_a_queue_card_shows_its_duration_and_where_the_queue_leaves_the_lab(tmp_
 
 
 def test_a_part_of_a_plan_the_forecast_does_not_know_is_shown_with_its_time_unknown(lab, make_engine):
-    """Newer plan steps (a ramp sweep, until:) must never break a card: the drive is shown, its time unknown."""
-    from labharness.plans import Axis, Segment
+    """Newer plan steps (a kind of sweep or a plan key added after forecast.py) must never break a card: the drive is
+    shown, its time unknown."""
+    from labharness.plans import Axis
     engine, gate, approver = make_engine([False])
     plan = load_plan(COOL_AND_SWEEP.replace("tc.setpoint: 4, ", ""))
-    # a kind this forecast doesn't know, built as the parser builds it: innermost, with its interval and legs
-    plan.axes.append(Axis("tc", "setpoint", [2.0], kind="ramp", every=10, segments=[Segment(2.0)]))
-    plan.source["until"] = "tc.T_sample < 2.5"
+    plan.axes.append(Axis("tc", "setpoint", [2.0], kind="spiral"))   # a kind this forecast doesn't know
+    plan.source["pulses"] = "a newer key"
     assert engine.run(plan).status == "declined"
     text, title = card(approver), approver.requests[0].title
     assert title.endswith(", at least ~13 s"), title
     assert "tc.setpoint: now 1.6 K, plan uses 2 K" in text, text
-    assert "Not in the ~13 s: tc.setpoint's ramp sweep; cool_and_sweep's until" in text, text
+    assert "Not in the ~13 s: tc.setpoint's spiral sweep; cool_and_sweep's pulses" in text, text
 
 
 def test_a_forecast_that_fails_never_loses_the_card(lab, make_engine, monkeypatch):
@@ -302,6 +303,134 @@ def test_the_agent_is_told_to_put_a_runs_prep_in_its_setup():
     text = " ".join(INSTRUCTIONS.split())
     assert "One run, one approval: what a run needs set up first goes in its plan's setup, not in set_value or " \
            "do_action calls before it" in text and "isrc.wave_start: run" in text
+
+# ------------------------------------------------------------------ what plans do since wave 2, counted on the card:
+# ramp: sweeps, until: and while:, a hold per step, stabilize near:, retry (their cards said "time not counted")
+
+FIELD_RAMP = """
+plan: field_ramp
+sweep:
+  magnet.B: {ramp: [{to: 1, rate: 0.5}, {to: 0.2, rate: 0.25, hold: 30}], every: 5}
+measure: [tc.T_sample]
+after: {magnet.B: 0}
+"""
+
+
+def test_a_ramp_leg_takes_its_distance_over_its_rate_and_its_hold(lab, make_engine):
+    engine, gate, approver = make_engine([False, True])
+    assert engine.run(FIELD_RAMP).status == "declined"
+    title, text = approver.requests[0].title, card(approver)
+    # up to 1 T at 0.5 T/min (2 min), down to 0.2 T at 0.25 T/min (3.2 min), its 30 s hold, then back to 0 at the
+    # rate the last leg left (48 s)
+    assert title == "Run plan field_ramp: measures every 5 s while magnet.B ramps to 1 T at 0.5 T/min, then 200 mT " \
+                    "at 0.25 T/min (~70 points), ~6.5 min", title
+    assert "magnet.B: now 0 T, plan uses 0 … 1 T; at 0.5 T/min, then 0.25 T/min (the plan sets magnet.rate), ~6.0 min;" \
+           " interlock: needs tc.T_sample < 10" in text, text
+    assert "Not in" not in text and "sweep" not in text, text
+    report = engine.run(FIELD_RAMP)
+    assert report.ok and report.duration_s == pytest.approx(390, abs=10)    # what the card said
+
+
+def test_a_ramp_leg_without_a_rate_goes_at_the_rate_the_instrument_is_set_to(lab, make_engine):
+    engine, gate, approver = make_engine([False, False])
+    plan = FIELD_RAMP.replace("{to: 1, rate: 0.5}, {to: 0.2, rate: 0.25, hold: 30}", "{to: 0.5}, {to: 0.1, hold: 20}")
+    engine.run(plan)
+    title, text = approver.requests[0].title, card(approver)
+    # 0.9 T in all at the 0.2 T/min the supply reads now (4.5 min), a 20 s hold, and back to 0 (30 s)
+    assert title.endswith("ramps to 500 mT, then 100 mT (~60 points), ~5.3 min"), title
+    assert "magnet.B: now 0 T, plan uses 0 … 500 mT; at 0.2 T/min (magnet.rate, read now), ~5.0 min" in text, text
+    engine.run(plan.replace("sweep:", "setup: {magnet.rate: 0.4}\nsweep:"))   # its setup sets the rate first
+    title, text = approver.requests[1].title, card(approver, 1)
+    assert title.endswith("ramps to 500 mT, then 100 mT (~33 points), ~2.8 min"), title
+    assert "magnet.B: now 0 T, plan uses 0 … 500 mT; at 0.4 T/min (the plan sets magnet.rate), ~2.5 min" in text, text
+
+
+def test_a_ramps_rate_on_a_magnet_supply_is_a_drive_asked_with_the_run(lab, make_engine):
+    """A supply's ramp rate is a drive (a fast ramp risks a quench): its legs' rates are asked with the field, and
+    the card says where the run leaves it (it said everything was back at safe, with the rate left at 0.25 T/min)."""
+    engine, gate, approver = make_engine([False])
+    engine.run(FIELD_RAMP)
+    request = approver.requests[0]
+    assert "magnet.rate: now 0.2 T/min, plan uses 0.25 … 0.5 T/min" in request.items[:2], request.items
+    assert "At the end it leaves magnet.rate 0.25 T/min; back at safe: magnet.B 0 T" in request.items, request.items
+
+
+def test_a_ramp_records_about_its_duration_over_every_points(lab, make_engine):
+    """The card's count of a ramp's points is the forecast's: its legs at the rates the run sets, in every pass of
+    the loops outside it, each pass from where the one before left it."""
+    engine, gate, approver = make_engine([False, True, False, True])
+    plan = "plan: up\nsetup: {magnet.rate: 0.4}\nsweep: {magnet.B: {ramp: 1, every: 5}}\nmeasure: [tc.T_sample]\n" \
+           "after: {magnet.B: 0}\n"
+    engine.run(plan)   # 1 T at the 0.4 T/min its setup sets, not the 0.2 T/min the supply reads now: 150 s
+    assert approver.requests[0].title.endswith("ramps to 1 T (~31 points), ~5.0 min"), approver.requests[0].title
+    assert engine.run(plan).points == 31
+    nested = "plan: field_by_gate\nsetup: {smu.output: on}\nsweep:\n  smu.V: {values: [0, 1, 2]}\n" \
+             "  magnet.B: {ramp: [{to: 0.5, rate: 0.5}, {to: 0.1}], every: 5}\nmeasure: [tc.T_sample]\n" \
+             "after: {magnet.B: 0, smu.V: 0}\n"
+    engine.run(nested)   # 0 → 0.5 → 0.1 T, then twice 0.1 → 0.5 → 0.1 T: 300 s at 0.5 T/min
+    assert approver.requests[2].title.endswith("(~66 points), ~5.3 min"), approver.requests[2].title
+    assert engine.run(nested).points == pytest.approx(66, abs=3)
+
+
+def test_until_and_while_make_the_time_the_most_it_takes(lab, make_engine):
+    engine, gate, approver = make_engine([False, False])
+    engine.run(FIELD_RAMP.replace("every: 5}", "every: 5, until: \"magnet.B_actual > 0.5\"}"))
+    title, text = approver.requests[0].title, card(approver)
+    assert title.endswith("(~70 points), at most ~6.5 min"), title
+    assert text.endswith("It may end sooner: magnet.B's ramp ends once magnet.B_actual > 0.5"), text
+    engine.run("plan: iv\nsetup: {smu.output: on}\nsweep: {smu.V: {from: 0, to: 2, step: 0.5, "
+               "until: \"abs(smu.I) > 1e-7\"}}\nwhile: \"tc.T_sample < 5\"\nmeasure: [smu.I]\nafter: {smu.V: 0}\n")
+    title, text = approver.requests[1].title, card(approver, 1)
+    assert title == "Run plan iv: 5 points, at most ~8 s", title
+    assert "It may end sooner: smu.V skips its other values once abs(smu.I) > 1e-7; the sweep ends once " \
+           "tc.T_sample < 5 no longer holds" in text, text
+
+
+def test_a_hold_per_step_is_counted_step_by_step(lab, make_engine):
+    """settle: per value (a staircase's last steps need longer): the card counted the axis's one settle for each."""
+    engine, gate, approver = make_engine([False, False])
+    plan = "plan: staircase\nsetup: {smu.output: on}\nsweep: {smu.V: {values: [0, 1, 2], settle: [0, 5, 60]}}\n" \
+           "settle: 1\nmeasure: [smu.I]\nafter: {smu.V: 0}\n"
+    engine.run(plan)   # holds of 0, 5 and 60 s, and 2 V up and back down at 0.5 V/s (8 s)
+    assert approver.requests[0].title == "Run plan staircase: 3 points, ~73 s", approver.requests[0].title
+    engine.run(plan.replace("[0, 5, 60]", "{2: 60}"))   # the others hold for the plan's settle: (1 s)
+    assert approver.requests[1].title == "Run plan staircase: 3 points, ~70 s", approver.requests[1].title
+
+
+def test_stabilize_near_may_wait_out_its_timeout(lab, make_engine):
+    engine, gate, approver = make_engine([False])
+    engine.run("plan: steps\nsetup: {tc.heater_range: medium}\nsweep: {tc.setpoint: {values: [3, 5], stabilize: "
+               "{read: tc.T_sample, within: 0.02, for: 30, near: 0.05, timeout: 600}}}\nmeasure: [tc.T_sample]\n")
+    title, text = approver.requests[0].title, card(approver)
+    assert title == "Run plan steps: 2 points, at least ~60 s", title
+    assert "Not in the ~60 s: tc.setpoint's ramp (its card gives no rate Kelvin can read); tc.T_sample's stabilize " \
+           "(counted at its 30 s at each point; up to its 10.0 min timeout wherever tc.T_sample doesn't come within " \
+           "50 mK of its set point)" in text, text
+
+
+def test_retry_adds_time_nobody_can_count(lab, make_engine):
+    engine, gate, approver = make_engine([False])
+    engine.run("plan: gate_retry\nsetup: {smu.output: on}\nsweep: {smu.V: {from: 0, to: 2, step: 0.5}}\nsettle: 1\n"
+               "measure: [lockin.X, smu.I]\nretry: {times: 3, wait: 5}\n")
+    title, text = approver.requests[0].title, card(approver)
+    assert title == "Run plan gate_retry: 5 points, at least ~9 s", title
+    assert "Not in the ~9 s: readings taken again after a fault (retry: up to 3 times, 5 s apart)" in text, text
+
+
+def test_a_queues_card_counts_its_ramps_and_says_what_may_end_them(tmp_path):
+    from test_queue import runtime
+    rt = runtime(tmp_path, [False])
+    rt.queue_add(FIELD_RAMP.replace("every: 5}", "every: 5, until: \"magnet.B_actual > 0.5\"}"))
+    rt.queue_add("plan: gate_retry\nsetup: {smu.output: on}\nsweep: {smu.V: {from: 0, to: 2, step: 0.5}}\n"
+                 "measure: [smu.I]\nafter: {smu.V: 0}\nretry: 2\n")
+    assert rt.queue_start().startswith("declined")
+    request = rt.approver.requests[0]
+    assert request.title == "Run the queue: 2 scans, ~6.6 min (it may end sooner or wait longer)", request.title
+    text = str(request)
+    assert "magnet.B: now 0 T, plan uses 0 … 1 T; at 0.5 T/min, then 0.25 T/min (the queue sets magnet.rate)" in text
+    assert "Not in the ~6.6 min: readings taken again after a fault (gate_retry's retry: up to 2 times, 10 s apart)" \
+        in text, text
+    assert "It may end sooner: magnet.B's ramp (in field_ramp) ends once magnet.B_actual > 0.5" in text, text
 
 # ------------------------------------------------------------------ on labsim: instruments Kelvin takes for real
 
