@@ -17,19 +17,19 @@ from ..imports import DataError, Table, key_of, number_of, parse_time, table_fro
 
 # experiments by their TAG: (in Kelvin's words, the keys of its x, in order of preference)
 TAGS = {
-    "CV": ("cyclic voltammetry", ["vf", "t"]),
-    "LSV": ("linear sweep voltammetry", ["vf", "t"]),
-    "POTENTIODYNAMIC": ("potentiodynamic scan", ["vf", "t"]),
-    "POTDYN": ("potentiodynamic scan", ["vf", "t"]),
-    "CYCPOL": ("cyclic polarization", ["vf", "t"]),
-    "LPR": ("polarization resistance", ["vf", "t"]),
-    "TAFEL": ("Tafel scan", ["vf", "t"]),
+    "CV": ("cyclic voltammetry", ["vf", "time"]),
+    "LSV": ("linear sweep voltammetry", ["vf", "time"]),
+    "POTENTIODYNAMIC": ("potentiodynamic scan", ["vf", "time"]),
+    "POTDYN": ("potentiodynamic scan", ["vf", "time"]),
+    "CYCPOL": ("cyclic polarization", ["vf", "time"]),
+    "LPR": ("polarization resistance", ["vf", "time"]),
+    "TAFEL": ("Tafel scan", ["vf", "time"]),
     "EISPOT": ("impedance spectroscopy (potentiostatic)", ["freq", "time"]),
     "EISGALV": ("impedance spectroscopy (galvanostatic)", ["freq", "time"]),
-    "CORPOT": ("open-circuit potential", ["t", "time"]),
-    "CHRONOA": ("chronoamperometry", ["t", "time"]),
-    "CHRONOP": ("chronopotentiometry", ["t", "time"]),
-    "CHRONOC": ("chronocoulometry", ["t", "time"]),
+    "CORPOT": ("open-circuit potential", ["time"]),
+    "CHRONOA": ("chronoamperometry", ["time"]),
+    "CHRONOP": ("chronopotentiometry", ["time"]),
+    "CHRONOC": ("chronocoulometry", ["time"]),
 }
 MAIN = re.compile(r"^(?:Z?CURVE\d*)$")      # the measurement's own tables
 LEFT_OUT = ["pt"]                            # the point's number in its curve: the run counts its own
@@ -73,7 +73,8 @@ def read_dta(p: Path, text: str) -> Table:
         rows += [r + [number] for r in body] if several and "cycle" not in lowered else body
     if several and "cycle" not in lowered:
         header, units = header + ["curve"], units + [""]
-    what, prefer = TAGS.get(tag, ("", ["freq", "t", "time"]))
+    header = ["Time" if h.strip() == "T" else h for h in header]   # Gamry's T is its clock (in s), as EIS's Time
+    what, prefer = TAGS.get(tag, ("", ["freq", "time"]))
     table = table_from_rows(key_of(p.stem, "data"), p.name, rows, comma=True, header=header,
                             units=[_unit(u) for u in units], prefer=prefer, drop=LEFT_OUT, grid=False)
     about = [what] if what else []

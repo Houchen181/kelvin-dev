@@ -39,6 +39,9 @@ def test_an_instruments_table_keeps_its_names_units_and_dates(tmp_path):
     t = imports.read(write(tmp_path / "us.csv", "When,V\n8/12/2021 11:59:59 PM,1\n8/13/2021 12:00:09 AM,2\n"
                                                 "8/13/2021 12:00:19 AM,3\n8/13/2021 12:00:29 AM,4\n"))
     assert t.x == [0.0, 10.0, 20.0, 30.0]                                 # month first, AM and PM
+    t = imports.read(write(tmp_path / "eu.csv", "When,V\n" + "".join("%02d/08/2021 10:00:00,%d\n" % (d, d)
+                                                                       for d in (11, 12, 13, 14))))
+    assert t.x == [0.0, 86400.0, 172800.0, 259200.0]                        # the 13th, late on, says day first
     t = imports.read(write(tmp_path / "clock.txt", "23:59:58\t1\n23:59:59\t2\n00:00:00\t3\n00:00:01\t4\n"))
     assert t.x == [0.0, 1.0, 2.0, 3.0]                                    # past midnight
     t = imports.read(write(tmp_path / "saved.txt", "# x y\n0 1\n1 4\n2 9\n3 16\n"))   # numpy.savetxt's header
@@ -48,6 +51,8 @@ def test_an_instruments_table_keeps_its_names_units_and_dates(tmp_path):
     t = imports.read(write(tmp_path / "idx.csv", "Index,f (Hz),|Z| (Ohm),-Im(Z) (Ohm)\n0,10,5,1\n1,20,6,2\n"
                                                  "2,30,7,3\n3,40,8,4\n"))
     assert t.x_key == "f" and list(t.columns) == ["idx.abs_z", "idx.minus_im_z"]   # no index as x; signs kept
+    with pytest.raises(DataError, match="holds one row of numbers"):                 # notes that are no table
+        imports.read(write(tmp_path / "notes.txt", "Cooled down today.\nGate at 5 V and 10 mA, fine.\nDone.\n"))
 
 
 def test_a_long_table_of_a_2d_scan_has_two_axes(tmp_path):
@@ -129,6 +134,11 @@ def test_a_workbook_reads_its_first_sheet_with_numbers_and_refuses_tricks(tmp_pa
         imports.read(write(tmp_path / "bomb.xlsx", out.getvalue()))
     with pytest.raises(DataError, match="not an Excel workbook"):
         imports.read(write(tmp_path / "fake.xlsx", b"PK not really"))
+    damaged = bytearray(book)
+    at = damaged.index(b"xl/worksheets/sheet2.xml") + 40   # inside the sheet's compressed bytes
+    damaged[at:at + 16] = bytes(16)
+    with pytest.raises(DataError, match="damaged"):            # said in words, never a bare error
+        imports.read(write(tmp_path / "damaged.xlsx", bytes(damaged)))
 
 
 # ------------------------------------------------------------------ BioLogic
@@ -235,6 +245,7 @@ def test_gamry_files(tmp_path):
         t = imports.read(write(tmp_path / "cv.DTA", gamry_cv(comma)))
         assert (t.x_key, t.x_unit, len(t.x)) == ("vf", "V", 12)                 # both cycles, on their potential
         assert t.columns["cv.im"][0] == "A" and t.columns["cv.curve"][1] == [1.0] * 6 + [2.0] * 6
+        assert t.columns["cv.time"][0] == "s"                                   # Gamry's T is its clock
         assert "cv.pt" not in t.columns and "cv.over" not in t.columns
         assert t.notes[0] == ("cv.DTA: Gamry Framework data, cyclic voltammetry, 2 curves one after another, started "
                               "2019-03-21 14:52:42, area 0.5 cm², scan rate 100 mV/s")

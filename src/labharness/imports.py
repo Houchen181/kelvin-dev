@@ -17,7 +17,10 @@ the model only as Kelvin's own words for it (a technique's name, when it started
 from __future__ import annotations
 
 import csv
+import functools
 import re
+import struct
+import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -195,16 +198,12 @@ def seconds_of(cells: Sequence[Any]) -> Tuple[List[Optional[float]], Optional[da
     """A column of dates or times as seconds from its first, that first date (None for times of day or spans), and
     the kind read. Day and month: day first where a day comes first ("25/01/2004", "25.01.2004"), else month first."""
     texts = [c.strip() if isinstance(c, str) else c for c in cells]
+    sample = texts[::max(1, len(texts) // 2000)]
     kinds = Counter(k for k in (("dt" if isinstance(c, datetime) else time_kind(c) if isinstance(c, str) else None)
-                                for c in texts) if k)
+                                for c in sample) if k)
     if not kinds:
         return [None] * len(cells), None, ""
     kind = kinds.most_common(1)[0][0]
-    day_first = False
-    if kind == "dmy":
-        matches = [_DMY.match(c) for c in texts if isinstance(c, str)]
-        matches = [m for m in matches if m]
-        day_first = any(m.group(2) == "." for m in matches) or any(int(m.group(1)) > 12 for m in matches)
     out: List[Optional[float]] = []
     if kind in ("hms", "dhms"):
         wrap = 0.0
@@ -221,16 +220,40 @@ def seconds_of(cells: Sequence[Any]) -> Tuple[List[Optional[float]], Optional[da
             out.append(last)
         first = next((v for v in out if v is not None), 0.0)
         return [None if v is None else v - first for v in out], None, kind
-    dates: List[Optional[datetime]] = []
-    for c in texts:
+    pattern = _YMD if kind == "ymd" else _DMY
+    matches = [pattern.match(c) if isinstance(c, str) else None for c in texts]
+    # the whole column says which comes first: a 13th of the month late in a log settles it
+    day_first = kind == "dmy" and any(m.group(2) == "." or int(m.group(1)) > 12 for m in matches if m)
+    for c, m in zip(texts, matches):   # seconds since the start of year 1: a day's number, then its clock
         if isinstance(c, datetime):
-            dates.append(c)
-        elif isinstance(c, str) and time_kind(c) == kind:
-            dates.append(_date(kind, (_YMD if kind == "ymd" else _DMY).match(c), day_first))
+            out.append(c.toordinal() * 86400.0 + c.hour * 3600 + c.minute * 60 + c.second + c.microsecond / 1e6)
+            continue
+        if m is None:
+            out.append(None)
+            continue
+        if kind == "ymd":
+            y, month, day, clock = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.groups()[3:7]
         else:
-            dates.append(None)
-    start = next((d for d in dates if d is not None), None)
-    return [None if d is None or start is None else (d - start).total_seconds() for d in dates], start, kind
+            a, b, y = int(m.group(1)), int(m.group(3)), int(m.group(4))
+            day, month = (a, b) if day_first else (b, a)
+            y = y + (2000 if y < 70 else 1900) if y < 100 else y
+            clock = m.groups()[4:8]
+        number = _day(y, month, day)
+        out.append(None if number is None else number * 86400.0 + _clock(*clock))
+    first = next((v for v in out if v is not None), None)
+    if first is None:
+        return [None] * len(cells), None, kind
+    start = datetime.fromordinal(int(first // 86400)) + timedelta(seconds=first % 86400)
+    return [None if v is None else v - first for v in out], start, kind
+
+
+@functools.lru_cache(maxsize=4096)
+def _day(year: int, month: int, day: int) -> Optional[int]:
+    """A date's number of days since the start of year 1 (None: no such date), worked out once per day."""
+    try:
+        return datetime(year, month, day).toordinal()
+    except ValueError:
+        return None
 
 
 def _scan(cell: Any, comma: bool) -> str:
@@ -252,11 +275,23 @@ def _scan(cell: Any, comma: bool) -> str:
 # ------------------------------------------------------------------ reading a file
 
 def read(path: Any) -> Table:
+    """A file as a Table. DataError: not imported, saying why in plain words, also for a file damaged in a way no
+    reader foresaw (never a bare error)."""
     p = Path(str(path)).expanduser()
     if not p.is_file():
         raise DataError("there is no file %s" % path)
     if p.stat().st_size > MAX_BYTES:
         raise DataError("%s is bigger than Kelvin imports (%d MB)" % (p.name, MAX_BYTES // 2 ** 20))
+    try:
+        return _read(p)
+    except DataError:
+        raise
+    except (ValueError, IndexError, KeyError, struct.error, zlib.error, EOFError, UnicodeError) as e:
+        raise DataError("%s could not be read: it looks damaged, or isn't what its name says (%s)" % (
+            p.name, str(e).splitlines()[0][:120] if str(e) else type(e).__name__))
+
+
+def _read(p: Path) -> Table:
     suffix = p.suffix.lower()
     with open(p, "rb") as f:
         head = f.read(64)
@@ -465,6 +500,7 @@ def table_from_rows(stem: str, filename: str, rows: List[List[Any]], comma: bool
     from .importers import arbin
     rows = [r if isinstance(r, _Comment) else _trim(r) for r in rows]
     rows = [r for r in rows if r or isinstance(r, _Comment)]
+    found = header is None   # a table found in a file, not one a maker's reader laid out
     if header is None:
         start = _start(rows, comma)
         if start < 0:
@@ -508,8 +544,9 @@ def table_from_rows(stem: str, filename: str, rows: List[List[Any]], comma: bool
         raise DataError("%s has more than %d rows" % (filename, MAX_ROWS))
     cells = [[r[k] if k < len(r) else None for r in body] for k in range(width)]
     kinds: List[str] = []   # each column's: n numbers, t dates or times, w words (most of its cells), "" empty
+    step = max(1, len(body) // 4000)   # judged on rows spread through the file: a cycler's 200 000 in a moment
     for k in range(width):
-        counts = Counter(_scan(c, comma) for c in cells[k])
+        counts = Counter(_scan(c, comma) for c in cells[k][::step])
         filled = counts["n"] + counts["t"] + counts["w"]
         kinds.append("" if not filled else "n" if counts["n"] > filled / 2 else
                      "t" if counts["t"] > filled / 2 else "w")
@@ -549,6 +586,8 @@ def table_from_rows(stem: str, filename: str, rows: List[List[Any]], comma: bool
     skipped = len(body) - len(use)
     if not use:
         raise DataError("%s holds no rows of numbers" % filename)
+    if found and len(use) < 2:   # a line of a note with two numbers in it ("5 V and 10 mA") is no table
+        raise DataError("%s holds one row of numbers: Kelvin needs at least two" % filename)
     if len(use) > MAX_ROWS:
         raise DataError("%s has more than %d rows" % (filename, MAX_ROWS))
     nan = float("nan")

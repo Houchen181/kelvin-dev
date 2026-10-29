@@ -68,6 +68,17 @@ def test_a_long_table_of_a_2d_scan_is_a_2d_run(tmp_path):
     assert png and "map" in caption.lower()                                  # a 2-D scan reads as a map
 
 
+def test_a_column_named_like_a_runs_own_keeps_its_numbers(tmp_path):
+    """A run's i counts its points and t is its clock: an x named I (a current) or T (a temperature) once replaced
+    the point numbers and came back as whole numbers (0.0015 A read 0)."""
+    rt = lab(tmp_path)
+    (tmp_path / "iv.csv").write_text("I (A),V (V)\n0.0015,1\n0.0025,2\n0.0035,3\n", encoding="utf-8")
+    out = rt.import_data(str(tmp_path / "iv.csv"))
+    assert "3 points of x_i (A), columns iv.v" in out
+    data = rt.run_data(rt.runs_index(1)[0]["run_id"])
+    assert data.splitlines()[1] == "i,t,x_i,iv.v" and "1,0,0.0025,2" in data
+
+
 def test_an_attached_file_becomes_a_run_beside_a_run_that_holds_the_lab(tmp_path):
     rt = lab(tmp_path)
     (tmp_path / "cell.csv").write_text(CELL, encoding="utf-8")

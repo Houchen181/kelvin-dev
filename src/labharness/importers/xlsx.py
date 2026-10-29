@@ -12,6 +12,7 @@ from __future__ import annotations
 import posixpath
 import re
 import zipfile
+import zlib
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from xml.parsers import expat
@@ -74,15 +75,18 @@ def sheets(path: Any, wanted: Any = None) -> List[Tuple[str, List[List[Any]]]]:
     except (zipfile.BadZipFile, OSError) as e:
         raise DataError("not an Excel workbook (.xlsx): %s" % e)
     with z:
-        book, date1904 = _workbook(z)
-        strings = _strings(z)
-        dates = _date_styles(z)
-        out = []
-        for name, part in book:
-            if wanted is not None and not wanted(name):
-                continue
-            out.append((name, _rows(z, part, strings, dates, date1904)))
-        return out
+        try:
+            book, date1904 = _workbook(z)
+            strings = _strings(z)
+            dates = _date_styles(z)
+            out = []
+            for name, part in book:
+                if wanted is not None and not wanted(name):
+                    continue
+                out.append((name, _rows(z, part, strings, dates, date1904)))
+            return out
+        except (zipfile.BadZipFile, zlib.error, EOFError) as e:   # a part damaged inside the zip
+            raise DataError("the workbook is damaged (%s)" % e)
 
 
 def names(path: Any) -> List[str]:

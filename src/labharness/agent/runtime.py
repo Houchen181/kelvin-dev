@@ -1573,6 +1573,12 @@ class LabRuntime:
         run keeps a camera's. {text: what Kelvin says of it, run: its id, points, frames}."""
         from types import SimpleNamespace
         from ..analysis import analyze_run
+        # a run's own i (its points' numbers) and t (its clock): an x named I (a current) or T (a temperature) would
+        # take their place and come back as whole numbers, so it keeps its numbers under another name
+        if table.x_key in ("i", "t"):
+            table.x_key = "x_" + table.x_key
+        if table.outer and table.outer[0] in ("i", "t"):
+            table.outer = ("x_" + table.outer[0],) + tuple(table.outer[1:])
         plan_name = re.sub(r"[^\w.-]+", "_", (name or "").strip() or "imported_" + table.name)[:48]
         rec = self.engine.store.create(plan_name, {"plan": plan_name, "imported": files}, "import",
                                        self.attribution.get("folder"))
