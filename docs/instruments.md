@@ -94,7 +94,7 @@ Real hardware gets the same gate as the virtual lab, and a few protections of it
 
 **Instruments behind vendor software.** Some instruments are not driven with text commands but through their maker's library. Kelvin has drivers for two of them; the address says which:
 - `zhinst://dev1234` for a Zurich Instruments lock-in, through LabOne's Python API (`zhinst-core`, which Kelvin installs the first time). Add `?host=...&port=8004&interface=1GbE` if the data server runs elsewhere. A scan finds these devices through LabOne.
-- `qd://<computer>:5000` for a Quantum Design system, through MultiPyVu (Kelvin installs it; its server runs next to MultiVu). MultiVu ramps temperature and field itself; Kelvin sets the rate and setpoint, then waits for the reading.
+- `qd://<computer>:5000` for a Quantum Design system, through MultiPyVu (Kelvin installs it; its server runs next to MultiVu). MultiVu ramps temperature and field itself; Kelvin sets the rate and setpoint, then waits for the reading. To measure on the way (R(T) on a cool-down), a plan sweeps `T_set` or `B_set` with `ramp:`, its rates in K/min and T/s ([data.md](data.md#measuring-while-it-ramps)).
 
 More instruments with a library of their own:
 - `pulsestreamer://<ip>` for a Swabian Pulse Streamer (`pulsestreamer`), `pulseblaster://0?clock=500` for a SpinCore PulseBlaster (SpinCore's SpinAPI, and the `spinapi` wrapper), and `timetagger://<serial>?click=1&gate=2` for a Swabian Time Tagger (`Swabian-TimeTagger`, and Swabian's installer for its USB driver). A scan finds the Swabian devices. Kelvin installs the Python packages they need, once you approve; the makers' installers are yours to run (see [What an instrument needs on this computer](#what-an-instrument-needs-on-this-computer)).

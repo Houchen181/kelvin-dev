@@ -824,7 +824,7 @@ class LabRuntime:
             if errors:
                 return "invalid plan: " + "; ".join(errors[:5])
             items, _, problems = self.gate.plan_approval(self.engine.drive_values(plan))
-            lines = ["ok: %s, %d points, instruments %s" % (plan.name, plan.points, ", ".join(plan.requires))]
+            lines = ["ok: %s, %s, instruments %s" % (plan.name, self.engine.shape(plan), ", ".join(plan.requires))]
             lines += ["will be refused: " + p for p in problems]
             lines += ["needs approval: " + i for i in items] or ["no approval needed (measurement only or inside the envelope)"]
             return "\n".join(lines)
@@ -998,7 +998,7 @@ class LabRuntime:
     def _preview(self, plan: Plan, rows: List[Dict[str, Any]]) -> List[str]:
         if not rows:
             return []
-        axes = [a.key for a in plan.axes]
+        axes = [a["key"] for a in self.engine.columns(plan)["axes"]]   # a ramp's is the reading it follows
         out = []
         for instr, param in plan.measure:
             key = "%s.%s" % (instr, param)
@@ -1010,7 +1010,7 @@ class LabRuntime:
                 continue
             lo = min(vals, key=lambda x: x[0])
             hi = max(vals, key=lambda x: x[0])
-            where = lambda r: ", ".join("%s=%s" % (a, num(r[a])) for a in axes) or "row %d" % r["i"]
+            where = lambda r: ", ".join("%s=%s" % (a, num(r[a])) for a in axes if a in r) or "row %d" % r["i"]
             out.append("%s: min %s at %s; max %s at %s" % (key, spec.show(lo[0]), where(lo[1]), spec.show(hi[0]), where(hi[1])))
         return out
 
@@ -3460,7 +3460,9 @@ class LabRuntime:
             lines += ["References:"] + ["- %s%s" % (r.get("title"), " (doi:%s)" % r["doi"] if r.get("doi") else
                                                     " (%s)" % r["url"] if r.get("url") else "") for r in refs]
         lines.append("These plans are a starting point: fit the values to this sample and the lab's limits, then run "
-                     "them with run_plan as usual (the same checks and approvals apply).")
+                     "them with run_plan as usual (the same checks and approvals apply). A temperature or field set "
+                     "point in setup: or on a stepped sweep waits until it gets there and measures nothing on the "
+                     "way; to measure while it ramps (R(T) on a cool-down), sweep it with ramp:.")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ literature

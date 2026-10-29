@@ -57,6 +57,11 @@ You are connected to a physics lab through Kelvin.
   uncertainties) rather than raw rows. A dry run (simulate_plan, or run_plan with dry_run: true) is not a routine
   step, even for a plan that drives: only when the person asks, or to estimate how long a long plan takes. It is
   only a rehearsal on the simulated lab: the real run is its own run_plan call, when the person asks for it.
+- A set point the instrument ramps to by itself (a cryostat's temperature, a magnet's field, a stage) blocks until
+  its reading gets there: in set_value, in a plan's setup: and at each value of a stepped sweep, and nothing is
+  measured on the way (a 300 K to 2 K cool-down holds the run half an hour or more). To measure while it ramps
+  (R(T) on a cool-down, a field sweep), sweep it with ramp: (validate_plan shows the form); to stop a loop on a
+  reading, until: or while:. A wait whose reading stops getting closer ends after 10 min, and an alarm says so.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - A camera's frame is an image: measure cam.frame to keep images (each run keeps them in its run.h5), and its mean,
   max or sum for numbers to fit. A spectrum is recorded with its wavelengths.
@@ -248,7 +253,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @cancellable
     def set_value(instrument: str, parameter: str, value: float | bool | str) -> str:
         """Set one parameter. Measurement settings apply at once. Drive increases wait for human
-        approval (unless inside the project envelope), then ramp at a safe rate while guards are watched."""
+        approval (unless inside the project envelope), then ramp at a safe rate while guards are watched. A set point
+        the instrument ramps to by itself (temperature, field, a stage) returns only once its reading gets there,
+        which can take an hour, with nothing measured meanwhile: to measure on the way, run a plan with a ramp:
+        sweep."""
         return rt.set(instrument, parameter, value)
 
     @server.tool(annotations=ACT, structured_output=False)
@@ -554,11 +562,19 @@ def build_server(rt: LabRuntime) -> MCPServer:
         asks (run_plan checks plans itself). Format:
         plan: name / preconditions: ["tc.T_sample < 2.5"] / setup: {instr.param: value} /
         sweep: {instr.param: {from, to, step} | {from, to, points} | {from, to, points, log: true} | {values: [...]},
-                plus optional back: true (there and back), settle: s,
-                stabilize: {read: instr.param, within: change, for: s, timeout: s}}
+                plus optional back: true (there and back), settle: s (or one per value: [s, ...] or {value: s}),
+                stabilize: {read: instr.param, within: change, for: s, timeout: s, near: distance from its set
+                point, every: s (also record points while it waits)}, until: / while: (as below, ends this loop)}
                (several keys = nested loops, outer first) /
-        repeat: n / time: {every: s, for: s} (innermost time series) / settle: s / measure: [instr.param] /
-        after: {instr.param: value} / on_abort: {...}"""
+        a ramp, as the innermost sweep key, for a set point the instrument ramps to by itself (setup: and stepped
+        values wait until its reading arrives and measure nothing on the way): instr.param: {ramp: [{to: value,
+        rate: in its rate parameter's unit, hold: s}, ...], every: s, read: instr.param (default its readback),
+        within: tolerance, stall: s (default 600; 0 never)}: sets each target without waiting and measures every s
+        seconds until the reading is there, e.g. ppms.T_set: {ramp: [{to: 2, rate: 10}], every: 10} for R(T) /
+        repeat: n / time: {every: s, for: s, until/while} (innermost time series) / settle: s /
+        measure: [instr.param] / until: "abs(smu.I) > 1e-6 or tc.T > 300" (the sweep ends once true, checked after
+        each point; while: the opposite) / retry: {times: n, wait: s} (a reading that fails is taken again; the gap
+        is marked in gap_s) / after: {instr.param: value} / on_abort: {...}"""
         return rt.validate(plan)
 
     @server.tool(annotations=READ, structured_output=False)
@@ -574,7 +590,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         human approval for its drive ranges, run, log, then analyse automatically. Call it directly, without
         validate_plan or simulate_plan first. dry_run: true only rehearses it on the simulated lab (when the person
         asks, or to show how long it takes): nothing runs on the instruments, and the real run is another call.
-        Returns the assessment, key results and the run id."""
+        To measure while a temperature or field ramps, sweep its set point with ramp: (validate_plan has the
+        format); in setup: it only waits. Returns the assessment, key results and the run id."""
         return rt.run(plan, dry_run=bool(dry_run))
 
     @server.tool(annotations=ACT, structured_output=False)
