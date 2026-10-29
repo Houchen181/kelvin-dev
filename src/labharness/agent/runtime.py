@@ -1605,7 +1605,11 @@ class LabRuntime:
         out: Dict[str, List[Any]] = {}
         for item in items:
             if item.kind == "plan":
-                values = self.engine.drive_values(self._plan(item.text))
+                plan = self._plan(item.text)
+                values = self.engine.drive_values(plan)
+                for s in plan.on_abort or []:   # what it sets after a stop, which in the night nobody is there to approve
+                    if self.lab.resolve(s.key)[1].is_drive:
+                        values.setdefault(s.key, []).append(s.value)
             else:
                 values = {}
                 for instr, param, value in load_step(item.text).sets:
@@ -1616,6 +1620,25 @@ class LabRuntime:
             for key, vals in values.items():
                 out.setdefault(key, []).extend(vals)
         return out
+
+    def _queue_later(self, items: List[Item]) -> List[str]:
+        """The drives whose interlock condition an item before the first that moves them works on (it sets something on
+        the condition's instrument: a cool-down step before a field sweep). Their interlock is checked when they move,
+        not at the start: a queue that cools first could not start while the sample was still warm."""
+        touched: set = set()   # instruments an item so far sets something on
+        used: set = set()      # drives an item so far moves
+        later = []
+        for item in items:
+            if item.kind == "plan":
+                plan = self._plan(item.text)
+                keys = {s.key for s in plan.setup + plan.after} | {a.key for a in plan.instrument_axes}
+            else:
+                keys = set(load_step(item.text).keys)
+            later += [lock.drive for lock in self.lab.config.interlocks
+                      if lock.drive in keys and lock.drive not in used and lock.require.instr in touched]
+            touched.update(k.split(".")[0] for k in keys)
+            used.update(keys)
+        return later
 
     def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
         """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong)."""
@@ -1667,7 +1690,7 @@ class LabRuntime:
             if problems:
                 return REHEARSAL % "queue_start" + "\nnot rehearsed:\n" + "\n".join(problems[:8])
             duration, failed = self._rehearse(items)
-            _, _, refusals = self.gate.plan_approval(self._queue_drives(items))
+            _, _, refusals = self.gate.plan_approval(self._queue_drives(items), True, self._queue_later(items))
             return "\n".join([REHEARSAL % "queue_start", "the %d waiting item%s would take ~%s" % (
                 len(items), "" if len(items) == 1 else "s", _dur(duration))]
                 + ["would fail: " + f for f in failed[:8]] + ["would be refused: " + r for r in refusals[:8]])
@@ -1679,7 +1702,9 @@ class LabRuntime:
             problems = check()
             if problems:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
-            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items))
+            # over the queue's whole path: every value an item sets away from safe, wherever the drive is now, so
+            # nothing asks again in the night (an item that switches an output off made the next one ask)
+            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), True, self._queue_later(items))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
             duration = None

@@ -25,7 +25,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from .cards import ParamSpec, num
 from .eventlog import EventLog
@@ -545,15 +545,22 @@ class SafetyGate:
             self._grants = old
             self._asked = asked
 
-    def plan_approval(self, drive_values: Dict[str, List[Any]]) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
-        """For a plan's drive targets: lines to show the human, the ranges to grant, and refusals."""
+    def plan_approval(self, drive_values: Dict[str, List[Any]], whole_path: bool = False,
+                      later: Iterable[str] = ()) -> Tuple[List[str], Dict[str, Allowed], List[str]]:
+        """For a plan's drive targets: lines to show the human, the ranges to grant, and refusals.
+        whole_path: for a queue, whose items run one after another for hours, and between which a drive may go
+        anywhere (an item switches an output off, the next switches it on; an abort sends it to safe): every value
+        away from safe counts, not only those beyond where the drive is now, so no item asks again in the night.
+        later: drives whose interlock a queue item before theirs works on (a cool-down before a field sweep): their
+        interlock is checked when they move, not now, and the line says so."""
         items: List[str] = []
         grants: Dict[str, Allowed] = {}
         problems: List[str] = []
+        later = set(later)
         for key, values in drive_values.items():
             inst, spec = self.lab.resolve(key)
             current = self._current(inst, spec)
-            if current is None:   # unknown (no read-back): every value but safe counts as driving harder
+            if current is None or whole_path:   # unknown (no read-back), or a queue: every value but safe drives harder
                 away = [v for v in values if spec.distance(v) > 0]
             else:
                 d0 = spec.distance(current)
@@ -563,7 +570,7 @@ class SafetyGate:
                 away = [v for v in values if current is None or not _same(spec, v, current)]
             if not away:
                 continue
-            problem = None if toward else self._away_problem(inst, spec)   # toward safe: no interlock stops it
+            problem = None if toward else self._away_problem(inst, spec, key in later)   # toward safe: no interlock
             standing = self._standing.get(key)
             if not problem and standing is not None and all(standing.covers(v) for v in away):
                 continue   # inside what a person approved for the queue this scan is part of
@@ -584,6 +591,13 @@ class SafetyGate:
                 bits.append(g)
             if unsure:
                 bits.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
+            if key in later:
+                for lock in self.lab.config.interlocks:
+                    broken = interlock_problem(self.lab, lock) if lock.drive == key else None
+                    if broken:   # it reads, but doesn't hold yet (one that can't be read was refused above)
+                        bits.append("its interlock needs %s, which doesn't hold now%s: an item before it works on "
+                                    "that, and it is checked again before %s moves (if it still doesn't hold, the "
+                                    "queue pauses there)" % (lock.require.text, broken, key))
             items.append("; ".join(bits))
         return items, grants, problems
 
@@ -797,7 +811,10 @@ class SafetyGate:
         return ("%s: %s has hands on the sample (since %s), so every drive stays at safe until a person unlocks it "
                 "in the Lab panel" % (what, hands.get("by") or "someone", hands.get("since") or "now"))
 
-    def _away_problem(self, inst: Instrument, spec: ParamSpec) -> Optional[str]:
+    def _away_problem(self, inst: Instrument, spec: ParamSpec, later: bool = False) -> Optional[str]:
+        """Why this drive can't move away from safe now (hands on the sample, a guard or interlock that can't be
+        watched or doesn't hold), or None. later: a queue's start, for a drive whose interlock an item before it works
+        on: a condition that doesn't hold yet is left for the check when it moves (one whose instrument is off isn't)."""
         key = "%s.%s" % (inst.name, spec.name)
         hands = self._hands_problem(key)
         if hands:
@@ -814,7 +831,7 @@ class SafetyGate:
                 return "interlock: %s needs %s, but %s is %s" % (key, lock.require.text,
                                                                   lock.require.key.split(".")[0], away)
             broken = interlock_problem(self.lab, lock)
-            if broken:
+            if broken and not (later and broken.startswith(" (now")):   # one that can't be read is never left
                 return "interlock: %s needs %s%s" % (key, lock.require.text, broken)
         return None
 
