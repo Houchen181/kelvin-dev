@@ -39,16 +39,6 @@ def _when(iso: Any) -> str:
         return str(iso or "?")
 
 
-def value_in_run(key: str, plan: Dict[str, Any], start: Dict[str, Any]) -> Any:
-    """A setting's value while the run measured: the plan's setup if it set it, else as the run found it."""
-    setup = plan.get("setup") if isinstance(plan.get("setup"), dict) else {}
-    if key in setup:
-        return setup[key]
-    inst, _, param = key.partition(".")
-    v = (start.get(inst) or {}).get(param) if isinstance(start.get(inst), dict) else None
-    return None if isinstance(v, str) else v
-
-
 def run_provenance(run_dir: Path, lab: Any, events: Sequence[Dict[str, Any]],
                    files: Iterable[str] = ()) -> str:
     """The run's provenance as text (see the module's docstring)."""
@@ -86,7 +76,7 @@ def run_provenance(run_dir: Path, lab: Any, events: Sequence[Dict[str, Any]],
     kept = meta.get("chain") if isinstance(meta.get("chain"), dict) else None
     out.append("")
     if kept:
-        current = chains.excitation_current(kept, lambda k: value_in_run(k, plan, start))
+        current = chains.excitation_current(kept, lambda k: chains.setting_in_run(k, plan, start))
         out.append("measurement chain (as stamped into the run, the %s's):" % (meta.get("chain_of") or "device"))
         out += ["  " + line for line in chains.lines(kept, current)]
         for m in (rec.columns.get("measures") or []):

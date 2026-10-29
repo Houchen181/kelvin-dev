@@ -868,10 +868,14 @@ class ChatAgent:
         kind = str(args.get("kind") or "runs")
         if kind == "project" and args.get("summary"):   # Kelvin's words open the master report until rewritten
             self.store.set_summary(project["id"] if project else None, str(args["summary"]))
+        try:
+            pages = max(0, int(args.get("pages") or 0))
+        except (TypeError, ValueError):
+            return "no report: pages must be a whole number", True
         text = await asyncio.to_thread(self.runtime.make_report, runs, day, last, title, str(args.get("summary") or ""),
                                        str(args.get("format") or "pdf"), self.report_notes(project), "agent",
                                        self.report_references(project), kind, str(args.get("device") or ""),
-                                       project["id"] if project else None)
+                                       project["id"] if project else None, pages)
         return text, text.startswith("no report")
 
     # ------------------------------------------------------------------ turns

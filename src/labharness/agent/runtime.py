@@ -985,8 +985,10 @@ class LabRuntime:
                 lines.append("%s [%s]: %s" % (label, s["kind"], "; ".join("%s %s" % (r["name"], r["value"]) for r in s["results"][:5])))
         return lines
 
-    def analyze(self, run_id: str, column: Optional[str] = None, model: Optional[str] = None) -> str:
-        """Re-analyse a recorded run, optionally one column and/or with a chosen fit model."""
+    def analyze(self, run_id: str, column: Optional[str] = None, model: Optional[str] = None,
+                accept: bool = False, by: str = "agent") -> str:
+        """Re-analyse a recorded run, optionally one column and/or with a chosen fit model. accept: keep these fits
+        as the run's (in run.h5), and its scan report shows them."""
         from ..analysis import MODELS, analyze_run
         if model and model not in MODELS and model != "linear":
             return "unknown model %r (choose: linear, %s)" % (model, ", ".join(MODELS))
@@ -999,7 +1001,38 @@ class LabRuntime:
         if column and column not in [m["key"] for m in cols["measures"]]:
             return "unknown column %r (have: %s)" % (column, ", ".join(m["key"] for m in cols["measures"]))
         a = analyze_run(rows, cols["axes"], cols["measures"], meta, force=model, only=column)
-        return "\n".join(["%s: %d rows" % (run_id, len(rows))] + self._analysis_lines(a))
+        lines = ["%s: %d rows" % (run_id, len(rows))] + self._analysis_lines(a)
+        if accept:
+            lines.append(self._accept_fit(run_id, rec.analysis or {}, a, model, by))
+        return "\n".join(lines)
+
+    def _accept_fit(self, run_id: str, kept: Dict[str, Any], new: Dict[str, Any], model: Optional[str],
+                    by: str) -> str:
+        """Keep a re-analysis's fits as the run's own: each of its series replaces the kept one for the same column
+        (and group), marked accepted (by whom, when, which model), in run.h5; then the run's scan report is written
+        again, so it shows the fit that was accepted rather than the automatic one."""
+        stamp = {"by": by, "at": datetime.now().isoformat(timespec="seconds"), "model": model or "chosen automatically"}
+        fresh = [dict(s, accepted=stamp) for s in new.get("series") or []]
+        done = {(s.get("y"), s.get("group")) for s in fresh}
+        merged = dict(kept, series=[s for s in kept.get("series") or [] if (s.get("y"), s.get("group")) not in done]
+                      + fresh)
+        if not kept.get("series"):
+            merged.update(assessment=new.get("assessment", ""), next=new.get("next", ""))
+        d = self._run_dir(run_id)
+        try:
+            rundata.set_analysis(d, merged)
+        except (OSError, ValueError) as e:
+            return "not kept: %s" % e
+        self.gate.log.write("fit_accepted", by=by, run=run_id, model=stamp["model"],
+                            columns=sorted({str(s.get("y")) for s in fresh}))
+        made = []
+        if "scan" in self.report_kinds and self.auto_report != "off":
+            try:
+                made = self.write_scan_report(run_id)
+            except Exception as e:   # the fit is kept whatever happens to the report
+                return "kept as the run's fit; its report was not written again: %s" % e
+        return "kept as the run's fit (in run.h5)%s" % (
+            "; its scan report shows it now (%s)" % ", ".join(made) if made else "")
 
     def _preview(self, plan: Plan, rows: List[Dict[str, Any]]) -> List[str]:
         if not rows:
@@ -3587,9 +3620,10 @@ class LabRuntime:
 
     def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
                notes: Any = (), by: str = "human", references: Any = (), folder: Optional[Path] = None,
-               name: str = "", log: bool = True) -> List[Dict[str, Any]]:
+               name: str = "", log: bool = True, pages: int = 0) -> List[Dict[str, Any]]:
         """Write a report of these runs (oldest first) as PDF and/or PowerPoint into reports/ (or folder, as
-        name.pdf / name.pptx). Reads only files: it never talks to an instrument, so it can run while a plan runs."""
+        name.pdf / name.pptx). Reads only files: it never talks to an instrument, so it can run while a plan runs.
+        pages: at most this many pages (slides), as asked; it leaves out detail until it fits."""
         if not run_ids:
             raise ValueError("no runs to report")
         fmts = ["pdf", "pptx"] if fmt == "both" else [fmt]
@@ -3616,7 +3650,7 @@ class LabRuntime:
         out = []
         for f in fmts:
             path = target / ("%s.%s" % (base, f))
-            n = write_pdf(report, path) if f == "pdf" else write_pptx(report, path)
+            n = write_pdf(report, path, pages) if f == "pdf" else write_pptx(report, path, pages)
             try:
                 shown = path.relative_to(self.reports_dir).as_posix()
             except ValueError:
@@ -3847,7 +3881,7 @@ class LabRuntime:
     def make_report(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
                     summary: str = "", fmt: str = "pdf", notes: Any = (), by: str = "agent",
                     references: Any = (), kind: str = "runs", device: str = "",
-                    project: Optional[str] = None) -> str:
+                    project: Optional[str] = None, pages: int = 0) -> str:
         """The make_report tool's answer. kind runs (default): the runs chosen, or today's, or else the latest.
         kind project: the project's master report, rewritten now; device: that sample's report; scan: a run's own."""
         if kind in ("project", "device"):
@@ -3887,7 +3921,7 @@ class LabRuntime:
         if not ids:
             return "no report: no runs %s" % ("on %s" % day if day else "yet")
         try:
-            files = self.report(ids, title, summary, fmt, notes, by, references)
+            files = self.report(ids, title, summary, fmt, notes, by, references, pages=max(0, int(pages or 0)))
         except (ValueError, OSError) as e:
             return "no report: %s" % e
         lines = ["report: %s (%d run%s, %s)" % (f["name"], len(ids), "" if len(ids) == 1 else "s",

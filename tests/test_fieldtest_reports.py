@@ -109,3 +109,60 @@ def test_run_plan_says_why_a_run_has_no_folder(tmp_path, monkeypatch):
     answer = rt.run(SWEEP)
     assert answer.startswith("not run: Kelvin could not make the run's folder")
     assert rt.lab.read("smu", "output") is False   # nothing was set
+
+
+def test_a_report_keeps_to_the_length_asked(tmp_path):
+    """F2 l10, F3 P8: "a one-page report" came out at 5 to 22 pages: make_report had no length at all."""
+    from test_reports import check_pptx
+    rt = runtime(tmp_path, answers=40)
+    for _ in range(4):
+        rt.run(SWEEP)
+    ids = [r["run_id"] for r in rt.runs_index(10)]
+    full = rt.make_report(ids, title="Gate sweeps")
+    assert "1 pages" not in full and int(full.split(", ")[1].split(" ")[0]) > 1
+    one = rt.make_report(ids, title="Gate sweeps for my advisor", pages=1)
+    assert "(4 runs, 1 pages)" in one
+    path = rt.reports_dir / one.split("report: ")[1].split(" (")[0]
+    assert check_pdf(path) == 1
+    text = " ".join(pdf_strings(path))
+    assert "Shortened to 1 page, as asked" in text and "gate_sweep" in text
+    deck = rt.make_report(ids, fmt="pptx", pages=3)
+    assert "3 slides" in deck
+    assert len(check_pptx(rt.reports_dir / deck.split("report: ")[1].split(" (")[0])) == 3
+
+
+def test_reports_plot_the_resistance_the_measurement_chain_gives(tmp_path):
+    """F2 l10, F3 P8: reports plotted raw volts where a person wanted R. With the setup's chain (50 mV rms through
+    10 MOhm: 5 nA), lockin.X becomes R_xx in ohms."""
+    rt = runtime(tmp_path)
+    rt.measurement_chain("setup", {"excitation": {"source": "lockin.amplitude", "form": "rms",
+                                                  "series_resistor": 10e6},
+                                   "readings": {"lockin.X": {"gain": 1, "name": "R_xx"}}})
+    rt.run(SWEEP.replace("setup: { smu.output: on }", "setup: { smu.output: on, lockin.amplitude: 0.05 }"))
+    run_id = rt.runs_index(1)[0]["run_id"]
+    from labharness.agent.runtime import event_line
+    from labharness.reports import Collector
+    part = Collector(rt.runs, rt.lab, lambda r: None, lambda: [], event_line).run(run_id, [])
+    chart = next(c for c in part.charts if c.title == "R_xx")
+    assert chart.y_unit == "Ω" and "5 nA rms" in chart.caption
+    from labharness import rundata
+    rows = rundata.load(rt._run_dir(run_id)).rows
+    assert chart.series[0].ys[0] == pytest.approx(rows[0]["lockin.X"] / 5e-9)
+    text = " ".join(pdf_strings(rt._run_dir(run_id) / "report.pdf"))
+    assert "R_xx" in text and "From the measurement chain" in text
+
+
+def test_an_accepted_fit_is_the_one_its_report_shows(tmp_path):
+    """F3 (P5 P7 P8 P12): a fit chosen after the run wasn't kept, and the report kept showing the automatic one."""
+    rt = runtime(tmp_path)
+    rt.run(SWEEP)
+    run_id = rt.runs_index(1)[0]["run_id"]
+    answer = rt.analyze(run_id, "smu.I", "linear", accept=True)
+    assert "kept as the run's fit (in run.h5); its scan report shows it now" in answer
+    from labharness import rundata
+    kept = [s for s in rundata.load(rt._run_dir(run_id), with_rows=False).analysis["series"] if s["y"] == "smu.I"]
+    assert kept and kept[0]["accepted"]["model"] == "linear" and kept[0]["accepted"]["by"] == "agent"
+    text = " ".join(pdf_strings(rt._run_dir(run_id) / "report.pdf"))
+    assert "accepted by agent" in text and "the accepted fit" in text
+    assert any(e["type"] == "fit_accepted" for e in rt.gate.log.events())
+    assert "kept as" not in rt.analyze(run_id, "smu.I", "linear")   # looking again keeps nothing

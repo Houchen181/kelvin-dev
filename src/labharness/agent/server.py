@@ -439,14 +439,17 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def make_report(runs: Optional[List[str]] = None, day: str = "", last: int = 0, title: str = "",
-                    summary: str = "", format: str = "pdf", kind: str = "runs", device: str = "") -> str:
+                    summary: str = "", format: str = "pdf", kind: str = "runs", device: str = "",
+                    pages: int = 0) -> str:
         """Reports. Kelvin already keeps three up to date by itself: each run's scan report (in its folder), each
         device's report and each project's master report. kind project: rewrite the project's master report now
         (summary, if given, becomes its opening, in your own words); device: rewrite that sample's report; scan: a
         run's own report again. kind runs (default): a separate report of the runs chosen by id, by day (YYYY-MM-DD,
         today, yesterday) or the last N (default today's), with summary as its opening, for sharing a selection.
-        Only facts from the runs and the conversation; no speculation."""
-        return rt.make_report(runs, day, last, title, summary, format, kind=kind, device=device)
+        pages: the length the person asked for ("one page": 1), in pages or slides; the report leaves out detail
+        until it fits, and each run's own report keeps the rest. Only facts from the runs and the conversation; no
+        speculation."""
+        return rt.make_report(runs, day, last, title, summary, format, kind=kind, device=device, pages=pages)
 
     @server.tool(annotations=READ, structured_output=False)
     def scan_instruments() -> str:
@@ -641,11 +644,13 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Add a saved queue's items to the end of the queue."""
         return rt.queue_load(name)
 
-    @server.tool(annotations=READ, structured_output=False)
-    def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None) -> str:
+    @server.tool(annotations=ACT, structured_output=False)   # accept writes the run's fits (never an instrument)
+    def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None,
+                    accept: bool = False) -> str:
         """Re-analyse a recorded run. column: one measured instr.param; model: linear, lorentzian,
-        gaussian or exponential to force that fit (default: chosen automatically)."""
-        return rt.analyze(run_id, column, model)
+        gaussian or exponential to force that fit (default: chosen automatically). accept: once the person agrees
+        this is the right fit, keep it as the run's own (in run.h5); its report shows it from then on."""
+        return rt.analyze(run_id, column, model, accept=accept)
 
     @server.tool(annotations=READ, structured_output=False)
     def list_runs(limit: int = 10) -> str:

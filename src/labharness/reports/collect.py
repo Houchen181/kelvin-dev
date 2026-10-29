@@ -56,6 +56,30 @@ def _numbers(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _fit_words(s: Dict[str, Any]) -> str:
+    """A fit's model, and what makes it reproducible where the run kept it: who accepted it and when, its window and
+    its reduced chi-squared (a fit chosen after the run is the one its report shows: F3 P5 P7 P8 P12)."""
+    fit = s.get("fit") or {}
+    bits = [str(fit.get("model") or "model")]
+    acc = s.get("accepted")
+    if isinstance(acc, dict):
+        when = str(acc.get("at") or "")
+        try:
+            at = datetime.fromisoformat(when)
+            when = at.strftime("%b %d").replace(" 0", " ") + at.strftime(", %H:%M")
+        except ValueError:
+            pass
+        bits.append("accepted by %s%s" % (acc.get("by") or "?", " on " + when if when else ""))
+    window = fit.get("window")
+    if isinstance(window, (list, tuple)) and len(window) == 2:
+        bits.append("window %s to %s" % (num(window[0]), num(window[1])) if all(map(_numbers, window)) else
+                    "window %s" % (window,))
+    chi2 = fit.get("chi2_red", fit.get("chi2r"))
+    if _numbers(chi2):
+        bits.append("reduced chi-squared %s" % num(chi2))
+    return ", ".join(bits[:1]) + (" (%s)" % "; ".join(bits[1:]) if len(bits) > 1 else "")
+
+
 def _unread(v: Any) -> bool:
     """A setting the snapshot couldn't read: an instrument that stopped answering leaves "ERROR: ..." in its place."""
     return v is None or isinstance(v, list) or (isinstance(v, str) and v.startswith("ERROR"))
@@ -141,9 +165,9 @@ class Collector:
         part.sweep = self._sweep_lines(plan)
         part.measured = [str(m) for m in plan.get("measure") or []]
         cols = self.columns(run_id)
-        part.charts = self._charts(rows, cols, plan, analysis)
-        part.results = self._results(analysis)
         start = rec.snapshots.get("start") or {}
+        part.charts = self._charts(rows, cols, plan, analysis, self._derived(meta, plan, start, rec.columns))
+        part.results = self._results(analysis)
         end = rec.snapshots.get("end") or {}
         part.conditions = self._conditions(start)
         part.away = self._away(start)
@@ -181,8 +205,29 @@ class Collector:
             out.append("repeated %s times" % plan["repeat"])
         return out
 
+    @staticmethod
+    def _derived(meta: Dict[str, Any], plan: Dict[str, Any], start: Dict[str, Any],
+                 columns: Dict[str, Any]) -> Dict[str, Tuple[float, str, str, str]]:
+        """The readings the run's measurement chain turns into the sample's resistance: {key: (factor, name, unit,
+        how)}, from the chain stamped into the run and the excitation it measured with."""
+        kept = meta.get("chain")
+        if not isinstance(kept, dict):
+            return {}
+        from .. import chain as chains
+        current = chains.excitation_current(kept, lambda k: chains.setting_in_run(k, plan, start))
+        out = {}
+        for m in columns.get("measures") or []:
+            d = chains.derived(kept, m["key"], m.get("unit") or "", current)
+            if d:
+                out[m["key"]] = d
+        return out
+
     def _charts(self, rows: List[Dict[str, Any]], cols: Optional[Dict[str, List[Dict[str, str]]]],
-                plan: Dict[str, Any], analysis: Dict[str, Any]) -> List[Chart]:
+                plan: Dict[str, Any], analysis: Dict[str, Any],
+                derive: Optional[Dict[str, Tuple[float, str, str, str]]] = None) -> List[Chart]:
+        """Each measured column against the innermost axis (one line per outer value, with its fit), and each trace.
+        derive: readings to plot as the sample's resistance, from the measurement chain (in ohms, not volts)."""
+        derive = derive or {}
         if not rows:
             return []
         if cols is None:   # the run's instruments are not in this lab any more: plot without units
@@ -204,22 +249,28 @@ class Collector:
                     groups.setdefault(r.get(outer["key"]) if outer else None, []).append(r)
                 series: List[Series] = []
                 model = ""
+                factor, title, y_unit, how = derive.get(m["key"]) or (1.0, m["key"], m.get("unit", ""), "")
+
+                def scaled(ys: List[Any]) -> List[Any]:
+                    return [y * factor if _numbers(y) else y for y in ys] if factor != 1.0 else ys
                 for k, (gval, grows) in enumerate(list(groups.items())[:MAX_GROUPS]):
                     if outer:   # the same label the analysis gives this group
                         name = "%s = %s" % (outer["key"], si(gval, outer.get("unit", "")) if _numbers(gval) else gval)
                     else:
-                        name = m["key"]
+                        name = title
                     color = PALETTE[k % len(PALETTE)] if outer else ""
-                    series.append(Series(name, [r.get(xa["key"]) for r in grows], [r.get(m["key"]) for r in grows],
-                                         color=color))
+                    series.append(Series(name, [r.get(xa["key"]) for r in grows],
+                                         scaled([r.get(m["key"]) for r in grows]), color=color))
                     fit = next((f for f in fits if f["y"] == m["key"]
                                 and (f.get("group") == name if outer else not f.get("group"))), None)
                     if fit:
-                        model = fit["fit"].get("model") or "model"
-                        series.append(Series("fit", fit["fit"]["x"], fit["fit"]["y"], fit=True, color=color))
+                        model = _fit_words(fit)
+                        series.append(Series("fit", fit["fit"]["x"], scaled(fit["fit"]["y"]), fit=True, color=color))
                 caption = ("Dashed: %s fit%s to %s." % (model, "s" if outer and len(groups) > 1 else "", m["key"])
                            if model else "")
-                charts.append(Chart(m["key"], xa["key"], xa.get("unit", ""), m.get("unit", ""), series, caption))
+                if how:   # a derived quantity says how it was worked out
+                    caption = ("%s From the measurement chain: %s." % (caption, how)).strip()
+                charts.append(Chart(title, xa["key"], xa.get("unit", ""), y_unit, series, caption))
         for m in [m for m in measures if m.get("kind") == "trace"]:
             last = next((r for r in reversed(rows) if isinstance(r.get(m["key"]), list)), None)
             if not last:
@@ -232,8 +283,9 @@ class Collector:
                 series.append(Series("fit", fit["fit"]["x"], fit["fit"]["y"], fit=True))
             x_unit = m.get("x_unit", "")
             charts.append(Chart(m["key"] + (" (last of %d)" % len(rows) if len(rows) > 1 else ""),
-                                "frequency" if x_unit == "Hz" else "x", x_unit, m.get("unit", ""), series,
-                                "Dashed: %s fit to %s." % (fit["fit"].get("model", "model"), m["key"]) if fit else ""))
+                                {"Hz": "frequency", "nm": "wavelength", "s": "delay"}.get(x_unit, "x"), x_unit,
+                                m.get("unit", ""), series,
+                                "Dashed: %s fit to %s." % (_fit_words(fit), m["key"]) if fit else ""))
         return charts[:MAX_CHARTS]
 
     def _results(self, analysis: Dict[str, Any]) -> List[Table]:
@@ -246,7 +298,8 @@ class Collector:
             if len(series) == 1 and not series[0].get("group"):
                 s = series[0]
                 tables.append(Table(["Quantity", "Value"], [[r["name"], str(r["value"])] for r in s["results"]],
-                                    "%s vs %s (%s)" % (y, s.get("x") or "", s.get("kind", "")) if s.get("x") else y))
+                                    ("%s vs %s (%s)" % (y, s.get("x") or "", s.get("kind", "")) if s.get("x") else y)
+                                    + (", the accepted fit" if s.get("accepted") else "")))
                 continue
             names: List[str] = []
             for s in series:

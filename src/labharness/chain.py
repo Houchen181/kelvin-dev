@@ -100,6 +100,16 @@ def parse(data: Any) -> Dict[str, Any]:
     return out
 
 
+def setting_in_run(key: str, plan: Dict[str, Any], start: Dict[str, Any]) -> Any:
+    """A setting's value while a run measured: the plan's setup if it set it, else as the run found it."""
+    setup = plan.get("setup") if isinstance(plan.get("setup"), dict) else {}
+    if key in setup:
+        return setup[key]
+    inst, _, param = key.partition(".")
+    v = (start.get(inst) or {}).get(param) if isinstance(start.get(inst), dict) else None
+    return None if isinstance(v, str) else v
+
+
 def excitation_current(chain: Dict[str, Any], value_of: Callable[[str], Any]) -> Optional[Tuple[float, str]]:
     """The excitation as an rms current through the sample (A), with how it was worked out; None when the chain has
     no excitation or its value isn't known (value_of(key) gives the setting's value, None when unknown)."""
