@@ -27,6 +27,10 @@ UI_HTML = (Path(__file__).parent / "ui.html").read_bytes()
 MAX_BODY = 16 * 1024
 
 
+def _minutes(seconds: float) -> str:
+    return "%.0f s" % seconds if seconds < 90 else "%.0f min" % (seconds / 60)
+
+
 def who_text(who: Dict[str, Any]) -> str:
     """A person who answered, in words: their account (when people sign in) and where they answered from, e.g.
     "Ada (phone Pixel 7)" or "a person (portal)"."""
@@ -35,10 +39,16 @@ def who_text(who: Dict[str, Any]) -> str:
 
 
 class WebApprover(Approver):
-    """Blocks the gate until a human answers on the page, or declines after `timeout` seconds."""
+    """Blocks the gate until a human answers on the page, or declines after `timeout` seconds. A request nobody
+    answered by then goes to people away from the computer instead (escalate: the phone, email, a webhook) and waits
+    escalate_s more before it is declined: in the night a card declined after 5 minutes ended a whole queue."""
 
-    def __init__(self, timeout: float = 120.0):
+    def __init__(self, timeout: float = 120.0, escalate_s: float = 0.0):
         self.timeout = timeout
+        # escalate(request): tells people away from the computer about a request nobody answered in `timeout`; True
+        # when anyone could be reached (then it waits escalate_s more), False when nobody can (declined as before)
+        self.escalate: Optional[Callable[[Dict[str, Any]], bool]] = None
+        self.escalate_s = escalate_s
         self._cv = threading.Condition()
         self._pending: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._history: Deque[Dict[str, Any]] = deque(maxlen=20)
@@ -84,14 +94,19 @@ class WebApprover(Approver):
         with self._cv:
             while entry["answer"] is None:
                 left = entry["expires"] - time.time()
-                if left <= 0:
+                if left > 0:
+                    self._cv.wait(left)
+                elif not entry.get("away") and self._escalate(entry, public):
+                    continue   # it waits for someone away from the computer now
+                elif entry["answer"] is None:
                     entry["answer"], entry["by"] = False, "timeout"
-                    break
-                self._cv.wait(left)
             del self._pending[entry["id"]]
             entry["decided"] = time.time()
             self._history.appendleft(entry)
-        if entry["by"] == "timeout":
+        if entry["by"] == "timeout" and entry.get("escalated"):
+            request.note = "no answer within %.0f s at the computer, nor in %s after it went to the phone" % (
+                self.timeout, _minutes(entry["decided"] - entry["escalated"]))
+        elif entry["by"] == "timeout":
             request.note = "no answer within %.0f s" % self.timeout
         elif entry.get("who"):   # the record says who answered, from where, and when (reports print it)
             request.note = "%s by %s at %s" % ("approved" if entry["answer"] else "declined", who_text(entry["who"]),
@@ -99,6 +114,27 @@ class WebApprover(Approver):
         elif entry["by"] != "human":
             request.note = "declined by %s" % entry["by"]
         return bool(entry["answer"])
+
+    def _escalate(self, entry: Dict[str, Any], public: Dict[str, Any]) -> bool:
+        """Called with the lock held, once, when nobody answered in `timeout`: tell people away from the computer
+        (outside the lock: sending may take a moment, and an answer may come meanwhile). True: it waits escalate_s more."""
+        entry["away"] = True   # asked once, reached or not
+        if self.escalate is None or self.escalate_s <= 0:
+            return False
+        now = time.time()
+        until = now + self.escalate_s
+        self._cv.release()
+        try:
+            reached = bool(self.escalate(dict(public, seconds_left=int(self.escalate_s), escalated=True,
+                                              until=until)))
+        except Exception:
+            reached = False
+        finally:
+            self._cv.acquire()
+        if reached and entry["answer"] is None:
+            entry["escalated"], entry["expires"] = now, until
+            self._cv.notify_all()
+        return reached
 
     def inform(self, request: ApprovalRequest, reasons: List[str]) -> None:
         """Auto mode approved this without asking: show it with the reasons, like an answered request."""
@@ -162,7 +198,8 @@ class WebApprover(Approver):
         with self._cv:
             now = time.time()
             return [{"id": e["id"], "title": e["title"], "items": e["items"],
-                     "seconds_left": max(0, int(e["expires"] - now)), "where": e.get("where")}
+                     "seconds_left": max(0, int(e["expires"] - now)), "where": e.get("where"),
+                     "escalated": bool(e.get("escalated"))}
                     for e in self._pending.values() if e["answer"] is None]
 
     def history_list(self) -> List[Dict[str, Any]]:

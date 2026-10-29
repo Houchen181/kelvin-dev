@@ -311,3 +311,125 @@ def test_a_reading_its_card_never_read_is_the_cards_problem_not_a_garbled_reply(
     with pytest.raises(ValueError) as e:
         lab.read("lockin", "X")
     assert not isinstance(e.value, Garbled)
+
+
+# ---------------------------------------------------------------------------------------------- telling people away
+
+
+def test_a_request_nobody_answers_goes_to_the_phone_instead_of_being_declined():
+    """In the night a card was declined after 5 minutes, which ended the queue. Unanswered at the computer, it now goes
+    to the people away from it and waits for them; answered from the phone, it goes ahead."""
+    import threading
+    from labharness.agent.approval import WebApprover
+    from labharness.gate import ApprovalRequest
+    approver = WebApprover(timeout=0.3, escalate_s=30)
+    told = []
+    approver.escalate = lambda r: told.append(r) or True
+    answers = []
+    t = threading.Thread(target=lambda: answers.append(approver.approve(ApprovalRequest("Run the queue", ["x"]))))
+    t.start()
+    entry = approver.wait_for_pending(timeout=5)
+    import time
+    time.sleep(0.8)                                                  # past the first wait: it went to the phone
+    assert len(told) == 1 and told[0]["title"] == "Run the queue" and told[0]["escalated"]
+    [pending] = approver.pending_list()
+    assert pending["escalated"] and 20 < pending["seconds_left"] <= 30
+    assert approver.answer(entry["id"], True, "human (phone Pixel)", {"channel": "phone", "device": "Pixel"})
+    t.join(5)
+    assert answers == [True]
+
+
+def test_a_request_nobody_can_be_reached_for_is_declined_as_before_and_says_so():
+    from labharness.agent.approval import WebApprover
+    from labharness.gate import ApprovalRequest
+    approver = WebApprover(timeout=0.2, escalate_s=30)
+    approver.escalate = lambda r: False                               # no phone, email or webhook
+    request = ApprovalRequest("Run the queue", ["x"])
+    assert approver.approve(request) is False and request.note == "no answer within 0 s"
+    approver = WebApprover(timeout=0.2, escalate_s=0.3)
+    approver.escalate = lambda r: True
+    request = ApprovalRequest("Run the queue", ["x"])
+    assert approver.approve(request) is False
+    assert request.note.startswith("no answer within 0 s at the computer, nor in ") and "after it went to the phone" \
+        in request.note
+
+
+def test_the_runtime_asks_people_away_only_when_it_can_reach_them(tmp_path):
+    from labharness.agent.approval import WebApprover
+    pytest.importorskip("mcp")
+    from labharness.agent.runtime import LabRuntime
+    rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=5, escalate_s=60), tmp_path / "data", None)
+    assert rt.approver.escalate == rt._escalate
+    request = {"title": "Run the queue: 3 scans", "items": ["smu.V: now 0 V, plan uses 0 … 1 V"], "until": 0}
+    assert rt._escalate(request) is False                            # nobody to reach: declined as before
+    rt.notifier.phones = lambda: True                                # a paired phone
+    assert rt._escalate(request) is True
+    notice = rt.notifier.notices[-1]
+    assert notice["kind"] == "alarm" and notice["title"] == "Waiting for your answer: Run the queue: 3 scans"
+    assert "Kelvin waits until" in notice["text"] and "smu.V" in notice["text"]
+    assert any(e["type"] == "approval_escalated" for e in rt.gate.log.events())
+
+
+def test_email_notices_go_out_without_credentials_in_any_words():
+    from labharness.notify import Notifier, email_from
+    sent = []
+    mail = email_from("smtp.example.edu", "pi@example.edu, me@example.edu", "", "starttls", "kelvin-lab", "hunter2",
+                      "kelvin@example.edu")
+    assert mail.port == 587 and mail.to == ["pi@example.edu", "me@example.edu"] and "hunter2" not in repr(mail)
+    with pytest.raises(ValueError, match="not an email address"):
+        email_from("smtp.example.edu", "pi at example")
+    assert email_from("", "pi@example.edu") is None and email_from("smtp.example.edu", "") is None   # off
+    n = Notifier(mail=lambda cfg, subject, text: sent.append((cfg.host, subject, text)))
+    n.configure(None, ["alarm"], email=mail)
+    assert n.reaches_away("alarm") and not n.reaches_away("run")
+    n("alarm", "Alarm: nvm doesn't answer", "cable or power?")
+    n("run", "Run finished")                                          # not ticked: not sent
+    assert n.test() == "sent"
+    assert sent[0] == ("smtp.example.edu", "Alarm: nvm doesn't answer", "cable or power?") or len(sent) == 2
+
+    def refused(cfg, subject, text):
+        raise OSError("535 5.7.8 authentication failed for kelvin-lab with password hunter2")
+    n = Notifier(mail=refused)
+    n.configure(None, ["alarm"], email=mail)
+    said = n.test()
+    assert said.startswith("could not send the email: 535") and "hunter2" not in said and "kelvin-lab" not in said
+
+
+def test_the_heartbeat_pings_while_kelvin_watches_and_stops_when_it_doesnt():
+    from labharness.notify import Notifier
+    pinged = []
+    n = Notifier(ping=pinged.append)
+    alive = [True]
+    n.alive = lambda: alive[0]
+    with pytest.raises(ValueError, match="heartbeat"):
+        n.configure(None, heartbeat="ftp://example.org")
+    n.configure(None, heartbeat="https://hc-ping.com/abc", heartbeat_s=60)
+    import time
+    end = time.time() + 5
+    while not pinged and time.time() < end:
+        time.sleep(0.05)
+    assert pinged == ["https://hc-ping.com/abc"] and n.heartbeat_s == 60   # at once, then every minute
+    alive[0] = False                                                  # the monitor stopped: no more pings
+    assert n.test() == "heartbeat: not pinged: Kelvin isn't watching the lab" and len(pinged) == 1
+    n.configure(None)                                                 # off
+    assert n.heartbeat is None
+
+
+def test_the_settings_keep_email_heartbeat_and_how_long_a_request_waits(tmp_path):
+    pytest.importorskip("starlette")
+    from labharness.web.settings import Settings
+    s = Settings(tmp_path / "settings.json")
+    assert s.email() is None and s.approval_wait_s == 3600 and s.heartbeat_s == 300   # email off; an hour; 5 min
+    s.update({"smtp_host": "smtp.example.edu", "smtp_to": "pi@example.edu", "smtp_user": "lab",
+              "smtp_password": "hunter2", "smtp_security": "SSL", "heartbeat": "https://hc-ping.com/abc",
+              "heartbeat_minutes": "15", "approval_wait": "off"})
+    mail = s.email()
+    assert mail.host == "smtp.example.edu" and mail.security == "ssl" and mail.port == 465 and mail.password == "hunter2"
+    assert s.approval_wait_s == 0 and s.heartbeat_s == 900
+    public = s.public()
+    assert public["email"]["host"] == "smtp.example.edu" and public["keys"]["smtp_password"] == "settings"
+    assert "hunter2" not in str(public) and "hc-ping" not in str(public)   # secrets are never shown
+    with pytest.raises(ValueError, match="port"):
+        s.update({"smtp_port": "twenty"})
+    with pytest.raises(ValueError, match="heartbeat"):
+        s.update({"heartbeat": "hc-ping.com/abc"})

@@ -211,7 +211,7 @@ def test_notifier_sends_only_what_the_user_chose():
         raise OSError("no route to host")
 
     n = Notifier(post=broken)
-    assert n.test() == "no webhook set"
+    assert n.test() == "no webhook, email or heartbeat set"
     n.configure("https://ntfy.sh/topic")
     assert n.test() == "could not reach the webhook: no route to host"
 
@@ -257,7 +257,7 @@ def test_portal_watches_alarms_and_notification_settings(runtime, tmp_path):
         state = client.get("/api/state", headers=headers).json()
         assert {"watches", "alarms", "notices"} <= set(state)
         assert client.get("/api/settings", headers=headers).json()["settings"]["notify_kinds"] == ["alarm", "run"]
-        assert client.post("/api/notify/test", json={}, headers=headers).json()["result"] == "no webhook set"
+        assert client.post("/api/notify/test", json={}, headers=headers).json()["result"] == "no webhook, email or heartbeat set"
         bad = client.post("/api/settings", json={"webhook": "javascript:alert(1)"}, headers=headers)
         assert bad.status_code == 400 and "http" in bad.json()["error"]
         secret = "https://ntfy.sh/kelvin-private-topic-123"

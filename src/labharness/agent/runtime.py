@@ -350,6 +350,9 @@ class LabRuntime:
                 "approval", "Approval needed: " + r["title"], (r.get("items") or [""])[0]))
         if hasattr(approver, "where"):   # each card says where it acts: SIMULATOR or REAL HARDWARE
             approver.where = self.where
+        if hasattr(approver, "escalate"):   # nobody answers at the computer: people away from it are asked
+            approver.escalate = self._escalate
+        self.notifier.alive = lambda: self.monitor.watching()   # the heartbeat: Kelvin is there, watching the lab
         vetoes = getattr(approver, "vetoes", None)
         if vetoes is not None:   # a cancelled call asks nobody: no one is left to act on a yes
             vetoes.append(lambda: ClientCall.CANCELLED if getattr(getattr(self._client, "call", None), "cancelled",
@@ -3892,6 +3895,22 @@ class LabRuntime:
 
     WATCHES = "watches.json"   # the person's and the agent's watches, by lab, next to the queue
     ALARMS = "alarms.json"     # the latest alarms, on or cleared
+
+    def _escalate(self, request: Dict[str, Any]) -> bool:
+        """A request nobody answered at the computer (WebApprover.escalate): it goes to people away from it as an
+        alarm (the Kelvin app on a paired phone, email, a webhook) and waits for their answer, instead of being
+        declined after a few minutes and ending the night's queue. False when Kelvin can reach nobody away from the
+        computer: then it is declined, as before."""
+        if not self.notifier.reaches_away("alarm"):
+            return False
+        until = time.strftime("%H:%M", time.localtime(request.get("until") or time.time()))
+        self.gate.log.write("approval_escalated", by="kelvin", request=request.get("title"), until=until)
+        self.notifier("alarm", "Waiting for your answer: %s" % request.get("title"),
+                      "Nobody answered at the Kelvin computer. Kelvin waits until %s for an answer from your phone (the "
+                      "Kelvin app) or the computer; then it declines%s. Asked: %s" % (
+                          until, ", and the queue pauses there" if self.queue.state in ("running", "pausing") else "",
+                          "; ".join(request.get("items") or [])[:300]))
+        return True
 
     def _monitor_said(self, kind: str, title: str, text: str = "") -> Any:
         """The monitor raised or cleared an alarm: kept with the alarm history, then told to people."""

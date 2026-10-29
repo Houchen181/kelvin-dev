@@ -5005,6 +5005,12 @@
     }));
   }
 
+  // a select's option for a stored value, added when the value is one the list doesn't offer
+  function pickOption(select, value, label) {
+    if (![...select.options].some((o) => o.value === value)) select.append(h("option", { value }, label(value)));
+    select.value = value;
+  }
+
   function openSettings() {
     settingsPage(store("lh.settingsPage") || "models");
     showZoom();
@@ -5055,6 +5061,12 @@
     $("update-status").textContent = updateText(S.update);
     const kinds = (S.settings && S.settings.notify_kinds) || ["alarm", "run"];
     for (const c of document.querySelectorAll("#notify-kinds input")) c.checked = kinds.includes(c.value);
+    const mail = (S.settings && S.settings.email) || {};   // email notices; the password stays among the keys
+    $("smtp-host").value = mail.host || ""; $("smtp-port").value = mail.port || ""; $("smtp-user").value = mail.user || "";
+    $("smtp-from").value = mail.from || ""; $("smtp-to").value = mail.to || ""; $("smtp-security").value = mail.security || "starttls";
+    pickOption($("heartbeat-minutes"), String((S.settings && S.settings.heartbeat_minutes) || 5), (v) => "Every " + v + " minutes");
+    const wait = S.settings && S.settings.approval_wait !== undefined ? S.settings.approval_wait : 60;
+    pickOption($("approval-wait"), wait ? String(wait) : "off", (v) => "After 5 minutes, ask your phone and wait " + v + " minutes more");
     $("allow-notify").hidden = !("Notification" in window) || Notification.permission !== "default";
     $("settings-msg").textContent = "";
     renderGlobalNotes(null);
@@ -5259,6 +5271,11 @@
     body.ask_folder = $("ask-folder").checked ? "on" : "off";
     body.report_kinds = [...document.querySelectorAll("#report-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
     body.notify_kinds = [...document.querySelectorAll("#notify-kinds input")].filter((c) => c.checked).map((c) => c.value).join(",") || "none";
+    body.smtp_host = $("smtp-host").value.trim(); body.smtp_port = $("smtp-port").value.trim();
+    body.smtp_security = $("smtp-security").value; body.smtp_user = $("smtp-user").value.trim();
+    body.smtp_from = $("smtp-from").value.trim(); body.smtp_to = $("smtp-to").value.trim();
+    body.heartbeat_minutes = $("heartbeat-minutes").value;
+    body.approval_wait = $("approval-wait").value;
     if (S.claudeCode) { body.claude_code = $("cc-on").checked ? "on" : "off"; body.claude_code_path = $("cc-path").value.trim(); }
     body.updates = $("updates").value;
     $("settings-msg").textContent = "Saving…";
