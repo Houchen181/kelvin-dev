@@ -47,7 +47,7 @@ from .. import rundata
 from ..virtual_lab import (build_lab, builtin_ids, builtin_registry, collection_ids, is_simulated, kelvin_ids,
                            lab_registry, open_home_lab)
 from .agent import Busy, ChatAgent, runs_in, typed_stop
-from . import review, rules as rulebook
+from . import labops, review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
 from .qr import QR
@@ -55,7 +55,7 @@ from .relay import RelayLink
 from .remote import (API as PHONE_API, ROLES, Remote, addresses, allow_through_firewall, allowed, firewall_state,
                      pairing_link, remote_host_ok)
 from .providers.base import Provider
-from .settings import Settings
+from .settings import Settings, default_model
 from .store import ChatStore
 
 log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/kelvin.log
@@ -296,18 +296,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return accounts.data_dir(session["user"]) if accounts is not None and session["user"] else default_data
 
     async def card_model() -> str:
-        """The model that writes cards: the default one, else the first real (not demo) model there is."""
-        key = settings.get("default_model") or ""
-        if key and not key.startswith("demo:"):
-            try:
-                agent.provider_for(key)
-                return key
-            except ValueError:
-                pass
-        for g in (await agent.models())["groups"]:
-            if g["provider"] != "demo" and g["models"]:
-                return g["models"][0]["key"]
-        raise ValueError("no model to write the card with: add an API key in Settings")
+        """The model that writes cards: the default one (Settings' choice, else Claude Sonnet), never the demo."""
+        keys = [m["key"] for g in (await agent.models())["groups"] if g["provider"] != "demo" for m in g["models"]]
+        key = default_model(keys, agent.model_key(settings.get("default_model") or ""))
+        if key:
+            return key
+        raise ValueError("no model to write the card with: add an API key in Settings → Models")
+
+    def defaults_of(models: Dict[str, Any]) -> Dict[str, Any]:
+        """The model new chats start with (Settings' choice while it is offered, else Claude Sonnet:
+        settings.default_model) and what Automatic stands for now, which Settings shows."""
+        keys = [m["key"] for g in models["groups"] for m in g["models"]]
+        return {"default_model": default_model(keys, agent.model_key(settings.get("default_model") or "")),
+                "auto_model": default_model(keys)}
 
     def ask_model(system: str, prompt: str) -> Any:
         """Ask the card model from a worker thread (the providers live on the server's event loop)."""
@@ -463,21 +464,17 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
 
     async def bootstrap(request: Request) -> Response:
         models = await agent.models()
-        keys = [m["key"] for g in models["groups"] for m in g["models"]]
-        default = settings.get("default_model")
-        if default not in keys:
-            default = next((k for k in keys if k.startswith("anthropic:")), keys[0] if keys else None)
-        return JSONResponse({
+        return JSONResponse(dict(defaults_of(models), **{
             "lab": runtime.lab.config.name,
             "simulated": all(i.simulated for i in runtime.lab.instruments.values()),
-            "chats": store.list(), "projects": store.projects(), "models": models, "default_model": default,
+            "chats": store.list(), "projects": store.projects(), "models": models,
             "settings": settings.public(), "active": agent.active, "answering": agent.answering(),
             "can_quit": on_quit is not None,
             "account": session_data(),
             "claude_code": claude_code_enabled(),
             "hub_sharing": HUB_SHARING,
             "update": update_summary(updater, settings.updates),
-        })
+        }))
 
     # ------------------------------------------------------------------ people (accounts.py)
 
@@ -1665,8 +1662,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 return error(400, str(e))
             if providers is None:
                 agent.providers = make_providers(settings, demo, signin)
-        return JSONResponse({"services": settings.service_views(), "presets": presets_view(),
-                             "models": await agent.models()})
+        models = await agent.models()
+        return JSONResponse(dict(defaults_of(models), services=settings.service_views(), presets=presets_view(),
+                                 models=models))
 
     async def service_view(request: Request) -> Response:
         try:
@@ -1675,7 +1673,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(404, e.args[0])
         if providers is None:
             agent.providers = make_providers(settings, demo, signin)
-        return JSONResponse({"services": settings.service_views(), "models": await agent.models()})
+        models = await agent.models()
+        return JSONResponse(dict(defaults_of(models), services=settings.service_views(), models=models))
 
     async def service_test(request: Request) -> Response:
         """Ask the service for its models with the key it has."""
@@ -1798,10 +1797,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         if len(manual) < 200:
             return error(400, "Paste the manual's command reference or the maker's example scripts (at least a few "
                               "commands or functions with their arguments).")
-        key = str(body.get("model") or settings.get("default_model") or "")
-        if not key:
-            groups = (await agent.models())["groups"]
-            key = next((m["key"] for g in groups for m in g["models"]), "")
+        key = str(body.get("model") or "")
+        if not key:   # the default model (Settings' choice, else Claude Sonnet)
+            key = defaults_of(await agent.models())["default_model"] or ""
         try:
             provider, model_id = agent.provider_for(key)
         except ValueError as e:
@@ -2230,7 +2228,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                         "answered_with": p.get("answered_with"), "manual": p.get("has_manual"),
                         "manual_pages": m.get("pages"), "manual_file": m.get("file"), "manual_from": m.get("url"),
                         "manual_title": inst.card.manual, "manual_url": inst.card.manual_url,
-                        "settings_at": p.get("settings_read_at")})
+                        "settings_at": p.get("settings_read_at"),
+                        "calibration": profiles.calibration_view(home, name)})   # Calibration… on its row
         return out
 
     def real_instrument(name: str) -> Any:
@@ -2568,7 +2567,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             said = [{"type": "note", "text": STOPPED}, {"type": "turn_end", "reason": "stopped"}]
             return Response("".join(json.dumps(e) + "\n" for e in said), media_type="application/x-ndjson",
                             headers={"Cache-Control": "no-store"})
-        model = str(body.get("model") or "")
+        model = agent.model_key(str(body.get("model") or ""))   # "sonnet" works as well as "claudecode:sonnet"
         try:
             attached = agent.check_attachments(chat_id, body.get("attachments"))
         except KeyError:
@@ -2741,6 +2740,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         data["answering"] = agent.answering()   # every chat answering now: the portal marks them
         data["wakes"], data["woke"] = agent.waker.view(), agent.waker.latest()
         data["ask_scripts"] = setup.first and settings.lab_scripts is None   # the first setup: the lab's scripts?
+        from ..cardlang import shown   # each card also as this person reads it (Settings → Display), for the phone too
+        data["pending"] = [shown(p, settings.card_language) for p in data.get("pending") or []]
         return JSONResponse(data)
 
     async def scripts_folder(request: Request) -> Response:
@@ -2784,7 +2785,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                 loop_ref["collection"].set()   # switched on: fetch it now
             agent.providers = make_providers(settings, demo, signin) if providers is None else providers
             relay_wake()   # phones through the hub may have been switched on or off
-        return JSONResponse({"settings": settings.public(), "models": await agent.models()})
+        models = await agent.models()
+        return JSONResponse(dict(defaults_of(models), settings=settings.public(), models=models))
 
     async def run_data(request: Request) -> Response:
         """What the browser needs to plot a run: axes (outer first), scalar columns, the last trace per
@@ -3003,6 +3005,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/runs/{run_id}/files/{name}/open", run_open, methods=["POST"]),
         Route("/api/runs/{run_id}/export", run_export),
         Route("/static/{name}", static),
+        # Help and the first-run checklist, ELN records, calibration, cards in the reader's language (labops.py)
+        *labops.routes(runtime, settings, home, lambda request: runtime.user or person(request)),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.agent = agent

@@ -100,8 +100,12 @@
       h("div", { class: "row" }, act("Got it", "", () => api("/api/alarms/" + a.id + "/ack", {}))))));
 
     const pending = (s.pending || []).map((r) => Object.assign({}, r, { seconds_left: Math.ceil(r.seconds_left / 30) * 30 }));
+    // a card in the language its person reads cards in (r.shown, cardlang.py); the English is the card itself
     if (changed("approvals", pending)) $("approvals").replaceChildren(...pending.map((r) => h("div", { class: "card ask" },
-      h("b", {}, (r.where ? "[" + r.where + "] " : "") + r.title), h("ul", {}, ...r.items.map((i) => h("li", {}, i))),
+      h("b", {}, ((r.shown || r).where ? "[" + (r.shown || r).where + "] " : "") + (r.shown || r).title),
+      h("ul", {}, ...(r.shown || r).items.map((i) => h("li", {}, i))),
+      r.shown ? h("details", { class: "muted" }, h("summary", {}, "English"), h("p", {}, r.title),
+        h("ul", {}, ...r.items.map((i) => h("li", {}, i)))) : null,
       h("p", { class: "muted" }, "about " + (r.seconds_left > 90 ? Math.round(r.seconds_left / 60) + " min" : r.seconds_left + " s") + " left to answer"),
       h("div", { class: "row" },
         me && me.role !== "watch" ? act("Approve", "primary", async () => {

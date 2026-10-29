@@ -1056,3 +1056,34 @@ body.resizing .plot-svg { pointer-events: none; }
 .pin-dialog { border: 1px solid var(--border, #ccc); border-radius: 10px; padding: 16px; max-width: 22rem; }
 .pin-dialog input { width: 100%; margin: 8px 0; font-size: 18px; letter-spacing: .2em; }
 .pin-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* lab-ops basics (labops.py): Help, the first-run checklist, calibration on an instrument's row, cards in another
+   language */
+.checklist-box { margin-top: 22px; text-align: left; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px;
+  background: var(--panel); }
+.help .checklist-box { margin-top: 4px; }
+.check-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13.5px; }
+.check-list { list-style: none; margin: 6px 0 0; padding: 0; }
+.check-item { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.check-item:first-child { border-top: 0; }
+.check-mark { flex: 0 0 18px; height: 18px; border-radius: 50%; border: 1.5px solid var(--line-strong); display: inline-grid;
+  place-items: center; font-size: 11px; line-height: 1; align-self: center; }
+.check-item.done .check-mark { background: var(--ok); border-color: var(--ok); color: #fff; }
+.check-body { flex: 1 1 auto; display: grid; gap: 1px; min-width: 0; overflow-wrap: anywhere; }
+.check-item > button { flex: none; white-space: nowrap; }
+.check-item.done .check-body b { font-weight: 550; color: var(--muted); }
+.help-results { display: grid; gap: 10px; max-height: 46vh; overflow: auto; margin-bottom: 10px; }
+.help-passage { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: var(--panel); }
+.help-passage .md { font-size: 13.5px; }
+.help-topics { display: grid; gap: 8px; }
+.help-doc { display: grid; gap: 2px; font-size: 13px; }
+.help-links { display: flex; flex-wrap: wrap; gap: 2px 12px; }
+.cal-state { font-size: 12px; color: var(--muted); }
+.cal-state.soon { color: var(--warn); }
+.cal-state.overdue { color: var(--danger); font-weight: 600; }
+.cal-editor { flex: 1 1 100%; display: grid; gap: 6px; margin-top: 6px; padding: 10px; border-radius: 10px;
+  background: var(--accent-soft); border: 1px solid var(--line); }
+.cal-editor .hint { margin: 0 0 2px; }
+.cal-row { display: flex; flex-wrap: wrap; gap: 8px 12px; }
+.cal-field { display: grid; gap: 2px; font-size: 13px; font-weight: 400; flex: 1 1 140px; }
+.approval-title .card-lang { font-size: 11.5px; margin-left: 6px; white-space: nowrap; }

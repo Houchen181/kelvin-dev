@@ -7,11 +7,14 @@
                           each time Kelvin connects
         manual.pdf        the maker's manual, fetched once from the address on the card (or put there by hand)
         manual.txt        its text, page by page, which search_manual looks through
+        calibration.json  every calibration a person recorded: when, due again, the certificate, the serial number
+        certificates/     the certificates' files, when a person added them
 
 Kelvin reads these when it plans an involved scan (buffers, triggers, sweep modes, ranges), so it works from the
 instrument's own manual rather than from memory. Fetching a manual sends only its address to the maker's site."""
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import math
@@ -341,3 +344,161 @@ def prepare(home: Any, lab: Any, lock: Any, found: Optional[Dict[str, Dict[str, 
                 entry["manual"] = "not fetched: " + _first_line(e)
         report[name] = entry
     return report
+
+
+# ------------------------------------------------------------------ calibration
+# Each instrument's calibration as a person records it (in the portal: Lab, Set up…, Calibration… on its row): when it
+# was calibrated, when it is due again, the certificate (its number, and its file when there is one) and the serial
+# number it is for. health_check says when one is out of date or due soon, an approval card when one is out of date,
+# and a run's ELN record which one was in force. Every record is kept, oldest first, in the instrument's folder.
+
+CALIBRATION = "calibration.json"
+CERTIFICATES = "certificates"
+DUE_SOON_DAYS = 30
+CERT_MAX = 20 * 1024 * 1024
+CERT_KINDS = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def _date(value: Any, what: str) -> str:
+    try:
+        return datetime.date.fromisoformat(str(value or "").strip()[:10]).isoformat()
+    except ValueError:
+        raise ValueError("%s must be a date, YYYY-MM-DD." % what)
+
+
+def calibrations(home: Any, name: str) -> List[Dict[str, Any]]:
+    """Every calibration recorded for the instrument, oldest first."""
+    data = _read_json(folder(home, name) / CALIBRATION)
+    return [r for r in data.get("records") or [] if isinstance(r, dict) and r.get("due")]
+
+
+def calibration(home: Any, name: str) -> Dict[str, Any]:
+    """The calibration recorded last ({} while there is none)."""
+    records = calibrations(home, name)
+    return dict(records[-1]) if records else {}
+
+
+def record_calibration(home: Any, name: str, due: Any, calibrated: Any = "", certificate: str = "", by: str = "",
+                       serial: str = "", provider: str = "", note: str = "", file: str = "",
+                       today: Optional[datetime.date] = None) -> Dict[str, Any]:
+    """A person's record of a calibration: ValueError for dates that can't be (due before it was calibrated, a
+    calibration in the future). The serial number is the instrument's own (its identity) unless given."""
+    today = today or datetime.date.today()
+    record: Dict[str, Any] = {"due": _date(due, "The due date")}
+    if str(calibrated or "").strip():
+        record["calibrated"] = _date(calibrated, "The calibration date")
+        if record["calibrated"] > today.isoformat():
+            raise ValueError("The calibration date is in the future.")
+        if record["calibrated"] > record["due"]:
+            raise ValueError("It would be due again before it was calibrated: check the dates.")
+    serial = str(serial or "").strip() or _serial(home, name)
+    for key, value, limit in (("certificate", certificate, 200), ("serial", serial, 100), ("provider", provider, 200),
+                              ("note", note, 500), ("file", file, 200), ("by", by, 200)):
+        value = " ".join(str(value or "").split())[:limit]
+        if value:
+            record[key] = value
+    record["recorded"] = datetime.datetime.now().isoformat(timespec="seconds")
+    _write_json(folder(home, name) / CALIBRATION, {"records": calibrations(home, name) + [record]})
+    return record
+
+
+def save_certificate(home: Any, name: str, filename: str, data: bytes) -> str:
+    """Keep a calibration certificate (a PDF, or a picture of it) in the instrument's folder; the name it is kept as."""
+    ext = Path(str(filename or "")).suffix.lower()
+    if ext not in CERT_KINDS:
+        raise ValueError("A certificate must be a PDF, PNG or JPEG file.")
+    if len(data) > CERT_MAX:
+        raise ValueError("A certificate can be up to %d MB." % (CERT_MAX // 2 ** 20))
+    if ext == ".pdf" and not data.startswith(b"%PDF"):
+        raise ValueError("That file isn't a PDF.")
+    stem = re.sub(r"[^\w.-]+", "_", Path(filename).stem).strip("._")[:60] or "certificate"
+    target = folder(home, name) / CERTIFICATES / ("%s-%s%s" % (datetime.date.today().isoformat(), stem, ext))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, target)
+    return target.name
+
+
+def certificate_path(home: Any, name: str, file: str) -> Path:
+    """A kept certificate, by the name its record gives; KeyError for anything else."""
+    base = folder(home, name) / CERTIFICATES
+    if not re.fullmatch(r"[\w.-]+", str(file or "")) or str(file).startswith(".") or not (base / file).is_file():
+        raise KeyError("no certificate %r for %s" % (file, name))
+    return base / file
+
+
+def calibration_state(record: Dict[str, Any], today: Optional[datetime.date] = None,
+                      serial_now: str = "") -> Dict[str, Any]:
+    """Where a calibration stands: state none, ok, soon (due within DUE_SOON_DAYS) or overdue, with the days to go
+    (negative: past), in words; "serial" when the instrument reports another serial number than the record's."""
+    if not record or not record.get("due"):
+        return {"state": "none", "words": "no calibration on record"}
+    today = today or datetime.date.today()
+    days = (datetime.date.fromisoformat(record["due"]) - today).days
+    cert = " (certificate %s)" % record["certificate"] if record.get("certificate") else ""
+    if days < 0:
+        out = {"state": "overdue", "days": days, "words": "out of date since %s%s" % (record["due"], cert)}
+    elif days <= DUE_SOON_DAYS:
+        out = {"state": "soon", "days": days, "words": "due %s, in %d day%s%s" % (
+            record["due"], days, "" if days == 1 else "s", cert)}
+    else:
+        out = {"state": "ok", "days": days, "words": "%sdue %s%s" % (
+            "calibrated %s, " % record["calibrated"] if record.get("calibrated") else "", record["due"], cert)}
+    if serial_now and record.get("serial") and serial_now.strip().lower() != str(record["serial"]).strip().lower():
+        out["serial"] = "the calibration on record is for serial %s, but it reports serial %s" % (
+            record["serial"], serial_now)
+    return out
+
+
+def _serial(home: Any, name: str) -> str:
+    """The serial number the instrument gave in its identity reply when Kelvin last connected ("" unknown)."""
+    return str((info(home, name).get("parsed") or {}).get("serial") or "")
+
+
+def calibration_notes(home: Any, names: Iterable[str], today: Optional[datetime.date] = None) -> List[str]:
+    """For health_check: each instrument whose calibration is out of date or due soon, or on record for another
+    serial number. A note, never a failure: the instrument works, and its readings say what they say."""
+    out = []
+    for name in names:
+        st = calibration_state(calibration(home, name), today, _serial(home, name))
+        if st["state"] == "overdue":
+            out.append("%s calibration %s: its readings may have drifted; recalibrate it, or record the new "
+                       "calibration (Lab, Set up…, Calibration…)" % (name, st["words"]))
+        elif st["state"] == "soon":
+            out.append("%s calibration %s" % (name, st["words"]))
+        if st.get("serial"):
+            out.append("%s: %s" % (name, st["serial"]))
+    return out
+
+
+def card_lines(home: Any, names: Iterable[str], today: Optional[datetime.date] = None) -> List[str]:
+    """For an approval card: the instruments it names whose calibration is out of date, or on record for another
+    serial number (cardlang.py translates these lines)."""
+    out = []
+    for name in names:
+        record = calibration(home, name)
+        st = calibration_state(record, today, _serial(home, name))
+        if st["state"] == "overdue":
+            out.append("Calibration out of date: %s was due %s%s" % (
+                name, record["due"], " (certificate %s)" % record["certificate"] if record.get("certificate") else ""))
+        if st.get("serial"):
+            out.append("Calibration on record is for serial %s; %s reports serial %s" % (
+                record["serial"], name, _serial(home, name)))
+    return out
+
+
+def calibration_at(home: Any, name: str, when: datetime.datetime) -> Dict[str, Any]:
+    """The calibration in force at a moment (a run's start): the last one recorded by then, with where it stood that
+    day ({} when none was)."""
+    stamp = when.isoformat(timespec="seconds")
+    then = [r for r in calibrations(home, name) if str(r.get("recorded") or "") <= stamp]
+    return dict(then[-1], state=calibration_state(then[-1], when.date())) if then else {}
+
+
+def calibration_view(home: Any, name: str, today: Optional[datetime.date] = None) -> Dict[str, Any]:
+    """For the portal: the latest record and where it stands, and how many were recorded before it."""
+    records = calibrations(home, name)
+    last = records[-1] if records else {}
+    return {"record": last, "earlier": max(0, len(records) - 1),
+            "state": calibration_state(last, today, _serial(home, name))}

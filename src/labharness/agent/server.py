@@ -470,6 +470,20 @@ def build_server(rt: LabRuntime) -> MCPServer:
         speculation."""
         return rt.make_report(runs, day, last, title, summary, format, kind=kind, device=device, pages=pages)
 
+    @server.tool(annotations=ACT, structured_output=False)   # writes a file in the data folder, never an instrument
+    def export_eln(runs: Optional[List[str]] = None, day: str = "", last: int = 0) -> str:
+        """A run's or a day's record for an electronic lab notebook, as Markdown with its figures (PNG): what ran,
+        who approved it, the conditions and each instrument's calibration at its start, the results and fits, the
+        assessment, what it left on, the plan; a day's adds that day's lab record. Runs by id, a day (YYYY-MM-DD,
+        today, yesterday) or the last N (default the latest run). Written by code from the runs, never retyped."""
+        from .. import eln
+        try:
+            return eln.answer(eln.export(rt, runs, day, last, "agent"))
+        except (KeyError, ValueError) as e:
+            return "no record: %s" % (e.args[0] if e.args else e)
+        except OSError as e:
+            return "no record: could not write it (%s)" % e
+
     @server.tool(annotations=READ, structured_output=False)
     def scan_instruments() -> str:
         """Find instruments connected to this computer (GPIB, USB, LAN, serial) and match them to cards. It only

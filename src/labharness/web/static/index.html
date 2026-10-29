@@ -103,6 +103,9 @@
         <button id="sign-out" class="link soft" type="button" title="Sign out, so someone else can sign in">Sign out</button>
       </div>
       <div class="lab-chip" title="The lab this portal controls"><span class="dot on"></span><span id="lab-name">Lab</span><span id="sim-tag" class="tag" hidden>simulated</span></div>
+      <button id="open-help" class="side-btn subtle" type="button" title="Help: how Kelvin works, where things are, and what to set up first">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .9-1 1.6v.4M12 17h.01"/></svg>Help
+      </button>
       <button id="open-settings" class="side-btn subtle" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings
       </button>
@@ -147,6 +150,7 @@
         <h1 id="greeting">What are we measuring today?</h1>
         <p id="empty-sub" class="muted"></p>
         <div id="suggestions" class="suggestions"></div>
+        <div id="checklist-box" class="checklist-box" hidden></div>
       </section>
       <div id="thread" class="thread" aria-live="polite"></div>
     </div>
@@ -635,6 +639,14 @@
             <span id="zoom-hint" class="hint">The whole window, everything in it bigger or smaller: also Ctrl + and Ctrl −, or Ctrl and the mouse wheel; Ctrl 0 goes back to 100%. Yours: it follows you when you sign in on this computer.</span>
             <span id="zoom-browser" class="hint" hidden>In a browser, use the browser's own zoom: Ctrl + and Ctrl − (⌘ on a Mac), Ctrl 0 for 100%.</span>
           </div>
+          <div class="field">
+            <label for="card-language">Approval cards in</label>
+            <select id="card-language" name="card_language">
+              <option value="">English, as Kelvin writes them</option>
+              <option value="zh-Hans" lang="zh-Hans">简体中文 (Simplified Chinese)</option>
+            </select>
+            <span class="hint">Cards are translated as they are shown, here and on your phone. Names, numbers, units and values stay as Kelvin wrote them, a line Kelvin can't translate stays in English, and <b>English</b> on each card shows the original. The lab's record keeps English. Yours: it follows you when you sign in on this computer.</span>
+          </div>
         </section>
         <section class="set-page" data-page="updates" hidden>
           <h3 class="set-title">Updates</h3>
@@ -816,6 +828,11 @@
         <label class="check"><input type="radio" name="report-format" value="both"> Both</label>
       </div>
     </div>
+    <div class="field">
+      <span class="field-label">For a lab notebook (ELN)</span>
+      <div class="key-row"><input id="eln-day" type="date" aria-label="The day"><button id="eln-day-go" class="btn small" type="button">Download the day's record</button></div>
+      <span class="hint">That day's runs and the lab's record (approvals, stops, alarms, changes) as Markdown with the plots, in a .zip to paste or upload into your notebook. A single run's is in the Runs pane, under its data. A copy stays in the data folder's eln folder.</span>
+    </div>
     <div id="report-files" class="report-files" hidden></div>
     <footer class="dialog-foot">
       <span id="report-msg" class="muted small"></span>
@@ -823,6 +840,30 @@
       <button class="btn" value="cancel" type="submit">Close</button>
       <button id="make-report" class="btn primary" type="button">Make report</button>
     </footer>
+  </form>
+</dialog>
+
+<dialog id="help-dialog" class="dialog help" aria-labelledby="help-dialog-title">
+  <form id="help-form" method="dialog">
+    <header class="dialog-head">
+      <h2 id="help-dialog-title">Help</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div class="field">
+      <div class="key-row"><input id="help-q" type="search" placeholder="What do you want to know? e.g. change an instrument's limits" aria-label="Search Kelvin's help"><button id="help-go" class="btn small primary" type="button">Search</button></div>
+      <span class="hint">From Kelvin's own documentation, the same pages Kelvin reads when you ask it (kelvin_help). You can also just ask in a chat.</span>
+    </div>
+    <div id="help-results" class="help-results" hidden></div>
+    <div class="field">
+      <span class="field-label">Getting started</span>
+      <div id="help-checklist" class="checklist-box"></div>
+    </div>
+    <div class="field">
+      <span class="field-label">All topics</span>
+      <div id="help-topics" class="help-topics"></div>
+    </div>
   </form>
 </dialog>
 

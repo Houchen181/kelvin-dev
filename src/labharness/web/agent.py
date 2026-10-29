@@ -238,6 +238,7 @@ DEFERRED = {
     "watching readings": ["watch", "unwatch", "watches"],
     "pulse boards and sequences": ["run_on_board", "show_sequence"],
     "SQL on the catalog of runs": ["query_runs"],
+    "a lab notebook (ELN) record of a run or a day": ["export_eln"],
 }
 DEFERRED_NAMES = {n for names in DEFERRED.values() for n in names}
 MAX_FOUND = 10
@@ -259,6 +260,7 @@ BESIDE_THE_LAB = {"queue_add", "queue_edit", "queue_change", "queue_pause", "que
 # call at a time across chats, filed under its own chat, as the gate's approvals are the lab's
 OFF_LAB = LOOKUPS | READINGS | BESIDE_THE_LAB | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe",
                                                  "save_paper", "make_report", "write_file", "measurement_chain"}
+OFF_LAB |= {"export_eln"}   # reads kept runs and the record, writes its own folder (eln.py)
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
 LOOKUPS |= ANALYSIS
@@ -408,15 +410,9 @@ REPORT_SCOPE = (" In this portal, with no runs, day or last chosen, the report c
 
 
 def describe_error(provider: Provider, e: Exception) -> str:
-    status = getattr(e, "status_code", None)
-    if status == 401 or "Authentication" in type(e).__name__:
-        return "%s rejected the API key. Check it in Settings." % provider.label
-    if status == 404 or "NotFound" in type(e).__name__:
-        return "%s does not offer that model to this key." % provider.label
-    if status == 429 or "RateLimit" in type(e).__name__:
-        return "%s is rate-limiting this key. Wait a moment and try again." % provider.label
-    text = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
-    return "%s error: %s" % (provider.label, text[:300])
+    """A model service's failure in plain words: a missing, wrong or expired key, no credit, a limit (modelerrors.py)."""
+    from .modelerrors import describe
+    return describe(provider.label, provider.name, e)
 
 
 class ChatAgent:
@@ -894,11 +890,19 @@ class ChatAgent:
     # ------------------------------------------------------------------ turns
 
     def provider_for(self, model_key: str) -> Tuple[Provider, str]:
-        provider_name, _, model_id = str(model_key or "").partition(":")
+        model_key = self.model_key(model_key)
+        provider_name, _, model_id = model_key.partition(":")
         provider = self.providers.get(provider_name)
-        if provider is None or not provider.available() or not model_id:
-            raise ValueError("That model is not available. Add its API key in Settings.")
+        if provider is None or not provider.available() or not model_id:   # says which: no key, no sign-in, no name
+            from .modelerrors import unavailable
+            raise ValueError(unavailable(model_key, self.providers))
         return provider, model_id
+
+    def model_key(self, model_key: str) -> str:
+        """A model as the services name it, also from its name alone ("sonnet", "claude-sonnet-5-5"): to the Claude
+        API key when there is one, else to Claude Code (settings.resolve_model)."""
+        from .settings import resolve_model
+        return resolve_model(str(model_key or ""), lambda s: s in self.providers and self.providers[s].available())
 
     def label(self, model_key: str) -> str:
         provider = self.providers.get(str(model_key).partition(":")[0])
@@ -906,6 +910,7 @@ class ChatAgent:
 
     def claim(self, chat_id: str, model_key: str) -> Provider:
         self._may_start(chat_id)
+        model_key = self.model_key(model_key)   # the caller passes the same key to run_turn: model_key() it first
         provider, _ = self.provider_for(model_key)
         self.check_model(self.store.load(chat_id), model_key, "Pick one of the allowed models.")   # KeyError: no chat
         self.turns[chat_id] = _Turn({"chat_id": chat_id, "model": model_key})
@@ -1265,8 +1270,8 @@ class ChatAgent:
                                     note=request.note or None)
         if not go:
             return "declined: Claude did not use the computer%s" % (" (%s)" % request.note if request.note else ""), True
-        model = (self.active or {}).get("model") or ""
-        alias = model.split(":", 1)[1] if model.startswith("claudecode:") else "opus"
+        from .settings import bridge_alias
+        alias = bridge_alias((self.active or {}).get("model") or "")   # the chat's Claude model, else Sonnet
         config = provider.cwd / "screen-mcp.json"
         command = [sys.executable, "--screen-mcp"] if getattr(sys, "frozen", False) else \
             [sys.executable, "-m", "labharness.screen"]
@@ -1376,6 +1381,7 @@ class ChatAgent:
         """A second opinion on the chat's latest answer, kept with it; the main model sees it with the next message."""
         if chat_id in self.turns:
             raise Busy("Wait until Kelvin has finished answering.")
+        model_key = self.model_key(model_key)
         provider, model_id = self.provider_for(model_key)
         chat = self.store.load(chat_id)
         self.check_model(chat, model_key)
@@ -1394,6 +1400,7 @@ class ChatAgent:
     async def recheck_review(self, chat_id: str, model_key: str) -> Dict[str, Any]:
         """Another model checks the findings of the second opinion on the chat's latest answer, against the lab's
         records: the ones it confirms become sure, the ones it refutes are dropped. Kept with the answer."""
+        model_key = self.model_key(model_key)
         provider, model_id = self.provider_for(model_key)
         chat = self.store.load(chat_id)
         self.check_model(chat, model_key)
@@ -1494,7 +1501,7 @@ class ChatAgent:
 
     def claim_compare(self, chat_id: str, model_keys: List[str]) -> List[Tuple[str, Provider, str]]:
         self._may_start(chat_id)
-        keys = list(dict.fromkeys(str(k) for k in model_keys if k))
+        keys = list(dict.fromkeys(self.model_key(str(k)) for k in model_keys if k))
         if not 2 <= len(keys) <= MAX_LANES:
             raise ValueError("Pick two or three different models to compare.")
         lanes = [(k,) + self.provider_for(k) for k in keys]

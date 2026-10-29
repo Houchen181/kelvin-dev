@@ -30,7 +30,7 @@ SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key", "smtp_passw
 SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
-                     "answer_words", "phone_relay", "ask_folder", "text_size",
+                     "answer_words", "phone_relay", "ask_folder", "text_size", "card_language", "checklist",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all",
                      "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
@@ -46,6 +46,60 @@ APPROVAL_WAIT_MINUTES = 60   # a request nobody answered at the computer waits t
 HEARTBEAT_MINUTES = 5        # minutes between heartbeat pings
 MAX_RECENT_FOLDERS = 8   # chats' folders the folder menu offers again
 TEXT_SIZES = (0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)   # the desktop window's zoom, each person's own
+CARD_LANGUAGES = ("zh-Hans",)   # approval cards shown in another language (cardlang.py); "" is English, as written
+
+# The model a chat starts with when nobody chose one under Settings → Models → Default model for new chats: Claude
+# Sonnet, through a Claude API key, else through the Claude Code on this computer. It was silently Opus (F3 #25), the
+# slowest and dearest, for every first chat. A person who wants another picks it there.
+DEFAULT_MODELS = ("anthropic:claude-sonnet-5-5", "claudecode:sonnet")
+# Claude's models named without their service, as Claude Code takes them ("sonnet") or by their id alone
+# ("claude-sonnet-5-5"): F3 #25 found "claudecode:sonnet" needed in some places while "sonnet" worked in others
+CLAUDE = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "haiku": "claude-haiku-5-5",
+          "fable": "claude-fable-5-1"}
+BRIDGE = {"claude-sonnet-5-5": "sonnet", "claude-opus-5-5": "opus", "claude-haiku-5-5": "haiku"}   # Claude Code's
+
+
+def default_model(keys: List[str], chosen: Optional[str] = "") -> Optional[str]:
+    """The model a new chat starts with, of the keys the services offer now: the one chosen in Settings while it is
+    offered, else Claude Sonnet (DEFAULT_MODELS), else the first real model, else the scripted demo (None: none)."""
+    if chosen and chosen in keys:
+        return chosen
+    for key in DEFAULT_MODELS:
+        if key in keys:
+            return key
+    real = [k for k in keys if not k.startswith("demo:")]
+    return (real or list(keys) or [None])[0]
+
+
+def resolve_model(key: str, available: Any) -> str:
+    """A model key as the services know it ("anthropic:claude-sonnet-5-5"), from one written as people and Claude Code
+    write it: "sonnet", "claude-sonnet-5-5", "anthropic:sonnet", "claudecode:claude-sonnet-5-5". A bare Claude model
+    goes to the Claude API key when there is one, else to Claude Code. available(service): is it set up here? Anything
+    else comes back as it was (the caller says why it can't be used)."""
+    text = str(key or "").strip()
+    service, colon, model = text.partition(":")
+    if not colon:   # no service named: a Claude model's name or id alone
+        model, service = text, ""
+    low = model.lower()
+    full = CLAUDE.get(low, low if low in CLAUDE.values() else "")
+    if not full:
+        return text
+    if service == "anthropic" or (not service and available("anthropic")):
+        return "anthropic:" + full
+    if (service == "claudecode" or not service) and full in BRIDGE and (service or available("claudecode")):
+        return "claudecode:" + BRIDGE[full]
+    return text
+
+
+def bridge_alias(model_key: str) -> str:
+    """The Claude Code model for a job Claude Code does for a chat (operate_computer): the chat's own Claude model,
+    else Sonnet (it was Opus, unasked)."""
+    service, _, model = str(model_key or "").partition(":")
+    if service == "claudecode" and model:
+        return model
+    if service == "anthropic":
+        return BRIDGE.get(model, "sonnet")
+    return BRIDGE[DEFAULT_MODELS[0].partition(":")[2]]
 
 
 def _text_size(value: str) -> str:
@@ -255,6 +309,10 @@ class Settings:
                 value = "on" if value.lower() in ("on", "true", "1", "yes") else ""
             if name == "text_size":  # the desktop window's zoom (desktop.py), as a factor
                 value = _text_size(value)
+            if name == "card_language":  # approval cards shown in this language (cardlang.py); "" English, as written
+                value = value if value in CARD_LANGUAGES else ""
+            if name == "checklist":  # the first-run checklist on the start screen: shown until hidden
+                value = "hidden" if value.lower() in ("hidden", "hide", "off", "false", "0", "no") else ""
             if name == "ask_folder":  # the folder picker opens for each new chat (desktop app): on unless off
                 value = "off" if value.lower() in ("off", "false", "0", "no") else ""
             if name == "learn":  # Kelvin may save notes from conversations; only "off" is stored
@@ -363,6 +421,8 @@ class Settings:
             "report_kinds": self.report_kinds,
             "ask_folder": self._user.get("ask_folder") != "off",
             "text_size": float(_text_size(str(self._user.get("text_size") or 1)) or 1),
+            "card_language": self.card_language,
+            "checklist": self._user.get("checklist") != "hidden",
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
             "claude_code_path": self._user.get("claude_code_path", ""),
@@ -404,6 +464,12 @@ class Settings:
         if value == "off":
             return 0
         return int(value) if value and value.isdigit() else ANSWER_WORDS
+
+    @property
+    def card_language(self) -> str:
+        """The language this person reads approval cards in ("" English, as Kelvin writes them; cardlang.py)."""
+        value = str(self._user.get("card_language") or "")
+        return value if value in CARD_LANGUAGES else ""
 
     @property
     def idle_off_minutes(self) -> int:
