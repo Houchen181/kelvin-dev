@@ -399,6 +399,35 @@ def test_an_instrument_approved_up_front_is_not_asked_again_however_it_is_spelle
     assert scriptrun.lab_name is real_lab_name
 
 
+def test_a_serial_port_approved_up_front_is_not_asked_again_however_it_is_spelled(lab, folder, tmp_path):
+    write(folder, "ports.py", """
+        import pyvisa, serial
+        rm = pyvisa.ResourceManager()
+        try:
+            port = serial.Serial("COM9", 9600, timeout=1)
+        except RuntimeError as e:
+            print("opened as usual:", e)   # the test's fake pyserial: it really tried to open it itself
+        try:
+            tty = serial.Serial("/dev/ttyUSB9", 9600, timeout=1)
+        except RuntimeError as e:
+            print("opened as usual:", e)
+        try:
+            dev = rm.open_resource("ASRL%d::INSTR" % (4 + 5))   # COM9 again, worked out as it runs
+            dev.query("*IDN?")
+        except RuntimeError as e:
+            print("opened as usual:", e)
+    """)
+    gate, request, report = run(lab, folder, tmp_path, "ports.py")   # one answer: the run's approval
+    assert "It also opens serial://COM9" in str(request) and "It also opens serial:///dev/ttyUSB9" in str(request)
+    assert "ASRL9" not in str(request)
+    assert len(gate.approver.requests) == 1
+    out = output(report)
+    assert "opened as usual: the test's fake pyserial has no ports (COM9)" in out
+    assert "opened as usual: the test's fake pyserial has no ports (/dev/ttyUSB9)" in out
+    assert "opened as usual: the test's fake pyvisa has no instruments (ASRL9::INSTR)" in out
+    assert report.status == "done", report.message
+
+
 def test_a_makers_library_is_named_in_the_approval_or_asked_about_before_it_is_imported(lab, folder, tmp_path):
     (tmp_path / "fakes" / "zhinst").mkdir()
     (tmp_path / "fakes" / "zhinst" / "__init__.py").write_text("")

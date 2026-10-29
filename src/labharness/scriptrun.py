@@ -798,8 +798,9 @@ class ScriptRun:
                  busy: Optional[Callable[[str], None]] = None):
         self.gate, self.lab, self.prep = gate, gate.lab, prep
         self.store, self.grants, self.meta, self.folder = store, grants, dict(meta or {}), folder
-        # unknown addresses (as VISA resources, however the script spells them) and libraries a person allowed
-        self.allowed = {canonical(a) if lab_scripts.is_address(a) else a for a in allowed}
+        # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
+        # is the script's COM5 or ASRL5::INSTR), and makers' libraries, by name
+        self.allowed = {a if a in OPAQUE else canonical(a) for a in allowed}
         self.busy = busy or (lambda text: None)
         self.token = secrets.token_hex(16)
         self.stopping: Optional[str] = None  # why the run is stopping
