@@ -291,6 +291,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     nobody = home / "lab"                                 # the record of what happens while nobody is signed in
 
     def user_default_data() -> Path:
+        if accounts is None and runtime.lab_folder is not None:   # this lab's own folder (labfolders.py)
+            return lab_data_folder(home, runtime.lab, runtime.lab_info, record=False)
         return accounts.data_dir(session["user"]) if accounts is not None and session["user"] else default_data
 
     async def card_model() -> str:
@@ -3032,6 +3034,18 @@ def suggested_name() -> str:
         return ""
 
 
+def lab_data_folder(home: Path, lab: Any, info: Optional[Dict[str, Any]] = None, key: Optional[str] = None,
+                    record: bool = True) -> Path:
+    """The folder a lab keeps its data in when nobody chose one: virtual-lab for the virtual lab, else its own,
+    named after it (labfolders.py). info: the lab's open_home_lab info (its kind and config file)."""
+    from .. import labfolders
+    info = info or {}
+    virtual = info.get("kind") == "virtual" if info.get("kind") else all(i.simulated for i in lab.instruments.values())
+    where = info.get("path") or key
+    return labfolders.folder_for(home, lab.config.name, virtual, str(Path(where).resolve()) if where else None,
+                                 record=record)
+
+
 def data_folder_for(settings: Settings, home: Path, default: Optional[Path] = None) -> Any:
     """The data folder the user chose in Settings, if Kelvin can write there now; otherwise the default, and why."""
     default = default or home / "virtual-lab"
@@ -3084,10 +3098,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     accounts = None if (args.no_accounts or args.data_dir) else Accounts(home)   # people sign in (accounts.py)
     if accounts is not None:
         data_dir, problem = home / "lab", None   # until someone signs in
-    else:
-        data_dir, problem = (Path(args.data_dir), None) if args.data_dir else data_folder_for(settings, home)
+    else:   # a data folder chosen in Settings, else the lab's own (and the next lab's, when the lab changes)
+        data_dir, problem = (Path(args.data_dir), None) if args.data_dir else data_folder_for(
+            settings, home, None if settings.get("data_dir") else lab_data_folder(home, lab, info, args.lab))
     runtime = LabRuntime(lab, WebApprover(timeout=args.approval_timeout), data_dir, envelope)
     runtime.data_problem = problem
+    if accounts is None and not args.data_dir:
+        runtime.lab_folder = lambda new, about: None if settings.get("data_dir") else lab_data_folder(home, new, about)
     if info:
         runtime.lab_info = info
     if accounts is not None:

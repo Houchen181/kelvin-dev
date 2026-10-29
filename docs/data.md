@@ -72,7 +72,7 @@ wait: 300                                                          # then wait 5
 
 ## Your data
 
-Every run is saved as it is measured, with nothing to click, in the folder of the chat that started it (see [Each chat's folder](#each-chats-folder)). It gets its own folder there, named by date, time and plan, such as `20261018-015328-gate_sweep/`, which holds:
+Every run is saved as it is measured, with nothing to click, in the folder of the chat that started it (see [Each chat's folder](#each-chats-folder)). It gets its own folder there, named by date, time and plan, such as `20261018-015328-gate_sweep/` (a plan's name longer than 40 characters is cut, with a short code of the whole, so a folder fits in Windows' 260-character paths), which holds:
 - `run.h5`: the run's data, in one HDF5 file. It holds every point, trace and camera frame, every instrument setting at the start and at the end, the plan as it ran, the automatic fits, and a short card saying what the run is.
 - `report.pdf` and `report.pptx`: the scan report, written as soon as the run ends (see [Reports](#reports)).
 
@@ -106,9 +106,23 @@ run.h5
 
 Kelvin keeps it up to date by itself. It lets the AI answer questions across all your runs, such as "every field sweep on D3 below 2 K last month", without opening each one. Any SQLite tool opens it too. It is only an index: the runs stay the record, and if `catalog.sqlite` is deleted, Kelvin builds it again.
 
-**Asking about your data in a chat.** Kelvin's AI finds runs (`find_runs`, or `query_runs` for anything its filters can't ask), reads a run's card (`describe_run`), and reads or computes numbers (`get_run_data`, `compute`):
+**Asking about your data in a chat.** Kelvin's AI finds runs (`find_runs`, or `query_runs` for anything its filters can't ask), reads a run's card (`describe_run`) and where it came from (`run_provenance`), and reads or computes numbers (`get_run_data`, `compute`):
 - **Selecting points:** both reading tools take a condition, `where: smu.V > 1 and tc.T < 5`.
 - **`compute` works without writing code:** `lockin.X / smu.I` (a resistance), `deriv(lockin.X, smu.V)`, `mean(smu.I)`. It only does arithmetic on the run's columns.
+
+**Where a run came from, and who did what.** Kelvin's AI reads these rather than guessing:
+- **`run_provenance`:** the plan as it ran; who started it and when (this computer's clock, never the simulated lab's); every setting at the start and the end, with what the plan left changed or couldn't read; the measurement chain; each approval it needed and who gave it (their account, and portal or phone); and the stops, trips and alarms while it ran.
+- **`lab_activity`:** the lab record between two times (a date, a time, today, or "2h" ago), each line with who: a signed-in person and where they answered, Kelvin's AI, a queue or a plan. It reads the lab's instrument log, everyone's, where there is one.
+
+**A device's measurement chain** says what sits between the instruments and the sample, so a run says it whatever changes later:
+```yaml
+excitation: {source: iac.amplitude, form: peak}   # a 6221's AC amplitude is its peak; a lock-in's sine out is rms
+readings: {li_xx.X: {gain: 100, name: R_xx}}       # a preamplifier's gain before the instrument
+notes: 10 MOhm bias resistor on the sine out       # or series_resistor: 10e6 under excitation
+```
+- **Kept** in the data folder (`chains.json`), per device, or for the setup itself (`setup`), which a device without one of its own uses. Kelvin records it when a person says how the sample is wired (`measurement_chain`), and never assumes peak or rms.
+- **Stamped into every run** of the device (its record in `run.h5`), with the excitation worked out from the run's own setting: 50 nA peak is 35.4 nA rms.
+- **Reports plot the named readings as the sample's resistance** (V / gain / I_rms, in ohms), saying how in the caption.
 
 **Runs saved by Kelvin 0.3.19 or earlier** (`data.jsonl`, `meta.json`, `plan.yaml`, `data.csv`...). At its first start after the update, Kelvin writes each one as `run.h5` and moves its old files into `legacy/` in the run's folder. Nothing is deleted.
 
@@ -116,12 +130,13 @@ Next to the run folders sit `events.jsonl`, your record of every command, readin
 
 **When you uninstall Kelvin:** the Windows uninstaller deletes Kelvin's own data and keeps your measurements.
 - **Deleted:** settings and API keys, the ChatGPT sign-ins (revoked with OpenAI first), the accounts, chats, projects and memory, the lab config, your instrument cards, the instrument folders with their manuals, the manuals Kelvin kept, what it installed for instruments (its environments in `~/Kelvin/env`, and uv and their Pythons in `~/Kelvin/tools`), the log and the window's cache. Everyone's.
-- **Kept:** every run folder, `events.jsonl` and `reports/`, in `~/Kelvin/virtual-lab`, in each person's `~/Kelvin/users/<name>/data` and in any data folder someone chose; and the lab's instrument log. A note in `~/Kelvin`, "About this folder.txt", says what is there. Installing Kelvin again shows those runs again.
+- **Kept:** every run folder, `events.jsonl` and `reports/`, in `~/Kelvin/virtual-lab`, in each lab's `~/Kelvin/labs/<lab>`, in each person's `~/Kelvin/users/<name>/data` and in any data folder someone chose; and the lab's instrument log. A note in `~/Kelvin`, "About this folder.txt", says what is there. Installing Kelvin again shows those runs again.
 - **Only Kelvin's own items are deleted, by name.** Any other file you put in `~/Kelvin` stays.
 - **Kelvin must be closed:** the uninstaller waits until it is.
 - **On a Mac or from source:** run `/Applications/Kelvin.app/Contents/MacOS/Kelvin --remove-data` (from source: `python -m labharness.desktop --remove-data`) for the same clean-up, then delete the app.
 
 **Choosing the data folder:** these live in your own folder, `~/Kelvin/users/<you>/data` (for the first account, `~/Kelvin/virtual-lab`, where they were before accounts), until you choose another folder under **Settings → Data folder**. A lab server or a synced drive works:
+- **Without accounts** (`--no-accounts`), each lab keeps its own folder: the virtual lab `~/Kelvin/virtual-lab`, your instruments' lab `~/Kelvin/labs/<the lab's name>`, so real measurements never sit under virtual-lab. Switching labs switches folders, and nothing moves: the other folder's runs are still found by their ids, and its reports by their names. A lab that measured into `virtual-lab` with an older Kelvin keeps using it. `~/Kelvin/lab-folders.json` records each lab's folder, by its config file, so a renamed lab keeps its own. To move one by hand: close Kelvin, move the folder, and change its line in `lab-folders.json` (or choose the new place under Settings → Data folder, with **Move what is saved now**).
 - **Use this folder** switches at once. Kelvin checks first that it can write there. In the Kelvin app, **Choose…** opens the computer's folder picker.
 - **Move what is saved now** takes the existing runs, reports and record along (runs in chats' own folders stay there, and Kelvin keeps finding them). Nothing there is overwritten: a run whose name is taken stays where it was, and Kelvin says so.
 - **If the folder can't be written to when you sign in** (a network drive that is offline, say), Kelvin saves to your own folder meanwhile and tells you in Settings.
@@ -190,6 +205,8 @@ Work outside every project goes to a **General** project.
 
 **Reports of runs you choose.** For a different selection or your own words:
 - **In a chat:** "make a report of today's runs for my advisor". Kelvin's `make_report` covers the runs started in this conversation, or in all of the project's conversations, unless you name runs, a day, or the last N. It also rewrites a master or device report on request (`kind` project or device).
+- **The length you ask for:** "one page" (`pages: 1`) gives one page: the report leaves out detail, least needed first (the plans, the conditions tables and the lab log, then all but each run's result and first plot, then the runs as a table), and says it was shortened; each run's own report keeps the rest. A deck keeps the summary and each run's result slide.
+- **The fit you accept:** once a fit is chosen and the person agrees (`analyze_run` with `accept`), it is kept as the run's own in `run.h5`, with who accepted it and when, and the run's scan report is written again to show it (with its window and reduced chi-squared, where the fit has them).
 - **In the Runs pane:** **Report…** opens the library of every report above, and below it makes a report of this run, the project's or chat's runs, today's runs, or the last five. These go to `reports/custom/`.
 
 **Settings → Reports** chooses PDF, PowerPoint or both (the default), or **Only when I ask**, and which of the three kinds Kelvin keeps up to date. The data (`run.h5`) is always written. A report that can't be written never fails the run; the lab record notes it.

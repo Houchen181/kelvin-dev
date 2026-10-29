@@ -298,6 +298,9 @@ class LabRuntime:
         self.collection: Any = None             # the instrument collection (collection.py) while it is switched on
         self.setup_status: Dict[str, Any] = {"state": "idle"}   # setting up connected instruments (autosetup.py)
         self.data_problem: Optional[str] = None   # why the chosen data folder is not in use, if it is not
+        # the data folder a lab keeps its data in when nobody chose one (labfolders.py), given (lab, info); None
+        # leaves the folder as it is. The app sets it where no person or account has a folder of their own
+        self.lab_folder: Optional[Callable[[Lab, Dict[str, Any]], Optional[Path]]] = None
         self.scan_network = True                    # scans also look on the local network (a Settings switch)
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
@@ -3948,9 +3951,46 @@ class LabRuntime:
                 any(not re.fullmatch(r"[\w.-]+", p) or p.startswith(".") for p in parts):
             raise KeyError("no report %r" % name)
         path = self.reports_dir.joinpath(*parts)
-        if not path.is_file():
-            raise KeyError("no report %r" % name)
+        if not path.is_file():   # a report a lab made before it switched folders (labfolders.py): still found
+            from .. import labfolders
+            earlier = labfolders.all_folders(self.home) if self.home is not None else []
+            path = next((p for p in (f / "reports" / Path(*parts) for f in earlier) if p.is_file()), None)
+            if path is None:
+                raise KeyError("no report %r" % name)
         return path
+
+    def _follow_lab_folder(self, lab: Lab, info: Dict[str, Any], by: str) -> None:
+        """Switching labs, where nobody chose a data folder: the lab's own folder takes the runs, the record, the
+        reports and the queue from now on (labfolders.py). Nothing moves: the earlier folder's runs are still found
+        by their ids, and its reports by their names (report_path)."""
+        if self.lab_folder is None:
+            return
+        try:
+            new = self.lab_folder(lab, info)
+        except Exception:
+            return
+        if new is None or Path(new).resolve() == self.data_dir.resolve():
+            return
+        try:
+            new = writable_folder(new)
+        except ValueError as e:   # the lab's folder can't be written: its data stay where they are, said in Settings
+            self.data_problem = str(e)
+            return
+        old = self.data_dir
+        later = RunFolders(new)
+        for f in ([old / "runs"] if (old / "runs").is_dir() else []) + RunFolders(old).chat_folders():
+            later.remember(f)
+        self.gate.log.write("data_folder", by=by, moved_to=str(new), note="%s keeps its data there; what is here "
+                            "stays here" % lab.config.name)
+        self.data_dir = new
+        frames.FOLDER = new / "frames"
+        self.events_path = new / "events.jsonl"
+        self.queue = ScanQueue(new / "queue.json")   # each lab's queue in its own folder (the old one stays there)
+        if self.mounted:
+            (new / "mounted.json").write_text(json.dumps(self.mounted, indent=1), encoding="utf-8")
+        self._save_alarms()
+        self._new_log().write("data_folder", by=by, previous=str(old), lab=lab.config.name)
+        self.tidy_later()
 
     # ------------------------------------------------------------------ watching instruments
 
@@ -4324,6 +4364,7 @@ class LabRuntime:
                 except Exception:
                     pass
             self.lab = lab
+            self._follow_lab_folder(lab, info, by)
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
             self.engine = RunEngine(self.gate, self._store())
             self.engine.progress = self._on_progress

@@ -5,8 +5,9 @@ Removed, Kelvin's own:  settings and API keys, the ChatGPT sign-in (revoked with
                         manuals, the manuals Kelvin kept, what it installed for instruments (its environments, uv and
                         their Pythons), the app's log, lock file and window cache. With accounts, each person's too.
 Kept, your measurements: every run folder, the record of commands and approvals (events.jsonl) and reports, in
-                        ~/Kelvin/virtual-lab, in each person's ~/Kelvin/users/<name>/data and in any data folder
-                        chosen in Settings; the lab's instrument log (instrument-log.jsonl, and lab/events.jsonl).
+                        ~/Kelvin/virtual-lab, in each lab's ~/Kelvin/labs/<lab>, in each person's
+                        ~/Kelvin/users/<name>/data and in any data folder chosen in Settings; the lab's instrument log
+                        (instrument-log.jsonl, and lab/events.jsonl).
 
 Only items Kelvin itself makes are deleted, by name; anything else in the folder is left alone."""
 from __future__ import annotations
@@ -121,7 +122,9 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
             report["removed"].append(str(path))
         except OSError as e:
             report["failed"].append("%s (%s)" % (path, e.strerror or e))
-    report["kept"] = [str(d / n) for d in [data] + [p / "data" for p in people] for n in MEASUREMENTS if (d / n).exists()]
+    labs = sorted(p for p in (home / "labs").iterdir() if p.is_dir()) if (home / "labs").is_dir() else []
+    report["kept"] = [str(d / n) for d in [data] + labs + [p / "data" for p in people] for n in MEASUREMENTS
+                      if (d / n).exists()]
     report["kept"] += [str(p) for p in (home / "instrument-log.jsonl", home / "lab" / "events.jsonl") if p.exists()]
     report["kept"] += [c for c in chosen if Path(c).exists()]
     for folder in [data, home / "lab"] + people + [home / "users", home]:   # nothing left: no empty folders behind
@@ -137,6 +140,8 @@ def remove_data(home: Any, revoke: bool = True) -> Dict[str, List[str]]:
                  "                            the start and end, and the automatic analysis",
                  "  virtual-lab/events.jsonl  the lab record: every command, reading, approval and alarm",
                  "  virtual-lab/reports       PDF and PowerPoint reports"]
+        if labs:
+            lines += ["", "Each lab's own runs, record and reports are in labs/<lab>, the same way."]
         if people:
             lines += ["", "Each person's runs, record and reports are in users/<name>/data, the same way."]
         if (home / "instrument-log.jsonl").exists():

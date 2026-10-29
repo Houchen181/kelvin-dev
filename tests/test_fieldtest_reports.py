@@ -166,3 +166,66 @@ def test_an_accepted_fit_is_the_one_its_report_shows(tmp_path):
     assert "accepted by agent" in text and "the accepted fit" in text
     assert any(e["type"] == "fit_accepted" for e in rt.gate.log.events())
     assert "kept as" not in rt.analyze(run_id, "smu.I", "linear")   # looking again keeps nothing
+
+
+def test_each_lab_keeps_its_data_in_a_folder_named_after_it(tmp_path):
+    """F2 l05, l08, l09: a real lab's runs sat under ~/Kelvin/virtual-lab. The virtual lab keeps that folder; a lab
+    of real instruments gets its own, named after it, recorded so a renamed lab keeps it; nothing moves."""
+    from labharness import labfolders
+    home = tmp_path / "Kelvin"
+    assert labfolders.folder_for(home, "Virtual Lab", True) == home / "virtual-lab"
+    mine = labfolders.folder_for(home, "Confocal B114: emitters", False, key="C:/K/lab.yaml")
+    assert mine == home / "labs" / "Confocal_B114_emitters"
+    assert labfolders.folder_for(home, "Confocal B115", False, key="C:/K/lab.yaml") == mine   # renamed: same folder
+    other = labfolders.folder_for(home, "Confocal B114: emitters", False, key="D:/other/lab.yaml")
+    assert other == home / "labs" / "Confocal_B114_emitters_2"                                  # never shared
+    assert labfolders.safe_name("CON") == "lab_CON" and labfolders.safe_name("  ") == "lab"
+    assert set(labfolders.all_folders(home)) == {home / "virtual-lab", mine, other}
+
+
+def test_a_lab_that_measured_into_virtual_lab_keeps_it(tmp_path):
+    """An older Kelvin put a real lab's runs in virtual-lab: that lab goes on using it, so nothing it made moves."""
+    from labharness import labfolders
+    from labharness.eventlog import RunStore
+    home = tmp_path / "Kelvin"
+    rec = RunStore(home / "virtual-lab" / "runs").create("rt_check", {"plan": "rt_check"}, "agent")
+    rec.meta.update(lab="My lab", simulated=False)
+    rec.finish(status="done", points=0)
+    assert labfolders.folder_for(home, "My lab", False, key="k1") == home / "virtual-lab"
+    assert labfolders.folder_for(home, "Another lab", False, key="k2") == home / "labs" / "Another_lab"
+
+
+def test_switching_to_a_lab_switches_to_its_folder_and_old_links_still_work(tmp_path):
+    """The first-run set-up switches from the virtual lab to the person's own mid-session: from then on its runs go
+    to the lab's own folder, while the virtual lab's runs and reports are still found by their ids and names."""
+    from labharness.agent.runtime import LabRuntime
+    pytest.importorskip("mcp")
+    home = tmp_path / "Kelvin"
+    rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover([True] * 20), home / "virtual-lab", None)
+    rt.home = home
+    rt.run(SWEEP)
+    first = rt.runs_index(1)[0]["run_id"]
+    made = rt.make_report([first])
+    report = made.split("report: ")[1].split(" (")[0]
+    mine = home / "labs" / "My_lab"
+    rt.lab_folder = lambda lab, info: mine
+    rt.switch_lab(build_virtual_lab(seed=2), None, {"kind": "file", "path": str(home / "lab.yaml")}, "test")
+    assert rt.data_dir == mine and rt.events_path == mine / "events.jsonl"
+    rt.run(SWEEP)
+    assert (mine / "runs").is_dir() and len(list((mine / "runs").iterdir())) == 1                # new runs here
+    assert rt.runs.find(first) == home / "virtual-lab" / "runs" / first                         # old ones found
+    assert rt.report_path(report).is_file()                                                     # old report links
+    assert rt.describe_run(first).startswith("run:") or first in rt.describe_run(first)
+    assert (home / "virtual-lab" / "runs" / first / "run.h5").is_file()                         # nothing moved
+    events = (home / "virtual-lab" / "events.jsonl").read_text(encoding="utf-8")
+    assert '"type": "data_folder"' in events and str(mine).replace("\\", "\\\\") in events
+
+
+def test_the_app_names_a_real_labs_folder_after_it(tmp_path):
+    pytest.importorskip("starlette")
+    from labharness.web.app import lab_data_folder
+    home = tmp_path / "Kelvin"
+    lab = build_virtual_lab(seed=1)
+    assert lab_data_folder(home, lab, {"kind": "virtual", "path": str(home / "lab.yaml")}) == home / "virtual-lab"
+    lab.config.name = "My lab"
+    assert lab_data_folder(home, lab, {"kind": "file", "path": str(home / "lab.yaml")}) == home / "labs" / "My_lab"
