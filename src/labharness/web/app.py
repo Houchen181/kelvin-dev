@@ -1750,12 +1750,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, str(e))
         runtime.refresh_cards([card.id] + ([str(body["replace"])] if body.get("replace") else []))
         runtime.gate.log.write("card", by="human", card=card.id, status=card.status, file=path.name)
-        made = await asyncio.to_thread(runtime.config_changed, "human (portal)",
-                                       " ".join(str(body.get("why") or "").split())[:300], "card")
+        await asyncio.to_thread(runtime.config_changed, "human (portal)",
+                                " ".join(str(body.get("why") or "").split())[:300], "card")
         return JSONResponse({"id": card.id, "file": path.name, "status": card.status, "warnings": warnings,
                              "kelvins": card.id in builtin_ids(), "reconnect": sorted(
-                                 n for n, i in runtime.lab.instruments.items() if i.card.id == card.id),
-                             "versions": [v["n"] for v in made]})
+                                 n for n, i in runtime.lab.instruments.items() if i.card.id == card.id)})
 
     def card_before(card_id: str) -> Optional[str]:
         """The card a person's card of this id replaces, as text: the lab's own, else the one Kelvin uses for it
