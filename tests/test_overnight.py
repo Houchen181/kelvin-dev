@@ -433,3 +433,39 @@ def test_the_settings_keep_email_heartbeat_and_how_long_a_request_waits(tmp_path
         s.update({"smtp_port": "twenty"})
     with pytest.raises(ValueError, match="heartbeat"):
         s.update({"heartbeat": "hc-ping.com/abc"})
+
+
+# ---------------------------------------------------------------------------------------------- the morning's account
+
+
+def test_the_morning_summary_says_what_was_done_what_stopped_and_every_alarm(tmp_path):
+    """l09's morning summary came from the model: an unplug "when you replugged", a wrong set point, watches it said
+    were there. The queue now keeps its own account, from the record alone, and sends it when it ends."""
+    rt = runtime(tmp_path, [True])
+    rt.queue_add(SWEEP.format(name="first"))
+    rt.queue_add("plan: look\ntime: { every: 1, points: 3 }\nmeasure: [lockin.X]")
+    rt.queue_add(SWEEP.format(name="third"))
+    real = rt.lab.instruments["lockin"].backend.query
+    n = [0]
+
+    def dies(command):   # answers through the first scan, then stops
+        n[0] += 1
+        if rt.queue.items[0].status == "done":
+            raise TimeoutError("lockin: offline")
+        return real(command)
+    rt.lab.instruments["lockin"].backend.query = dies
+    run_queue(rt)
+    lines = rt.queue.last["lines"]
+    assert lines[0].startswith("The queue ran ") and " and paused: look: " in lines[0]
+    assert lines[1].startswith("Done: #1 first (3 points, run ")
+    assert lines[2].startswith("Stopped with no data: #2 look: ") and "lockin (Virtual Lock-in Amplifier) doesn't " \
+        "answer" in lines[2]
+    assert lines[3] == "Not run: #3 third"
+    assert lines[4].startswith("Alarms while it ran: ") and lines[4].count("doesn't answer") == 1 \
+        and lines[4].endswith("(still on)")
+    notice = rt.notifier.notices[-1]
+    assert notice["title"] == "Queue paused" and notice["text"].splitlines() == lines
+    text = rt.queue_show()
+    assert "last run:" in text and "  Not run: #3 third" in text
+    from labharness.scanqueue import ScanQueue
+    assert ScanQueue(rt.data_dir / "queue.json").last["lines"] == lines   # kept for the morning, across a restart

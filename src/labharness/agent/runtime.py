@@ -1770,10 +1770,12 @@ class LabRuntime:
                     break
                 q.mark(item, "running")
                 position = q.items.index(item) + 1
-            lost = self.monitor.mark()
+            lost, t0 = self.monitor.mark(), time.time()
             ok, message = self._queue_item(item, position, grants, by)
             if not ok:   # an instrument that stopped answering ended it: its alarm goes up now, with the pause
-                self.monitor.lost_since(lost)
+                self.monitor.lost_since(lost)   # and the pause says which alarm stopped it ("stop requested" doesn't)
+                said = [a.text for a in list(self.monitor.alarms) if a.raised >= t0 and a.text not in message]
+                message += "; alarm: " + "; ".join(said) if said else ""
             with q.lock:   # a person's stop of the scan is never an error to go on after
                 if not ok and q.state == "running" and (q.on_error == "pause" or item.status == "stopped"):
                     q.state, q.reason = "pausing", "%s: %s" % (item.name, message)
@@ -1787,10 +1789,17 @@ class LabRuntime:
                             by="kelvin (automatic)", folder=self.reports_dir / "queues")
             except Exception as e:
                 self.gate.log.write("report_failed", by="kelvin (automatic)", runs=len(ran), error=str(e)[:300])
-        if q.state == "idle":
-            self.notifier("run", "Queue finished", "%d items done" % done)
-        else:
-            self.notifier("run", "Queue paused", q.reason[:300])
+        # the morning's account, from the record alone: done, stopped part-way with its data, not run, every alarm
+        lines = q.summarize(started, list(self.monitor.alarms), self._run_points)
+        self.notifier("run", "Queue finished" if q.state == "idle" else "Queue paused", "\n".join(lines)[:1500])
+
+    def _run_points(self, run_id: str) -> Optional[Tuple[int, int]]:
+        """(points taken, points planned) of a run, from its record; None when it can't be read."""
+        try:
+            m = rundata.meta(self._run_dir(run_id))
+            return int(m.get("points") or 0), int(m.get("planned_points") or 0)
+        except Exception:
+            return None
 
     def _queue_item(self, item: Item, position: int, grants: Dict[str, Allowed], by: str) -> Tuple[bool, str]:
         """Run one item under the queue's approval. (ok, message)"""
