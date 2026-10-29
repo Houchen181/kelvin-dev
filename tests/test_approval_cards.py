@@ -218,3 +218,116 @@ def test_on_labsim_an_output_on_card_says_the_2400_now_sources_current(labsim_be
         assert lab.read("gate", "output") is False
     finally:
         lab.close()
+
+
+EXCITED = """
+plan: rxx_ac
+setup:
+  li_xx.reference: external
+  isrc.wave_function: sine
+  isrc.wave_frequency: 13.333
+  isrc.wave_amplitude: 1.0e-7
+  isrc.phase_marker: on
+  isrc.wave_start: run
+time: { every: 1, points: 4 }
+measure: [li_xx.X, li_xx.R]
+after: { isrc.wave_stop: run }
+"""
+
+
+def test_on_labsim_an_excitation_started_in_setup_is_on_the_runs_one_card(labsim_bench, tmp_path):
+    """l10: the excitation took three cards (amplitude, output on, start the waveform) before the run's own, which
+    didn't mention it. In the plan's setup it is one card, and the lock-in sees the sample."""
+    bench = labsim_bench("transport")
+    lab = labsim_lab(tmp_path, TRANSPORT)
+    try:
+        engine, gate, approver = labsim_engine(lab, [True], tmp_path)
+        report = engine.run(EXCITED)
+        assert report.ok, report.message
+        assert len(approver.requests) == 1
+        text = card(approver)
+        assert "isrc.wave_amplitude: now 2 pA, plan uses 100 nA; ramp 0.001 A/s" in text, text
+        assert "At the start: isrc.wave_start (Arm and start the waveform (output on)), which drives the sample" in text
+        assert "won't reach the sample" not in text         # the action switches the output on itself
+        assert "At the end it leaves isrc.wave_amplitude 100 nA; then it runs isrc.wave_stop" in text
+        assert report.rows[-1]["li_xx.R"] > 1e-5, report.rows      # locked to the 6221's phase marker
+        status = next(i["status"] for i in bench.ctl("status")["instruments"] if i["name"] == "isrc")
+        assert status["output"] is False and not status["wave"]["running"]     # stopped in its after step
+    finally:
+        lab.close()
+
+
+PPMS = """lab: labsim PPMS
+instruments:
+  ppms:
+    card: qd/multivu
+    address: "qd://127.0.0.1:5000"
+    limits: { T_set: [1.8, 400], B_set: [-9, 9], T_rate: [0.01, 20], B_rate: [1e-05, 0.01] }
+  isrc:
+    card: keithley/6221
+    address: "GPIB0::12::INSTR"
+    limits: { I: [-1e-05, 1e-05], compliance_V: [0.1, 10] }
+"""
+
+COOLDOWN = """
+plan: rt_cooldown
+setup: { ppms.T_rate: 20, ppms.T_set: 14, isrc.output: on, isrc.I: 1.0e-6 }
+time: { every: 5, points: 3 }
+measure: [ppms.T]
+after: { isrc.I: 0 }
+"""
+
+
+def test_on_labsim_a_ppms_cooldown_is_on_the_card_with_its_rate_and_time(labsim_bench, tmp_path):
+    """l03: the card of an R(T) run listed only the current source; the PPMS cooling to 14 K at 20 K/min, the run's
+    main action, wasn't on it because it was toward safe."""
+    labsim_bench("ppms", sdk=True)
+    lab = labsim_lab(tmp_path, PPMS)
+    try:
+        engine, gate, approver = labsim_engine(lab, [False], tmp_path)
+        assert engine.run(COOLDOWN).status == "declined"
+        text, title = card(approver), approver.requests[0].title
+        assert re.search(r"ppms\.T_set: now 30\d(\.\d+)? K, plan uses 14 K, toward its safe value; at 20 K/min \(the plan "
+                         r"sets ppms\.T_rate\), ~14\.\d min", text), text
+        assert "isrc.I: now 0 A, plan uses 0 … 1 µA; ramp 0.001 A/s" in text, text
+        assert re.match(r"Run plan rt_cooldown: 3 points, ~1[45]\.\d min$", title), title   # 286 K at 20 K/min
+        assert "At the end it leaves ppms.T_set 14 K and isrc.output on; back at safe: isrc.I 0 A" in text
+        assert lab.read("ppms", "T") > 250                 # declined: nothing moved
+    finally:
+        lab.close()
+
+
+PUMPPROBE = """lab: labsim pump-probe
+instruments:
+  delay:
+    card: newport/smc100
+    address: "ASRL6::INSTR"
+    limits: { position: [0, 25] }
+"""
+
+
+def test_on_labsim_a_delay_scan_on_a_draft_card_asks_once(labsim_bench, tmp_path):
+    """l06: on a draft stage card each step of an approved scan asked again (41 approvals)."""
+    import time
+    labsim_bench("pumpprobe")
+    lab = labsim_lab(tmp_path, PUMPPROBE)
+    try:
+        stage = lab.instruments["delay"]
+        stage.card.status = "draft"                        # the lab's own draft of the card, not yet reviewed
+        stage.act("home")                                  # homed earlier, at the start of the day
+        deadline = time.monotonic() + 20
+        while not str(stage.read("state")).startswith("ready") and time.monotonic() < deadline:
+            time.sleep(0.2)
+        engine, gate, approver = labsim_engine(lab, [True], tmp_path)
+        report = engine.run("plan: t0_coarse\nsweep: { delay.position: {from: 12.0, to: 12.4, step: 0.2} }\n"
+                            "measure: [delay.position_actual]\n")
+        assert report.ok, report.message
+        assert len(approver.requests) == 1, [str(r) for r in approver.requests]
+        text = card(approver)
+        assert "delay.position: now 0 mm, plan uses 12 … 12.4 mm; at 2.5 mm/s (delay.velocity, read now), ~5 s; " \
+               "Kelvin isn't sure about delay: its card is a draft" in text, text
+        assert abs(report.rows[-1]["delay.position_actual"] - 12.4) < 0.01
+        r = gate.set("delay", "position", 12.0)            # outside the plan, a draft card's setting asks again
+        assert r.action == "error" and "unexpected approval request" in r.message
+    finally:
+        lab.close()

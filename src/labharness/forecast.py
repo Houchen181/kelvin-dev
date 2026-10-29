@@ -399,10 +399,11 @@ class Forecast:
         and what is back at safe when it ends, and what its duration doesn't count."""
         lines: List[str] = []
         dark: Dict[str, List[str]] = {}
+        started = {key.split(".")[0] for key in self.driving_actions()}   # an action it runs may switch it on
         for key, change in self.drives().items():
             inst, spec = self.lab.resolve(key)
             switch = self.gate._switch_of(inst, spec)
-            if switch is None or not any(spec.distance(v) > 0 for v in change.values):
+            if switch is None or inst.name in started or not any(spec.distance(v) > 0 for v in change.values):
                 continue
             skey = "%s.%s" % (inst.name, switch.name)
             state = self.start(skey)
