@@ -180,6 +180,27 @@ def test_a_4_ns_pulse_shows_in_the_drawing():
     assert "→" in pulses.caption(seq) and "<script" not in svg
 
 
+def test_the_drawing_is_an_svg_a_browser_reads():
+    """The cards show it as <img src="data:image/svg+xml,...">: it must be well-formed XML, with everything inside
+    its own size, or the browser shows nothing."""
+    import xml.etree.ElementTree as ET
+    from urllib.parse import quote, unquote
+    ns = "{http://www.w3.org/2000/svg}"
+    for seq in (pulses.build("rabi", {"tau": 4e-9, "t_wait": 1e-3}), pulses.parse(XY8).build({"tau": 4e-6,
+                                                                                             "t_pi": 40e-9})):
+        svg = pulses.svg(seq)
+        root = ET.fromstring(svg)
+        assert root.tag == ns + "svg" and int(root.get("width")) == pulses.WIDTH
+        assert root.find(ns + "title").text.startswith("Timing of")
+        rects = root.findall(ns + "rect")[1:]                             # the pulses (the first is the paper)
+        assert len(rects) == sum(len(v) for v in seq.channels.values())
+        assert all(float(r.get("width")) > 0 and float(r.get("x")) + float(r.get("width")) <= pulses.WIDTH
+                   for r in rects)
+        assert all(0 < float(t.get("y")) < int(root.get("height")) for t in root.findall(ns + "text"))
+        url = "data:image/svg+xml;charset=utf-8," + quote(svg, safe="-_.!~*'()")   # as encodeURIComponent makes it
+        assert unquote(url.split(",", 1)[1]) == svg
+
+
 def test_the_edges_are_exact():
     seq = pulses.parse(ECHO).build({"tau": 2e-6, "t_pi": 1e-7})
     assert pulses.lines(seq) == ["laser: 2.22 µs → 5.22 µs", "mw: 0 → 50 ns, 1.05 µs → 1.15 µs, 2.15 µs → 2.2 µs",
