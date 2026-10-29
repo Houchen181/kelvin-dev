@@ -95,6 +95,13 @@ def test_a_cards_limits_safe_values_blocks_and_review_are_kept_apart():
         "mylab/heater P: limits narrowed, [0, 2] → [0, 1]": False}
     reviewed = CARD.replace("status: draft", "status: lab-verified")
     assert card_changes(CARD, reviewed)[0]["safety"]
+    other = reviewed.replace('set: "POW {value}"', 'set: "CURR {value}"')   # a reviewed card's outputs don't ask
+    assert changed(card_changes(reviewed, other)) == {"card mylab/heater: its commands or settings changed while it "
+                                                      "is marked lab-verified (whoever saves it vouches for it again)":
+                                                      True}
+    assert not any(c["safety"] for c in card_changes(CARD, CARD.replace('"POW {value}"', '"CURR {value}"')))
+    assert not any(c["safety"] for c in card_changes(reviewed, reviewed.replace("[0, 2]", "[0, 1]")
+                                                     .replace("Bench heater", "Bench heater, left")))
     assert not any(c["safety"] for c in card_changes(None, CARD))      # a new draft: each change on it asks
     assert card_changes(None, reviewed)[0]["safety"]                    # a new card, marked reviewed
     assert card_changes(reviewed, None)[0]["safety"]                    # Kelvin's own of that id may come back
@@ -432,7 +439,10 @@ def test_a_trainee_can_widen_nothing_and_the_owner_hears_of_what_others_widen(la
         shown = client.get("/api/config/history/%d" % n, headers=h).json()
         assert "+    limits: { V: [-8, 8] }" in shown["diff"] and shown["entry"]["account"] == "Ben"
         safety = client.get("/api/config/history?safety=1", headers=h).json()["entries"]
-        assert [e.get("what") or e.get("subject") for e in safety][:2] == ["lab.yaml", "the owner's safety notices go to Ada's notification settings"] or safety[0]["n"] == n
+        assert [e["n"] for e in safety] == [n, first["n"]]   # the PIN set, roles given: narrowing, so not these
+        assert {c["text"]: c["safety"] for c in first["changes"]} == {
+            "smu added (card keithley/2400 at GPIB0::24::INSTR; its limits count as reviewed)": True,
+            "lockin added (card srs/sr830 at GPIB0::8::INSTR; its limits count as reviewed)": True}
         r = client.post("/api/roles", headers=h, json={"roles": {"Ben": "owner"}, "pin": "2468"})
         assert r.status_code == 403 and "only the lab's owner" in r.json()["error"]
 
@@ -504,3 +514,60 @@ def test_kelvins_own_changes_are_kept_as_its_own(lab):
         top = client.get("/api/config/history", headers=h).json()["entries"][0]
         assert top["by"] == "Kelvin (agent)" and top["account"] == "Ada" and top["kind"] == "added"
         assert top["changes"][0]["text"].startswith("nvm added") and not top["safety"]   # Kelvin's mark: it asks
+
+
+def test_the_portal_asks_who_confirms_and_shows_the_history_and_the_roles():
+    from labharness.web.app import STATIC
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "function askApprover(why, names, pinSet)" in js and "data.approver && opts.body" in js
+    assert "e.data && e.data.approver" in js                            # a card not confirmed stays open
+    for id_ in ("history-dialog", "history-list", "lab-history", "roles-box", "roles-edit", "owner-notify-mine",
+                "lab-why"):
+        assert 'id="%s"' % id_ in page, id_
+    assert 'value="safety"' in page                                      # a person may tick safety changes too
+
+
+# ---------------------------------------------------------------------------------- on labsim
+
+from labsim_bench import labsim_bench  # noqa: E402,F401  (the fixture)
+
+TRANSPORT = """lab: labsim transport
+instruments:
+  gate:
+    card: keithley/2400
+    address: "GPIB0::24::INSTR"
+    limits: { V: [-5, 5], compliance_I: [1e-09, 1e-06] }
+"""
+
+
+def test_on_labsim_a_trainees_gate_voltage_waits_for_an_operator(labsim_bench, tmp_path):
+    """The field tests' student, on instruments Kelvin takes for real (labsim's transport bench): the gate's 2400
+    moves away from safe only once an operator confirms the trainee's yes, and the record says who confirmed it."""
+    labsim_bench("transport")
+    from labharness.virtual_lab import build_lab
+    (tmp_path / "lab.yaml").write_text(TRANSPORT, encoding="utf-8")
+    lab = build_lab(tmp_path / "lab.yaml", partial=True)
+    try:
+        assert lab.unavailable == {}, lab.unavailable
+        rt = LabRuntime(lab, WebApprover(timeout=20), tmp_path / "data")
+        acc, pin, roles = accounts_with_roles(tmp_path / "Kelvin")
+        rt.owner, rt.roles, rt.accounts = pin, roles, acc
+        pin.set("2468")
+        roles.set({"Ada": "owner", "Ben": "operator"}, pin, "2468", "Ada", acc)
+        rt.user = "Cy"
+        result = {}
+        t = threading.Thread(target=lambda: result.setdefault("r", rt.set("gate", "output", True)))
+        t.start()
+        entry = rt.approver.wait_for_pending(timeout=20)
+        assert entry is not None and "gate.output" in " ".join(entry["items"])
+        with pytest.raises(PermissionError, match="needs an operator"):
+            rt.answer(entry["id"], True, "human (portal)")
+        assert lab.read("gate", "output") is False                       # nothing moved on the trainee's yes alone
+        assert rt.answer(entry["id"], True, "human (portal)", approver={"name": "Ben", "password": "ben-pass"})
+        t.join(30)
+        assert "approved" in result["r"] and lab.read("gate", "output") is True, result
+        answer = [e for e in rt.gate.log.events() if e["type"] == "answer"][-1]
+        assert answer["account"] == "Cy" and answer["vouched"] == {"account": "Ben", "role": "operator"}
+    finally:
+        lab.close()

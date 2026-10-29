@@ -583,10 +583,27 @@ def card_changes(old_text: Optional[str], new_text: Optional[str]) -> List[Dict[
         out.append(_change("%s: no longer blocks %s" % (ident, b), True))
     for b in sorted(bb - ba):
         out.append(_change("%s: blocks %s" % (ident, b)))
-    if not out and old_text != new_text:
+    if sa != "draft" and sb != "draft" and _workings(old) != _workings(new):
+        # a reviewed card's outputs go out without asking each time: a changed command is a new review's
+        out.append(_change("card %s: its commands or settings changed while it is marked %s (whoever saves it "
+                           "vouches for it again)" % (ident, sb), True))
+    elif not out and old_text != new_text:
         out.append(_change("card %s: commands or descriptions changed (no limits, safe values, drives or blocked "
                            "commands)" % ident))
     return out
+
+
+def _workings(card: Dict[str, Any]) -> str:
+    """What a card makes Kelvin send and how it reads the answers: the card without its status, names and words for
+    people, and without what card_changes compares on its own (limits, rates, safe values, kinds, blocked commands;
+    narrowing those is safe)."""
+    def strip(d: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: v for k, v in d.items() if k not in ("label", "description", "limits", "max_rate", "safe", "kind")}
+    data = {k: v for k, v in card.items() if k not in ("status", "model", "vendor", "notes", "parameters")}
+    data["parameters"] = {p: strip(v) if isinstance(v, dict) else v for p, v in _map(card.get("parameters")).items()}
+    if isinstance(data.get("raw"), dict):
+        data["raw"] = {k: v for k, v in data["raw"].items() if k != "blocked"}
+    return json.dumps(data, sort_keys=True, default=str)
 
 
 def review_changes(old_text: Optional[str], new_text: Optional[str]) -> List[Dict[str, Any]]:

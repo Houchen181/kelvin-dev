@@ -77,7 +77,7 @@
     <p id="signin-msg" class="signin-msg" role="status"></p>
     <div id="signin-setup" class="signin-setup" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="signin-setup-text"></span></div>
     <div id="signin-busy" class="signin-busy" hidden><span id="signin-busy-text"></span><button id="signin-stop" class="btn small" type="button">Stop it</button></div>
-    <p id="signin-foot" class="muted small signin-foot">Everyone here is equal. Each person has their own chats, projects, memory, API keys, data folder and record. The instruments, their cards and the lab's instrument log are shared.</p>
+    <p id="signin-foot" class="muted small signin-foot">Each person has their own chats, projects, memory, API keys, data folder and record. The instruments, their cards and the lab's instrument log are shared, and the lab's owner may give people roles.</p>
     <p class="muted small signin-foot"><span id="central-hub-text">Accounts on this computer only.</span> <button id="central-hub-edit" class="link" type="button">Use a Kelvin hub</button></p>
   </div>
 </div>
@@ -444,6 +444,23 @@
               <button id="owner-pin-remove" class="link soft" type="button" hidden>Remove</button></div>
             <span id="owner-pin-state" class="hint"></span>
           </div>
+          <div id="roles-box" class="field" hidden>
+            <div class="field-row"><span class="field-label">Lab roles</span>
+              <button id="roles-edit" class="btn small" type="button">Give roles…</button></div>
+            <span id="roles-state" class="hint"></span>
+            <ul id="roles-list" class="roles-list" hidden></ul>
+            <div id="roles-actions" class="field-actions" hidden>
+              <button id="roles-save" class="btn small primary" type="button">Save roles</button>
+              <button id="roles-cancel" class="link soft" type="button">Cancel</button></div>
+            <span class="hint">Owner, operator or trainee: whoever has no role is a trainee. An operator or the owner confirms a trainee's yes on a request with their password (or the owner's PIN). Only an owner changes the roles, with the PIN.</span>
+          </div>
+          <div class="field">
+            <div class="field-row"><span class="field-label">Safety changes go to the owner</span>
+              <button id="owner-notify-mine" class="btn small" type="button">Where my notifications go</button>
+              <button id="owner-notify-off" class="link soft" type="button" hidden>Stop</button></div>
+            <span id="owner-notify-state" class="hint"></span>
+            <span class="hint">A limit widened, an interlock taken out, auto mode on, Hands on the sample unlocked, a card's limits changed: whoever does it, the owner hears of it. Kelvin keeps a copy of the owner's webhook and email settings for this, readable on this computer. <button id="history-open" class="link" type="button">Lab config history…</button></span>
+          </div>
           <h3 class="set-title">Instruments</h3>
           <p class="muted small">For everyone on this computer.</p>
           <div class="field">
@@ -542,6 +559,7 @@
               <label class="check"><input type="checkbox" value="alarm_cleared"> Alarms cleared</label>
               <label class="check"><input type="checkbox" value="approval"> Approvals waiting</label>
               <label class="check"><input type="checkbox" value="run"> Finished runs</label>
+              <label class="check"><input type="checkbox" value="safety"> Safety changes</label>
               <button id="notify-test" class="link soft" type="button">Send a test</button>
             </div>
             <span class="hint">Only what you tick goes to that address, which then holds lab details; use a private topic or channel.</span>
@@ -709,6 +727,7 @@
     </div>
     <div class="field">
       <div class="field-row"><label for="lab-yaml">Lab config</label>
+        <button id="lab-history" class="link soft" type="button">History…</button>
         <div id="lab-view" class="seg" role="group" aria-label="How to show the lab config" hidden>
           <button type="button" data-view="instruments">By instrument</button><button type="button" data-view="file">Whole file</button>
         </div></div>
@@ -716,6 +735,7 @@
       <div id="lab-entries" class="lab-entries" hidden></div>
       <span id="lab-rest" class="hint" hidden>Click an instrument to edit its part of the lab config. The lab's name, interlocks and watches are in Whole file.</span>
       <textarea id="lab-yaml" class="mono" rows="12" spellcheck="false" placeholder="Scan, or add an instrument by address, to start a lab config."></textarea>
+      <input id="lab-why" placeholder="Why this change? (kept with it in the lab config's history)" aria-label="Why this change">
       <span class="hint">Set limits to what your sample can take: Kelvin refuses anything beyond them and asks before driving harder. Lasers default to always asking.</span>
     </div>
     <ul id="lab-health" class="health-list" hidden></ul>
@@ -724,6 +744,34 @@
       <div class="spacer"></div>
       <button class="btn" value="cancel" type="submit">Close</button>
       <button id="lab-save" class="btn primary" type="button">Save and connect</button>
+    </footer>
+  </form>
+</dialog>
+
+<dialog id="history-dialog" class="dialog wide" aria-labelledby="history-dialog-title">
+  <form method="dialog">
+    <header class="dialog-head">
+      <h2 id="history-dialog-title">Lab config history</h2>
+      <button class="icon-btn" value="cancel" type="submit" aria-label="Close">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <p class="muted small">Every version of the lab config and of the lab's own cards, with who changed it, when and why, and each change to who may do what (auto mode, Hands on the sample, the roles, the PIN). <b>widens</b> marks what widened Kelvin's reach: the lab owner hears of it. <b>Roll back</b> puts an earlier version back as a change of its own, with the PIN where the change itself needs it.</p>
+    <div class="field-row history-filters">
+      <select id="history-subject" aria-label="What">
+        <option value="">Everything</option>
+        <option value="lab.yaml">The lab config</option>
+        <option value="cards">The lab's cards</option>
+        <option value="events">Auto mode, Hands on, roles</option>
+      </select>
+      <select id="history-who" aria-label="Who"><option value="">Anyone</option></select>
+      <label class="check"><input id="history-safety" type="checkbox"> Only what widened Kelvin's reach</label>
+    </div>
+    <ul id="history-list" class="history-list"></ul>
+    <footer class="dialog-foot">
+      <span id="history-msg" class="muted small"></span>
+      <div class="spacer"></div>
+      <button class="btn" value="cancel" type="submit">Close</button>
     </footer>
   </form>
 </dialog>

@@ -140,7 +140,7 @@ def routes(runtime: Any, settings: Any, accounts: Any, needs_owner: Callable[...
             if inst.card.id in ids and inst.card.id in runtime.lab.registry:
                 inst.card.status = runtime.lab.registry.get(inst.card.id).status
         made = await asyncio.to_thread(runtime.config_changed, by, why, "rollback", n)
-        return JSONResponse({"ok": True, "versions": [entry_view(v) for v in made], "reconnect": sorted(
+        return JSONResponse({"ok": True, "versions": [v["n"] for v in made], "reconnect": sorted(
             name for name, inst in runtime.lab.instruments.items() if inst.card.id in ids and subject != REVIEWS)})
 
     def roles_data() -> Dict[str, Any]:

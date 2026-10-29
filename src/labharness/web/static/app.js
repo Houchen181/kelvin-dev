@@ -96,6 +96,10 @@
         const pin = await askPin(msg);
         if (pin) return api(path, Object.assign({}, opts, { body: Object.assign({}, opts.body, { pin }) }));
       }
+      if (res.status === 403 && data && data.approver && opts.body) {   // a trainee's yes: an operator confirms it
+        const given = await askApprover(msg, data.approvers || [], data.pin_set);
+        if (given) return api(path, Object.assign({}, opts, { body: Object.assign({}, opts.body, given) }));
+      }
       const err = new Error(msg);
       err.data = data;
       throw err;
@@ -121,6 +125,35 @@
       input.focus();
     });
   }
+  // With the lab's roles (accounts.py LabRoles), a trainee's yes on a request needs an operator or the owner to
+  // confirm it here: their name and their account's password, or the owner's PIN. {approver} or {pin}; "" cancels.
+  function askApprover(why, names, pinSet) {
+    return new Promise((resolve) => {
+      const who = h("select", { "aria-label": "Who confirms" },
+        ...names.map((n) => h("option", { value: n }, n)),
+        pinSet ? h("option", { value: "" }, "The lab owner's PIN") : null);
+      const secret = h("input", { type: "password", autocomplete: "off", "aria-label": "Their password" });
+      const label = () => { secret.placeholder = who.value ? who.value + "'s password" : "Lab owner's PIN"; };
+      who.addEventListener("change", label);
+      label();
+      const cancel = h("button", { class: "btn", type: "button" }, "Cancel");
+      const form = h("form", { class: "pin-form" }, h("p", {}, why), who, secret,
+        h("div", { class: "pin-actions" }, cancel, h("button", { class: "btn primary", type: "submit" }, "Approve")));
+      const dlg = h("dialog", { class: "pin-dialog" }, form);
+      document.body.append(dlg);
+      const done = (v) => { if (dlg.open) dlg.close(); dlg.remove(); resolve(v); };
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const value = secret.value;
+        if (!value) return;
+        done(who.value ? { approver: { name: who.value, password: value } } : { pin: value.trim() });
+      });
+      cancel.addEventListener("click", () => done(""));
+      dlg.addEventListener("cancel", (e) => { e.preventDefault(); done(""); });
+      dlg.showModal();
+      secret.focus();
+    });
+  }
   async function ownerPinState() {
     try {
       const r = await api("/api/owner-pin");
@@ -141,6 +174,115 @@
     try { await api("/api/owner-pin", { body: { pin, old }, noPin: true }); toast(remove ? "PIN removed." : "PIN set."); }
     catch (e) { toast(e.message); }
     ownerPinState();
+    rolesState();
+  }
+
+  // ------------------------------------------------------------------ the lab's roles, the owner told, the history
+  // web/governance.py serves them; the rules are accounts.py's LabRoles and configversions.py's.
+  const ROLESUI = { data: null };
+  const AN = { owner: "an owner", operator: "an operator", trainee: "a trainee" };
+  async function rolesState() {
+    let r;
+    try { r = await api("/api/roles"); } catch (e) { $("roles-state").textContent = e.message; return; }
+    ROLESUI.data = r;
+    $("roles-box").hidden = !r.accounts;   // roles are people's: they need accounts
+    $("roles-state").textContent = r.on
+      ? "On" + (r.my_role ? ": you are " + AN[r.my_role] : "") + ". " + r.people.map((p) => p.name + ": " + p.role
+          + (p.given ? "" : " (no role given)")).join("; ") + "."
+      : "Off: everyone at this computer is equal." + (r.pin ? "" : " Roles need the lab owner's PIN.");
+    $("roles-edit").textContent = r.on ? "Change…" : "Give roles…";
+    $("roles-edit").disabled = !r.pin;
+    $("owner-notify-state").textContent = r.owner_notify.length
+      ? "To " + r.owner_notify.join(" and ") + ", and the list in the app."
+      : "Only to the list in the app. The owner can send them where their own notifications go (Notifications).";
+    $("owner-notify-off").hidden = !r.owner_notify.length;
+  }
+  function editRoles() {
+    const r = ROLESUI.data;
+    if (!r) return;
+    const rows = r.people.map((p) => {
+      const sel = h("select", { "aria-label": "Role of " + p.name }, h("option", { value: "" }, "no role"),
+        ...r.roles_list.map((x) => h("option", { value: x }, x)));
+      sel.value = r.roles[p.name] || "";
+      return { name: p.name, sel, el: h("li", { class: "role-row" }, h("span", {}, p.name), sel) };
+    });
+    $("roles-list").replaceChildren(...rows.map((x) => x.el));
+    $("roles-list").hidden = $("roles-actions").hidden = false;
+    $("roles-save").onclick = async () => {
+      const roles = {};
+      for (const x of rows) if (x.sel.value) roles[x.name] = x.sel.value;
+      try {
+        await api("/api/roles", { body: { roles } });
+        toast(Object.keys(roles).length ? "Roles saved: anyone without one is a trainee." : "Roles off: everyone is equal again.");
+        $("roles-list").hidden = $("roles-actions").hidden = true;
+      } catch (e) { toast(e.message); }
+      rolesState();
+    };
+  }
+  async function ownerNotify(use) {
+    try {
+      await api("/api/roles/notify", { body: { use } });
+      toast(use === "mine" ? "Safety changes now go where your notifications go." : "Safety changes go only to the list in the app.");
+    } catch (e) { toast(e.message); }
+    rolesState();
+  }
+
+  async function openHistory() {
+    $("history-dialog").showModal();
+    await loadHistory();
+  }
+  async function loadHistory() {
+    const q = new URLSearchParams();
+    for (const [key, id] of [["subject", "history-subject"], ["who", "history-who"]]) if ($(id).value) q.set(key, $(id).value);
+    if ($("history-safety").checked) q.set("safety", "1");
+    let r;
+    try { r = await api("/api/config/history?" + q); } catch (e) { $("history-msg").textContent = e.message; return; }
+    const who = $("history-who"), chosen = who.value;
+    who.replaceChildren(h("option", { value: "" }, "Anyone"), ...r.people.map((p) => h("option", { value: p }, p)));
+    who.value = chosen;
+    $("history-msg").textContent = r.entries.length ? "Kept in " + r.folder : "Nothing kept yet.";
+    $("history-list").replaceChildren(...r.entries.map(historyRow));
+  }
+  function historyRow(e) {
+    const person = e.account ? e.account + (e.role ? ", " + e.role : "") + " (" + e.by + ")" : e.by;
+    const what = e.type === "event" ? e.what
+      : e.title + (e.kind === "first" ? ", as Kelvin found it" : e.gone ? ", deleted" : "");
+    const li = h("li", { class: "hist" + (e.safety ? " widens" : "") },
+      h("div", { class: "hist-head" }, h("b", {}, "#" + e.n), h("time", {}, String(e.at || "").replace("T", " ").slice(0, 16)),
+        h("span", { class: "hist-what" }, what),
+        e.safety ? h("span", { class: "tag", title: "This widened Kelvin's reach: the lab owner hears of it" }, "widens") : null,
+        e.rollback ? h("span", { class: "tag" }, "back to #" + e.rollback) : null),
+      h("div", { class: "muted small" }, person),
+      (e.changes || []).length ? h("ul", { class: "hist-changes" },
+        ...e.changes.map((c) => h("li", { class: c.safety ? "widens" : "" }, c.text))) : null,
+      e.why ? h("div", { class: "muted small" }, "Why: " + e.why) : null);
+    if (e.type !== "version") return li;
+    const diff = h("pre", { class: "diff mono", hidden: true });
+    const show = h("button", { class: "link soft", type: "button" }, "Diff");
+    show.addEventListener("click", async () => {
+      if (!diff.hidden) { diff.hidden = true; return; }
+      try {
+        const d = await api("/api/config/history/" + e.n);
+        diff.replaceChildren(...(d.diff || "(no earlier version of it is kept)\n").split("\n").map((line) => h("span", {
+          class: /^\+(?!\+\+)/.test(line) ? "add" : /^-(?!--)/.test(line) ? "del" : line.startsWith("@@") ? "hunk" : null }, line + "\n")));
+        diff.hidden = false;
+      } catch (err) { toast(err.message); }
+    });
+    const back = h("button", { class: "link soft", type: "button" }, "Roll back to this…");
+    back.addEventListener("click", () => rollBack(e));
+    li.append(h("div", { class: "hist-actions" }, show, back), diff);
+    return li;
+  }
+  async function rollBack(e) {
+    const why = prompt("Put #" + e.n + " of the " + e.title + " back? It is kept as a new version. Why?", "");
+    if (why === null) return;
+    try {
+      const r = await api("/api/config/rollback", { body: { n: e.n, why } });
+      toast("Put #" + e.n + " back" + ((r.versions || []).length ? ", kept as #" + r.versions.join(", #") : "")
+        + ((r.reconnect || []).length ? ". Reconnect " + andList(r.reconnect) + " to use it." : "."));
+      pollState();
+    } catch (err) { toast(err.message); }
+    loadHistory();
   }
 
   // ------------------------------------------------------------------ who is using Kelvin (accounts)
@@ -1655,6 +1797,12 @@
         await api("/api/approvals/" + encodeURIComponent(ev.id), { body: { approve } });
         card.close(approve ? "Approved" : "Declined", approve);
       } catch (e) {
+        if (e.data && e.data.approver) {   // not confirmed by an operator: the request is still open
+          yes.disabled = no.disabled = false;
+          card.choice = undefined;
+          toast(e.message);
+          return;
+        }
         card.close("Already closed", false);
       }
     }
@@ -4128,7 +4276,7 @@
         }
         save.disabled = true;
         try {
-          const saved = await api("/api/instruments/" + encodeURIComponent(name) + "/limits", { body: { limits, reviewed: !r.reviewed && reviewed.checked } });
+          const saved = await api("/api/instruments/" + encodeURIComponent(name) + "/limits", { body: { limits, reviewed: !r.reviewed && reviewed.checked, why: why.value.trim() } });
           const now = new Map(saved.rows.map((x) => [x.param, x.lab]));
           for (const row of r.rows) row.lab = now.get(row.param) || null;
           const checked = saved.reviewed && !r.reviewed;
@@ -4141,7 +4289,8 @@
       const foot = h("div", { class: "lim-foot" });
       const tick = h("label", { class: "lim-review" }, reviewed, " I checked these for my sample: Kelvin may treat " + name + " like my other instruments");
       if (!r.reviewed) foot.append(tick);
-      foot.append(save, msg);
+      const why = h("input", { class: "lim-why", placeholder: "Why? (kept in the lab config's history)", "aria-label": "Why" });
+      foot.append(why, save, msg);
       box.append(foot);
     }
     li.append(box);
@@ -4916,7 +5065,10 @@
     try {
       await api("/api/approvals/" + encodeURIComponent(p.id), { body: { approve } });
       termLine(approve ? "approved" : "declined", approve ? "ok" : "warn");
-    } catch (e) { termLine(e.message, "err"); }
+    } catch (e) {
+      termLine(e.message, "err");
+      if (e.data && e.data.approver) TERM.asked.delete(p.id);   // still open: the Lab panel shows it again
+    }
   }
   function termState(s) {   // each poll: ask here for what the terminal is waiting on; notice answers given elsewhere
     if (TERM.ask && Date.now() - TERM.askAt > 2500 && !s.pending.some((p) => p.id === TERM.ask.id)) {
@@ -5064,6 +5216,7 @@
     loadCollection();
     $("auto-report").value = (S.settings && S.settings.auto_report) || "both";
     ownerPinState();
+    rolesState();
     const idle = S.settings && S.settings.idle_off !== undefined ? S.settings.idle_off : 60, idleSel = $("idle-off");
     const idleValue = idle ? String(idle) : "off";
     if (![...idleSel.options].some((o) => o.value === idleValue)) idleSel.append(h("option", { value: idleValue }, "After " + idle + " minutes"));
@@ -5441,6 +5594,12 @@
 
     $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
     $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));
+    $("roles-edit").addEventListener("click", editRoles);
+    $("roles-cancel").addEventListener("click", () => { $("roles-list").hidden = $("roles-actions").hidden = true; });
+    $("owner-notify-mine").addEventListener("click", () => ownerNotify("mine"));
+    $("owner-notify-off").addEventListener("click", () => ownerNotify("off"));
+    for (const id of ["history-open", "lab-history"]) $(id).addEventListener("click", openHistory);
+    for (const id of ["history-subject", "history-who", "history-safety"]) $(id).addEventListener("change", loadHistory);
     $("composer").addEventListener("submit", (e) => {
       e.preventDefault();
       if (S.streaming && !$("input").value.trim()) api("/api/stop", { body: { chat_id: S.chatId } }).catch(() => {});
@@ -5583,7 +5742,7 @@
     $("lab-add-scripts").addEventListener("click", addScripts);
     $("lab-recipes").addEventListener("click", recipesFromScripts);
     $("lab-add").addEventListener("click", addByAddress);
-    $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value }));
+    $("lab-save").addEventListener("click", () => connectLab({ yaml: $("lab-yaml").value, why: $("lab-why").value.trim() }));
     for (const b of document.querySelectorAll("#lab-view button")) b.addEventListener("click", () => {
       LABCFG.view = b.dataset.view;
       store("lh.labView", LABCFG.view);

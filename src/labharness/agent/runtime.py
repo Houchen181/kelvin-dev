@@ -1003,7 +1003,8 @@ class LabRuntime:
         A no never does."""
         who: Dict[str, Any] = {"account": self.user, "channel": channel, "device": device}
         title = getattr(self.approver, "title_of", lambda _: None)(request_id)
-        if approve and title is not None:
+        # a request no longer open asks nothing (no password tried for nothing); one that can't tell, asks
+        if approve and (title is not None or not hasattr(self.approver, "title_of")):
             vouched = self.vouched(approver, pin)
             if vouched:
                 who["vouched"] = vouched
