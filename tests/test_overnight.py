@@ -50,7 +50,7 @@ def test_the_queue_approval_covers_what_a_plan_sets_after_a_stop(tmp_path):
     rt.queue_add(SWEEP.format(name="first") + "\non_abort: { smu.V: 0.5 }")
     out = rt.queue_start(dry_run=True)
     assert out.startswith("REHEARSAL ONLY")
-    lines, grants, _ = rt.gate.plan_approval(rt._queue_drives(rt.queue.waiting()), True)
+    lines, grants, _ = rt.gate.plan_approval(rt._queue_drives(rt.queue.waiting()), whole_path=True)
     assert grants["smu.V"].covers(0.5) and grants["smu.output"].covers(True)
 
 

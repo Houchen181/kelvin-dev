@@ -1690,7 +1690,8 @@ class LabRuntime:
             if problems:
                 return REHEARSAL % "queue_start" + "\nnot rehearsed:\n" + "\n".join(problems[:8])
             duration, failed = self._rehearse(items)
-            _, _, refusals = self.gate.plan_approval(self._queue_drives(items), True, self._queue_later(items))
+            _, _, refusals = self.gate.plan_approval(self._queue_drives(items), whole_path=True,
+                                                     later=self._queue_later(items))
             return "\n".join([REHEARSAL % "queue_start", "the %d waiting item%s would take ~%s" % (
                 len(items), "" if len(items) == 1 else "s", _dur(duration))]
                 + ["would fail: " + f for f in failed[:8]] + ["would be refused: " + r for r in refusals[:8]])
@@ -1704,7 +1705,8 @@ class LabRuntime:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
             # over the queue's whole path: every value an item sets away from safe, wherever the drive is now, so
             # nothing asks again in the night (an item that switches an output off made the next one ask)
-            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), True, self._queue_later(items))
+            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), whole_path=True,
+                                                              later=self._queue_later(items))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
             duration = None
