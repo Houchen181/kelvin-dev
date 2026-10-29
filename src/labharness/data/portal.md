@@ -13,7 +13,9 @@ You can't see the portal. When the person must do something there, tell them exa
   - **Sample**: the device mounted now (a list), **New device…**, and **Protect this device…** for the mounted device (**Change…** once it has protection);
   - **Hands on the sample** (and **Unlock…** while it is locked);
   - **Instruments**, with **Set up…** and **Cards…**: a row per instrument; clicking a row shows its readings and drives, and the switch at its right turns it on or off for Kelvin;
-  - **Watches**, with **Add…**; **Activity**, with **Everyone**.
+  - **Watches**, with **Add…**;
+  - **Lab memory**, with **Add…**: what people and Kelvin keep about this lab for every chat and everyone here (wiring, reference sources, excitations, lessons), each note with who wrote it and when; the pencil on a note changes it, the bin deletes it;
+  - **Activity**, with **Everyone**.
 - **Lab** → **Set up…** opens the **Instruments** dialog: **Virtual lab** or **My instruments**; **Limits reviewed…** (while instruments Kelvin added wait for review) and **Set up again**; the instrument folders, with their manuals; **Scan**, and adding an instrument by its address with a card (**Add**); the **Lab config**, the lab's YAML: for each instrument its `card`, `address`, `limits: {parameter: [min, max]}` in the card's units, `rates` and `auto` ranges, shown **By instrument** (a row per instrument with a search box; clicking a row opens its part of the file) or as the **Whole file** (also the lab's name, interlocks and watches); **Save and connect**.
 - To change an instrument's limits: **Lab** → **Set up…** → **Limits…** on its row, **Save limits**; or edit its `limits` in the **Lab config** and **Save and connect**. Only a person does this.
 - Instruments Kelvin added itself: once the person has checked their limits, **Lab** → **Set up…** → **Limits reviewed…** (or **Review limits…** in the Lab panel's notice). Until then every output change on them asks a person.

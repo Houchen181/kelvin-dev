@@ -2605,7 +2605,7 @@ class LabRuntime:
             found = lm.find(notes, query)
             head = "the lab's memory, notes that bear on %r: %d of %d" % (query, len(found), len(notes))
         else:
-            found = sorted(notes, key=lambda n: lm.KINDS.index(n["kind"]))
+            found = lm.ordered(notes, self.lab.instruments)
             head = "the lab's memory, %s: %d note%s, shared by every chat and agent here" % (
                 lab, len(found), "" if len(found) == 1 else "s")
         out = [head] + [lm.line(n) for n in found]

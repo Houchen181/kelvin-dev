@@ -43,6 +43,7 @@
   .request h3 { margin: 0 0 6px; font-size: 15px; }
   .request ul { margin: 0 0 10px; padding-left: 18px; }
   .request li { margin: 2px 0; overflow-wrap: anywhere; }
+  .request .lessons { margin: -4px 0 10px; font-size: 13px; }
   .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .empty { color: var(--muted); }
   table { width: 100%; border-collapse: collapse; }
@@ -147,6 +148,7 @@ function renderPending(list) {
     box.append(el("div", { class: "request" },
       el("h3", {}, (r.where ? "[" + r.where + "] " : "") + r.title),
       el("ul", {}, ...r.items.map((i) => el("li", {}, i))),
+      ...((r.lessons || []).length ? [el("p", { class: "lessons" }, "From the lab's memory: " + r.lessons.join(" · "))] : []),
       el("div", { class: "actions" }, ok, no, el("span", { class: "muted" }, "declines itself in " + r.seconds_left + " s"))));
     if (!seen.has(r.id)) {
       seen.add(r.id);

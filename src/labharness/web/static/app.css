@@ -1056,3 +1056,17 @@ body.resizing .plot-svg { pointer-events: none; }
 .pin-dialog { border: 1px solid var(--border, #ccc); border-radius: 10px; padding: 16px; max-width: 22rem; }
 .pin-dialog input { width: 100%; margin: 8px 0; font-size: 18px; letter-spacing: .2em; }
 .pin-actions { display: flex; gap: 8px; justify-content: flex-end; }
+/* the lab's memory (labmemory.py): in the Lab panel, and the lessons on an approval card */
+.labmem-list { list-style: none; margin: 0 0 6px; padding: 0; }
+.labmem-note { font-size: 13px; padding: 6px 4px 6px 6px; }
+.labmem-note .row-btn:first-of-type:hover { color: var(--accent); background: var(--accent-soft); }
+.labmem-form { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; margin-bottom: 8px; }
+.labmem-form textarea { grid-column: 1 / -1; resize: vertical; }
+.labmem-form select, .labmem-form input, .labmem-form textarea { min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px;
+  padding: 5px 7px; background: var(--raised); color: var(--text); font: inherit; font-size: 13px; }
+.labmem-actions { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; }
+.approval-lessons { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
+.approval-lessons svg { flex: none; width: 15px; height: 15px; margin-top: 2px; color: var(--accent); }
+.approval-lessons > div { display: grid; gap: 1px; overflow-wrap: anywhere; }
+.approval.done:not(.open) .approval-lessons { display: none; }
+.approval.done .approval-lessons { grid-column: 1 / -1; }

@@ -176,18 +176,23 @@ def _newest_first(notes: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [n for _, n in sorted(enumerate(notes), key=lambda p: (newest(p[1]), p[0]), reverse=True)]
 
 
+def ordered(notes: Iterable[Dict[str, Any]], instruments: Iterable[str] = ()) -> List[Dict[str, Any]]:
+    """The notes in the order chats, lab_memory and the Lab panel show them: lessons first, then wiring, references,
+    excitations and other facts; within a kind, notes on the lab's own instruments (or on none) before notes on
+    instruments it doesn't have, the newest first."""
+    here = {str(i).lower() for i in instruments}
+    out = _newest_first(notes)
+    out.sort(key=lambda n: (KINDS.index(n["kind"]), bool(n.get("instruments")) and not _tied_to(n, here)))
+    return out
+
+
 def brief(notes: Sequence[Dict[str, Any]], instruments: Iterable[str] = (),
           budget: int = BRIEF_CHARS) -> Tuple[List[str], int]:
-    """The notes every chat sees in its prompt, as lines within `budget` characters, and how many were left out.
-    Lessons first, then wiring, references, excitations and other facts; within a kind, notes on the lab's own
-    instruments (or on none) before notes on instruments it doesn't have, the newest first. A note that doesn't fit
-    is left for lab_memory, and a shorter one after it may still fit."""
-    here = {str(i).lower() for i in instruments}
-    ordered = _newest_first(notes)
-    ordered.sort(key=lambda n: (KINDS.index(n["kind"]), bool(n.get("instruments")) and not _tied_to(n, here)))
+    """The notes every chat sees in its prompt, in order (ordered), as lines within `budget` characters, and how many
+    were left out. A note that doesn't fit is left for lab_memory, and a shorter one after it may still fit."""
     picked: List[str] = []
     used = 0
-    for n in ordered:
+    for n in ordered(notes, instruments):
         text = line(n)
         if used + len(text) + 1 <= budget:
             picked.append(text)

@@ -377,3 +377,79 @@ def test_each_chat_is_shown_an_instruments_notes_at_its_first_use(tmp_path):
     assert "From the lab's memory, on smu:" in said[0] and "Ramp the gate to 0 V" in said[0]
     assert "From the lab's memory" not in said[1]                     # shown once in a chat
     assert "Ramp the gate to 0 V" in said[2]                           # and once in every other
+
+
+# ------------------------------------------------------------------ people, in the portal's Lab panel
+
+def test_people_keep_change_and_delete_notes_in_the_lab_panel(tmp_path):
+    rt, store, client, headers = portal(tmp_path, {})
+    rt.user = "ada"                                                    # who is signed in
+    with client:
+        empty = client.get("/api/lab-memory", headers=headers).json()
+        assert empty["notes"] == [] and empty["virtual"] is True and "lesson" in empty["kinds"]
+        stamp = client.get("/api/state", headers=headers).json()["lab_memory"]
+        kept = client.post("/api/lab-memory", headers=headers, json={
+            "kind": "wiring", "text": "The mixing chamber is channel A of the LS350.", "instruments": "tc, magnet"}).json()
+        note = kept["notes"][0]
+        assert (note["kind"], note["instruments"], note["who"]) == ("wiring", ["tc", "magnet"], "ada")
+        assert client.get("/api/state", headers=headers).json()["lab_memory"] != stamp   # the panel reloads it
+        again = client.post("/api/lab-memory", headers=headers, json={
+            "kind": "wiring", "text": "the mixing chamber is channel A of the LS350"}).json()
+        assert again["said"].startswith("already in") and len(again["notes"]) == 1
+        bad = client.post("/api/lab-memory", headers=headers, json={"kind": "quirk", "text": "x"})
+        assert bad.status_code == 400 and "lesson (what to do or avoid)" in bad.json()["error"]
+        lesson = client.post("/api/lab-memory", headers=headers, json={
+            "kind": "lesson", "text": "Ramp the magnet slowly below 4 K.", "instruments": ["magnet"]}).json()
+        assert [n["kind"] for n in lesson["notes"]] == ["lesson", "wiring"]   # in the order the chats' brief has
+        rt.user = "grace"
+        changed = client.post("/api/lab-memory/" + note["id"], headers=headers,
+                              json={"text": "The mixing chamber is channel B of the LS350.", "instruments": ["tc"]}).json()
+        now = next(n for n in changed["notes"] if n["id"] == note["id"])
+        assert now["text"].endswith("channel B of the LS350.") and now["edited_who"] == "grace" and now["who"] == "ada"
+        assert now["before"][0]["text"] == "The mixing chamber is channel A of the LS350."
+        assert client.post("/api/lab-memory/m00000000", headers=headers, json={"text": "x"}).status_code == 404
+        left = client.delete("/api/lab-memory/" + note["id"], headers=headers).json()["notes"]
+        assert [n["kind"] for n in left] == ["lesson"]
+        assert client.delete("/api/lab-memory/" + note["id"], headers=headers).status_code == 404
+    lines = rt.events(10)
+    assert "ada added a note in the lab's memory (wiring; tc, magnet)" in lines
+    assert "grace changed a note in the lab's memory (wiring; tc): The mixing chamber is channel B" in lines
+    assert "grace deleted a note" in lines
+
+
+def test_the_lab_memory_is_the_computers_not_a_phones_and_not_claudes_while_it_operates(tmp_path):
+    from labharness.web.remote import allowed
+    for role in ("watch", "control"):
+        for method in ("GET", "POST", "DELETE"):
+            assert not allowed(role, method, "/api/lab-memory/m1") and not allowed(role, method, "/api/lab-memory")
+    rt, store, client, headers = portal(tmp_path, {})
+    with client:
+        rt.operating = "Open LaserDesk"                               # Claude works the screen: its clicks never edit it
+        r = client.post("/api/lab-memory", headers=headers, json={"kind": "fact", "text": "Base temperature 8 mK."})
+        assert r.status_code == 423 and client.get("/api/lab-memory", headers=headers).status_code == 200
+        rt.operating = None
+    assert rt.lab_notes() == []
+
+
+def test_an_approval_card_shows_the_labs_lessons_on_its_instruments(tmp_path):
+    import threading
+    from labharness.agent.approval import WebApprover
+    from labharness.gate import ApprovalRequest
+    approver = WebApprover(timeout=5)
+    rt = runtime(tmp_path, approver)
+    rt.keep_lab_note("lesson", "Switch the laser's emission on before its power.", ["laser"], by="human (portal)",
+                     account="grace")
+    rt.keep_lab_note("wiring", "The laser's fibre goes to the objective's back port.", ["laser"], by="Kelvin")
+    rt.keep_lab_note("lesson", "Ramp the magnet slowly below 4 K.", ["magnet"], by="Kelvin")
+    answers = []
+    asking = threading.Thread(target=lambda: answers.append(approver.approve(
+        ApprovalRequest("Set laser.power", ["laser.power: 0 → 5 mW (limit 20 mW)"]))))
+    asking.start()
+    entry = approver.wait_for_pending(timeout=5)
+    assert entry["lessons"] == ["Switch the laser's emission on before its power. (grace, %s)"
+                                % rt.lab_notes()[0]["at"][:10]]                # lessons only, on its instruments
+    assert approver.pending_list()[0]["lessons"] == entry["lessons"]
+    approver.answer(entry["id"], True)
+    asking.join(5)
+    assert answers == [True]
+    assert rt.lab_lessons_for(ApprovalRequest("Install a package", ["numpy"])) == []

@@ -116,7 +116,7 @@
       </button>
       <div id="chat-title" class="chat-title"></div>
       <div class="spacer"></div>
-      <button id="toggle-incognito" class="pill" type="button" aria-pressed="false" title="Incognito chat: no memory is used or kept, and the chat is not saved">
+      <button id="toggle-incognito" class="pill" type="button" aria-pressed="false" title="Incognito chat: none of your memory is used or kept, and the chat is not saved">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h18"/><path d="M6 11l1.6-5.2h8.8L18 11"/><circle cx="7.5" cy="16" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/><path d="M10.1 16h3.8"/></svg><span class="incog-text pill-text">Incognito</span>
       </button>
       <button id="toggle-term" class="pill" type="button" aria-label="Show the terminal" aria-pressed="false" title="Terminal: type to Kelvin, or send instruments their own commands (Ctrl+`)">
@@ -298,6 +298,18 @@
         <button class="btn small" type="submit">Watch</button>
       </form>
       <ul id="watch-list" class="watch-list"></ul>
+      <div class="inst-head-row"><h3>Lab memory</h3><span id="labmem-summary" class="inst-summary"></span>
+        <button id="labmem-add" class="link soft" type="button">Add…</button></div>
+      <form id="labmem-form" class="labmem-form" hidden>
+        <select id="labmem-kind" aria-label="What kind of note">
+          <option value="lesson">Lesson</option><option value="wiring">Wiring</option><option value="reference">Reference</option>
+          <option value="excitation">Excitation</option><option value="fact">Fact</option>
+        </select>
+        <input id="labmem-instruments" placeholder="Instruments (pump, li)" aria-label="The instruments it concerns" spellcheck="false" autocomplete="off">
+        <textarea id="labmem-text" rows="2" maxlength="300" placeholder="e.g. Switch each OBIS's emission on before its power." aria-label="The note"></textarea>
+        <div class="labmem-actions"><button id="labmem-keep" class="btn small" type="submit">Keep</button><button id="labmem-cancel" class="link soft" type="button">Cancel</button></div>
+      </form>
+      <ul id="labmem-list" class="labmem-list"></ul>
       <div class="inst-head-row"><h3>Activity</h3><button id="activity-all" class="link soft" type="button" aria-pressed="false" hidden>Everyone</button></div>
       <ol id="lab-events" class="lab-events"></ol>
     </div>
