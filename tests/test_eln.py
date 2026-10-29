@@ -51,12 +51,16 @@ def test_a_runs_record_has_what_ran_who_approved_it_its_results_and_its_plots(rt
 def test_a_days_record_has_its_runs_and_the_days_lab_record(rt):
     rt.run(IV)
     rt.run(IV.replace("plan: iv", "plan: iv_again"))
+    rt.gate.log.write("calibration", by="Ada", instrument="smu", due="2027-10-01", certificate="C-9")
+    rt.gate.log.write("command", by="agent", message="lockin: *CLS sent")   # commands stay in events.jsonl only
     result = eln.export(rt, day="today")
     text = Path(result["path"]).read_text(encoding="utf-8")
     today = datetime.date.today()
     assert text.startswith("# Lab record, %s\n" % today.strftime("%b %d %Y").replace(" 0", " "))
     assert result["runs"] == 2 and "## Runs" in text and "### iv_again, run" in text
     assert "## The day's lab record" in text and "run %s started, 5 points" % run_id(rt) in text
+    assert "Ada: smu calibration recorded, due 2027-10-01 (certificate C-9)" in text
+    assert "*CLS" not in text
     assert Path(result["path"]).name == "%s-lab-record.md" % today.isoformat()
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
         eln.export(rt, day="last tuesday")
