@@ -823,10 +823,16 @@ class LabRuntime:
             errors = self.engine.validate(plan)
             if errors:
                 return "invalid plan: " + "; ".join(errors[:5])
-            items, _, problems = self.gate.plan_approval(self.engine.drive_values(plan))
-            lines = ["ok: %s, %d points, instruments %s" % (plan.name, plan.points, ", ".join(plan.requires))]
+            from ..forecast import Forecast
+            forecast = Forecast(self.engine).plan(plan)   # as the run's own card: its setup actions, a draft's settings
+            items, _, problems = self.gate.plan_approval(self.engine.drive_values(plan), forecast=forecast)
+            asked = forecast.asked + forecast.action_lines()
+            lines = ["ok: %s, %d points%s, instruments %s" % (plan.name, plan.points, forecast.duration(),
+                                                             ", ".join(plan.requires))]
             lines += ["will be refused: " + p for p in problems]
-            lines += ["needs approval: " + i for i in items] or ["no approval needed (measurement only or inside the envelope)"]
+            lines += ["needs approval: " + i for i in asked] or ["no approval needed (measurement only or inside the envelope)"]
+            if asked:
+                lines += ["also on its card: " + i for i in items[len(forecast.asked):] + forecast.closing()]
             return "\n".join(lines)
         return self._do("validating plan", run)
 

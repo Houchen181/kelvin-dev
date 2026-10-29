@@ -210,6 +210,51 @@ def test_a_queue_step_part_the_forecast_does_not_know_is_shown(lab, make_engine)
     assert f.seconds == 30 and "cool's until" in f.not_counted() and f.duration() == ", at least ~30 s"
 
 
+def test_validate_plan_says_what_the_runs_card_will_ask(tmp_path):
+    from test_queue import runtime
+    rt = runtime(tmp_path, [])
+    smu = rt.lab.instruments["smu"]
+    smu.card.actions["arm"] = Action("arm", ["ARM"], "Arm the source's trigger", drives=True)
+    out = rt.validate("plan: armed\nsetup: { smu.arm: run }\nmeasure: [smu.I]\n")
+    assert "needs approval: At the start: smu.arm (Arm the source's trigger), which drives the sample" in out, out
+    smu.backend.simulated = False
+    smu.card.status = "draft"
+    out = rt.validate("plan: nplc\nsweep: { smu.nplc: {values: [1, 2]} }\nmeasure: [smu.I]\n")
+    assert "needs approval: smu.nplc: now 1 PLC, plan uses 1 … 2 PLC; Kelvin isn't sure about smu" in out, out
+
+
+def test_the_portal_the_phone_and_the_approval_page_show_the_same_card(tmp_path):
+    """The chat's card (the approver's event), the Lab panel, the phone and the approval page (all from ui_state's
+    pending) show one title and the same lines; the phone's notice gives the title and the first line asked."""
+    import threading
+    import pytest
+    pytest.importorskip("mcp")
+    from labharness import build_virtual_lab
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=10), tmp_path / "data")
+    rt.auto_report = "off"
+    events = []
+    rt.approver.subscribe(events.append)
+    rt.lab.instruments["tc"].write("heater_range", "low")
+    rt.lab.instruments["tc"].write("setpoint", 20.0)
+    done = []
+    worker = threading.Thread(target=lambda: done.append(rt.run(COOL_AND_SWEEP)), daemon=True)
+    worker.start()
+    asked = rt.approver.wait_for_pending(timeout=10)
+    assert asked is not None
+    [pending] = rt.ui_state()["pending"]
+    [event] = [e for e in events if e["id"] == asked["id"]]
+    assert pending["title"] == event["title"] == asked["title"] and pending["items"] == event["items"] == asked["items"]
+    assert pending["where"] == event["where"] == "SIMULATOR"
+    assert any(i.startswith("At the end it leaves") for i in pending["items"])
+    assert pending["items"][0].startswith("smu.output: now off, plan uses on")       # asked lines first
+    notices = [(n["kind"], n["title"], n["text"]) for n in rt.notifier.notices]   # what reaches the phone's alert
+    assert ("approval", "Approval needed: " + pending["title"], pending["items"][0]) in notices
+    assert rt.answer(asked["id"], False)
+    worker.join(30)
+    assert done and done[0].startswith("declined")
+
 # ------------------------------------------------------------------ on labsim: instruments Kelvin takes for real
 
 TRANSPORT = """lab: labsim transport
