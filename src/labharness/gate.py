@@ -625,8 +625,9 @@ class SafetyGate:
             grants[key] = Allowed.of(spec, change.values)
             lines.append((True, "; ".join(shown(inst, spec, change.start, change.values) + [
                 "Kelvin isn't sure about %s: %s" % (inst.name, self.unsure(inst))])))
-        items = [text for _, text in lines] if asking or any(asks for asks, _ in lines) else []
-        return items, grants, problems
+        # what the person approves first (a phone's notice shows the first line), then what else the run changes
+        items = [text for asks, text in lines if asks] + [text for asks, text in lines if not asks]
+        return items if asking or any(asks for asks, _ in lines) else [], grants, problems
 
     # ------------------------------------------------------------------ internals
 
