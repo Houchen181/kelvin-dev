@@ -108,6 +108,18 @@ def test_a_heater_range_too_low_for_its_set_point_alarms(lab, tmp_path):
     assert alarm.cleared and "new set point" in notices[-1][1]   # 30 K is another set point: followed afresh
 
 
+def test_a_set_point_whose_switch_is_off_is_not_a_stall(lab, tmp_path):
+    """A controller's setpoint with its heater range off goes nowhere: not followed (no alarm) until the heater is on,
+    then followed afresh."""
+    gate, monitor, notices = watching(lab, tmp_path, answers=[True, True])
+    assert gate.set("tc", "setpoint", 5, wait=False).ok    # its heater range is off
+    run_for(lab, monitor, 10 * 60, step=15)
+    assert not monitor.alarms and "tc.setpoint" not in monitor._moves
+    assert gate.set("tc", "heater_range", "low").ok
+    run_for(lab, monitor, 3 * 60, step=15)
+    assert not monitor.alarms and monitor._moves["tc.setpoint"].arrived
+
+
 def test_the_approach_counts_progress_beyond_noise_and_slow_ramps():
     way = Approach(2.0, 0.05, 0.0)
     assert way.update(150.0, 0.0) == 0.0

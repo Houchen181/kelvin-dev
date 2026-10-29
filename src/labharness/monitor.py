@@ -348,7 +348,7 @@ class Monitor:
                 if not (spec.is_drive and spec.ramp == "instrument" and spec.readback and spec.numeric):
                     continue
                 target = inst._last.get(spec.name)
-                if not _number(target) or (_unreachable(spec) and target <= 0):
+                if not _number(target) or (_unreachable(spec) and target <= 0) or not self._applied(inst, spec):
                     continue
                 key = "%s.%s" % (name, spec.name)
                 seen.add(key)
@@ -387,6 +387,18 @@ class Monitor:
             del self._moves[key]
             if key in self._stalled:
                 self._clear(self._stalled.pop(key).id, "%s is no longer followed" % key)
+
+    @staticmethod
+    def _applied(inst: Any, spec: Any) -> bool:
+        """Whether a set point reaches the sample: no switch it applies through, or that switch away from safe (a
+        controller's setpoint with its heater range off goes nowhere, and isn't a stall). Followed afresh once on."""
+        switch = inst.card.params.get(spec.applies_when) if spec.applies_when else None
+        if switch is None:
+            return True
+        try:
+            return switch.distance(inst.read(switch.name)) > 0
+        except Exception:
+            return False
 
     def _clear(self, alarm_id: str, text: str) -> None:
         for a in self.alarms:
