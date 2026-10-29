@@ -65,6 +65,9 @@ Requirements: Python 3.9+ with `pyvisa` (and `pyvisa-py` if the program also doe
   - A warm CCD is dark-current limited.
   - A PPMS ramps at the rate it is given and settles on its set point: it owns the stage temperature, so the
     cryostat's own cooling doesn't hold it short.
+  - A Keithley 2450 run as a potentiostat sweeps on its own clock into its buffer, and its cell answers as a
+    reversible redox couple does: peaks 59 mV apart around E0, the peak current growing with the square root of the
+    scan rate (Randles-Sevcik), and the double layer's charging current on top.
 - **Timing:**
   - Measurements take their integration time (NPLC, time constants, exposures, sweeps).
   - Cool-downs take minutes, not hours, but they do take minutes.
@@ -79,6 +82,7 @@ Requirements: Python 3.9+ with `pyvisa` (and `pyvisa-py` if the program also doe
 | `confocal.yaml` | Quantum emitters at room temperature: OBIS (COM5), PM100D, PI E-727 (LAN), ANC300 (COM7 and TCP 7230), Arduino (COM4), Shamrock + Andor CCD, Basler, Zyla, Time Tagger, NI USB-6363 (galvos), Ocean USB4000 |
 | `pumpprobe.yaml` | SMC100 delay line (COM6), pump and probe OBIS (COM8, COM9), SR830 on a balanced photodiode locked to the chopper, PM100D, Pfeiffer TPG 362 (COM3) |
 | `no_cards.yaml` | Instruments Kelvin has no card for: 6221, 34401A, Pfeiffer gauge, Arduino hot plate, Mercury iTC (LAN), SMC100 |
+| `echem.yaml` | An electrochemical cell (a 1 mM ferrocene-like couple on a 3 mm disc) on a Keithley 2450 run as a potentiostat (USB): its SCPI linear sweeps (`SOURce:SWEep:VOLTage:LINear[:STEP]`, dual and repeated) and its reading buffer (`TRACe:ACTual?`, `TRACe:DATA?`), for cyclic voltammetry |
 
 `python -m labsim models` lists every model. A bench file says where each instrument sits (`address:` a VISA
 resource, `COMn`, or `sdk:<kind>:<serial>`) and what it is wired to (`connect: {port: terminal}`; a terminal is

@@ -365,6 +365,9 @@ class SafetyGate:
         if card.actions:
             lines.append("  actions (do_action, or a plan's trigger:): " + ", ".join(
                 "%s%s" % (n, " (drives the sample: asks first)" if a.drives else "") for n, a in card.actions.items()))
+        if card.techniques:   # hardware-timed, buffered measurements a plan runs (techniques.py)
+            from .techniques import describe as techniques_of
+            lines += techniques_of(card)
         return "\n".join(lines)
 
     def status(self) -> Dict[str, Dict[str, Any]]:

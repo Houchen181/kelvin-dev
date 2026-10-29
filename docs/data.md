@@ -74,6 +74,24 @@ With `retry: {times: 3, wait: 10}` (or `retry: 3`), a point whose reading fails 
 - **The gap is marked:** every point has `gap_s`, the time lost to a fault just before it (0 for none), and the run lists the gaps (`gaps`) and says how much time was lost.
 - **Never retried:** a sensor fault, a stop or an instrument switched off. Without `retry:`, a failed reading stops the run.
 
+### Hardware-timed techniques
+
+Some measurements are timed by the instrument itself, into its buffer: cyclic voltammetry on a potentiostat, an impedance sweep, a scope's burst. An instrument's card lists them as techniques (`describe_instrument` shows each with its parameters; [instruments.md](instruments.md#writing-a-card) says how a card declares one). A plan runs one at every point, after its triggers and before its readings, and keeps the buffer as traces:
+
+```yaml
+plan: cv_scan_rates
+setup: { pstat.compliance_I: 1.0e-3, pstat.nplc: 0.01, pstat.output: on }
+technique: { pstat.cv: { start: -0.2, vertex: 0.6, step: 0.002, cycles: 2 } }
+sweep: { pstat.cv.rate: { values: [0.01, 0.02, 0.05, 0.1, 0.2] } }   # one of its parameters, stepped
+after: { pstat.output: off }
+```
+
+- **What is kept:** each quantity it fetches, as a trace against its `x` (`pstat.cv.I`, with `pstat.cv.I.x` the potential of each point), one row per point of the plan.
+- **What is checked first:** every value its sweep gives it, against its own limits, and each level against the limits of the drive it is a level of (here `pstat.V`, with the lab's and a mounted device's limits), each rate against that drive's rate limit; and that the drive has no guards, which nothing could watch inside it.
+- **One card:** its levels, rate, cycles and duration are on the run's card (or the queue's), with the instrument's own current limit, since Kelvin can't ramp or watch guards inside it. A person approves it; auto mode never does. The run's duration counts it.
+- **Stop** ends it at once: the instrument gets the technique's abort commands, and the drives the plan touched go back to safe.
+- Put the output, and settings such as a fast integration (`nplc`), in the plan's `setup:`. A technique never sets them itself.
+
 ## Recipes
 
 A recipe is a measurement in stages that checks its own results, kept so that it can be run again (`run_recipe`; in the portal by its name). Each stage is a plan, a check on its run's data, values kept for the later stages, and how often to try again with changed values:

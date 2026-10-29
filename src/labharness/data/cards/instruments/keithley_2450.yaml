@@ -82,6 +82,57 @@ parameters:
 display:
   headline: I
 
+# hardware-timed sweeps on the 2450's own clock, into its reading buffer (SCPI linear sweeps): a 2450-EC is a
+# potentiostat. Set nplc to 0.01 in the plan's setup for scans faster than about 10 mV/s: each point's measurement
+# adds NPLC/60 s to its step, which slows the scan.
+techniques:
+  cv:
+    label: Cyclic voltammetry
+    description: The potential steps from start to vertex and back, cycles times, at rate; the current at each step goes to the reading buffer.
+    parameters:
+      start:  { unit: V, drive: V, label: Start and end potential }
+      vertex: { unit: V, drive: V, label: Vertex potential }
+      rate:   { unit: V/s, rate_of: V, limits: [1.0e-4, 10], default: 0.05, label: Scan rate }
+      step:   { unit: V, limits: [1.0e-4, 0.05], default: 0.002, label: Potential step }
+      cycles: { type: int, limits: [1, 100], default: 1, label: Cycles }
+    let:
+      delay: "step / rate"
+    duration: "cycles * 2 * abs(vertex - start) / rate"
+    arm:
+      - ':TRACe:CLEar "defbuffer1"'
+      - ':SOURce:SWEep:VOLTage:LINear:STEP {start}, {vertex}, {step}, {delay}, {cycles}, BEST, OFF, ON, "defbuffer1"'
+    trigger: [":INITiate"]
+    wait: "*OPC?"
+    count: ':TRACe:ACTual? "defbuffer1"'
+    fetch:
+      E: { get: ':TRACe:DATA? 1, {n}, "defbuffer1", SOURce', unit: V, label: Potential }
+      I: { get: ':TRACe:DATA? 1, {n}, "defbuffer1", READing', unit: A, label: Current }
+      t: { get: ':TRACe:DATA? 1, {n}, "defbuffer1", RELative', unit: s, label: Time }
+    x: E
+    abort: [":ABORt"]
+  lsv:
+    label: Linear sweep voltammetry
+    description: One sweep of the potential from start to stop at rate; the current at each step goes to the reading buffer.
+    parameters:
+      start: { unit: V, drive: V, label: Start potential }
+      stop:  { unit: V, drive: V, label: End potential }
+      rate:  { unit: V/s, rate_of: V, limits: [1.0e-4, 10], default: 0.05, label: Scan rate }
+      step:  { unit: V, limits: [1.0e-4, 0.05], default: 0.002, label: Potential step }
+    let:
+      delay: "step / rate"
+    duration: "abs(stop - start) / rate"
+    arm:
+      - ':TRACe:CLEar "defbuffer1"'
+      - ':SOURce:SWEep:VOLTage:LINear:STEP {start}, {stop}, {step}, {delay}, 1, BEST, OFF, OFF, "defbuffer1"'
+    trigger: [":INITiate"]
+    wait: "*OPC?"
+    count: ':TRACe:ACTual? "defbuffer1"'
+    fetch:
+      E: { get: ':TRACe:DATA? 1, {n}, "defbuffer1", SOURce', unit: V, label: Potential }
+      I: { get: ':TRACe:DATA? 1, {n}, "defbuffer1", READing', unit: A, label: Current }
+    x: E
+    abort: [":ABORt"]
+
 health:
   - query: "*IDN?"
     expect: "KEITHLEY"

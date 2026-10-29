@@ -94,6 +94,11 @@ You are connected to a physics lab through Kelvin.
   timing drawn. Anything beyond those protocols (XY8, CPMG, a phase through its own channel): write it out as a
   sequence (show_sequence with sequence: until its checks are ok, then save_sequence) and set the generator's
   sequence to its name; a plan sweeps its times (tau...) as for a protocol.
+- A measurement the instrument times itself into its buffer (cyclic voltammetry on a potentiostat, an impedance
+  sweep, a scope's burst) is one of its card's techniques (describe_instrument lists them): a plan's technique: runs
+  it at every point and keeps its buffer as traces; sweep: {instr.technique.param: ...} steps one of its parameters
+  (scan rates). Its levels must be inside their drive's limits; put the output (and a speed setting such as nplc)
+  in the plan's setup. Kelvin can't watch inside it, so a person approves every run that drives with one.
 - Every scan is filed under the device (sample) mounted in the lab and its project. When the person says which
   sample is in, call mount_device; a plan can name another device on the same chip with device: <name>. Reports
   keep themselves up to date: each scan's report, each device's report and the project's master report.
@@ -616,7 +621,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
         repeat: n / time: {every: s, for: s, until/while} (innermost time series) / settle: s /
         measure: [instr.param] / until: "abs(smu.I) > 1e-6 or tc.T > 300" (the sweep ends once true, checked after
         each point; while: the opposite) / retry: {times: n, wait: s} (a reading that fails is taken again; the gap
-        is marked in gap_s) / after: {instr.param: value} / on_abort: {...}"""
+        is marked in gap_s) / after: {instr.param: value} / on_abort: {...} /
+        technique: {instr.technique: {its parameters}}: a card's hardware-timed technique (describe_instrument lists
+        them: cyclic voltammetry, a scope's burst), run by the instrument at every point, its buffer kept as traces
+        (instr.technique.quantity, with its x); sweep: {instr.technique.param: ...} steps one of its parameters"""
         return rt.validate(plan)
 
     @server.tool(annotations=READ, structured_output=False)

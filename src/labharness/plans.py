@@ -33,6 +33,13 @@ stall: seconds (default 600; 0: never) stops the run. Also:
     time: { every: 10, for: 7200, until: "tc.T_sample < 2.1" }
     until: "nvm.V < 1e-6"                    # the whole sweep ends once this holds (also while:), checked each point
     retry: { times: 3, wait: 10 }            # a reading that fails is tried again; the time lost is marked (gap_s)
+
+A card's hardware-timed technique (techniques.py: cyclic voltammetry, a scope's burst) runs at every point, after the
+triggers and before the readings, its buffer kept as traces (pstat.cv.I, against pstat.cv.E); a sweep can step one
+of its parameters:
+
+    technique: { pstat.cv: { start: -0.2, vertex: 0.6, cycles: 2 } }
+    sweep:     { pstat.cv.rate: { values: [0.02, 0.05, 0.1] } }
 """
 from __future__ import annotations
 
@@ -46,7 +53,7 @@ from .labconfig import read_yaml
 MAX_POINTS = 1_000_000
 STALL_S = 600.0     # a ramp whose reading stops getting closer to its target for this long stops the run
 _KEYS = {"plan", "description", "device", "requires", "preconditions", "setup", "sweep", "repeat", "time",
-         "settle", "measure", "after", "on_abort", "trigger", "until", "while", "retry"}
+         "settle", "measure", "after", "on_abort", "trigger", "until", "while", "retry", "technique"}
 _STEPPED = {"values", "from", "to", "step", "points", "log", "back", "settle", "stabilize", "until", "while"}
 _RAMPED = {"ramp", "rate", "every", "read", "within", "stall", "until", "while"}
 
@@ -96,6 +103,18 @@ class Segment:
 
 
 @dataclass
+class TechniqueStep:
+    """A card's technique the plan runs at every point (techniques.py), with the values it gives its parameters."""
+    instr: str
+    name: str
+    values: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def key(self) -> str:
+        return "%s.%s" % (self.instr, self.name)
+
+
+@dataclass
 class Retry:
     """A reading that fails for a reason that can pass (no answer, a garbled one) is tried again, up to `times` times,
     `wait` seconds apart; the time lost is marked on the next point (gap_s)."""
@@ -123,7 +142,7 @@ class Axis:
 
     @property
     def key(self) -> str:
-        return "%s.%s" % (self.instr, self.param) if self.kind in ("instrument", "ramp") else self.param
+        return "%s.%s" % (self.instr, self.param) if self.kind in ("instrument", "ramp", "technique") else self.param
 
     @property
     def count(self) -> int:
@@ -154,6 +173,7 @@ class Plan:
     until: Optional[Rule] = None      # the sweep ends (after: runs, the run is done) once this holds after a point
     while_: Optional[Rule] = None     # ... or once this no longer holds
     retry: Optional[Retry] = None
+    techniques: List[TechniqueStep] = field(default_factory=list)   # run at every point (techniques.py)
 
     @property
     def points(self) -> int:
@@ -471,7 +491,12 @@ def load_plan(source: Any) -> Plan:
             stab = _stabilize(spec.get("stabilize"), path + ".stabilize", errors) if isinstance(spec, dict) else None
             until = _rule(spec.get("until"), path + ".until", errors) if isinstance(spec, dict) else None
             while_ = _rule(spec.get("while"), path + ".while", errors) if isinstance(spec, dict) else None
-            axes.append(Axis(ip[0], ip[1], values, settle_s, stabilize=stab, settles=settles, until=until,
+            # instrument.technique.parameter: one of a technique's parameters, stepped (techniques.py)
+            kind = "technique" if "." in ip[1] else "instrument"
+            if kind == "technique" and stab is not None:
+                errors.append("%s: a technique's parameter is stepped as the technique runs; stabilize: goes on "
+                              "an instrument's own setting" % path)
+            axes.append(Axis(ip[0], ip[1], values, settle_s, kind=kind, stabilize=stab, settles=settles, until=until,
                              while_=while_))
     if data.get("time") is not None:
         t = _time_axis(data["time"], errors) if isinstance(data["time"], dict) else None
@@ -496,6 +521,19 @@ def load_plan(source: Any) -> Plan:
         ip = _split(key, "trigger", errors)
         if ip:
             trigger.append(ip)
+    techniques: List[TechniqueStep] = []
+    raw_tech = data.get("technique")
+    if raw_tech is not None and not isinstance(raw_tech, dict):
+        errors.append("technique: a mapping of instrument.technique: {its parameters' values}")
+        raw_tech = {}
+    for key, values in (raw_tech or {}).items():   # a card's hardware-timed technique, run at every point
+        ip = _split(key, "technique", errors)
+        if not ip:
+            continue
+        if values is not None and not isinstance(values, dict):
+            errors.append("technique.%s: a mapping of its parameters' values, e.g. {start: -0.2, vertex: 0.6}" % key)
+            continue
+        techniques.append(TechniqueStep(ip[0], ip[1], dict(values or {})))
 
     preconditions = []
     for text in data.get("preconditions") or []:
@@ -518,10 +556,11 @@ def load_plan(source: Any) -> Plan:
                 on_abort=on_abort,
                 source=data, device=" ".join(str(data.get("device") or "").split())[:60],
                 until=_rule(data.get("until"), "until", errors), while_=_rule(data.get("while"), "while", errors),
-                retry=_retry(data.get("retry"), errors))
+                retry=_retry(data.get("retry"), errors), techniques=techniques)
     if plan.points > MAX_POINTS:
         errors.append("plan has %d points (max %d)" % (plan.points, MAX_POINTS))
-    used = [s.instr for s in plan.all_steps()] + [a.instr for a in plan.axes if a.kind in ("instrument", "ramp")] \
+    used = [s.instr for s in plan.all_steps()] + [t.instr for t in techniques] \
+        + [a.instr for a in plan.axes if a.kind in ("instrument", "ramp", "technique")] \
         + [a.read[0] for a in axes if a.read] \
         + [a.stabilize.instr for a in axes if a.stabilize] + [i for i, _ in measure] + [c.instr for c in preconditions] \
         + [i for i, _ in trigger] + [k.split(".")[0] for r in plan.rules() for k in r.keys]

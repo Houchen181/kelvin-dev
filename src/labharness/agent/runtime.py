@@ -1958,13 +1958,32 @@ class LabRuntime:
         """The waiting items walked through in order, each from where the one before leaves the lab, for the queue's
         card (forecast.py): every drive and setting, the rates read from the instruments, the duration, the end."""
         from ..forecast import Forecast
+        from .. import techniques
         forecast = Forecast(self.engine, "the queue")
         for item in items:
             if item.kind == "plan":
-                forecast.plan(self._plan(item.text))
+                plan = self._plan(item.text)
+                forecast.plan(plan)
+                techniques.account(forecast, self.lab, plan)   # its techniques' time, which the walk doesn't count
             else:
                 forecast.queue_step(load_step(item.text))
         return forecast
+
+    def _queue_techniques(self, items: List[Item]) -> Tuple[List[str], List[str]]:
+        """The techniques that drive the sample its scans run (instr.technique), and their lines for its card: the
+        queue's one approval covers them, as it covers the actions its scans start."""
+        from .. import techniques
+        keys: List[str] = []
+        lines: List[str] = []
+        for n, item in enumerate(items, 1):
+            if item.kind != "plan":
+                continue
+            plan = self._plan(item.text)
+            found = techniques.driving(self.lab, plan)
+            if found:
+                keys += [k for k in found if k not in keys]
+                lines += ["#%d %s: %s" % (n, item.name, line) for line in techniques.lines(self.gate, plan)]
+        return keys, lines
 
     def _queue_later(self, items: List[Item]) -> List[str]:
         """The drives whose interlock condition an item before the first that moves them works on (it sets something on
@@ -2051,10 +2070,11 @@ class LabRuntime:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
             forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
             starting = forecast.driving_actions()     # a waveform its scans start: on this card, approved with it
+            running, technique_lines = self._queue_techniques(items)   # a technique its scans run: likewise
             # over the queue's whole path: every value an item sets away from safe, wherever the drive is now, so
             # nothing asks again in the night (an item that switches an output off made the next one ask)
             lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast=forecast,
-                                                              asking=bool(starting), whole_path=True,
+                                                              asking=bool(starting or running), whole_path=True,
                                                               later=self._queue_later(items))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
@@ -2063,8 +2083,9 @@ class LabRuntime:
             steps = len(items) - scans
             title = "Run the queue: %d scan%s%s%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
                 steps, "" if steps == 1 else "s") if steps else "", forecast.duration())
-            if lines or starting:
-                request = ApprovalRequest(title, lines + forecast.action_lines(starting) + forecast.closing() + [
+            if lines or starting or running:
+                request = ApprovalRequest(title, lines + forecast.action_lines(starting) + technique_lines
+                                          + forecast.closing() + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
                 covered = False
                 if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
@@ -2073,6 +2094,9 @@ class LabRuntime:
                     covered, why = self.gate.auto_plan(grants, rehearsal)
                     if starting:   # an action that drives the sample is a person's to start, as with do_action
                         covered, why = False, why + ["its scans start %s" % ", ".join(starting)]
+                    if running:   # nothing watches inside a technique: a person approves it
+                        covered, why = False, why + ["its scans run %s, which drive the sample on the instrument's "
+                                                     "own clock" % ", ".join(running)]
                     if covered:
                         self.gate.auto_approve(request, why)
                     else:
@@ -2082,7 +2106,7 @@ class LabRuntime:
                     note = " (%s)" % request.note if request.note else ""
                     self.gate.log.write("queue_declined", by=by)
                     return "declined: the queue did not start%s" % note
-            self.gate.queue_actions = frozenset(starting)   # its scans start these without asking again
+            self.gate.queue_actions = frozenset(starting) | frozenset(running)   # its scans do these, not asking again
             with self.queue.lock:
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()
