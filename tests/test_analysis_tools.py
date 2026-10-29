@@ -281,9 +281,9 @@ def test_a_heat_map_and_a_kept_fit(rt):
                             "points: 9}}\nmeasure: [counter.rate]")
     png, text = datatools.plot_runs(rt, heat_map={"run": "last", "z": "counter.rate"})
     assert png and "Heat map: counter.rate" in text and "9 x 9 points" in text
-    assert "done" in rt.run(GATE)
-    datatools.fit_run(rt, "last", "lorentzian", y="lockin.X", name="peak")
-    _, text = datatools.plot_runs(rt, [{"run": "last", "y": "lockin.X", "fit": "peak"}])
+    gate = re.search(r"run (\S+) done", rt.run(GATE)).group(1)   # by its id: two runs can start in one second
+    datatools.fit_run(rt, gate, "lorentzian", y="lockin.X", name="peak")
+    _, text = datatools.plot_runs(rt, [{"run": gate, "y": "lockin.X", "fit": "peak"}])
     assert "dashed: lorentzian fit" in text
 
 # ------------------------------------------------------------------ run_python
