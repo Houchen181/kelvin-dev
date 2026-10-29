@@ -908,6 +908,45 @@ def test_an_arduino_is_opened_once_and_an_echoing_command_line_still_answers():
     assert found.card_id == "attocube/anc300" and found.idn.startswith("attocube ANC300")
 
 
+class ArduinoSketch(SerialLine):
+    """A student's sketch, as labsim's arduino_heater: opening the port resets the board, which loses what is sent
+    until it has started and printed READY; it answers ID? and refuses anything else with ERR."""
+
+    def __init__(self):
+        super().__init__((9600, 8, "none", 1.0), lambda cmd: "HEATER-ARDUINO v2" if cmd == "ID?" else "ERR")
+        self.booted = False
+
+    def write(self, cmd):
+        if not self.booted:
+            self.sent.append(cmd)   # lost in the bootloader
+            return
+        super().write(cmd)
+
+    def read(self):
+        if not self.booted:   # waited through the boot: its banner
+            self.booted = True
+            return "READY"
+        return super().read()
+
+
+def test_an_arduino_sketchs_banner_and_refusal_are_not_its_identity():
+    """The orchestrator's labsim check: the scan sent *IDN? into the Arduino's bootloader and took the sketch's READY
+    banner for its identity, so first-run setup went on to draft an instrument named READY. The banner is read as it
+    starts, ERR is no answer, and the board is reported as there, without an identity, opened once."""
+    from labharness.discovery import identify
+    opened = []
+
+    class Port:
+        def open_resource(self, name):
+            opened.append(name)
+            return ArduinoSketch()
+    found = identify("ASRL4::INSTR", builtin_registry(), Port(), usb={"ASRL4::INSTR": "2341:0043"})
+    assert opened == ["ASRL4::INSTR"] and found.idn == "" and found.card_id is None
+    assert found.how == ("an Arduino-type board (USB 2341:0043): it printed READY as it started and didn't answer "
+                         "*IDN?; give Kelvin its commands to make a card"), found.how
+    assert found.how in found.line() and found.serial["baud_rate"] == 9600   # the framing it talks at, for its card
+
+
 def test_a_laser_gets_its_own_rating_as_its_limit():
     """l05, l06: first-run lab configs gave 20 mW and 10 mW OBIS lasers the card's 0.1 W."""
     from labharness.discovery import instrument_block, rated_limits

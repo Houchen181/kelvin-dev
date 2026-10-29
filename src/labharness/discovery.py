@@ -235,6 +235,12 @@ def resets_on_open(vid_pid: Optional[str]) -> bool:
     return bool(vid_pid) and str(vid_pid).lower().startswith(RESETS_ON_OPEN)
 
 
+BOOT_S = 3.0   # how long such a board may take to start (an Arduino's bootloader waits about two seconds)
+# a reply that refuses the query rather than answering it: an error token, a lone ?, an unknown-command line
+REFUSAL = re.compile(r"^(?:err(?:or)?\b.*|\?+|nak|unknown(?: command)?\b.*|invalid\b.*|syntax error\b.*|bad command\b.*|"
+                     r"command not (?:found|recognized)\b.*|not recognized\b.*)$", re.I)
+
+
 def _serial_settings(registry: CardRegistry) -> List[Dict[str, Any]]:
     """Each distinct way a known card talks over serial, then common defaults."""
     out: List[Dict[str, Any]] = []
@@ -262,9 +268,12 @@ def _framing(s: Dict[str, Any]) -> str:
     return "%d %d%s%g" % (s["baud_rate"], s["data_bits"], str(s["parity"])[0].upper(), s["stop_bits"])
 
 
-def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dict[str, Any]] = None) -> str:
-    """Its reply to the identity query, or '' for none: no reply, control characters (a NAK), or numbers only (a
-    gauge controller sending its readings by itself, as Pfeiffer's do from power-up)."""
+def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dict[str, Any]] = None,
+         booting: float = 0.0, said: Optional[List[str]] = None) -> str:
+    """Its reply to the identity query, or '' for none: no reply, control characters (a NAK), numbers only (a gauge
+    controller sending its readings by itself, as Pfeiffer's do from power-up), or a refusal (ERR). booting: the
+    seconds a board that resets as its port opens may take to start; what it prints meanwhile (an Arduino sketch's
+    READY) goes into `said`, and the query is sent after it, as sent earlier it is lost in the bootloader."""
     res = rm.open_resource(name)
     try:
         res.timeout = timeout_ms
@@ -272,6 +281,17 @@ def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dic
         res.write_termination = (settings or {}).get("write_termination", "\n")
         if settings:
             apply_serial_settings(res, settings)
+        if booting:
+            res.timeout = int(booting * 1000)
+            try:
+                said = said if said is not None else []
+                said.append(str(res.read()).strip())   # the first line once it has started, or nothing
+                res.timeout = 300
+                for _ in range(3):
+                    said.append(str(res.read()).strip())
+            except Exception:
+                pass
+            res.timeout = timeout_ms
         if name.upper().endswith("::SOCKET"):   # what it says by itself as a connection opens (an AMI 430 greets)
             res.timeout = min(timeout_ms, 300)
             for _ in range(3):
@@ -294,8 +314,8 @@ def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dic
             reply = str(res.query(query)).strip()
             if reply == query.strip():   # it echoes each command (an ANC300's command line): its answer comes next
                 reply = str(res.read()).strip()
-        if re.fullmatch(r"[\d\s.,;:+\-Ee]*", reply):
-            return ""
+        if re.fullmatch(r"[\d\s.,;:+\-Ee]*", reply) or REFUSAL.match(reply) or reply in (said or []):
+            return ""   # not who it is: its readings, a refusal of the query, or the banner it printed again
         return reply if all(ch.isprintable() for ch in reply) else ""
     finally:
         try:
@@ -329,15 +349,10 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
     found = Found(address)
     tries: List[Tuple[str, Optional[Dict[str, Any]]]]
     vid_pid = (usb if usb is not None else _usb_ids()).get(address) if is_serial(address) else None
+    if resets_on_open(vid_pid):
+        return _ask_board(found, rm, registry, vid_pid, timeout_ms, catalog)
     if is_serial(address):
         tries = [(s["query"], s) for s in _serial_settings(registry)]
-        if resets_on_open(vid_pid):   # once, with the framing of a card for its USB ID or the commonest, after it boots
-            named = [c for c in registry if vid_pid in c.usb_ids and "baud_rate" in c.connection]
-            baud, term = DEFAULT_SERIAL[0]   # an Arduino sketch's usual Serial.begin(9600), 8N1
-            first = _settings_of(named[0]) if named else {
-                "baud_rate": baud, "data_bits": 8, "parity": "none", "stop_bits": 1.0, "read_termination": term,
-                "write_termination": term, "query": "*IDN?"}
-            tries, timeout_ms = [(first["query"], first)], max(timeout_ms, 2500)
     else:
         queries = queries or ["*IDN?"] + sorted({c.idn_query for c in registry if c.idn_query != "*IDN?"})
         tries = [(q, None) for q in queries]
@@ -365,6 +380,44 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
             found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "USB ID %s" % vid_pid
             return found
     found.how = "no answer (it may be write-only, use other settings, or be switched off)"
+    return found
+
+
+def _ask_board(found: Found, rm: Any, registry: CardRegistry, vid_pid: str, timeout_ms: int, catalog: Any) -> Found:
+    """A board that resets as its port opens (an Arduino, a CH340 board): opened once, with the framing of a card for
+    its USB ID or a sketch's usual 9600 8N1. What it prints as it starts (READY) is read first and is not who it is,
+    nor a refusal of the query (ERR): such a board is reported as there, without an identity, so first-run setup
+    doesn't take it for an instrument named READY (l07, the orchestrator's labsim check)."""
+    named = [c for c in registry if vid_pid in c.usb_ids and "baud_rate" in c.connection]
+    baud, term = DEFAULT_SERIAL[0]
+    settings = _settings_of(named[0]) if named else {
+        "baud_rate": baud, "data_bits": 8, "parity": "none", "stop_bits": 1.0, "read_termination": term,
+        "write_termination": term, "query": "*IDN?"}
+    said: List[str] = []
+    try:
+        reply = _ask(rm, found.address, settings["query"], max(timeout_ms, 1000), settings, BOOT_S, said)
+    except Exception:
+        reply = ""
+    said = [s for s in said if s]
+    if said or reply:   # it talks at this framing: kept, for the card a person writes for it
+        found.settings = _framing(settings)
+        found.serial = {k: v for k, v in settings.items() if k != "query"}
+    if reply:
+        found.idn = reply
+        card = match_card(reply, registry)
+        if card:
+            found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "identity reply"
+            return found
+        found.how = "no card matches the reply"
+        return look_up(found, catalog)
+    cards = [c for c in registry if vid_pid in c.usb_ids]
+    if cards:
+        card = cards[0]
+        found.card_id, found.model, found.kind, found.how = card.id, card.model, card.kind, "USB ID %s" % vid_pid
+        return found
+    found.how = ("an Arduino-type board (USB %s): %s and didn't answer %s; give Kelvin its commands to make a card"
+                 % (vid_pid, "it printed %s as it started" % " / ".join(said[:2]) if said else
+                    "it printed nothing as it started", settings["query"]))
     return found
 
 
