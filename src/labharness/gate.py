@@ -225,7 +225,7 @@ class SafetyGate:
         # the actions that drive the sample (instr.action) its scans start, which the queue's card showed: approved
         # with it (runtime.queue_start), and counted only while one of its items runs (standing)
         self.queue_actions: frozenset = frozenset()
-        self._queued = False
+        self._queued = threading.local()   # on the queue's own thread only: another chat's run never borrows them
         # the drive levels the running plan or queue item set: switching their enable on parks them at safe (_move),
         # then puts them back (_reapply), so a run measures at what was approved, not at safe. None: no plan running
         self._asked: Optional[Dict[str, Any]] = None
@@ -533,18 +533,18 @@ class SafetyGate:
         inside it run without asking again; anything outside still asks."""
         old, self._standing = self._standing, dict(grants)
         asked, self._asked = self._asked, {}
-        queued, self._queued = self._queued, True
+        queued, self._queued.on = getattr(self._queued, "on", False), True
         try:
             yield
         finally:
             self._standing = old
             self._asked = asked
-            self._queued = queued
+            self._queued.on = queued
 
     def action_covered(self, key: str) -> bool:
         """An action that drives the sample (instr.action), started by a scan of the queue running now whose card
         showed it: the queue's approval covers it, so the scan doesn't ask again in the night."""
-        return self._queued and key in self.queue_actions
+        return getattr(self._queued, "on", False) and key in self.queue_actions
 
     @contextmanager
     def preapproved(self, grants: Dict[str, Allowed]) -> Iterator[None]:

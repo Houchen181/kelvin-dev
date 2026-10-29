@@ -152,6 +152,20 @@ def test_a_queue_whose_scans_start_an_action_asks_once_on_its_card(tmp_path):
     assert "At the start: smu.arm (Arm the source's trigger), which drives the sample" in str(rt.approver.requests[0])
 
 
+def test_a_queues_actions_count_only_on_the_queues_own_thread(lab, make_gate):
+    """Another chat's run, working while the queue runs, never borrows the queue's approval of an action."""
+    import threading
+    gate, _ = make_gate()
+    gate.queue_actions = frozenset({"smu.arm"})
+    seen = []
+    with gate.standing({}):
+        assert gate.action_covered("smu.arm") and not gate.action_covered("smu.fire")
+        other = threading.Thread(target=lambda: seen.append(gate.action_covered("smu.arm")))
+        other.start()
+        other.join()
+    assert seen == [False] and not gate.action_covered("smu.arm")
+
+
 def test_a_queue_card_shows_its_duration_and_where_the_queue_leaves_the_lab(tmp_path):
     from test_queue import FIELD, STEP, SWEEP, runtime
     rt = runtime(tmp_path, [False])
