@@ -59,13 +59,24 @@ class WebApprover(Approver):
         self.vetoes: List[Callable[[], Optional[str]]] = []
         # where a request acts, shown on its card: SIMULATOR or REAL HARDWARE (LabRuntime.where); None: no label
         self.where: Optional[Callable[[ApprovalRequest], Optional[str]]] = None
+        # lines a card adds about the instruments it names, kept with it in the record: a calibration out of date
+        # (LabRuntime.card_notes)
+        self.notes: Optional[Callable[[ApprovalRequest], List[str]]] = None
 
     def subscribe(self, listener: Callable[[Dict[str, Any]], None]) -> Callable[[], None]:
         """Call `listener(request)` for every new request (from the requesting thread). Returns unsubscribe."""
         self._listeners.append(listener)
         return lambda: self._listeners.remove(listener) if listener in self._listeners else None
 
+    def _annotate(self, request: ApprovalRequest) -> None:
+        try:
+            notes = self.notes(request) if self.notes else []
+        except Exception:
+            notes = []   # a note never stands in the way of the card
+        request.items.extend(n for n in notes if n not in request.items)
+
     def approve(self, request: ApprovalRequest) -> bool:
+        self._annotate(request)
         why = next((w for w in (veto() for veto in list(self.vetoes)) if w), None)
         try:
             where = self.where(request) if self.where else None
@@ -138,6 +149,7 @@ class WebApprover(Approver):
 
     def inform(self, request: ApprovalRequest, reasons: List[str]) -> None:
         """Auto mode approved this without asking: show it with the reasons, like an answered request."""
+        self._annotate(request)
         with self._cv:
             self._seq += 1
             now = time.time()

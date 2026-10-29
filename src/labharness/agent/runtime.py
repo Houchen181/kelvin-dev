@@ -386,6 +386,8 @@ class LabRuntime:
                 "approval", "Approval needed: " + r["title"], (r.get("items") or [""])[0]))
         if hasattr(approver, "where"):   # each card says where it acts: SIMULATOR or REAL HARDWARE
             approver.where = self.where
+        if hasattr(approver, "notes"):   # and when an instrument it names is out of calibration (profiles.py)
+            approver.notes = self.card_notes
         if hasattr(approver, "escalate"):   # nobody answers at the computer: people away from it are asked
             approver.escalate = self._escalate
         self.notifier.alive = lambda: self.monitor.watching()   # the heartbeat: Kelvin is there, watching the lab
@@ -987,6 +989,17 @@ class LabRuntime:
             return None
         return "SIMULATOR" if all(inst.simulated for inst in named) else "REAL HARDWARE"
 
+    def card_notes(self, request: ApprovalRequest) -> List[str]:
+        """What a card adds about the real instruments it names: a calibration out of date, or on record for another
+        serial number (profiles.card_lines). Never asks an instrument anything."""
+        if self.home is None:
+            return []
+        from .. import profiles
+        text = " ".join([request.title] + [str(i) for i in request.items])
+        named = [name for name, inst in self.lab.instruments.items() if not inst.simulated
+                 and re.search(r"(?<![\w.])%s(?![\w])" % re.escape(name), text)]
+        return profiles.card_lines(self.home, named)
+
     def answer(self, request_id: str, approve: bool, by: str = "human", channel: str = "portal",
                device: Optional[str] = None) -> bool:
         """A person's answer to a request, kept with who they are: their account (the person signed in), where they
@@ -1083,6 +1096,10 @@ class LabRuntime:
         if not instruments:
             lines += ["%s switched off (not checked)" % n for n in self.lab.switched_off]
             lines += ["%s not connected: %s" % kv for kv in self.lab.unavailable.items()]
+        if self.home is not None:   # a calibration out of date or due soon: said, never a failure (profiles.py)
+            from .. import profiles
+            lines += profiles.calibration_notes(self.home, [n for n in names if n in self.lab.instruments
+                                                            and not self.lab.instruments[n].simulated])
         return "\n".join(lines)
 
     def wait(self, seconds: float) -> str:
@@ -2700,6 +2717,9 @@ class LabRuntime:
         lines.append("address: %s%s%s" % (p.get("address"), "; connection: " + conn if conn else "",
                                           "; answered with " + p["answered_with"] if p.get("answered_with") else ""))
         lines.append("folder: %s" % p["folder"])
+        cal = profiles.calibration_view(self.home, instrument)   # as a person recorded it (profiles.py)
+        lines.append("calibration: %s%s" % (cal["state"]["words"], "; " + cal["state"]["serial"]
+                                             if cal["state"].get("serial") else ""))
         m = p.get("manual") or {}
         if p.get("has_manual"):
             lines.append("manual: %s, %s pages%s; search it with search_manual" % (

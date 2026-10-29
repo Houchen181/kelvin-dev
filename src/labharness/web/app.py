@@ -47,7 +47,7 @@ from .. import rundata
 from ..virtual_lab import (build_lab, builtin_ids, builtin_registry, collection_ids, is_simulated, kelvin_ids,
                            lab_registry, open_home_lab)
 from .agent import Busy, ChatAgent, runs_in, typed_stop
-from . import review, rules as rulebook
+from . import labops, review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
 from .qr import QR
@@ -2228,7 +2228,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                         "answered_with": p.get("answered_with"), "manual": p.get("has_manual"),
                         "manual_pages": m.get("pages"), "manual_file": m.get("file"), "manual_from": m.get("url"),
                         "manual_title": inst.card.manual, "manual_url": inst.card.manual_url,
-                        "settings_at": p.get("settings_read_at")})
+                        "settings_at": p.get("settings_read_at"),
+                        "calibration": profiles.calibration_view(home, name)})   # Calibration… on its row
         return out
 
     def real_instrument(name: str) -> Any:
@@ -2739,6 +2740,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         data["answering"] = agent.answering()   # every chat answering now: the portal marks them
         data["wakes"], data["woke"] = agent.waker.view(), agent.waker.latest()
         data["ask_scripts"] = setup.first and settings.lab_scripts is None   # the first setup: the lab's scripts?
+        from ..cardlang import shown   # each card also as this person reads it (Settings → Display), for the phone too
+        data["pending"] = [shown(p, settings.card_language) for p in data.get("pending") or []]
         return JSONResponse(data)
 
     async def scripts_folder(request: Request) -> Response:
@@ -3002,6 +3005,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/runs/{run_id}/files/{name}/open", run_open, methods=["POST"]),
         Route("/api/runs/{run_id}/export", run_export),
         Route("/static/{name}", static),
+        # Help and the first-run checklist, ELN records, calibration, cards in the reader's language (labops.py)
+        *labops.routes(runtime, settings, home, lambda request: runtime.user or person(request)),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.agent = agent

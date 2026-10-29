@@ -238,6 +238,7 @@ DEFERRED = {
     "watching readings": ["watch", "unwatch", "watches"],
     "pulse boards and sequences": ["run_on_board", "show_sequence"],
     "SQL on the catalog of runs": ["query_runs"],
+    "a lab notebook (ELN) record of a run or a day": ["export_eln"],
 }
 DEFERRED_NAMES = {n for names in DEFERRED.values() for n in names}
 MAX_FOUND = 10
@@ -259,6 +260,7 @@ BESIDE_THE_LAB = {"queue_add", "queue_edit", "queue_change", "queue_pause", "que
 # call at a time across chats, filed under its own chat, as the gate's approvals are the lab's
 OFF_LAB = LOOKUPS | READINGS | BESIDE_THE_LAB | {"find_tools", "remember", "wake_me", "save_skill", "save_recipe",
                                                  "save_paper", "make_report", "write_file", "measurement_chain"}
+OFF_LAB |= {"export_eln"}   # reads kept runs and the record, writes its own folder (eln.py)
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
 LOOKUPS |= ANALYSIS
