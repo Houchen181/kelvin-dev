@@ -823,10 +823,16 @@ class LabRuntime:
             errors = self.engine.validate(plan)
             if errors:
                 return "invalid plan: " + "; ".join(errors[:5])
-            items, _, problems = self.gate.plan_approval(self.engine.drive_values(plan))
-            lines = ["ok: %s, %s, instruments %s" % (plan.name, self.engine.shape(plan), ", ".join(plan.requires))]
+            from ..forecast import Forecast
+            forecast = Forecast(self.engine).plan(plan)   # as the run's own card: its setup actions, a draft's settings
+            items, _, problems = self.gate.plan_approval(self.engine.drive_values(plan), forecast=forecast)
+            asked = forecast.asked + forecast.action_lines()
+            lines = ["ok: %s, %s%s, instruments %s" % (plan.name, self.engine.shape(plan), forecast.duration(),
+                                                      ", ".join(plan.requires))]
             lines += ["will be refused: " + p for p in problems]
-            lines += ["needs approval: " + i for i in items] or ["no approval needed (measurement only or inside the envelope)"]
+            lines += ["needs approval: " + i for i in asked] or ["no approval needed (measurement only or inside the envelope)"]
+            if asked:
+                lines += ["also on its card: " + i for i in items[len(forecast.asked):] + forecast.closing()]
             return "\n".join(lines)
         return self._do("validating plan", run)
 
@@ -1617,6 +1623,18 @@ class LabRuntime:
                 out.setdefault(key, []).extend(vals)
         return out
 
+    def _queue_forecast(self, items: List[Item]) -> Any:
+        """The waiting items walked through in order, each from where the one before leaves the lab, for the queue's
+        card (forecast.py): every drive and setting, the rates read from the instruments, the duration, the end."""
+        from ..forecast import Forecast
+        forecast = Forecast(self.engine, "the queue")
+        for item in items:
+            if item.kind == "plan":
+                forecast.plan(self._plan(item.text))
+            else:
+                forecast.queue_step(load_step(item.text))
+        return forecast
+
     def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
         """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong)."""
         from ..gate import SimulationApprover
@@ -1679,22 +1697,27 @@ class LabRuntime:
             problems = check()
             if problems:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
-            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items))
+            forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
+            starting = forecast.driving_actions()     # a waveform its scans start: on this card, approved with it
+            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast=forecast,
+                                                              asking=bool(starting))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
-            duration = None
+            duration = forecast.seconds or None
             scans = sum(1 for i in items if i.kind == "plan")
             steps = len(items) - scans
             title = "Run the queue: %d scan%s%s%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
-                steps, "" if steps == 1 else "s") if steps else "", ", ~%s" % _dur(duration) if duration else "")
-            if lines:
-                request = ApprovalRequest(title, lines + [
+                steps, "" if steps == 1 else "s") if steps else "", forecast.duration())
+            if lines or starting:
+                request = ApprovalRequest(title, lines + forecast.action_lines(starting) + forecast.closing() + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
                 covered = False
                 if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
                     duration, failed = self._rehearse(items)
                     rehearsal = type("Rehearsal", (), {"ok": not failed})()
                     covered, why = self.gate.auto_plan(grants, rehearsal)
+                    if starting:   # an action that drives the sample is a person's to start, as with do_action
+                        covered, why = False, why + ["its scans start %s" % ", ".join(starting)]
                     if covered:
                         self.gate.auto_approve(request, why)
                     else:
@@ -1704,6 +1727,7 @@ class LabRuntime:
                     note = " (%s)" % request.note if request.note else ""
                     self.gate.log.write("queue_declined", by=by)
                     return "declined: the queue did not start%s" % note
+            self.gate.queue_actions = frozenset(starting)   # its scans start these without asking again
             with self.queue.lock:
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()

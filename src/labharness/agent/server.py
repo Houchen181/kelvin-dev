@@ -32,6 +32,10 @@ INSTRUCTIONS = """\
 You are connected to a physics lab through Kelvin.
 - Measurement and configuration (reading values, time constants, averaging, spans, moving a delay stage...) run immediately.
 - Changes that drive the sample harder (more power, voltage, current, field, temperature, outputs on) wait for a human to approve them on the Kelvin approval page, unless the project envelope covers them. Your call blocks until they answer or the request times out. You cannot approve requests yourself; do not try.
+- One run, one approval: what a run needs set up first goes in its plan's setup, not in set_value or do_action calls
+  before it. That covers an excitation (amplitude, frequency, output, and its card's start action, e.g.
+  isrc.wave_start: run) and a laser (emission, power). The run's one card then shows all of it, with each rate,
+  how long the run takes and what it leaves on, and nothing asks twice.
 - Cancelling a call (or disconnecting) ends it: what it asked a person for is declined, the ramp or run it started
   stops, and a call still waiting for the lab is not run. A person's Stop also ends the calls waiting for the lab.
 - A person may switch on auto mode. Then drive changes and runs that stay well inside the lab's limits (and pass

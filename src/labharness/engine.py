@@ -15,6 +15,7 @@ from . import frames
 from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
+from .forecast import Forecast, action_of, runs
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
 from .instrument import InstrumentOff, SensorError, Stopped
 from .monitor import Approach, rate_per_s
@@ -223,6 +224,15 @@ class RunEngine:
 
         for group, steps in (("setup", plan.setup), ("after", plan.after), ("on_abort", plan.on_abort or [])):
             for step in steps:
+                action = action_of(lab, step.instr, step.param)
+                if action is not None:   # the card's action, run once (a waveform started), on the run's own card
+                    if not runs(step.value):
+                        errors.append("%s: %s is one of %s's actions: write %s: run" % (group, step.key, step.instr,
+                                                                                       step.key))
+                    elif group == "on_abort" and action.drives:
+                        errors.append("on_abort: %s drives the sample; after a stop only actions that don't can run"
+                                      % step.key)
+                    continue
                 inst, spec = settable(step.instr, step.param, group)
                 if spec:
                     step.value = check_value(inst, spec, step.value, group)
@@ -362,7 +372,8 @@ class RunEngine:
         level other than the one approved and shown. skip: keys the plan changes again (its sweep axes)."""
         last: Dict[str, Step] = {}
         for s in steps:
-            last[s.key] = s
+            if action_of(self.lab, s.instr, s.param) is None:   # an action reads back nothing
+                last[s.key] = s
         out = []
         for key, s in last.items():
             if key in skip:
@@ -393,9 +404,11 @@ class RunEngine:
 
     def drive_values(self, plan: Plan) -> Dict[str, List[Any]]:
         out: Dict[str, List[Any]] = {}
-        for key, value in [(s.key, s.value) for s in plan.setup] \
-                + [(a.key, v) for a in plan.instrument_axes for v in a.values] + self._ramp_values(plan) \
-                + [(s.key, s.value) for s in plan.after]:
+
+        def settings(steps: List[Step]) -> List[Tuple[str, Any]]:   # not the card's actions a step may name
+            return [(s.key, s.value) for s in steps if action_of(self.lab, s.instr, s.param) is None]
+        for key, value in settings(plan.setup) + [(a.key, v) for a in plan.instrument_axes for v in a.values] \
+                + self._ramp_values(plan) + settings(plan.after):
             _, spec = self.lab.resolve(key)
             if spec.is_drive:
                 out.setdefault(key, []).append(value)
@@ -469,13 +482,21 @@ class RunEngine:
             if not ok:
                 _, spec = self.lab.resolve(cond.key)
                 return self._refuse(plan.name, "precondition %s not met (now %s)" % (cond.text, spec.show(actual)))
-        items, grants, problems = self.gate.plan_approval(drives)
-        if problems:
-            return self._refuse(plan.name, "; ".join(problems))
+        forecast = Forecast(self).plan(plan)   # what the run changes, how fast, how long, and what it leaves on
         firing = ["%s.%s (%s)" % (i, a, self.lab.instruments[i].card.actions[a].label) for i, a in plan.trigger
                   if self.lab.instruments[i].card.actions[a].drives]
+        # set-up that drives the sample (a waveform started) is on this card, not a card of its own; a queue's card
+        # that showed it covers it
+        starting = [k for k in forecast.driving_actions() if not self.gate.action_covered(k)]
+        items, grants, problems = self.gate.plan_approval(drives, forecast=forecast, asking=bool(firing or starting))
+        if problems:
+            return self._refuse(plan.name, "; ".join(problems))
         if firing:   # an action that drives the sample at every point: the person approves the run
             items = list(items) + ["At every point, after settling: %s, which drive the sample" % ", ".join(firing)]
+        if starting:
+            items = list(items) + forecast.action_lines(starting)
+        if items:
+            items = list(items) + forecast.closing()
         sim = None
         # auto mode needs a clean dry run, unless a drive is on an instrument Kelvin isn't sure about (a person asks)
         could_auto = self.gate.auto and not any(self.gate.unsure(self.lab.resolve(k)[0]) for k in grants)
@@ -487,10 +508,14 @@ class RunEngine:
             title = "Run plan %s: %s" % (plan.name, self.shape(plan))
             if sim is not None:
                 title += ", ~%s" % _dur(sim.duration_s) if sim.ok else "; %s" % sim.message
+            else:   # no dry run: the forecast's ramps, settling and waits
+                title += forecast.duration()
             request = ApprovalRequest(title, items)
             auto, why = self.gate.auto_plan(grants, sim)
             if firing:
                 auto, why = False, list(why or []) + ["it fires %s" % ", ".join(firing)]
+            if starting:   # as do_action: an action that drives the sample is a person's to start
+                auto, why = False, list(why or []) + ["it starts %s" % ", ".join(starting)]
             if auto:
                 self.gate.auto_approve(request, why)
             elif why:
@@ -596,7 +621,12 @@ class RunEngine:
         def apply(instr: str, param: str, value: Any) -> None:
             if gate.stop_generation != gen:   # a stop that came between steps (or while the run was starting)
                 raise _Abort("stop requested")
-            r = gate._set(instr, param, value, True, "plan:" + plan.name, gen=gen)   # and one during it ends its waits
+            if action_of(lab, instr, param) is not None:   # the card's action, run once; on the run's card if it drives
+                if lab.instrument(instr).simulated:
+                    return   # a twin has nothing to start
+                r = gate.act(instr, param, in_plan=True)
+            else:
+                r = gate._set(instr, param, value, True, "plan:" + plan.name, gen=gen)   # a stop ends its waits too
             if not r.ok:
                 raise _Abort(r.message)
 
@@ -910,8 +940,23 @@ class RunEngine:
         magnet the lab holds. A set point the instrument ramps to by itself is set and not waited for, so a stop never
         hangs on a cool-down (gate.abort_to_safe)."""
         by = "abort:" + plan.name
-        out = [r.message for r in self.gate.abort_to_safe(list(self.drive_values(plan)), by)]
+        keys = list(self.drive_values(plan))
+        for step in plan.setup + plan.after:   # an action that drives (a waveform started) switched its output on
+            action = action_of(self.lab, step.instr, step.param)
+            inst = self.lab.instruments.get(step.instr)
+            if action is not None and action.drives and inst is not None:
+                keys += ["%s.%s" % (inst.name, p.name) for p in inst.card.drives
+                         if p.enables and "%s.%s" % (inst.name, p.name) not in keys]
+        out = [r.message for r in self.gate.abort_to_safe(keys, by)]
         for step in plan.on_abort or []:
+            if action_of(self.lab, step.instr, step.param) is not None:   # one that doesn't drive (validate)
+                if getattr(self.lab.instruments.get(step.instr), "simulated", True):
+                    continue   # a twin has nothing to stop
+                try:   # the clean-up goes on whatever this instrument answers
+                    out.append(self.gate.act(step.instr, step.param, in_plan=True).message)
+                except Exception as e:
+                    out.append("%s: %s" % (step.key, str(e).splitlines()[0][:160] if str(e) else type(e).__name__))
+                continue
             if self.lab.config.safe_actions.get(step.key) == "hold":
                 out.append("%s stays held: the lab config holds it on a stop (on_abort asked for %s)"
                            % (step.key, self.lab.resolve(step.key)[1].show(step.value)))

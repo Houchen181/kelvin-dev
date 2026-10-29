@@ -25,6 +25,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -124,6 +125,21 @@ def _hook_serial(monkeypatch: Any) -> None:
     hooks.install_serial()
 
 
+def _forget_links() -> None:
+    """The makers' stand-ins call the bench over one link per thread (labsim.link.shared), made for the bench running
+    then; labsim itself stays imported between tests, so its links go with the bench they were made for."""
+    module = sys.modules.get("labsim.link")
+    if module is None:
+        return
+    link = getattr(module._local, "link", None)
+    if link is not None:
+        try:
+            link.close()
+        except Exception:
+            pass
+    module._local = threading.local()
+
+
 @pytest.fixture
 def labsim_bench(tmp_path: Path, monkeypatch: Any):
     """labsim_bench(bench, sdk=False) starts the bench for this test and points this process at it: Kelvin's VISA
@@ -145,6 +161,7 @@ def labsim_bench(tmp_path: Path, monkeypatch: Any):
         started.append(running)
         monkeypatch.setenv("LABSIM_HOME", str(running.home))
         monkeypatch.setenv("KELVIN_VISA_BACKEND", "@labsim")
+        _forget_links()   # a link an earlier test's bench left would talk to that bench, long stopped
         _hook_serial(monkeypatch)
         if sdk:
             monkeypatch.syspath_prepend(str(SHIMS))
@@ -160,6 +177,7 @@ def labsim_bench(tmp_path: Path, monkeypatch: Any):
     adapters.set_resource_manager(before)
     for running in started:
         running.stop()
+    _forget_links()
     for name, module in list(sys.modules.items()):   # the stand-ins go, so later tests see this computer's own
         if str(getattr(module, "__file__", None) or "").startswith(str(SHIMS)):
             del sys.modules[name]

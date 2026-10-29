@@ -14,7 +14,8 @@ You ask in plain words. Kelvin turns the request into a measurement plan for you
 ```text
 You     Sweep the gate from 0 to 5 V and record the lock-in signal.
 Kelvin  Plan gate_sweep: smu.V from 0 to 5 V in 0.1 V steps; read lockin.X and smu.I; back to 0 V after.
-        Approve?  51 points.  smu.output off → on,  smu.V 0 → 5 V (your limit ±10 V), ramped.
+        Approve?  51 points, ~1 min.  smu.output off → on,  smu.V 0 → 5 V at 0.5 V/s (your limit ±10 V).
+        At the end smu.output stays on; smu.V is back at 0 V.
 You     Approve
 Kelvin  Done. lockin.X has a peak at 2.41 ± 0.02 V, FWHM 0.38 ± 0.05 V.
         Plot, data and fit in runs/20261018-153012-gate_sweep/

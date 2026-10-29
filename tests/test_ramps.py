@@ -260,7 +260,7 @@ measure: [tc.T_sample]
     rec = rundata.load(tmp_path / "runs" / report.run_id)
     assert [s["settled"] for s in rec.meta["stabilized"]] == [True, True] and rec.meta["stabilized"][1]["after_s"] >= 30
     # the automatic analysis took the two settled points only: too few for a curve, though many more were logged
-    assert report.analysis["series"][0]["summary"] == "tc.T_sample: too few points to analyse"
+    assert report.analysis["series"][0]["summary"] == "tc.T_sample: too few points to analyse (2 with numbers)"
 
 
 def test_near_waits_for_the_set_point_not_only_a_steady_reading(lab, make_engine, monkeypatch):
