@@ -1374,7 +1374,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         else:
             if role_of(request) == "watch":
                 return error(403, "This phone can lock, not unlock. Unlock on the Kelvin computer.")
-            refused = needs_owner(body, None)   # before anything changes: the sample mounted, the lock
+            m = runtime.mounted or {}   # unlocking with another sample takes a protected one out, as Mount does
+            swap = "device" in body and m.get("protection") and body.get("device") not in (m.get("device"),
+                                                                                         m.get("device_name"))
+            refused = needs_owner(body, "Taking out a protected device" if swap else None)   # before anything changes
             if refused:
                 return refused
             if "device" in body and role_of(request) == "owner":

@@ -571,3 +571,29 @@ def test_on_labsim_a_trainees_gate_voltage_waits_for_an_operator(labsim_bench, t
         assert answer["account"] == "Cy" and answer["vouched"] == {"account": "Ben", "role": "operator"}
     finally:
         lab.close()
+
+
+def test_a_trainee_unlocks_with_the_pin_but_never_takes_a_protected_sample_out(lab):
+    client, h, runtime, settings, home, posts = lab
+    gate = {"gates": [{"drive": "smu.V", "dielectric": "hBN", "thickness_nm": 20, "leak": "smu.I"}]}
+    with client:
+        sign_in(client, h, "Ada")
+        client.post("/api/owner-pin", headers=h, json={"pin": "2468"})
+        client.post("/api/roles", headers=h, json={"roles": {"Ada": "owner"}, "pin": "2468"})
+        sign_in(client, h, "Cy")                                          # a trainee: the samples are his own
+        p = client.post("/api/projects", json={"name": "Graphene"}, headers=h).json()
+        url = "/api/projects/%s/devices" % p["id"]
+        d4 = client.post(url, json={"name": "D4"}, headers=h).json()["devices"][0]
+        client.post(url, json={"name": "D5"}, headers=h)
+        r = client.patch("%s/%s" % (url, d4["id"]), json={"protection": gate}, headers=h)
+        assert r.status_code == 200                                       # protecting narrows: a trainee may
+        assert client.post("/api/mount", json={"project": p["id"], "device": "D4"}, headers=h).status_code == 200
+        r = client.patch("%s/%s" % (url, d4["id"]), json={"protection": {}, "pin": "2468"}, headers=h)
+        assert r.status_code == 403 and r.json()["role"] == "trainee"   # lifting it: never a trainee's
+        assert client.post("/api/hands", json={"on": True}, headers=h).status_code == 200
+        r = client.post("/api/hands", json={"on": False, "project": p["id"], "device": "D5", "pin": "2468"}, headers=h)
+        assert r.status_code == 403 and r.json()["role"] == "trainee" and runtime.hands is not None
+        r = client.post("/api/hands", json={"on": False, "project": p["id"], "device": "D4", "pin": "2468"}, headers=h)
+        assert r.status_code == 200 and runtime.hands is None and runtime.mounted.get("device_name") == "D4"
+        unlocked = [e for e in runtime.versions.history(subject="events") if e["what"] == "Hands on the sample unlocked"]
+        assert unlocked and unlocked[0]["account"] == "Cy" and unlocked[0]["role"] == "trainee"
