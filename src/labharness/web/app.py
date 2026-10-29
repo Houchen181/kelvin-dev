@@ -2104,7 +2104,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                     return error(400, "There is no lab config yet; scan for instruments or write one first.")
                 registry = lab_registry(lab_file.parent, runtime.collection)   # Kelvin's, the collection's, the user's
                 load_lab_config(text, registry)   # check it before touching any instrument
-                lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off, True)
+                # opened before connecting: the switch closes the old lab's instruments first and keeps the ones
+                # that are unchanged (runtime.switch_lab), as a camera or a maker's SDK takes one connection
+                lab = await asyncio.to_thread(build_lab, text, None, 0, registry, settings.switched_off, True, True)
                 envelope, info = None, {"kind": "file", "path": str(lab_file), "error": None, "has_file": True}
                 if use != "mine":
                     tmp = lab_file.with_suffix(".tmp")

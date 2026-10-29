@@ -273,12 +273,16 @@ def test_nothing_to_set_up_leaves_the_virtual_lab(tmp_path):
     assert chose.run()["state"] == "done" and rt.lab_info["kind"] == "virtual"
 
 
-def test_while_kelvin_is_busy_the_found_lab_waits_for_later(tmp_path, bench):
+def test_while_kelvin_is_busy_the_found_lab_opens_at_the_next_idle_moment(tmp_path, bench):
+    """It once switched under the person's first answer (a whole turn ran on the virtual lab), or not at all."""
     rt = runtime_for(tmp_path)
     settings = FakeSettings()
-    status = AutoSetup(rt, settings, tmp_path, scan=lambda: scanned(bench), can_switch=lambda: False).run()
-    assert "opens when Kelvin is idle" in status["message"] and rt.lab_info["kind"] == "virtual"
-    assert (tmp_path / "lab.yaml").exists() and settings["lab"] == "mine"   # it opens on the next start
+    answering = iter([True] * 4)                                          # the first answer takes a moment
+    setup = AutoSetup(rt, settings, tmp_path, scan=lambda: scanned(bench),
+                      can_switch=lambda: not next(answering, False))
+    status = setup.run()
+    assert rt.lab_info["kind"] == "file" and next(answering, None) is None   # switched once the answer ended
+    assert (tmp_path / "lab.yaml").exists() and settings["lab"] == "mine" and status["state"] == "done"
 
 
 def test_portal_sets_up_on_start_and_a_person_reviews_the_limits(tmp_path, bench, pdf, monkeypatch):

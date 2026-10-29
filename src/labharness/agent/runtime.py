@@ -522,6 +522,9 @@ class LabRuntime:
             lines.append("%s: switched off in the Lab panel; Kelvin sends it nothing (ask_to_switch_on asks the person)"
                          % name)
         for name, why in self.lab.unavailable.items():
+            if why.startswith("set aside"):   # its lab.yaml entry has a problem: the person's to fix, not a reconnect
+                lines.append("%s: %s; tell the person" % (name, why))
+                continue
             lines.append("%s: not connected (%s); Kelvin sends it nothing until it connects: fix that "
                          "(install_for_instrument for a missing package), then reconnect_instrument" % (name, why))
         for name, values in self._status.items():
@@ -4065,13 +4068,67 @@ class LabRuntime:
             self.gate.log.write("lab_reviewed", by=by, instruments=names)
             return names
 
-    def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human") -> List[str]:
+    def switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str = "human",
+                   idle: Optional[Callable[[], bool]] = None) -> List[str]:
         """Control another lab (the user's instruments, or the virtual lab). Refused while a plan runs. The approval
-        mode goes back to asking, and the new lab is health-checked right away."""
+        mode goes back to asking, and the new lab is health-checked right away.
+        A lab opened before connecting (build_lab later=True) takes over the connections of the instruments it has
+        unchanged (same address, card, connection and names), and the old lab's other instruments are closed before
+        any of the new lab's is opened: a camera or a maker's SDK takes one connection at a time (a pylon camera was
+        "exclusively opened by another client", an Andor SDK shut down under the new connection). idle: the switch
+        waits for the next moment Kelvin is idle (it says so, and no queue runs), so the lab never changes under an
+        answer in progress (the first-run setup's switch once raced the person's first message)."""
+        held = self._until_idle(idle) if idle is not None else False
+        try:
+            return self._switch_lab(lab, envelope, info, by)
+        finally:
+            if held:
+                self.lock.release()
+
+    def _until_idle(self, idle: Callable[[], bool], wait_s: float = 6 * 3600.0) -> bool:
+        """Wait for Kelvin to be idle (idle(), no run, no queue) with the lab to itself: True, holding the lock."""
+        end = time.monotonic() + wait_s
+        while True:
+            if idle() and self.queue.state not in ("running", "pausing") and self.lock.acquire(timeout=0.5):
+                if idle() and not (self.live or {}).get("status") == "running":
+                    return True
+                self.lock.release()
+            if time.monotonic() > end:
+                raise RuntimeError("Kelvin was not idle for %s; switch to your instruments in Lab setup" % _dur(wait_s))
+            time.sleep(0.5)
+
+    @staticmethod
+    def _carry_over(old: Lab, new: Lab) -> List[str]:
+        """The instruments a lab opened before connecting has unchanged from the lab in use: their connections move
+        to it, unclosed, with what Kelvin set on them. Returns their names."""
+        from ..instrument import Unavailable
+        from ..lab import CONNECTING
+        kept = []
+        for name, inst in new.instruments.items():
+            was = old.instruments.get(name)
+            if inst.unavailable != CONNECTING or was is None or not was.enabled or was.simulated:
+                continue
+            a, b = was.config, inst.config
+            if (a.address, a.card, a.connection, a.vars) != (b.address, b.card, b.connection, b.vars):
+                continue
+            inst.backend, was.backend = was.backend, Unavailable(name, "moved to %s" % new.config.name)
+            inst._last = dict(was._last)
+            kept.append(name)
+        return kept
+
+    def _switch_lab(self, lab: Lab, envelope: Optional[Envelope], info: Dict[str, Any], by: str) -> List[str]:
         with self.lock:
             if self.live and self.live.get("status") == "running":
                 raise RuntimeError("a plan is running; wait for it to finish or stop it first")
             old = self.lab
+            kept = self._carry_over(old, lab) if old is not lab else []
+            if old is not lab:
+                old.close()   # the old lab's own connections, before the new lab opens its own
+            for name in lab.connecting:   # one that can't be connected is set aside, with why
+                try:
+                    lab.reconnect(name)
+                except Exception:
+                    pass
             self.lab = lab
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
             self.engine = RunEngine(self.gate, self._store())
@@ -4089,10 +4146,8 @@ class LabRuntime:
             self._status = {}
             self._refresh()
             self.gate.log.write("lab_changed", by=by, lab=lab.config.name, instruments=sorted(lab.instruments),
-                                kind=info.get("kind"))
+                                kind=info.get("kind"), kept=kept or None, set_aside=info.get("set_aside") or None)
             results = [str(r) for r in self.engine.preflight()]
-        if old is not lab:
-            old.close()
         return results
 
     def scan(self) -> str:
