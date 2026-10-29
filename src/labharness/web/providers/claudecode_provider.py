@@ -9,7 +9,12 @@ Claude models often write a call in the form they are trained on instead, <invok
 name="...">...</parameter></invoke> (sometimes inside <function_calls>), and with no tools of its own in the run
 nothing stops the model after a call, so it may go on to write the result itself. So Kelvin reads both forms, shows
 none of the markup, ends the turn where the model starts writing a result (or the person's next message), and asks
-once more when a turn had call markup but no call Kelvin could run."""
+once more when a turn had call markup but no call Kelvin could run.
+
+Pictures (a photo the person attaches, look_at's plots and frames) go in as pictures: a conversation that has any is
+sent as one stream-json user message (`--input-format stream-json`, how Claude Code takes messages from a program),
+the transcript's text with each picture where it came, as Claude's own image blocks. Without pictures the transcript
+goes in as plain text, as before."""
 from __future__ import annotations
 
 import json
@@ -68,11 +73,16 @@ def tool_catalog(tools: List[Dict[str, Any]]) -> str:
                        for t in tools)
 
 
-def transcript(history: List[Dict[str, Any]]) -> str:
-    out = ["<conversation>"]
+def pieces(history: List[Dict[str, Any]]) -> List[Any]:
+    """The conversation as Claude reads it: its text, and each picture ({"mime", "data"}) where it came, inside the
+    person's message it was attached to or the tool result that showed it."""
+    out: List[Any] = ["<conversation>"]
     for m in history:
         if m["role"] == "user":
-            out.append('<message role="user">\n%s\n</message>' % user_text(m))
+            if m.get("images"):
+                out += ['<message role="user">\n%s\n' % user_text(m)] + list(m["images"]) + ["</message>"]
+            else:
+                out.append('<message role="user">\n%s\n</message>' % user_text(m))
         elif m["role"] == "assistant":
             parts = []
             for b in m.get("blocks") or []:
@@ -84,10 +94,42 @@ def transcript(history: List[Dict[str, Any]]) -> str:
                 out.append('<message role="assistant">\n%s\n</message>' % "\n".join(parts))
         elif m["role"] == "tool":
             for r in m["results"]:
-                out.append('<tool_result name="%s" error="%s">\n%s\n</tool_result>'
-                           % (r["name"], "true" if r.get("is_error") else "false", r.get("content") or "(empty)"))
+                head = '<tool_result name="%s" error="%s">\n%s\n' % (
+                    r["name"], "true" if r.get("is_error") else "false", r.get("content") or "(empty)")
+                if r.get("images"):
+                    out += [head] + list(r["images"]) + ["</tool_result>"]
+                else:
+                    out.append(head + "</tool_result>")
     out.append("</conversation>")
-    return "\n".join(out)
+    return out
+
+
+def transcript(history: List[Dict[str, Any]]) -> str:
+    return "\n".join(p for p in pieces(history) if isinstance(p, str))
+
+
+def has_pictures(history: List[Dict[str, Any]]) -> bool:
+    return any(m.get("images") for m in history if m["role"] == "user") or \
+        any(r.get("images") for m in history if m["role"] == "tool" for r in m["results"])
+
+
+def stream_message(parts: List[Any]) -> str:
+    """One user message for `claude -p --input-format stream-json` (Claude Code's own wire form, as its SDKs send
+    it): the text runs as text blocks, each picture as an image block where it came."""
+    content: List[Dict[str, Any]] = []
+    text: List[str] = []
+    for p in parts:
+        if isinstance(p, str):
+            text.append(p)
+            continue
+        if text:
+            content.append({"type": "text", "text": "\n".join(text)})
+            text = []
+        content.append({"type": "image", "source": {"type": "base64", "media_type": p["mime"], "data": p["data"]}})
+    if text:
+        content.append({"type": "text", "text": "\n".join(text)})
+    return json.dumps({"type": "user", "message": {"role": "user", "content": content},
+                       "parent_tool_use_id": None, "session_id": "default"}) + "\n"
 
 
 class Reading:
@@ -339,6 +381,7 @@ class ClaudeCodeProvider(Provider):
     name = "claudecode"
     label = "Claude Code"
     can_search = True
+    sees_images = True   # through stream-json input (stream_message); F1, F2, F3: the bridge once passed none
 
     def __init__(self, cmd: Optional[List[str]], cwd: Optional[Path] = None, timeout: float = 600):
         self.cmd = cmd
@@ -378,18 +421,29 @@ class ClaudeCodeProvider(Provider):
         fd, path = tempfile.mkstemp(prefix="system-", suffix=".md", dir=str(self.cwd))
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(prompt)
-        args = ["-p", ASK, "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-                "--system-prompt-file", path, "--tools", "", "--strict-mcp-config", "--no-session-persistence",
-                "--model", model]
+        common = ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--system-prompt-file",
+                  path, "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--model", model]
+        pictures = has_pictures(history)
+        if pictures:   # the conversation, pictures and all, as one message on standard input; the request ends it
+            args = ["-p", "--input-format", "stream-json"] + common
+            said: List[Any] = pieces(history)
+
+            def stdin(extra: str = "") -> str:
+                return stream_message(said + ([extra] if extra else []) + [ASK])
+        else:
+            args = ["-p", ASK] + common
+            said_text = transcript(history)
+
+            def stdin(extra: str = "") -> str:
+                return said_text + ("\n" + extra if extra else "")
         try:
-            said = transcript(history)
-            reading = await self._turn(args, said, schemas, emit)
+            reading = await self._turn(args, stdin(), schemas, emit)
             if tools and reading.markup and not reading.run:   # nothing Kelvin can run: once more, told why
                 why = ("a tool result you wrote yourself" if reading.made_up else
                        "tool-call markup Kelvin could not read")
                 log.info("Claude Code bridge: the model's turn had %s; asking once more", why)
                 await emit({"type": "reset"})
-                reading = await self._turn(args, said + "\n" + RETRY % why, schemas, emit)
+                reading = await self._turn(args, stdin(RETRY % why), schemas, emit)
         finally:
             try:
                 os.unlink(path)

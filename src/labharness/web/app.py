@@ -229,8 +229,8 @@ def shown(message: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def unseen_pictures(provider: Provider, attached: List[Dict[str, Any]]) -> Optional[str]:
-    """What to tell a person who sends pictures to a model that can't see them (the Claude Code bridge passes none
-    on): said as they send them, not learnt from an answer about a picture the model never saw."""
+    """What to tell a person who sends pictures to a model that can't see them (most local models): said as they
+    send them, not learnt from an answer about a picture the model never saw."""
     names = [str(a.get("name") or "the picture") for a in attached if str(a.get("mime") or "").startswith("image/")]
     if not names or getattr(provider, "sees_images", False):
         return None

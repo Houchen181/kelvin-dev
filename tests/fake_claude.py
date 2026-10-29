@@ -39,7 +39,28 @@ def main():
             time.sleep(0.2)
         out({"type": "result", "subtype": "success", "is_error": False, "result": "Opened LaserDesk; power reads 5 mW."})
         return 0
-    if "<tool_result" in stdin:
+    pictures = 0
+    if "--input-format" in args and args[args.index("--input-format") + 1] == "stream-json":
+        if "-p" not in args:
+            out({"type": "result", "subtype": "error", "is_error": True,
+                 "result": "Error: --input-format=stream-json requires --print"})
+            return 1
+        said = []
+        for line in stdin.splitlines():   # user messages as Claude Code's SDKs send them
+            if not line.strip():
+                continue
+            message = json.loads(line)
+            assert message["type"] == "user" and message["message"]["role"] == "user"
+            for block in message["message"]["content"]:
+                if block["type"] == "text":
+                    said.append(block["text"])
+                else:
+                    assert block["type"] == "image" and block["source"]["type"] == "base64"
+                    pictures += 1
+        stdin = "\n".join(said)
+    if pictures:
+        text = "I see %d picture%s." % (pictures, "" if pictures == 1 else "s")
+    elif "<tool_result" in stdin:
         text = "The gate is at 0 V."
     else:
         text = 'Checking the gate.\n<tool_call name="get_value">{"instrument": "smu", "parameter": "V"}</tool_call>'
