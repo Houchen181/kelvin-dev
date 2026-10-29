@@ -43,6 +43,7 @@
   .request h3 { margin: 0 0 6px; font-size: 15px; }
   .request ul { margin: 0 0 10px; padding-left: 18px; }
   .request li { margin: 2px 0; overflow-wrap: anywhere; }
+  .request .figure { display: block; max-width: 100%; height: auto; margin: 0 0 10px; background: #fff; border-radius: 6px; }
   .request .lessons { margin: -4px 0 10px; font-size: 13px; }
   .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .empty { color: var(--muted); }
@@ -148,6 +149,9 @@ function renderPending(list) {
     box.append(el("div", { class: "request" },
       el("h3", {}, (r.where ? "[" + r.where + "] " : "") + r.title),
       el("ul", {}, ...r.items.map((i) => el("li", {}, i))),
+      // a pulse generator's timing: an SVG shown as an image, which can't run anything
+      ...(r.figures || []).map((f) => el("img", { class: "figure", alt: f.caption || "",
+        src: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(String(f.svg || "")) })),
       ...((r.lessons || []).length ? [el("p", { class: "lessons" }, "From the lab's memory: " + r.lessons.join(" · "))] : []),
       el("div", { class: "actions" }, ok, no, el("span", { class: "muted" }, "declines itself in " + r.seconds_left + " s"))));
     if (!seen.has(r.id)) {

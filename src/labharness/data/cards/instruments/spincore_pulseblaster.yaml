@@ -20,8 +20,11 @@ vars:
   gate: { default: "2", label: "Output wired to the counter's gate input" }
   laser_delay: { default: "0", label: "How late the AOM responds, in seconds (e.g. 4.5e-7)" }
   max_mw_duty: { default: "0.5", label: "Highest microwave duty cycle allowed (heating of the sample)" }
+  mw_x: { default: "none", label: "Output wired to a second microwave switch (a phase path, mw_x in a written sequence); none if not wired" }
+  mw_y: { default: "none", label: "Output wired to a third microwave switch (mw_y in a written sequence); none if not wired" }
+  aux: { default: "none", label: "Output wired to anything else a written sequence names aux (a trigger, an RF switch); none if not wired" }
 on_connect:
-  - "SET wiring laser={laser},mw={mw},gate={gate}"
+  - "SET wiring laser={laser},mw={mw},gate={gate},mw_x={mw_x},mw_y={mw_y},aux={aux}"
   - "SET delays laser={laser_delay}"
   - "SET limits max_mw_duty={max_mw_duty}"
 
@@ -42,6 +45,14 @@ parameters:
     get: "GET protocol"
     values: [cw, pulsed_odmr, rabi, ramsey, hahn_echo, t1]
     default: pulsed_odmr
+  sequence:
+    label: Written sequence
+    kind: measure
+    type: str
+    set: "SET sequence {value}"
+    get: "GET sequence"
+    default: none
+    description: A sequence written out and saved (save_sequence), played in place of the protocol; none plays the protocol
   tau:
     label: Tau
     kind: measure

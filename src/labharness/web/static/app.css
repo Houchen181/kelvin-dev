@@ -369,6 +369,10 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .approval.done .approval-actions { grid-column: 2; grid-row: 1; }
 .approval.done ul { grid-column: 1 / -1; grid-row: 2; }
 .approval.done:not(.open) ul, .approval.done:not(.open) .approval-actions .muted { display: none; }
+.approval-figure { margin: 0; display: grid; gap: 4px; }
+.approval-figure img { max-width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.approval.done .approval-figure { grid-column: 1 / -1; }
+.approval.done:not(.open) .approval-figure { display: none; }
 .approval.done .approval-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
 .verdict { font-weight: 600; font-size: 14px; }
 .verdict.yes { color: var(--ok); } .verdict.no { color: var(--muted); }

@@ -275,22 +275,28 @@ class MultiVu(DriverBackend):
 # ------------------------------------------------------------------ pulse generators and photon counters (spin experiments)
 
 class PulseGeneratorDriver(DriverBackend):
-    """A pulse generator that plays one of pulses.PROTOCOLS in a loop. Paths: protocol, tau, t_pi, t_laser, t_gate,
-    t_wait, running (play / stop), period and mw_duty (read). The card's on_connect says the wiring:
-        SET wiring laser=0,mw=1,gate=2          which output drives the AOM, the MW switch, the counter gate
+    """A pulse generator that plays one of pulses.PROTOCOLS, or a written sequence (pulses.LIBRARY, by its name in
+    `sequence`), in a loop. Paths: protocol, sequence, tau, t_pi, t_laser, t_gate, t_wait, running (play / stop),
+    period and mw_duty (read). The card's on_connect says the wiring:
+        SET wiring laser=0,mw=1,gate=2,mw_y=3   which output drives the AOM, the MW switch, the counter gate (and
+                                                any other channel a written sequence names; none: not wired)
         SET delays laser=4.5e-7                 how late each channel's device responds (moved earlier)
         SET limits max_mw_duty=0.2              stricter than the default 50 % (resolution comes from the model)
-    A sequence that fails pulses.check is refused before it reaches the hardware. Subclasses only play and stop."""
+    A sequence that fails pulses.check, or that names a channel no output is wired to, is refused before it reaches
+    the hardware. Subclasses only play and stop."""
     RESOLUTION = 1e-9
+    MAX_SEGMENTS: Optional[int] = None   # how many segments (instructions) a period may have, where the model says
     TIMES = ("tau", "t_pi", "t_laser", "t_gate", "t_wait")
 
     def __init__(self, name: str, card: Card, address: str):
         super().__init__(name, card, address)
         from . import pulses
-        self.state: Dict[str, Any] = dict(pulses.DEFAULTS, protocol="pulsed_odmr", running=0)
+        self.state: Dict[str, Any] = dict(pulses.DEFAULTS, protocol="pulsed_odmr", sequence=pulses.NONE, running=0)
         self.wiring: Dict[str, int] = {"laser": 0, "mw": 1, "gate": 2}
         self.delays: Dict[str, float] = {}
         self.limits: Dict[str, float] = {"resolution": self.RESOLUTION}
+        if self.MAX_SEGMENTS:
+            self.limits["max_segments"] = self.MAX_SEGMENTS
 
     @staticmethod
     def _pairs(text: str) -> Dict[str, str]:
@@ -304,18 +310,23 @@ class PulseGeneratorDriver(DriverBackend):
 
     def sequence(self) -> Any:
         from . import pulses
-        return pulses.build(str(self.state["protocol"]), {k: float(self.state[k]) for k in self.TIMES}, self.delays)
+        return pulses.make(str(self.state["protocol"]), self.state.get("sequence"),
+                           {k: float(self.state[k]) for k in self.TIMES}, self.delays)
 
     def set(self, path: str, value: Any) -> None:
         from . import pulses
         if path in ("wiring", "delays", "limits"):
             pairs = self._pairs(value)
             if path == "wiring":
-                unknown = set(pairs) - set(pulses.CHANNELS)
-                if unknown:
-                    raise AdapterError("%s: no channel %s (channels: %s)" % (self.name, ", ".join(sorted(unknown)),
-                                                                             ", ".join(pulses.CHANNELS)))
-                self.wiring.update({k: int(v) for k, v in pairs.items()})
+                bad = sorted(k for k in pairs if not pulses.CHANNEL.match(k) or k in pulses.RESERVED)
+                if bad:
+                    raise AdapterError("%s: %s is not a channel name (lower-case letters, digits and _)"
+                                       % (self.name, ", ".join(bad)))
+                for k, v in pairs.items():
+                    if v.lower() in (pulses.NONE, "-", ""):   # not wired (a card's spare channel)
+                        self.wiring.pop(k, None)
+                    else:
+                        self.wiring[k] = int(v)
             elif path == "delays":
                 self.delays.update({k: float(v) for k, v in pairs.items()})
             else:
@@ -325,6 +336,11 @@ class PulseGeneratorDriver(DriverBackend):
             value = str(value).lower()
             if value not in pulses.PROTOCOLS:
                 raise AdapterError("%s: no protocol %r (have: %s)" % (self.name, value, ", ".join(pulses.PROTOCOLS)))
+        elif path == "sequence":
+            value = str(value).strip().lower() or pulses.NONE
+            if value != pulses.NONE and value not in pulses.LIBRARY:
+                raise AdapterError("%s: no sequence %r (saved: %s; none plays the protocol)"
+                                   % (self.name, value, ", ".join(sorted(pulses.LIBRARY)) or "none yet"))
         elif path in self.TIMES:
             value = float(value)
         elif path != "running":
@@ -336,8 +352,16 @@ class PulseGeneratorDriver(DriverBackend):
             if old.get("running"):
                 self.stop()
             return
-        seq = self.sequence()
-        problems = pulses.check(seq, self.limits)
+        try:
+            seq = self.sequence()
+            problems = pulses.check(seq, self.limits)
+        except (KeyError, ValueError) as e:   # a written sequence these times can't build (a negative wait)
+            seq, problems = None, [str(e.args[0] if e.args else e)]
+        unwired = sorted(ch for ch, spans in (seq.channels.items() if seq is not None else []) if spans
+                         and ch not in self.wiring)
+        if unwired:   # it would play without them: fail closed
+            problems.append("the sequence uses %s, which no output is wired to (wiring: %s)" % (
+                ", ".join(unwired), ", ".join("%s=%d" % kv for kv in sorted(self.wiring.items()))))
         if problems:
             self.state = old
             raise AdapterError("%s: refused: %s" % (self.name, problems[0]))
@@ -347,7 +371,7 @@ class PulseGeneratorDriver(DriverBackend):
         if path == "period":
             return self.sequence().period
         if path == "mw_duty":
-            return self.sequence().duty("mw")
+            return self.sequence().mw_duty()
         if path in self.state:
             return self.state[path]
         raise AdapterError("%s: no reading %r" % (self.name, path))
@@ -461,9 +485,11 @@ class PulseBlaster(PulseGeneratorDriver):
     """SpinCore PulseBlaster through `spinapi` (a ctypes wrapper of SpinCore's SpinAPI; SpinAPI itself must be
     installed). Address pulseblaster://<board, 0-based>?clock=<core clock MHz>[&pro=1]. pro=1 is for the
     PulseBlasterESR-PRO, whose bits 21-23 must be 111 for ordinary pulses (on other models they are outputs). The
-    shortest instruction is 5 clock cycles. Stopping loads an all-off program, since pb_stop may leave outputs high."""
+    shortest instruction is 5 clock cycles. Stopping loads an all-off program, since pb_stop may leave outputs high.
+    A period has at most 4096 instructions (the ESR-PRO's memory; SET limits max_segments=... for a larger board)."""
     ON = 0xE00000
     MIN_CYCLES = 5
+    MAX_SEGMENTS = 4096
 
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
         super().__init__(name, card, address)

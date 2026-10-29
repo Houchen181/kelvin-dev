@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List,
 
 import yaml
 
-from .. import frames
+from .. import frames, pulses
 from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunFolderError, RunFolders, RunStore
@@ -308,6 +308,7 @@ class LabRuntime:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         frames.FOLDER = self.data_dir / "frames"   # camera frames read outside a run
+        pulses.use_folder(self.data_dir / "sequences")   # the lab's written pulse sequences
         self.events_path = self.data_dir / "events.jsonl"
         self.user: Optional[str] = None             # the person signed in to the portal (accounts.py), if any
         self.shared_log: Optional[Path] = None      # the lab's instrument log, everyone's events; set by the app
@@ -851,7 +852,7 @@ class LabRuntime:
                 return dict(self.data_summary(), moved=0, kept=[])
             moved, kept = 0, []
             if move:
-                for sub in ("runs", "reports"):
+                for sub in ("runs", "reports", "sequences"):   # the lab's written pulse sequences go along too
                     src = old / sub
                     if not src.is_dir():
                         continue
@@ -877,6 +878,7 @@ class LabRuntime:
                                     note="what stays here was not moved" if move else "earlier data stay here")
             self.data_dir = new
             frames.FOLDER = new / "frames"
+            pulses.use_folder(new / "sequences")
             self.queue.move_to(new / "queue.json")
             self._save_watches()
             self._save_alarms()
@@ -922,6 +924,7 @@ class LabRuntime:
             self.user = user
             self.data_dir = new
             frames.FOLDER = new / "frames"
+            pulses.use_folder(new / "sequences")
             self.events_path = new / "events.jsonl"
             self.gate.log = self._new_log()
             self.engine.store = self._store()
@@ -2139,13 +2142,32 @@ class LabRuntime:
         """The waiting items walked through in order, each from where the one before leaves the lab, for the queue's
         card (forecast.py): every drive and setting, the rates read from the instruments, the duration, the end."""
         from ..forecast import Forecast
+        from .. import techniques
         forecast = Forecast(self.engine, "the queue")
         for item in items:
             if item.kind == "plan":
-                forecast.plan(self._plan(item.text))
+                plan = self._plan(item.text)
+                forecast.plan(plan)
+                techniques.account(forecast, self.lab, plan)   # its techniques' time, which the walk doesn't count
             else:
                 forecast.queue_step(load_step(item.text))
         return forecast
+
+    def _queue_techniques(self, items: List[Item]) -> Tuple[List[str], List[str]]:
+        """The techniques that drive the sample its scans run (instr.technique), and their lines for its card: the
+        queue's one approval covers them, as it covers the actions its scans start."""
+        from .. import techniques
+        keys: List[str] = []
+        lines: List[str] = []
+        for n, item in enumerate(items, 1):
+            if item.kind != "plan":
+                continue
+            plan = self._plan(item.text)
+            found = techniques.driving(self.lab, plan)
+            if found:
+                keys += [k for k in found if k not in keys]
+                lines += ["#%d %s: %s" % (n, item.name, line) for line in techniques.lines(self.gate, plan)]
+        return keys, lines
 
     def _queue_later(self, items: List[Item]) -> List[str]:
         """The drives whose interlock condition an item before the first that moves them works on (it sets something on
@@ -2232,10 +2254,11 @@ class LabRuntime:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
             forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
             starting = forecast.driving_actions()     # a waveform its scans start: on this card, approved with it
+            running, technique_lines = self._queue_techniques(items)   # a technique its scans run: likewise
             # over the queue's whole path: every value an item sets away from safe, wherever the drive is now, so
             # nothing asks again in the night (an item that switches an output off made the next one ask)
             lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast=forecast,
-                                                              asking=bool(starting), whole_path=True,
+                                                              asking=bool(starting or running), whole_path=True,
                                                               later=self._queue_later(items))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
@@ -2244,8 +2267,9 @@ class LabRuntime:
             steps = len(items) - scans
             title = "Run the queue: %d scan%s%s%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
                 steps, "" if steps == 1 else "s") if steps else "", forecast.duration())
-            if lines or starting:
-                request = ApprovalRequest(title, lines + forecast.action_lines(starting) + forecast.closing() + [
+            if lines or starting or running:
+                request = ApprovalRequest(title, lines + forecast.action_lines(starting) + technique_lines
+                                          + forecast.closing() + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
                 covered = False
                 if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
@@ -2254,6 +2278,9 @@ class LabRuntime:
                     covered, why = self.gate.auto_plan(grants, rehearsal)
                     if starting:   # an action that drives the sample is a person's to start, as with do_action
                         covered, why = False, why + ["its scans start %s" % ", ".join(starting)]
+                    if running:   # nothing watches inside a technique: a person approves it
+                        covered, why = False, why + ["its scans run %s, which drive the sample on the instrument's "
+                                                     "own clock" % ", ".join(running)]
                     if covered:
                         self.gate.auto_approve(request, why)
                     else:
@@ -2263,7 +2290,7 @@ class LabRuntime:
                     note = " (%s)" % request.note if request.note else ""
                     self.gate.log.write("queue_declined", by=by)
                     return "declined: the queue did not start%s" % note
-            self.gate.queue_actions = frozenset(starting)   # its scans start these without asking again
+            self.gate.queue_actions = frozenset(starting) | frozenset(running)   # its scans do these, not asking again
             with self.queue.lock:
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()
@@ -3194,14 +3221,20 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ pulse sequences (spin experiments)
 
-    def pulse_sequence(self, protocol: str, times: Dict[str, Any], generator: str = "") -> str:
-        """The timing a pulse generator would play, checked: the diagram, period, duty cycles and any problem.
-        Missing times come from the generator's current settings (if named), else from pulses.DEFAULTS."""
-        from .. import pulses
+    def pulse_sequence(self, protocol: str, times: Dict[str, Any], generator: str = "", sequence: str = "") -> str:
+        """The timing a pulse generator would play, checked: period, duty cycles, every edge and any problem.
+        Missing times come from the generator's current settings (if named), else from pulses.DEFAULTS. sequence:
+        a written sequence (its text, or the name it was saved under) in place of the protocol."""
+        text, _ = self.pulse_view(protocol, times, generator, sequence)
+        return text
+
+    def pulse_view(self, protocol: str, times: Dict[str, Any], generator: str = "",
+                   sequence: str = "") -> Tuple[str, Optional[bytes]]:
+        """pulse_sequence's text, and the timing drawn (PNG; None when there is nothing to draw)."""
         current: Dict[str, Any] = {}
         inst = self.lab.instruments.get(generator) if generator else None
         if generator and inst is None:
-            return "no instrument %r (have: %s)" % (generator, ", ".join(self.lab.instruments))
+            return "no instrument %r (have: %s)" % (generator, ", ".join(self.lab.instruments)), None
         why = None
         if inst is not None:
             with self._reading(generator) as why:   # beside whatever else Kelvin does; a run's generator isn't asked
@@ -3218,13 +3251,72 @@ class LabRuntime:
                     except Exception:
                         pass
         given = {k: v for k, v in (times or {}).items() if v is not None}
+        written = str(sequence or "").strip()
         try:
-            seq = pulses.build(protocol, dict(current, **given))
-        except (ValueError, TypeError) as e:
-            return str(e)
-        problems = pulses.check(seq)
-        return pulses.describe(seq) + ("\nproblems: " + "; ".join(problems) if problems else "\nchecks: ok") + (
+            if written and ("\n" in written or ":" in written):   # its text: checked as written
+                seq = pulses.parse(written).build(dict(current, **given), pulses.delays_of(inst))
+            elif written:
+                seq = pulses.program(written.lower()).build(dict(current, **given), pulses.delays_of(inst))
+            else:
+                seq = pulses.build(protocol, dict(current, **given), pulses.delays_of(inst) if inst else None)
+        except pulses.SequenceError as e:
+            return "the sequence is not right yet:\n" + "\n".join("- " + p for p in e.errors), None
+        except (KeyError, ValueError, TypeError) as e:
+            return str(e.args[0] if e.args else e), None
+        problems = pulses.check(seq, pulses.limits_of(inst) if inst is not None else None)
+        if inst is not None and written:
+            wired = getattr(inst.backend, "wiring", None)
+            unwired = sorted(ch for ch, spans in seq.channels.items() if spans and isinstance(wired, dict)
+                             and ch not in wired)
+            if unwired:
+                problems.append("%s has no output wired to %s (its card's wiring vars)" % (generator,
+                                                                                       ", ".join(unwired)))
+        text = pulses.describe(seq) + ("\nproblems: " + "; ".join(problems) if problems else "\nchecks: ok") + (
             "\n%s's times are its latest Kelvin has, not read now: %s" % (generator, why) if why else "")
+        try:
+            picture = pulses.png(seq)
+        except Exception:   # the words say it all; a picture is a convenience
+            picture = None
+        return text, picture
+
+    def save_sequence(self, text: str, by: str = "agent") -> str:
+        """Keep a written sequence in the lab's sequences folder, checked as written, so a generator plays it by name
+        (its `sequence` setting). Drives nothing: playing it is the generator's running, which a person approves
+        with the timing drawn on the card. A sequence a generator is playing now is not changed under it."""
+        try:
+            prog = pulses.parse(text)
+        except pulses.SequenceError as e:
+            return "not saved; the sequence is not right yet:\n" + "\n".join("- " + p for p in e.errors)
+        for name, inst in self.lab.instruments.items():
+            if not pulses.is_generator(inst) or "sequence" not in inst.card.params or prog.name not in pulses.LIBRARY:
+                continue
+            with self._reading(name) as why:   # a generator a run uses isn't asked: its latest values (unknown: playing)
+                kept = self._kept(name) if why else {}
+                try:
+                    running = kept.get("running", (True,))[0] if why else inst.read("running")
+                    current = kept.get("sequence", (prog.name,))[0] if why else inst.read("sequence")
+                except Exception:
+                    running, current = False, None
+            if running and str(current).strip().lower() == prog.name:
+                return ("not saved: %s is playing %s now%s; stop it first, or save this under another name"
+                        % (name, prog.name, " (as far as Kelvin can tell: %s)" % why if why else ""))
+        folder = self.data_dir / "sequences"
+        replaced = (folder / (prog.name + ".yaml")).exists()
+        try:
+            pulses.save(folder, text)
+        except (OSError, pulses.SequenceError) as e:
+            return "not saved: %s" % e
+        self.gate.log.write("sequence_saved", by=by, name=prog.name, channels=prog.channels, replaced=replaced)
+        try:
+            seq = prog.build({})
+            at = "at the default times: " + pulses.summary(seq)
+            problems = pulses.check(seq)
+        except ValueError as e:
+            at, problems = "at the default times it can't be built: %s" % e, []
+        return ("saved %s%s (channels %s); a generator plays it with its sequence set to %s, and running on (a person "
+                "approves that, with its timing drawn on the card)\n%s%s" % (
+                    prog.name, ", replacing the one saved before" if replaced else "", ", ".join(prog.channels),
+                    prog.name, at, "\nat those times: " + "; ".join(problems) if problems else ""))
 
     # ------------------------------------------------------------------ cards for new instruments
 
@@ -4764,6 +4856,7 @@ class LabRuntime:
                             "stays here" % lab.config.name)
         self.data_dir = new
         frames.FOLDER = new / "frames"
+        pulses.use_folder(new / "sequences")
         self.events_path = new / "events.jsonl"
         self.queue = ScanQueue(new / "queue.json")   # each lab's queue in its own folder (the old one stays there)
         if self.mounted:

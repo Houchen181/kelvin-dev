@@ -28,6 +28,14 @@ parameters:
     values: [cw, pulsed_odmr, rabi, ramsey, hahn_echo, t1]
     default: pulsed_odmr
     description: The pulse protocol (see pulses.py)
+  sequence:
+    label: Written sequence
+    kind: measure
+    type: str
+    set: "SEQuence:CUSTom {value}"
+    get: "SEQuence:CUSTom?"
+    default: none
+    description: A sequence written out and saved (save_sequence), played in place of the protocol; none plays the protocol
   tau:
     label: Tau
     kind: measure

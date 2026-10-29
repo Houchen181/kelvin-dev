@@ -41,7 +41,7 @@ Cards follow the makers' manuals and most are not yet checked on hardware. The a
 
 **The instrument collection:** more instruments with their manuals, experiments with ready plans, and lab configs for common setups are in the public [Kelvin repository](https://github.com/Houchen181/Kelvin), next to the published releases.
 
-For spin experiments it builds and checks the pulse sequences itself: CW and pulsed ODMR, Rabi, Ramsey, Hahn echo and T1.
+For spin experiments it builds and checks the pulse sequences itself: CW and pulsed ODMR, Rabi, Ramsey, Hahn echo and T1, and any other you write out (XY8, CPMG, loops, a swept delay), each drawn with every pulse visible on the card you approve. Measurements an instrument times itself into its buffer are a card's techniques, which a plan runs and keeps as traces: cyclic and linear sweep voltammetry on a Keithley 2450 run as a potentiostat.
 
 ## Safety
 

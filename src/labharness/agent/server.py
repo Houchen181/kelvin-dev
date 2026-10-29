@@ -95,7 +95,15 @@ You are connected to a physics lab through Kelvin.
   sweep its tau, read the counter's signal, reference and contrast) for the pi time; then pulsed ODMR with that
   t_pi, Ramsey (T2*), Hahn echo (T2) and T1. Before running a sequence, show it with show_sequence and say its
   period and duty cycles. Start with low MW and laser power and raise them within the limits. Playing a sequence
-  (the generator's running) pulses light and microwaves onto the sample: it is a drive.
+  (the generator's running) pulses light and microwaves onto the sample: it is a drive, and its card shows the
+  timing drawn. Anything beyond those protocols (XY8, CPMG, a phase through its own channel): write it out as a
+  sequence (show_sequence with sequence: until its checks are ok, then save_sequence) and set the generator's
+  sequence to its name; a plan sweeps its times (tau...) as for a protocol.
+- A measurement the instrument times itself into its buffer (cyclic voltammetry on a potentiostat, an impedance
+  sweep, a scope's burst) is one of its card's techniques (describe_instrument lists them): a plan's technique: runs
+  it at every point and keeps its buffer as traces; sweep: {instr.technique.param: ...} steps one of its parameters
+  (scan rates). Its levels must be inside their drive's limits; put the output (and a speed setting such as nplc)
+  in the plan's setup. Kelvin can't watch inside it, so a person approves every run that drives with one.
 - Every scan is filed under the device (sample) mounted in the lab and its project. When the person says which
   sample is in, call mount_device; a plan can name another device on the same chip with device: <name>. Reports
   keep themselves up to date: each scan's report, each device's report and the project's master report.
@@ -261,14 +269,39 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "an instrument's manual", rt.search_manual(instrument, query, max_passages))
 
     @server.tool(annotations=READ, structured_output=False)
-    def show_sequence(protocol: str, generator: str = "", t_pi: Optional[float] = None, tau: Optional[float] = None,
-                      t_laser: Optional[float] = None, t_gate: Optional[float] = None,
-                      t_wait: Optional[float] = None) -> str:
-        """The timing a pulse generator would play, checked, without playing it: per-channel diagram (laser/AOM, MW
-        switch, counter gate), period, MW and laser duty cycles, and problems. protocol: cw, pulsed_odmr, rabi,
-        ramsey, hahn_echo or t1. Times in seconds; any left out come from the named generator's settings."""
-        return rt.pulse_sequence(protocol, {"t_pi": t_pi, "tau": tau, "t_laser": t_laser, "t_gate": t_gate,
-                                            "t_wait": t_wait}, generator)
+    def show_sequence(protocol: str = "", generator: str = "", t_pi: Optional[float] = None,
+                      tau: Optional[float] = None, t_laser: Optional[float] = None, t_gate: Optional[float] = None,
+                      t_wait: Optional[float] = None, sequence: str = "") -> List[Any]:
+        """The timing a pulse generator would play, checked, without playing it: a picture (every pulse visible),
+        period, MW and laser duty cycles, every edge exactly, and problems. protocol: cw, pulsed_odmr, rabi, ramsey,
+        hahn_echo or t1; or sequence: a written sequence (its YAML text, or the name it was saved under) for anything
+        else (XY8, CPMG, phases on their own channels...): channels, pulses with start and duration, loops, waits,
+        let: names, all from the generator's times (sweepable). Write one with show_sequence until its checks are ok,
+        then save_sequence. Times in seconds; any left out come from the named generator's settings."""
+        text, png = rt.pulse_view(protocol, {"t_pi": t_pi, "tau": tau, "t_laser": t_laser, "t_gate": t_gate,
+                                             "t_wait": t_wait}, generator, sequence)
+        return [Image(data=png, format="png"), text] if png else [text]
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def save_sequence(text: str) -> str:
+        """Keep a written pulse sequence (YAML) under its name, checked, so a generator plays it: set the generator's
+        sequence to that name (none: its protocol), then running on, which a person approves with the timing drawn on
+        the card. The syntax:
+            sequence: xy4                   # its name
+            let: { spacing: tau / 4 }       # names from the generator's times (tau, t_pi, t_laser, t_gate, t_wait)
+            steps:                          # in order; each starts where the one before ended
+              - mw: t_pi / 2                # a pulse: channel: duration (20 ns, 3 us, an expression)
+              - repeat: 4                   # a loop
+                steps: [{wait: spacing / 2}, {mw: t_pi}, {wait: spacing / 2}]
+              - mw: t_pi / 2
+              - wait: 20 ns
+              - laser: t_laser              # pulses in one step start together
+                gate: [{for: t_gate}, {start: t_laser - t_gate, for: t_gate}]   # signal, then reference window
+              - wait: t_wait
+        Channels are laser, mw, gate and any other the generator's wiring names (mw_x, mw_y for phases through
+        their own paths; every mw... channel counts as microwave for heating). A plan sweeps the generator's times
+        (tau...) as with a protocol, and every value is checked before the run."""
+        return rt.save_sequence(text)
 
     @server.tool(annotations=READ, structured_output=False)
     def get_value(instrument: str, parameter: str) -> str:
@@ -618,7 +651,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
         repeat: n / time: {every: s, for: s, until/while} (innermost time series) / settle: s /
         measure: [instr.param] / until: "abs(smu.I) > 1e-6 or tc.T > 300" (the sweep ends once true, checked after
         each point; while: the opposite) / retry: {times: n, wait: s} (a reading that fails is taken again; the gap
-        is marked in gap_s) / after: {instr.param: value} / on_abort: {...}"""
+        is marked in gap_s) / after: {instr.param: value} / on_abort: {...} /
+        technique: {instr.technique: {its parameters}}: a card's hardware-timed technique (describe_instrument lists
+        them: cyclic voltammetry, a scope's burst), run by the instrument at every point, its buffer kept as traces
+        (instr.technique.quantity, with its x); sweep: {instr.technique.param: ...} steps one of its parameters"""
         return rt.validate(plan)
 
     @server.tool(annotations=READ, structured_output=False)

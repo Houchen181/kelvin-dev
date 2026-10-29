@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import frames
+from . import frames, pulses, techniques
 from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
@@ -143,7 +143,9 @@ class RunEngine:
         axes = []
         for a in plan.axes:
             key = (self.followed(a) or a.key) if a.kind == "ramp" else a.key
-            axes.append({"key": key, "unit": "s" if a.kind == "time" else ("" if a.kind == "repeat" else unit(key)),
+            axes.append({"key": key, "unit": "s" if a.kind == "time" else ("" if a.kind == "repeat" else
+                                                                           techniques.axis_unit(self.lab, a)
+                                                                           if a.kind == "technique" else unit(key)),
                          "kind": a.kind})
         ramped = {c["key"] for c in axes if c["kind"] == "ramp"}
         measures = []
@@ -157,6 +159,7 @@ class RunEngine:
             if spec.axis or spec.axis_step or spec.x_values:
                 m["x_unit"] = unit("%s.%s" % (instr, (spec.axis or spec.axis_step or (spec.x_values,))[0]))
             measures.append(m)
+        measures += techniques.columns(self.lab, plan)   # a technique's buffers: traces, against its x
         return {"axes": axes, "measures": measures}
 
     # ------------------------------------------------------------------ checks
@@ -263,6 +266,10 @@ class RunEngine:
                 errors.append(e.args[0])
         if ramp is not None and not errors:
             ramp.estimate = self._estimate(ramp)
+        if not errors:   # a technique's values and levels, at every value its sweep gives them
+            errors += techniques.check(self.gate, plan)
+        if not errors:   # a generator it plays, at every value its sweep gives it, before anything plays
+            errors += pulses.plan_problems(lab, plan)
         return errors
 
     def _check_ramp(self, axis: Axis, settable: Any, check_value: Any, errors: List[str]) -> None:
@@ -408,7 +415,7 @@ class RunEngine:
         def settings(steps: List[Step]) -> List[Tuple[str, Any]]:   # not the card's actions a step may name
             return [(s.key, s.value) for s in steps if action_of(self.lab, s.instr, s.param) is None]
         for key, value in settings(plan.setup) + [(a.key, v) for a in plan.instrument_axes for v in a.values] \
-                + self._ramp_values(plan) + settings(plan.after):
+                + self._ramp_values(plan) + techniques.drive_values(self.lab, plan) + settings(plan.after):
             _, spec = self.lab.resolve(key)
             if spec.is_drive:
                 out.setdefault(key, []).append(value)
@@ -483,18 +490,25 @@ class RunEngine:
                 _, spec = self.lab.resolve(cond.key)
                 return self._refuse(plan.name, "precondition %s not met (now %s)" % (cond.text, spec.show(actual)))
         forecast = Forecast(self).plan(plan)   # what the run changes, how fast, how long, and what it leaves on
+        techniques.account(forecast, self.lab, plan)   # its techniques' time, which the walk doesn't count
+        # a technique that drives the sample runs at every point on the instrument's own clock: on this card, a
+        # person's to approve (a queue's card that showed it covers it)
+        running = [k for k in techniques.driving(self.lab, plan) if not self.gate.action_covered(k)]
         firing = ["%s.%s (%s)" % (i, a, self.lab.instruments[i].card.actions[a].label) for i, a in plan.trigger
                   if self.lab.instruments[i].card.actions[a].drives]
         # set-up that drives the sample (a waveform started) is on this card, not a card of its own; a queue's card
         # that showed it covers it
         starting = [k for k in forecast.driving_actions() if not self.gate.action_covered(k)]
-        items, grants, problems = self.gate.plan_approval(drives, forecast=forecast, asking=bool(firing or starting))
+        items, grants, problems = self.gate.plan_approval(drives, forecast=forecast,
+                                                          asking=bool(firing or starting or running))
         if problems:
             return self._refuse(plan.name, "; ".join(problems))
         if firing:   # an action that drives the sample at every point: the person approves the run
             items = list(items) + ["At every point, after settling: %s, which drive the sample" % ", ".join(firing)]
         if starting:
             items = list(items) + forecast.action_lines(starting)
+        if running or (items and plan.techniques):
+            items = list(items) + techniques.lines(self.gate, plan)
         if items:
             items = list(items) + forecast.closing()
         sim = None
@@ -511,11 +525,15 @@ class RunEngine:
             else:   # no dry run: the forecast's ramps, settling and waits
                 title += forecast.duration()
             request = ApprovalRequest(title, items)
+            pulses.illustrate_plan(request, self.lab, plan)   # a generator it plays: its timing, drawn and exact
             auto, why = self.gate.auto_plan(grants, sim)
             if firing:
                 auto, why = False, list(why or []) + ["it fires %s" % ", ".join(firing)]
             if starting:   # as do_action: an action that drives the sample is a person's to start
                 auto, why = False, list(why or []) + ["it starts %s" % ", ".join(starting)]
+            if running:   # nothing watches inside it: a person approves it
+                auto, why = False, list(why or []) + ["it runs %s, which drives the sample on the instrument's own "
+                                                      "clock" % ", ".join(running)]
             if auto:
                 self.gate.auto_approve(request, why)
             elif why:
@@ -654,6 +672,7 @@ class RunEngine:
         followed = self.followed(ramp) if ramp is not None else None   # the reading a ramp follows: its column
         logs_waits = any(a.stabilize is not None and a.stabilize.every for a in plan.axes)
         state: Dict[str, Any] = {"last": {}}
+        tvalues = {t.key: dict(t.values) for t in plan.techniques}   # each technique's values, as its sweep steps them
         gaps: List[Dict[str, Any]] = []      # points a plan's retry took again, and the time lost
         settled: List[Dict[str, Any]] = []   # when each stabilize settled (or didn't)
         legs: List[Dict[str, Any]] = []      # a ramp's legs: when each began, got there and ended
@@ -669,6 +688,13 @@ class RunEngine:
                 done = gate.act(instr, action, in_plan=True)
                 if not done.ok:
                     raise _Abort("%s.%s: %s" % (instr, action, done.message))
+            for step in plan.techniques:   # the cards' techniques: their buffers, as traces
+                inst, tech = techniques.of(lab, step.instr, step.name)
+                try:
+                    buffers = techniques.run(gate, inst, tech, tvalues[step.key], stops, "plan:" + plan.name)
+                except techniques.Refused as e:
+                    raise _Abort(str(e))
+                techniques.record(row, step.key, tech, buffers)
             for instr, param in plan.measure:
                 key = "%s.%s" % (instr, param)
                 if key == followed:
@@ -775,6 +801,12 @@ class RunEngine:
                     raise _Abort("stop requested")   # a stop ends a settle at once
             elif axis.kind == "time" and v:
                 if not lab.stops.sleep(clock, axis.every, stops):
+                    raise _Abort("stop requested")
+            elif axis.kind == "technique":   # one of a technique's parameters: its next runs use this value
+                name, _, param = axis.param.partition(".")
+                tvalues["%s.%s" % (axis.instr, name)][param] = v
+                hold = axis.settle_at(k)
+                if not lab.stops.sleep(clock, hold if hold is not None else plan.settle, stops):
                     raise _Abort("stop requested")
 
         def loop(j: int, at: Dict[str, Any]) -> bool:

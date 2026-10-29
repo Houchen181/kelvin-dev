@@ -1,0 +1,11 @@
+# An electrochemical cell on a Keithley 2450 run as a potentiostat (Keithley's 2450-EC kit): a reversible
+# one-electron couple (ferrocene-like, E0 0.2 V, 1 mM, D 2.4e-5 cm2/s) on a 3 mm disc electrode, 20 uF of double
+# layer. Cyclic voltammetry runs as the 2450's own SCPI sweep into its reading buffer (models/potentiostat.py).
+name: Electrochemistry (labsim)
+world: {}
+instruments:
+  pstat:
+    model: keithley_2450ec
+    address: USB0::0x05E6::0x2450::04412345::INSTR
+    connect: {out: cell}
+    cell: {E0_V: 0.2, n: 1, conc_mM: 1.0, D_cm2_s: 2.4e-5, area_cm2: 0.0707, Cdl_uF: 20, T_K: 298.15}

@@ -328,6 +328,8 @@ class Card:
     library: Dict[str, Any] = field(default_factory=dict)            # the maker's module or DLL (library.py)
     requires: List[str] = field(default_factory=list)   # the maker's Python packages its driver imports (envs.py)
     actions: Dict[str, "Action"] = field(default_factory=dict)   # named commands: trigger, arm, fire a burst
+    # hardware-timed, buffered measurements a plan runs (techniques.py): cyclic voltammetry, a scope's burst capture
+    techniques: Dict[str, Any] = field(default_factory=dict)
 
     def bind(self, values: Optional[Dict[str, Any]]) -> "Card":
         """This card with its variables set for one instrument (which sensor, channel or output it uses)."""
@@ -725,7 +727,10 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
             chosen[k] = str(v)
     if card_vars:
         data = _substitute({k: v for k, v in data.items() if k != "vars"}, chosen)
-    leftover = sorted(set(re.findall(r"\{([a-z_][a-z0-9_]*)\}", repr(data))) - {"value", "address"})
+    # a technique's commands name its own parameters ({start}); techniques.parse checks those
+    leftover = sorted(set(re.findall(r"\{([a-z_][a-z0-9_]*)\}", repr({k: v for k, v in data.items()
+                                                                         if k != "techniques"})))
+                      - {"value", "address"})
     if leftover:
         err("vars", "the commands use %s, which the card does not declare under vars" % ", ".join(leftover))
     for key in ("id", "model", "kind"):
@@ -870,6 +875,19 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         err("display.headline", "%r is not a readable parameter" % headline)
     library = _library(data.get("library"), params, identify, err)
     actions = _actions(data.get("actions"), params, err)
+    techniques: Dict[str, Any] = {}
+    if data.get("techniques") is not None:
+        from .techniques import parse as parse_techniques
+        techniques = parse_techniques(data["techniques"], params, card_vars, actions, err)
+        if library and techniques:
+            err("techniques", "a card with a library has no techniques yet (they are for text commands)")
+        for tname, tech in techniques.items():   # never a reset (its drives could jump), never a blocked command
+            for where, command in tech.commands():
+                sent = re.sub(r"\{[A-Za-z_][A-Za-z0-9_]*\}", "0", command)
+                if re.match(r"^\s*\*RST\b", sent, re.I) or any(t.match(sent) is not None for t in reset):
+                    err("techniques.%s.%s" % (tname, where), "%r resets the instrument; a technique never does" % command)
+                elif any(t.match(sent) is not None for t in blocked):
+                    err("techniques.%s.%s" % (tname, where), "%r is blocked on this card (raw.blocked)" % command)
     for spec in params.values():   # a reading's arming commands only start the acquisition, never set anything
         for c in spec.get_before:
             for other in params.values():
@@ -890,7 +908,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
         source=source, connection=connection, idn_query=as_sent(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
         on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library, actions=actions,
-        requires=[r.strip() for r in requires],
+        requires=[r.strip() for r in requires], techniques=techniques,
     )
 
 

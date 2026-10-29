@@ -69,18 +69,27 @@ def flip_probability(protocol: str, p: Dict[str, float], f_mw: float, p_dbm: flo
 
 
 class PulseGeneratorTwin(Twin):
-    """Plays one protocol in a loop while `running`; refuses a sequence that fails pulses.check, as Kelvin's drivers
-    do on real generators."""
+    """Plays one protocol, or a written sequence (pulses.LIBRARY), in a loop while `running`; refuses a sequence
+    that fails pulses.check, as Kelvin's drivers do on real generators."""
     TIMES = ("t_pi", "tau", "t_laser", "t_gate", "t_wait")
 
     def sequence(self) -> pulses.Sequence:
-        return pulses.build(str(self.state["protocol"]), {k: self.state[k] for k in self.TIMES})
+        return pulses.make(str(self.state["protocol"]), self.state.get("sequence"),
+                           {k: self.state[k] for k in self.TIMES})
 
     def apply(self, param: str, value: Any) -> None:
+        if param == "sequence":
+            value = str(value).strip().lower() or pulses.NONE
+            if value != pulses.NONE and value not in pulses.LIBRARY:
+                self.errors.append('-224,"Illegal parameter value; no sequence %s"' % value)
+                return
         old = self.state.get(param)
         self.state[param] = value
         if self.state.get("running"):
-            problems = pulses.check(self.sequence(), {"max_mw_duty": float(self.state.get("max_mw_duty", 0.5))})
+            try:
+                problems = pulses.check(self.sequence(), {"max_mw_duty": float(self.state.get("max_mw_duty", 0.5))})
+            except (KeyError, ValueError) as e:
+                problems = [str(e.args[0] if e.args else e)]
             if problems:
                 self.state[param] = old
                 self.errors.append('-221,"Settings conflict; %s"' % problems[0].replace('"', "'"))
@@ -89,7 +98,7 @@ class PulseGeneratorTwin(Twin):
         return self.sequence().period
 
     def measure_mw_duty(self) -> float:
-        return self.sequence().duty("mw")
+        return self.sequence().mw_duty()
 
 
 class PhotonCounterTwin(Twin):

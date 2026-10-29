@@ -72,6 +72,7 @@ The scan only asks each instrument who it is (`*IDN?`, or the card's own identit
 | Kind | Models |
 |---|---|
 | Source-meters and sources | Keithley 2400-series, Keithley 2450/2460/2461/2470, Keysight B2900, Yokogawa GS200/GS210 |
+| Potentiostats | Keithley 2450/2460/2461 with the -EC kit: cyclic and linear sweep voltammetry as hardware-timed techniques (its own sweeps, into its buffer) |
 | Lock-ins | SRS SR830/SR810, SRS SR860/SR865, Zurich Instruments MFLI (through LabOne) |
 | Temperature controllers (cryostats) | Lake Shore 335/336, Lake Shore 350, Oxford Instruments Mercury iTC |
 | Cryostat systems | Quantum Design PPMS, DynaCool, VersaLab, MPMS3 (through MultiVu), attocube attoDRY1100/2100/800 (through attoDRYLib, draft) |
@@ -206,7 +207,36 @@ Kelvin builds the pulse sequences for spin experiments itself, checks them, and 
 | `hahn_echo` | π/2, π, π/2 with `tau` on each side: T2 |
 | `t1` | dark time `tau` after initialization: T1 |
 
-Each sequence has three channels: the laser (through the AOM), the microwave (a switch, or the source's pulse-modulation input) and the counter's gate, with a signal and a reference window. Before anything plays, Kelvin checks the timing against the generator's resolution, looks for overlapping windows, and keeps the microwave duty cycle below `max_mw_duty` (0.5 by default) so the sample doesn't heat. `show_sequence` draws a sequence before it runs. Starting a sequence (`running`) counts as a drive, so a person approves it.
+Each sequence has three channels: the laser (through the AOM), the microwave (a switch, or the source's pulse-modulation input) and the counter's gate, with a signal and a reference window. Before anything plays, Kelvin checks the timing against the generator's resolution, looks for overlapping windows, and keeps the microwave duty cycle below `max_mw_duty` (0.5 by default) so the sample doesn't heat. Starting a sequence (`running`) counts as a drive, so a person approves it.
+
+**What you see before it plays.** `show_sequence` draws a sequence: one row per channel, with every pulse visible (each interval is drawn at least a few pixels wide, so a 4 ns pulse shows beside a 1 ms wait; the drawing says when it isn't to scale, and each interval's length is written under it). It also lists every edge exactly ("mw: 0 → 50 ns, 1.05 µs → 1.15 µs"). The approval card that starts a generator shows the same drawing and edges, and says if the generator would refuse what it shows. A run's card draws the sequence at the first and the last value of its sweep, with how the period and the microwave duty change in between. Every value of the sweep is checked before the run starts: a Rabi sweep whose longest `tau` would heat the sample is refused before anything plays, naming that value, instead of stopping halfway.
+
+**Sequences of your own.** Anything beyond the six protocols (XY8, CPMG, a phase through its own microwave path) is written out and saved under a name; the generator plays it when its `sequence` is set to that name (`none` plays its protocol again):
+
+```yaml
+sequence: xy4                      # its name
+let: { spacing: tau / 4 }          # names worked out from the generator's times
+steps:                             # in order; each starts where the one before ended
+  - mw: t_pi / 2                   # a pulse: channel: duration
+  - repeat: 4                      # a loop: its steps, this many times over
+    steps:
+      - wait: spacing / 2          # nothing on, for this long
+      - mw: t_pi
+      - wait: spacing / 2
+  - mw: t_pi / 2
+  - wait: 20 ns
+  - laser: t_laser                 # pulses in one step start together
+    gate:                          # a pulse with a start (from its step's start) and a duration
+      - { for: t_gate, window: signal }
+      - { start: t_laser - t_gate, for: t_gate, window: reference }
+  - wait: t_wait
+```
+
+- **Times** are numbers with units (`20 ns`, `3 us`; a bare number is seconds) and expressions of the generator's own times (`tau`, `t_pi`, `t_laser`, `t_gate`, `t_wait`) and the sequence's `let:` names. A plan sweeps those times as it does for a protocol (`sweep: { pg.tau: ... }`).
+- **Channels** are `laser`, `mw`, `gate` and any other the generator's wiring names: the Pulse Streamer and PulseBlaster cards have `mw_x`, `mw_y` and `aux` outputs in their `vars` (`none`: not wired). Every channel named `mw` or `mw_...` counts as microwave for the duty-cycle limit. The gate's windows alternate signal and reference unless each says which it is. A sequence that uses a channel no output is wired to is refused: it would play without it.
+- **Checked twice:** as it is written (names, channels, loops, every expression) and at the times it will play (a negative wait, a pulse before its step, two pulses that overlap on one channel, the generator's resolution, the duty cycle, the PulseBlaster's 4096 instructions).
+- Kelvin writes one with `show_sequence` until its checks pass, then keeps it with `save_sequence`, in the lab's data folder (`sequences/`, which moves with the data folder). A sequence a generator is playing isn't replaced under it.
+- The virtual lab's generator plays written sequences too, but its NV centre only follows the six protocols' physics: a written sequence there checks the procedure and timing, not the spin's response.
 
 The usual order is CW ODMR to find the resonance at a low microwave power, then Rabi for the π time, then pulsed ODMR, Ramsey, echo or T1. Kelvin fits the Rabi oscillation and reports the π time.
 
@@ -372,6 +402,39 @@ More that a card can say:
 - **Network analyzers' traces:** an S-parameter is a trace of the formatted data in dB, taken by one sweep in the reading, with the text format sent first so a binary format another program left can't break it: `get: ["FORMat:DATA ASCii,0", ..., "*OPC?", "CALCulate1:MEASure1:DATA:FDATA?"]` (Kelvin's PNA card). A reply with two numbers per point (complex data, real and imaginary; HP's formatted data, the value and one that means nothing) says `pairs: true`, and `y` can use `re` and `im`, e.g. `y: "20*log10(hypot(re, im))"` for dB; without `y`, the first of each pair. A trace sent a line per point (HP's 87xx and 8753) is read whole on GPIB, USB and LAN instruments, to the end of the message.
 - **Values that run into the mnemonic** (`set: "SOUP{value}"` with `bool_text: ["ON", "OFF"]` sends `SOUPON`, as HP's analyzers take it): a raw `SOUPON` counts as that setting, so it goes through the gate like any other.
 - **Actions:** named commands with no value, such as `actions: {trigger: {send: "*TRG"}, fire: {send: ":BURS:FIRE", label: Fire a burst, drives: true}}`. Kelvin does one with `do_action`; one that drives the sample asks you first. A plan does them at every point, after settling and before measuring, with `trigger: [gen.fire]`, or once in its `setup` or `after` (`gen.arm: run`), and asks you once for the run.
+- **Techniques:** a measurement the instrument times itself and keeps in its buffer, with parameters of its own: cyclic voltammetry on a potentiostat, an impedance sweep, a scope's burst or segmented capture. Kelvin's Keithley 2450 card has two, `cv` and `lsv`:
+
+  ```yaml
+  techniques:
+    cv:
+      label: Cyclic voltammetry
+      parameters:
+        start:  { unit: V, drive: V, label: Start and end potential }   # a level of the drive V: V's limits hold
+        vertex: { unit: V, drive: V, label: Vertex potential }
+        rate:   { unit: V/s, rate_of: V, limits: [1.0e-4, 10], default: 0.05 }   # V's rate limit holds
+        step:   { unit: V, limits: [1.0e-4, 0.05], default: 0.002 }
+        cycles: { type: int, limits: [1, 100], default: 1 }
+      let: { delay: "step / rate" }                       # what the commands need, from the parameters
+      duration: "cycles * 2 * abs(vertex - start) / rate"  # seconds: on the run's card, and how long Kelvin waits
+      arm:
+        - ':TRACe:CLEar "defbuffer1"'
+        - ':SOURce:SWEep:VOLTage:LINear:STEP {start}, {vertex}, {step}, {delay}, {cycles}, BEST, OFF, ON, "defbuffer1"'
+      trigger: [":INITiate"]
+      wait: "*OPC?"                                        # answered once it is done; or done: {get, match}
+      count: ':TRACe:ACTual? "defbuffer1"'                 # how many points it took: {n} below
+      fetch:
+        E: { get: ':TRACe:DATA? 1, {n}, "defbuffer1", SOURce', unit: V }
+        I: { get: ':TRACe:DATA? 1, {n}, "defbuffer1", READing', unit: A }
+      x: E                                                 # the others are kept against it: I against E
+      abort: [":ABORt"]                                    # what ends it early, after a stop
+  ```
+
+  A plan runs one at every point with `technique: { pstat.cv: {start: -0.2, vertex: 0.6} }`, and a sweep steps one of its parameters (`sweep: { pstat.cv.rate: {values: [0.01, 0.05, 0.1]} }`); see [data.md](data.md#hardware-timed-techniques). Because the instrument runs it alone, Kelvin is strict about it:
+  - Every number it sends has limits, and a level it applies names the drive it is a level of (`drive:`), so the lab's and a mounted device's limits on that drive hold; a rate names the drive it is the rate of (`rate_of:`), so its rate limit holds. A drive with guards (readings Kelvin watches while it moves) can't be run by a technique: nothing could watch them inside it.
+  - Its commands may use only its own names (`{start}`), never set a parameter of the card (the output, the source level), and never change what the gate keeps to itself (the source's function, protection, units, calibration). The card is refused when it is read otherwise.
+  - A technique that drives the sample (`drives: true`, the default; `false` for one that only listens, such as a scope's capture) is on the run's one card, with each level, rate and how long it takes, and that Kelvin can't ramp or watch guards inside it. A person approves it; auto mode never does. A queue's card shows each scan's techniques and covers them for the night.
+  - A stop ends the wait at once, sends its `abort` commands, and takes the drives the plan touched back to safe. An error the instrument reports during it fails the point rather than keeping its buffer as if it were good.
+  - On the simulated lab (a dry run) a technique takes its time and records nothing.
 - **Waveforms from oscilloscopes:** `axis: { origin: xorig, step: xinc }` gives each point's time from the first point's time and the step between points, as scopes report them (`:WAV:XORigin?`, `:WAV:XINCrement?`). A trace whose reply starts with an IEEE 488.2 block header (`#800012345...`) is read as it comes. One sent as binary numbers (BYTE or WORD format) says `binary: uint8` or `binary: int16` (`int16 little` when the lowest byte comes first). `y: "(raw - yref) * yinc + yorig"` turns the digitizer's levels into volts with the instrument's own scale readings, as its manual gives the formula; it may use the card's readable parameters, numbers and functions such as `clip`.
 - **A maker's Python package without example scripts:** `library_api` lists its classes and functions with their arguments and documentation, read in Kelvin's helper process without calling anything, so a library card can be written from it.
 - **`acquires: true`:** the reading runs an acquisition, so Kelvin takes it only when asked or measured.

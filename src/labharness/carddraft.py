@@ -133,6 +133,13 @@ and wait: <the seconds it may take>; *OPC? answers when the acquisition is done.
 and wait: a setting (trigger source, sample count) is a parameter of its own. Named commands with no value go under
 actions: {trigger: {send: "*TRG", label: Trigger}, fire: {send: ":BURS:FIRE", label: Fire a burst, drives: true}}
 (drives: true when it drives the sample, which then asks a person); a plan does them at every point with trigger:.
+A measurement the instrument times itself into its buffer, with parameters (cyclic voltammetry, an impedance sweep,
+a scope's segmented capture) is a technique: techniques: {cv: {label, parameters: {start: {unit: V, drive: V},
+rate: {unit: V/s, rate_of: V, limits: [lo, hi], default: x}, ...}, let: {delay: "step / rate"}, duration: "<its
+seconds, from its parameters>", arm: [commands with {its names}], trigger: [...], wait: "*OPC?" (or done: {get,
+match}), count: "<query: how many points>", fetch: {I: {get: "<query with {n}>", unit: A}, ...}, x: <the quantity
+the others are against>, abort: [...]}}. A level it applies names the drive it is a level of (drive:), so that
+drive's limits hold; every other number has limits; its commands never set a parameter of the card.
 
 Instruments whose commands start with the value ("ON,1" / "OFF,1"): set: "{value},{ch}" with bool_text: ["ON", "OFF"]
 (quote the words: YAML reads a bare ON as true). Settings with no read-back: leave out get; Kelvin remembers what

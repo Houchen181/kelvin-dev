@@ -104,6 +104,9 @@
     if (changed("approvals", pending)) $("approvals").replaceChildren(...pending.map((r) => h("div", { class: "card ask" },
       h("b", {}, ((r.shown || r).where ? "[" + (r.shown || r).where + "] " : "") + (r.shown || r).title),
       h("ul", {}, ...(r.shown || r).items.map((i) => h("li", {}, i))),
+      // a pulse generator's timing: an SVG shown as an image, which can't run anything
+      ...(r.figures || []).map((f) => h("img", { alt: f.caption || "", style: "max-width:100%;height:auto;background:#fff",
+        src: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(String(f.svg || "")) })),
       r.shown ? h("details", { class: "muted" }, h("summary", {}, "English"), h("p", {}, r.title),
         h("ul", {}, ...r.items.map((i) => h("li", {}, i)))) : null,
       h("p", { class: "muted" }, "about " + (r.seconds_left > 90 ? Math.round(r.seconds_left / 60) + " min" : r.seconds_left + " s") + " left to answer"),
