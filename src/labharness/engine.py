@@ -592,8 +592,12 @@ class RunEngine:
         out = [r.message for r in self.gate.abort_to_safe(keys, by)]
         for step in plan.on_abort or []:
             if action_of(self.lab, step.instr, step.param) is not None:   # one that doesn't drive (validate)
-                r = self.gate.act(step.instr, step.param, in_plan=True)
-                out.append(r.message)
+                if getattr(self.lab.instruments.get(step.instr), "simulated", True):
+                    continue   # a twin has nothing to stop
+                try:   # the clean-up goes on whatever this instrument answers
+                    out.append(self.gate.act(step.instr, step.param, in_plan=True).message)
+                except Exception as e:
+                    out.append("%s: %s" % (step.key, str(e).splitlines()[0][:160] if str(e) else type(e).__name__))
                 continue
             if self.lab.config.safe_actions.get(step.key) == "hold":
                 out.append("%s stays held: the lab config holds it on a stop (on_abort asked for %s)"

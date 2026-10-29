@@ -133,6 +133,30 @@ def test_a_setup_action_runs_once_on_the_runs_own_card(lab, make_engine):
     assert bad.status == "refused" and "smu.arm is one of smu's actions" in bad.message
 
 
+def test_an_on_abort_action_that_fails_never_stops_the_clean_up(lab, make_engine):
+    engine, gate, approver = make_engine([True])
+    smu = lab.instruments["smu"]
+    smu.card.actions["halt"] = Action("halt", ["HALT"], "Halt the source's trigger")
+    smu.backend.simulated = False
+    real_write = smu.backend.write
+
+    def write(cmd):
+        if cmd == "HALT":
+            raise TimeoutError("no answer")
+        real_write(cmd)
+    smu.backend.write = write
+    report = engine.run("plan: halted\nsetup: { smu.output: on }\nsweep: { smu.V: {from: 0, to: 14, step: 1} }\n"
+                        "measure: [smu.I]\non_abort: { smu.halt: run }\n")   # the gate's leakage guard trips
+    assert report.status == "aborted" and "tripped" in report.message, report.message
+    assert "smu.halt: no answer" in report.message
+    assert lab.read("smu", "V") == 0 and lab.read("smu", "output") is False   # and the drives went to safe first
+    bad = engine.run("plan: x\nsetup: { smu.output: on }\nmeasure: [smu.I]\non_abort: { smu.arm: run }\n")
+    assert bad.status == "refused"                     # no such action: a parameter it doesn't have
+    smu.card.actions["arm"] = Action("arm", ["ARM"], "Arm the source's trigger", drives=True)
+    bad = engine.run("plan: x\nsetup: { smu.output: on }\nmeasure: [smu.I]\non_abort: { smu.arm: run }\n")
+    assert bad.status == "refused" and "after a stop only actions that don't can run" in bad.message
+
+
 def test_a_queue_whose_scans_start_an_action_asks_once_on_its_card(tmp_path):
     from test_queue import runtime
     rt = runtime(tmp_path, [True])                          # one approval: another would fail the test
