@@ -24,6 +24,8 @@ Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points
 - a `stabilize` condition: wait until a reading changes by less than `within` over `for` seconds, up to `timeout` (then it measures anyway and says so). With `near: 0.05` the reading must also be that close to its set point (the one its instrument reads back, else the axis's value), so a steady reading short of it, or a dead sensor, doesn't pass. With `every: 10` a point is recorded every 10 s while it waits, marked `stabilizing: 1` (the settled point has 0; the automatic analysis takes only those). The run keeps when each one settled (`stabilized`);
 - `until:` or `while:` (see [Ending early](#ending-early)).
 
+After a run, Kelvin classifies each measured curve and fits it: a peak or dip (Lorentzian or Gaussian: center, FWHM, height, Q for frequency axes), a straight line (slope, and resistance for I–V), an exponential relaxation (τ), a steady value or no signal. Every number has a one-standard-error uncertainty. It also tracks how the fitted feature changes along an outer loop, and it flags clipping, under-resolved or cut-off features, hysteresis, unsettled readings and stopped runs. The result is saved as `analysis.json` in the run folder; `analyze_run` re-fits a run with a chosen model.
+
 ### Measuring while it ramps
 
 A set point the instrument ramps to by itself (a cryostat's temperature, a magnet's field, a stage's position) waits until its reading gets there: in `setup:`, at each value of a stepped sweep, and in `set_value`. Nothing is measured on the way, so a cool-down from 300 K holds the run for half an hour or more. To measure on the way, sweep it with `ramp:`:
@@ -62,7 +64,6 @@ With `retry: {times: 3, wait: 10}` (or `retry: 3`), a point whose reading fails 
 - **The gap is marked:** every point has `gap_s`, the time lost to a fault just before it (0 for none), and the run lists the gaps (`gaps`) and says how much time was lost.
 - **Never retried:** a sensor fault, a stop or an instrument switched off. Without `retry:`, a failed reading stops the run.
 
-After a run, Kelvin classifies each measured curve and fits it: a peak or dip (Lorentzian or Gaussian: center, FWHM, height, Q for frequency axes), a straight line (slope, and resistance for I–V), an exponential relaxation (τ), a steady value or no signal. Every number has a one-standard-error uncertainty. It also tracks how the fitted feature changes along an outer loop, and it flags clipping, under-resolved or cut-off features, hysteresis, unsettled readings and stopped runs. The result is saved as `analysis.json` in the run folder; `analyze_run` re-fits a run with a chosen model.
 
 ## Recipes
 
