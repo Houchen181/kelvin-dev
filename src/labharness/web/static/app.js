@@ -2477,6 +2477,7 @@
   function newChat(projectId, ask) {   // ask: the person started it, so the folder picker opens (in the app)
     leaveIncognito();
     S.chatId = null;
+    if (S.defaultModel && S.labels[S.defaultModel]) { $("model").value = S.defaultModel; updateSend(); }
     S.chatRules = null;
     SIDE.newProject = projectId || null;
     applyRules();
@@ -2715,7 +2716,6 @@
     if (!model) { openSettings(); return; }
     const extra = S.compare.filter((k) => k !== model);
     if (extra.length) return sendCompare(text, [model, ...extra]);
-    store("lh.model", model);
     if (!S.chatId) {
       const rules = currentRules();
       try {
@@ -2837,7 +2837,7 @@
     if (S.streaming) return;
     try {
       const r = await api("/api/chats/" + S.chatId + "/choose", { body: { index } });
-      if (S.labels[r.model]) { $("model").value = r.model; store("lh.model", r.model); }
+      if (S.labels[r.model]) $("model").value = r.model;
       const chat = await api("/api/chats/" + S.chatId);
       renderChat(chat);
       const last = [...chat.messages].reverse().find((m) => m.role === "user");
@@ -2964,7 +2964,7 @@
       if (!st.signed_in) return;
       clearInterval(GPT.timer);
       showChatGPT(st);
-      try { const b = await api("/api/bootstrap"); applyModels(b.models.groups, b.default_model); } catch (e) { /* the list updates on reload */ }
+      try { const b = await api("/api/bootstrap"); applyModels(b.models.groups, b.default_model, b.auto_model); } catch (e) { /* the list updates on reload */ }
       if (st.plan && !st.welcomed) { $("chatgpt-dialog").showModal(); api("/api/chatgpt/welcomed", { body: {} }).catch(() => {}); }
     }, 2000);
   }
@@ -2975,7 +2975,7 @@
       showChatGPT(st);
       toast(st.revoked ? "Signed out of ChatGPT." : "Signed out here; OpenAI did not confirm the sign-out, so you can also disconnect Kelvin in ChatGPT's settings.");
       const b = await api("/api/bootstrap");
-      applyModels(b.models.groups, b.default_model);
+      applyModels(b.models.groups, b.default_model, b.auto_model);
     } catch (e) { $("chatgpt-status").textContent = e.message; }
   }
   // ------------------------------------------------------------------ the Kelvin hub (accounts across labs)
@@ -3093,14 +3093,14 @@
         h("span", { class: "card-actions" }, test),
         rowButton("trash", "Remove " + s.name, async () => {
           if (!confirm("Remove " + s.name + " and its key from Kelvin?")) return;
-          try { const r = await api("/api/services/" + s.id, { method: "DELETE" }); renderServices(r.services); refreshModels(r.models); }
+          try { const r = await api("/api/services/" + s.id, { method: "DELETE" }); renderServices(r.services); refreshModels(r); }
           catch (e) { $("svc-hint").textContent = e.message; }
         }));
     }));
   }
-  function refreshModels(models) {
-    applyModels(models.groups, (S.settings && S.settings.default_model) || "");
-    fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
+  function refreshModels(r) {   // r: the models, with the default (Settings' choice, else Claude Sonnet)
+    applyModels(r.models.groups, r.default_model, r.auto_model);
+    fillDefaultModel();
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
   }
@@ -3112,7 +3112,7 @@
       const r = await api("/api/services", { body });
       $("svc-key").value = $("svc-models").value = $("svc-name").value = "";
       renderServices(r.services);
-      refreshModels(r.models);
+      refreshModels(r);
       const added = r.services[r.services.length - 1];
       const group = r.models.groups.find((g) => g.provider === added.id);
       $("svc-hint").textContent = group && group.error ? "Added, but " + group.error
@@ -3647,7 +3647,7 @@
   // ------------------------------------------------------------------ the user's own instrument cards
   const CARDS = { editing: null, version: false };   // version: the lab's version of one of Kelvin's cards
   async function openCards() {
-    fillModels($("card-model"), S.groups, (S.settings && S.settings.default_model) || $("model").value);
+    fillModels($("card-model"), S.groups, S.defaultModel || $("model").value);
     showCardEditor(null);
     $("cards-msg").textContent = "";
     $("cards-dialog").showModal();
@@ -4987,15 +4987,26 @@
     const keys = groups.flatMap((g) => g.models.map((m) => m.key));
     select.value = keys.includes(selected) ? selected : allowEmpty ? "" : (keys[0] || "");
   }
-  function applyModels(groups, preferred) {
+  // preferred: the model a new chat starts with (Settings → Models → Default model for new chats; Automatic is
+  // Claude Sonnet: settings.default_model); a chat that is open keeps its own
+  function applyModels(groups, preferred, auto) {
+    const current = S.chatId && S.labels && S.labels[$("model").value] ? $("model").value : "";
     S.groups = groups;
     S.labels = {};
     for (const g of groups) for (const m of g.models) S.labels[m.key] = m.label;
-    fillModels($("model"), groups, store("lh.model") || preferred);
+    if (preferred !== undefined) S.defaultModel = preferred || "";
+    if (auto !== undefined) S.autoModel = auto || "";
+    fillModels($("model"), groups, (current && S.labels[current]) ? current : S.defaultModel);
     if ($("rules-chip")) applyRules();
     if (!$("model").value) $("input").placeholder = "Add an API key in Settings to start";
     else $("input").placeholder = "Ask Kelvin…";
     updateSend();
+  }
+  // Settings → Models → Default model for new chats: Automatic says which model it is now (Claude Sonnet when there)
+  function fillDefaultModel() {
+    fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
+    const auto = S.autoModel && S.labels[S.autoModel];
+    $("default-model").options[0].textContent = auto ? "Automatic: " + auto : "Automatic";
   }
   // Settings: one section at a time, chosen from the list on the left (the last one is remembered)
   function settingsPage(name) {
@@ -5046,7 +5057,7 @@
     for (const input of document.querySelectorAll("#settings-form input:not([type=checkbox])")) { input.value = ""; delete input.dataset.clear; }
     $("local-url").value = (S.settings && S.settings.local_base_url) || "";
     $("local-models").value = (S.settings && S.settings.local_models) || "";
-    fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
+    fillDefaultModel();
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
     const words = S.settings ? S.settings.answer_words : 200, length = $("answer-words"), chosen = words ? String(words) : "off";
@@ -5305,7 +5316,7 @@
     try {
       const r = await api("/api/settings", { body });
       S.settings = r.settings;
-      applyModels(r.models.groups, r.settings.default_model);
+      applyModels(r.models.groups, r.default_model, r.auto_model);
       $("settings-dialog").close();
       toast("Settings saved.");
     } catch (e) {
@@ -5431,7 +5442,7 @@
       b.addEventListener("click", () => sendMessage(text));
       return b;
     }));
-    applyModels(boot.models.groups, boot.default_model);
+    applyModels(boot.models.groups, boot.default_model, boot.auto_model);
     initRunsPane();
     fitLayout();
     initTerminal();
@@ -5453,7 +5464,7 @@
     });
     $("input").addEventListener("blur", () => setTimeout(closeSlash, 150));
     $("model").addEventListener("change", () => {
-      store("lh.model", $("model").value); updateSend(); showPlanChip();
+      updateSend(); showPlanChip();
       S.compare = S.compare.filter((k) => k !== $("model").value); compareLabel();
     });
     $("compare-btn").addEventListener("click", toggleCompareMenu);
