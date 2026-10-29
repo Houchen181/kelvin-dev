@@ -175,12 +175,13 @@ class Instrument:
         return any((ord(c) < 32 and c not in "\t\r\n") or ord(c) == 127 for c in reply)
 
     def _parse(self, spec: ParamSpec, command: str, reply: str) -> Any:
-        """A reading from its reply. One that can't be read is a garbled reply when it holds characters no instrument
-        sends, or this reading has read before; otherwise it is the card's (a wrong command or format)."""
+        """A reading from its reply. One that can't be read is a garbled reply when this reading has read before;
+        the first reply it ever gets that can't be read is the card's (a wrong command or format, or a binary reply
+        to a text query), whatever characters it holds."""
         try:
             value = spec.from_wire(reply)
         except ValueError:
-            if isinstance(reply, str) and (self._noise(reply) or spec.name in self._read_ok):
+            if isinstance(reply, str) and spec.name in self._read_ok:
                 raise self._garbled(command, reply) from None
             raise
         self._read_ok.add(spec.name)

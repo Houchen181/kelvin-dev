@@ -292,12 +292,13 @@ def test_a_garbled_reading_stops_a_run_in_words_and_a_garbled_error_check_fails_
     engine, gate, _ = make_engine([])
     twin = lab.instruments["lockin"].backend
     assert isinstance(lab.read("lockin", "X"), float)                 # it reads, as it always has
+    assert isinstance(lab.read("lockin", "frequency"), float)
     garbling(twin, every=10 ** 6)
     with pytest.raises(Garbled, match="lockin's reply to .* arrived garbled"):
         lab.read("lockin", "X")
     report = engine.run(load_plan("plan: look\ntime: { every: 1, points: 3 }\nmeasure: [lockin.X]"))
     assert report.status == "refused" and "arrived garbled" in report.message   # its check before the run says it
-    r = gate.set("lockin", "frequency", 1234)                         # its error check after the set: garbled
+    r = gate.set("lockin", "frequency", 1234)                         # where it is now can't be known: no set
     assert not r.ok and "arrived garbled" in r.message
 
 
