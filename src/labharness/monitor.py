@@ -441,11 +441,12 @@ class Monitor:
                 if not re.search(inst.card.idn_pattern, reply.strip(), re.I):
                     inst.health.garbled(inst.garble_text(inst.card.idn_query, reply))
             return ask
-        param = inst.card.headline
-        if param is None:
-            param = next((s.name for s in inst.card.params.values() if s.kind == "measure" and s.get_cmd is not None
-                          and s.type not in ("trace", "image") and not s.acquires and not s.get_before
-                          and s.read_when is None), None)
+        def plain(s: Any) -> bool:   # a reading that only reads: no acquisition, no trace or frame, no switch to wait on
+            return s.get_cmd is not None and s.type not in ("trace", "image") and not s.acquires \
+                and not s.get_before and s.read_when is None
+        head = inst.card.params.get(inst.card.headline) if inst.card.headline else None
+        param = head.name if head is not None and plain(head) else next(
+            (s.name for s in inst.card.params.values() if s.kind == "measure" and plain(s)), None)
         return (lambda: inst.read(param)) if param else None
 
     def _check_reset(self, name: str, inst: Any, asked: Dict[str, Any], t: float) -> None:
