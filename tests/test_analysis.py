@@ -37,14 +37,20 @@ def test_peak_center_width_and_height():
 
 
 def test_dip_and_resonator_quality_factor():
+    """A resonance is a Lorentzian in linear power, which is how it is fitted when it was recorded in dB: the same
+    dip fitted as a Lorentzian on its dB values gave a Q 2.4 times too high (field test l04)."""
     rng = random.Random(3)
     xs = [3.99e9 + 5e4 * i for i in range(401)]
-    ys = [lorentz(f, 4.0e9, 2e6, -20.0, -30.0) + rng.gauss(0, 0.1) for f in xs]
+    power = [1e-3 * lorentz(f, 4.0e9, 2e6, -0.99, 1.0) for f in xs]          # a 20 dB deep notch, 2 MHz wide
+    ys = [10 * math.log10(p) + rng.gauss(0, 0.05) for p in power]
     s = analyze_curve(xs, ys, "frequency", "vna.S21", "Hz", "dB")
     assert s["kind"] == "dip"
-    q = next(r["value"] for r in s["results"] if r["name"].startswith("Q"))
-    assert 1900 < float(q.split(" ± ")[0]) < 2100
-    assert "Q ≈" in s["summary"]
+    q = next(r for r in s["results"] if r["name"].startswith("Q"))
+    assert 1900 < q["num"] < 2100 and "linear power" in q["name"]
+    assert "Q ≈" in s["summary"] and "FWHM of the linear power" in s["summary"]
+    depth = next(r for r in s["results"] if r["name"] == "depth")
+    assert depth["unit"] == "dB" and 19 < depth["num"] < 21
+    assert min(y for y in s["fit"]["y"] if y is not None) < -45                 # the fit drawn in dB, as recorded
 
 
 def test_under_resolved_and_edge_features_are_flagged():

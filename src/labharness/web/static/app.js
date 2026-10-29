@@ -1126,8 +1126,31 @@
     });
     const folder = h("button", { class: "link soft", type: "button" }, "Open folder");
     folder.addEventListener("click", () => openIt(base + "/open", "the run's folder"));
-    box.replaceChildren(...buttons, folder);
+    box.replaceChildren(...buttons, folder, runDownloads(tab.runId));
     box.hidden = false;
+  }
+
+  // the run's data written by Kelvin's code (/api/runs/{id}/export): CSV, Excel or NumPy, never copied by hand
+  function runDownloads(runId) {
+    const get = async (fmt, label) => {
+      try {
+        const res = await fetch("/api/runs/" + encodeURIComponent(runId) + "/export?format=" + fmt,
+          { headers: { "X-Kelvin-Token": token } });
+        if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).error) || "HTTP " + res.status);
+        const named = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "");
+        const url = URL.createObjectURL(await res.blob());
+        const a = h("a", { href: url, download: named ? named[1] : runId + "." + fmt });
+        document.body.append(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+      } catch (e) { toast("Could not download the " + label + ": " + e.message); }
+    };
+    const choices = [["csv", "CSV"], ["xlsx", "Excel"], ["npz", "NumPy"]].map(([fmt, label]) => {
+      const b = h("button", { class: "btn small ghost", type: "button", title: "Download the data as " + label },
+        label);
+      b.addEventListener("click", () => get(fmt, label + " file"));
+      return b;
+    });
+    return h("span", { class: "run-downloads" }, h("span", { class: "hint" }, "Download data:"), ...choices);
   }
 
   // ------------------------------------------------------------------ reports

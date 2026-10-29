@@ -1996,6 +1996,24 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
                  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}[path.suffix]
         return FileResponse(path, media_type=media, filename="%s-%s" % (request.path_params["run_id"], path.name))
 
+    async def run_export(request: Request) -> Response:
+        """A run's data to download, written by code (export.py): ?format=csv (data.csv, a zip with the traces' CSVs
+        when it has traces), xlsx or npz. The files are kept in the run's folder too."""
+        from .. import export
+        try:
+            folder = runtime._run_dir(request.path_params["run_id"])
+            data, name, media = await asyncio.to_thread(export.download, folder,
+                                                        request.query_params.get("format", "csv"))
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else "no such run")
+        except export.ExportError as e:
+            return error(400, str(e))
+        except ImportError:
+            return error(400, "NumPy isn't installed here, so only CSV and Excel can be written")
+        except OSError as e:
+            return error(500, "Could not write the export: %s" % e)
+        return Response(data, media_type=media, headers={"Content-Disposition": 'attachment; filename="%s"' % name})
+
     async def run_open(request: Request) -> Response:
         """Open a run's file (or, with no name, its folder) on this computer."""
         run_id, name = request.path_params["run_id"], request.path_params.get("name")
@@ -2970,6 +2988,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         Route("/api/runs/{run_id}/open", run_open, methods=["POST"]),
         Route("/api/runs/{run_id}/files/{name}", run_file),
         Route("/api/runs/{run_id}/files/{name}/open", run_open, methods=["POST"]),
+        Route("/api/runs/{run_id}/export", run_export),
         Route("/static/{name}", static),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
