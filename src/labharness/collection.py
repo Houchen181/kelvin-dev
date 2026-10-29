@@ -12,7 +12,10 @@ this computer so they work offline.
 - Pinned: Kelvin takes the newest commit of the repository's default branch, then index.json and every file from
   that commit (raw.githubusercontent.com), never from a branch that can move meanwhile. Each file must have the
   SHA-256 that index.json gives it, when it arrives and every time it is read. Files that did not change come from
-  the copy before, and a new copy is used only once it is complete: state.json names it last.
+  the copy before, and a new copy is used only once it is complete: state.json names it last. A file this computer
+  can't keep (a disk error) is left out, and its card with it, and the status says so; paths longer than Windows'
+  260 characters are written with its long-path prefix.
+- Said, not only logged: a sync that fails, or leaves files out, tells the portal once (notify), as it starts to.
 - Offline: everything is read from the copy here. Only sync() goes to the network, and Kelvin calls it only while
   the collection is switched on in Settings. Switched off, Kelvin leaves the copy alone and uses its own cards.
 - Cards (virtual_lab.lab_registry): a collection card replaces Kelvin's own card with the same id (a fix, or a lab's
@@ -153,7 +156,21 @@ def files_of(index: Dict[str, Any]) -> List[Tuple[str, str]]:
     return [(str(p), str(d)) for p, d in listed]
 
 
+def _long(path: Path) -> Path:
+    """The path as Windows takes it beyond its 260-character limit: a long home folder and the collection's own folders
+    went over it on some computers, and the whole update failed. Elsewhere, and short paths, as they are."""
+    if os.name != "nt":
+        return path
+    text = os.path.abspath(str(path))
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    if len(text) < 240:
+        return path
+    return Path("\\\\?\\UNC\\" + text[2:] if text.startswith("\\\\") else "\\\\?\\" + text)
+
+
 def _write(path: Path, data: bytes) -> None:
+    path = _long(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".part")
     tmp.write_bytes(data)
@@ -163,7 +180,7 @@ def _write(path: Path, data: bytes) -> None:
 def _matching(path: Optional[Path], digest: str) -> Optional[bytes]:
     """The file's bytes if it is there and has this SHA-256."""
     try:
-        data = path.read_bytes() if path is not None else None
+        data = _long(path).read_bytes() if path is not None else None
     except OSError:
         return None
     return data if data is not None and sha256(data) == digest else None
@@ -183,12 +200,13 @@ class Collection:
         self.repo = repo
         self._index: Tuple[Optional[str], Dict[str, Any]] = (None, {})
         self._syncing = threading.Lock()
+        self.notify: Optional[Callable[[str, str], Any]] = None   # (title, text) for the portal's notices
 
     # ------------------------------------------------------------------ the copy here
 
     def state(self) -> Dict[str, Any]:
         try:
-            data = json.loads((self.dir / "state.json").read_text(encoding="utf-8"))
+            data = json.loads(_long(self.dir / "state.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}
@@ -349,7 +367,7 @@ class Collection:
                     raw = fetch(RAW % (name, commit, "index.json"))
                 index = read_index(raw)
                 before = self._folder(state)
-                fetched = 0
+                fetched, unstored = 0, []
                 for path, digest in files_of(index):
                     if _matching(folder / path, digest) is not None:
                         continue
@@ -359,23 +377,47 @@ class Collection:
                         fetched += 1
                         if sha256(data) != digest:
                             raise CollectionError("%s at %s does not match its SHA-256 in index.json" % (path, commit[:12]))
-                    _write(folder / path, data)
+                    try:
+                        _write(folder / path, data)
+                    except OSError as e:   # this computer could not keep one file: the rest of the collection works
+                        unstored.append("%s (%s)" % (path, _first_line(e)))
                 _write(folder / "index.json", raw)
+                problem = None
+                if unstored:   # those files' cards are left out, and say so (status: left_out)
+                    problem = "%d file%s of the instrument collection could not be stored here: %s" % (
+                        len(unstored), "" if len(unstored) == 1 else "s", "; ".join(unstored[:3]))
+                    log.warning(problem)
                 with _LOCK:   # the switch: from now on the new copy is read
                     _write(self.dir / "state.json", json.dumps({
                         "source": self.repo, "repository": name, "commit": commit, "index_sha256": sha256(raw),
-                        "synced": state.get("synced") if same else now, "checked": now, "error": None},
+                        "synced": state.get("synced") if same else now, "checked": now, "error": problem},
                         indent=1).encode("utf-8"))
-                    for other in self.dir.iterdir():   # the copies before
-                        if other.is_dir() and other != folder:
+                    for other in _long(self.dir).iterdir():   # the copies before
+                        if other.is_dir() and other.name != folder.name:
                             shutil.rmtree(other, ignore_errors=True)
                 if not same:
                     log.info("instrument collection: now at %s (%d files fetched)", commit[:12], fetched)
+                if problem and not state.get("error"):
+                    self._tell(problem)
             except Exception as e:   # offline, rate-limited, a file that does not match: the copy here stays
                 problem = "could not update the instrument collection from %s: %s" % (self.repo, _first_line(e))
                 log.warning(problem)
                 _write(self.dir / "state.json", json.dumps(dict(state, checked=now, error=problem), indent=1).encode())
+                if not state.get("error"):   # once, when it starts failing, not at every look
+                    self._tell(problem)
         return self.status()
+
+    def _tell(self, problem: str) -> None:
+        """A problem with the collection, said where people see it (notify: the portal's notices), not only in the
+        log: without a copy, Kelvin writes cards from what it finds on the makers' sites instead."""
+        if self.notify is None:
+            return
+        try:
+            self.notify("Kelvin's instrument collection is not up to date",
+                        problem + (". Kelvin uses its own cards meanwhile, and writes new ones from the makers' sites."
+                                   if not self.index() else ". Kelvin uses the copy it has meanwhile."))
+        except Exception:   # telling never stops the update
+            log.exception("instrument collection notice")
 
 
 # ------------------------------------------------------------------ experiments, for a lab's own instruments

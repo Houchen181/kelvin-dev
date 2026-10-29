@@ -21,6 +21,22 @@ parameters:
     limits: [0.004, 5.0]
     safe: 0.004
     description: Reference sine output (rms), usually the excitation of the sample
+  reference:
+    label: Reference source
+    kind: measure
+    type: enum
+    set: "FMOD {value}"
+    get: "FMOD?"
+    values: { external: 0, internal: 1 }
+    description: Internal (its own oscillator, on SINE OUT) or external (REF IN, e.g. a current source's phase marker or a chopper)
+  reference_slope:
+    label: External reference trigger
+    kind: measure
+    type: enum
+    set: "RSLP {value}"
+    get: "RSLP?"
+    values: { sine: 0, "TTL rising": 1, "TTL falling": 2 }
+    description: How REF IN is read with an external reference, a sine's zero crossing or a TTL edge; a TTL reference is needed below 1 Hz
   frequency:
     label: Frequency
     kind: measure
@@ -28,7 +44,7 @@ parameters:
     set: "FREQ {value}"
     get: "FREQ?"
     limits: [0.001, 102000]
-    description: Internal reference frequency
+    description: The reference frequency; set only with the internal reference, and with an external one the frequency it locks to
   phase:
     label: Phase
     kind: measure
@@ -98,3 +114,4 @@ raw:
 notes:
   - Written from the manual; verify on your unit before trusting it with a sample.
   - Over RS-232 the SR830 ends replies with a carriage return; set connection read_termination to "\r" in the lab config.
+  - "reference and reference_slope are FMOD and RSLP of the manual's reference commands (chapter 5): a lock-in referenced to another instrument (a 6221's phase marker, a chopper) is set to external, with TTL rising for a TTL reference."

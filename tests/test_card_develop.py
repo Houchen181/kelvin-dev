@@ -50,8 +50,11 @@ def test_trying_a_card_asks_and_reads_but_never_sets(bus):
     values = {r["name"]: r for r in result["readings"]}
     assert "value" in values["X"] and "error" not in values["X"]
     sent = bus.devices["GPIB0::8::INSTR"].sent
-    assert sent and all("?" in c.split()[0] for c in sent)                 # only queries went out
-    assert "readings answered" in summary(result)
+    check = result["write_check"]                                          # one setting, with the value it had
+    assert check["ok"] and not card.params[check["name"]].is_drive
+    writes = [c for c in sent if "?" not in c.split()[0]]
+    assert writes == [check["sent"]]                                       # nothing else but queries went out
+    assert "readings answered" in summary(result) and "set command: %s takes" % check["name"] in summary(result)
 
     data = load_yaml(open(card.source, encoding="utf-8"))
     data = dict(data, id="test/sr830", parameters=dict(data["parameters"], beep={

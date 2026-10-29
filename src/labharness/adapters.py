@@ -21,7 +21,7 @@ import re
 import threading
 from typing import Any, Callable, Dict, List, Optional
 
-from .cards import Card
+from .cards import Card, parity_name, serial_settings
 
 _rm: Any = None
 _rm_lock = threading.Lock()
@@ -91,7 +91,9 @@ def marks_message_end(name: str) -> bool:
 
 
 def apply_serial_settings(res: Any, settings: Dict[str, Any]) -> None:
-    """Baud rate and framing on a serial resource, from a card's connection block."""
+    """Baud rate and framing on a serial resource, from a card's connection block (or a lab config's): parity as a
+    word or the manual's letter (N, O, E), or framing: 8N1."""
+    settings = serial_settings(settings)
     try:
         from pyvisa import constants
         parity = {"none": constants.Parity.none, "odd": constants.Parity.odd, "even": constants.Parity.even,
@@ -99,12 +101,14 @@ def apply_serial_settings(res: Any, settings: Dict[str, Any]) -> None:
         stop = {1.0: constants.StopBits.one, 1.5: constants.StopBits.one_and_a_half, 2.0: constants.StopBits.two}
     except ImportError:  # a fake bus in tests
         parity, stop = {}, {}
+    if "parity" in settings and parity_name(settings["parity"]) is None:
+        raise AdapterError("parity %r: it is none, odd, even, mark or space (N, O, E, M, S)" % (settings["parity"],))
     if "baud_rate" in settings:
         res.baud_rate = int(settings["baud_rate"])
     if "data_bits" in settings:
         res.data_bits = int(settings["data_bits"])
     if "parity" in settings:
-        res.parity = parity.get(str(settings["parity"]).lower(), settings["parity"])
+        res.parity = parity.get(settings["parity"], settings["parity"])
     if "stop_bits" in settings:
         res.stop_bits = stop.get(float(settings["stop_bits"]), settings["stop_bits"])
 
@@ -118,7 +122,7 @@ class VisaBackend:
         self.name = name
         self.address = address
         self.resource = resource_name(address)
-        conn = dict(card.connection, **(overrides or {}))
+        conn = dict(card.connection, **serial_settings(overrides or {}))   # a lab's framing: 8N1 wins over the card's
         self.ack = conn.get("ack")
         self.enq = bool(conn.get("enq"))
         self.echo = bool(conn.get("echo"))
@@ -144,12 +148,44 @@ class VisaBackend:
         self.res.read_termination = self._conn.get("read_termination", "\n")
         self.res.write_termination = self._conn.get("write_termination", "\n")
         if is_serial(self.resource):
-            apply_serial_settings(self.res, self._conn)
+            try:
+                apply_serial_settings(self.res, self._conn)
+            except AdapterError as e:
+                self.close()
+                raise AdapterError("%s: %s" % (self.name, e)) from None
+        if self._conn.get("greeting_lines"):
+            self._drop_greeting(int(self._conn["greeting_lines"]))
         for command in self._on_connect:   # configuration only; parse_card refuses drive commands here
             self.write(command)
 
-    def _check_ack(self, command: str) -> None:
-        reply = str(self.res.read()).strip()
+    def _drop_greeting(self, lines: int) -> None:
+        """The lines an instrument sends by itself as a connection opens (the AMI 430 greets each LAN connection with
+        two), read and dropped: left there, every reply would be taken for the command before. One that sends none
+        (the same instrument on its serial port) costs a short wait."""
+        before = self.res.timeout
+        try:
+            self.res.timeout = min(int(before or 3000), 2000)
+            for _ in range(lines):
+                try:
+                    self.res.read()
+                except Exception as e:
+                    if timed_out(e):
+                        break
+                    raise
+        finally:
+            self.res.timeout = before
+
+    def _check_ack(self, command: str, answer: Optional[str] = None) -> None:
+        """The ack line after a command (answer: a query's reply, read before it). An instrument that acks only its
+        set commands leaves a query's ack missing: its card wants set_reply, not ack, and the error says so."""
+        try:
+            reply = str(self.res.read()).strip()
+        except Exception as e:
+            if answer is not None and timed_out(e):
+                raise AdapterError("%s answered %r to %r but sent no %r after it: if only its set commands are "
+                                   "answered %r, its card wants set_reply: \"^%s$\" instead of ack"
+                                   % (self.name, answer.strip(), command, self.ack, self.ack, re.escape(self.ack))) from e
+            raise
         if reply != self.ack:
             raise AdapterError("%s: %r answered %r instead of %r" % (self.name, command, reply, self.ack))
 
@@ -286,7 +322,7 @@ class VisaBackend:
         else:
             reply = str(self.res.query(command))
         if self.ack:
-            self._check_ack(command)
+            self._check_ack(command, reply)
         return reply
 
     def query_binary(self, command: str, binary: str) -> List[float]:

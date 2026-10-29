@@ -3644,17 +3644,22 @@
       rows.push(h("li", { class: idOk ? "good" : "bad" }, icon(idOk ? "check" : "warn"),
         h("span", {}, r.identity_error ? "Identity: " + r.identity_error
           : "Identity: " + (r.identity || "(empty)") + (r.matches === false ? " (does not match the card)" : ""))));
-      for (const x of r.readings) {
-        const text = x.error ? x.name + ": " + x.error : x.skipped ? x.name + ": skipped, " + x.skipped
+      for (const x of r.readings) {   // a reading not tried is said so, never shown as checked
+        const text = x.error ? x.name + ": " + x.error : x.skipped ? x.name + ": not tried, " + x.skipped
           : x.name + " = " + x.value + (x.unit ? " " + x.unit : "");
-        rows.push(h("li", { class: x.error ? "bad" : "good" }, icon(x.error ? "warn" : "check"),
+        rows.push(h("li", { class: x.error ? "bad" : x.skipped ? "" : "good" }, icon(x.error ? "warn" : x.skipped ? "dots" : "check"),
           h("span", { class: x.skipped ? "muted" : "" }, text)));
       }
+      const w = r.write_check;   // the card's set command, written with the value the setting had
+      if (w) rows.push(h("li", { class: w.ok ? "good" : "bad" }, icon(w.ok ? "check" : "warn"),
+        h("span", {}, "Set command " + w.name + ": " + (w.ok ? "takes " + w.sent + " (no change)" : w.error))));
       if (r.instrument_error) rows.push(h("li", { class: "bad" }, icon("warn"), h("span", {}, "Error queue: " + r.instrument_error)));
       $("card-try-results").replaceChildren(...rows);
-      const bad = r.readings.filter((x) => x.error).length;
-      $("cards-msg").textContent = bad ? bad + " readings failed: fix them in the card and try again."
-        : "Every reading answered. Compare the values with the front panel.";
+      const bad = r.readings.filter((x) => x.error).length + (w && !w.ok ? 1 : 0);
+      const untried = r.readings.filter((x) => x.skipped).length;
+      $("cards-msg").textContent = bad ? bad + " checks failed: fix them in the card and try again."
+        : (untried ? "Every reading tried answered (" + untried + " not tried)." : "Every reading answered.")
+          + " Compare the values with the front panel.";
     } catch (e) { $("cards-msg").textContent = e.message; }
     finally { btn.disabled = false; }
   }

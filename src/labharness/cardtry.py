@@ -1,11 +1,16 @@
-"""Try a card on the instrument before keeping it: ask who it is and read every reading, nothing else.
+"""Try a card on the instrument before keeping it: ask who it is, read every reading, and write one setting with the
+value it already has.
 
 This is the step that makes a drafted card trustworthy: the person (or Kelvin, on an instrument a person connected)
 sees each reading's value next to the front panel, or the error it gave, and the card is fixed until they agree.
-Nothing is set: no drive, no setting, no connect commands for text instruments; reads that would start something
-(MEASure?, READ?, INITiate, *TST?, *CAL?) are skipped. A library card runs its open calls, which connect it."""
+Nothing changes: no drive, no connect commands for text instruments; reads that would start something (MEASure?,
+READ?, INITiate, *TST?, *CAL?) are skipped, and said to be (a skip is not a check). One setting (never a drive) is
+written with the value it reads, then read back with the error queue: a set command the instrument doesn't take (a
+long form it refuses, -113) shows here rather than in the first run, where it once passed for a set. A library card
+runs its open calls, which connect it."""
 from __future__ import annotations
 
+import math
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -90,6 +95,10 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
             out["instrument_error"] = inst.instrument_error()
         except Exception as e:
             out["instrument_error"] = "the error query failed: %s" % e
+        if text and not card.connection.get("write_only"):
+            check = write_check(inst, card)
+            if check is not None:
+                out["write_check"] = check
     finally:
         if reuse is None:
             try:
@@ -97,6 +106,50 @@ def try_card(card: Card, address: str, lab: Any = None) -> Dict[str, Any]:
             except Exception:
                 pass
     return out
+
+
+def _same(spec: Any, a: Any, b: Any) -> bool:
+    if spec.numeric and a is not None and b is not None:
+        return math.isclose(float(a), float(b), rel_tol=1e-6, abs_tol=1e-15)
+    return a == b
+
+
+def write_check(inst: Instrument, card: Card) -> Optional[Dict[str, Any]]:
+    """One setting written with the value it has (so nothing changes), read back, and the error queue read after:
+    {name, value, ok, error}. Only a setting that reads back, never a drive, a source's range or a reading that
+    starts something; None when the card has none. Errors already queued are read out first, so only the write's
+    own count."""
+    for spec in card.params.values():
+        if spec.is_drive or spec.set_cmd is None or spec.get_cmd is None or spec.get_before or spec.acquires \
+                or spec.read_when or card.range_owner(spec.name) is not None \
+                or spec.type not in ("float", "int", "bool", "enum") or ACTION_READ.match(spec.get_cmd.render()):
+            continue
+        try:
+            value = inst.read(spec.name)
+        except Exception:
+            continue   # its reading failed: the readings above say so
+        if value is None:
+            continue
+        row: Dict[str, Any] = {"name": spec.name, "value": value, "unit": spec.unit}
+        try:
+            for _ in range(10):   # older errors (a reading's) are not the write's
+                if not inst.instrument_error():
+                    break
+            inst.write(spec.name, value)
+            back = inst.read(spec.name)
+            err = inst.instrument_error()
+        except Exception as e:
+            row.update(ok=False, error=str(e).splitlines()[0][:300] if str(e) else type(e).__name__)
+            return row
+        if err:
+            row.update(ok=False, error="the instrument reported %s after %s" % (err, spec.set_cmd.render(
+                spec.to_wire(value))))
+        elif not _same(spec, back, value):
+            row.update(ok=False, error="it reads %s after Kelvin wrote %s" % (spec.show(back), spec.show(value)))
+        else:
+            row.update(ok=True, sent=spec.set_cmd.render(spec.to_wire(value)))
+        return row
+    return None
 
 
 def summary(result: Dict[str, Any]) -> str:
@@ -107,20 +160,27 @@ def summary(result: Dict[str, Any]) -> str:
     else:
         match = {True: "matches the card", False: "does NOT match the card's identity pattern", None: ""}[result.get("matches")]
         lines.append("identity: %r %s" % (result.get("identity", ""), match))
-    ok = bad = 0
+    ok = bad = skipped = 0
     for r in result["readings"]:
         if r.get("error"):
             bad += 1
             lines.append("  %s: ERROR %s" % (r["name"], r["error"]))
         elif r.get("skipped"):
-            lines.append("  %s: skipped (%s)" % (r["name"], r["skipped"]))
+            skipped += 1
+            lines.append("  %s: NOT TRIED (%s)" % (r["name"], r["skipped"]))
         else:
             ok += 1
             lines.append("  %s = %s%s" % (r["name"], r["value"], " " + r["unit"] if r.get("unit") else ""))
     if result.get("instrument_error"):
         lines.append("instrument error queue: %s" % result["instrument_error"])
-    lines.append("%d readings answered, %d failed. Compare the values with the front panel; fix the card and try "
-                 "again until they agree." % (ok, bad))
+    check = result.get("write_check")
+    if check is not None:
+        lines.append("set command: %s %s" % (check["name"], "takes %s (written with the value it had, read back the "
+                                                           "same)" % check["sent"] if check.get("ok") else
+                                             "FAILED: %s" % check["error"]))
+    lines.append("%d readings answered, %d failed, %d not tried%s. Compare the values with the front panel; fix the "
+                 "card and try again until they agree." % (ok, bad, skipped, "" if check is not None else
+                                                           "; no setting could be written back to check a set command"))
     return "\n".join(lines)
 
 

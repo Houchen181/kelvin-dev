@@ -119,9 +119,9 @@ def test_every_real_card_passes_its_health_check_on_a_twin():
 def test_a_twin_fails_the_health_checks_an_instrument_would_fail():
     lab = sim_lab({"mw": {"card": "rs/smb100a"}, "magnet": {"card": "ami/430"}})
     mw = lab.instruments["mw"].backend
-    assert mw.query(":SYSTem:ERRor[:NEXT]?") == '0,"No error"'    # the card's notation, answered as :SYST:ERR?
+    assert mw.query(":SYSTem:ERRor?") == '0,"No error"'    # the card's :SYSTem:ERRor[:NEXT]?, as it is sent
     mw.errors += ['-222,"Data out of range"', '-221,"Settings conflict"']
-    assert mw.query(":SYSTem:ERRor[:NEXT]?") == '-222,"Data out of range"'   # the queued error, not a made-up 0
+    assert mw.query(":SYSTem:ERRor?") == '-222,"Data out of range"'   # the queued error, not a made-up 0
     lab.instruments["magnet"].backend.load_state({"field_units": "kG"})     # a dry run copies a 430 left in kG
     results = {r.instr: r for r in lab.health_check()}
     assert not results["mw"].ok and "-221" in str(results["mw"])

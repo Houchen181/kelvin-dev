@@ -2143,6 +2143,45 @@ class LabRuntime:
 
     # ------------------------------------------------------------------ cards for new instruments
 
+    def find_card(self, query: str = "") -> str:
+        """The cards Kelvin has (its own, the instrument collection's, the lab's) for a maker and model, a kind, an
+        identity reply or a driver address, and the instruments the collection knows that have no card yet, with
+        their manuals: what to look up before writing a card. Only reads Kelvin's files."""
+        from ..collection import manuals
+        from ..discovery import find_cards
+        from ..virtual_lab import builtin_ids, lab_registry
+        registry = lab_registry(self.home, self.collection) if self.home is not None else self.lab.registry
+        found = find_cards(query, registry, self.collection)
+        mine = str(self.cards_dir).replace("\\", "/") if self.cards_dir is not None else None
+
+        def origin(card: Any) -> str:
+            source = str(card.source).replace("\\", "/")
+            if mine and source.startswith(mine):
+                return "this lab's version of Kelvin's card" if card.id in builtin_ids() else "this lab's card"
+            return "the instrument collection's" if "/collection/" in source else "Kelvin's"
+        lines = []
+        if found["cards"]:
+            lines.append("Cards Kelvin has%s:" % (" for %r" % query if query else ""))
+            lines += ["- %s: %s (%s; %s, %s)%s" % (c.id, c.model, c.kind, origin(c), c.status,
+                                                    "; " + c.notes[0][:160] if c.notes and query else "")
+                      for c in found["cards"]]
+            lines.append("Use one as it is: add_instrument with card=<id> (try_card first on an instrument it may not "
+                         "fit). Write a card only for an instrument none of these fits.")
+        for e in found["entries"]:
+            if not lines or not lines[-1].startswith("No card yet"):
+                lines.append("No card yet, but the instrument collection knows:")
+            links = manuals(e)
+            lines.append("- %s: %s (%s)%s" % (e.get("id"), e.get("name") or e.get("model"), e.get("kind") or "?",
+                                              "; manual " + links[0] if links else ""))
+        if found["entries"]:
+            lines.append("draft_card writes its card from the manual the collection links (or draft_card with manual).")
+        if not lines:
+            lines.append("Kelvin has no card for %r%s; draft_card finds the maker's manual and writes one." % (
+                query, "" if self.collection is not None and self.collection.index() else
+                " (and the instrument collection is %s)" % ("switched off" if self.collection is None else
+                                                             "not fetched yet")))
+        return "\n".join(lines)
+
     def check_card(self, text: str) -> str:
         card, problems, warnings = carddraft.check(text)
         if card is None:
@@ -2285,8 +2324,10 @@ class LabRuntime:
         if address is None and ("::" in instrument or "://" in instrument):
             request = ApprovalRequest("Try a card on %s?" % instrument, [
                 "Kelvin's last scan did not find an instrument at %s. Trying the %s card asks it who it is and reads "
-                "its readings; it sets nothing." % (instrument, card.model)])
-            if not self.gate.auto_simple(request, "trying a card only asks the instrument who it is and reads it") \
+                "its readings; it changes nothing (one setting is written with the value it already has, to check "
+                "the card's set command)." % (instrument, card.model)])
+            if not self.gate.auto_simple(request, "trying a card asks the instrument who it is and reads it, and "
+                                                  "changes nothing") \
                     and not self.gate.ask(request):
                 note = " (%s)" % request.note if request.note else ""
                 return "declined: the person did not want Kelvin to try %s%s" % (instrument, note)
@@ -2305,12 +2346,16 @@ class LabRuntime:
             return cardtry.summary(result)
         return self._do("trying card %s" % card.id, run)
 
-    def save_card(self, text: str, by: str = "agent") -> str:
+    def save_card(self, text: str, by: str = "agent", version: bool = False) -> str:
+        """version: the card takes the id of one of Kelvin's cards (its own or the collection's) on purpose, as this
+        lab's version of it; without it such a card is refused, so a draft never silently replaces a card Kelvin has
+        (l07's Mercury draft, which lacked the card's set_reply, broke a run)."""
         if self.cards_dir is None:
             return "not saved: this Kelvin has no folder for your cards"
         from ..virtual_lab import builtin_ids, kelvin_ids
         try:
-            card, path, warnings = carddraft.save(self.cards_dir, text, kelvin_ids(self.collection), by, version=True)
+            card, path, warnings = carddraft.save(self.cards_dir, text, kelvin_ids(self.collection), by,
+                                                  version=version)
         except ValueError as e:
             return "not saved: %s" % e
         self.refresh_cards([card.id])
@@ -2338,6 +2383,17 @@ class LabRuntime:
         idn = str(found.get("idn") or "")
         if found.get("card_id"):
             return "%s already matches card %s (%s): add_instrument" % (address, found["card_id"], found.get("model"))
+        from ..discovery import cards_named, match_card
+        from ..virtual_lab import lab_registry
+        registry = lab_registry(self.home, self.collection) if self.home is not None else self.lab.registry
+        have = [c for c in [match_card(idn, registry) if idn else None] if c is not None]
+        if not have and not idn and maker.strip() and model.strip():
+            have = cards_named("%s %s" % (maker, model), registry)
+        if have:   # Kelvin's own, the collection's or the lab's: a draft would only be a worse copy of it
+            return ("Kelvin already has %s for it: %s. Use it (add_instrument with card=<id>; try_card first if "
+                    "unsure); draft_card writes cards only for instruments Kelvin has none for" % (
+                        "a card" if len(have) == 1 else "cards",
+                        "; ".join("%s (%s)" % (c.id, c.model) for c in have[:4])))
         if not idn and not (maker.strip() and model.strip()):
             return ("%s did not answer who it is%s: give the maker and the model the person named"
                     % (address or "the instrument", "" if found else " (or the last scan did not find it)"))
@@ -2709,9 +2765,9 @@ class LabRuntime:
             items.append("the maker's files from %s, kept in the environment (a Python package among them is "
                          "installed)" % files)
         request = ApprovalRequest("Install on this computer%s?" % (" for " + why if why else ""), items)
-        if not self.gate.auto_simple(request, "installing into one of Kelvin's own environments drives nothing; the "
-                                              "instrument's commands still go through Kelvin's checks") \
-                and not self.gate.ask(request):
+        # a download onto the person's computer is theirs to say yes to (F3 P6: ~71 MB came unasked); the Lab panel's
+        # Install button is that yes already
+        if not by.startswith("human") and not self.gate.ask(request):
             note = " (%s)" % request.note if request.note else ""
             return "declined: nothing installed%s" % note
         try:
@@ -2789,26 +2845,36 @@ class LabRuntime:
 
     def reconnect_instrument(self, name: str, by: str = "agent") -> str:
         """Connect an instrument of the lab that could not be connected, once what stopped it is fixed (a package
-        installed, the instrument switched on or plugged in). Connecting changes nothing on it."""
+        installed, the instrument switched on or plugged in), with its card as it is on disk now: a card fixed since
+        it connected is used from now on (lab.Lab.reconnect). Connecting changes nothing on it."""
+        from ..virtual_lab import card_now
         inst = self.lab.instruments.get(name)
         if inst is None:
             return "no instrument %r (have: %s)" % (name, ", ".join(self.lab.instruments))
-        if inst.enabled:
-            return "%s is connected" % name
-        if not inst.unavailable:
-            return "%s is switched off in the Lab panel: ask_to_switch_on asks the person" % name
+        try:
+            card = card_now(self.lab, name, self.home, self.collection)
+        except ValueError as e:   # the card is gone, or no longer fits the lab config: the instrument keeps its own
+            return "%s keeps the card it connected with: %s" % (name, e)
+        if not inst.enabled and not inst.unavailable:
+            news = self.lab.reconnect(name, card)
+            return "%s is switched off in the Lab panel: ask_to_switch_on asks the person%s" % (
+                name, " (it will use %s)" % news if news else "")
+        if inst.enabled and card is None:
+            return "%s is connected, with its card as it is now" % name
         with self.lock:
             try:
-                self.lab.reconnect(name)
+                news = self.lab.reconnect(name, card)
             except Exception as e:
                 self.gate.log.write("reconnect_failed", by=by, instrument=name, error=inst.unavailable)
                 return "%s is still not connected: %s" % (name, inst.unavailable or e)
-            self.gate.log.write("instrument_connected", by=by, instrument=name)
+            self.gate.log.write("instrument_connected", by=by, instrument=name, card=inst.card.id,
+                                reloaded=bool(news))
             self._caps_if_waiting()
             self._refresh()
         health = self.lab.health_check([name])[0]
-        return "%s is connected now%s" % (name, ": " + "; ".join(health.problems) if health.problems else
-                                          " and answers as its card expects")
+        return "%s is connected now%s%s" % (name, ", with " + news if news else "",
+                                            ": " + "; ".join(health.problems) if health.problems else
+                                            " and answers as its card expects")
 
     def _fetch_files(self, env: str, source: str) -> str:
         """A maker's files into an environment: a folder or file on this computer, or a web address. A Python package
@@ -2965,7 +3031,7 @@ class LabRuntime:
         Kelvin off a virtual lab the person chose asks too."""
         from ..adapters import AdapterError, resource_name
         from ..cards import CONNECTION_KEYS
-        from ..discovery import Found, add_to_config
+        from ..discovery import Found, add_to_config, card_for
         from ..labconfig import ConfigError, load_lab_config
         from ..virtual_lab import build_lab, lab_registry
         if self.home is None:
@@ -2974,12 +3040,21 @@ class LabRuntime:
         if not address or address.startswith("sim://"):
             return "not added: give the address of an instrument connected to this computer (scan_instruments)"
         lab_file = self.home / "lab.yaml"
-        registry = lab_registry(self.home)
+        registry = lab_registry(self.home, self.collection)   # the cards the lab opens with, the collection's too
         found = self.found_info.get(resource_name(address), {})
-        card_id = (card or "").strip() or found.get("card_id") or ""
-        if not card_id:
-            return "not added: Kelvin has no card for %s yet%s; draft_card writes one from its manual" % (
-                address, " (it answered %r)" % found["idn"][:60] if found.get("idn") else "")
+        named = (card or "").strip()
+        card_id = named if named in registry else "" if named else found.get("card_id") or ""
+        matched = ""
+        if not card_id:   # by the name given, its identity reply or its driver address (qd://) before any draft
+            hit, matched = card_for(address, registry, str(found.get("idn") or ""), named)
+            if hit is None and named:
+                return "not added: %s (find_card lists the cards Kelvin has)" % matched
+            if hit is None:
+                return ("not added: Kelvin has no card for %s yet%s%s; find_card looks for one by maker and model, "
+                        "draft_card writes one from its manual" % (address, " (it answered %r)" % found["idn"][:60]
+                                                                   if found.get("idn") else "",
+                                                                   "; " + matched if matched else ""))
+            card_id = hit.id
         try:
             the_card = registry.get(card_id)
         except KeyError:
@@ -3108,11 +3183,11 @@ class LabRuntime:
             self.lab_changed("added")
             lim = ", ".join("%s [%s, %s]%s" % (p.name, num(p.limits[0]), num(p.limits[1]), " " + p.unit if p.unit else "")
                             for p in self.lab.instruments[new].card.drives if p.numeric and p.limits)
-            return ("added %s (%s, card %s%s) at %s to %s; health: %s. Its outputs keep the maker's limits%s until a "
+            return ("added %s (%s, card %s%s%s) at %s to %s; health: %s. Its outputs keep the maker's limits%s until a "
                     "person reviews them, and every output change on it asks them (auto mode doesn't cover it)."
-                    % (new, the_card.model, the_card.id, ", a draft" if the_card.status == "draft" else "", address,
-                       self.lab.config.name, "ok" if health.ok else "; ".join(health.problems),
-                       " (" + lim + ")" if lim else ""))
+                    % (new, the_card.model, the_card.id, ", a draft" if the_card.status == "draft" else "",
+                       ", found by " + matched if matched else "", address, self.lab.config.name,
+                       "ok" if health.ok else "; ".join(health.problems), " (" + lim + ")" if lim else ""))
         return self._do("adding an instrument", run)
 
     def refresh_cards(self, ids: Iterable[str]) -> None:

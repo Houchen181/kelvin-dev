@@ -254,6 +254,16 @@ def page_links(html: str, base: str) -> List[Tuple[str, str]]:
     return docs + rest
 
 
+BROCHURE = re.compile(r"\bbrochure\b|\bdata ?sheet\b|\bproduct (?:flyer|overview|selection guide)\b|\bcatalog(?:ue)?\b",
+                      re.I)
+
+
+def _listing(html: str, base: str) -> bool:
+    """A page that lists documents (a site's manuals for many models, a downloads list): followed for its links,
+    never taken for the manual, however much of the model's name and command-like text its list has (l07)."""
+    return sum(1 for _, u in page_links(html, base) if u.lower().split("?")[0].split("#")[0].endswith(".pdf")) >= 8
+
+
 def pdf_links(html: str, base: str, model: str = "", want: Any = PROGRAMMING_WORDS) -> List[str]:
     """Links on a maker's page that may lead to the model's manual, best first: those naming the model (or its
     series), PDFs, and links that say programming (want: what else to look for) or manual. Pages are followed on the
@@ -346,7 +356,7 @@ def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
             html = data.decode("utf-8", errors="replace")
             from .literature import html_to_text
             pages = [html_to_text(html)]
-            kind = "html"
+            kind = "listing" if _listing(html, url) else "html"
             # a product or downloads page: what it links; a page about this model (or its series): its manuals'
             # pages and PDFs, as on makers' support sites (product -> manuals list -> manual page -> PDF)
             if depth == 0 or (depth < MAX_DEPTH and names_model(pages[0], model)):
@@ -361,8 +371,11 @@ def find_manual(maker: str, model: str, ask: Optional[Ask], fetch: Fetch,
             log("%s: does not name the %s" % (url, model))
             continue
         score = specs_score(pages, model) if document else sum(command_score(p) for p in pages)
-        if kind == "html" and (sum(len(p) for p in pages) < 5000 or score < 15):
+        if kind == "listing" or kind == "html" and (sum(len(p) for p in pages) < 5000 or score < 15):
             continue   # a web page counts only if it is a command reference (or the specifications) itself
+        if kind == "pdf" and not document and score < GOOD and BROCHURE.search(head[:400]):   # its title says so
+            log("%s: a brochure or data sheet, not the command reference" % url)
+            continue
         found = {"url": url, "pages": pages, "score": score, "kind": kind, "data": data}
         if best is None or score > best["score"]:
             best = found
@@ -577,6 +590,17 @@ def draft(manual_pages: List[str], maker: str, model: str, idn: str, url: str, a
     return text, changed, key, notes
 
 
+def draft_id(entry_id: str, model: str, taken: Any) -> str:
+    """An id for a drafted card of a model whose collection entry's id Kelvin's own card has: the entry's maker, then
+    the model (keithley/6220 under keithley/6221), not one of `taken`."""
+    vendor = entry_id.split("/")[0]
+    name = re.sub(r"[^a-z0-9]+", "-", model.lower()).strip("-") or "instrument"
+    card_id, n, taken = "%s/%s" % (vendor, name), 2, set(taken)
+    while card_id in taken:
+        card_id, n = "%s/%s-%d" % (vendor, name, n), n + 1
+    return card_id
+
+
 def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: Optional[Fetch] = None,
               builtin_ids: Any = (), log: Callable[[str], None] = lambda m: None,
               search: Optional[Callable[[str], List[str]]] = None, catalog: Any = None) -> Dict[str, Any]:
@@ -592,6 +616,14 @@ def make_card(found: Dict[str, Any], cards_dir: Any, ask: Optional[Ask], fetch: 
     idn = str(found.get("idn") or "")
     entry = catalog.instrument_for(idn) if catalog is not None and idn else None
     maker, model = maker_model(idn) if idn else ("", "")
+    if entry and str(entry.get("id")) in set(builtin_ids):
+        # Kelvin has a card under the collection's id, and it doesn't fit this instrument (the scan would have matched
+        # it): a model the entry also covers, such as a 6220 under the 6221's. The draft gets an id of its own, and
+        # its identity from the instrument's reply, so it never takes the instruments Kelvin's card fits.
+        bare = re.sub(r"(?i)^model\s*", "", model).strip() or str(entry.get("model") or "")
+        entry = {k: v for k, v in entry.items() if k != "identify"}
+        entry.update(id=draft_id(str(entry["id"]), bare, builtin_ids),
+                     name="%s %s" % (str(entry.get("maker") or maker).split(" (")[0], bare))
     if entry and not (maker and model):
         maker, model = str(entry.get("maker") or ""), str(entry.get("model") or "")
     if not maker or not model:

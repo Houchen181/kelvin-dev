@@ -209,11 +209,16 @@ class ANC300(_Controller):
                                                         "%.6g" % float(value)))
 
     def identity(self) -> str:
+        """Its answer to ver ("attocube ANC300 controller version 1.1.0-1304 ..."): the ANC300 has no *IDN?. What
+        doesn't answer it isn't taken for an ANC300 (no identity is made up), so a wrong port fails the health check."""
+        said = " ".join(self.dev.command("ver")).strip()
+        if not said:
+            raise AdapterError("%s did not say who it is (ver)" % self.name)
         try:
             serial = " ".join(self.dev.command("getcser")).strip()
-            return "attocube,ANC300,%s" % (serial or self.target)
-        except Exception:
-            return "attocube,ANC300,%s" % self.target
+        except AdapterError:   # not on every firmware
+            serial = ""
+        return "%s%s" % (said, ", serial %s" % serial if serial else "")
 
 
 class ANC350(_Controller):

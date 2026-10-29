@@ -261,6 +261,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
     envs.attach(envs.DRIVERS)    # the built-in drivers import their makers' packages from there
     runtime.keep_hands(settings.hands_on())               # a hands-on lock stays on across restarts
     collection = Collection(home)                         # the instrument collection's copy: ~/Kelvin/collection
+    collection.notify = lambda title, text: runtime.notifier("setup", title, text)   # an update failing is said
 
     def collection_on() -> Optional[Collection]:
         """The instrument collection while it is switched on in Settings (it is, unless switched off)."""

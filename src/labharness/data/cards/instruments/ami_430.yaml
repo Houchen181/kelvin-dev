@@ -9,7 +9,8 @@ manual_url: "https://www.americanmagnetics.com/support/manuals/mn-430-rev14.pdf"
 identify:
   idn: "AMERICAN MAGNETICS INC\\.?,MODEL 430"
   example: "AMERICAN MAGNETICS INC.,MODEL 430,2.01"
-connection: { baud_rate: 115200, read_termination: "\r\n", write_termination: "\r\n", timeout_ms: 3000 }
+connection: { baud_rate: 115200, read_termination: "\r\n", write_termination: "\r\n", timeout_ms: 3000,
+              greeting_lines: 2 }
 error_query: "SYSTem:ERRor?"
 
 parameters:
@@ -25,7 +26,9 @@ parameters:
     readback: B
     tol: 0.0005
     timeout: 7200
-    description: Sets the target and starts ramping at the rate programmed in the 430. Assumes field units are tesla.
+    rate_param: ramp_rate
+    rate_per: s
+    description: Sets the target and starts ramping at the rate programmed in the 430. Assumes field units are tesla and ramp rates per second (the health checks say otherwise).
   B:
     label: Field
     kind: measure
@@ -49,6 +52,19 @@ parameters:
     type: enum
     get: "FIELD:UNITS?"
     values: { "kG": 0, "T": 1 }
+  ramp_rate:
+    label: Ramp rate
+    kind: measure
+    unit: T/s
+    get: "RAMP:RATE:FIELD:1?"
+    field: 0
+    description: The first ramp segment's rate as programmed in the 430 (rates and segments are set on the 430 itself); Kelvin estimates how long a ramp takes from it. Segments above the first may be slower.
+  ramp_rate_units:
+    label: Ramp rate units
+    kind: measure
+    type: enum
+    get: "RAMP:RATE:UNITS?"
+    values: { "per second": 0, "per minute": 1 }
 
 display:
   headline: B
@@ -58,11 +74,15 @@ health:
     expect: "AMERICAN MAGNETICS"
   - query: "FIELD:UNITS?"
     expect: "^1"
+  - query: "RAMP:RATE:UNITS?"
+    expect: "^0"
 raw:
   reset: ["*RST"]
   blocked: ["PSwitch", "CONFigure:COILconst", "CONFigure:CURRent:LIMit", "CONFigure:STABility", "CONFigure:QUench",
-            "CONFigure:RAMP:RATE", "CONFigure:VOLTage:LIMit"]
+            "CONFigure:RAMP:RATE", "CONFigure:VOLTage:LIMit", "CONFigure:FIELD:UNITS", "CONFigure:PSwitch"]
 notes:
   - Written from the manual; verify on your unit before trusting it with a sample.
   - Ramp rates, limits, the coil constant, quench detection and the persistent switch are set on the 430 itself.
   - Send PAUSE (raw) to stop a ramp where it is.
+  - "On its LAN port (TCPIP0::<ip>::7180::SOCKET) the 430 greets each connection with two lines (American Magnetics Model 430 IP Interface, then Hello.), as AMI's manual and PyMeasure's driver have it; Kelvin reads and drops them (greeting_lines: 2). Over RS-232 there is none, which costs two seconds when connecting. The greeting is not yet checked on a real 430."
+  - "The field must be in tesla and the ramp rates per second (FIELD:UNITS? 1, RAMP:RATE:UNITS? 0): the health checks refuse anything else, and changing either remotely is blocked."

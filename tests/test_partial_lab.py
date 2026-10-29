@@ -85,7 +85,7 @@ def test_kelvin_reconnects_an_instrument_once_it_is_fixed(bench, tmp_path):
         assert rt.reconnect_instrument("lockin").startswith("lockin is still not connected")
         bench.devices["GPIB0::9::INSTR"] = Device("srs/sr830", name="sr830")
         assert rt.reconnect_instrument("lockin").startswith("lockin is connected now")
-        assert rt.reconnect_instrument("lockin") == "lockin is connected"
+        assert rt.reconnect_instrument("lockin") == "lockin is connected, with its card as it is now"
         logged = [json.loads(x) for x in (tmp_path / "data" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         assert [e["type"] for e in logged if e["type"] in ("reconnect_failed", "instrument_connected")] == [
             "reconnect_failed", "instrument_connected"]

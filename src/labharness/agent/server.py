@@ -32,9 +32,9 @@ You are connected to a physics lab through Kelvin.
 - A person may switch on auto mode. Then drive changes and runs that stay well inside the lab's limits (and pass
   a clean dry run) go ahead without asking; lab_status says when it is on. Only a person can switch it.
 - Values beyond the lab's limits, firmware/calibration commands and interlock violations are refused. Do not try to work around a refusal; tell the user.
-- Only driving the sample waits for a person. What drives nothing (installing a maker's package, keeping a skill or
-  recipe, trying a card, saving a file) Kelvin approves itself and shows in the chat, unless the chat has read text
-  from the web since the person last wrote: then the person answers.
+- Only driving the sample, and installing software on this computer, wait for a person. What drives nothing (keeping a
+  skill or recipe, trying a card, saving a file) Kelvin approves itself and shows in the chat, unless the chat has read
+  text from the web since the person last wrote: then the person answers.
 - An instrument's limits are its card's range (the instrument's own), narrowed only where the lab config's limits:
   or a mounted device's protection say so. describe_instrument shows where each limit comes from, a refusal says
   whose limit it hit, and lab_config shows the lab config itself. Tell the person exactly that, never a guess.
@@ -87,7 +87,9 @@ You are connected to a physics lab through Kelvin.
   A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
   queued and roughly how long it takes; queue_show follows it.
 - When the person names an instrument connected to this computer, or wants to use one the lab doesn't have yet,
-  set it up yourself: scan_instruments to find it; if a card matched, add_instrument; if none did, draft_card (Kelvin
+  set it up yourself: scan_instruments to find it; if a card matched, add_instrument; if none did, find_card by its
+  maker and model (Kelvin's own cards, the collection's and the lab's: one that fits is used as it is, never drafted
+  again); if Kelvin has none, draft_card (Kelvin
   finds the maker's manual online and writes a draft card; when the instrument collection knows the model, the scan
   names it and the card starts from the manual the collection links), try_card it (it only reads) and check that its readings
   make sense, then add_instrument. Then tell the person in a line or two what you added, with a reading or two they
@@ -274,6 +276,14 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return rt.experiment_guide(experiment, query)
 
     @server.tool(annotations=READ, structured_output=False)
+    def find_card(query: str = "") -> str:
+        """The cards Kelvin has for an instrument: its own, the instrument collection's and the lab's, by maker and
+        model (e.g. "AMI 430", "Mercury iTC"), kind ("lock-in"), identity reply or driver address (qd://...); and the
+        instruments the collection knows that have no card yet, with their manuals. Look here before draft_card or
+        writing a card: a card Kelvin has is used as it is. No query lists every card."""
+        return rt.find_card(query)
+
+    @server.tool(annotations=READ, structured_output=False)
     def check_card(card: str) -> str:
         """Check a card (YAML text) without saving it: what is wrong, or what it offers and what to improve."""
         return rt.check_card(card)
@@ -299,18 +309,20 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def try_card(card: str, instrument: str) -> str:
         """Try a card on the instrument before using it: card is its YAML text, or the id of a card Kelvin has (one
         draft_card wrote); instrument is its name in the lab or its address (one the last scan did not find asks the
-        person first). Asks who it is and reads every reading; it sets nothing and skips reads that could start
-        something. Compare the values with what the person sees, fix the card, and try again."""
+        person first). Asks who it is, reads every reading, and writes one setting with the value it already has to
+        check the card's set command; it changes nothing, and skips reads that could start something (said as not
+        tried, never as checked). Compare the values with what the person sees, fix the card, and try again."""
         return rt.try_card(card, instrument)
 
     @server.tool(annotations=ACT, structured_output=False)
-    def save_card(card: str) -> str:
+    def save_card(card: str, version: bool = False) -> str:
         """Keep a new instrument card (status draft) with the user's cards. Only from the manual text the user gave;
         never invent commands. Then try_card and add_instrument; until a person reviews it, every setting and output
-        change on it asks them. When one of Kelvin's cards doesn't fit this lab's instrument (another firmware, a
-        wider range, a different command), save the corrected card under the same id: it becomes this lab's version
-        of Kelvin's card and replaces it here only."""
-        return rt.save_card(card)
+        change on it asks them. A card under the id of one of Kelvin's cards (find_card) is refused: use Kelvin's.
+        Only when Kelvin's card doesn't fit this lab's instrument (another firmware, a wider range, a different
+        command), save the corrected card under the same id with version: true: it becomes this lab's version of
+        Kelvin's card and replaces it here only."""
+        return rt.save_card(card, version=version)
 
     @server.tool(annotations=FETCH, structured_output=False)
     def draft_card(address: str, maker: str = "", model: str = "", manual: str = "", specs: str = "") -> str:

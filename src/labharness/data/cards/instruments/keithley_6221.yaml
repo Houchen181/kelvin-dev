@@ -1,0 +1,233 @@
+card: 1
+id: keithley/6221
+model: Keithley 6221 AC and DC current source
+vendor: Keithley / Tektronix
+kind: current-source
+status: community
+manual: "Model 6220/6221 Reference Manual 622x-901-01 Rev. C (Oct 2008): Table 3-2 DC output commands, Table 7-4 waveform commands, Table 5-3 Delta commands, Tables 14-4 to 14-11 SCPI reference"
+manual_url: "https://download.tek.com/manual/622x-901-01%20(C%20-%20Oct%202008)(Ref).pdf"
+identify:
+  idn: "^KEITHLEY INSTRUMENTS INC\\.?,\\s*MODEL 6221,"
+  example: "KEITHLEY INSTRUMENTS INC.,MODEL 6221,4123960,D04  /700x "
+connection: { timeout_ms: 5000 }
+error_query: ":SYSTem:ERRor[:NEXT]?"
+safe_sequence: [I, wave_amplitude, wave_offset, output, compliance_V, delta_high, delta_low]
+
+parameters:
+  output:
+    label: Output
+    kind: drive
+    type: bool
+    set: ":OUTPut[:STATe] {value}"
+    get: ":OUTPut[:STATe]?"
+    safe: off
+    enables: [I, wave_amplitude, wave_offset]
+    description: Connects the source to the device. It turns on only while the rear INTERLOCK is closed (manual 2-4).
+  I:
+    label: DC current
+    applies_when: output
+    kind: drive
+    unit: A
+    set: ":SOURce:CURRent[:LEVel][:IMMediate][:AMPLitude] {value}"
+    get: ":SOURce:CURRent[:LEVel][:IMMediate][:AMPLitude]?"
+    limits: [-0.105, 0.105]
+    safe: 0
+    ramp: gate
+    max_rate: 0.001
+    description: The DC output level. Arming a waveform sets it to 0 (manual note 12, Table 7-4).
+    source_range: { param: range, auto: autorange, steps: [2.0e-9, 2.0e-8, 2.0e-7, 2.0e-6, 2.0e-5, 2.0e-4, 2.0e-3, 2.0e-2, 0.1] }
+  range:
+    label: Source range
+    kind: measure
+    unit: A
+    set: ":SOURce:CURRent:RANGe {value}"
+    get: ":SOURce:CURRent:RANGe?"
+    limits: [2.0e-9, 0.105]
+    description: The DC source range (2 nA to 100 mA); the 6221 picks the lowest range that covers the value. Setting it switches autorange off.
+  autorange:
+    label: Source autorange
+    kind: measure
+    type: bool
+    set: ":SOURce:CURRent:RANGe:AUTO {value}"
+    get: ":SOURce:CURRent:RANGe:AUTO?"
+    default: off
+  compliance_V:
+    label: Voltage compliance
+    applies_when: output
+    kind: drive
+    unit: V
+    set: ":SOURce:CURRent:COMPliance {value}"
+    get: ":SOURce:CURRent:COMPliance?"
+    limits: [0.1, 105]
+    safe: 0.1
+    default: 10
+    description: The most voltage the source puts across the device to drive its current; raising it is a drive change. The output light blinks while the source is in compliance.
+  wave_function:
+    label: Waveform
+    kind: measure
+    type: enum
+    set: ":SOURce:WAVE:FUNCtion {value}"
+    get: ":SOURce:WAVE:FUNCtion?"
+    values: { sine: SINusoid, square: SQUare, ramp: RAMP, arb0: ARBitrary0, arb1: ARBitrary1, arb2: ARBitrary2,
+              arb3: ARBitrary3, arb4: ARBitrary4 }
+    default: sine
+  wave_amplitude:
+    label: Waveform amplitude (peak)
+    applies_when: output
+    kind: drive
+    unit: A
+    set: ":SOURce:WAVE:AMPLitude {value}"
+    get: ":SOURce:WAVE:AMPLitude?"
+    limits: [2.0e-12, 0.105]
+    safe: 2.0e-12
+    ramp: gate
+    max_rate: 0.001
+    description: Peak amplitude, half the peak-to-peak (a sine of 100 nA peak is 70.7 nA rms). Amplitude plus offset must fit the range when ranging is fixed.
+  wave_offset:
+    label: Waveform DC offset
+    applies_when: output
+    kind: drive
+    unit: A
+    set: ":SOURce:WAVE:OFFSet {value}"
+    get: ":SOURce:WAVE:OFFSet?"
+    limits: [-0.105, 0.105]
+    safe: 0
+    ramp: gate
+    max_rate: 0.001
+  wave_frequency:
+    label: Waveform frequency
+    kind: measure
+    unit: Hz
+    set: ":SOURce:WAVE:FREQuency {value}"
+    get: ":SOURce:WAVE:FREQuency?"
+    limits: [0.001, 100000]
+    default: 1000
+  wave_ranging:
+    label: Waveform ranging
+    kind: measure
+    type: enum
+    set: ":SOURce:WAVE:RANGing {value}"
+    get: ":SOURce:WAVE:RANGing?"
+    values: { best: BEST, fixed: FIXed }
+    default: best
+    description: BEST picks the range from amplitude and offset; FIXed keeps the source range. Not accepted while a waveform is armed (error +404).
+  wave_duration:
+    label: Waveform duration
+    kind: measure
+    unit: s
+    set: ":SOURce:WAVE:DURation:TIME {value}"
+    get: ":SOURce:WAVE:DURation:TIME?"
+    limits: [1.0e-7, 999999.999]
+    description: How long a started waveform runs. The 6221's default is no end (INFinity), which it reads back as 9.9e37.
+  phase_marker:
+    label: Phase marker
+    kind: measure
+    type: bool
+    set: ":SOURce:WAVE:PMARker:STATe {value}"
+    get: ":SOURce:WAVE:PMARker:STATe?"
+    default: off
+    description: A 1 µs trigger pulse at the marker phase of each waveform cycle, on the trigger-link line below; a lock-in's external reference.
+  phase_marker_phase:
+    label: Phase marker phase
+    kind: measure
+    unit: deg
+    set: ":SOURce:WAVE:PMARker[:LEVel] {value}"
+    get: ":SOURce:WAVE:PMARker[:LEVel]?"
+    limits: [0, 360]
+    default: 180
+  phase_marker_line:
+    label: Phase marker trigger line
+    kind: measure
+    type: int
+    set: ":SOURce:WAVE:PMARker:OLINe {value}"
+    get: ":SOURce:WAVE:PMARker:OLINe?"
+    limits: [1, 6]
+    default: 3
+    description: Not the trigger layer's output line (2 by default) or the waveform's external trigger line, or the 6221 answers -221 Settings conflict.
+  delta_high:
+    label: Delta high current
+    kind: drive
+    unit: A
+    set: ":SOURce:DELTa:HIGH {value}"
+    limits: [0, 0.105]
+    safe: 0
+    description: The positive current of Delta mode with a 2182A. Kelvin leaves the Delta settings unread (a 6221 without its 2182A, or another program's set-up), so it knows them once it has set them.
+  delta_low:
+    label: Delta low current
+    kind: drive
+    unit: A
+    set: ":SOURce:DELTa:LOW {value}"
+    limits: [-0.105, 0]
+    safe: 0
+    description: The negative current of Delta mode (the 6221 makes it -high unless set).
+  delta_delay:
+    label: Delta delay
+    kind: measure
+    unit: s
+    set: ":SOURce:DELTa:DELay {value}"
+    limits: [0.001, 9999.999]
+    description: Settling time after each current step, before the 2182A measures.
+  delta_count:
+    label: Delta count
+    kind: measure
+    type: int
+    set: ":SOURce:DELTa:COUNt {value}"
+    limits: [1, 65536]
+    description: How many Delta readings a run takes (the 6221's default runs without end).
+  delta_compliance_abort:
+    label: Delta stops on compliance
+    kind: measure
+    type: bool
+    set: ":SOURce:DELTa:CABort {value}"
+    description: On, a Delta run stops when the source goes into compliance (an open contact).
+  delta_units:
+    label: Delta reading units
+    kind: measure
+    type: enum
+    set: ":UNIT[:VOLTage][:DC] {value}"
+    values: { V: V, ohm: OHMS, W: W, S: SIEMens }
+    description: What the Delta readings are in (V by default; ohms divide by the Delta current).
+  delta_reading:
+    label: Delta reading
+    kind: measure
+    get: ":SENSe:DATA[:LATest]?"
+    field: 0
+    acquires: true
+    description: The 2182A's latest Delta reading, in delta_units, while Delta runs (do_action delta_start); read when asked or measured, as the 6221 answers -221 when Delta isn't running.
+
+actions:
+  wave_start:
+    send: [":SOURce:WAVE:ARM", ":SOURce:WAVE:INITiate"]
+    label: Arm and start the waveform (output on)
+    drives: true
+  wave_stop:
+    send: ":SOURce:WAVE:ABORt"
+    label: Stop the waveform (output off, source at 0)
+  delta_start:
+    send: [":SOURce:DELTa:ARM", ":INITiate[:IMMediate]"]
+    label: Arm and start Delta with the 2182A
+    drives: true
+  delta_stop:
+    send: ":SOURce:SWEep:ABORt"
+    label: Stop Delta
+  nanovoltmeter_connected:
+    send: ":SOURce:DELTa:NVPResent?"
+    label: Is a 2182A connected for Delta (1 yes, 0 no)
+
+display:
+  headline: I
+
+health:
+  - query: "*IDN?"
+    expect: "KEITHLEY"
+raw:
+  reset: ["*RST", ":SYSTem:PRESet", ":SOURce:CLEar"]
+  blocked: [":CALibration", ":SYSTem:PASSword", ":SOURce:WAVE:ARBitrary", ":SOURce:LIST", ":SOURce:PDELta",
+            ":SOURce:DCONductance", ":OUTPut:RESPonse", "*SAV", ":SYSTem:COMMunicate"]
+notes:
+  - "Written from the 6220/6221 Reference Manual (Rev. C), tried on labsim's 6221 for DC, sine and phase marker; not yet on a real unit. labsim does not model Delta, so the Delta commands are the manual's only."
+  - "The output turns on only while the INTERLOCK connector on the rear panel is closed (manual 2-4); with it open, OUTPut ON is refused. :OUTPut:INTerlock:TRIPped? answers 1 when it is closed."
+  - "A waveform (sine, square, ramp) is set up with its parameters, then started with do_action wave_start, which asks you: it arms the waveform (that sets the DC level to 0) and starts it with the output on. wave_stop, or switching the output off, ends it with the source at 0. Amplitudes are peak values (rms = peak / sqrt 2 for a sine). After a reset the amplitude is 1 mA: set it before starting a waveform."
+  - "For a lock-in, the phase marker pulse on the trigger link (phase_marker_line) is its reference: on an SR830 set reference: external and reference_slope: TTL rising."
+  - "Delta with a 2182A: connect the 2182A to the 6221's RS-232 with a null-modem cable and the trigger link (manual 5-4); the 6221 configures and reads the 2182A itself. Set delta_high, delta_low, delta_delay, delta_count and delta_units, do_action delta_start (asks you), measure delta_reading, then delta_stop. Kelvin cannot check that the 2182A is connected over RS-232: nanovoltmeter_connected answers only when the 6221 itself is reached over GPIB or LAN (-221 otherwise)."
+  - "LAN (6221 only), GPIB or RS-232. Raw socket addresses depend on the unit's COMM settings: check them on the front panel."

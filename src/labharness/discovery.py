@@ -73,6 +73,136 @@ def match_card(idn: str, registry: CardRegistry) -> Optional[Card]:
     return max(hits, key=lambda c: len(c.idn_pattern or "")) if hits else None
 
 
+GENERIC_SCHEMES = ("http", "https", "lib", "serial", "visa", "sim", "modbus")   # any instrument's: no card follows
+_OPTION = re.compile(r"[?&]([a-z0-9_]+=[^&\s\"',)]+)", re.I)
+
+
+def by_scheme(address: str, registry: CardRegistry) -> List[Card]:
+    """The cards for a maker's-driver address (qd://... is a Quantum Design system: qd/multivu), from the addresses
+    the cards themselves give; where several share the scheme, those whose example has the address's options
+    (andor://0?sdk=2 is the SDK2 camera), then those that name it most."""
+    scheme = address.split("://", 1)[0].lower() if "://" in address else ""
+    if not scheme or scheme in GENERIC_SCHEMES:
+        return []
+    hits = []
+    for card in registry:
+        text = json.dumps(card.data, ensure_ascii=False) if card.data else " ".join(card.notes)
+        examples = re.findall(r"(?<![a-z0-9])%s://[^\s\"',)]*" % re.escape(scheme), text, re.I)
+        if examples:
+            hits.append((card, examples))
+    options = set(o.lower() for o in _OPTION.findall(address))
+    if len(hits) > 1 and options:
+        same = [h for h in hits if options & {o.lower() for e in h[1] for o in _OPTION.findall(e)}]
+        hits = same or hits
+    if len(hits) > 1:
+        most = max(len(examples) for _, examples in hits)
+        hits = [h for h in hits if len(h[1]) == most]
+    return [card for card, _ in hits]
+
+
+def _words(text: str) -> List[str]:
+    return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in ("model", "the", "and", "card")]
+
+
+def cards_named(name: str, registry: CardRegistry) -> List[Card]:
+    """The cards a name means (american-magnetics/430, AMI 430, smc100, Mercury iTC): the card with that id, else those
+    whose id or model has every word of the name that has a digit in it and one of its other words (the maker's), or,
+    for a name without a number, all of its words."""
+    flat = re.sub(r"[^a-z0-9]+", "", name.lower())
+    exact = [c for c in registry if re.sub(r"[^a-z0-9]+", "", c.id.lower()) == flat]
+    if exact or not flat:
+        return exact
+    words = _words(name)
+    numbered = [w for w in words if any(ch.isdigit() for ch in w)]
+    plain = [w for w in words if w not in numbered and len(w) > 2]
+
+    def near(w: str, mine: set) -> bool:
+        return w in mine or any(m.startswith(w) or w.startswith(m) for m in mine if len(m) > 2)
+    out = []
+    for card in registry:
+        have = " ".join([card.id, card.model, card.vendor]).lower()
+        mine = set(_words(have))
+        if numbered:   # a model number as a word, or inside one (smc100 in newport/smc100), never a bare digit or two
+            fits = all(w in mine or len(w) > 2 and w in re.sub(r"[^a-z0-9]+", "", have) for w in numbered) and \
+                (not plain or any(near(w, mine) for w in plain))
+        else:
+            fits = bool(plain) and all(near(w, mine) for w in plain)
+        if fits:
+            out.append(card)
+    return out
+
+
+def card_for(address: str, registry: CardRegistry, idn: str = "", name: str = "") -> Tuple[Optional[Card], str]:
+    """The card for an instrument Kelvin is about to add, before anyone drafts one: the one named (by id, or by maker
+    and model: name), the one its identity reply matches, or the one its driver address calls for (qd://). (card,
+    how it was found), or (None, why not: the candidates when several fit)."""
+    if name:
+        named = cards_named(name, registry)
+        if len(named) == 1:
+            return named[0], "" if named[0].id == name.strip() else "its name (%s)" % name
+        if named:
+            return None, "several cards fit %r: %s; give card=<one of them>" % (name, ", ".join(c.id for c in named))
+        return None, "there is no card %r" % name
+    if idn:
+        card = match_card(idn, registry)
+        if card is not None:
+            return card, "its identity reply"
+    schemed = by_scheme(address, registry)
+    if len(schemed) == 1:
+        return schemed[0], "its address (%s://)" % address.split("://", 1)[0]
+    if schemed:
+        return None, "several cards fit %s addresses: %s; give card=<one of them>" % (
+            address.split("://", 1)[0], ", ".join(c.id for c in schemed))
+    return None, ""
+
+
+def find_cards(query: str, registry: CardRegistry, catalog: Any = None, limit: int = 10) -> Dict[str, Any]:
+    """Kelvin's cards (its own, the instrument collection's and the lab's, as the registry has them) and the
+    collection's instruments that have no card yet, for a query: words (maker, model, kind), an identity reply, or a
+    driver address. {cards: [Card], entries: [collection entries without a card]}, the best first."""
+    query = (query or "").strip()
+    if "://" in query:
+        return {"cards": by_scheme(query, registry)[:limit], "entries": []}
+    cards: List[Card] = []
+    entries: List[Dict[str, Any]] = []
+    if "," in query and len(query) > 12:   # an identity reply: what it matches
+        card = match_card(query, registry)
+        cards = [card] if card else []
+        entry = catalog.instrument_for(query) if catalog is not None else None
+        if entry and not isinstance(entry.get("card"), dict):
+            entries.append(entry)
+        if cards or entries:
+            return {"cards": cards, "entries": entries}
+    words = [w for w in _words(query) if len(w) > 1]
+    if not words:
+        return {"cards": sorted(registry, key=lambda c: c.id)[:limit] if not query else [], "entries": []}
+
+    def score(text: str, name: str) -> int:
+        hay, title = set(_words(text)), set(_words(name))
+        hits = [w for w in words if w in hay or (len(w) > 3 and any(h.startswith(w) for h in hay))]
+        if len(hits) < len(words) and not any(any(ch.isdigit() for ch in w) and w in hay for w in words):
+            return 0   # every word, or the model number
+        return sum(3 if w in title else 1 for w in hits)
+    ranked = []
+    for card in registry:
+        s = score(" ".join([card.id, card.model, card.vendor, card.kind] + card.notes[:2]), card.id + " " + card.model)
+        if s:
+            ranked.append((-s, card.id, card))
+    cards = [c for _, _, c in sorted(ranked, key=lambda r: r[:2])][:limit]
+    if catalog is not None:
+        have = {c.id for c in registry}
+        found = []
+        for entry in catalog.index().get("instruments") or []:
+            if not isinstance(entry, dict) or isinstance(entry.get("card"), dict) or entry.get("id") in have:
+                continue
+            s = score(" ".join(str(entry.get(k) or "") for k in ("id", "maker", "model", "name", "kind")),
+                      "%s %s" % (entry.get("id") or "", entry.get("name") or ""))
+            if s:
+                found.append((-s, str(entry.get("id")), entry))
+        entries = [e for _, _, e in sorted(found, key=lambda r: r[:2])][:limit]
+    return {"cards": cards, "entries": entries}
+
+
 def look_up(found: Found, catalog: Any) -> Found:
     """An instrument that answered but matches no card: its name, kind and public manuals from the instrument
     collection (collection.Collection), if the collection knows its identity reply."""
@@ -86,6 +216,25 @@ def look_up(found: Found, catalog: Any) -> Found:
     return found
 
 
+def _settings_of(card: Card) -> Dict[str, Any]:
+    conn = card.connection
+    s = {"baud_rate": conn["baud_rate"], "data_bits": conn.get("data_bits", 8), "parity": conn.get("parity", "none"),
+         "stop_bits": conn.get("stop_bits", 1.0), "read_termination": conn.get("read_termination", "\n"),
+         "write_termination": conn.get("write_termination", "\n"), "query": card.idn_query}
+    if conn.get("enq"):
+        s["enq"] = True
+    return s
+
+
+# boards that reset when their port opens (the DTR line): Arduinos and CH340 USB-serial adapters. Each framing tried
+# was one more reset of a student's hot plate, heater off (l07: seven times on COM4), so such a port is asked once.
+RESETS_ON_OPEN = ("2341:", "2a03:", "1a86:7523", "1a86:5523")
+
+
+def resets_on_open(vid_pid: Optional[str]) -> bool:
+    return bool(vid_pid) and str(vid_pid).lower().startswith(RESETS_ON_OPEN)
+
+
 def _serial_settings(registry: CardRegistry) -> List[Dict[str, Any]]:
     """Each distinct way a known card talks over serial, then common defaults."""
     out: List[Dict[str, Any]] = []
@@ -94,11 +243,7 @@ def _serial_settings(registry: CardRegistry) -> List[Dict[str, Any]]:
         conn = card.connection
         if "baud_rate" not in conn or conn.get("write_only"):
             continue
-        s = {"baud_rate": conn["baud_rate"], "data_bits": conn.get("data_bits", 8), "parity": conn.get("parity", "none"),
-             "stop_bits": conn.get("stop_bits", 1.0), "read_termination": conn.get("read_termination", "\n"),
-             "write_termination": conn.get("write_termination", "\n"), "query": card.idn_query}
-        if conn.get("enq"):
-            s["enq"] = True
+        s = _settings_of(card)
         key = tuple(sorted(s.items()))
         if key not in seen:
             seen.add(key)
@@ -127,6 +272,14 @@ def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dic
         res.write_termination = (settings or {}).get("write_termination", "\n")
         if settings:
             apply_serial_settings(res, settings)
+        if name.upper().endswith("::SOCKET"):   # what it says by itself as a connection opens (an AMI 430 greets)
+            res.timeout = min(timeout_ms, 300)
+            for _ in range(3):
+                try:
+                    res.read()
+                except Exception:
+                    break
+            res.timeout = timeout_ms
         if (settings or {}).get("enq"):   # acknowledged (passing over readings it was sending), then asked with ENQ
             res.write(query)
             for _ in range(20):
@@ -139,6 +292,8 @@ def _ask(rm: Any, name: str, query: str, timeout_ms: int, settings: Optional[Dic
             reply = str(res.read()).strip()
         else:
             reply = str(res.query(query)).strip()
+            if reply == query.strip():   # it echoes each command (an ANC300's command line): its answer comes next
+                reply = str(res.read()).strip()
         if re.fullmatch(r"[\d\s.,;:+\-Ee]*", reply):
             return ""
         return reply if all(ch.isprintable() for ch in reply) else ""
@@ -173,8 +328,16 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
     rm = rm or resource_manager()
     found = Found(address)
     tries: List[Tuple[str, Optional[Dict[str, Any]]]]
+    vid_pid = (usb if usb is not None else _usb_ids()).get(address) if is_serial(address) else None
     if is_serial(address):
         tries = [(s["query"], s) for s in _serial_settings(registry)]
+        if resets_on_open(vid_pid):   # once, with the framing of a card for its USB ID or the commonest, after it boots
+            named = [c for c in registry if vid_pid in c.usb_ids and "baud_rate" in c.connection]
+            baud, term = DEFAULT_SERIAL[0]   # an Arduino sketch's usual Serial.begin(9600), 8N1
+            first = _settings_of(named[0]) if named else {
+                "baud_rate": baud, "data_bits": 8, "parity": "none", "stop_bits": 1.0, "read_termination": term,
+                "write_termination": term, "query": "*IDN?"}
+            tries, timeout_ms = [(first["query"], first)], max(timeout_ms, 2500)
     else:
         queries = queries or ["*IDN?"] + sorted({c.idn_query for c in registry if c.idn_query != "*IDN?"})
         tries = [(q, None) for q in queries]
@@ -194,7 +357,7 @@ def identify(address: str, registry: CardRegistry, rm: Any = None, timeout_ms: i
             return found
         found.how = "no card matches the reply"
         return look_up(found, catalog)
-    vid_pid = (usb if usb is not None else _usb_ids()).get(address)
+    vid_pid = vid_pid or (usb if usb is not None else _usb_ids()).get(address)
     if vid_pid:
         cards = [c for c in registry if vid_pid in c.usb_ids]
         if cards:
@@ -262,6 +425,21 @@ def _flow(values: Dict[str, Any]) -> str:
     return "{ %s }" % ", ".join("%s: %s" % (k, json.dumps(v)) for k, v in values.items())
 
 
+_RATED = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)\s*(mW|W)(?![A-Za-z])")
+
+
+def rated_limits(card: Card, idn: str) -> Dict[str, Tuple[float, float]]:
+    """A laser's own power rating, where its identity reply names it (Coherent's OBIS: '... 520nm LX 20mW ...'), as its
+    power drives' limit in place of the card's, which covers the whole series (100 mW): at a first start Kelvin
+    proposed 0.1 W for a 20 mW laser (l05, l06)."""
+    m = _RATED.search(idn or "") if card.kind in ("laser", "laser-driver") else None
+    if not m:
+        return {}
+    watts = float(m.group(1)) * (1e-3 if m.group(2) == "mW" else 1.0)
+    return {p.name: (p.limits[0], watts) for p in card.drives
+            if p.numeric and p.limits and p.unit == "W" and p.limits[0] < watts < p.limits[1]}
+
+
 def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
     """One instrument entry of a lab config, with its drives' vendor limits to tighten. Optional: connection and
     vars (what the person or the manual says), added_by: kelvin (Kelvin added it; no person has reviewed it)."""
@@ -269,11 +447,15 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
     note = item.get("note") or card.model.split(" (")[0]
     lines = ["  %s:" % item["name"], "    card: %s        # %s" % (card.id, note), "    address: %s" % json.dumps(item["address"])]
     used = {p: v for p, v in (item.get("limits") or {}).items() if p in card.params}   # what the lab's scripts use
+    rated = {} if used else rated_limits(card, str(item.get("idn") or item.get("note") or ""))
     lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives
-           if p.numeric and p.limits and p.name not in used]
+           if p.numeric and p.limits and p.name not in used and p.name not in rated]
     if used:
         lines.append("    limits: { %s }   # from your scripts (the values they use): check them, and tighten the "
                      "rest" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim))
+    elif rated:
+        lines.append("    limits: { %s }   # its own rating, from its identity reply: tighten to what your sample "
+                     "can take" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in rated.items()] + lim))
     elif lim:
         lines.append("    limits: { %s }   # vendor limits: tighten to what your sample can take" % ", ".join(lim))
     if card.kind in ("laser", "laser-driver"):

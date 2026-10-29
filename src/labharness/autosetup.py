@@ -252,14 +252,51 @@ class AutoSetup:
         log.info("Instruments: %s", message)
         self._set("connected", message=message, connected=result["connected"], not_connected=sorted(missing))
 
+    def _from_collection(self, unknown: List[Dict[str, Any]], matched: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The instruments that answered but matched no card, with the card the instrument collection has for them
+        once it is up to date. At a first start Kelvin may not have its copy yet (it is fetched in the background), and
+        the card writer then fell back to guessing manuals on the web, never trying the reference manual the
+        collection links (field test l08). A sync that fails says so in the portal (collection.notify)."""
+        coll = getattr(self.runtime, "collection", None)
+        if coll is None or not unknown:
+            return []
+        from .discovery import Found, match_card
+        from .virtual_lab import lab_registry
+        self._set("drafting", message="Bringing Kelvin's instrument collection up to date first: its cards, and where "
+                                      "the makers publish their manuals")
+        try:
+            status = coll.sync()   # a problem goes into its status, not raised
+        except Exception as e:
+            status = {"error": profiles._first_line(e)}
+        if status.get("error"):
+            log.info("  instrument collection: %s", status["error"])
+        registry = lab_registry(self.home, coll)
+        taken = [f.get("suggested") for f in matched if f.get("suggested")]
+        out = []
+        for f in unknown:
+            card = match_card(str(f.get("idn") or ""), registry)
+            if card is None:
+                continue
+            name = Found(f["address"], kind=card.kind).suggest_name(taken)
+            taken.append(name)
+            out.append(dict(f, card_id=card.id, model=card.model, kind=card.kind, suggested=name,
+                            how="the instrument collection's card"))
+            log.info("  %s: the instrument collection has a card for it, %s", f["address"], card.id)
+        if out:
+            self.runtime.refresh_cards([f["card_id"] for f in out])
+        return out
+
     def _write_cards(self, unknown: List[Dict[str, Any]], matched: List[Dict[str, Any]]) -> Any:
-        """For instruments that answered but match no card: find the manual and write a draft card (autocard.py)."""
+        """For instruments that answered but match no card: the instrument collection's card, once it is up to date;
+        else find the manual (the collection's link first) and write a draft card (autocard.py)."""
+        written = self._from_collection(unknown, matched)
+        unknown = [f for f in unknown if f["address"] not in {w["address"] for w in written}]
         if not unknown or self.make_card is None or self.settings.get("auto_cards") == "off":
-            return [], []
+            return written, []
         from .autocard import maker_model
         from .discovery import Found
-        written, problems = [], self._card_problems
-        taken = [f.get("suggested") for f in matched if f.get("suggested")]
+        problems = self._card_problems
+        taken = [f.get("suggested") for f in matched + written if f.get("suggested")]
         for f in unknown:
             maker, model = maker_model(str(f.get("idn") or ""))
             name = f.get("model") if f.get("collection") else ""   # the instrument collection's name for it

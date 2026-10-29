@@ -195,6 +195,8 @@ class FakeANC300:
                     fake.offset[axis] = float(words[2])
                 elif cmd == "getcser":
                     return ["ANC300B-C-1234"]
+                elif cmd == "ver":
+                    return ["attocube ANC300 controller version 1.1.0-1304 2013-10-17 08:16"]
                 return []
 
             def close(self):
@@ -481,7 +483,9 @@ def test_attocube_positioners(tmp_path):
     assert lab.read("x", "steps") == 15
     assert gate.set("x", "offset", 60).action == "refused"               # the lab's 40 V
     assert gate.set("x", "offset", 2).ok and anc300.offset[1] == 2.0      # asked, then ramped
-    assert lab.instrument("x").backend.identity() == "attocube,ANC300,ANC300B-C-1234"
+    assert lab.instrument("x").backend.identity() == ("attocube ANC300 controller version 1.1.0-1304 2013-10-17 08:16, "
+                                                      "serial ANC300B-C-1234")   # its ver: there is no *IDN?
+    assert lab.health_check(["x"])[0].ok
     assert lab.read("fine", "position") == pytest.approx(1.0)              # um
     assert gate.set("fine", "position", 5).ok and ("move_to", 0, pytest.approx(5e-6)) in anc350.calls
     lab.close()

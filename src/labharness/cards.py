@@ -28,10 +28,18 @@ RAMPS = ("gate", "instrument", "none")
 STATUSES = ("community", "lab-verified", "draft")
 CONNECTION_KEYS = {"read_termination": str, "write_termination": str, "baud_rate": int, "data_bits": int,
                    "stop_bits": float, "parity": str, "timeout_ms": int, "query_delay": float, "write_only": bool,
+                   "framing": str,   # data bits, parity and stop bits as manuals write them: "8N1", "7O1"
                    "echo": bool,  # the instrument echoes each command as a line: read and dropped before the reply
-                   "ack": str,   # ack: the line an instrument sends after every command (e.g. "OK"), read and checked
+                   # the line an instrument sends after every command, queries too (Coherent OBIS's "OK"), read and
+                   # checked; for a reply only set commands get (an Arduino's "OK"), set_reply
+                   "ack": str,
                    "set_reply": str,   # a regex every set command's reply must match (e.g. ":VALID$"); read after each set
+                   # lines an instrument sends by itself when a connection opens (the AMI 430's greeting on its LAN
+                   # port), read and dropped before the first command; none coming is fine (its serial port has none)
+                   "greeting_lines": int,
                    "enq": bool}   # Pfeiffer's protocol: each command is acknowledged (ACK or NAK) and a reply is sent on ENQ
+PARITY = {"n": "none", "e": "even", "o": "odd", "m": "mark", "s": "space"}   # a manual's letter, as PyVISA names it
+FRAMING = re.compile(r"^\s*([5-8])\s*([NEOMS])\s*(1|1\.5|2)\s*$", re.I)        # 8N1, 7O1, 8E2
 VAR_NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 VAR_VALUE = re.compile(r"^[A-Za-z0-9_.+-]{1,40}$")   # never spaces, separators or line ends: no command can hide in it
 _TRUE = {"1", "on", "true", "yes", "open"}
@@ -46,6 +54,32 @@ class CardError(ValueError):
 
 def num(x: float) -> str:
     return "%.4g" % x
+
+
+def parity_name(value: Any) -> Optional[str]:
+    """none, odd, even, mark or space, from the word or the letter a manual gives (N, O, E, M, S); None for neither."""
+    text = str(value).strip().lower()
+    return text if text in PARITY.values() else PARITY.get(text)
+
+
+def serial_settings(conn: Dict[str, Any]) -> Dict[str, Any]:
+    """A connection block with its serial framing spelled out: framing "8N1" as data_bits, parity and stop_bits (it
+    wins over those keys, as a lab config's framing does over its card's), and a parity letter as its name. A value
+    that is neither is left as written, for the connecting to refuse with what it should be."""
+    out = dict(conn)
+    m = FRAMING.match(str(out.pop("framing", "") or ""))
+    if m:
+        out.update(data_bits=int(m.group(1)), parity=PARITY[m.group(2).lower()], stop_bits=float(m.group(3)))
+    if "parity" in out and parity_name(out["parity"]):
+        out["parity"] = parity_name(out["parity"])
+    return out
+
+
+def as_sent(command: str) -> str:
+    """A card's command as it goes to the instrument: the manual's optional [nodes] left out, as a parameter's command
+    is rendered (SYSTem:ERRor[:NEXT]? goes out as SYSTem:ERRor?; an instrument takes the brackets for an unknown
+    header)."""
+    return re.sub(r"\[[^\]]*\]", "", str(command)).strip()
 
 
 SI_UNITS = {"V", "A", "Hz", "W", "s", "Ω", "T", "K", "F", "H", "S", "m"}
@@ -176,7 +210,8 @@ class ParamSpec:
                 if s == name.lower() or s == str(code).lower():
                     return name
             for name, code in (self.values or {}).items():   # an SCPI reply in short form: SIN for SINusoid
-                short = re.match(r"[A-Z]*", str(code)).group(0)
+                m = re.match(r"([A-Z]*)[a-z]*(\d*)$", str(code))   # with its number: ARB1 for ARBitrary1
+                short = m.group(1) + m.group(2) if m and m.group(1) else re.match(r"[A-Z]*", str(code)).group(0)
                 if short and short != str(code) and s == short.lower():
                     return name
             raise ValueError("%s must be one of %s, got %r" % (self.name, ", ".join(self.values or {}), value))
@@ -272,6 +307,7 @@ class Card:
     idn_pattern: Optional[str] = None
     idn_example: Optional[str] = None
     error_query: Optional[Template] = None
+    no_error: Optional[str] = None             # a regex for the error query's reply that means no error (SMC100: 1TE@)
     safe_sequence: List[str] = field(default_factory=list)
     health: List[HealthCheck] = field(default_factory=list)
     reset: List[Template] = field(default_factory=list)
@@ -432,7 +468,7 @@ def _parse_param(name: str, p: Any, err: Callable[[str, str], None]) -> Optional
             err(path + ".get", "a command, or a list of commands whose last one reads the value")
             get = None
         else:
-            get_before, get = [c.strip() for c in get[:-1]], get[-1]
+            get_before, get = [as_sent(c) for c in get[:-1]], get[-1]
     get_cmd = _template(get, err, path + ".get") if get else None
     set_cmd = _template(p["set"], err, path + ".set") if p.get("set") else None
     if set_cmd is not None and not set_cmd.has_value:
@@ -759,7 +795,7 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     for i, h in enumerate(data.get("health") or []):
         path = "health[%d]" % i
         if isinstance(h, dict) and h.get("query"):
-            health.append(HealthCheck(query=str(h["query"]), expect=h.get("expect")))
+            health.append(HealthCheck(query=as_sent(h["query"]), expect=h.get("expect")))
         elif isinstance(h, dict) and h.get("read"):
             r = h.get("range")
             if h["read"] not in params:
@@ -775,6 +811,14 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
     reset = [t for t in (_template(x, err, "raw.reset", True) for x in raw.get("reset") or []) if t]
     blocked = [t for t in (_template(x, err, "raw.blocked", True) for x in raw.get("blocked") or []) if t]
     error_query = _template(data["error_query"], err, "error_query") if data.get("error_query") else None
+    no_error = None
+    if data.get("no_error") is not None:
+        try:
+            no_error = re.compile(str(data["no_error"])).pattern
+        except re.error as e:
+            err("no_error", "not a valid regex: %s" % e)
+        if error_query is None:
+            err("no_error", "the reply of the error query that means no error: give error_query too")
     identify = data.get("identify") or {}
     if identify.get("idn"):
         try:
@@ -800,7 +844,19 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
             err("connection." + key, "must be a number")
         else:
             connection[key] = kind(value)
-    on_connect = [str(c) for c in data.get("on_connect") or []]
+    # serial framing is checked here, not first when connecting: what a manual writes (N, 8N1) is taken as it means
+    if "parity" in connection and parity_name(connection["parity"]) is None:
+        err("connection.parity", "none, odd, even, mark or space (or the manual's letter: N, O, E, M, S)")
+    if "framing" in connection and not FRAMING.match(connection["framing"]):
+        err("connection.framing", "data bits, parity and stop bits, as the manual writes them: 8N1, 7O1, 8E2")
+    if connection.get("data_bits") not in (None, 5, 6, 7, 8):
+        err("connection.data_bits", "5, 6, 7 or 8")
+    if connection.get("stop_bits") not in (None, 1.0, 1.5, 2.0):
+        err("connection.stop_bits", "1, 1.5 or 2")
+    if connection.get("greeting_lines") is not None and not 0 <= connection["greeting_lines"] <= 20:
+        err("connection.greeting_lines", "how many lines the instrument sends when a connection opens (0 to 20)")
+    connection = serial_settings(connection)
+    on_connect = [as_sent(c) for c in data.get("on_connect") or []]
     for c in on_connect:  # connecting leaves the instrument as it is: it may only set up the connection itself
         for spec in params.values():
             if spec.set_cmd is not None and spec.family().match(c) is not None:
@@ -829,10 +885,10 @@ def parse_card(data: Any, source: str = "card", values: Optional[Dict[str, Any]]
         id=str(data["id"]), model=str(data["model"]), kind=str(data["kind"]), status=status,
         params=params, vendor=str(data.get("vendor", "")),
         idn_pattern=identify.get("idn"), idn_example=identify.get("example"),
-        error_query=error_query, safe_sequence=seq, health=health,
+        error_query=error_query, no_error=no_error, safe_sequence=seq, health=health,
         reset=reset, blocked=blocked, twin=data.get("twin"), headline=headline,
         notes=[str(n) for n in data.get("notes") or []], manual=str(data.get("manual", "")), manual_url=manual_url,
-        source=source, connection=connection, idn_query=str(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
+        source=source, connection=connection, idn_query=as_sent(identify.get("query") or "*IDN?"), usb_ids=usb_ids,
         on_connect=on_connect, vars=card_vars, bound=chosen, data=original, library=library, actions=actions,
         requires=[r.strip() for r in requires],
     )
@@ -1010,7 +1066,7 @@ def _actions(raw: Any, params: Dict[str, ParamSpec], err: Callable[[str, str], N
                     err(path + ".send", "%r would set %s: set it as the parameter, with its limits" % (c, p.name))
         if spec.get("drives") is not None and not isinstance(spec["drives"], bool):
             err(path + ".drives", "true when it drives the sample (fires a burst, a pulse, a shutter)")
-        out[str(name)] = Action(str(name), [c.strip() for c in send], str(spec.get("label") or name),
+        out[str(name)] = Action(str(name), [as_sent(c) for c in send], str(spec.get("label") or name),
                                 bool(spec.get("drives")))
     return out
 

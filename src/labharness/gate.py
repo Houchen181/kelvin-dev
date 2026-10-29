@@ -119,6 +119,8 @@ def _dur(seconds: float) -> str:
 
 
 def _same(spec: ParamSpec, a: Any, b: Any) -> bool:
+    if a is None or b is None:   # a setting with no read-back, not set since connecting: unknown, never the same
+        return False
     if spec.numeric:
         return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-15)
     return a == b
@@ -976,6 +978,22 @@ class SafetyGate:
         amplitude on its load setting), and its card has no error queue that would say so. None when it agrees or
         can't be read back. Not for switches and modes, whose state may take seconds to follow (a laser enabling),
         nor for an instrument that ramps itself (_wait follows it)."""
+        if inst.card.status == "draft" and not inst.simulated and spec.get_cmd is not None and not spec.numeric \
+                and spec.type in ("bool", "enum") and spec.ramp != "instrument":
+            # a draft card's command may be one the instrument doesn't take (a long form it answers -113 to): its
+            # switch or mode is read back too, given a moment to follow, before the change counts as made
+            now = None
+            for attempt in range(4):
+                if attempt:
+                    self.lab.clock.sleep(0.5)
+                try:
+                    now = inst.read(spec.name)
+                except Exception:
+                    return None
+                if now is None or now == target:
+                    return None
+            return "that it is %s, not %s: the draft card's command may not be one it takes" % (spec.show(now),
+                                                                                              spec.show(target))
         if inst.simulated or spec.get_cmd is None or spec.ramp == "instrument" or not spec.numeric:
             return None
         lim = inst.limits(spec.name)

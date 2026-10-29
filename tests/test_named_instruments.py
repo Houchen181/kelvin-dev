@@ -167,14 +167,14 @@ def test_a_gauge_controller_that_answers_on_enq():
     tpg = Device(name="tpg")
     tpg.streaming = True
     bus = PfeifferBus({"ASRL6::INSTR": tpg})
-    found = identify("ASRL6::INSTR", builtin_registry(), bus)                  # no card for it yet
+    reg = builtin_registry()
+    reg.remove("pfeiffer/tpg36x")
+    found = identify("ASRL6::INSTR", reg, bus)                                 # no card that asks AYT
     assert found.idn == "" and found.card_id is None                           # its readings are not who it is
     card = parse_card(TPG, "test")
-    reg = builtin_registry()
-    reg.put(card)
     tpg.streaming = True                                                       # switched off and on again
-    found = identify("ASRL6::INSTR", reg, bus)
-    assert found.card_id == "pfeiffer/tpg362" and found.idn.startswith("TPG362") and found.serial["enq"] is True
+    found = identify("ASRL6::INSTR", builtin_registry(), bus)                  # Kelvin's own card asks AYT
+    assert found.card_id == "pfeiffer/tpg36x" and found.idn.startswith("TPG362") and found.serial["enq"] is True
 
     tpg.streaming = True
     be = VisaBackend("tpg", card, "ASRL6::INSTR", bus)
