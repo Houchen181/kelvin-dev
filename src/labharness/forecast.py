@@ -336,6 +336,7 @@ class Forecast:
                 _dur(retry.wait)))
         for step in plan.after:
             self._step(step.instr, step.param, step.value, "after")
+        self._after_a_stop(plan)
         for instr, param in plan.measure:
             try:
                 spec = self.lab.resolve("%s.%s" % (instr, param))[1]
@@ -343,6 +344,22 @@ class Forecast:
                 continue
             if spec.type in ("trace", "image") or spec.acquires or spec.get_before:
                 self.slow_reads.append("%s.%s" % (instr, param))
+
+    def _after_a_stop(self, plan: Any) -> None:
+        """The settings a plan's on_abort sets after a stop (its drives go on the card from engine.drive_values or a
+        queue's whole path): values the run may set, for a queue's card (settings(every=True)), so a stop in the night
+        doesn't ask about a draft card's setting in its clean-up. Nothing is walked: a stop is not the run's path."""
+        for step in getattr(plan, "on_abort", None) or []:
+            if action_of(self.lab, step.instr, step.param) is not None:
+                continue
+            try:
+                spec = self.lab.resolve(step.key)[1]
+                value = spec.coerce(step.value)
+            except (KeyError, ValueError):
+                continue
+            if not spec.is_drive:
+                self.start(step.key)
+                self.uses.setdefault(step.key, []).append(value)
 
     def _unknown_axis(self, axis: Any) -> None:
         """A kind of sweep this walk doesn't know: the drive it names is shown with its values, its time unknown."""
@@ -516,9 +533,18 @@ class Forecast:
         """The drives the run changes, in the order its text names them."""
         return self._kind(True)
 
-    def settings(self) -> Dict[str, Change]:
-        """The settings (not drives) the run changes: on a draft card each asks, so the run's card covers them."""
-        return self._kind(False)
+    def settings(self, every: bool = False) -> Dict[str, Change]:
+        """The settings (not drives) the run changes: on a draft card each asks, so the run's card covers them.
+        every: also those it only sets to what they are now, for a queue's card (its whole path): in the night an item
+        may find one changed (at the front panel), and setting it back must not ask."""
+        out = self._kind(False)
+        for key, used in self.uses.items() if every else ():
+            try:
+                if key not in out and not self.lab.resolve(key)[1].is_drive:
+                    out[key] = self.changes.get(key) or Change(key, self.before.get(key), used)
+            except KeyError:
+                continue
+        return out
 
     def detail(self, key: str) -> str:
         """What a line on the card adds for this drive or setting: the rate the instrument moves it at, read from the

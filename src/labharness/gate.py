@@ -593,8 +593,9 @@ class SafetyGate:
                 d0 = spec.distance(current)
                 away = [v for v in values if not _same(spec, v, current) and spec.distance(v) >= d0]
             toward = not away and self._draft(inst)
-            if toward:   # on a draft card even a change toward safe asks: the plan's one approval covers it
-                away = [v for v in values if current is None or not _same(spec, v, current)]
+            if toward:   # on a draft card even a change toward safe asks: the plan's one approval covers it (a queue's
+                # every value: in the night an item may find the drive changed, at the front panel)
+                away = [v for v in values if whole_path or current is None or not _same(spec, v, current)]
             if not away:
                 if forecast is not None and key in forecast.changes:   # toward safe: it runs, so it is shown
                     lines.append((False, "; ".join(shown(inst, spec, current, values, "toward its safe value"))))
@@ -629,7 +630,7 @@ class SafetyGate:
                                     "that, and it is checked again before %s moves (if it still doesn't hold, the "
                                     "queue pauses there)" % (lock.require.text, broken, key))
             lines.append((True, "; ".join(bits)))
-        for key, change in (forecast.settings() if forecast is not None else {}).items():
+        for key, change in (forecast.settings(every=whole_path) if forecast is not None else {}).items():
             inst, spec = self.lab.resolve(key)
             if not self._draft(inst):
                 continue   # a setting on a reviewed card only configures: it never asks

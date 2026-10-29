@@ -116,6 +116,76 @@ def test_a_draft_cards_settings_in_an_approved_plan_ask_once_on_its_card(lab, ma
     assert r.action == "error" or len(approver.requests) == 2
 
 
+def draft_smu_queue(tmp_path):
+    """A runtime whose source-meter is a real instrument on a draft card: each of its settings asks, outside an
+    approved run or queue."""
+    from test_queue import runtime
+    rt = runtime(tmp_path, [True])                          # one approval: another fails the item that asks
+    smu = rt.lab.instruments["smu"]
+    smu.backend.simulated = False
+    smu.card.status = "draft"
+    return rt, smu
+
+
+def test_a_draft_cards_settings_in_a_queue_ask_once_on_the_queues_card(tmp_path):
+    """Overnight flagged it: a draft card's settings in a queue's scans and steps must be covered by the queue's one
+    card, or the night asks again at each item, with nobody there."""
+    rt, smu = draft_smu_queue(tmp_path)
+    rt.queue_add("plan: nplc_scan\nsetup: { smu.output: on }\nsweep: { smu.nplc: {values: [1, 2]} }\n"
+                 "measure: [smu.I]\nafter: { smu.output: off }\n")
+    rt.queue_add("step: slower\nset: { smu.nplc: 5 }\nwait: 1\n")
+    rt.queue_add("plan: iv\nsetup: { smu.output: on }\nsweep: { smu.V: {from: 0, to: 1, step: 0.5} }\n"
+                 "measure: [smu.I]\nafter: { smu.V: 0, smu.output: off, smu.nplc: 1 }\n")
+    out = rt.queue_start()
+    assert out.startswith("queue started"), out
+    rt._queue_thread.join(60)
+    assert [i.status for i in rt.queue.items] == ["done"] * 3, [(i.name, i.message) for i in rt.queue.items]
+    assert len(rt.approver.requests) == 1, [str(r) for r in rt.approver.requests]
+    assert "smu.nplc: now 1 PLC, plan uses 1 … 5 PLC; Kelvin isn't sure about smu" in str(rt.approver.requests[0])
+
+
+def test_what_a_queue_sets_a_draft_card_to_as_it_is_now_is_covered_too(tmp_path):
+    """A queue covers its whole path: a draft card's setting it only ever sets to what it reads now, and an output
+    it only ever switches off, are covered as well, so a change at the front panel between two scans of the night
+    doesn't make the next one ask (and fail, with nobody there)."""
+    rt, smu = draft_smu_queue(tmp_path)
+    plan = "plan: dark_%d\nsetup: { smu.output: off, smu.nplc: 1 }\ntime: { every: 1, points: 3 }\nmeasure: [smu.I]\n"
+    rt.queue_add(plan % 1)
+    rt.queue_add(plan % 2)
+    shown, changed = rt.engine.progress, []
+
+    def progress(event):
+        shown(event)
+        if event["event"] == "end" and not changed:        # someone at the front panel, after the first scan
+            smu.write("nplc", 2)
+            smu.write("output", True)
+            changed.append(event["run_id"])
+    rt.engine.progress = progress
+    assert rt.queue_start().startswith("queue started")
+    rt._queue_thread.join(60)
+    assert changed and [i.status for i in rt.queue.items] == ["done", "done"], \
+        [(i.name, i.message) for i in rt.queue.items]
+    assert len(rt.approver.requests) == 1 and smu.read("nplc") == 1 and smu.read("output") is False
+    assert rt.approver.requests[0].title.startswith("Run the queue: 2 scans")   # asked at the start, not at night
+    text = str(rt.approver.requests[0])
+    assert "smu.output: now off, plan uses off; Kelvin isn't sure about smu" in text, text
+    assert "smu.nplc: now 1 PLC, plan uses 1 PLC; Kelvin isn't sure about smu" in text, text
+
+
+def test_a_draft_setting_a_queue_item_sets_after_a_stop_is_covered_too(tmp_path):
+    """An item's on_abort setting on a draft card asked in the middle of the night's clean-up, after a trip."""
+    rt, smu = draft_smu_queue(tmp_path)
+    rt.queue_add("plan: leaky\nsetup: { smu.output: on }\nsweep: { smu.V: {from: 0, to: 14, step: 1} }\n"
+                 "measure: [smu.I]\non_abort: { smu.nplc: 2 }\n")   # the gate's leakage guard trips on the way up
+    assert rt.queue_start().startswith("queue started")
+    rt._queue_thread.join(60)
+    item = rt.queue.items[0]
+    assert item.status == "failed" and "tripped" in item.message, item.message
+    assert "then smu.nplc 1 PLC → 2 PLC (queue approval)" in item.message and smu.read("nplc") == 2, item.message
+    assert len(rt.approver.requests) == 1 and smu.read("output") is False and smu.read("V") == 0
+    assert "smu.nplc: now 1 PLC, plan uses 2 PLC; Kelvin isn't sure about smu" in str(rt.approver.requests[0])
+
+
 def test_a_setup_action_runs_once_on_the_runs_own_card(lab, make_engine):
     """An excitation took three cards before the run's own (amplitude, output on, start the waveform: l10)."""
     engine, gate, approver = make_engine([True])
