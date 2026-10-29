@@ -21,6 +21,8 @@ after: { smu.V: 0, magnet.B: 0 }
 
 Sweep values can be `{from, to, step}`, `{from, to, points}`, `{from, to, points, log: true}` or `{values: [...]}`. A sweep axis can also set its own `settle` and a `stabilize` condition (wait until a reading changes by less than `within` over `for` seconds, up to `timeout`).
 
+What the run needs first goes in its `setup`, so the run's one card covers it: an excitation's amplitude, frequency and output, a laser's emission and power. One of the card's actions runs once there, in order (`isrc.wave_start: run`), or in `after` (`isrc.wave_stop: run`); `on_abort` takes only actions that don't drive the sample. The card shows every drive the run changes. It gives the rate each moves at, as the instrument reports it or as the plan sets it, and how long the run takes. It also shows what the run leaves on at the end ([safety.md](safety.md#the-rules)).
+
 After a run, Kelvin classifies each measured curve and fits it: a peak or dip (Lorentzian or Gaussian: center, FWHM, height, Q for frequency axes), a straight line (slope, and resistance for I–V), an exponential relaxation (τ), a steady value or no signal. Every number has a one-standard-error uncertainty. It also tracks how the fitted feature changes along an outer loop, and it flags clipping, under-resolved or cut-off features, hysteresis, unsettled readings and stopped runs. The result is saved as `analysis.json` in the run folder; `analyze_run` re-fits a run with a chosen model.
 
 ## Recipes
