@@ -4,7 +4,10 @@
                              pylon:// is the first one found.
     andor://<index>?sdk=3    Andor sCMOS cameras (Zyla, Neo, Sona, Marana) through Andor's pyAndorSDK3
     andor://<index>?sdk=2    Andor CCD and EMCCD cameras (iXon, Newton, iDus, Luca, Clara) through pyAndorSDK2
-                             (both come with Andor's SDK; sdk=3 is the default).
+                             (both come with Andor's SDK; sdk=3 is the default). On a spectrograph (an Andor
+                             Shamrock or Kymera) its spectrum's x axis is each column's wavelength, from the
+                             spectrograph's calibration: &spectrograph=<its index> (the only one, if not given;
+                             none: a camera on no spectrograph), &pixel_um=<pixel width> where the SDK can't say.
     uvc://<index>            USB video cameras (webcams, microscope cameras) through OpenCV
     genicam://<serial>       GenICam industrial cameras through Harvesters and the maker's GenTL producer (.cti)
                              (OpenCV and Harvesters: Kelvin installs them once a person approves)
@@ -160,16 +163,19 @@ def discover_pylon(module: Any = None) -> List[Tuple[str, str]]:
 # ------------------------------------------------------------------ Andor (Andor's own SDK wrappers)
 
 DRV_SUCCESS = 20002
+DRV_NOT_INITIALIZED = 20075
 TEMP_STATUS = {20034: "cooler off", 20035: "not stabilized", 20036: "stabilized", 20037: "not reached",
                20040: "drifted"}
 READ_FVB, READ_IMAGE, SINGLE_SCAN = 0, 4, 1
 
 
 class AndorCamera(Camera):
-    """Paths: exposure (s), temperature (sensor, C), cooler (on/off), setpoint (C; SDK2), spectrum (full vertical
-    binning, counts per column; SDK2 spectroscopy cameras), plus the frame and its statistics."""
+    """Paths: exposure (s), temperature (sensor, C), cooler (on/off), setpoint (C; SDK2), plus the frame and its
+    statistics. SDK2 spectroscopy cameras: spectrum (full vertical binning, counts per column) with wavelengths (nm,
+    each column's, from the spectrograph it sits on), spectrum_pixels (the same, by column number, for a camera on no
+    spectrograph), peak and peak_wavelength (of the latest spectrum)."""
 
-    def __init__(self, name: str, card: Card, address: str, module: Any = None):
+    def __init__(self, name: str, card: Card, address: str, module: Any = None, spectrograph: Any = None):
         super().__init__(name, card, address)
         target, q = _target(address)
         try:
@@ -179,6 +185,16 @@ class AndorCamera(Camera):
         self.sdk_version = q.get("sdk", "3")
         if self.sdk_version not in ("2", "3"):
             raise AdapterError("%s: sdk is 2 (iXon, Newton, iDus...) or 3 (Zyla, Neo, Sona, Marana)" % name)
+        # the spectrograph whose calibration gives the spectrum its wavelengths: an index, "none", or "" for the
+        # only one Andor's spectrograph library sees (opened when a wavelength is first asked for)
+        self.spectrograph = str(q.get("spectrograph", "")).strip().lower()
+        try:
+            self.pixel_um = float(q["pixel_um"]) if q.get("pixel_um") else None
+        except ValueError:
+            raise AdapterError("%s: pixel_um is the pixel width in micrometres, e.g. 26" % name)
+        self._shamrock_module = spectrograph   # Andor's spectrograph library, for tests; else loaded when needed
+        self._shamrock: Optional[Tuple[Any, int]] = None
+        self._spectrum: Optional[Tuple[set, List[float]]] = None   # the latest, and which readings it served
         if module is None:
             try:
                 if self.sdk_version == "3":
@@ -225,19 +241,90 @@ class AndorCamera(Camera):
                 ret, exposure, _, _ = self.sdk.GetAcquisitionTimings()
                 self._ok(ret, "GetAcquisitionTimings")
                 return float(exposure)
-            if path == "temperature":
+            if path in ("temperature", "temperature_status"):
                 ret, t = self.sdk.GetTemperatureF()
-                return float(t)
-            if path == "temperature_status":
-                ret, _ = self.sdk.GetTemperatureF()
-                return TEMP_STATUS.get(ret, str(ret))
+                if ret not in TEMP_STATUS:   # its status codes are answers; anything else is an error, never 0 C
+                    self._ok(ret, "GetTemperatureF")
+                return float(t) if path == "temperature" else TEMP_STATUS[ret]
             if path == "cooler":
                 ret, on = self.sdk.IsCoolerOn()
                 self._ok(ret, "IsCoolerOn")
                 return 1 if on else 0
-            if path == "spectrum":
-                return self._acquire(READ_FVB)
+            if path in ("spectrum", "spectrum_pixels"):
+                ys = self._acquire(READ_FVB)
+                self._spectrum = (set(), ys)
+                return ys
+            if path == "wavelengths":
+                return self.wavelengths()
+            if path in ("peak", "peak_wavelength"):
+                # one spectrum serves one reading of each: in a plan step, of the spectrum measured with them;
+                # asked again (the next step, after a move), of a new one
+                if self._spectrum is None or path in self._spectrum[0]:
+                    self.get_setting("spectrum")
+                read, ys = self._spectrum
+                read.add(path)
+                i = max(range(len(ys)), key=ys.__getitem__) if ys else 0
+                return float(ys[i]) if path == "peak" else self.wavelengths()[i]
         return super().get_setting(path)
+
+    # ------------------------------------------------------------------ its spectrograph's calibration (SDK2)
+
+    def _spectrograph(self) -> Tuple[Any, int]:
+        """Andor's spectrograph library and the index of the spectrograph this camera sits on, opened once."""
+        if self._shamrock is not None:
+            return self._shamrock
+        if self.spectrograph == "none":
+            raise AdapterError("%s is on no spectrograph (its address says spectrograph=none), so its spectrum has no "
+                               "wavelengths: spectrum_pixels gives it by column" % self.name)
+        from . import spectra
+        try:
+            lib = self._shamrock_module if self._shamrock_module is not None else spectra.load_shamrock()
+        except AdapterError as e:
+            raise AdapterError("%s: no wavelength calibration: %s" % (self.name, e)) from e
+        spectra.open_shamrock(lib)
+        try:
+            n = spectra.shamrock_count(lib)
+            if self.spectrograph:
+                try:
+                    idx = int(self.spectrograph)
+                except ValueError:
+                    raise AdapterError("%s: spectrograph is the spectrograph's index (0 for the first) or none"
+                                       % self.name)
+                if not 0 <= idx < n:
+                    raise AdapterError("%s: no spectrograph %d (Andor's library sees %d)" % (self.name, idx, n))
+            elif n == 1:
+                idx = 0
+            else:
+                raise AdapterError("%s: no wavelength calibration: Andor's library sees %s, so Kelvin can't tell which "
+                                   "the camera is on; give its index in the camera's address (&spectrograph=0), or "
+                                   "&spectrograph=none for a camera on none" % (
+                                       self.name, "no spectrograph" if not n else "%d spectrographs" % n))
+        except Exception:
+            spectra.close_shamrock(lib)
+            raise
+        self._shamrock = (lib, idx)
+        return self._shamrock
+
+    def _pixel_width(self) -> float:
+        if self.pixel_um:
+            return self.pixel_um
+        size = getattr(self.sdk, "GetPixelSize", None)
+        if size is not None:
+            ret, xsize, _ = size()
+            if ret == DRV_SUCCESS and xsize:
+                return float(xsize)
+        raise AdapterError("%s: Andor's SDK didn't say its pixel width: give it in the address (&pixel_um=26)"
+                           % self.name)
+
+    def wavelengths(self) -> List[float]:
+        """Each column's wavelength (nm), from the spectrograph's calibration at its grating and centre now (it
+        changes with them, so it is read with every spectrum: a plan records it as the spectrum's x values)."""
+        from . import spectra
+        lib, idx = self._spectrograph()
+        try:
+            return spectra.calibration(lib, idx, self.width, self._pixel_width())
+        except AdapterError as e:
+            raise AdapterError("%s: %s" % (self.name, e)) from e
 
     def set(self, path: str, value: Any) -> None:
         if self.sdk_version == "3":
@@ -290,11 +377,18 @@ class AndorCamera(Camera):
                 return "Andor,%s,%s" % (self.cam.CameraModel, self.cam.SerialNumber)
             ret, model = self.sdk.GetHeadModel()
             ret2, serial = self.sdk.GetCameraSerialNumber()
-            return "Andor,%s,%s" % (model, serial)
         except Exception:
             return "Andor,camera,%d" % self.idx
+        if DRV_NOT_INITIALIZED in (ret, ret2):   # not "Andor,,0" taken for another camera (l05: a lab switch shut it)
+            raise AdapterError("%s: Andor's SDK says the camera isn't initialized (code %d): another program or a "
+                               "Kelvin that closed it shut its session; reconnect it" % (self.name, DRV_NOT_INITIALIZED))
+        return "Andor,%s,%s" % (model, serial)
 
     def close(self) -> None:
+        if self._shamrock is not None:
+            from . import spectra
+            spectra.close_shamrock(self._shamrock[0])
+            self._shamrock = None
         try:
             if self.sdk_version == "3":
                 self.cam.close()

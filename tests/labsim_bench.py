@@ -120,6 +120,18 @@ def _hook_serial(monkeypatch: Any) -> None:
     hooks.install_serial()
 
 
+def _drop_shared_link() -> None:
+    """The SDK shims keep one link to the bench per thread: a later test's bench needs a link of its own."""
+    try:
+        from labsim import link
+    except ImportError:
+        return
+    old = getattr(link._local, "link", None)
+    if old is not None:
+        old.close()
+        link._local.link = None
+
+
 @pytest.fixture
 def labsim_bench(tmp_path: Path, monkeypatch: Any):
     """labsim_bench(bench, sdk=False) starts the bench for this test and points this process at it: Kelvin's VISA
@@ -139,6 +151,7 @@ def labsim_bench(tmp_path: Path, monkeypatch: Any):
             raise RuntimeError("one bench per test: LABSIM_HOME names one bench for the whole process")
         running = start(bench, tmp_path / ("labsim-" + bench_file(bench).stem))
         started.append(running)
+        _drop_shared_link()
         monkeypatch.setenv("LABSIM_HOME", str(running.home))
         monkeypatch.setenv("KELVIN_VISA_BACKEND", "@labsim")
         _hook_serial(monkeypatch)
@@ -154,6 +167,7 @@ def labsim_bench(tmp_path: Path, monkeypatch: Any):
         except Exception:
             pass
     adapters.set_resource_manager(before)
+    _drop_shared_link()
     for running in started:
         running.stop()
     for name, module in list(sys.modules.items()):   # the stand-ins go, so later tests see this computer's own

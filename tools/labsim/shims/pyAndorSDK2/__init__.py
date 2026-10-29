@@ -76,6 +76,10 @@ class atmcd:
     def GetCameraSerialNumber(self):
         return self._c("GetCameraSerialNumber")
 
+    def GetPixelSize(self):
+        r = self._c("GetPixelSize")
+        return r if isinstance(r, tuple) else (r, 0.0, 0.0)
+
     def SetTemperature(self, t):
         return self._c("SetTemperature", int(t))
 

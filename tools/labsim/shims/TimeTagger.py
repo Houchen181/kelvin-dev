@@ -199,4 +199,7 @@ class Correlation(_Measurement):
         return d / max(edge.mean(), 1e-12)
 
     def getIndex(self):
+        return (np.arange(self._n, dtype=np.int64) - self._n // 2) * self._bw
+
+    def getIndex(self):
         return (np.arange(self._n) - self._n // 2) * self._bw

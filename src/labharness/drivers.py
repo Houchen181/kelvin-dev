@@ -547,7 +547,12 @@ class TimeTagger(CounterDriver):
     """Swabian Instruments Time Tagger (20, Ultra, X) through `Swabian-TimeTagger`. Address
     timetagger://<serial, or empty for the first>?click=1&gate=2[&level=0.5]: the detector input and the gate input
     (1-based; the gate's falling edge closes each window). Per period the gate opens a signal window, then a
-    reference window. Which window comes first in the record is found from the generator's own timing."""
+    reference window. Which window comes first in the record is found from the generator's own timing.
+
+    g2 (Hanbury Brown–Twiss): &click2=<the second detector's input>. g2 correlates click and click2 for the
+    integration time (Swabian's Correlation, normalised to uncorrelated light), g2_delay is its delays (s), and
+    g2_zero, g2_zero_err and g2_tau are the fit of that correlation (correlation.py): g2(0) with its error, and the
+    antibunching time. Settings g2_binwidth (s) and g2_bins."""
     BINS = 2_000_000
 
     def __init__(self, name: str, card: Card, address: str, module: Any = None):
@@ -557,8 +562,11 @@ class TimeTagger(CounterDriver):
         self.serial = (url.netloc or url.path).strip("/")
         try:
             self.click, self.gate = int(q.get("click", 1)), int(q.get("gate", 2))
+            self.click2 = int(q["click2"]) if q.get("click2") else None
         except ValueError:
-            raise AdapterError("%s: click and gate are input numbers (1-based)" % name)
+            raise AdapterError("%s: click, click2 and gate are input numbers (1-based)" % name)
+        self.binwidth, self.bins = 1e-10, 1000   # 100 ps bins, ±50 ns: an emitter's antibunching is ns wide
+        self._g2: Optional[Dict[str, Any]] = None
         if module is None:
             try:
                 from Swabian import TimeTagger as module   # type: ignore
@@ -619,6 +627,81 @@ class TimeTagger(CounterDriver):
         m.startFor(int(seconds * 1e12), True)
         m.waitUntilFinished(int(seconds * 1000) + 10_000)
         return float(list(m.getData())[0])
+
+    # ------------------------------------------------------------------ g2: correlations between two detectors
+
+    G2 = ("g2", "g2_delay", "g2_zero", "g2_zero_err", "g2_tau")
+
+    def set(self, path: str, value: Any) -> None:
+        if path == "g2_binwidth":
+            if not 1e-12 <= float(value) <= 1e-6:
+                raise AdapterError("%s: g2_binwidth is 1 ps to 1 us" % self.name)
+            self.binwidth, self._g2 = float(value), None
+        elif path == "g2_bins":
+            if not 10 <= int(value) <= 100_000:
+                raise AdapterError("%s: g2_bins is 10 to 100000" % self.name)
+            self.bins, self._g2 = int(value), None
+        else:
+            super().set(path, value)
+
+    def get(self, path: str) -> Any:
+        if path == "g2_binwidth":
+            return self.binwidth
+        if path == "g2_bins":
+            return self.bins
+        if path not in self.G2:
+            return super().get(path)
+        last = self._g2
+        if path == "g2_delay":   # the delays depend on the bins alone: the latest correlation's, or the ones it will have
+            return last["delay"] if last is not None else self._delays(None)
+        # one correlation serves one reading of each (as the gated counts do): the trace and the fit of it read in one
+        # plan step are of the same correlation, and the next step's (after a move) of a new one, however soon
+        if path == "g2" or last is None or path in last["read"]:
+            last = self._correlate(self.integration)
+        last["read"].add(path)
+        if path == "g2":
+            return last["g2"]
+        fit = last.get("fit")
+        if fit is None:
+            from .correlation import fit_g2
+            try:
+                fit = last["fit"] = fit_g2(last["delay"], last["g2"], last["counts"])
+            except ValueError as e:
+                raise AdapterError("%s: g2 not fitted: %s" % (self.name, e)) from e
+        return {"g2_zero": fit["g2_zero"], "g2_zero_err": fit["g2_zero_err"], "g2_tau": fit["tau"]}[path]
+
+    def _correlate(self, seconds: float) -> Dict[str, Any]:
+        """One correlation of click and click2 for `seconds`: its normalised g2, delays (s) and raw coincidences."""
+        if self.click2 is None:
+            raise AdapterError("%s: g2 needs the second detector's input: add it to the address "
+                               "(timetagger://%s?click=%d&click2=2)" % (self.name, self.serial, self.click))
+        bw = max(1, int(round(self.binwidth * 1e12)))   # picoseconds
+        m = self.tt.Correlation(self.tagger, self.click, self.click2, bw, self.bins)
+        self.tagger.sync()
+        m.startFor(int(seconds * 1e12), True)
+        if not m.waitUntilFinished(int(seconds * 1000) + 10_000):
+            raise AdapterError("%s: the correlation did not finish" % self.name)
+        data = m.getData()
+        counts = [float(c) for c in (data.tolist() if hasattr(data, "tolist") else data)]
+        if hasattr(m, "getDataNormalized"):   # normalised to uncorrelated light: N1·N2·binwidth/T
+            g2 = [float(v) for v in m.getDataNormalized()]
+        else:
+            edge = counts[: self.bins // 10] + counts[-(self.bins // 10):]
+            mean = sum(edge) / len(edge) if edge else 0.0
+            g2 = [c / mean if mean else 0.0 for c in counts]
+        delay = self._delays(m)
+        if not any(counts):
+            raise AdapterError("%s: no coincidences between inputs %d and %d in %s s: are both detectors seeing light?"
+                               % (self.name, self.click, self.click2, "%g" % seconds))
+        self._g2 = {"g2": g2, "delay": delay, "counts": counts, "read": set()}
+        return self._g2
+
+    def _delays(self, m: Any) -> List[float]:
+        """Each bin's delay (s): the measurement's own index, else centred on zero as Swabian's Correlation bins are."""
+        if m is not None and hasattr(m, "getIndex"):
+            return [float(t) * 1e-12 for t in m.getIndex()]
+        bw = max(1, int(round(self.binwidth * 1e12)))
+        return [(i - self.bins // 2) * bw * 1e-12 for i in range(self.bins)]
 
     def identity(self) -> str:
         try:
