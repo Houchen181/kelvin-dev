@@ -24,9 +24,10 @@ import re
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from . import pulses
 from .cards import ParamSpec, num
 from .eventlog import EventLog
 from .instrument import Instrument
@@ -52,6 +53,9 @@ class ApprovalRequest:
     title: str
     items: List[str]
     note: str = ""          # set by the approver, e.g. "no answer within 120 s"
+    # pictures the card shows beside its lines, each {"svg": an SVG document, "caption": its numbers in words}: a
+    # pulse generator's timing (pulses.illustrate). The lines say everything the pictures do
+    figures: List[Dict[str, str]] = field(default_factory=list)
 
     def __str__(self) -> str:
         return "\n".join([self.title] + ["  - " + i for i in self.items])
@@ -731,6 +735,7 @@ class SafetyGate:
                 if how is None:
                     request = ApprovalRequest("Approve drive change on %s?" % inst.name,
                                               [self._describe_move(inst, spec, current, target)])
+                    pulses.illustrate(request, inst, {spec.name: target})   # a generator's timing, if it starts one
                     if unsure:
                         request.items.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
                     if not self.auto:

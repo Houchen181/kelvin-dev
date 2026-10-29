@@ -102,6 +102,9 @@
     const pending = (s.pending || []).map((r) => Object.assign({}, r, { seconds_left: Math.ceil(r.seconds_left / 30) * 30 }));
     if (changed("approvals", pending)) $("approvals").replaceChildren(...pending.map((r) => h("div", { class: "card ask" },
       h("b", {}, (r.where ? "[" + r.where + "] " : "") + r.title), h("ul", {}, ...r.items.map((i) => h("li", {}, i))),
+      // a pulse generator's timing: an SVG shown as an image, which can't run anything
+      ...(r.figures || []).map((f) => h("img", { alt: f.caption || "", style: "max-width:100%;height:auto;background:#fff",
+        src: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(String(f.svg || "")) })),
       h("p", { class: "muted" }, "about " + (r.seconds_left > 90 ? Math.round(r.seconds_left / 60) + " min" : r.seconds_left + " s") + " left to answer"),
       h("div", { class: "row" },
         me && me.role !== "watch" ? act("Approve", "primary", async () => {

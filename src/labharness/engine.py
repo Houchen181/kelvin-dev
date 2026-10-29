@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import frames
+from . import frames, pulses
 from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
@@ -263,6 +263,8 @@ class RunEngine:
                 errors.append(e.args[0])
         if ramp is not None and not errors:
             ramp.estimate = self._estimate(ramp)
+        if not errors:   # a generator it plays, at every value its sweep gives it, before anything plays
+            errors += pulses.plan_problems(lab, plan)
         return errors
 
     def _check_ramp(self, axis: Axis, settable: Any, check_value: Any, errors: List[str]) -> None:
@@ -511,6 +513,7 @@ class RunEngine:
             else:   # no dry run: the forecast's ramps, settling and waits
                 title += forecast.duration()
             request = ApprovalRequest(title, items)
+            pulses.illustrate_plan(request, self.lab, plan)   # a generator it plays: its timing, drawn and exact
             auto, why = self.gate.auto_plan(grants, sim)
             if firing:
                 auto, why = False, list(why or []) + ["it fires %s" % ", ".join(firing)]

@@ -76,7 +76,8 @@ class WebApprover(Approver):
             now = time.time()
             entry = {"id": "r%d" % self._seq, "title": request.title, "items": list(request.items),
                      "created": now, "expires": now + self.timeout, "answer": None, "by": None,
-                     "thread": threading.get_ident(), "where": where}
+                     "thread": threading.get_ident(), "where": where,
+                     "figures": list(getattr(request, "figures", None) or [])}   # a generator's timing, drawn
             if why:   # never shown: nobody is left to act on a yes
                 entry.update(answer=False, by=why, decided=now)
                 self._history.appendleft(entry)
@@ -85,7 +86,7 @@ class WebApprover(Approver):
             self._pending[entry["id"]] = entry
             self._cv.notify_all()
         public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "seconds_left": int(self.timeout),
-                  "where": where}
+                  "where": where, "figures": entry["figures"]}
         for listener in list(self._listeners):
             try:
                 listener(public)
@@ -145,7 +146,7 @@ class WebApprover(Approver):
                      "decided": now, "answer": True, "by": "auto mode", "reasons": list(reasons)}
             self._history.appendleft(entry)
         public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "auto": True,
-                  "reasons": entry["reasons"]}
+                  "reasons": entry["reasons"], "figures": list(getattr(request, "figures", None) or [])}
         for listener in list(self._listeners):
             try:
                 listener(public)
@@ -199,7 +200,7 @@ class WebApprover(Approver):
             now = time.time()
             return [{"id": e["id"], "title": e["title"], "items": e["items"],
                      "seconds_left": max(0, int(e["expires"] - now)), "where": e.get("where"),
-                     "escalated": bool(e.get("escalated"))}
+                     "escalated": bool(e.get("escalated")), "figures": e.get("figures") or []}
                     for e in self._pending.values() if e["answer"] is None]
 
     def history_list(self) -> List[Dict[str, Any]]:

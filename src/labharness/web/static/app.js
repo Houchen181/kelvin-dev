@@ -1500,6 +1500,12 @@
     const m = String((input && input.plan) || "").match(/plan:\s*([^\n]+)/);
     return m ? m[1].trim() : "";
   }
+  // a written pulse sequence's name: from its text (sequence: xy8), or the name it was saved under
+  function seqName(text) {
+    const s = String(text || "").trim();
+    const m = s.match(/sequence:\s*([a-z][a-z0-9_]*)/);
+    return m ? m[1] : (/^[a-z][a-z0-9_]*$/.test(s) ? s : "");
+  }
   function stepLabel(name, input, done) {
     const a = input || {};
     const code = (s) => "<code>" + esc(s) + "</code>";
@@ -1510,7 +1516,8 @@
       case "instrument_info": return v("Reading", "Read") + " the folder of " + code(a.instrument);
       case "lab_config": return v("Reading", "Read") + " the lab config" + (a.instrument ? " for " + code(a.instrument) : "");
       case "search_manual": return v("Searching", "Searched") + " the " + esc(a.instrument || "") + " manual for " + code(a.query || "");
-      case "show_sequence": return v("Drawing", "Drew") + " the " + code(a.protocol || "") + " pulse sequence";
+      case "show_sequence": return v("Drawing", "Drew") + " the " + code(a.protocol || seqName(a.sequence) || "written") + " pulse sequence";
+      case "save_sequence": return v("Saving", "Saved") + " the pulse sequence " + code(seqName(a.text) || "");
       case "read_examples": return v("Reading", "Read") + " the maker's examples in " + code(a.path || "");
       case "try_card": return v("Trying", "Tried") + " the card on " + code(a.instrument || "");
       case "experiment_guide": return a.experiment ? v("Reading", "Read") + " the experiment " + code(a.experiment)
@@ -1598,11 +1605,16 @@
   // ------------------------------------------------------------------ approvals
   // a request's points; one of several lines (code to run or save) as it is written, scrolling when long
   const approvalItem = (i) => h("li", {}, String(i).includes("\n") ? h("pre", { class: "approval-code" }, i) : i);
+  // a request's pictures (a pulse generator's timing): an SVG shown as an image, which can't run anything; its lines
+  // above say the same numbers
+  const approvalFigures = (figs) => (figs || []).map((f) => h("figure", { class: "approval-figure" },
+    h("img", { src: "data:image/svg+xml;charset=utf-8," + encodeURIComponent(String(f.svg || "")), alt: f.caption || "" }),
+    f.caption ? h("figcaption", { class: "muted small" }, f.caption) : null));
   // auto mode approved this without asking: show what ran and why, like an answered request
   function autoApproval(ev) {
     const title = h("div", { class: "approval-title" }, icon("check"), h("span", {}, ev.title));
     const el = h("div", { class: "approval done auto", role: "group", "aria-label": ev.title }, title,
-      h("ul", {}, ...ev.items.map(approvalItem)),
+      h("ul", {}, ...ev.items.map(approvalItem)), ...approvalFigures(ev.figures),
       h("div", { class: "approval-actions" }, h("span", { class: "verdict auto" }, "Auto-approved"),
         h("span", { class: "muted small" }, (ev.reasons || []).join("; "))));
     foldable(el, title);
@@ -1630,7 +1642,7 @@
     const actions = h("div", { class: "approval-actions" }, yes, no, count);
     const title = h("div", { class: "approval-title" }, icon("hand"), h("span", {}, ev.title), whereTag(ev.where));
     const el = h("div", { class: "approval", role: "group", "aria-label": ev.title }, title,
-      h("ul", {}, ...ev.items.map(approvalItem)), actions);
+      h("ul", {}, ...ev.items.map(approvalItem)), ...approvalFigures(ev.figures), actions);
     let left = ev.seconds_left;
     const tick = () => { count.textContent = left > 0 ? "Declines itself in " + left + " s" : ""; left -= 1; };
     tick();

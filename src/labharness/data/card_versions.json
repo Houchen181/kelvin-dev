@@ -163,7 +163,8 @@
   ],
   "spincore/pulseblaster": [
    "357835dfc1ef6e5da7953a28495a902ab6235f1fd1bb1c7b6686fbc698ceb0e6",
-   "8d81ae2cfe65f30b3feb41faaf06ed4e40fa84ca4a8d9f7b95fb03b32e61be0a"
+   "8d81ae2cfe65f30b3feb41faaf06ed4e40fa84ca4a8d9f7b95fb03b32e61be0a",
+   "ee2c5e4743a88935b6b9a9f2b3450fb864b997fd30789e29af7159c667acf761"
   ],
   "srs/dg645": [
    "cf32a5b100dcfd76bb5b49293f33843b0051b74db520285a4195f96ddb6e2280"
@@ -190,7 +191,8 @@
   ],
   "swabian/pulse-streamer": [
    "a1d0eda47ea21893d65fc9f88c86af1a2165ecfba2666163174100aeb8f4d00a",
-   "58520ec70fb0ed133e1298da155c3581bd5dda8097e427a063b6e93dfe0f4431"
+   "58520ec70fb0ed133e1298da155c3581bd5dda8097e427a063b6e93dfe0f4431",
+   "4398acd3ca0acde4c71f42f2f058d93b97de201b3a83ec9a9ee7c579b37a5d63"
   ],
   "swabian/time-tagger": [
    "2e996c245c30e38cfb76c361eb628a43bd52160426cdd03f2d1bfcafd57c6087",
