@@ -1,6 +1,6 @@
-"""Which model a chat starts with (Claude Sonnet unless Settings says otherwise), model names written without their
-service, and what a model service's refusal says (F3 #25: silently Opus, "claudecode:sonnet" needed in some places,
-and every failure said "add its API key")."""
+"""Which model a chat starts with (Claude Opus unless Settings says otherwise, the owner's choice), model names
+written without their service, and what a model service's refusal says (F3 #25: silently Opus, "claudecode:sonnet"
+needed in some places, and every failure said "add its API key")."""
 import json
 
 import pytest
@@ -68,39 +68,39 @@ def turn(client, headers, chat_id, model, text="hello"):
 
 # --- the default ----------------------------------------------------------------------------------------------
 
-def test_sonnet_is_the_default_not_the_first_model_listed():
-    keys = ["anthropic:" + i for i in CLAUDE_IDS] + ["openai:gpt-5"]
-    assert default_model(keys) == "anthropic:claude-sonnet-5-5"   # Opus is listed first, and was the default
-    assert default_model(keys, "anthropic:claude-opus-5-5") == "anthropic:claude-opus-5-5"   # Settings' choice
-    assert default_model(keys, "gemini:gone") == "anthropic:claude-sonnet-5-5"   # a choice no longer offered
-    bridge = ["claudecode:opus", "claudecode:sonnet", "claudecode:haiku"]
-    assert default_model(bridge) == "claudecode:sonnet"
-    assert default_model(["anthropic:claude-sonnet-5-5"] + bridge) == "anthropic:claude-sonnet-5-5"
+def test_opus_is_the_default_wherever_it_is_listed():
+    keys = ["openai:gpt-5"] + ["anthropic:" + i for i in reversed(CLAUDE_IDS)]   # Opus last, not first
+    assert default_model(keys) == "anthropic:claude-opus-5-5"
+    assert default_model(keys, "anthropic:claude-sonnet-5-5") == "anthropic:claude-sonnet-5-5"   # Settings' choice
+    assert default_model(keys, "gemini:gone") == "anthropic:claude-opus-5-5"   # a choice no longer offered
+    bridge = ["claudecode:sonnet", "claudecode:haiku", "claudecode:opus"]
+    assert default_model(bridge) == "claudecode:opus"
+    assert default_model(["anthropic:claude-opus-5-5"] + bridge) == "anthropic:claude-opus-5-5"
     assert default_model(["demo:demo", "openai:gpt-5"]) == "openai:gpt-5"   # a real model before the scripted one
     assert default_model(["demo:demo"]) == "demo:demo" and default_model([]) is None
 
 
-def test_the_portal_starts_new_chats_on_sonnet_and_settings_can_change_it(parts):
+def test_the_portal_starts_new_chats_on_opus_and_settings_can_change_it(parts):
     settings = parts[1]
     client, headers = client_for(parts, {"anthropic": Fake("anthropic", "Claude", CLAUDE_IDS),
                                          "claudecode": Fake("claudecode", "Claude Code", ["opus", "sonnet", "haiku"])})
     with client:
         boot = client.get("/api/bootstrap", headers=headers).json()
-        assert boot["default_model"] == "anthropic:claude-sonnet-5-5" and boot["auto_model"] == boot["default_model"]
-        r = client.post("/api/settings", json={"default_model": "anthropic:claude-opus-5-5"}, headers=headers).json()
-        assert r["default_model"] == "anthropic:claude-opus-5-5" and r["auto_model"] == "anthropic:claude-sonnet-5-5"
-        assert client.get("/api/bootstrap", headers=headers).json()["default_model"] == "anthropic:claude-opus-5-5"
+        assert boot["default_model"] == "anthropic:claude-opus-5-5" and boot["auto_model"] == boot["default_model"]
+        r = client.post("/api/settings", json={"default_model": "anthropic:claude-sonnet-5-5"}, headers=headers).json()
+        assert r["default_model"] == "anthropic:claude-sonnet-5-5" and r["auto_model"] == "anthropic:claude-opus-5-5"
+        assert client.get("/api/bootstrap", headers=headers).json()["default_model"] == "anthropic:claude-sonnet-5-5"
         r = client.post("/api/settings", json={"default_model": ""}, headers=headers).json()   # back to Automatic
-        assert r["default_model"] == "anthropic:claude-sonnet-5-5" and r["settings"]["default_model"] == ""
+        assert r["default_model"] == "anthropic:claude-opus-5-5" and r["settings"]["default_model"] == ""
         settings.update({"default_model": "sonnet"})   # a name alone, as Claude Code takes it
         assert client.get("/api/bootstrap", headers=headers).json()["default_model"] == "anthropic:claude-sonnet-5-5"
 
 
-def test_with_only_claude_code_the_default_is_its_sonnet(parts):
+def test_with_only_claude_code_the_default_is_its_opus(parts):
     client, headers = client_for(parts, {"anthropic": Fake("anthropic", "Claude", CLAUDE_IDS, key=False),
                                          "claudecode": Fake("claudecode", "Claude Code", ["opus", "sonnet", "haiku"])})
     with client:
-        assert client.get("/api/bootstrap", headers=headers).json()["default_model"] == "claudecode:sonnet"
+        assert client.get("/api/bootstrap", headers=headers).json()["default_model"] == "claudecode:opus"
 
 
 # --- model names ----------------------------------------------------------------------------------------------
@@ -144,10 +144,11 @@ def test_a_model_that_cant_be_used_says_why(parts):
     assert "signed in with ChatGPT" in unavailable("chatgpt:gpt-5", {})
 
 
-def test_claude_code_works_the_screen_with_the_chats_claude_model_else_sonnet():
+def test_claude_code_works_the_screen_with_the_chats_claude_model_else_opus():
     assert bridge_alias("claudecode:haiku") == "haiku"
-    assert bridge_alias("anthropic:claude-opus-5-5") == "opus"
-    assert bridge_alias("openai:gpt-5") == "sonnet" and bridge_alias("") == "sonnet"   # it was Opus, unasked
+    assert bridge_alias("anthropic:claude-sonnet-5-5") == "sonnet"
+    assert bridge_alias("openai:gpt-5") == "opus" and bridge_alias("") == "opus"   # the default's
+    assert bridge_alias("anthropic:claude-fable-5-1") == "opus"   # a Claude model Claude Code doesn't name
 
 
 # --- what a refusal says --------------------------------------------------------------------------------------

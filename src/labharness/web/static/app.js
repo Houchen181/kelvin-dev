@@ -3327,7 +3327,7 @@
         }));
     }));
   }
-  function refreshModels(r) {   // r: the models, with the default (Settings' choice, else Claude Sonnet)
+  function refreshModels(r) {   // r: the models, with the default (Settings' choice, else Claude Opus)
     applyModels(r.models.groups, r.default_model, r.auto_model);
     fillDefaultModel();
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
@@ -5401,7 +5401,7 @@
     select.value = keys.includes(selected) ? selected : allowEmpty ? "" : (keys[0] || "");
   }
   // preferred: the model a new chat starts with (Settings → Models → Default model for new chats; Automatic is
-  // Claude Sonnet: settings.default_model); a chat that is open keeps its own
+  // Claude Opus: settings.default_model); a chat that is open keeps its own
   function applyModels(groups, preferred, auto) {
     const current = S.chatId && S.labels && S.labels[$("model").value] ? $("model").value : "";
     S.groups = groups;
@@ -5415,7 +5415,7 @@
     else $("input").placeholder = "Ask Kelvin…";
     updateSend();
   }
-  // Settings → Models → Default model for new chats: Automatic says which model it is now (Claude Sonnet when there)
+  // Settings → Models → Default model for new chats: Automatic says which model it is now (Claude Opus when there)
   function fillDefaultModel() {
     fillModels($("default-model"), S.groups, (S.settings && S.settings.default_model) || "", true);
     const auto = S.autoModel && S.labels[S.autoModel];

@@ -159,6 +159,6 @@ def unavailable(key: str, providers: Dict[str, Any]) -> str:
     if service == "chatgpt":
         return "You aren't signed in with ChatGPT: %s → Continue with ChatGPT." % SETTINGS
     if not colon:
-        return ("There's no model called %r here. Pick one from the list under the message box (Claude Sonnet is "
-                "anthropic:claude-sonnet-5-5 with a Claude API key, or claudecode:sonnet through Claude Code)." % key)
+        return ("There's no model called %r here. Pick one from the list under the message box (Claude Opus is "
+                "anthropic:claude-opus-5-5 with a Claude API key, or claudecode:opus through Claude Code)." % key)
     return "There's no model service called %r here: pick a model from the list under the message box." % service

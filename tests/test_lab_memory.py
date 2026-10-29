@@ -298,7 +298,7 @@ def test_a_fact_one_chat_keeps_for_the_lab_is_in_every_other_chat(tmp_path):
     assert (tmp_path / "virtual-lab-memory.json").exists()                # Kelvin's own folder: no one person's
 
 
-def test_unshared_work_and_incognito_chats_read_the_lab_memory_but_add_nothing(tmp_path):
+def test_unshared_work_reads_the_lab_memory_but_adds_nothing_and_incognito_reads_none(tmp_path):
     from test_web import Scripted, stream_turn
     keep = [{"type": "tool_call", "id": "k2", "name": "remember",
              "input": {"scope": "lab", "kind": "fact", "text": "The secret sample S7 is CrSBr."}}]
@@ -320,7 +320,8 @@ def test_unshared_work_and_incognito_chats_read_the_lab_memory_but_add_nothing(t
         assert "a person corrects it in the portal's Lab panel" in bot.systems[0]  # and can't keep a note in it
         incognito = client.post("/api/chats", json={"model": "scripted:m1", "incognito": True}, headers=headers).json()
         stream_turn(client, headers, incognito["id"], "switch the laser on", "scripted:m1")
-        assert "emission on before its power" in bot.systems[-1] and "remember" not in bot.tool_names[-1]
+        assert "emission on before its power" not in bot.systems[-1] and "# The lab's memory" not in bot.systems[-1]
+        assert not {"remember", "shared_memory"} & set(bot.tool_names[-1])   # nor can it look the memory up
     assert [n["text"] for n in rt.lab_notes()] == ["Switch the laser's emission on before its power."]
 
 
@@ -382,6 +383,34 @@ def test_each_chat_is_shown_an_instruments_notes_at_its_first_use(tmp_path):
     assert "From the lab's memory, on smu:" in said[0] and "Ramp the gate to 0 V" in said[0]
     assert "From the lab's memory" not in said[1]                     # shown once in a chat
     assert "Ramp the gate to 0 V" in said[2]                           # and once in every other
+
+
+def test_an_incognito_chat_uses_no_memory_at_all(tmp_path):
+    """The owner's choice (2026-10-29): an incognito chat has none of the lab's memory, in its prompt, its tools or a
+    tool's answer, as it has none of the person's or a project's."""
+    from test_web import Scripted, stream_turn
+    look = [{"type": "tool_call", "id": "d1", "name": "describe_instrument", "input": {"instrument": "smu"}}]
+    zero = [{"type": "tool_call", "id": "s1", "name": "set_value",
+             "input": {"instrument": "smu", "parameter": "V", "value": 0}}]
+    ask = [{"type": "tool_call", "id": "m1", "name": "shared_memory", "input": {}}]   # called by its name
+    bot = Scripted([look, zero, ask, DONE, zero, DONE])
+    rt, store, client, headers = portal(tmp_path, {"scripted": bot})
+    rt.keep_lab_note("lesson", "Ramp the gate to 0 V before anyone touches the bonds.", ["smu"], by="human (portal)")
+    with client:
+        hidden = client.post("/api/chats", json={"model": "scripted:m1", "incognito": True}, headers=headers).json()
+        ends = [e for e in stream_turn(client, headers, hidden["id"], "gate to zero", "scripted:m1")
+                if e["type"] == "tool_end"]
+        assert "# The lab's memory" not in bot.systems[0] and "Ramp the gate" not in bot.systems[0]
+        assert "shared_memory" not in bot.tool_names[0]
+        described, zeroed, asked = [e["content"] for e in ends]
+        assert "smu" in described and "V" in zeroed and not ends[1]["is_error"]   # the tools answer as ever
+        assert "Ramp the gate" not in described + zeroed and "From the lab's memory" not in described + zeroed
+        assert ends[2]["is_error"] and asked.startswith("not in an incognito chat: it uses no memory")
+        saved = client.post("/api/chats", json={"model": "scripted:m1"}, headers=headers).json()
+        said = [e for e in stream_turn(client, headers, saved["id"], "gate to zero", "scripted:m1")
+                if e["type"] == "tool_end"][0]["content"]
+    assert "From the lab's memory, on smu:" in said and "Ramp the gate" in said   # a saved chat still has it
+    assert "Ramp the gate" in bot.systems[-1]
 
 
 # ------------------------------------------------------------------ people, in the portal's Lab panel

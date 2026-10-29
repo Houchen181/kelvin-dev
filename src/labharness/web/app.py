@@ -301,7 +301,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         return accounts.data_dir(session["user"]) if accounts is not None and session["user"] else default_data
 
     async def card_model() -> str:
-        """The model that writes cards: the default one (Settings' choice, else Claude Sonnet), never the demo."""
+        """The model that writes cards: the default one (Settings' choice, else Claude Opus), never the demo."""
         keys = [m["key"] for g in (await agent.models())["groups"] if g["provider"] != "demo" for m in g["models"]]
         key = default_model(keys, agent.model_key(settings.get("default_model") or ""))
         if key:
@@ -309,7 +309,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         raise ValueError("no model to write the card with: add an API key in Settings → Models")
 
     def defaults_of(models: Dict[str, Any]) -> Dict[str, Any]:
-        """The model new chats start with (Settings' choice while it is offered, else Claude Sonnet:
+        """The model new chats start with (Settings' choice while it is offered, else Claude Opus:
         settings.default_model) and what Automatic stands for now, which Settings shows."""
         keys = [m["key"] for g in models["groups"] for m in g["models"]]
         return {"default_model": default_model(keys, agent.model_key(settings.get("default_model") or "")),
@@ -1870,7 +1870,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
             return error(400, "Paste the manual's command reference or the maker's example scripts (at least a few "
                               "commands or functions with their arguments).")
         key = str(body.get("model") or "")
-        if not key:   # the default model (Settings' choice, else Claude Sonnet)
+        if not key:   # the default model (Settings' choice, else Claude Opus)
             key = defaults_of(await agent.models())["default_model"] or ""
         try:
             provider, model_id = agent.provider_for(key)

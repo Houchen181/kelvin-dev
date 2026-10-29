@@ -24,7 +24,9 @@ in on this computer, every chat and every agent reads the same notes.
 
 Every chat sees a brief of it (BRIEF_CHARS at most): lessons first, then wiring, references, excitations and other
 facts; notes on the lab's own instruments before notes on instruments it no longer has, the newest first; and how many
-it left out, which shared_memory looks up."""
+it left out, which shared_memory looks up. An incognito chat uses no memory at all (the owner's choice, 2026-10-29): no
+brief, no shared_memory, no notes with an instrument's use (without_notes); approval cards still show the person who
+answers them the lab's lessons."""
 from __future__ import annotations
 
 import json
@@ -45,6 +47,7 @@ MAX_TIES = 8        # instruments one note is tied to
 MAX_BEFORE = 5      # earlier versions kept with a note
 BRIEF_CHARS = 1200  # the notes in every chat's prompt (about 300 tokens); the rest is one lookup away
 AT_USE = 5          # notes shown with an instrument's use; shared_memory has the rest
+AT_USE_HEAD = "From the lab's memory, on "   # how those notes start, at the end of a tool's answer
 ON_CARD = 3         # lessons shown on an approval card
 FILE = "lab-memory.json"
 VIRTUAL_FILE = "virtual-lab-memory.json"
@@ -59,10 +62,17 @@ you see, {fix}. shared_memory looks up every note, and describe_instrument shows
 
 
 def head(keep: str = "") -> str:
-    """The brief's head. keep: how this client keeps a note ("" when it keeps none: an incognito chat, unshared
-    work, learning switched off)."""
+    """The brief's head. keep: how this client keeps a note ("" when it keeps none: unshared work, learning
+    switched off)."""
     return SECTION.format(fix="say so, and correct it (%s, replaces: its id) once the person confirms" % keep if keep
                           else "say so: a person corrects it in the portal's Lab panel")
+
+
+def without_notes(text: str) -> str:
+    """A tool's answer without the lab's notes it ends with (LabRuntime.lab_notes_at_use), for a chat that uses no
+    memory: an incognito one."""
+    at = text.rfind("\n" + AT_USE_HEAD)
+    return text[:at] if at >= 0 else text
 
 
 class LabMemoryError(ValueError):

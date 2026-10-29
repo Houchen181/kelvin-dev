@@ -49,9 +49,9 @@ TEXT_SIZES = (0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)   # the desktop window's
 CARD_LANGUAGES = ("zh-Hans",)   # approval cards shown in another language (cardlang.py); "" is English, as written
 
 # The model a chat starts with when nobody chose one under Settings → Models → Default model for new chats: Claude
-# Sonnet, through a Claude API key, else through the Claude Code on this computer. It was silently Opus (F3 #25), the
-# slowest and dearest, for every first chat. A person who wants another picks it there.
-DEFAULT_MODELS = ("anthropic:claude-sonnet-5-5", "claudecode:sonnet")
+# Opus, through a Claude API key, else through the Claude Code on this computer (the owner's choice, 2026-10-29).
+# Settings says which model Automatic is, since F3 #25 found it silently Opus; a person who wants another picks it there.
+DEFAULT_MODELS = ("anthropic:claude-opus-5-5", "claudecode:opus")
 # Claude's models named without their service, as Claude Code takes them ("sonnet") or by their id alone
 # ("claude-sonnet-5-5"): F3 #25 found "claudecode:sonnet" needed in some places while "sonnet" worked in others
 CLAUDE = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "haiku": "claude-haiku-5-5",
@@ -61,7 +61,7 @@ BRIDGE = {"claude-sonnet-5-5": "sonnet", "claude-opus-5-5": "opus", "claude-haik
 
 def default_model(keys: List[str], chosen: Optional[str] = "") -> Optional[str]:
     """The model a new chat starts with, of the keys the services offer now: the one chosen in Settings while it is
-    offered, else Claude Sonnet (DEFAULT_MODELS), else the first real model, else the scripted demo (None: none)."""
+    offered, else Claude Opus (DEFAULT_MODELS), else the first real model, else the scripted demo (None: none)."""
     if chosen and chosen in keys:
         return chosen
     for key in DEFAULT_MODELS:
@@ -93,13 +93,14 @@ def resolve_model(key: str, available: Any) -> str:
 
 def bridge_alias(model_key: str) -> str:
     """The Claude Code model for a job Claude Code does for a chat (operate_computer): the chat's own Claude model,
-    else Sonnet (it was Opus, unasked)."""
+    else the default's, Opus."""
     service, _, model = str(model_key or "").partition(":")
+    default = BRIDGE[DEFAULT_MODELS[0].partition(":")[2]]
     if service == "claudecode" and model:
         return model
     if service == "anthropic":
-        return BRIDGE.get(model, "sonnet")
-    return BRIDGE[DEFAULT_MODELS[0].partition(":")[2]]
+        return BRIDGE.get(model, default)
+    return default
 
 
 def _text_size(value: str) -> str:

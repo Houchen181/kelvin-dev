@@ -2935,7 +2935,7 @@ class LabRuntime:
             return ""
         shown = notes[:lm.AT_USE]
         on = [name for name in names if lm.for_instruments(shown, [name])]   # only the instruments it has notes on
-        out = ["", "From the lab's memory, on %s:" % ", ".join(on)] + [lm.line(n) for n in shown]
+        out = ["", lm.AT_USE_HEAD + "%s:" % ", ".join(on)] + [lm.line(n) for n in shown]
         if len(notes) > lm.AT_USE:
             out.append("(%d more: shared_memory with the instrument)" % (len(notes) - lm.AT_USE))
         return "\n".join(out)
