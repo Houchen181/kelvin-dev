@@ -24,21 +24,26 @@ ENV = {
     "openai_api_key": "OPENAI_API_KEY",
     "gemini_api_key": "GEMINI_API_KEY",
 }
-SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key"}   # a webhook URL is a credential too
+# a webhook or heartbeat URL is a credential too, and so is the email account's password
+SECRET = set(ENV) | {"local_api_key", "webhook", "openalex_api_key", "smtp_password", "heartbeat"}
 # secrets Kelvin keeps itself, never shown or set from the browser: the Kelvin hub's token (hubsync.py)
 SEALED = SECRET | {"hub_token", "account_token"}   # encrypted with the password
 EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instructions", "learn", "lab", "notify_kinds",
                      "reviewer", "literature", "auto_setup", "manuals", "scan_network", "auto_cards", "auto_report",
                      "answer_words", "phone_relay", "ask_folder", "text_size",
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
-                     "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all"}
+                     "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all",
+                     "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
+                     "heartbeat_minutes", "approval_wait"}
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "lab", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
-       "idle_off_all"}
+       "idle_off_all", "approval_wait"}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 IDLE_OFF_MINUTES = 60   # outputs left on this long with nothing happening go to safe (LabRuntime._idle_check)
+APPROVAL_WAIT_MINUTES = 60   # a request nobody answered at the computer waits this long for the phone, then declines
+HEARTBEAT_MINUTES = 5        # minutes between heartbeat pings
 MAX_RECENT_FOLDERS = 8   # chats' folders the folder menu offers again
 TEXT_SIZES = (0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)   # the desktop window's zoom, each person's own
 
@@ -72,6 +77,18 @@ def _idle_off(value: str) -> str:
     except ValueError:
         return ""
     return "" if n == IDLE_OFF_MINUTES else str(n)
+
+
+def _minutes(value: str, low: int, high: int, default: int, off: bool = False) -> str:
+    """What is stored for a number of minutes: "off" (where allowed), or minutes from low to high ("" for the
+    default)."""
+    if off and value.lower() in ("off", "0", "no", "false", "never"):
+        return "off"
+    try:
+        n = max(low, min(high, int(float(value))))
+    except ValueError:
+        return ""
+    return "" if n == default else str(n)
 
 
 def _load(path: Optional[Path]) -> Dict[str, Any]:
@@ -251,6 +268,20 @@ class Settings:
                 value = value if value in ("mine", "virtual") else ""
             if name == "webhook" and value and not value.startswith(("https://", "http://")):
                 raise ValueError("The notification webhook must be an http(s) URL.")
+            if name == "heartbeat" and value and not value.startswith(("https://", "http://")):
+                raise ValueError("The heartbeat address must be an http(s) URL.")
+            if name == "heartbeat_minutes":  # between heartbeat pings: 1 to 60 minutes
+                value = _minutes(value, 1, 60, HEARTBEAT_MINUTES)
+            if name == "approval_wait":  # how long a request goes on waiting once it went to the phone, or off
+                value = _minutes(value, 5, 720, APPROVAL_WAIT_MINUTES, off=True)
+            if name == "smtp_security":  # starttls (the default), ssl or none
+                value = value.lower() if value.lower() in ("ssl", "none") else ""
+            if name in ("smtp_host", "smtp_port", "smtp_to", "smtp_from"):
+                from ..notify import email_from
+                mail = {k: self._at(k).get(k) for k in ("smtp_host", "smtp_port", "smtp_to", "smtp_from")}
+                mail[name] = value
+                email_from(mail["smtp_host"] or "x", mail["smtp_to"] or "x@y", mail["smtp_port"], None, None, None,
+                           mail["smtp_from"])   # ValueError for settings that can't work
             if name == "notify_kinds":  # which notices also go to the webhook
                 from ..notify import KINDS
                 value = ",".join(k for k in value.split(",") if k in KINDS) or "none"
@@ -338,6 +369,12 @@ class Settings:
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
             "idle_off": self.idle_off_minutes,
             "idle_off_all": self._lab.get("idle_off_all") == "on",
+            # email notices: where they go and from which account (its password is among the keys, never shown)
+            "email": {"host": self._user.get("smtp_host", ""), "port": self._user.get("smtp_port", ""),
+                      "security": self._user.get("smtp_security") or "starttls", "user": self._user.get("smtp_user", ""),
+                      "from": self._user.get("smtp_from", ""), "to": self._user.get("smtp_to", "")},
+            "heartbeat_minutes": int(self.heartbeat_s // 60),
+            "approval_wait": int(self.approval_wait_s // 60),   # 0: declined after the first wait, as before
         }
 
     @property
@@ -375,6 +412,29 @@ class Settings:
         if value == "off":
             return 0
         return int(value) if value and str(value).isdigit() else IDLE_OFF_MINUTES
+
+    def email(self) -> Any:
+        """Where email notices go (notify.Email), or None while no server or recipient is set."""
+        from ..notify import email_from
+        try:
+            return email_from(self.get("smtp_host"), self.get("smtp_to"), self.get("smtp_port"),
+                              self.get("smtp_security"), self.get("smtp_user"), self.get("smtp_password"),
+                              self.get("smtp_from"))
+        except ValueError:
+            return None
+
+    @property
+    def heartbeat_s(self) -> float:
+        value = self._user.get("heartbeat_minutes")
+        return 60.0 * (int(value) if value and str(value).isdigit() else HEARTBEAT_MINUTES)
+
+    @property
+    def approval_wait_s(self) -> float:
+        """How long a request nobody answered at the computer waits for an answer from the phone; 0: it doesn't."""
+        value = self._lab.get("approval_wait")
+        if value == "off":
+            return 0.0
+        return 60.0 * (int(value) if value and str(value).isdigit() else APPROVAL_WAIT_MINUTES)
 
     @property
     def updates(self) -> str:

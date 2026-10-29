@@ -547,6 +547,46 @@
             <span class="hint">Only what you tick goes to that address, which then holds lab details; use a private topic or channel.</span>
           </div>
           <div class="field">
+            <label for="smtp-host">Also send by email <span class="muted">(your institution's or provider's mail server, SMTP)</span></label>
+            <div class="field-row">
+              <input id="smtp-host" type="text" autocomplete="off" spellcheck="false" placeholder="smtp.example.edu" aria-label="Mail server" style="flex: 4 1 0">
+              <input id="smtp-port" type="text" inputmode="numeric" maxlength="5" placeholder="587" aria-label="Port" style="flex: 1 1 0">
+              <select id="smtp-security" aria-label="Connection security" style="flex: 2 1 0">
+                <option value="starttls">STARTTLS</option>
+                <option value="ssl">SSL</option>
+                <option value="none">None</option>
+              </select>
+            </div>
+            <input id="smtp-user" type="text" autocomplete="off" spellcheck="false" placeholder="User name (often your address)" aria-label="Mail user name">
+            <div class="key-row"><input id="k-smtp-password" name="smtp_password" type="password" autocomplete="new-password" placeholder="Password" aria-label="Mail password"><button type="button" class="link" data-clear="smtp_password">Remove</button></div>
+            <span class="hint" data-hint="smtp_password"></span>
+            <input id="smtp-from" type="text" autocomplete="off" spellcheck="false" placeholder="From (if not the user name)" aria-label="From address">
+            <input id="smtp-to" type="text" autocomplete="off" spellcheck="false" placeholder="To: you@example.edu, a colleague's address" aria-label="Send to">
+            <span class="hint">The notices you tick above go to these addresses too, which reaches a phone with no other service. The password is kept like an API key and never shown again. Off until a server and an address are set.</span>
+          </div>
+          <div class="field">
+            <label for="k-heartbeat">Heartbeat <span class="muted">(a healthchecks.io check, or an Uptime Kuma push monitor)</span></label>
+            <div class="key-row"><input id="k-heartbeat" name="heartbeat" type="password" autocomplete="off" spellcheck="false" placeholder="https://hc-ping.com/your-check"><button type="button" class="link" data-clear="heartbeat">Remove</button></div>
+            <span class="hint" data-hint="heartbeat"></span>
+            <select id="heartbeat-minutes" aria-label="How often">
+              <option value="1">Every minute</option>
+              <option value="5">Every 5 minutes</option>
+              <option value="15">Every 15 minutes</option>
+            </select>
+            <span class="hint">While Kelvin runs and watches the lab it pings this address, and sends it nothing else. If Kelvin or this computer stops in the night, the pings stop and that service tells you.</span>
+          </div>
+          <div class="field">
+            <label for="approval-wait">When nobody answers a request at this computer</label>
+            <select id="approval-wait" aria-describedby="approval-wait-hint">
+              <option value="off">Decline it after 5 minutes</option>
+              <option value="15">After 5 minutes, ask your phone and wait 15 minutes more</option>
+              <option value="60">After 5 minutes, ask your phone and wait an hour more</option>
+              <option value="240">After 5 minutes, ask your phone and wait 4 hours more</option>
+              <option value="720">After 5 minutes, ask your phone and wait 12 hours more</option>
+            </select>
+            <span id="approval-wait-hint" class="hint">Your phone: the Kelvin app on a paired phone, the email or the webhook above (with alarms ticked). Without any of them a request is declined after 5 minutes. Nothing moves while a request waits; a queue waits on it.</span>
+          </div>
+          <div class="field">
             <label for="idle-off">Switch off outputs left idle</label>
             <select id="idle-off" name="idle_off" aria-describedby="idle-off-hint">
               <option value="15">After 15 minutes with nothing happening</option>

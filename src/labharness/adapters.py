@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import re
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .cards import Card, parity_name, serial_settings
 
@@ -33,8 +33,89 @@ class AdapterError(RuntimeError):
 
 
 def timed_out(e: BaseException) -> bool:
-    """A read that ran out of time (PyVISA's VI_ERROR_TMO), not a broken connection."""
-    return isinstance(e, TimeoutError) or getattr(e, "error_code", None) == -1073807339 or "VI_ERROR_TMO" in str(e)
+    """A read that ran out of time (PyVISA's VI_ERROR_TMO), not a broken connection; also when Kelvin said it in
+    words (instrument.InstrumentLost), from the error it came from."""
+    if isinstance(e, TimeoutError) or getattr(e, "error_code", None) == -1073807339 or "VI_ERROR_TMO" in str(e):
+        return True
+    return e.__cause__ is not None and e.__cause__ is not e and timed_out(e.__cause__)
+
+
+# VISA's codes for an instrument that can't be reached at all, as opposed to one that is slow to answer
+GONE = {-1073807265: "VI_ERROR_NLISTENERS",    # GPIB: nothing listens at the address (off, unplugged, address changed)
+        -1073807343: "VI_ERROR_RSRC_NFOUND",   # no longer listed (a pulled USB cable, switched off)
+        -1073807194: "VI_ERROR_CONN_LOST",     # a LAN connection dropped
+        -1073807298: "VI_ERROR_IO",            # an I/O error (a pulled USB cable)
+        -1073807346: "VI_ERROR_INV_OBJECT"}    # the session went away
+_SLOW = re.compile(r"timed? ?out|time-out|did not answer|didn't answer|no response", re.I)
+_GONE = re.compile(r"not connected|isn't connected|connection (was )?(lost|refused|reset|closed|aborted)|unreachable"
+                   r"|no listeners|device (was )?(removed|not found|disconnected)|broken pipe", re.I)
+
+
+def lost_kind(e: BaseException) -> Optional[str]:
+    """Whether an error says the instrument isn't answering: "gone" when it can't be reached at all (nothing listens
+    on GPIB, a pulled USB cable, a dropped connection), "silent" when it didn't answer in time; None for any other
+    error (a command it refused, a card's mistake), which is not a lost instrument."""
+    if getattr(e, "error_code", None) in GONE or isinstance(e, (ConnectionError, BrokenPipeError)):
+        return "gone"
+    if timed_out(e):
+        return "silent"
+    text = str(e)
+    if _GONE.search(text):
+        return "gone"
+    if _SLOW.search(text):
+        return "silent"
+    return None
+
+
+# a maker's software an instrument is reached through, by its address's scheme: (where, what to check)
+_SOFTWARE = {"qd": ("MultiVu at %s", "is MultiVu running, with its server started?"),
+             "zhinst": ("LabOne at %s", "is the LabOne data server running, and the instrument on?")}
+
+
+def where_and_cause(address: str) -> Tuple[str, str]:
+    """Where an instrument at this address is reached, and what to check when it stops answering, in words:
+    ("on GPIB (address 7)", "cable or power?"), ("through MultiVu at 127.0.0.1:5000", "is MultiVu running, ...?");
+    ("", "") for a simulated one."""
+    address = (address or "").strip()
+    scheme, sep, rest = address.partition("://")
+    if sep and scheme.lower() == "sim":
+        return "", ""
+    if sep and scheme.lower() not in ("visa", "serial"):
+        where, cause = _SOFTWARE.get(scheme.lower(), ("its maker's software (%s)" % address,
+                                                      "is it on, and its maker's software running?"))
+        return "through " + (where % rest if "%s" in where else where), cause
+    name = resource_name(address).upper()
+    m = re.match(r"^GPIB\d*::(\d+)", name)
+    if m:
+        return "on GPIB (address %s)" % m.group(1), "cable or power?"
+    if name.startswith("USB"):
+        return "on USB", "USB cable or power?"
+    m = re.match(r"^TCPIP\d*::([^:]+)", name)
+    if m:
+        return "on the network (%s)" % m.group(1), "network cable, power or its IP address?"
+    m = re.match(r"^ASRL(\w+?)::", name)
+    if m:
+        port = "COM%s" % m.group(1) if m.group(1).isdigit() else m.group(1)
+        return "on " + port, "cable or power? (or the port's baud rate and framing)"
+    return "at " + address, "cable or power?"
+
+
+def short_model(model: str) -> str:
+    """A card's model name, short enough for an alarm: "Keithley 2182 / 2182A nanovoltmeter" as it is, "Quantum Design
+    PPMS / DynaCool / VersaLab / MPMS3 (MultiVu)" -> "Quantum Design PPMS / DynaCool"."""
+    text = re.split(r" \(|, ", model or "", maxsplit=1)[0].strip()
+    while len(text) > 40 and " / " in text:
+        text = text.rsplit(" / ", 1)[0]
+    return text if len(text) <= 40 else text[:39].rstrip() + "…"
+
+
+def short_code(e: BaseException) -> str:
+    """The error as the bus or library gave it, short: VISA's code name, else its first line."""
+    code = getattr(e, "error_code", None)
+    if code in GONE or code == -1073807339:
+        return GONE.get(code, "VI_ERROR_TMO")
+    text = str(e).strip().splitlines()[0] if str(e).strip() else type(e).__name__
+    return text[:120]
 
 
 def resource_manager() -> Any:

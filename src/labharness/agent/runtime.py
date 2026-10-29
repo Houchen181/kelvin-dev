@@ -356,6 +356,9 @@ class LabRuntime:
                 "approval", "Approval needed: " + r["title"], (r.get("items") or [""])[0]))
         if hasattr(approver, "where"):   # each card says where it acts: SIMULATOR or REAL HARDWARE
             approver.where = self.where
+        if hasattr(approver, "escalate"):   # nobody answers at the computer: people away from it are asked
+            approver.escalate = self._escalate
+        self.notifier.alive = lambda: self.monitor.watching()   # the heartbeat: Kelvin is there, watching the lab
         vetoes = getattr(approver, "vetoes", None)
         if vetoes is not None:   # a cancelled call asks nobody: no one is left to act on a yes
             vetoes.append(lambda: ClientCall.CANCELLED if getattr(getattr(self._client, "call", None), "cancelled",
@@ -1653,10 +1656,15 @@ class LabRuntime:
         return "\n".join(["added %d items from %s" % (added, name)] + problems + [self.queue.text()])
 
     def _queue_drives(self, items: List[Item]) -> Dict[str, List[Any]]:
+        from ..forecast import action_of   # an on_abort action is the card's, not a drive's value
         out: Dict[str, List[Any]] = {}
         for item in items:
             if item.kind == "plan":
-                values = self.engine.drive_values(self._plan(item.text))
+                plan = self._plan(item.text)
+                values = self.engine.drive_values(plan)
+                for s in plan.on_abort or []:   # what it sets after a stop, which in the night nobody is there to approve
+                    if action_of(self.lab, s.instr, s.param) is None and self.lab.resolve(s.key)[1].is_drive:
+                        values.setdefault(s.key, []).append(s.value)
             else:
                 values = {}
                 for instr, param, value in load_step(item.text).sets:
@@ -1679,6 +1687,26 @@ class LabRuntime:
             else:
                 forecast.queue_step(load_step(item.text))
         return forecast
+
+    def _queue_later(self, items: List[Item]) -> List[str]:
+        """The drives whose interlock condition an item before the first that moves them works on (it sets something on
+        the condition's instrument: a cool-down step before a field sweep). Their interlock is checked when they move,
+        not at the start: a queue that cools first could not start while the sample was still warm."""
+        touched: set = set()   # instruments an item so far sets something on
+        used: set = set()      # drives an item so far moves
+        later = []
+        for item in items:
+            if item.kind == "plan":
+                plan = self._plan(item.text)
+                keys = {s.key for s in plan.setup + plan.after} | {a.key for a in plan.instrument_axes} \
+                    | ({plan.ramp.key} if plan.ramp else set())
+            else:
+                keys = set(load_step(item.text).keys)
+            later += [lock.drive for lock in self.lab.config.interlocks
+                      if lock.drive in keys and lock.drive not in used and lock.require.instr in touched]
+            touched.update(k.split(".")[0] for k in keys)
+            used.update(keys)
+        return later
 
     def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
         """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong)."""
@@ -1730,7 +1758,8 @@ class LabRuntime:
             if problems:
                 return REHEARSAL % "queue_start" + "\nnot rehearsed:\n" + "\n".join(problems[:8])
             duration, failed = self._rehearse(items)
-            _, _, refusals = self.gate.plan_approval(self._queue_drives(items))
+            _, _, refusals = self.gate.plan_approval(self._queue_drives(items), whole_path=True,
+                                                     later=self._queue_later(items))
             return "\n".join([REHEARSAL % "queue_start", "the %d waiting item%s would take ~%s" % (
                 len(items), "" if len(items) == 1 else "s", _dur(duration))]
                 + ["would fail: " + f for f in failed[:8]] + ["would be refused: " + r for r in refusals[:8]])
@@ -1744,8 +1773,11 @@ class LabRuntime:
                 return "the queue did not start:\n" + "\n".join(problems[:8])
             forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
             starting = forecast.driving_actions()     # a waveform its scans start: on this card, approved with it
+            # over the queue's whole path: every value an item sets away from safe, wherever the drive is now, so
+            # nothing asks again in the night (an item that switches an output off made the next one ask)
             lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast=forecast,
-                                                              asking=bool(starting))
+                                                              asking=bool(starting), whole_path=True,
+                                                              later=self._queue_later(items))
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
             duration = forecast.seconds or None
@@ -1809,7 +1841,12 @@ class LabRuntime:
                     break
                 q.mark(item, "running")
                 position = q.items.index(item) + 1
+            lost, t0 = self.monitor.mark(), time.time()
             ok, message = self._queue_item(item, position, grants, by)
+            if not ok:   # an instrument that stopped answering ended it: its alarm goes up now, with the pause
+                self.monitor.lost_since(lost)   # and the pause says which alarm stopped it ("stop requested" doesn't)
+                said = [a.text for a in list(self.monitor.alarms) if a.raised >= t0 and a.text not in message]
+                message += "; alarm: " + "; ".join(said) if said else ""
             with q.lock:   # a person's stop of the scan is never an error to go on after
                 if not ok and q.state == "running" and (q.on_error == "pause" or item.status == "stopped"):
                     q.state, q.reason = "pausing", "%s: %s" % (item.name, message)
@@ -1823,10 +1860,17 @@ class LabRuntime:
                             by="kelvin (automatic)", folder=self.reports_dir / "queues")
             except Exception as e:
                 self.gate.log.write("report_failed", by="kelvin (automatic)", runs=len(ran), error=str(e)[:300])
-        if q.state == "idle":
-            self.notifier("run", "Queue finished", "%d items done" % done)
-        else:
-            self.notifier("run", "Queue paused", q.reason[:300])
+        # the morning's account, from the record alone: done, stopped part-way with its data, not run, every alarm
+        lines = q.summarize(started, list(self.monitor.alarms), self._run_points)
+        self.notifier("run", "Queue finished" if q.state == "idle" else "Queue paused", "\n".join(lines)[:1500])
+
+    def _run_points(self, run_id: str) -> Optional[Tuple[int, int]]:
+        """(points taken, points planned) of a run, from its record; None when it can't be read."""
+        try:
+            m = rundata.meta(self._run_dir(run_id))
+            return int(m.get("points") or 0), int(m.get("planned_points") or 0)
+        except Exception:
+            return None
 
     def _queue_item(self, item: Item, position: int, grants: Dict[str, Allowed], by: str) -> Tuple[bool, str]:
         """Run one item under the queue's approval. (ok, message)"""
@@ -4057,6 +4101,22 @@ class LabRuntime:
 
     WATCHES = "watches.json"   # the person's and the agent's watches, by lab, next to the queue
     ALARMS = "alarms.json"     # the latest alarms, on or cleared
+
+    def _escalate(self, request: Dict[str, Any]) -> bool:
+        """A request nobody answered at the computer (WebApprover.escalate): it goes to people away from it as an
+        alarm (the Kelvin app on a paired phone, email, a webhook) and waits for their answer, instead of being
+        declined after a few minutes and ending the night's queue. False when Kelvin can reach nobody away from the
+        computer: then it is declined, as before."""
+        if not self.notifier.reaches_away("alarm"):
+            return False
+        until = time.strftime("%H:%M", time.localtime(request.get("until") or time.time()))
+        self.gate.log.write("approval_escalated", by="kelvin", request=request.get("title"), until=until)
+        self.notifier("alarm", "Waiting for your answer: %s" % request.get("title"),
+                      "Nobody answered at the Kelvin computer. Kelvin waits until %s for an answer from your phone (the "
+                      "Kelvin app) or the computer; then it declines%s. Asked: %s" % (
+                          until, ", and the queue pauses there" if self.queue.state in ("running", "pausing") else "",
+                          "; ".join(request.get("items") or [])[:300]))
+        return True
 
     def _monitor_said(self, kind: str, title: str, text: str = "") -> Any:
         """The monitor raised or cleared an alarm: kept with the alarm history, then told to people."""

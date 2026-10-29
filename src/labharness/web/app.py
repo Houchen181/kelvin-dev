@@ -382,10 +382,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *, dem
         runtime.report_kinds = set(settings.report_kinds)                # scan, device and project reports
 
     def configure_notifications() -> None:
-        try:
-            runtime.notifier.configure(settings.get("webhook"), settings.notify_kinds)
+        try:   # the webhook, email and the heartbeat: each off until a person sets it up
+            runtime.notifier.configure(settings.get("webhook"), settings.notify_kinds, email=settings.email(),
+                                       heartbeat=settings.get("heartbeat"), heartbeat_s=settings.heartbeat_s)
         except ValueError:
             runtime.notifier.configure(None, settings.notify_kinds)
+        runtime.notifier.phones = lambda: bool(settings.devices)   # a paired phone sees requests and alarms
+        if hasattr(runtime.approver, "escalate_s"):   # a request nobody answered here waits this long for the phone
+            runtime.approver.escalate_s = settings.approval_wait_s
 
     @asynccontextmanager
     async def lifespan(app: Starlette):

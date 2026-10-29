@@ -12,17 +12,19 @@ Items can be added at any position, moved, edited or removed while the queue run
 is fixed. A person approves the whole queue once, before it starts: every drive range any item uses. Each scan is
 still dry-run just before it runs, and a scan or step that needs more than was approved asks again. The queue
 pauses when a scan fails, is declined or stopped, or Kelvin closes; it never starts by itself.
-The queue is kept per lab in queue.json, next to its runs."""
+The queue is kept per lab in queue.json, next to its runs, with an account of its last run for the morning: what was
+done, what stopped part-way and what data it kept, what didn't run, and every alarm raised meanwhile."""
 from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .labconfig import read_yaml
 from .plans import PlanError, Stabilize, _split, _stabilize, load_plan
@@ -126,6 +128,7 @@ class ScanQueue:
         self.on_error = "pause"      # pause | continue
         self.changed = time.time()
         self.cut_short: List[Item] = []   # the items that were running when Kelvin last closed
+        self.last: Optional[Dict[str, Any]] = None   # the account of its last run (summarize), until it runs again
         if path is not None:
             self._load()
 
@@ -148,6 +151,7 @@ class ScanQueue:
                 self.cut_short.append(item)
             self.items.append(item)
         self.on_error = data.get("on_error") if data.get("on_error") in ("pause", "continue") else "pause"
+        self.last = data.get("last") if isinstance(data.get("last"), dict) else None
         if any(i.status == "waiting" for i in self.items):
             self.state, self.reason = "paused", "Kelvin restarted; start the queue again when you are ready"
 
@@ -158,8 +162,8 @@ class ScanQueue:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"items": [i.view() for i in self.items], "on_error": self.on_error},
-                                      indent=1, ensure_ascii=False), encoding="utf-8")
+            tmp.write_text(json.dumps({"items": [i.view() for i in self.items], "on_error": self.on_error,
+                                       "last": self.last}, indent=1, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self.path)
         except OSError:
             pass
@@ -268,7 +272,50 @@ class ScanQueue:
             running = next((i for i in self.items if i.status == "running"), None)
             return {"state": self.state, "reason": self.reason, "on_error": self.on_error,
                     "items": [i.view() for i in self.items], "running": running.id if running else None,
-                    "waiting": sum(1 for i in self.items if i.status == "waiting"), "changed": self.changed}
+                    "waiting": sum(1 for i in self.items if i.status == "waiting"), "changed": self.changed,
+                    "last": self.last}
+
+    def summarize(self, started: float, alarms: List[Any],
+                  points: Callable[[str], Optional[Tuple[int, int]]]) -> List[str]:
+        """What happened since the queue started, in lines, for the person who comes in the morning, from the record
+        alone: when it ran and how it ended, what was done, what stopped part-way and the data it kept, what stopped
+        with none, what didn't run, and every alarm raised meanwhile (cleared or still on). Kept with the queue and
+        shown with it until it runs again. alarms: the monitor's (raised, cleared, text); points(run_id): (points
+        taken, points planned) of a run."""
+        end = time.time()
+        with self.lock:
+            ran = [(n, i) for n, i in enumerate(self.items, 1) if i.started and i.started >= started]
+            waiting = [(n, i) for n, i in enumerate(self.items, 1) if i.status == "waiting"]
+            state, reason = self.state, self.reason
+        lines = ["The queue ran %s to %s (%s) and %s" % (_at(started), _at(end), _span(end - started),
+                                                        "finished" if state == "idle" else "paused: %s" % reason)]
+        done, partial, empty = [], [], []
+        for n, i in ran:
+            got = points(i.run_id) if i.run_id else None
+            label = "#%d %s" % (n, i.name)
+            if i.status == "done":
+                done.append(label + (" (%d points, run %s)" % (got[0], i.run_id) if got else ""))
+            elif got and got[0]:
+                partial.append("%s, %d of %d points kept (run %s): %s" % (label, got[0], got[1], i.run_id,
+                                                                         _why(i.message)))
+            else:
+                empty.append("%s: %s" % (label, _why(i.message) or i.status))
+        if done:
+            lines.append("Done: " + "; ".join(done))
+        if partial:
+            lines.append("Stopped part-way, its data kept: " + "; ".join(partial))
+        if empty:
+            lines.append("Stopped with no data: " + "; ".join(empty))
+        if waiting:
+            lines.append("Not run: " + ", ".join("#%d %s" % (n, i.name) for n, i in waiting))
+        raised = sorted((a for a in alarms if getattr(a, "raised", 0) >= started), key=lambda a: a.raised)
+        lines.append("Alarms while it ran: " + "; ".join(
+            "%s %s (%s)" % (_at(a.raised), a.text, "cleared %s" % _at(a.cleared) if a.cleared else "still on")
+            for a in raised) if raised else "No alarm was raised while it ran.")
+        with self.lock:
+            self.last = {"started": started, "ended": end, "lines": lines}
+            self.save()
+        return lines
 
     def text(self) -> str:
         v = self.view()
@@ -278,7 +325,23 @@ class ScanQueue:
             lines.append("%d. [%s] %s %s%s%s" % (n, i.status, i.kind, i.name, " (%s)" % i.note if i.note else "", extra))
         if not self.items:
             lines.append("(empty: add plans or steps with queue_add)")
+        if self.last and v["state"] not in ("running", "pausing"):
+            lines += ["last run:"] + ["  " + line for line in self.last.get("lines") or []]
         return "\n".join(lines)
+
+
+def _at(t: float) -> str:
+    return time.strftime("%H:%M", time.localtime(t))
+
+
+def _span(seconds: float) -> str:
+    return "%.0f min" % (seconds / 60) if seconds < 5400 else "%.1f h" % (seconds / 3600)
+
+
+def _why(message: str) -> str:
+    """Why a run stopped, from its item's message: "run X aborted after 9/80 points: <why>; then <cleanup>"."""
+    m = re.search(r"points: (.*?)(?:; then |$)", message or "", re.S)
+    return (m.group(1) if m else message or "").strip()[:400]
 
 
 def saved_queues(folder: Path) -> List[str]:
