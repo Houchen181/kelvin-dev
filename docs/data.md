@@ -286,3 +286,11 @@ Work outside every project goes to a **General** project.
 **Settings → Reports** chooses PDF, PowerPoint or both (the default), or **Only when I ask**, and which of the three kinds Kelvin keeps up to date. The data (`run.h5`) is always written. A report that can't be written never fails the run; the lab record notes it.
 
 Slides are 16:9; the plots are native shapes and the results native tables, so you can edit them in PowerPoint, Keynote or Google Slides. Neither format needs extra software to write. Characters that the standard PDF fonts can't show are spelled out (Ω becomes "Ohm").
+
+### A record for your lab notebook (ELN)
+
+A run's or a day's record as Markdown, with its plots as PNG files beside it, to paste or upload into an electronic lab notebook (eLabFTW, LabArchives, Benchling, OneNote, Obsidian...). Like the reports, it is written by Kelvin's code from what Kelvin keeps, never retyped by a model, so every number is the run's own.
+- **What a run's record holds:** when it ran, its duration, points and status, who started it and the run folder; what it set, swept and measured; each instrument's values at the start, and what was away from safe; **each instrument's calibration in force when it started** (and whether it was out of date then, see [Calibration](portal.md#calibration)); the plots with their numbers in words, the results with their fits, the assessment, its issues and the next step; the approvals and alarms with who answered and when; what it left changed; and the plan.
+- **A day's record** has that day's runs (the latest 40) and the day's lab record: approvals and declines, runs, stops, alarms, calibrations recorded and changes to the lab, as `events.jsonl` keeps them. Every command is still in `events.jsonl`.
+- **Where to get it:** on a run's tab in the Runs pane, **Lab notebook** beside **Download data**; for a day, **Report…** → **For a lab notebook (ELN)**, a date, **Download the day's record**. Each downloads a .zip (the Markdown and its `figures/`). In a chat: "put today's runs in my lab notebook" (`export_eln`: runs by id, a day, or the last N).
+- **A copy stays** in the data folder's `eln/<name>/` (`<name>.md` and `figures/`), and making one is in the lab record.
