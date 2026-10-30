@@ -3399,10 +3399,17 @@ class LabRuntime:
         return "\n".join(lines + ["warning: " + w for w in warnings])
 
     def read_examples(self, path: str) -> str:
+        """A maker's files, read for a card: never in Kelvin's own folder (the lab config, the settings, the accounts,
+        the cards, everyone's chats), nor a file that may hold sign-ins, keys or tokens (carddraft.read_sources)."""
         try:
-            return carddraft.read_sources(path)
+            return carddraft.read_sources(path, own=self._kelvins())
         except (OSError, ValueError) as e:
             return "not read: %s" % e
+
+    def _kelvins(self) -> List[Path]:
+        """Kelvin's own folder (~/Kelvin: the lab config, the settings, the accounts, the cards, everyone's chats),
+        which the tools that read a folder a person or the model names never reach."""
+        return [self.home] if self.home is not None else []
 
     def script_cards(self) -> Any:
         """Every card Kelvin can use here, to match the lab's scripts against: Kelvin's own and the lab's. Kept
@@ -3426,7 +3433,7 @@ class LabRuntime:
         from .. import scripts as lab_scripts
         from ..adapters import resource_name
         try:
-            found = lab_scripts.survey(path, self.script_cards())
+            found = lab_scripts.survey(path, self.script_cards(), own=self._kelvins())
         except (OSError, ValueError) as e:
             return "not read: %s" % e
         in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}

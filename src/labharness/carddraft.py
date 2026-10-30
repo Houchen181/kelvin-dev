@@ -385,12 +385,23 @@ def _source_text(path: Path) -> str:
     return text
 
 
-def read_sources(path: str, limit: int = MAX_MANUAL) -> str:
+def read_sources(path: str, limit: int = MAX_MANUAL, own: Iterable[Any] = ()) -> str:
     """A maker's example scripts, headers and READMEs from a file or folder, as one text with each file's name: what
-    a card is drafted from when the maker gives code rather than a command reference."""
+    a card is drafted from when the maker gives code rather than a command reference. Never Kelvin's own folders
+    (own: its folder, with the lab config, the settings, the accounts, the cards and everyone's chats), nor a file
+    that may hold sign-ins, keys or tokens (folderfiles.secret): a folder that holds them is read without them."""
+    from .folderfiles import mine, secret
     root = Path(path).expanduser()
     if not root.exists():
         raise ValueError("no file or folder %s" % path)
+    kelvins = mine(root.resolve(), own)
+    if kelvins is not None:
+        raise ValueError("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, "
+                         "the instrument cards and everyone's chats: Kelvin's AI never reads there. Name the maker's "
+                         "files where the maker put them" % (root, kelvins))
+    if secret(root.resolve()):
+        raise ValueError("%s may hold sign-ins, keys or tokens (a password file, an SSH or cloud key, a .env file, "
+                         "another program's sign-in): Kelvin's AI never reads such files" % root)
     if root.is_file():
         files = [root]
     else:
@@ -398,10 +409,11 @@ def read_sources(path: str, limit: int = MAX_MANUAL) -> str:
         for p in sorted(root.rglob("*")):
             if len(files) >= 400:
                 break
-            if any(part in SKIP_DIRS for part in p.relative_to(root).parts[:-1]):
+            if any(part in SKIP_DIRS or part.startswith(".") for part in p.relative_to(root).parts[:-1]):
                 continue
             if p.is_file() and p.suffix.lower() in SOURCE_TYPES and p.stat().st_size < (
-                    MAX_PDF_BYTES if p.suffix.lower() == ".pdf" else 2_000_000):
+                    MAX_PDF_BYTES if p.suffix.lower() == ".pdf" else 2_000_000) and not secret(p) \
+                    and mine(p.resolve(), own) is None:
                 files.append(p)
     if not files:
         raise ValueError("no scripts, headers, text files or PDFs in %s" % path)
