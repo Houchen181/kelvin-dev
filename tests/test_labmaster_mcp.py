@@ -1245,5 +1245,6 @@ def test_datasets_and_files_against_the_real_engine(runtime, real_engine):
                          ("labmaster_dataset_files", {"path": str(folder)}))
     assert "2026-10-30/#001_RT_10-00-00 (RT;" in listed, listed
     assert "a.dat" in files and "snapshot.json" in files, files
-    (outside,) = call(runtime, ("labmaster_dataset_files", {"path": "C:/Windows"}))
+    outside_dir = real_engine.parent          # Kelvin's folder: absolute, exists, outside the data folder
+    (outside,) = call(runtime, ("labmaster_dataset_files", {"path": str(outside_dir)}))
     assert outside.startswith("not listed:") and "outside the data folder" in outside, outside
