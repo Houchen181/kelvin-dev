@@ -69,3 +69,18 @@ def test_auto_mode_stays_inside_the_mounted_devices_protection(tmp_path):
     said = rt.run(GATE_SWEEP.format(name="to_four", top=4))                       # a run is judged the same way
     assert "declined: plan to_four not run" in said
     assert "smu.V goes 67% of the way from safe to device D1's limit" in str(rt.gate.approver.requests[-1])
+
+
+# ------------------------------------------------------------------- 7. hands on the sample holds a stage
+
+def test_hands_on_the_sample_holds_the_motion_stage(tmp_path):
+    """t07: with the lock on, stage.position 24 → 30 mm went ahead; in optics the stage carries the sample."""
+    rt = runtime(tmp_path, [])
+    rt.hands_on("human (portal)")
+    r = rt.gate.set("stage", "position", 30)
+    assert r.action == "refused" and "nothing on stage moves until a person unlocks it" in r.message
+    assert rt.gate.raw("stage", "MOVE:ABSolute 30").action == "refused"
+    assert rt.gate.raw("stage", "*RST").action == "refused"
+    assert rt.gate.get("stage", "position_actual").ok                            # reading still works
+    rt.hands_off("human (portal)")
+    assert rt.gate.set("stage", "position", 30).ok

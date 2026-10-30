@@ -133,7 +133,8 @@ def test_hands_on_the_sample_holds_every_drive_at_safe(tmp_path):
     setpoint = tc.read("setpoint")
     lines = rt.hands_on("human (portal)")
     assert smu.read("V") == 0 and smu.read("output") is False
-    assert "kept as they are (they don't touch the sample): tc, magnet, stage, counter" in lines
+    assert "kept as they are (they don't touch the sample): tc, magnet, counter" in lines
+    assert "held where they are, nothing on them moves until you unlock: stage" in lines   # it may carry the sample
     assert tc.read("setpoint") == setpoint
     r = rt.gate.set("smu", "V", 1)
     assert not r.ok and "hands on the sample" in r.message

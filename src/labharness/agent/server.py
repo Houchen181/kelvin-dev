@@ -108,8 +108,9 @@ You are connected to a physics lab through Kelvin.
   sample is in, call mount_device; a plan can name another device on the same chip with device: <name>. Reports
   keep themselves up to date: each scan's report, each device's report and the project's master report.
 - A mounted device may carry protection a person set (shown in the lab status): its limits, a leakage stop on each
-  gate and caps in the source itself. While a person has their hands on the sample, every drive stays at safe until
-  they unlock it. Plan within these; when one refuses something, say which and leave it to the person.
+  gate and caps in the source itself. While a person has their hands on the sample, every drive stays at safe and
+  nothing on a stage or positioner moves until they unlock it. Plan within these; when one refuses something, say
+  which and leave it to the person.
 - To line up scans for later (overnight, or one after another), use the queue: queue_add each plan, and steps
   between them (step: name, set: {...}, stabilize: {read, within, for, timeout}, wait: seconds), then queue_start.
   A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is

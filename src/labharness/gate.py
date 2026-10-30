@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from . import pulses
+from . import protection, pulses
 from .cards import ParamSpec, num
 from .eventlog import EventLog
 from .instrument import Instrument
@@ -308,6 +308,10 @@ class SafetyGate:
             if any(b.match(c) is not None for b in inst.card.blocked):
                 return self._done(Result(False, "refused", target, message="refused: %r is blocked on %s" % (c, instr)),
                                   "action")
+        held = None if re.match(r"(stop|halt|abort)\b", "%s %s" % (name, action.label), re.I) else \
+            self._held_still(inst, target)   # a stage's own stop still works with hands on the sample
+        if held:
+            return self._done(Result(False, "refused", target, message="refused: %s" % held), "action")
         if action.drives:
             hands = self._hands_problem(target)
             if hands:
@@ -701,6 +705,11 @@ class SafetyGate:
             if problem:
                 return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
             current = self._current(inst, spec)
+            if not _same(spec, current, target):
+                problem = self._held_still(inst, key)
+                if problem:
+                    return self._done(Result(False, "refused", key, value=target, message="refused: " + problem),
+                                      "set", by)
             owner = inst.card.range_owner(spec.name)
             if owner is not None and not _same(spec, current, target):
                 problem = self._range_problem(inst, owner, spec, target)
@@ -889,6 +898,16 @@ class SafetyGate:
             return None
         return ("%s: %s has hands on the sample (since %s), so every drive stays at safe until a person unlocks it "
                 "in the Lab panel" % (what, hands.get("by") or "someone", hands.get("since") or "now"))
+
+    def _held_still(self, inst: Instrument, what: str) -> Optional[str]:
+        """While a person has their hands on the sample, nothing on an instrument that moves the sample or the optics
+        around it (a motion stage, a positioner) moves either way: a stage that carries the sample or an objective
+        could pinch or crash (protection.holds_position). Reading it, and its own stop, still work."""
+        hands = getattr(self.lab, "hands_on", None)
+        if not hands or not protection.holds_position(inst.card):
+            return None
+        return ("%s: %s has hands on the sample (since %s), so nothing on %s moves until a person unlocks it in the "
+                "Lab panel" % (what, hands.get("by") or "someone", hands.get("since") or "now", inst.name))
 
     def _away_problem(self, inst: Instrument, spec: ParamSpec, later: bool = False) -> Optional[str]:
         """Why this drive can't move away from safe now (hands on the sample, a guard or interlock that can't be
@@ -1438,6 +1457,9 @@ class SafetyGate:
             for name, action in card.actions.items():   # the card's own named command: as do_action sends it
                 if len(action.send) == 1 and action.send[0].strip().lower() == cmd.strip().lower():
                     return self.act(inst.name, name)
+            held = None if _HARMLESS.match(cmd) else self._held_still(inst, inst.name)
+            if held:   # a stage or positioner with hands on the sample: no move, reset or unknown command reaches it
+                return refused("%r not sent; %s" % (cmd, held))
             for r in card.reset:
                 if r.match(cmd) is not None:
                     prep = self._to_safe(inst, wait=True)

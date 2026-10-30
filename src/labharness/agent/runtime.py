@@ -1866,6 +1866,7 @@ class LabRuntime:
         with self.lock:
             lines: List[str] = []
             kept: List[str] = []
+            held: List[str] = []
             with self.gate.acting_as(by):
                 for name, inst in self.lab.instruments.items():
                     if not inst.enabled:
@@ -1873,10 +1874,12 @@ class LabRuntime:
                     if protection.applies_to_sample(inst.card):
                         lines += [r.message for r in self.gate.to_safe(name)]
                     else:
-                        kept.append(name)
+                        (held if protection.holds_position(inst.card) else kept).append(name)
             lines = lines or ["everything that reaches the sample was already at safe"]
             if kept:
                 lines.append("kept as they are (they don't touch the sample): %s" % ", ".join(kept))
+            if held:
+                lines.append("held where they are, nothing on them moves until you unlock: %s" % ", ".join(held))
             self.gate.log.write("hands_on", by=by, steps=lines)
             self._refresh()
         return lines
