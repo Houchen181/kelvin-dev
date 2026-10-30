@@ -203,7 +203,7 @@ It serves `http://127.0.0.1:8780` on this computer only. On the first start it w
 
 `backup` copies the database now and `stats` prints the counts. `operator-key` makes a new operator key; the old one stops working at once, even while the hub runs, and so do the operator pages opened with it.
 
-While the hub runs, it re-reads `hub.json` when the file changes. If the file can't be read at that moment (half saved, or between an editor's delete and rename), it keeps the settings it has and tries again later. It never writes defaults over it. `KELVIN_HUB_HOME` can stand in for `--home`.
+While the hub runs, it looks at `hub.json` every 30 seconds and takes it in again when it changed. If the file can't be read at that moment (half saved, or between an editor's delete and rename), it keeps the settings it has and tries again later. It never writes defaults over it. `KELVIN_HUB_HOME` can stand in for `--home`.
 
 The hub's folder:
 

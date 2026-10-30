@@ -54,6 +54,7 @@ MAX_FORM = 64 * 1024               # bytes in a form post
 MAX_TOKEN = 16 * 1024              # bytes in a token trade
 MAX_SYNC = 64 * 1024 * 1024        # bytes in one sync
 EXPORT_EVERY = 600                 # seconds between one person's exports
+CONFIG_EVERY = 30                  # seconds between looks at hub.json, taken in again when it changed
 AT_ONCE = 3                        # one person's syncs and uploads in flight; more get a 429 at once, on the event loop
 HEAVY_THREADS = 16                 # worker threads syncs and uploads may hold across the hub (of 40): pages keep the rest
 CHALLENGE = re.compile(r"^[A-Za-z0-9_-]{43,128}$")
@@ -1573,9 +1574,16 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                 except Exception:
                     log.exception("backup failed")
                 await asyncio.sleep(3600)
-        task = asyncio.create_task(nightly()) if backups else None
+        async def settings() -> None:   # hub.json edited while the hub runs: in use within CONFIG_EVERY
+            while True:
+                await asyncio.sleep(CONFIG_EVERY)
+                try:
+                    await call(hub.refresh_config)
+                except Exception:
+                    log.exception("hub.json not read again")
+        tasks = [asyncio.create_task(settings())] + ([asyncio.create_task(nightly())] if backups else [])
         yield
-        if task:
+        for task in tasks:
             task.cancel()
         await gateway.close()
 

@@ -559,3 +559,26 @@ def test_a_hub_for_kelvin_accounts_only(tmp_path, monkeypatch):
     client.cookies.clear()
     assert client.get("/admin/people.csv", follow_redirects=False).status_code == 303   # owners only
     assert client.get("/admin/users/1", follow_redirects=False).status_code == 303
+
+
+def test_hub_json_edited_while_the_hub_runs_is_taken_in(tmp_path, monkeypatch):
+    """Not only when the owner console is used: the hub looks at hub.json every CONFIG_EVERY seconds."""
+    import json
+    import time
+    import labharness.hub.server as hub_server
+    monkeypatch.setattr(hub_server, "CONFIG_EVERY", 0.05)
+    hub = Hub(tmp_path / "hub")
+    with TestClient(create_app(hub, hosts=["testserver"], backups=False)) as client:
+        assert client.get("/api/health").status_code == 200
+        path = hub.config_path
+        data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        data["consent_version"] = "2099-01-01"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        for _ in range(200):
+            if hub.config.get("consent_version") == "2099-01-01":
+                break
+            time.sleep(0.02)
+        assert hub.config["consent_version"] == "2099-01-01"
+        path.write_text("{half saved", encoding="utf-8")                        # mid-write: the settings stay
+        time.sleep(0.3)
+        assert hub.config["consent_version"] == "2099-01-01"
