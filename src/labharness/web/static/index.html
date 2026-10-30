@@ -226,6 +226,8 @@
     </section>
   </main>
 
+  <!-- the side panels: each opens on its own; side by side, or a pair to a column (fitLayout in app.js) -->
+  <div id="workcol" class="dock-col" hidden>
   <section id="runpane" class="runpane" aria-label="Runs" hidden>
     <div id="runpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the runs pane" tabindex="0"></div>
     <header class="pane-head">
@@ -291,7 +293,9 @@
       </div>
     </div>
   </section>
+  </div>
 
+  <div id="sidecol" class="dock-col" hidden>
   <aside id="labpanel" class="labpanel" aria-label="Lab" hidden>
     <div id="labpanel-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the lab panel" tabindex="0"></div>
     <header class="lab-head">
@@ -385,6 +389,7 @@
       <button id="team-send" class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
     </form>
   </aside>
+  </div>
 </div>
 
 <dialog id="settings-dialog" class="dialog settings">

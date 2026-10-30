@@ -989,7 +989,6 @@
   }
   function toggleRuns(open) {
     RUNS.open = open === undefined ? !RUNS.open : open;
-    if (RUNS.open && ANA.open) toggleAnalysis(false);   // they take turns beside the chat
     $("runpane").hidden = !RUNS.open;
     $("toggle-runs").setAttribute("aria-pressed", String(RUNS.open));
     $("toggle-runs").classList.toggle("on", RUNS.open);
@@ -1006,8 +1005,7 @@
     if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
     const tab = runTab(runId, plan);
     setTabStatus(tab, "running");
-    if (ANA.open) selectRun(runId);   // the Analysis pane keeps its place; the dot on Runs says a run is on
-    else openRun(runId, plan);
+    openRun(runId, plan);
     pollLive();
   }
   async function pollLive() {
@@ -1153,32 +1151,88 @@
     }) : [h("div", { class: "pane-menu-note" }, "No runs yet.")]));
   }
 
-  // The conversation keeps at least CHAT_MIN pixels. When the side panels need the room, the sidebar steps aside (the
-  // menu button brings it back over the page), and if that is not enough the lab panel floats over the runs pane.
-  // Below 1100 px both panels float anyway (app.css), below 820 px the sidebar too.
-  const CHAT_MIN = 520, SIDEBAR_W = 264, LAB_MIN = 300, RUNS_MIN = 340;
-  let LAB_W = 380;   // the lab panel's width: the person drags its left edge, like the runs pane's (lh.labWidth)
+  // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
+  // Beside the conversation, which keeps at least CHAT_MIN pixels, they stand side by side: Runs and Analysis, then
+  // Lab and Team chat. When they need more room than there is, they shrink alike; then the sidebar steps aside (the
+  // menu button brings it back over the page); then each pair shares a column, one above the other; and if even that
+  // doesn't fit, the Lab column floats over. Below 1100 px they float over the conversation in one column (app.css),
+  // below 820 px the sidebar too.
+  const CHAT_MIN = 520, SIDEBAR_W = 264;
+  const PANES = {   // id: [open?, its column, its least width, where its width is kept]
+    runpane: [() => RUNS.open, "workcol", 340, "lh.runsWidth"],
+    anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
+    labpanel: [() => S.labOpen, "sidecol", 300, "lh.labWidth"],
+    teampanel: [() => TEAM.open, "sidecol", 280, "lh.teamWidth"],
+  };
+  const PANE_W = {};   // each pane's width as the person left it
+  const sum = (xs) => xs.reduce((a, b) => a + b, 0);
+  const openPanes = () => Object.keys(PANES).filter((id) => PANES[id][0]());
+  const colPanes = (col) => openPanes().filter((id) => PANES[id][1] === col);
+  const paneWant = (id) => PANE_W[id] || PANES[id][2];
+  const colWant = (col) => Math.max(0, ...colPanes(col).map(paneWant));
+  const colLeast = (col) => Math.max(0, ...colPanes(col).map((id) => PANES[id][2]));
+  // widths that fit in `room`: each as wanted, or, when they don't fit, all shrunk alike and none below its least
+  function share(want, least, room) {
+    if (sum(want) <= room) return want;
+    const slack = want.map((w, i) => w - least[i]);
+    const k = Math.max(0, room - sum(least)) / Math.max(1, sum(slack));
+    return want.map((w, i) => Math.round(least[i] + slack[i] * k));
+  }
+  // the width the panes may take beside the conversation
+  function paneRoom() {
+    const w = window.innerWidth;
+    return w - (w <= 820 || $("app").classList.contains("compact") ? 0 : SIDEBAR_W) - CHAT_MIN;
+  }
   function fitLayout() {
-    const app = $("app"), w = window.innerWidth;
-    const floating = w <= 1100;
-    const runs = (RUNS.open || ANA.open) && !floating ? RUNS_MIN : 0;
-    const lab = (S.labOpen || TEAM.open) && !floating ? LAB_W : 0;
-    const compact = w > 820 && SIDEBAR_W + CHAT_MIN + runs + lab > w;
+    const app = $("app"), w = window.innerWidth, open = openPanes();
+    for (const col of ["workcol", "sidecol"]) $(col).hidden = !colPanes(col).length;
+    const floating = w <= 1100, both = !$("workcol").hidden && !$("sidecol").hidden;
+    const side = w > 820 ? SIDEBAR_W : 0;   // the sidebar, while it stands beside the page
+    const rowLeast = sum(open.map((id) => PANES[id][2])), stackLeast = colLeast("workcol") + colLeast("sidecol");
+    const stacked = !floating && CHAT_MIN + rowLeast > w;
+    const compact = !floating && side > 0 && open.length > 0 && side + CHAT_MIN + (stacked ? stackLeast : rowLeast) > w;
+    const floatLab = stacked && both && CHAT_MIN + stackLeast > w;
     app.classList.toggle("compact", compact);
-    app.classList.toggle("float-lab", lab > 0 && (compact ? 0 : SIDEBAR_W) + CHAT_MIN + runs + LAB_W > w);
+    app.classList.toggle("stacked", stacked);
+    app.classList.toggle("float-lab", floatLab);
+    app.classList.toggle("float-two", floating && both);
     if (!compact && w > 820) app.classList.remove("side-open");
-    if ((S.labOpen || TEAM.open) && !floating) setLabWidth(LAB_W);
-    if (RUNS.open || ANA.open) setPaneWidth(parseInt($("runpane").style.width, 10));
+    if (!floating) {
+      const room = paneRoom();
+      if (stacked) {   // a column for each pair, as wide as its wider pane
+        const cols = ["workcol", "sidecol"].filter((c) => !$(c).hidden && !(floatLab && c === "sidecol"));
+        const got = share(cols.map(colWant), cols.map(colLeast), room);
+        cols.forEach((c, i) => { $(c).style.width = got[i] + "px"; });
+        if (floatLab) $("sidecol").style.width = Math.min(colWant("sidecol"), w - 40) + "px";
+      } else {
+        $("workcol").style.width = $("sidecol").style.width = "";
+        const got = share(open.map(paneWant), open.map((id) => PANES[id][2]), room);
+        open.forEach((id, i) => { $(id).style.width = got[i] + "px"; });
+      }
+    }
     syncScrim();
   }
-  function setLabWidth(w) {
-    const app = $("app"), vw = window.innerWidth;
-    const sidebar = vw <= 820 || app.classList.contains("compact") ? 0 : SIDEBAR_W;
-    const runs = (RUNS.open || ANA.open) && vw > 1100 && !app.classList.contains("float-lab") ? RUNS_MIN : 0;
-    const max = Math.max(LAB_MIN, vw - sidebar - runs - CHAT_MIN);
-    LAB_W = Math.round(Math.min(max, Math.max(LAB_MIN, w || 0)));
-    $("labpanel").style.width = $("teampanel").style.width = LAB_W + "px";
-    return LAB_W;
+  // a pane's left edge, dragged: its width (in a shared column, the column's), as much as fits beside the others,
+  // which keep the widths they show now
+  function sizePane(id, want) {
+    const app = $("app"), col = PANES[id][1], floatLab = app.classList.contains("float-lab");
+    const shown = (el) => Math.round($(el).getBoundingClientRect().width);
+    let least = PANES[id][2], most, mates = [id];
+    if (app.classList.contains("stacked")) {
+      mates = colPanes(col);
+      least = colLeast(col);
+      const other = col === "workcol" ? "sidecol" : "workcol";
+      const beside = $(other).hidden || floatLab ? 0 : shown(other);
+      if (beside) for (const p of colPanes(other)) PANE_W[p] = beside;
+      most = floatLab && col === "sidecol" ? window.innerWidth - 40 : paneRoom() - beside;
+    } else {
+      const others = openPanes().filter((p) => p !== id);
+      for (const p of others) PANE_W[p] = shown(p);
+      most = paneRoom() - sum(others.map((p) => PANE_W[p]));
+    }
+    const width = Math.round(Math.min(Math.max(least, most), Math.max(least, want || 0)));
+    for (const p of mates) PANE_W[p] = width;
+    fitLayout();
   }
   // a side panel's left edge, dragged or moved with the arrow keys, sets its width: set(w) takes the width and keeps it
   // in bounds, done() keeps it for next time
@@ -1204,29 +1258,18 @@
       done();
     });
   }
-  function initLabPanel() {
-    const saved = Number(store("lh.labWidth"));
-    if (saved > 0) LAB_W = saved;
-    for (const id of ["labpanel", "teampanel"]) {   // they take turns at the side, at one width
-      $(id).style.width = LAB_W + "px";
-      edgeResize($(id + "-resize"), $(id), setLabWidth, () => { store("lh.labWidth", String(LAB_W)); fitLayout(); });
+  function initPanes() {
+    const kept = (key) => Number(store(key)) || 0;
+    PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(720, Math.max(420, window.innerWidth * 0.42)));
+    PANE_W.anpane = kept("lh.anWidth") || PANE_W.runpane;   // until it has its own: the one it shared with Runs
+    PANE_W.labpanel = kept("lh.labWidth") || 380;
+    PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
+    for (const id of Object.keys(PANES)) {
+      edgeResize($(id + "-resize"), $(id), (w) => sizePane(id, w),
+                 () => { for (const p of Object.keys(PANES)) store(PANES[p][3], String(PANE_W[p])); });
     }
-  }
-  function setPaneWidth(w) {
-    const app = $("app"), vw = window.innerWidth;
-    const sidebar = vw <= 820 || app.classList.contains("compact") ? 0 : SIDEBAR_W;
-    const lab = (S.labOpen || TEAM.open) && vw > 1100 && !app.classList.contains("float-lab") ? LAB_W : 0;
-    const max = Math.max(RUNS_MIN, vw - sidebar - lab - CHAT_MIN);
-    const width = Math.round(Math.min(max, Math.max(RUNS_MIN, w || 0)));
-    $("runpane").style.width = $("anpane").style.width = width + "px";
-    return width;
   }
   function initRunsPane() {
-    const saved = Number(store("lh.runsWidth"));
-    setPaneWidth(saved > 0 ? saved : Math.min(720, Math.max(420, window.innerWidth * 0.42)));
-    for (const id of ["runpane", "anpane"]) {   // they take turns beside the chat, at one width
-      edgeResize($(id + "-resize"), $(id), setPaneWidth, () => store("lh.runsWidth", String(parseInt($(id).style.width, 10))));
-    }
     $("toggle-runs").addEventListener("click", () => toggleRuns());
     $("close-runs").addEventListener("click", () => toggleRuns(false));
     $("runs-history").addEventListener("click", showRunsMenu);
@@ -4922,7 +4965,6 @@
 
   function toggleLab(open) {
     S.labOpen = open === undefined ? !S.labOpen : open;
-    if (S.labOpen && TEAM.open) toggleTeam(false);   // they take turns at the side
     $("labpanel").hidden = !S.labOpen;
     fitLayout();
     if (S.labOpen) pollState();
@@ -5871,7 +5913,6 @@
 
   function toggleTeam(open) {
     TEAM.open = open === undefined ? !TEAM.open : open;
-    if (TEAM.open && S.labOpen) toggleLab(false);   // they take turns at the side
     $("teampanel").hidden = !TEAM.open;
     $("toggle-team").setAttribute("aria-pressed", String(TEAM.open));
     $("toggle-team").classList.toggle("on", TEAM.open);
@@ -6054,7 +6095,6 @@
 
   function toggleAnalysis(open) {
     ANA.open = open === undefined ? !ANA.open : open;
-    if (ANA.open && RUNS.open) toggleRuns(false);   // they take turns beside the chat
     $("anpane").hidden = !ANA.open;
     $("toggle-analysis").setAttribute("aria-pressed", String(ANA.open));
     $("toggle-analysis").classList.toggle("on", ANA.open);
@@ -6088,7 +6128,6 @@
     ANA.auto = auto || { x: !spec.x, y: !spec.y, group: false };   // what Kelvin left out follows the run, as the server's does
     if (!ANA.open) {
       ANA.open = true;   // shown without starting the pane's own default
-      if (RUNS.open) toggleRuns(false);
       $("anpane").hidden = false;
       $("toggle-analysis").setAttribute("aria-pressed", "true");
       $("toggle-analysis").classList.add("on");
@@ -6449,8 +6488,8 @@
       return b;
     }));
     applyModels(boot.models.groups, boot.default_model, boot.auto_model, boot.models.hub);
+    initPanes();
     initRunsPane();
-    initLabPanel();
     initTeam();
     initAnalysis();
     fitLayout();
