@@ -97,6 +97,17 @@ final class WalkthroughTests: XCTestCase {
         reach(row, doing, file: file, line: line).coordinate(withNormalizedOffset: CGVector(dx: x, dy: 0.5)).tap()
     }
 
+    /// Tap `element` once nothing is over it, not even something still on its way out.
+    func tapWhenFree(_ element: XCUIElement, _ doing: String, file: StaticString = #filePath, line: UInt = #line) {
+        let free = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND hittable == true"),
+                                             object: element)
+        if XCTWaiter().wait(for: [free], timeout: 10) != .completed {
+            print("WALKTHROUGH-DEBUG while \(doing):\n\(app.debugDescription)")
+            return XCTFail("can't \(doing)", file: file, line: line)
+        }
+        element.tap()
+    }
+
     func testTheWelcomeScreensSheetsCanBeFilledInAndLeft() {
         launch([])
         must(app.buttons["Pair with a code"], "see the welcome screen").tap()
@@ -120,9 +131,12 @@ final class WalkthroughTests: XCTestCase {
         app.navigationBars.buttons["Cancel"].tap()
         gone(app.navigationBars["Kelvin account"], "leave the account sheet")
         let notNow = app.buttons["Not Now"]   // iOS offers to save the password typed, though nothing was signed in to
-        if notNow.waitForExistence(timeout: 5) { notNow.tap() }
+        if notNow.waitForExistence(timeout: 8) {
+            notNow.tap()
+            gone(notNow, "say no to saving the password")
+        }
 
-        must(app.buttons["Try a demo lab"], "find the demo lab").tap()
+        tapWhenFree(app.buttons["Try a demo lab"], "try the demo lab")
         must(app.navigationBars["Demo lab"], "open the demo lab")
     }
 
@@ -178,7 +192,11 @@ final class WalkthroughTests: XCTestCase {
         reach(keep, "get to Keep fit").tap()
         must(app.buttons["Kept"], "keep the fit", timeout: 20)
         app.buttons["Export CSV"].tap()
-        must(app.navigationBars.buttons["Done"], "see the CSV", timeout: 20).tap()
+        let preview = must(app.otherElements["QLPreviewControllerView"], "open the CSV", timeout: 20)
+        let header = preview.staticTexts.matching(NSPredicate(format: "label CONTAINS 'magnet.field'")).firstMatch
+        let csvShown = header.waitForExistence(timeout: 30)   // checked at the end, so the rest is walked through too
+        if !csvShown { print("WALKTHROUGH-DEBUG while showing the CSV:\n\(app.debugDescription)") }
+        must(app.buttons["QLOverlayDoneButtonAccessibilityIdentifier"], "close the CSV").tap()
         must(app.navigationBars["Analysis"], "come back from the CSV")
 
         // the computers: the demo lab unpaired, the welcome screen again
@@ -189,5 +207,6 @@ final class WalkthroughTests: XCTestCase {
         must(app.buttons["Unpair"], "find Unpair").tap()
         confirm("Unpair", "unpair the demo lab")
         must(app.buttons["Try a demo lab"], "get back to the welcome screen")
+        XCTAssertTrue(csvShown, "the CSV preview never showed the file")
     }
 }
