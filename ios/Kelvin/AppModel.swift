@@ -26,10 +26,18 @@ final class AppModel: ObservableObject {
         self.transport = transport
         self.tokens = tokens
         self.defaults = defaults
-        list = ComputerList.decode(defaults.data(forKey: key))
+        var kept = ComputerList.decode(defaults.data(forKey: key))
+        let older = kept.tidy()   // older pairings of a computer paired again, from app 0.1.6 and before
+        for id in older { tokens.delete(id) }
+        list = kept
         account = Account.decode(defaults.data(forKey: accountKey))
         teamName = defaults.string(forKey: "kelvin.teamName") ?? ""
+        if !older.isEmpty { save() }
     }
+
+    /// The account's Kelvins removed on this phone (their ids on the hub): not listed again until the phone signs in
+    /// to the account again.
+    private var removedKelvins: Set<String> { Set(defaults.stringArray(forKey: "kelvin.removedKelvins") ?? []) }
 
     /// The newest team chat message shown on this phone, per computer (nil: it never looked).
     func teamRead(_ c: Computer) -> Int? { defaults.object(forKey: "kelvin.teamRead." + c.id.uuidString) as? Int }
@@ -59,7 +67,8 @@ final class AppModel: ObservableObject {
         Notifier.shared.ask()
     }
 
-    /// Ask the hub which Kelvins the account is signed in to, and add the new ones.
+    /// Ask the hub which Kelvins the account is signed in to: one row per computer, without those removed here or
+    /// those the hub no longer lists (ComputerList.sync).
     func lookForKelvins() async throws {
         guard let account, let token = accountToken else { return }
         do {
@@ -68,7 +77,7 @@ final class AppModel: ObservableObject {
             kelvins = []
             throw e
         }
-        for k in kelvins { list.account(k, hub: account.hub) }
+        for id in list.sync(kelvins, hub: account.hub, removed: removedKelvins) { forgetHere(id) }
         save()
     }
 
@@ -91,6 +100,7 @@ final class AppModel: ObservableObject {
         self.account = nil
         kelvins = []
         defaults.removeObject(forKey: accountKey)
+        defaults.removeObject(forKey: "kelvin.removedKelvins")   // signed in again, the phone lists them all again
         save()
     }
 
@@ -175,17 +185,30 @@ final class AppModel: ObservableObject {
         save()
     }
 
-    /// Forget a computer on this phone, and unpair the phone on the computer too if it answers.
+    /// Forget a computer on this phone, at once. Then, if it answers, Kelvin there forgets this phone too: its pairing,
+    /// or, for one of the account's Kelvins, the direct token it gave this phone. One of the account's stays off this
+    /// list until the phone signs in to the account again.
     func remove(_ c: Computer) async {
-        if let token = tokens.token(for: c.id) {
-            _ = try? await reach(c.addresses, token: token, transport: transport(for: c)) { try await $0.forget() }
+        let token = tokens.token(for: c.id), hubToken = accountToken, here = transport(for: c)
+        if c.viaAccount, let kelvin = c.kelvin {
+            defaults.set(Array(removedKelvins.union([kelvin])), forKey: "kelvin.removedKelvins")
         }
-        tokens.delete(c.id)
-        sessions[c.id]?.pause()
-        sessions[c.id] = nil
+        forgetHere(c.id)
         list.remove(c.id)
-        defaults.removeObject(forKey: "kelvin.teamRead." + c.id.uuidString)
         save()
+        if c.viaAccount, let base = c.relayBase, let hubToken {
+            _ = try? await KelvinClient(base: base, token: hubToken, transport: here, timeout: 5, bearer: true).forgetDirect()
+        } else if !c.viaAccount, let token {
+            _ = try? await reach(c.addresses, token: token, transport: here) { try await $0.forget() }
+        }
+    }
+
+    /// What this phone keeps for a computer that left its list: its token, its session, its team chat read mark.
+    private func forgetHere(_ id: UUID) {
+        tokens.delete(id)
+        sessions[id]?.pause()
+        sessions[id] = nil
+        defaults.removeObject(forKey: "kelvin.teamRead." + id.uuidString)
     }
 
     private func save() {

@@ -195,7 +195,7 @@ The phone then opens Kelvin's phone page: alarms with **Got it**, requests with 
 - **Chat** (control phones): your conversations, a new or incognito chat, the answer as it arrives with Kelvin's steps, and requests to approve right there. Tap the microphone to talk instead of typing: the iPhone turns your words into text itself, the audio never leaves it, and you check the message before sending.
 - **Team:** the lab's team chat, the same as on the computer. Set the name you write under once on the phone (a watch phone only reads). A badge counts the messages written since you last looked.
 - **Runs:** recent runs with their plots, and their report and data to open on the phone. **Analyze** (control phones) opens the run in Analysis, as on the computer: more runs over it, x and y (a column or a formula), the steps, a fit with its errors, **Keep fit** and the CSV to share.
-- **Computers:** your Kelvin account and its Kelvins, switch between computers, pair another, unpair, sign out.
+- **Computers:** your Kelvin account and its Kelvins (one row per computer: of the Kelvins a computer has signed in with, the one online, else the latest), switch between computers, pair another, swipe left to unpair a paired one or remove one of the account's from the phone (it shows again after you sign in again), sign out.
 
 Team and Analysis need Kelvin 0.3.32 or later on the lab computer.
 

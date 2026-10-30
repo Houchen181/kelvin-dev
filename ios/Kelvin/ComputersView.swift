@@ -26,7 +26,7 @@ struct ComputersView: View {
                         }
                     }
                     .swipeActions {
-                        if !c.viaAccount { Button("Unpair", role: .destructive) { removing = c } }
+                        Button(c.viaAccount ? "Remove" : "Unpair", role: .destructive) { removing = c }
                     }
                 }
                 Button {
@@ -35,7 +35,7 @@ struct ComputersView: View {
                     Label("Pair with a Kelvin computer", systemImage: "qrcode.viewfinder")
                 }
             } footer: {
-                Text("Swipe left to unpair a paired one.")
+                Text("Swipe left to unpair or remove one.")
             }
 
             let c = session.computer
@@ -73,15 +73,22 @@ struct ComputersView: View {
         .navigationTitle("Computers")
         .refreshable { try? await app.lookForKelvins() }
         .task { try? await app.lookForKelvins() }
-        .confirmationDialog("Unpair \(removing?.lab ?? "")?", isPresented: Binding(get: { removing != nil },
-                                                                                   set: { if !$0 { removing = nil } }),
+        .confirmationDialog(removeTitle,
+                            isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible) {
-            Button("Unpair", role: .destructive) {
-                if let c = removing { Task { await app.remove(c) } }
+            if let c = removing {
+                Button(c.viaAccount ? "Remove" : "Unpair", role: .destructive) { Task { await app.remove(c) } }
             }
         } message: {
-            Text("This phone stops working with that computer, and Kelvin there forgets it. Pairing again needs a new code.")
+            Text(removing?.viaAccount == true
+                 ? "It shows again after you sign in to your Kelvin account again."
+                 : "This phone stops working with that computer, and Kelvin there forgets it. Pairing again needs a new code.")
         }
+    }
+
+    var removeTitle: String {
+        guard let c = removing else { return "" }
+        return c.viaAccount ? "Remove \(c.lab) from this phone?" : "Unpair \(c.lab)?"
     }
 
     func subtitle(_ c: Computer) -> String {

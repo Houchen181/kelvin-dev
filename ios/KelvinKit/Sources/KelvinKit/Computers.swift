@@ -96,12 +96,14 @@ public struct ComputerList: Codable, Equatable, Sendable {
         computers.first { $0.id == selected } ?? computers.first
     }
 
-    /// A new pairing. Pairing the same computer again (same name and an address in common) replaces the old one,
-    /// whose token is then useless; returns the id it replaced, if any, so its token can be deleted.
+    /// A new pairing. Pairing the same computer again replaces the old pairing, whose token is then useless: the same
+    /// computer by its name, wherever it is now (a laptop has another address on another network), or, when Kelvin
+    /// didn't say its name, by an address in common. Returns the id it replaced, if any, so its token can be deleted.
     @discardableResult
     public mutating func add(_ c: Computer) -> UUID? {
         let old = computers.firstIndex { o in
-            o.host != nil && o.host == c.host && !Set(o.addresses).isDisjoint(with: c.addresses)
+            !o.viaAccount && (c.host != nil ? o.host == c.host
+                                            : o.host == nil && !Set(o.addresses).isDisjoint(with: c.addresses))
         }
         var replaced: UUID?
         if let i = old {
@@ -139,5 +141,39 @@ public struct ComputerList: Codable, Equatable, Sendable {
         computers.append(c)
         if selected == nil || !computers.contains(where: { $0.id == selected }) { selected = c.id }
         return c
+    }
+
+    /// The account's Kelvins as the hub lists them, one row per computer: the hub keeps every Kelvin that ever signed
+    /// in with the account until it signs out, so a computer can have had several (a new data folder, a reinstall).
+    /// Of a computer's, those online now are shown, else its latest; not those removed on this phone, nor those the hub
+    /// no longer lists. Returns the ids that left the list, so their tokens go too.
+    @discardableResult
+    public mutating func sync(_ listed: [HubKelvin], hub: URL, removed: Set<String> = []) -> [UUID] {
+        let kept = listed.filter { !removed.contains($0.id) }
+        let shown = kept.filter { k in
+            let same = kept.filter { $0.name == k.name }
+            if same.contains(where: \.online) { return k.online }
+            return same.max { ($0.lastSeen ?? 0) < ($1.lastSeen ?? 0) }?.id == k.id
+        }
+        for k in shown { account(k, hub: hub) }
+        let ids = Set(shown.map(\.id))
+        let gone = computers.filter { c in c.hub == hub && c.kelvin.map { !ids.contains($0) } ?? false }.map(\.id)
+        for id in gone { remove(id) }
+        return gone
+    }
+
+    /// Older pairings of a computer paired again before a pairing replaced them by its name (app 0.1.6 and before):
+    /// the one in use, else the newest, stays. Returns the ids that left the list, so their tokens go too.
+    @discardableResult
+    public mutating func tidy() -> [UUID] {
+        var gone: [UUID] = []
+        for c in computers where !c.viaAccount && c.host != nil && !gone.contains(c.id) {
+            let same = computers.filter { !$0.viaAccount && $0.host == c.host }
+            guard same.count > 1 else { continue }
+            let stay = same.first { $0.id == selected } ?? same.max { $0.paired < $1.paired } ?? c
+            gone += same.filter { $0.id != stay.id && !gone.contains($0.id) }.map(\.id)
+        }
+        for id in gone { remove(id) }
+        return gone
     }
 }

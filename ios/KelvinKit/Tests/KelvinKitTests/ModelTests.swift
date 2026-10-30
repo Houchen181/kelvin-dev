@@ -78,6 +78,41 @@ final class ModelTests: XCTestCase {
         XCTAssertTrue(Route.hub.encrypted)
     }
 
+    func testOneRowPerComputerFromTheAccount() {
+        let hub = URL(string: "https://kelvin.example.org")!
+        let listed = [HubKelvin(id: "a", name: "LAB-PC", online: true, lastSeen: 300),
+                      HubKelvin(id: "b", name: "LAB-PC", online: false, lastSeen: 200),    // an older data folder
+                      HubKelvin(id: "c", name: "LAPTOP", online: false, lastSeen: 100),
+                      HubKelvin(id: "d", name: "LAPTOP", online: false, lastSeen: 150),    // its latest
+                      HubKelvin(id: "e", name: "OLD-PC", online: false, lastSeen: 50)]
+        var list = ComputerList()
+        list.sync(listed, hub: hub)
+        XCTAssertEqual(list.computers.compactMap(\.kelvin).sorted(), ["a", "d", "e"])
+        XCTAssertEqual(list.sync(listed, hub: hub, removed: ["e"]).count, 1)            // removed on this phone
+        XCTAssertEqual(list.computers.compactMap(\.kelvin).sorted(), ["a", "d"])
+        list.sync(Array(listed.prefix(2)), hub: hub)                                    // LAPTOP signed out
+        XCTAssertEqual(list.computers.compactMap(\.kelvin), ["a"])
+        XCTAssertEqual(list.selected, list.computers.first?.id)
+    }
+
+    func testPairingTheSameComputerAgainReplacesItWhereverItIsNow() {
+        let home = Computer(lab: "Cryostat lab", host: "LAB-PC", phoneName: "P", role: "control",
+                            addresses: [URL(string: "http://10.0.0.5:8771")!])
+        let away = Computer(lab: "Cryostat lab", host: "LAB-PC", phoneName: "P", role: "control",
+                            addresses: [URL(string: "http://192.168.7.20:8771")!])
+        var list = ComputerList()
+        list.add(home)
+        XCTAssertEqual(list.add(away), home.id)                                         // another network, one computer
+        XCTAssertEqual(list.computers.map(\.id), [away.id])
+        var before = ComputerList(computers: [home, away], selected: home.id)          // duplicates from app 0.1.6
+        XCTAssertEqual(before.tidy(), [away.id])                                        // the one in use stays
+        XCTAssertEqual(before.computers.map(\.id), [home.id])
+        let other = Computer(lab: "Optics lab", host: "OPTICS-PC", phoneName: "P", role: "control",
+                             addresses: [URL(string: "http://10.0.0.5:8771")!])
+        list.add(other)
+        XCTAssertEqual(list.computers.count, 2)                                         // another computer stays apart
+    }
+
     func testAnOlderOrNewerKelvinStillReads() throws {
         let s = try decode(LabState.self, "{\"lab\": \"Virtual Lab\", \"something_new\": [1, 2]}")
         XCTAssertEqual(s.pending, [])

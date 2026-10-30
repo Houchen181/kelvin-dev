@@ -227,6 +227,35 @@ final class AppTests: XCTestCase {
         XCTAssertNil(tokens.token(for: c.id))
     }
 
+    func testTheAccountListsEachComputerOnceAndRemovedOnesStayAway() async throws {
+        let script = Script()
+        script.on("POST /api/signin", "{\"access_token\": \"khub_phone\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        script.on("GET /api/relay/kelvins", "{\"kelvins\": [{\"id\": \"pc-1\", \"name\": \"LAB-PC\", \"online\": true},"
+                  + " {\"id\": \"pc-old\", \"name\": \"LAB-PC\", \"online\": false, \"last_seen\": 1},"
+                  + " {\"id\": \"laptop\", \"name\": \"LAPTOP\", \"online\": false, \"last_seen\": 5}]}")
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        try await app.signIn(hub: URL(string: "https://kelvin.example.org")!, email: "ada@example.org", password: "pw")
+        XCTAssertEqual(app.list.computers.compactMap(\.kelvin).sorted(), ["laptop", "pc-1"])   // LAB-PC once
+        let laptop = try XCTUnwrap(app.list.computers.first { $0.kelvin == "laptop" })
+        await app.remove(laptop)
+        XCTAssertEqual(app.list.computers.compactMap(\.kelvin), ["pc-1"])
+        try await app.lookForKelvins()
+        XCTAssertEqual(app.list.computers.compactMap(\.kelvin), ["pc-1"])        // removed on this phone: stays away
+        script.on("POST /api/signout", 204, "")
+        await app.signOut()
+        try await app.signIn(hub: URL(string: "https://kelvin.example.org")!, email: "ada@example.org", password: "pw")
+        XCTAssertEqual(app.list.computers.compactMap(\.kelvin).sorted(), ["laptop", "pc-1"])   // signed in again
+    }
+
+    func testUnpairingDoesNotWaitForTheComputer() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script)
+        script.unreachable = ["192.168.1.50", "100.101.7.9"]                   // the lab computer is off
+        await app.remove(c)
+        XCTAssertNil(app.current)
+        XCTAssertNil(tokens.token(for: c.id))
+    }
+
     func testTheTeamChatOnThePhone() async throws {
         let script = Script()
         let (app, c) = try await paired(script)
