@@ -1233,7 +1233,7 @@
       least = colLeast(col);
       const other = col === "workcol" ? "sidecol" : "workcol";
       const beside = $(other).hidden || floatLab ? 0 : shown(other);
-      if (beside) for (const p of colPanes(other)) PANE_W[p] = Math.min(start[p], beside);
+      if (beside) for (const p of colPanes(other)) PANE_W[p] = Math.min(start[p] || paneWant(p), beside);
       most = floatLab && col === "sidecol" ? window.innerWidth - CHAT_MIN : paneRoom() - beside;
     } else {
       const others = openPanes().filter((p) => p !== id);
@@ -1242,7 +1242,7 @@
     }
     const width = Math.round(Math.min(Math.max(least, most), Math.max(least, want || 0)));
     PANE_W[id] = width;
-    if (stacked) for (const p of colPanes(col)) if (p !== id) PANE_W[p] = Math.min(start[p], width);
+    if (stacked) for (const p of colPanes(col)) if (p !== id) PANE_W[p] = Math.min(start[p] || paneWant(p), width);   // opened since: as it is
     fitLayout();
   }
   // a side panel's left edge, dragged or moved with the arrow keys, sets its width: set(w) takes the width and keeps it
@@ -1254,13 +1254,17 @@
       handle.setPointerCapture(e.pointerId);
       document.body.classList.add("resizing");
       const move = (ev) => set(right - ev.clientX);
-      const up = () => {
+      let ended = false;
+      const up = () => {   // let go, or the pointer lost (the handle hidden mid-drag)
+        if (ended) return;
+        ended = true;
         handle.removeEventListener("pointermove", move);
         document.body.classList.remove("resizing");
         done();
       };
       handle.addEventListener("pointermove", move);
       handle.addEventListener("pointerup", up, { once: true });
+      handle.addEventListener("lostpointercapture", up, { once: true });
     });
     handle.addEventListener("keydown", (e) => {
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
@@ -1276,6 +1280,7 @@
     PANE_W.labpanel = kept("lh.labWidth") || 380;
     PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
     for (const id of Object.keys(PANES)) {
+      $(id + "-resize").addEventListener("pointerdown", () => { DRAG = null; });   // each drag starts from what is shown
       edgeResize($(id + "-resize"), $(id), (w) => sizePane(id, w), () => {
         DRAG = null;
         for (const p of Object.keys(PANES)) store(PANES[p][3], String(PANE_W[p]));
