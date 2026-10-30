@@ -9,6 +9,10 @@ final class AppModel: ObservableObject {
     @Published var signingIn = false
     @Published private(set) var account: Account?
     @Published private(set) var kelvins: [HubKelvin] = []     // the account's, as the hub last listed them
+    /// The name this phone writes under in team chats: each person their own, also on an account people share.
+    @Published var teamName: String {
+        didSet { defaults.set(teamName, forKey: "kelvin.teamName") }
+    }
 
     let transport: Transport
     let tokens: TokenStore
@@ -24,7 +28,13 @@ final class AppModel: ObservableObject {
         self.defaults = defaults
         list = ComputerList.decode(defaults.data(forKey: key))
         account = Account.decode(defaults.data(forKey: accountKey))
+        teamName = defaults.string(forKey: "kelvin.teamName") ?? ""
     }
+
+    /// The newest team chat message shown on this phone, per computer (nil: it never looked).
+    func teamRead(_ c: Computer) -> Int? { defaults.object(forKey: "kelvin.teamRead." + c.id.uuidString) as? Int }
+
+    func setTeamRead(_ id: Int, _ c: Computer) { defaults.set(id, forKey: "kelvin.teamRead." + c.id.uuidString) }
 
     /// This phone's token on the Kelvin hub, while signed in to the account.
     var accountToken: String? { account == nil ? nil : tokens.token(for: Account.tokenID) }
@@ -174,6 +184,7 @@ final class AppModel: ObservableObject {
         sessions[c.id]?.pause()
         sessions[c.id] = nil
         list.remove(c.id)
+        defaults.removeObject(forKey: "kelvin.teamRead." + c.id.uuidString)
         save()
     }
 
@@ -190,6 +201,7 @@ final class LabSession: ObservableObject {
     @Published private(set) var problem: KelvinError?
     @Published private(set) var connected: URL?
     @Published private(set) var live = LiveData()
+    @Published private(set) var teamRead: Int?     // the newest team chat message shown on this phone
 
     private weak var app: AppModel?
     private let transport: Transport
@@ -203,10 +215,24 @@ final class LabSession: ObservableObject {
         self.app = app
         transport = app.transport(for: computer)
         tokens = app.tokens
+        teamRead = app.teamRead(computer)
     }
 
     var role: Role { computer.access }
     var route: Route? { connected.map { computer.route($0) } }
+
+    /// Team chat messages written since this phone last showed the chat.
+    var teamUnread: Int {
+        guard let last = state?.team, let read = teamRead else { return 0 }
+        return max(0, last - read)
+    }
+
+    /// The team chat was shown up to this message. force: also back (a team chat that began again).
+    func readTeam(upTo id: Int, force: Bool = false) {
+        guard force || id > (teamRead ?? -1) else { return }
+        teamRead = id
+        app?.setTeamRead(id, computer)
+    }
 
     /// Look every few seconds until paused.
     func resume() {
@@ -231,6 +257,9 @@ final class LabSession: ObservableObject {
             let s = try await c.state()
             state = s
             problem = nil
+            if let last = s.team, last < (teamRead ?? Int.max) {   // the first look: what was there is not news
+                readTeam(upTo: last, force: true)
+            }
             Notifier.shared.look(at: s, on: computer)
             await follow(s.live, with: c)
         } catch let e as KelvinError {
@@ -339,7 +368,7 @@ final class LabSession: ObservableObject {
         return r.lines
     }
 
-    func runs() async throws -> [RunSummary] { try await ready().runs() }
+    func runs(limit: Int? = nil) async throws -> [RunSummary] { try await ready().runs(limit: limit) }
 
     func run(_ id: String) async throws -> RunDetail { try await ready().run(id) }
 
@@ -365,6 +394,36 @@ final class LabSession: ObservableObject {
 
     func turn(chat id: String, text: String, model: String) async throws -> AsyncThrowingStream<ChatEvent, Error> {
         try await ready().turn(chat: id, text: text, model: model)
+    }
+
+    // ------------------------------------------------------------------ the team chat and Analysis
+
+    func team(after: Int) async throws -> TeamPage { try await ready().team(after: after) }
+
+    func team(before: Int) async throws -> TeamPage { try await ready().team(before: before) }
+
+    func postTeam(name: String, text: String) async throws -> TeamMessage {
+        let m = try await ready().postTeam(name: name, text: text)
+        readTeam(upTo: m.id)
+        return m
+    }
+
+    func analysisColumns(run: String) async throws -> AnalysisColumns { try await ready().analysisColumns(run: run) }
+
+    func analyze(_ spec: AnalysisSpec) async throws -> AnalysisResult { try await ready().analyze(spec) }
+
+    func keepFit(_ spec: AnalysisSpec, curve: Int, replace: Bool) async throws -> KeepAnswer {
+        try await ready().keepFit(spec, curve: curve, replace: replace)
+    }
+
+    /// The curves as a CSV file, saved where Quick Look can open and share it.
+    func analysisCSV(_ spec: AnalysisSpec) async throws -> URL {
+        let (name, data) = try await ready().analysisCSV(spec)
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("analysis", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent(name)
+        try data.write(to: url, options: .atomic)
+        return url
     }
 }
 

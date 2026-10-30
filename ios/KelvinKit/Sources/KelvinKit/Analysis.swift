@@ -414,16 +414,18 @@ public enum KeepAnswer: Equatable, Sendable {
 public enum Measured {
     public static func text(_ value: Double?, error: Double? = nil, unit: String = "") -> String {
         guard let value, value.isFinite else { return "–" }
-        let err = error.map(abs).flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
-        let (factor, u) = SI.scale([value] + (err.map { [$0] } ?? []), unit: unit)
-        let tail = u.isEmpty ? "" : " " + u
-        let v = value * factor
-        guard let e = err.map({ $0 * factor }) else { return String(format: "%.4g", v) + tail }
+        var err: Double?
+        if let error, error.isFinite, error != 0 { err = Swift.abs(error) }
+        let scale = SI.scale(err.map { [value, $0] } ?? [value], unit: unit)
+        let factor: Double = scale.factor
+        let tail = scale.unit.isEmpty ? "" : " " + scale.unit
+        let v: Double = value * factor
+        guard let e: Double = err.map({ $0 * factor }) else { return String(format: "%.4g", v) + tail }
         if factor == 1 {   // no prefix fits this unit: a power of ten both share, when the numbers are far from 1
-            let top = max(abs(v), e)
+            let top: Double = Swift.max(Swift.abs(v), e)
             let power = Int(log10(top).rounded(.down))
             if power < -3 || power > 4 {
-                let s = pow(10, Double(power))
+                let s: Double = pow(10.0, Double(power))
                 return "(" + pair(v / s, e / s) + ")e\(power)" + tail
             }
         }
