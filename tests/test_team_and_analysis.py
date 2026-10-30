@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 import re
+import time
 
 import pytest
 
@@ -48,24 +49,24 @@ def last(rt):
 
 # ------------------------------------------------------------------ the team chat itself
 
-def test_messages_are_kept_with_their_names_and_read_back_after_a_restart(tmp_path):
-    team = TeamChat(tmp_path)
+def test_messages_are_kept_with_their_names_and_colors_and_read_back_after_a_restart(tmp_path):
+    team = TeamChat(tmp_path, enforce_rate=False)   # the rate itself is tested in test_peoplechat.py
     assert team.last == 0 and team.read() == "The team chat is empty."
     a = team.post("  Alice ", "Cooling down: don't touch the magnet.", account="xu lab", via="portal")
     b = team.post("Bob", "OK\nI'll take the AFM.", account="xu lab", via="phone Bob's iPhone")
     assert (a["id"], b["id"], a["name"], b["text"]) == (1, 2, "Alice", "OK\nI'll take the AFM.")
-    assert a["at"] and a["account"] == "xu lab" and b["via"] == "phone Bob's iPhone"
-    with open(team.path, "a", encoding="utf-8") as f:   # a line a crash cut short is skipped, never the file
-        f.write('{"id": 3, "na')
-    again = TeamChat(tmp_path)
+    assert a["at"] and a["ts"] and a["account"] == "xu lab" and b["via"] == "phone Bob's iPhone"
+    assert a["color"].startswith("#") and a["color"] != b["color"]   # each person a color of their own
+    again = TeamChat(tmp_path, enforce_rate=False)
     assert [m["id"] for m in again.since(0)] == [1, 2] and again.last == 2
     assert [m["id"] for m in again.since(1)] == [2] and [m["id"] for m in again.before(2)] == [1]
     c = again.post("Alice", "Back at 3.")
-    assert c["id"] == 3 and TeamChat(tmp_path).last == 3
+    assert c["id"] == 3 and TeamChat(tmp_path, enforce_rate=False).last == 3
+    assert (tmp_path / "team" / "chat.json").exists()   # Kelvin's own folder: everyone's, as the lab's memory
 
 
 def test_a_message_needs_a_name_and_text_within_bounds(tmp_path):
-    team = TeamChat(tmp_path)
+    team = TeamChat(tmp_path, enforce_rate=False)
     for name, text in [("", "hi"), ("   ", "hi"), ("A" * 41, "hi"), ("Alice", ""), ("Alice", " \n "),
                        ("Alice", "x" * 4001)]:
         with pytest.raises(TeamChatError):
@@ -74,7 +75,7 @@ def test_a_message_needs_a_name_and_text_within_bounds(tmp_path):
 
 
 def test_kelvin_reads_the_latest_or_what_matches_marked_as_peoples_words(tmp_path):
-    team = TeamChat(tmp_path)
+    team = TeamChat(tmp_path, enforce_rate=False)
     for i in range(50):
         team.post("Alice" if i % 2 else "Bob", "note %d about the cryostat" % i if i % 10 == 0 else "note %d" % i,
                   account="lab")
@@ -94,20 +95,47 @@ def test_kelvin_reads_the_latest_or_what_matches_marked_as_peoples_words(tmp_pat
 
 def test_the_portal_posts_and_reads_the_team_chat_and_the_state_marks_the_newest(rt, tmp_path):
     settings = Settings(tmp_path / "settings.json")
-    client = TestClient(create_app(rt, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"]))
+    # the old team chat (teamchat.py's JSONL) is copied into the new one on the first read (V1_SPEC.md F5.1)
+    (tmp_path / "team-chat.jsonl").write_text(
+        json.dumps({"id": 1, "at": "2026-10-29T09:12:00+00:00", "name": "Ana", "account": "xu lab",
+                    "via": "portal", "text": "Old message from the old chat."}) + "\n", encoding="utf-8")
+    provider = Scripted([[{"type": "text", "text": "The magnet is at 9 T, Bob."}]])
+    client = TestClient(create_app(rt, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"],
+                                   providers={"scripted": provider}))
     h = {"X-Kelvin-Token": settings.access_key}
-    assert client.get("/api/state", headers=h).json()["team"] == 0
-    r = client.post("/api/team", json={"name": "Alice", "text": "Fridge at base."}, headers=h)
-    assert r.status_code == 200 and r.json()["message"]["name"] == "Alice" and r.json()["last"] == 1
-    assert r.json()["message"]["via"] == "portal"
-    client.post("/api/team", json={"name": "Bob", "text": "Thanks!"}, headers=h)
-    assert [m["text"] for m in client.get("/api/team", headers=h).json()["messages"]] == ["Fridge at base.", "Thanks!"]
-    after = client.get("/api/team?after=1", headers=h).json()
-    assert [m["id"] for m in after["messages"]] == [2] and after["last"] == 2
-    assert client.get("/api/state", headers=h).json()["team"] == 2
-    assert client.post("/api/team", json={"name": "", "text": "x"}, headers=h).status_code == 400
-    assert client.get("/api/team?after=x", headers=h).status_code == 400
-    assert (tmp_path / "team-chat.jsonl").exists()   # Kelvin's own folder: everyone's, as the lab's memory
+    with client:
+        assert client.get("/api/state", headers=h).json()["team"] == 1
+        assert [m["text"] for m in client.get("/api/team", headers=h).json()["messages"]] == [
+            "Old message from the old chat."]
+        assert (tmp_path / "team-chat.jsonl.migrated").exists()   # the old file is kept, renamed
+        r = client.post("/api/team", json={"name": "Alice", "text": "Fridge at base."}, headers=h)
+        assert r.status_code == 200 and r.json()["message"]["name"] == "Alice" and r.json()["last"] == 2
+        assert r.json()["message"]["via"] == "portal" and r.json()["message"]["color"].startswith("#")
+        client.post("/api/team", json={"name": "Bob", "text": "Thanks!", "reply_to": 2}, headers=h)
+        got = client.get("/api/team", headers=h).json()
+        assert [m["text"] for m in got["messages"]] == ["Old message from the old chat.", "Fridge at base.", "Thanks!"]
+        assert got["messages"][2]["reply_to"] == 2 and got["messages"][2]["reply_name"] == "Alice"
+        assert set(got["colors"]) == {"Ana", "Alice", "Bob"}   # the chat page's names and colors (V1_SPEC.md F3)
+        after = client.get("/api/team?after=2", headers=h).json()
+        assert [m["id"] for m in after["messages"]] == [3] and after["last"] == 3
+        assert client.get("/api/state", headers=h).json()["team"] == 3
+        people = client.get("/api/team/people", headers=h).json()
+        assert people["you"] == "You" and {p["name"] for p in people["people"]} == {"Ana", "Alice", "Bob"}
+        assert all(p["you"] is False for p in people["people"])   # nobody signed in: nobody is "you"
+        assert client.post("/api/team", json={"name": "", "text": "x"}, headers=h).status_code == 400
+        assert client.get("/api/team?after=x", headers=h).status_code == 400
+        assert (tmp_path / "team" / "chat.json").exists()   # Kelvin's own folder: everyone's, as the lab's memory
+        # "@agent" wakes Kelvin: its answer arrives in the chat as a message of its own, replying to the question
+        asked = client.post("/api/team", json={"name": "Carla", "text": "@agent what is the magnet at?"},
+                            headers=h).json()["message"]
+        messages = []
+        for _ in range(100):   # the answer runs in the portal's loop, a task of its own
+            messages = client.get("/api/team", headers=h).json()["messages"]
+            if any(m["via"] == "agent" for m in messages):
+                break
+            time.sleep(0.05)
+        answer = [m for m in messages if m["via"] == "agent"][-1]
+        assert answer["name"] == "Kelvin" and "9 T" in answer["text"] and answer["reply_to"] == asked["id"]
 
 
 def test_phones_read_the_team_chat_and_controlling_ones_write_and_analyse():
@@ -379,14 +407,14 @@ def test_the_portals_readers_never_wait_for_the_lab():
 
 
 def test_a_message_with_any_unicode_survives_a_restart_and_kelvin_reads_a_page(tmp_path):
-    team = TeamChat(tmp_path)
-    team.post("Ana", "line one pasted line end\x85!")
+    team = TeamChat(tmp_path, enforce_rate=False)
+    team.post("Ana", "line one\u2028pasted line\u2029end\x85!")
     team.post("Bo\ud83d", "half an emoji \ud83d")   # a lone surrogate, as a browser can send one
     team.post("Cy", "third")
-    again = TeamChat(tmp_path)
+    again = TeamChat(tmp_path, enforce_rate=False)
     assert [m["id"] for m in again.since(0)] == [1, 2, 3] and again.post("Di", "fourth")["id"] == 4
-    assert again.since(0)[0]["text"] == "line one pasted line end\x85!"
-    assert "�" in again.since(0)[1]["text"]
+    assert again.since(0)[0]["text"] == "line onepasted lineend!"   # line separators and controls out
+    assert "\ufffd" in again.since(0)[1]["text"] and "\ufffd" in again.since(0)[1]["name"]   # UTF-8 that can be written
     for i in range(60):
         again.post("Ed", "x" * 3000)
     text = again.read(last=200)

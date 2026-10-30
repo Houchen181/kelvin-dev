@@ -289,6 +289,18 @@ DEFERRED = {
     "pulse boards and sequences": ["run_on_board", "show_sequence", "save_sequence"],
     "SQL on the catalog of runs": ["query_runs"],
     "a lab notebook (ELN) record of a run or a day": ["export_eln"],
+    # v2-C: the labMaster sequence engine's rarer half - the sequence's own edits and saved sequences, the rest of
+    # the function library, one run's detail, the analysis scripts, the data folder and the log. The 11 core tools
+    # (status, functions, history, add/update block, import/write script, control, rename, the Home cards) stay in
+    # every chat; these leave the step's context until find_tools loads them (a call by name loads too).
+    "labMaster's saved sequences, functions, analysis and data": [
+        "labmaster_saved", "labmaster_home_cards", "labmaster_delete_block", "labmaster_move_block",
+        "labmaster_duplicate_block", "labmaster_clear_sequence", "labmaster_saved_save", "labmaster_saved_load",
+        "labmaster_saved_delete", "labmaster_read_script", "labmaster_function_update",
+        "labmaster_function_duplicate", "labmaster_function_remove", "labmaster_run_detail",
+        "labmaster_analysis_scripts", "labmaster_write_analysis", "labmaster_run_analysis",
+        "labmaster_analysis_status", "labmaster_analysis_cancel", "labmaster_datasets",
+        "labmaster_dataset_files", "labmaster_log", "labmaster_home"],
 }
 DEFERRED_NAMES = {n for names in DEFERRED.values() for n in names}
 MAX_FOUND = 10
@@ -317,6 +329,18 @@ OFF_LAB = LOOKUPS | READINGS | BESIDE_THE_LAB | {"find_tools", "remember", "wake
                                                  "save_sequence",   # a written pulse sequence: drives nothing
                                                  "save_paper", "make_report", "write_file", "measurement_chain"}
 OFF_LAB |= {"export_eln"}   # reads kept runs and the record, writes its own folder (eln.py)
+# the Sequence engine's own page (in-process in Kelvin): its reads and Home page cards touch no instrument, and a
+# person arms AI starts in the Sequence page (its start/control keep their approval card and stay on the lab's lock)
+OFF_LAB |= {"labmaster_status", "labmaster_functions", "labmaster_saved", "labmaster_home_cards",
+            "labmaster_home_add_card", "labmaster_home_remove_card", "labmaster_rename_sequence"}
+# v2-C: the engine's library, scripts, History, analysis scripts, data folder and log write and read files only -
+# nothing there drives an instrument, so a chat runs them beside another chat's lab work. The sequence's own edits
+# (add/update/delete/move/duplicate/clear/control/import) still take the lab's lock, as they change what runs.
+OFF_LAB |= {"labmaster_write_script", "labmaster_read_script", "labmaster_function_update",
+            "labmaster_function_duplicate", "labmaster_function_remove", "labmaster_history",
+            "labmaster_run_detail", "labmaster_analysis_scripts", "labmaster_write_analysis",
+            "labmaster_run_analysis", "labmaster_analysis_status", "labmaster_analysis_cancel",
+            "labmaster_datasets", "labmaster_dataset_files", "labmaster_log", "labmaster_home"}
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
 LOOKUPS |= ANALYSIS

@@ -18,6 +18,7 @@ import sys
 import time
 import webbrowser
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -45,7 +46,7 @@ from .. import carddraft
 from .. import protection
 from .. import rundata
 from .. import workbench
-from ..teamchat import TeamChat, TeamChatError
+from ..peoplechat import TeamChat, TeamChatError
 from ..homelab import build_lab, builtin_ids, collection_ids, kelvin_ids, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import labops, review, rules as rulebook
@@ -58,6 +59,7 @@ from .remote import (API as PHONE_API, ROLES, Remote, addresses, allow_through_f
 from .providers.base import Provider, sees_images
 from .settings import ENV as OWN_KEYS, Settings, default_model
 from .store import ChatStore
+from .team_agent import TeamAgent
 
 log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/kelvin.log
 
@@ -262,6 +264,148 @@ def open_path(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+# ---------------------------------------------------------------- the complete History page (v1-C)
+# /api/history/all merges every Kelvin run (the runs folders of this person) with every run the
+# sequence engine's own History holds, for the History page in the left rail. The helpers below make
+# ONE row of that page from a run folder; the engine's rows come from sequence.service.panel_runs().
+
+RUN_START_RE = re.compile(r"^(\d{8})-(\d{6})-")
+REPORT_FILE_RE = re.compile(r"^[\w.-]+\.(pdf|pptx)$")
+
+
+def _history_epoch(value: Any) -> Optional[float]:
+    """An epoch second from a number or an ISO string (a run's meta keeps ISO), else None."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            try:
+                return datetime.fromisoformat(text.rstrip("Z")).astimezone().timestamp()
+            except ValueError:
+                return None
+    else:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+    return number if math.isfinite(number) else None
+
+
+def _history_at(epoch: Optional[float]) -> str:
+    """An epoch second as the local time the page shows: ISO 8601 with this PC's offset, or ''."""
+    if epoch is None:
+        return ""
+    try:
+        return datetime.fromtimestamp(epoch).astimezone().isoformat(timespec="seconds")
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _history_started(run_id: str) -> Optional[float]:
+    """When a run started, from its folder name (YYYYMMDD-HHMMSS-plan), in local time."""
+    match = RUN_START_RE.match(str(run_id or ""))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S") \
+            .astimezone().timestamp()
+    except ValueError:
+        return None
+
+
+def _history_reports(folder: Path) -> List[Dict[str, Any]]:
+    """The reports a run folder holds: [{name, url, size}], report.pdf/report.pptx first.
+
+    The url is run_file's own (/api/runs/<run id>/files/<name>), so a click downloads it; a name
+    run_file would refuse is left out (a space in it, an extension it does not serve)."""
+    out: List[Dict[str, Any]] = []
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return out
+    for path in entries:
+        try:
+            if not path.is_file() or not REPORT_FILE_RE.fullmatch(path.name):
+                continue
+            out.append({"name": path.name,
+                        "url": "/api/runs/%s/files/%s" % (folder.name, path.name),
+                        "size": path.stat().st_size})
+        except OSError:
+            continue
+    order = {"report.pdf": 0, "report.pptx": 1}
+    out.sort(key=lambda item: (order.get(item["name"], 2), item["name"]))
+    return out
+
+
+def _kelvin_history_entry(folder: Path, live: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """One row of /api/history/all for a Kelvin run folder (source "kelvin"), or None when the folder
+    is not a run. status/points are what `runtime.runs_index` shows (rundata.meta), and a plan that
+    runs now is "running" with the live numbers."""
+    run_id = str(folder.name)
+    plan = run_id.split("-", 2)[-1] if "-" in run_id else run_id
+    meta: Dict[str, Any] = {}
+    points = planned = None
+    reason = ""
+    running = bool(live and live.get("run_id") == run_id and live.get("status") == "running")
+    if running:
+        status = "running"
+        points, planned = live.get("done"), live.get("total")
+    else:
+        try:
+            meta = rundata.meta(folder) or {}
+        except (KeyError, OSError, ValueError):
+            meta = {}
+        raw = str(meta.get("status") or "unfinished").strip().lower()
+        status = {"interrupted": "unfinished", "error": "failed", "aborted": "failed",
+                  "stopped": "failed"}.get(raw, raw) or "unfinished"
+        points, planned = meta.get("points"), meta.get("planned_points")
+        reason = str(meta.get("reason") or "").strip()
+    started = _history_started(run_id)
+    if started is None:
+        started = _history_epoch(meta.get("started"))
+    finished = None if status == "running" else _history_epoch(meta.get("finished"))
+    bits: List[str] = []
+    if planned is not None:
+        bits.append("%s/%s points" % (points if points is not None else 0, planned))
+    elif points is not None:
+        bits.append("%s point%s" % (points, "" if points == 1 else "s"))
+    if reason:
+        bits.append(reason)
+    if status in ("unfinished",) and not bits:
+        bits.append("did not finish")
+    return {"source": "kelvin", "name": plan, "status": status,
+            "started": started, "at": _history_at(started), "finished": finished,
+            "detail": ", ".join(bits), "run_id": run_id, "blocks": None, "dataset": None,
+            "folder": str(folder).replace("\\", "/"), "report_files": _history_reports(folder),
+            "summary": ""}
+
+
+def _record_history_entry(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """One row of /api/history/all for one of Kelvin's own records of an AI measurement whose run
+    folder is gone (a queued measurement, or one whose folder was cleaned up): source "kelvin",
+    the record's own status (done/failed/queued), detail and time; no folder, data or reports.
+    None for a record without an id or a name (it cannot be identified on the page)."""
+    if not isinstance(record, dict):
+        return None
+    run_id = str(record.get("run_id") or "").strip()
+    name = str(record.get("name") or "").strip() or run_id
+    if not name:
+        return None
+    started = _history_epoch(record.get("started"))
+    return {"source": "kelvin", "name": name,
+            "status": str(record.get("status") or "done").strip().lower() or "done",
+            "started": started, "at": _history_at(started),
+            "finished": _history_epoch(record.get("finished")),
+            "detail": str(record.get("detail") or ""), "run_id": run_id or None,
+            "blocks": None, "dataset": None, "folder": None, "report_files": [],
+            "summary": ""}
+
+
 def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                hosts: Iterable[str] = ("127.0.0.1:8770", "localhost:8770"),
                providers: Optional[Dict[str, Provider]] = None, on_quit: Optional[Any] = None,
@@ -285,7 +429,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
     runtime.lab_memory_dir = home                         # the lab's memory, everyone's (labmemory.py)
-    team = TeamChat(home)                                 # the lab's team chat, everyone's (teamchat.py)
+    team = TeamChat(home)                                 # the lab's team chat, everyone's (peoplechat.py: names,
+                                                          # colors, replies, @agent, the old team-chat.jsonl moved)
     runtime.scripts_folder = lambda: settings.lab_scripts or None   # run_script runs only the scripts in it
     runtime.scripts_python = lambda: settings.lab_scripts_python
     from .. import envs
@@ -452,6 +597,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             runtime.stop_watching()
             await remote.stop()
             await agent.close()
+            # the sequence engine in this process: stop what it runs (the runner is killed and the safe
+            # stop runs as STOP does) and let its data-folder index go. Never raises, never blocks long.
+            try:
+                await asyncio.to_thread(seq_service.close)
+            except Exception:                        # noqa: BLE001 - a close must not fail the close
+                pass
 
     def error(status: int, message: str) -> JSONResponse:
         return JSONResponse({"error": message}, status_code=status)
@@ -737,6 +888,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     agent.draw = draw_pages
     agent.team = team
+    team_agent = TeamAgent(agent, store, team, settings)   # "@agent" wakes Kelvin in the team chat (team_agent.py)
 
     def central_sign_in(email: str, password: str, link: Optional[str] = None, link_password: str = "",
                         old_password: str = "", answer: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2253,9 +2405,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"result": await asyncio.to_thread(runtime.notifier.test)})
 
     async def team_view(request: Request) -> Response:
-        """GET ?after=<id> (or ?before=<id>, scrolling back): the team chat's messages, oldest first, and the newest's
-        id. POST {name, text}: a message under the name its writer chose; the account signed in and where it came
-        from go with it (teamchat.py). Everyone here reads the same chat, as the lab's memory."""
+        """GET ?after=<id> (or ?before=<id>, scrolling back): the team chat's messages, oldest first, the newest's
+        id and the color each name writes under. POST {name, text, reply_to?, color?, cid?}: a message under the
+        name its writer chose (quoting the message reply_to names); the account signed in and where it came from
+        go with it (peoplechat.py). Everyone here reads the same chat, as the lab's memory; a message with
+        "@agent" wakes Kelvin (team_agent.py), whose answer arrives as a message of its own."""
         if request.method == "POST":
             body = await request.json()
             if not isinstance(body, dict):
@@ -2265,9 +2419,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             where, phone = channel(request)
             try:
                 m = await asyncio.to_thread(team.post, body.get("name"), body.get("text"), account,
-                                            "phone %s" % phone if where == "phone" else "portal")
+                                            "phone %s" % phone if where == "phone" else "portal",
+                                            body.get("reply_to"), body.get("color") or "", body.get("cid") or "")
             except TeamChatError as e:
                 return error(400, str(e))
+            woken = team_agent.maybe_wake(m)   # "@agent": Kelvin answers in the chat, as a message of its own
+            if woken is not None:
+                tasks.append(woken)
+                woken.add_done_callback(lambda t: tasks.remove(t) if t in tasks else None)
             return JSONResponse({"message": m, "last": m["id"]})
         q = request.query_params
         try:
@@ -2275,7 +2434,20 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         except ValueError:
             return error(400, "after, before and limit are numbers")
         messages = team.before(before, limit) if before else team.since(after, limit)
-        return JSONResponse({"messages": messages, "last": team.last})
+        return JSONResponse({"messages": messages, "last": team.last, "colors": team.colors()})
+
+    async def team_people(request: Request) -> Response:
+        """GET: who writes in the team chat - each display name and the color it writes under, and which one is
+        this request's ("You" when no account names them): the chat page's names and colors (V1_SPEC.md F3)."""
+        user = session["user"] or {}
+        you = str(user.get("display") or user.get("name") or "")
+        people = await asyncio.to_thread(team.people)
+        if you and not any(p.get("name") == you for p in people):
+            people.insert(0, {"name": you, "color": await asyncio.to_thread(team.color_for, you),
+                              "messages": 0, "last": 0})
+        for p in people:
+            p["you"] = bool(you) and p.get("name") == you
+        return JSONResponse({"people": people, "you": you or "You"})
 
     async def analysis_view(request: Request) -> Response:
         """POST {spec}: the Analysis panel's spec worked out (workbench.py): each curve after its steps, and its fit.
@@ -3121,6 +3293,112 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             limit = 20
         return JSONResponse({"runs": await asyncio.to_thread(runtime.runs_index, limit)})
 
+    # --- the complete History page (v1-C): every Kelvin run + every run of the sequence engine -------
+
+    def kelvin_history_entries() -> List[Dict[str, Any]]:
+        """Every run in this person's runs folders (the data folder's runs/ and the chats' own
+        folders), newest first, as /api/history/all rows. Read on a worker thread (disk)."""
+        try:
+            live = runtime.live_view(10 ** 9)
+        except Exception:                                        # noqa: BLE001 - a page, never a 500
+            live = None
+        out: List[Dict[str, Any]] = []
+        try:
+            folders = list(runtime.runs.iterdir())
+        except Exception:                                        # noqa: BLE001 - no data folder, no rows
+            return out
+        for folder in folders:
+            try:
+                entry = _kelvin_history_entry(folder, live)
+            except Exception:                                    # noqa: BLE001 - one bad run, not the page
+                continue
+            if entry is not None:
+                out.append(entry)
+        out.sort(key=lambda entry: entry.get("started") or 0.0, reverse=True)
+        return out
+
+    def kelvin_record_entries(run_ids: set) -> List[Dict[str, Any]]:
+        """Kelvin's own record of the AI's measurements (sequence.service.kelvin_runs) whose run_id
+        is NOT one of the run folders: the queued ones, and the ones the folder of which was cleaned
+        up. A record whose run_id IS a run folder is that folder's row - the folder has the data and
+        the reports, so the record adds nothing (the same measurement under one row only)."""
+        try:
+            records = seq_service.kelvin_runs()
+        except Exception:                                        # noqa: BLE001 - the page still opens
+            return []
+        out: List[Dict[str, Any]] = []
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            run_id = str(record.get("run_id") or "").strip()
+            if run_id and run_id in run_ids:
+                continue
+            entry = _record_history_entry(record)
+            if entry is not None:
+                out.append(entry)
+        return out
+
+    async def history_all(request: Request) -> Response:
+        """GET /api/history/all?limit=50&offset=0&source=all|kelvin|panel&status=&q=
+
+        The complete History page: this computer's Kelvin runs and Kelvin's record of the AI's
+        measurements whose run folder is not there (both source "kelvin"), merged with the sequence
+        engine's own runs (source "panel"), newest first, one page at a time. `counts` is the size
+        of each source before status/q (the page's tab badges); `total` and `has_more` are after
+        every filter. Empty data is ok: true with no rows."""
+        params = request.query_params
+        try:
+            limit = max(1, min(int(params.get("limit") or 50), 200))
+        except ValueError:
+            limit = 50
+        try:
+            offset = max(0, int(params.get("offset") or 0))
+        except ValueError:
+            offset = 0
+        source = str(params.get("source") or "all").strip().lower()
+        if source not in ("all", "kelvin", "panel"):
+            return JSONResponse({"ok": False, "error": "source must be all, kelvin or panel"}, status_code=400)
+        status = str(params.get("status") or "").strip().lower()
+        query = str(params.get("q") or "").strip().lower()
+
+        kelvin_entries = await asyncio.to_thread(kelvin_history_entries)
+        # ... plus Kelvin's records of AI measurements that have no run folder (a queued one, or one
+        # whose folder was cleaned up); a record that names a run folder is that folder's row already
+        run_ids = {str(entry.get("run_id")) for entry in kelvin_entries if entry.get("run_id")}
+        kelvin_entries += await asyncio.to_thread(kelvin_record_entries, run_ids)
+        kelvin_entries.sort(key=lambda entry: entry.get("started") or 0.0, reverse=True)
+        panel_entries = await asyncio.to_thread(seq_service.panel_runs)
+        counts = {"kelvin": len(kelvin_entries), "panel": len(panel_entries)}
+        merged: List[Dict[str, Any]] = []
+        if source in ("all", "kelvin"):
+            merged += kelvin_entries
+        if source in ("all", "panel"):
+            merged += panel_entries
+
+        def wanted(entry: Dict[str, Any]) -> bool:
+            if status and str(entry.get("status") or "").strip().lower() != status:
+                return False
+            if query:
+                text = "%s\n%s" % (entry.get("name") or "", entry.get("detail") or "")
+                if query not in text.lower():
+                    return False
+            return True
+
+        merged = [entry for entry in merged if wanted(entry)]
+        # newest first; two runs of the same second keep the source order (kelvin before panel)
+        merged.sort(key=lambda entry: entry.get("started") or 0.0, reverse=True)
+        total = len(merged)
+        page = merged[offset:offset + limit]
+        return JSONResponse({"ok": True, "runs": page, "total": total, "offset": offset,
+                             "has_more": offset + len(page) < total, "counts": counts})
+
+    async def history_panel_run(request: Request) -> Response:
+        """GET ?id=<run_id>: one sequence-engine run's blocks, their params and datasets (404 JSON
+        with a readable error when the engine's History has no such run)."""
+        run_id = str(request.query_params.get("id") or "").strip()
+        answer = await asyncio.to_thread(seq_service.panel_run, run_id)
+        return JSONResponse(answer, status_code=404 if not answer.get("ok") else 200)
+
     async def stop_run(request: Request) -> Response:
         try:
             body = await request.json()
@@ -3178,6 +3456,215 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if not ok:
             return error(400, msg)
         return JSONResponse(dict(runtime.queue_view(), message=msg))
+
+    # ---------------------------------------------------------------- the labMaster panel (web/labmaster.py)
+    # Since v1-A labMaster's sequence engine runs IN this process (no 8770 port): web/labmaster.py is the
+    # door to labharness.sequence.service, and its answers keep the shapes the panel's HTTP API gave them.
+    # Every answer is JSON with ok true or false and HTTP 200 (the v0 vectors never raise); a fact that
+    # cannot be read is said in the answer, so the Home and Sequence pages still open.
+    from . import labmaster as bridge    # in-process since v1-A: calls labharness.sequence.service
+    from ..sequence import service as sequence_service
+
+    # One engine for this portal: its data root is ~/Kelvin/sequence (home/sequence). Created here (not on
+    # the first request) so the MCP tools and the page share the same instance; the engine itself starts
+    # lazily on the first call, and a test's second portal with another home replaces it.
+    seq_service = sequence_service.service(home, settings)
+    seq_service.attach_gate(runtime.gate)   # v2 phase B: a block script's instrument commands go through the gate
+
+    home_store = bridge.HomeStore(home / "home.json")
+
+    async def bridge_call(fn: Any, *args: Any, **kw: Any) -> Any:
+        """One bridge call on a worker thread: its 4 s panel timeout must never stall the portal's loop."""
+        def run() -> Any:
+            try:
+                return fn(*args, **kw)
+            except KeyError as e:
+                return {"ok": False, "error": "not found: %s" % (e.args[0] if e.args else e)}
+            except Exception as e:                   # noqa: BLE001 - a slip here must not become a 500
+                return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        return await asyncio.to_thread(run)
+
+    def bridge_json(value: Any) -> JSONResponse:
+        """A bridge answer as the page gets it: HTTP 200 either way."""
+        if not isinstance(value, dict):
+            value = {"ok": False, "error": "the labMaster bridge answered something unexpected"}
+        return JSONResponse(value)
+
+    async def home_view(request: Request) -> Response:
+        """GET: the Home page - greeting, five tiles and the AI's cards; with the panel down, still a page."""
+        return bridge_json(await bridge_call(bridge.snapshot, home_store))
+
+    async def home_cards(request: Request) -> Response:
+        """POST {kind, title, text, items, url, detail, source}: add one card; {"ok", "card"}."""
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the card was not sent as JSON"})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "a card is a JSON object"})
+        card = await bridge_call(home_store.add, body)
+        if isinstance(card, dict) and card.get("ok") is False:
+            return bridge_json(card)
+        return bridge_json({"ok": True, "card": card})
+
+    async def home_card(request: Request) -> Response:
+        """POST {fields}: change them on one card. DELETE: remove it."""
+        card_id = str(request.path_params.get("card_id") or "")
+        if request.method == "DELETE":
+            answer = await bridge_call(home_store.remove, card_id)
+            if isinstance(answer, dict) and answer.get("ok"):
+                return bridge_json({"ok": True})
+            return bridge_json(answer)
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the fields were not sent as JSON"})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the fields are a JSON object"})
+        card = await bridge_call(home_store.update, card_id, **body)
+        if isinstance(card, dict) and card.get("ok") is False:
+            return bridge_json(card)
+        return bridge_json({"ok": True, "card": card})
+
+    async def labmaster_state(request: Request) -> Response:
+        """GET: the panel's snapshot ({ok, url, error, state}); state is null when the panel is not running."""
+        return bridge_json(await bridge_call(bridge.state))
+
+    async def labmaster_palette(request: Request) -> Response:
+        """GET: the function library (palette) and its revision (a save names it as base_rev)."""
+        return bridge_json(await bridge_call(bridge.palette))
+
+    async def labmaster_scripts(request: Request) -> Response:
+        """GET: the .py scripts under the panel's search dirs (what + New function may pick)."""
+        return bridge_json(await bridge_call(bridge.scripts))
+
+    async def labmaster_saved(request: Request) -> Response:
+        """GET: the saved sequences. POST {action: save|load|delete, name?, id?, overwrite?, append?,
+        replace?}: save the live sequence, load a saved one (append or replace), or delete one."""
+        if request.method == "GET":
+            return bridge_json(await bridge_call(bridge.saved))
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the change was not sent as JSON", "state": None,
+                                "message": ""})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the change is a JSON object", "state": None,
+                                "message": ""})
+        action = str(body.get("action") or "").strip().lower()
+        item_id = str(body.get("id") or body.get("item_id") or "")
+        if action == "save":
+            answer = await bridge_call(bridge.saved_save, str(body.get("name") or ""),
+                                       bool(body.get("overwrite")))
+        elif action == "load":
+            answer = await bridge_call(bridge.saved_load, item_id, str(body.get("name") or ""),
+                                       bool(body.get("append")), bool(body.get("replace")))
+        elif action == "delete":
+            answer = await bridge_call(bridge.saved_delete, item_id, str(body.get("name") or ""))
+        else:
+            answer = {"ok": False, "error": "unknown saved action %r" % action, "state": None,
+                      "message": ""}
+        return bridge_json(answer)
+
+    async def labmaster_history(request: Request) -> Response:
+        """GET ?limit=: the merged History - the engine's own runs (source "panel") and Kelvin's record
+        of the AI's measurements (source "kelvin"), newest first."""
+        try:
+            limit = max(1, min(int(request.query_params.get("limit") or 20), 100))
+        except ValueError:
+            limit = 20
+        return bridge_json(await bridge_call(bridge.merged_runs, limit))
+
+    async def labmaster_kelvin_runs(request: Request) -> Response:
+        """GET: Kelvin's own record of the AI's measurements, oldest first (the raw list behind the
+        "kelvin" rows of /api/labmaster/history)."""
+        runs = await bridge_call(bridge.kelvin_runs)
+        return bridge_json({"ok": True, "runs": runs if isinstance(runs, list) else []})
+
+    async def labmaster_armed(request: Request) -> Response:
+        """GET: {"ok", "armed"} - may Kelvin's AI start the sequence on its own? POST {"armed": bool}
+        is the only way to change it, and only a person's page takes it: it is deliberately not an MCP
+        tool, so the AI can never arm itself."""
+        if request.method == "GET":
+            return bridge_json({"ok": True, "armed": bool(await bridge_call(seq_service.armed))})
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "armed": bool(await bridge_call(seq_service.armed)),
+                                "error": "the switch was not sent as JSON"})
+        if not isinstance(body, dict) or "armed" not in body:
+            return bridge_json({"ok": False, "armed": bool(await bridge_call(seq_service.armed)),
+                                "error": 'send {"armed": true} or {"armed": false}'})
+        return bridge_json(await bridge_call(seq_service.set_armed, bool(body.get("armed"))))
+
+    async def labmaster_seq(request: Request) -> Response:
+        """POST {action: add|update|delete|move|duplicate|clear|rename, ...}: change the sequence."""
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the change was not sent as JSON", "state": None,
+                                "message": ""})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the change is a JSON object", "state": None,
+                                "message": ""})
+        action = str(body.get("action") or "").strip().lower()
+        uid = str(body.get("uid") or "").strip()
+        params = body.get("params") if isinstance(body.get("params"), dict) else None
+        if action == "add":
+            answer = await bridge_call(bridge.seq_add, str(body.get("block") or ""),
+                                       str(body.get("block_id") or ""), params, body.get("index"))
+        elif action == "update":
+            answer = await bridge_call(bridge.seq_update, uid, params, str(body.get("name") or ""),
+                                       bool(body.get("reset")))
+        elif action == "delete":
+            answer = await bridge_call(bridge.seq_delete, uid)
+        elif action == "move":
+            answer = await bridge_call(bridge.seq_move, uid, body.get("index"))
+        elif action == "duplicate":
+            answer = await bridge_call(bridge.seq_duplicate, uid)
+        elif action == "clear":
+            answer = await bridge_call(bridge.seq_clear, bool(body.get("keep_done")))
+        elif action == "rename":
+            answer = await bridge_call(bridge.seq_rename, str(body.get("name") or ""))
+        else:
+            answer = {"ok": False, "error": "unknown sequence action %r" % action, "state": None,
+                      "message": ""}
+        return bridge_json(answer)
+
+    async def labmaster_control(request: Request) -> Response:
+        """POST {action, want?, uid?, minutes?, failed?, failed_uids?, reason?}: start, pause, stop,
+        safe_stop (and the rest of /api/control's actions). stop/skip/reset are the caller's to confirm."""
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the action was not sent as JSON", "state": None,
+                                "message": ""})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the action is a JSON object", "state": None,
+                                "message": ""})
+        action = str(body.get("action") or "").strip().lower()
+        if not action:
+            return bridge_json({"ok": False, "error": "control: say which action", "state": None,
+                                "message": ""})
+        fields = {k: body.get(k) for k in ("want", "uid", "minutes", "failed", "failed_uids", "reason")
+                  if body.get(k) is not None}
+        return bridge_json(await bridge_call(bridge.control, action, **fields))
+
+    async def labmaster_import(request: Request) -> Response:
+        """POST {path, name?, kind?}: put a script into the function library, as + New function does (the whole
+        palette is written back with base_rev - the panel refuses a list older than the one it has)."""
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the import was not sent as JSON", "entry": None,
+                                "palette": None, "message": ""})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the import is a JSON object", "entry": None,
+                                "palette": None, "message": ""})
+        path = str(body.get("path") or "").strip()
+        name = str(body.get("name") or "").strip()
+        kind = str(body.get("kind") or "script").strip() or "script"
+        return bridge_json(await bridge_call(bridge.import_script, path, name, kind))
 
     routes = [
         Route("/", index),
@@ -3271,6 +3758,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/lab-memory", lab_memory_view, methods=["GET", "POST"]),
         Route("/api/lab-memory/{note_id}", lab_memory_note, methods=["POST", "DELETE"]),
         Route("/api/team", team_view, methods=["GET", "POST"]),
+        Route("/api/team/people", team_people),
         Route("/api/analysis", analysis_view, methods=["POST"]),
         Route("/api/analysis/columns", analysis_columns),
         Route("/api/analysis/keep", analysis_keep, methods=["POST"]),
@@ -3293,6 +3781,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/quit", quit_app, methods=["POST"]),
         Route("/api/live", live),
         Route("/api/runs", runs),
+        Route("/api/history/all", history_all),
+        Route("/api/history/panel-run", history_panel_run),
         Route("/api/runs/stop", stop_run, methods=["POST"]),
         Route("/api/queue", queue, methods=["GET", "POST"]),
         Route("/api/runs/{run_id}", run_data),
@@ -3300,6 +3790,20 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/runs/{run_id}/files/{name}", run_file),
         Route("/api/runs/{run_id}/files/{name}/open", run_open, methods=["POST"]),
         Route("/api/runs/{run_id}/export", run_export),
+        # labMaster: the Home page (tiles and the AI's cards) and the panel's own API (web/labmaster.py)
+        Route("/api/home", home_view),
+        Route("/api/home/cards", home_cards, methods=["POST"]),
+        Route("/api/home/cards/{card_id}", home_card, methods=["POST", "DELETE"]),
+        Route("/api/labmaster/state", labmaster_state),
+        Route("/api/labmaster/palette", labmaster_palette),
+        Route("/api/labmaster/scripts", labmaster_scripts),
+        Route("/api/labmaster/saved", labmaster_saved, methods=["GET", "POST"]),
+        Route("/api/labmaster/history", labmaster_history),
+        Route("/api/labmaster/kelvin-runs", labmaster_kelvin_runs),
+        Route("/api/labmaster/armed", labmaster_armed, methods=["GET", "POST"]),
+        Route("/api/labmaster/seq", labmaster_seq, methods=["POST"]),
+        Route("/api/labmaster/control", labmaster_control, methods=["POST"]),
+        Route("/api/labmaster/import", labmaster_import, methods=["POST"]),
         Route("/static/{name}", static),
         # Help and the first-run checklist, ELN records, calibration, cards in the reader's language (labops.py)
         *labops.routes(runtime, settings, home, lambda request: runtime.user or person(request)),

@@ -84,6 +84,27 @@
 <div id="app" class="app" hidden>
   <div id="scrim" class="scrim" hidden></div>
 
+  <!-- the leftmost rail: Chat / Home / Sequence / History (the views are in app.js, lmInit) -->
+  <nav id="rail" class="rail" aria-label="Views">
+    <div class="rail-brand" aria-hidden="true"><span class="logo" data-mark></span></div>
+    <button id="rail-chat" class="rail-btn" type="button" data-rail="chat" aria-pressed="true" title="Chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-9.5 8.4 9.1 9.1 0 0 1-3.4-.7L3 21l1.9-5.2A8.4 8.4 0 0 1 12 3.1a8.4 8.4 0 0 1 9 8.4z"/></svg>
+      <span class="rail-label">Chat</span>
+    </button>
+    <button id="rail-home" class="rail-btn" type="button" data-rail="home" aria-pressed="false" title="Home: the lab at a glance, and cards Kelvin keeps for you">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5L12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/><path d="M10 20v-5.5h4V20"/></svg>
+      <span class="rail-label">Home</span>
+    </button>
+    <button id="rail-seq" class="rail-btn" type="button" data-rail="seq" aria-pressed="false" title="Measurement sequence: the engine's functions, sequence and run controls">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h2.5M4 12h2.5M4 18h2.5"/><path d="M10 6h10M10 12h10M10 18h10"/></svg>
+      <span class="rail-label">Sequence</span>
+    </button>
+    <button id="rail-history" class="rail-btn" type="button" data-rail="history" aria-pressed="false" title="History: every run, its analysis and its reports">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+      <span class="rail-label">History</span>
+    </button>
+  </nav>
+
   <aside id="sidebar" class="sidebar" aria-label="Conversations">
     <div class="side-top">
       <div class="brand">
@@ -125,7 +146,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg>
       </button>
       <button id="toggle-team" class="pill icon-only team-btn" type="button" aria-label="Team chat" aria-pressed="false" title="Team chat">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h1v3l3.5-3"/><path d="M12 10h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-1v3l-3.5-3H12a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z"/></svg><span id="team-dot" class="team-dot" hidden></span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h1v3l3.5-3"/><path d="M12 10h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-1v3l-3.5-3H12a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z"/></svg><span id="team-unread" class="team-unread" hidden></span><span id="team-dot" class="team-dot" hidden></span>
       </button>
       <button id="toggle-analysis" class="pill" type="button" aria-label="Show the analysis pane" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 16l3.5-4 2.5 2.5"/><circle cx="16.5" cy="8.5" r="3"/><path d="M18.7 10.7L21 13"/></svg><span class="pill-text">Analysis</span>
@@ -149,6 +170,167 @@
       <div class="hb-body"><b>Hands on the sample</b><span id="hands-text"></span></div>
       <button id="hands-done" class="btn small primary" type="button">Done: unlock…</button>
     </div>
+
+    <!-- Home: labMaster's overview, and the cards Kelvin's AI keeps for this person (app.js: lmHome*) -->
+    <div id="kview-home" class="kview kview-home" aria-label="Home">
+      <div class="kview-scroll">
+        <header class="kview-head">
+          <div class="kview-titles">
+            <h1 id="lm-home-greet">Home</h1>
+            <p id="lm-home-sub" class="muted small"></p>
+          </div>
+          <div class="spacer"></div>
+          <button id="lm-home-refresh" class="btn small ghost" type="button" title="Fetch it again now">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>Refresh
+          </button>
+        </header>
+        <div id="lm-home-msg" class="kview-msg" role="status" hidden></div>
+        <div id="lm-home-tiles" class="lm-tiles" aria-label="The lab at a glance"></div>
+        <section class="lm-home-ai" aria-label="Cards from Kelvin">
+          <div class="lm-sec-head">
+            <h2>From Kelvin</h2>
+            <span class="muted small">Cards Kelvin adds here as you work</span>
+          </div>
+          <div id="lm-home-cards" class="lm-cards"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Sequence: the only sequence in Kelvin - the sequence engine runs in this process (app.js: lmSeq*) -->
+    <div id="kview-seq" class="kview kview-seq" aria-label="Kelvin sequence">
+      <header class="kview-head kview-head-seq">
+        <div class="kview-titles">
+          <h1>Kelvin Sequence</h1>
+          <p id="lm-seq-sub" class="muted small">in-process · connecting…</p>
+        </div>
+        <div class="spacer"></div>
+        <div class="lm-head-right">
+          <span id="lm-seq-conn" class="lm-conn" title="The sequence engine runs inside Kelvin">…</span>
+          <label class="lm-arm" title="Only a person can change this: while it is on, Kelvin's AI may start this sequence itself">
+            <input id="lm-arm-toggle" class="lm-arm-input" type="checkbox" role="switch" aria-label="AI may start runs" disabled>
+            <span class="lm-arm-track" aria-hidden="true"><span class="lm-arm-thumb"></span></span>
+            <span class="lm-arm-label">AI may start runs</span>
+          </label>
+        </div>
+      </header>
+      <div id="lm-arm-banner" class="lm-arm-banner off" role="status">
+        <span class="lm-arm-dot" aria-hidden="true"></span>
+        <div class="lm-arm-banner-body">
+          <b id="lm-arm-banner-title">AI asks you each time</b>
+          <span id="lm-arm-banner-sub">Turn on “AI may start runs” above to let Kelvin start this sequence on its own.</span>
+        </div>
+      </div>
+      <div id="lm-seq-msg" class="kview-msg" role="status" hidden></div>
+      <div class="lm-seq-layout">
+        <section class="lm-panel lm-panel-palette" aria-label="Function library">
+          <div class="lm-sec-head">
+            <h2>Functions</h2>
+            <div class="spacer"></div>
+            <button id="lm-palette-refresh" class="lm-mini" type="button" title="Load the function library again">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+            </button>
+          </div>
+          <p class="muted small lm-hint">Click a function to add it to the sequence.</p>
+          <div id="lm-palette-list" class="lm-list" aria-label="Functions"></div>
+        </section>
+        <section class="lm-panel lm-panel-seq" aria-label="The sequence">
+          <div class="lm-sec-head lm-seq-head">
+            <h2>Sequence</h2>
+            <button id="lm-seq-name" class="lm-name-btn" type="button" title="Click to name this sequence">
+              <span id="lm-seq-name-text">Name this sequence</span>
+              <svg class="lm-name-pencil" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg>
+            </button>
+            <input id="lm-seq-name-input" class="lm-name-input" maxlength="80" spellcheck="false" aria-label="Sequence name" hidden>
+            <div class="spacer"></div>
+            <span id="lm-seq-run" class="lm-chip idle">idle</span>
+          </div>
+          <div class="lm-controls">
+            <button id="lm-btn-start" class="btn small primary" type="button" title="Run the sequence">Start</button>
+            <button id="lm-btn-pause" class="btn small" type="button" title="Pause after the running block" disabled>Pause</button>
+            <button id="lm-btn-stop" class="btn small" type="button" title="Stop the block that is running" disabled>Stop</button>
+            <button id="lm-btn-safe" class="btn small danger" type="button" title="Stop everything, then run the safe-stop script">Safe stop</button>
+            <div class="spacer"></div>
+            <button id="lm-btn-clear" class="btn small ghost" type="button" title="Empty the sequence">Clear</button>
+          </div>
+          <div id="lm-seq-list" class="lm-list lm-seq-list" aria-label="Blocks in the sequence"></div>
+          <section class="lm-history" aria-label="History and runs">
+            <div class="lm-sec-head lm-history-head">
+              <h2>History / Runs</h2>
+              <div class="spacer"></div>
+              <span id="lm-history-count" class="muted small"></span>
+              <button id="lm-history-all" class="lm-link-btn" type="button" title="Open the full history: every run, its analysis and its reports">View all →</button>
+            </div>
+            <div id="lm-history-msg" class="lm-history-msg" role="status" hidden></div>
+            <div id="lm-history-list" class="lm-history-list" aria-label="Runs"></div>
+          </section>
+        </section>
+        <section class="lm-panel lm-panel-side" aria-label="Saved sequences and import">
+          <div class="lm-side-block">
+            <div class="lm-sec-head"><h2>Saved sequences</h2></div>
+            <div class="lm-saved-save">
+              <input id="lm-saved-name" placeholder="Name…" aria-label="A name for the saved sequence" spellcheck="false">
+              <button id="lm-btn-save" class="btn small" type="button" title="Save the sequence as it is now">Save current</button>
+            </div>
+            <div id="lm-saved-list" class="lm-list lm-saved-list" aria-label="Saved sequences"></div>
+          </div>
+          <div class="lm-side-block">
+            <div class="lm-sec-head lm-import-head"><h2>+ Import Python</h2></div>
+            <div class="lm-import">
+              <select id="lm-script-select" aria-label="A script to import"><option value="">Choose a script…</option></select>
+              <input id="lm-import-path" placeholder="…or a path: scripts/my_script.py" aria-label="Path of the Python script" spellcheck="false">
+              <button id="lm-btn-import" class="btn small primary" type="button" title="Import the script's function into the library">Import</button>
+            </div>
+            <p id="lm-import-hint" class="muted small lm-hint">Imports a Python script as a function: labMaster finds its parameters.</p>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- History: every run (Kelvin's and the sequence engine's), its analysis and its reports (app.js: lmh*) -->
+    <div id="kview-history" class="kview kview-history" aria-label="History, analysis and reports">
+      <header class="kview-head kview-head-hist">
+        <div class="kview-titles">
+          <h1>History</h1>
+          <p id="lmh-sub" class="muted small">Every run, its analysis and its reports</p>
+        </div>
+        <div class="spacer"></div>
+        <button id="lmh-refresh" class="btn small ghost" type="button" title="Fetch the history again now">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>Refresh
+        </button>
+      </header>
+      <div class="lmh-toolbar" role="search">
+        <div id="lmh-sources" class="lmh-seg" role="group" aria-label="Where the run came from">
+          <button type="button" data-source="all" class="on" aria-pressed="true">All</button>
+          <button type="button" data-source="kelvin" aria-pressed="false">Kelvin</button>
+          <button type="button" data-source="panel" aria-pressed="false">Sequence</button>
+        </div>
+        <select id="lmh-status" aria-label="Only runs with this status">
+          <option value="">Any status</option>
+          <option value="done">Done</option>
+          <option value="failed">Failed</option>
+          <option value="running">Running</option>
+          <option value="unfinished">Unfinished</option>
+          <option value="queued">Queued</option>
+        </select>
+        <input id="lmh-q" type="search" placeholder="Search a name or detail…" aria-label="Search runs" spellcheck="false" autocomplete="off">
+        <span id="lmh-count" class="muted small"></span>
+      </div>
+      <div id="lmh-msg" class="kview-msg" role="status" hidden></div>
+      <div class="lmh-body">
+        <section class="lmh-listwrap" aria-label="Runs">
+          <div id="lmh-list" class="lmh-list"></div>
+          <button id="lmh-more" class="btn small" type="button" hidden>Load more</button>
+        </section>
+        <aside id="lmh-detail" class="lmh-detail" aria-label="Run details">
+          <div id="lmh-detail-empty" class="lmh-detail-empty">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 2.6-6.4L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>
+            <div>Select a run to see its plan, analysis and reports.</div>
+          </div>
+          <div id="lmh-detail-body" class="lmh-detail-body" hidden></div>
+        </aside>
+      </div>
+    </div>
+
     <div id="scroller" class="scroller">
       <section id="empty" class="empty">
         <img class="hero-mark" src="/static/kelvin.svg" width="72" height="72" alt="Kelvin">
@@ -233,7 +415,7 @@
     <header class="pane-head">
       <div id="run-tabs" class="run-tabs" role="tablist" aria-label="Runs"></div>
       <div class="spacer"></div>
-      <button id="open-queue" class="btn small ghost" type="button" title="Scans lined up to run one after another">Queue<span id="queue-count" class="badge q-badge" hidden></span></button>
+      <button id="open-queue" class="btn small ghost" type="button" hidden title="The queue lives on the Sequence page now">Queue<span id="queue-count" class="badge q-badge" hidden></span></button>
       <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
       <div class="pane-menu-wrap">
         <button id="runs-history" class="icon-btn" type="button" aria-label="Recent runs" aria-haspopup="menu" aria-expanded="false">
@@ -372,21 +554,38 @@
   <aside id="teampanel" class="labpanel teampanel" aria-label="Team chat" hidden>
     <div id="teampanel-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the team chat" tabindex="0"></div>
     <header class="lab-head">
-      <h2>Team chat</h2>
+      <h2>Team</h2>
+      <span class="team-sub" title="Everyone in the lab writes here; Kelvin reads it and answers @agent">@agent asks Kelvin</span>
       <div class="spacer"></div>
       <button id="team-name" class="team-me" type="button" title="Your name in the team chat, on this browser"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg><span id="team-name-text"></span></button>
       <button id="close-team" class="icon-btn" type="button" aria-label="Close the team chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <div id="team-list" class="team-list" role="log" aria-live="polite"></div>
+    <div id="team-people" class="team-people" aria-label="People in this chat"></div>
+    <div class="team-body">
+      <div id="team-list" class="team-list" role="log" aria-live="polite"></div>
+      <button id="team-new" class="team-new" type="button" hidden>New messages ↓</button>
+    </div>
+    <div id="team-reply" class="team-reply" hidden>
+      <span class="team-reply-label">Replying to <b id="team-reply-name"></b></span>
+      <button id="team-reply-x" class="icon-btn" type="button" aria-label="Cancel the reply">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <form id="team-form" class="team-form">
+      <div class="team-tools">
+        <button id="team-agent" class="team-tool" type="button" title="Ask Kelvin's AI: it answers in this chat">@agent</button>
+        <span id="team-hint" class="team-hint" role="status"></span>
+      </div>
+      <div class="team-input-row">
+        <textarea id="team-input" rows="1" maxlength="4000" placeholder="Message the team — Enter sends" aria-label="Message the team"></textarea>
+        <button id="team-send" class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+      </div>
+    </form>
     <form id="team-name-form" class="team-name-form" hidden>
       <input id="team-name-input" maxlength="40" placeholder="Your name" aria-label="Your name in the team chat" autocomplete="name" spellcheck="false">
       <button class="btn small primary" type="submit">OK</button>
-    </form>
-    <form id="team-form" class="team-form">
-      <textarea id="team-input" rows="1" maxlength="4000" placeholder="Message the team" aria-label="Message the team"></textarea>
-      <button id="team-send" class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
     </form>
   </aside>
   </div>

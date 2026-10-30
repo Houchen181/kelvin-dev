@@ -36,6 +36,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1429,6 +1430,145 @@ class ScriptRun:
         except OSError:
             return []
         return [ln[:300] for ln in text.splitlines()[-OUTPUT_TAIL:]]
+
+
+class ShimServer:
+    """Kelvin's end of the connection to the stand-ins of a script it did not start itself.
+
+    `ScriptRun.execute` launches the lab's Python and serves its stand-ins in the same loop. A
+    sequence block's runner (`sequence/runners/run_block.py`) is launched by the sequence engine
+    instead, so the engine starts this server before the child and hands its `env()` to the child:
+    the same protocol, the same `ScriptRun.handle` checks, approvals and record, and the same stop
+    message - only the child's launch is somebody else's.
+
+        server = ShimServer(run).start()
+        ... launch the child with its env ...
+        server.stop("stop requested")      # as the engine's Stop/Skip does
+        server.close()                     # when the child has ended
+    """
+
+    def __init__(self, run: "ScriptRun"):
+        self.run = run
+        self.token = run.token
+        self._stop: Optional[str] = None
+        self._stop_at = 0.0
+        self._done = threading.Event()
+        self._conns: Dict[socket.socket, _Conn] = {}
+        self._sel = selectors.DefaultSelector()
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.bind(("127.0.0.1", 0))
+        self._server.listen(8)
+        self._server.setblocking(False)
+        self._sel.register(self._server, selectors.EVENT_READ)
+        self.port = int(self._server.getsockname()[1])
+        self.thread: Optional[threading.Thread] = None
+        self.accepted = 0          # stand-in connections it took (the script's Python, and any it starts)
+        self.served = 0            # requests answered
+        self._gen = run.gate.stop_generation
+
+    # ---------------------------------------------------------------- the child's side
+
+    def start(self) -> "ShimServer":
+        self.thread = threading.Thread(target=self._loop, name="kelvin-shims", daemon=True)
+        self.thread.start()
+        while self.thread.ident is None:      # a request from the child must find the loop ready
+            time.sleep(0.001)
+        return self
+
+    def env(self, base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """The environment the child gets: where Kelvin listens and the token, and the stand-ins first
+        on PYTHONPATH (as ScriptRun._environ does for a script Kelvin starts itself)."""
+        env = dict(base or {})
+        env.update(KELVIN_IPC="127.0.0.1:%d" % self.port, KELVIN_IPC_TOKEN=self.token,
+                   PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(SHIM_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+        return env
+
+    # ---------------------------------------------------------------- stopping
+
+    @property
+    def stopping(self) -> Optional[str]:
+        return self._stop
+
+    def stop(self, why: str = "stop requested") -> None:
+        """The engine's Stop/Skip: the script's time.sleep returns now and it gets one KeyboardInterrupt
+        (as ScriptRun._begin_stop does), then the engine's own kill and safe stop follow."""
+        if self._stop is None:
+            self._stop = str(why or "stop requested")
+            self._stop_at = time.monotonic()
+
+    def close(self, wait: float = 5.0) -> None:
+        """The child has ended (or the engine is giving up on it): the loop stops and its socket closes."""
+        self._done.set()
+        thread = self.thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(wait)
+
+    # ---------------------------------------------------------------- the loop (as ScriptRun.execute's)
+
+    def _loop(self) -> None:
+        run, sel, conns = self.run, self._sel, self._conns
+        try:
+            while not self._done.is_set():
+                for key, _ in sel.select(timeout=0.2):
+                    if key.fileobj is self._server:
+                        try:
+                            sock, _address = self._server.accept()
+                        except OSError:
+                            continue
+                        sock.setblocking(True)
+                        sock.settimeout(60)
+                        conns[sock] = _Conn(sock)
+                        sel.register(sock, selectors.EVENT_READ)
+                        self.accepted += 1
+                        continue
+                    conn = conns.get(key.fileobj)
+                    if conn is None:
+                        continue
+                    try:
+                        data = conn.sock.recv(65536)
+                    except OSError:
+                        data = b""
+                    conn.buf += data
+                    keep = bool(data)
+                    while keep and b"\n" in conn.buf:
+                        line, conn.buf = conn.buf.split(b"\n", 1)
+                        keep = run._serve(conn, line, conns)
+                        self.served += 1
+                    if not keep:          # it hung up, or it was not this script's
+                        sel.unregister(conn.sock)
+                        conns.pop(conn.sock, None)
+                        conn.sock.close()
+                if self._done.is_set():
+                    break
+                if self._stop is None and run.gate.stop_generation != self._gen:
+                    self.stop("stop requested")      # Kelvin's own STOP, as ScriptRun.execute notices it
+                if self._stop is not None and not run.stopping:
+                    run._begin_stop(self._stop, conns)
+        finally:
+            for conn in list(conns.values()):
+                try:
+                    conn.sock.close()
+                except OSError:
+                    pass
+            conns.clear()
+            try:
+                sel.close()
+            except OSError:
+                pass
+            try:
+                self._server.close()
+            except OSError:
+                pass
+
+
+class _BlockScriptRun(ScriptRun):
+    """A ScriptRun told about the process somebody else started (a sequence block's runner): the
+    handlers, approvals and stop are ScriptRun's; only its own execute() is not used."""
+
+    def execute(self) -> ScriptReport:                      # pragma: no cover - never called
+        raise RuntimeError("this ScriptRun serves a runner started elsewhere: use ShimServer")
 
 
 def _number(v: Any) -> bool:
