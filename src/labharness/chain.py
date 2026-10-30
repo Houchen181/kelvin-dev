@@ -144,6 +144,22 @@ def derived(chain: Dict[str, Any], key: str, unit: str, current: Optional[Tuple[
     return factor, name, "Ω", "%s = %s%s / I, I = %s" % (name, key, gain, how)
 
 
+def derived_readings(chain: Any, setup: Any, start: Any, measures: Any) -> Dict[str, Tuple[float, str, str, str]]:
+    """The readings a run's measurement chain turns into the sample's resistance: {key: (factor, name, unit, how)},
+    from the chain stamped into the run, the excitation it measured with (its plan's setup, else the setting at its
+    start) and its measured columns. Empty when the run carries no chain, or its excitation isn't known."""
+    if not isinstance(chain, dict):
+        return {}
+    plan = {"setup": setup if isinstance(setup, dict) else {}}
+    current = excitation_current(chain, lambda k: setting_in_run(k, plan, start if isinstance(start, dict) else {}))
+    out = {}
+    for m in measures or []:
+        d = derived(chain, m["key"], m.get("unit") or "", current)
+        if d:
+            out[m["key"]] = d
+    return out
+
+
 def lines(chain: Dict[str, Any], current: Optional[Tuple[float, str]] = None) -> List[str]:
     """The chain in words, one line each."""
     out = []

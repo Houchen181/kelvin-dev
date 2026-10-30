@@ -793,8 +793,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)   # accept writes the run's fits (never an instrument)
     def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None,
                     accept: bool = False) -> str:
-        """Re-analyse a recorded run. column: one measured instr.param; model: linear, lorentzian,
-        gaussian or exponential to force that fit (default: chosen automatically). accept: once the person agrees
+        """Re-analyse a recorded run. column: one measured instr.param; model: linear, quadratic, lorentzian,
+        gaussian, double_lorentzian, exponential or oscillation to force that fit (default: chosen automatically,
+        one model for every row of the run). accept: once the person agrees
         this is the right fit, make it the run's result (in run.h5), in place of the automatic one; its reports
         show it as the run's fit from then on (fit_run's kept fits are shown beside it)."""
         return rt.analyze(run_id, column, model, accept=accept)

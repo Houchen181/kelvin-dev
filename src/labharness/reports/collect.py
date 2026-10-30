@@ -220,17 +220,8 @@ class Collector:
                  columns: Dict[str, Any]) -> Dict[str, Tuple[float, str, str, str]]:
         """The readings the run's measurement chain turns into the sample's resistance: {key: (factor, name, unit,
         how)}, from the chain stamped into the run and the excitation it measured with."""
-        kept = meta.get("chain")
-        if not isinstance(kept, dict):
-            return {}
-        from .. import chain as chains
-        current = chains.excitation_current(kept, lambda k: chains.setting_in_run(k, plan, start))
-        out = {}
-        for m in columns.get("measures") or []:
-            d = chains.derived(kept, m["key"], m.get("unit") or "", current)
-            if d:
-                out[m["key"]] = d
-        return out
+        from ..chain import derived_readings
+        return derived_readings(meta.get("chain"), plan.get("setup"), start, columns.get("measures"))
 
     def _charts(self, rows: List[Dict[str, Any]], cols: Optional[Dict[str, List[Dict[str, str]]]],
                 plan: Dict[str, Any], analysis: Dict[str, Any],
