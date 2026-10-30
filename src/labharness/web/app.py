@@ -2742,7 +2742,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if runtime.lab_info.get("kind") != "file" or not lab_file.exists():
             return error(409, "Limits are set in your lab config: there is none yet (Lab, Set up…).")
         body = await request.json()   # any time, a run or a chat going on too: the gate checks each change against them
-        refused = needs_owner(body)
+        refused = needs_owner(body, owner=False)   # a trainee changes no limits; the PIN only for widening (below)
         if refused:
             return refused
         card = runtime.lab.instruments[name].card
@@ -2760,12 +2760,17 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             changes[spec.name] = [float(lim[0]), float(lim[1])]
         reviewed = bool(body.get("reviewed"))
         try:
-            text = set_limits(lab_file.read_text(encoding="utf-8"), name, changes, reviewed)
+            old = lab_file.read_text(encoding="utf-8")
+            text = set_limits(old, name, changes, reviewed)
             cfg = load_lab_config(text, lab_registry(lab_file.parent))   # a limit beyond the card's is refused here
         except KeyError as e:
             return error(404, e.args[0])
         except ConfigError as e:
             return error(400, "; ".join(e.errors[:3]))
+        if config_widens("lab.yaml", old, text):   # narrowing never asks for the owner's PIN (safety.md)
+            refused = needs_owner(body)
+            if refused:
+                return refused
         tmp = lab_file.with_suffix(".tmp")
         tmp.write_text(text, encoding="utf-8")
         tmp.replace(lab_file)

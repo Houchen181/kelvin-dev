@@ -353,3 +353,39 @@ def test_undo_takes_back_only_this_chats_own_direct_changes(tmp_path):
     rt.attribution = {"chat": "c1"}
     assert rt.undo().startswith("nothing undone: smu.V is 1.5 V now, not the 2 V this chat set at ")
     assert rt.lab.read("smu", "V") == 1.5
+
+
+# ------------------------------------------------------------------- 10. tightening a limit takes no PIN
+
+def test_tightening_a_limit_takes_no_pin_and_widening_does(tmp_path):
+    """t10: narrowing ±10 V to ±5 V asked for the owner's PIN, though the docs say narrowing never does."""
+    pytest.importorskip("starlette")
+    from test_governance import LAB
+    from starlette.testclient import TestClient
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    from labharness.web.app import create_app
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    from labharness.adapters import set_resource_manager
+    from test_hardware import Bus, Device
+    set_resource_manager(Bus({"GPIB0::24::INSTR": Device("keithley/2400", name="k"),
+                              "GPIB0::8::INSTR": Device("srs/sr830", name="l")}))
+    try:
+        home = tmp_path / "Kelvin"
+        rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=5), home / "lab")
+        settings = Settings(home / "settings.json")
+        client = TestClient(create_app(rt, settings, ChatStore(home / "lab" / "chats", create=False),
+                                       hosts=["testserver"], providers={}))
+        h = {"X-Kelvin-Token": settings.access_key}
+        with client:
+            assert client.post("/api/lab", headers=h, json={"yaml": LAB}).json()["ok"]
+            assert client.post("/api/owner-pin", headers=h, json={"pin": "2468"}).json() == {"set": True}
+            r = client.post("/api/instruments/smu/limits", headers=h, json={"limits": {"V": [-3, 3]}})
+            assert r.status_code == 200 and rt.lab.instruments["smu"].limits("V") == (-3.0, 3.0)   # tighter: no PIN
+            r = client.post("/api/instruments/smu/limits", headers=h, json={"limits": {"V": [-8, 8]}})
+            assert r.status_code == 403 and r.json()["pin"] and rt.lab.instruments["smu"].limits("V") == (-3.0, 3.0)
+            r = client.post("/api/instruments/smu/limits", headers=h, json={"limits": {"V": None}})
+            assert r.status_code == 403 and r.json()["pin"]                       # taking it out widens too
+    finally:
+        set_resource_manager(None)
