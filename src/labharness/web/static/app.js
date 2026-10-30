@@ -1748,7 +1748,8 @@
     $("report-msg").textContent = "Writing…";
     try {
       const r = await api("/api/reports", { body });
-      $("report-msg").textContent = r.runs + (r.runs === 1 ? " run" : " runs") + " · done";
+      $("report-msg").textContent = r.runs + (r.runs === 1 ? " run" : " runs") + " · done"
+        + (r.left ? " · " + r.left + " of unshared work (another project's or chat's) left out" : "");
       const box = $("report-files");
       box.replaceChildren(...reportFiles(r.files.map((f) => f.name)).childNodes,
         h("p", { class: "report-folder" }, "Saved in " + r.folder));
@@ -6109,7 +6110,8 @@
     log10: ["log₁₀ |y|", []],
   };
   const anWhen = (r) => r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
-  const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "");
+  const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "")
+    + (r.unshared ? " · unshared" : "");
 
   function toggleAnalysis(open) {
     ANA.open = open === undefined ? !ANA.open : open;
@@ -6122,7 +6124,8 @@
     else loadAnalysisRuns().then(renderAnalysisForm);   // runs measured since it was last open
   }
   async function loadAnalysisRuns() {
-    try { ANA.runs = (await api("/api/runs?limit=100")).runs; } catch (e) { ANA.runs = []; }
+    // the runs this chat's model may see: what the pane hands to Kelvin goes into this chat
+    try { ANA.runs = (await api("/api/runs?limit=100&chat=" + encodeURIComponent(S.chatId || ""))).runs; } catch (e) { ANA.runs = []; }
     $("an-run").replaceChildren(...ANA.runs.map((r) => h("option", { value: r.run_id }, anRunLabel(r))));
   }
   // the pane opened by a person: the run the Runs pane shows, else the latest
@@ -6520,7 +6523,8 @@
     $("open-help").addEventListener("click", () => openHelp());
     $("help-go").addEventListener("click", helpSearch);
     $("help-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); helpSearch(); } });
-    $("eln-day-go").addEventListener("click", () => fetchDownload("/api/eln?day=" + encodeURIComponent($("eln-day").value || "today"),
+    $("eln-day-go").addEventListener("click", () => fetchDownload("/api/eln?day=" + encodeURIComponent($("eln-day").value || "today")
+      + "&chat=" + encodeURIComponent(S.chatId || ""),   // this chat's view: never another project's unshared work
       ($("eln-day").value || "today") + "-lab-record.zip", "day's lab notebook record"));
     $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
     $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));

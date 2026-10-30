@@ -193,3 +193,118 @@ def test_runs_are_filed_with_their_chat_never_under_another_projects_confidentia
     rt.protect(dict(device, protection={"limits": {"smu.V": [-2, 2]}}))
     status = p.turn(p.other, [("lab_status", {})])["c0"]
     assert "Acme" not in status
+
+
+# ------------------------------------------------------------------ the portal's reports and records (t06)
+
+def test_the_portals_day_records_reports_and_analysis_list_follow_the_chat_they_are_made_from(rt, tmp_path):
+    import io
+    import zipfile
+    from starlette.testclient import TestClient
+    from labharness.web.app import create_app
+    from labharness.web.settings import Settings
+    p = Portal(tmp_path, rt)
+    p.turn(p.secret, [("run_plan", {"plan": NDA})])
+    p.turn(p.other, [("run_plan", {"plan": OPEN})])
+    settings = Settings(tmp_path / "settings.json")
+    client = TestClient(create_app(rt, settings, p.store, hosts=["testserver"], providers={"scripted": Scripted([])}))
+    h = {"X-Kelvin-Token": settings.access_key}
+
+    def plans(query):
+        return {r["plan"]: r.get("unshared", False) for r in client.get("/api/runs?" + query, headers=h).json()["runs"]}
+    assert plans("limit=20") == {"acme_gate": True, "thesis_gate": False}   # the person's own list, marked
+    assert plans("limit=20&chat=" + p.other) == {"thesis_gate": False}     # what the Analysis pane hands that chat
+    assert plans("limit=20&chat=" + p.secret) == {"acme_gate": True, "thesis_gate": False}
+    assert plans("limit=20&chat=") == {"thesis_gate": False}
+
+    r = client.get("/api/eln?day=today&chat=" + p.other, headers=h)
+    assert r.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        text = "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist() if n.endswith(".md"))
+        assert all("acme" not in n for n in z.namelist())
+    assert "acme" not in text and "thesis_gate" in text and "1 run of unshared work" in text
+    r = client.get("/api/eln?day=today&chat=" + p.secret, headers=h)
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        assert any("acme_gate" in n for n in z.namelist())
+
+    made = client.post("/api/reports", headers=h, json={"scope": "today", "chat_id": p.other}).json()
+    assert (made["runs"], made["left"]) == (1, 1)
+    made = client.post("/api/reports", headers=h, json={"scope": "today", "chat_id": p.secret}).json()
+    assert (made["runs"], made["left"]) == (2, 0)
+
+
+def test_writing_a_confidential_projects_summary_never_goes_through_the_hub(rt, tmp_path):
+    from starlette.testclient import TestClient
+    from labharness.web.app import create_app
+    from labharness.web.settings import Settings
+    store = ChatStore(tmp_path / "chats")
+    p = store.create_project("Hub-only confidential")
+    store.set_sharing(p["id"], "confidential")   # its model rules left open
+    settings = Settings(tmp_path / "settings.json")
+    client = TestClient(create_app(rt, settings, store, hosts=["testserver"], providers={"scripted": Scripted([])}))
+    r = client.post("/api/projects/%s/summary" % p["id"], headers={"X-Kelvin-Token": settings.access_key},
+                    json={"model": "hub-anthropic:claude-opus-5-5"})
+    assert r.status_code == 400 and "Kelvin hub" in r.json()["error"]
+    assert store.summary_of(p["id"]) == ""
+
+
+# ------------------------------------------------------------------ phones through the Kelvin hub (t09)
+
+def test_phones_through_the_hub_get_the_labs_state_without_unshared_works_names(tmp_path, monkeypatch):
+    import threading
+    import time
+    from labharness.agent.approval import WebApprover
+    from labharness.gate import ApprovalRequest
+    from test_team_and_analysis import _relay
+    rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=30), tmp_path / "data")
+    p = Portal(tmp_path, rt)
+    device = p.store.add_device(p.nda, "Acme-HfO2-D1")
+    rt.mount(p.nda, device)
+
+    def approve_all():   # a person at the computer says yes to the NDA chat's run
+        while not done.is_set():
+            entry = rt.approver.wait_for_pending(timeout=0.2)
+            if entry:
+                rt.approver.answer(entry["id"], True)
+    done = threading.Event()
+    threading.Thread(target=approve_all, daemon=True).start()
+    p.turn(p.secret, [("run_plan", {"plan": NDA}),
+                      ("watch", {"reading": "tc.T_sample", "above": 5, "note": "Acme-HfO2-D1 must stay below 5 K"}),
+                      ("queue_add", {"item": NDA, "note": "Acme wafer W17 first pass"})])
+    done.set()
+    ask = _relay(rt, tmp_path, monkeypatch)
+
+    # a request of the NDA work waits for a person
+    asked = threading.Event()
+
+    def nda_request():
+        with rt.viewing(p.agent.viewer_for(p.store.load(p.secret))):
+            asked.set()
+            rt.gate.ask(ApprovalRequest("Run plan acme_gate: 6 points", ["smu.V 0 V → 1 V on Acme-HfO2-D1"]))
+    threading.Thread(target=nda_request, daemon=True).start()
+    asked.wait(5)
+    deadline = time.time() + 5
+    while not rt.approver.pending_list() and time.time() < deadline:
+        time.sleep(0.05)
+
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"acme" not in raw.lower() and b"Acme" not in raw, raw[:2000]
+    state = json.loads(raw)
+    assert state["live"]["status"] == "done" and state["live"]["run_id"] == "unshared"   # after it ended too
+    (card,) = state["pending"]
+    assert card["title"] == "A request of unshared work" and card["id"]                  # that one waits
+    assert state["mounted"]["device_name"] == "a sample of unshared work"
+    (mine,) = [w for w in state["watches"] if w["source"] == "agent"]   # its rule stays, its note goes
+    assert mine["note"] == "" and "above 5" in mine["rule"]
+    assert any(w["note"] for w in state["watches"] if w["source"] == "lab")   # the lab's own keep theirs
+    assert state["queue"]["items"][0]["name"] == "an item of unshared work"
+    assert any(n["title"] == "A notice of unshared work" for n in state["notices"])
+    status, raw = ask("GET", "/api/live")
+    assert status == 200 and b"acme" not in raw.lower() and json.loads(raw)["live"]["rows"] == []
+    status, raw = ask("GET", "/api/watches")
+    assert status == 200 and b"Acme" not in raw
+    # declining works from the phone; approving a card the phone never saw doesn't
+    status, raw = ask("POST", "/api/approvals/" + card["id"], {"approve": True})
+    assert status == 403 and b"Tailscale" in raw
+    status, raw = ask("POST", "/api/approvals/" + card["id"], {"approve": False})
+    assert status == 200
