@@ -1064,7 +1064,7 @@
       if (!v.table.hidden) v.table.replaceChildren(runTable(runViewData(tab)));
       v.tableBtn.textContent = v.table.hidden ? "Show table" : "Hide table";
     });
-    const requeue = h("button", { class: "btn small ghost", type: "button" }, "Add to the queue");
+    const requeue = h("button", { class: "btn small ghost", type: "button", hidden: true }, "Add to the queue");   // v1: the queue is retired (the Sequence page is the only sequence)
     requeue.addEventListener("click", async () => {
       if (await queueOp({ op: "add", text: (tab.final && tab.final.plan_text) || "" })) showQueue();
     });
@@ -4225,16 +4225,9 @@
     QUEUE.built = true;
   }
   function showQueue() {
-    if (!QUEUE.built) buildQueueView();
-    toggleRuns(true);
-    RUNS.active = null;
-    for (const t of RUNS.tabs.values()) { t.btn.classList.remove("on"); t.btn.setAttribute("aria-selected", "false"); t.body.hidden = true; }
-    $("run-body").querySelector(".pane-empty").hidden = true;
-    $("queue-view").hidden = false;
-    $("open-queue").classList.add("on");
-    QUEUE.open = true;
-    renderQueue();
-    api("/api/queue").then((q) => { QUEUE.data = q; renderQueue(); }, () => {});
+    // v1: the Runs pane's queue view is retired - the Sequence page is the only sequence. The backend
+    // queue is untouched (nothing here removes it); this view simply never opens again.
+    return;
   }
   function hideQueue() {
     QUEUE.open = false;
@@ -5923,11 +5916,57 @@
 
 
   // ------------------------------------------------------------------ team chat: the lab's people, to each other
-  // Everyone signed in here, and their phones, read the same chat (teamchat.py); Kelvin reads it with team_chat. The
-  // name you write under is this browser's (lh.teamName), so people who share an account each write under their own.
+  // The lab's shared chat (peoplechat.py), as labMaster's: every message carries the writer's display name and
+  // color, may quote another message, and "@agent" wakes Kelvin, whose answer arrives as a message of its own.
+  // This browser writes under its own name (lh.teamName, defaulting to /api/team/people's "you"). The list polls
+  // only while the panel is open, and the newest id in /api/state drives the unread mark on the toolbar button.
   const TEAM = { open: false, msgs: [], shown: 0, seen: Number(store("lh.teamSeen")) || 0, told: null, more: false,
-                 busy: false, drawn: false };
+                 busy: false, drawn: false, colors: {}, people: [], you: "", reply: null, poll: 0, unread: 0 };
   const teamName = () => store("lh.teamName") || "";
+  const TEAM_RICH = /https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]}]|@agent/gi;   // a link, or an @agent, inside a message
+
+  function teamWhen(m) {
+    let d = m && m.at ? new Date(m.at) : null;
+    if (!d || isNaN(d.getTime())) d = m && typeof m.ts === "number" ? new Date(m.ts * 1000) : new Date();
+    return d;
+  }
+  function teamColorOf(m) {
+    return String((m && (m.color || TEAM.colors[m.name])) || "");
+  }
+  function teamHint(text) {
+    const el = $("team-hint");
+    if (!el) return;
+    el.textContent = text || "";
+    el.hidden = !text;
+  }
+  function teamAtBottom() {
+    const list = $("team-list");
+    return !list || list.scrollHeight - list.scrollTop - list.clientHeight < 60;
+  }
+  function teamScrollBottom() {
+    const list = $("team-list");
+    if (list) list.scrollTop = list.scrollHeight;
+  }
+  // a message's text as nodes: never innerHTML - URLs become links and @agent is marked, everything else is text
+  function teamRich(text) {
+    const frag = document.createDocumentFragment();
+    const s = String(text == null ? "" : text);
+    let last = 0, m;
+    TEAM_RICH.lastIndex = 0;
+    while ((m = TEAM_RICH.exec(s))) {
+      const tok = m[0];
+      if (tok.charAt(0) === "@") {
+        const after = s.charAt(m.index + tok.length);
+        if (after && /[A-Za-z0-9_-]/.test(after)) continue;   // "@agents" is a word, not a mention
+      }
+      if (m.index > last) frag.append(document.createTextNode(s.slice(last, m.index)));
+      if (tok.charAt(0) === "@") frag.append(h("span", { class: "tm-agent" }, tok));
+      else frag.append(h("a", { href: tok, target: "_blank", rel: "noopener noreferrer" }, tok));
+      last = m.index + tok.length;
+    }
+    if (last < s.length) frag.append(document.createTextNode(s.slice(last)));
+    return frag;
+  }
 
   function toggleTeam(open) {
     TEAM.open = open === undefined ? !TEAM.open : open;
@@ -5935,8 +5974,10 @@
     $("toggle-team").setAttribute("aria-pressed", String(TEAM.open));
     $("toggle-team").classList.toggle("on", TEAM.open);
     fitLayout();
-    if (!TEAM.open) return;
+    if (!TEAM.open) { teamPollStop(); return; }
     showTeamName();
+    teamPeopleLoad();
+    teamPollStart();
     loadTeam();
     fitTeamInput();
     if (teamName()) $("team-input").focus();
@@ -5946,9 +5987,10 @@
     $("team-name-form").hidden = !asking;
     $("team-form").hidden = asking;
     $("team-name").hidden = !name;
-    $("team-name-text").textContent = name;
-    if (!asking) return;
-    $("team-name-input").value = name || (S.account && S.account.user ? S.account.user.name : "") || "";
+    $("team-name-text").textContent = name || "You";
+    if (!asking) { $("team-name").title = "Your name here: " + name + " (click to change)"; return; }
+    $("team-name-input").value = name || (TEAM.you && TEAM.you !== "You" ? TEAM.you : "") ||
+      (S.account && S.account.user ? S.account.user.name : "") || "";
     $("team-name-input").focus();
     $("team-name-input").select();
   }
@@ -5962,6 +6004,52 @@
     fitTeamInput();   // sized now it shows (it was hidden while the name was asked)
     $("team-input").focus();
   }
+  // who writes here (peoplechat.py's people, with the color each writes under) - this browser's own name defaults
+  // to this account's, so people who share an account each still write under their own.
+  async function teamPeopleLoad() {
+    try {
+      const r = await api("/api/team/people");
+      TEAM.people = Array.isArray(r.people) ? r.people : [];
+      TEAM.you = String(r.you || "");
+      for (const p of TEAM.people) if (p && p.name && p.color) TEAM.colors[p.name] = p.color;
+      renderTeamPeople();
+      if (!teamName() && TEAM.you && TEAM.you !== "You") {
+        store("lh.teamName", TEAM.you);
+        showTeamName();
+        fitTeamInput();
+      }
+    } catch (e) { /* the chat still works without the people list */ }
+  }
+  function renderTeamPeople() {
+    const box = $("team-people");
+    if (!box) return;
+    const people = TEAM.people.length ? TEAM.people
+      : Object.keys(TEAM.colors).map((name) => ({ name, color: TEAM.colors[name], messages: 0 }));
+    if (!people.length) { box.hidden = true; box.replaceChildren(); return; }
+    box.hidden = false;
+    box.replaceChildren(...people.slice(0, 12).map((p) => {
+      const color = String(p.color || TEAM.colors[p.name] || "");
+      const chip = h("button", { class: "team-person" + (p.you ? " you" : ""), type: "button",
+        title: p.name + " · " + (p.messages || 0) + " message" + (p.messages === 1 ? "" : "s") + (p.you ? " · you" : "") +
+          " — click to mention", style: color ? "--tm-color:" + color : null },
+        h("span", { class: "tm-dot", style: color ? "background:" + color : null }),
+        h("span", { class: "team-person-name" }, String(p.name || "?")));
+      chip.addEventListener("click", () => teamMention(p.name));
+      return chip;
+    }));
+  }
+  function teamMention(name) {
+    const input = $("team-input");
+    if (!input || !name) return;
+    const at = input.selectionStart == null ? input.value.length : input.selectionStart;
+    const before = input.value.slice(0, at), after = input.value.slice(at);
+    const sep = before && !/\s$/.test(before) ? " " : "";
+    input.value = before + sep + "@" + name + " " + after;
+    fitTeamInput();
+    input.focus();
+    const pos = (before + sep + "@" + name + " ").length;
+    input.setSelectionRange(pos, pos);
+  }
   function dayLabel(d) {
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const day = new Date(d); day.setHours(0, 0, 0, 0);
@@ -5972,36 +6060,100 @@
       year: day.getFullYear() === today.getFullYear() ? undefined : "numeric" });
   }
   function teamItems(m, prev) {
-    const at = new Date(m.at), before = prev ? new Date(prev.at) : null;
+    const at = teamWhen(m), before = prev ? teamWhen(prev) : null;
     const out = [];
     const newDay = !before || before.toDateString() !== at.toDateString();
     if (newDay) out.push(h("div", { class: "tm-day" }, dayLabel(at)));
-    const cont = !newDay && prev.name === m.name && at - before < 5 * 60000;
-    const who = m.name + (m.account && m.account !== m.name ? " (" + m.account + ")" : "") +
-      (m.via && m.via !== "portal" ? " · " + m.via : "");
-    out.push(h("div", { class: "tm" + (cont ? " cont" : "") + (m.name === teamName() ? " mine" : ""), title: who + " · " + at.toLocaleString() },
-      cont ? null : h("div", { class: "tm-head" }, h("b", {}, m.name),
-        h("time", { datetime: m.at }, at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))),
-      h("div", { class: "tm-text" }, m.text)));
+    const color = teamColorOf(m);
+    const mine = m.name === teamName();
+    const cont = !newDay && prev && prev.name === m.name && at - before < 5 * 60000 && !m.reply_to;
+    const who = [m.name, m.account && m.account !== m.name ? "account " + m.account : "",
+      m.via && m.via !== "portal" ? m.via : ""].filter(Boolean).join(" · ");
+    const wrap = h("div", { class: "tm" + (cont ? " cont" : "") + (mine ? " mine" : ""),
+      "data-tm-id": String(m.id), title: who + " · " + at.toLocaleString(),
+      style: color ? "--tm-color:" + color : null });
+    if (!cont) {
+      const badges = [];
+      if (m.via === "agent" || m.via === "system") {
+        badges.push(h("span", { class: "tm-badge ai", title: "Written by Kelvin's AI" }, "AI"));
+      }
+      if (m.mentions_agent) {
+        badges.push(h("span", { class: "tm-badge agent", title: "This message wakes Kelvin's AI" }, "@agent"));
+      }
+      const head = h("div", { class: "tm-head" },
+        h("span", { class: "tm-dot", style: color ? "background:" + color : null }),
+        h("b", {}, String(m.name || "?")),
+        h("time", { datetime: m.at || "" }, at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })),
+        ...badges);
+      if (m.account && m.account !== m.name) head.append(h("span", { class: "tm-account" }, m.account));
+      if (m.via && m.via !== "portal" && m.via !== "agent" && m.via !== "system") head.append(h("span", { class: "tm-via" }, m.via));
+      wrap.append(head);
+    }
+    if (m.reply_to) {   // the message it answers, a click away
+      const quote = h("button", { class: "tm-quote", type: "button", title: "Go to the message this answers" },
+        h("span", { class: "tm-quote-arrow", "aria-hidden": "true" }, "↩"),
+        h("span", {}, " ", h("b", {}, String(m.reply_name || ("#" + m.reply_to)))));
+      quote.addEventListener("click", () => teamJumpTo(m.reply_to));
+      wrap.append(quote);
+    }
+    wrap.append(h("div", { class: "tm-text" }, teamRich(m.text)));
+    const act = h("button", { class: "tm-act", type: "button", title: "Reply to this message" }, "Reply");
+    act.addEventListener("click", () => teamReplyTo(m));
+    wrap.append(h("div", { class: "tm-actions" }, act));
+    out.push(wrap);
     return out;
   }
-  function renderTeam(older) {
+  function teamReplyTo(m) {
+    if (!m) return;
+    TEAM.reply = { id: m.id, name: String(m.name || "") };
+    const box = $("team-reply"), nameEl = $("team-reply-name");
+    if (nameEl) nameEl.textContent = TEAM.reply.name || ("#" + m.id);
+    if (box) box.hidden = false;
+    teamHint("");
+    $("team-input").focus();
+  }
+  function teamClearReply() {
+    TEAM.reply = null;
+    const box = $("team-reply");
+    if (box) box.hidden = true;
+  }
+  function teamJumpTo(id) {
     const list = $("team-list");
-    const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
+    const el = list && list.querySelector('[data-tm-id="' + String(id) + '"]');
+    if (!el) { toast("That message is not loaded here."); return; }
+    el.scrollIntoView({ block: "center" });
+    el.classList.remove("tm-flash");
+    void el.offsetWidth;
+    el.classList.add("tm-flash");
+    setTimeout(() => el.classList.remove("tm-flash"), 1400);
+  }
+  function renderTeam(older, showNew) {
+    const list = $("team-list");
+    if (!list) return;
+    const atBottom = teamAtBottom();
     const fromEnd = list.scrollHeight - list.scrollTop;
     const items = TEAM.msgs.flatMap((m, i) => teamItems(m, TEAM.msgs[i - 1]));
-    list.replaceChildren(...(items.length ? items : [h("div", { class: "team-empty" }, "No messages yet")]));
+    list.replaceChildren(...(items.length ? items : [h("div", { class: "team-empty" },
+      h("div", {}, "No messages yet."),
+      h("div", { class: "muted small" }, "Say hello, or write @agent to ask Kelvin."))]));
     if (older) list.scrollTop = list.scrollHeight - fromEnd;   // what you were reading stays in place
-    else if (atEnd || !TEAM.drawn) list.scrollTop = list.scrollHeight;
+    else if (atBottom || !TEAM.drawn) teamScrollBottom();
     TEAM.drawn = true;
+    const bar = $("team-new");
+    if (bar) {
+      if (showNew && !atBottom) bar.hidden = false;
+      else if (atBottom) bar.hidden = true;
+    }
   }
   function addTeam(messages, older) {
     const have = new Set(TEAM.msgs.map((m) => m.id));
-    const fresh = messages.filter((m) => !have.has(m.id));
+    const fresh = (messages || []).filter((m) => m && !have.has(m.id));
     if (!fresh.length && TEAM.drawn) return;
+    const wasBottom = teamAtBottom();
     TEAM.msgs = TEAM.msgs.concat(fresh).sort((a, b) => a.id - b.id);
     TEAM.shown = TEAM.msgs.length ? TEAM.msgs[TEAM.msgs.length - 1].id : 0;
-    renderTeam(older);
+    renderTeam(older, !older && TEAM.drawn && !wasBottom);
+    if (TEAM.open && !older && (wasBottom || !TEAM.drawn)) markTeamSeen();
   }
   async function loadTeam() {
     if (TEAM.busy) return;
@@ -6009,9 +6161,11 @@
     try {
       const first = !TEAM.drawn;
       const r = await api("/api/team" + (TEAM.shown ? "?after=" + TEAM.shown : ""));
-      if (first) TEAM.more = r.messages.length >= 200;
-      addTeam(r.messages);
-      if (TEAM.open) markTeamSeen();
+      if (r && r.colors) TEAM.colors = Object.assign({}, TEAM.colors, r.colors);
+      if (first) TEAM.more = (r.messages || []).length >= 200;
+      addTeam(r.messages || []);
+      if (TEAM.open && teamAtBottom()) markTeamSeen();
+      renderTeamPeople();
     } catch (e) { /* the next poll tries again */ }
     TEAM.busy = false;
   }
@@ -6020,8 +6174,8 @@
     TEAM.busy = true;
     try {
       const r = await api("/api/team?before=" + TEAM.msgs[0].id);
-      TEAM.more = r.messages.length >= 200;
-      addTeam(r.messages, true);
+      TEAM.more = (r.messages || []).length >= 200;
+      addTeam(r.messages || [], true);
     } catch (e) { /* stays as it is */ }
     TEAM.busy = false;
   }
@@ -6029,41 +6183,79 @@
     TEAM.seen = Math.max(TEAM.seen, TEAM.shown);
     TEAM.told = Math.max(TEAM.told || 0, TEAM.shown);
     store("lh.teamSeen", String(TEAM.seen));
-    $("team-dot").hidden = true;
+    const dot = $("team-dot");
+    if (dot) dot.hidden = true;
+    const un = $("team-unread");
+    if (un) un.hidden = true;
+    const bar = $("team-new");
+    if (bar) bar.hidden = true;
+  }
+  // the list polls itself only while the panel is open (the state poll covers the unread mark when it is closed)
+  function teamPollStart() {
+    teamPollStop();
+    TEAM.poll = setInterval(() => { if (TEAM.open) loadTeam(); }, 4000);
+  }
+  function teamPollStop() {
+    if (TEAM.poll) { clearInterval(TEAM.poll); TEAM.poll = 0; }
   }
   async function sendTeam(e) {
-    e.preventDefault();
+    if (e && e.preventDefault) e.preventDefault();
     const input = $("team-input"), text = input.value.trim();
     if (!text) return;
     if (!teamName()) { showTeamName(true); return; }
-    $("team-send").disabled = true;
+    const send = $("team-send");
+    if (send) send.disabled = true;
+    teamHint("");
+    const reply = TEAM.reply;
     try {
-      const r = await api("/api/team", { body: { name: teamName(), text } });
+      const body = { name: teamName(), text };
+      if (reply && reply.id) body.reply_to = reply.id;
+      const r = await api("/api/team", { body });
       input.value = "";
       fitTeamInput();
+      teamClearReply();
       addTeam([r.message]);
+      teamScrollBottom();
       markTeamSeen();
-    } catch (err) { toast(err.message); }
-    $("team-send").disabled = false;
+    } catch (err) {
+      teamHint(err.message || "It was not sent.");
+      toast(err.message || "It was not sent.");
+    }
+    if (send) send.disabled = false;
     input.focus();
   }
   function fitTeamInput() {
     const t = $("team-input");
+    if (!t) return;
     t.style.height = "auto";
     t.style.height = Math.min(t.scrollHeight, 160) + "px";
     t.style.overflowY = t.scrollHeight > 160 ? "auto" : "hidden";
   }
   // the state's poll says the newest message's id: a dot on the button, and who wrote what while the chat is closed
+  // the state's poll says the newest message's id: the toolbar's unread mark (a dot and how many are new), and a
+  // toast for who wrote while the chat was closed (a click opens the panel there).
   async function teamState(last) {
     if (typeof last !== "number") return;
     if (TEAM.told === null) TEAM.told = last;   // what was there before this page opened is not news
     if (TEAM.open) { if (last > TEAM.shown) loadTeam(); return; }
-    $("team-dot").hidden = !(last > TEAM.seen);
+    const unread = last > TEAM.seen;
+    const dot = $("team-dot"), un = $("team-unread");
+    if (dot) dot.hidden = !unread;
+    if (!unread) {
+      if (un) un.hidden = true;
+      TEAM.unread = 0;
+    } else {
+      try {
+        const r = await api("/api/team?after=" + TEAM.seen + "&limit=200");
+        TEAM.unread = (r.messages || []).length;
+        if (un) { un.textContent = TEAM.unread > 99 ? "99+" : String(TEAM.unread); un.hidden = !TEAM.unread; }
+      } catch (e) { /* the dot still says */ }
+    }
     if (last <= TEAM.told) return;
     const from = TEAM.told;
     TEAM.told = last;
     try {
-      const theirs = (await api("/api/team?after=" + from)).messages.filter((m) => m.name !== teamName());
+      const theirs = ((await api("/api/team?after=" + from)).messages || []).filter((m) => m.name !== teamName());
       const m = theirs[theirs.length - 1];
       if (m) toast(m.name + ": " + (m.text.length > 90 ? m.text.slice(0, 90) + "…" : m.text), () => toggleTeam(true));
     } catch (e) { /* the dot still says */ }
@@ -6077,11 +6269,31 @@
     $("team-name-input").addEventListener("keydown", (e) => {
       if (e.key === "Escape" && teamName()) { e.preventDefault(); showTeamName(); }
     });
-    $("team-input").addEventListener("input", fitTeamInput);
+    $("team-input").addEventListener("input", () => { fitTeamInput(); teamHint(""); });
     $("team-input").addEventListener("keydown", (e) => {   // Enter sends, Shift+Enter starts a new line
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) sendTeam(e);
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendTeam(); }
     });
-    $("team-list").addEventListener("scroll", () => { if ($("team-list").scrollTop < 40) loadOlderTeam(); });
+    $("team-list").addEventListener("scroll", () => {
+      if ($("team-list").scrollTop < 40) loadOlderTeam();
+      if (teamAtBottom()) {
+        const bar = $("team-new");
+        if (bar) bar.hidden = true;
+        if (TEAM.open) markTeamSeen();
+      }
+    });
+    $("team-new").addEventListener("click", () => { teamScrollBottom(); markTeamSeen(); });
+    $("team-reply-x").addEventListener("click", () => { teamClearReply(); $("team-input").focus(); });
+    $("team-agent").addEventListener("click", () => {   // the quick way to ask Kelvin in the chat
+      const input = $("team-input");
+      const at = input.selectionStart == null ? input.value.length : input.selectionStart;
+      const before = input.value.slice(0, at), after = input.value.slice(at);
+      const sep = before && !/\s$/.test(before) ? " " : "";
+      input.value = before + sep + "@agent " + after;
+      fitTeamInput();
+      input.focus();
+      const pos = (before + sep + "@agent ").length;
+      input.setSelectionRange(pos, pos);
+    });
   }
 
   // ------------------------------------------------------------------ analysis: post-processing kept runs
@@ -6469,13 +6681,17 @@
   const LM_RAIL_KEY = "kelvin.rail";
   const LM = {
     tab: "chat",                    // "chat" | "home" | "seq"
-    homeTimer: 0, seqTimer: 0,
-    homeBusy: false, seqBusy: false,
-    homeLoaded: false, seqLoaded: false,
+    homeTimer: 0, seqTimer: 0, histTimer: 0,
+    homeBusy: false, seqBusy: false, histBusy: false,
+    homeLoaded: false, seqLoaded: false, historyLoaded: false,
     paletteLoaded: false, savedLoaded: false, scriptsLoaded: false,
-    palette: [], saved: [], scripts: [],
-    state: null,                    // the labMaster snapshot: sequence / run_state / progress / …
+    palette: [], saved: [], scripts: [], history: [],
+    state: null,                    // the sequence engine's snapshot: sequence / run_state / progress / …
+    homePanel: null,                // /api/home's panel block (version, in-process), for the header
+    seqName: "",                    // the sequence's name, as last drawn (and what a rename starts from)
+    armed: false, armedKnown: false, // may Kelvin's AI start a run itself? (a person sets this here)
     seqSig: "",                     // the sequence as last drawn, so polling only redraws when it changes
+    histSig: "",                    // the history list as last drawn
   };
   const LM_TILES = [
     { id: "measurement", title: "Measurement" },
@@ -6521,9 +6737,9 @@
 
   // ------------------------------------------------------------------ the rail and the view switch
   function lmSetTab(tab, remember) {
-    if (tab !== "home" && tab !== "seq") tab = "chat";
+    if (tab !== "home" && tab !== "seq" && tab !== "history") tab = "chat";
     LM.tab = tab;
-    document.body.classList.remove("rail-chat", "rail-home", "rail-seq");
+    document.body.classList.remove("rail-chat", "rail-home", "rail-seq", "rail-history");
     document.body.classList.add("rail-" + tab);
     for (const b of document.querySelectorAll("#rail .rail-btn")) {
       const on = b.dataset.rail === tab;
@@ -6532,15 +6748,21 @@
     }
     lmHomeStop();
     lmSeqPollStop();
-    // the side panels measure the top bar, which Home and Sequence hide: let the layout settle again
+    lmHistoryPollStop();
+    // the side panels measure the top bar, which Home / Sequence / History hide: let the layout settle again
     try { window.dispatchEvent(new Event("resize")); } catch (e) { /* a very old browser */ }
     if (tab === "home") {
       lmHomePollStart();
       lmHomeLoad();
     } else if (tab === "seq") {
       lmSeqPollStart();
+      lmHistoryPollStart();
+      lmArmLoad();
+      lmHistoryLoad();
       if (!LM.seqLoaded) { LM.seqLoaded = true; lmSeqRefresh(true); }
       else lmSeqRefresh(false);
+    } else if (tab === "history") {
+      lmhEnter();
     }
     if (remember) store(LM_RAIL_KEY, tab);
   }
@@ -6548,18 +6770,20 @@
   function lmInit() {
     try {
       lmSeqInit();
+      lmhInit();
       const refresh = lmEl("lm-home-refresh");
       if (refresh) refresh.addEventListener("click", () => lmHomeLoad());
       const rail = lmEl("rail");
       if (rail) for (const b of rail.querySelectorAll(".rail-btn")) b.addEventListener("click", () => lmSetTab(b.dataset.rail, true));
-      // the tab survives a reload (localStorage), and ?view=home / ?view=seq opens one straight away
+      // the tab survives a reload (localStorage), and ?view=home|seq|history opens one straight away
       let start = "chat";
       try {
         const q = new URLSearchParams(location.search);
         const want = q.get("view") || q.get("tab");
         start = want || store(LM_RAIL_KEY) || "chat";
       } catch (e) { start = "chat"; }
-      const tab = start === "home" ? "home" : start === "seq" || start === "sequence" ? "seq" : "chat";
+      const tab = start === "home" ? "home" : start === "seq" || start === "sequence" ? "seq"
+        : start === "history" || start === "hist" ? "history" : "chat";
       lmSetTab(tab, tab !== "chat");
     } catch (e) {
       try { document.body.classList.add("rail-chat"); } catch (e2) { /* never break the chat */ }
@@ -6588,13 +6812,16 @@
 
   function lmHomeRender(d) {
     const panel = d.panel || {};
+    LM.homePanel = panel;
     const greet = lmEl("lm-home-greet");
     if (greet) greet.textContent = String(d.greeting || "Home");
     const sub = lmEl("lm-home-sub");
+    const inproc = panel.url === "in-process";
+    const label = inproc ? "Sequence engine" : "labMaster panel";
     if (sub) {
       const bits = [];
-      if (panel.ok) bits.push("labMaster panel" + (panel.version ? " v" + panel.version : "") + (panel.sim ? " · SIMULATION" : ""));
-      else bits.push("labMaster panel not connected (" + (panel.url || "http://127.0.0.1:8770") + ")");
+      if (panel.ok) bits.push(label + (panel.version ? " v" + panel.version : "") + (inproc ? " · in-process" : (panel.sim ? " · SIMULATION" : "")));
+      else bits.push(label + " is not available" + (panel.error ? " (" + panel.error + ")" : ""));
       if (d.updated_at) { const at = lmDate(d.updated_at); if (at) bits.push("updated " + at); }
       sub.textContent = bits.join(" · ");
     }
@@ -6609,7 +6836,8 @@
     const cardBox = lmEl("lm-home-cards");
     if (cardBox) cardBox.replaceChildren(...(cards.length ? cards.map(lmHomeCard) :
       [h("div", { class: "lm-empty" }, "No cards yet. In the chat, ask Kelvin to put something here: a note, a metric, a checklist, a link or a sequence.")]));
-    if (!panel.ok) lmMsg("lm-home-msg", "labMaster panel is not connected (" + (panel.url || "http://127.0.0.1:8770") + "): the tiles show what Kelvin last knew; the chat and cards still work.", false);
+    if (!panel.ok) lmMsg("lm-home-msg", label + " is not available" + (panel.error ? " (" + panel.error + ")" : "") +
+      ". The tiles show what Kelvin last knew; the chat and cards still work.", false);
     else lmMsg("lm-home-msg", "", false);
   }
 
@@ -6671,8 +6899,8 @@
       const r = await api("/api/labmaster/state");
       if (!r || r.ok === false) {
         lmSeqConn(false, r);
-        lmMsg("lm-seq-msg", "labMaster is not connected (" + ((r && r.url) || "http://127.0.0.1:8770") + "): " +
-          ((r && r.error) || "the panel is not running") + ". Start it with: python -u panel_server.py --sim --port 8770", true);
+        lmMsg("lm-seq-msg", "The sequence engine did not answer" +
+          ((r && r.error) ? ": " + r.error : "") + ". It runs inside this Kelvin process; try restarting Kelvin.", true);
         return;
       }
       LM.state = r.state || null;
@@ -6776,7 +7004,7 @@
       lmSeqRenderScripts();
     } catch (e) {
       const hint = lmEl("lm-import-hint");
-      if (hint) hint.textContent = "The script list is unavailable (labMaster is not connected); type a path instead.";
+      if (hint) hint.textContent = "The script list is unavailable (the sequence engine did not answer); type a path instead.";
     }
   }
 
@@ -6792,29 +7020,210 @@
     sel.replaceChildren(...opts);
   }
 
+  // ------------------------------------------------------------------ the engine's header: in-process and its version
+  function lmEngineVersion() {
+    const live = LM.state || {};       // the engine's snapshot (GET /api/labmaster/state's "state")
+    const panel = LM.homePanel || {};
+    return String(live.panel_version || live.version || panel.version || "");
+  }
+
   function lmSeqConn(ok, info) {
     const badge = lmEl("lm-seq-conn");
     if (!badge) return;
-    const url = (info && info.url) || "http://127.0.0.1:8770";
     badge.classList.remove("ok", "bad", "sim");
-    const st = LM.state || {};
+    const ver = lmEngineVersion();
+    const sub = lmEl("lm-seq-sub");
+    const tail = ver ? " · v" + ver : "";
     if (ok === true) {
-      const sim = !!st.sim;
-      badge.textContent = sim ? "SIMULATION" : "panel";
-      badge.classList.add(sim ? "sim" : "ok");
-      badge.title = "labMaster panel · " + url + (st.panel_version ? " · v" + st.panel_version : "");
-      const sub = lmEl("lm-seq-sub");
-      if (sub) sub.textContent = "labMaster panel" + (st.panel_version ? " v" + st.panel_version : "") +
-        (sim ? " · SIMULATION" : "") + " · " + url;
+      badge.textContent = "in-process";
+      badge.classList.add("ok");
+      badge.title = "The sequence engine runs inside this Kelvin process" + tail;
+      if (sub) sub.textContent = "in-process" + tail;
     } else if (ok === false) {
-      badge.textContent = "not connected";
+      badge.textContent = "engine unavailable";
       badge.classList.add("bad");
-      badge.title = url;
-      const sub = lmEl("lm-seq-sub");
-      if (sub) sub.textContent = "labMaster panel · " + url;
+      badge.title = (info && info.error) || "the sequence engine did not answer";
+      if (sub) sub.textContent = "in-process" + tail + " · not answering";
     } else {
       badge.textContent = "…";
-      badge.title = "connecting";
+      badge.title = "connecting to the sequence engine";
+    }
+  }
+
+  // ------------------------------------------------------------------ the arm switch: may the AI start this sequence?
+  function lmArmRender(err) {
+    const input = lmEl("lm-arm-toggle");
+    const banner = lmEl("lm-arm-banner");
+    const title = lmEl("lm-arm-banner-title");
+    const sub = lmEl("lm-arm-banner-sub");
+    if (input) {
+      input.checked = !!LM.armed;
+      input.disabled = !LM.armedKnown;
+      input.setAttribute("aria-checked", String(!!LM.armed));
+    }
+    if (!banner || !title || !sub) return;
+    banner.classList.remove("on", "off", "bad");
+    if (!LM.armedKnown) {
+      banner.classList.add("bad");
+      title.textContent = "AI start is unavailable";
+      sub.textContent = err ? String(err) : "Kelvin could not read whether the AI may start this sequence.";
+      return;
+    }
+    if (LM.armed) {
+      banner.classList.add("on");
+      title.textContent = "AI can start this sequence";
+      sub.textContent = "Kelvin's AI may start runs here without asking each time. Turn this off to approve every start.";
+    } else {
+      banner.classList.add("off");
+      title.textContent = "AI asks you each time";
+      sub.textContent = "Turn on “AI may start runs” above to let Kelvin start this sequence on its own.";
+    }
+  }
+
+  async function lmArmLoad() {
+    try {
+      const r = await api("/api/labmaster/armed");
+      if (!r || r.ok === false) throw new Error((r && r.error) || "no answer");
+      LM.armed = !!r.armed;
+      LM.armedKnown = true;
+      lmArmRender();
+    } catch (e) {
+      LM.armedKnown = false;
+      const msg = String((e && e.message) || e);
+      lmArmRender(/HTTP 404/.test(msg) ? "The arm setting is not available in this build of Kelvin yet." :
+        "Kelvin could not read the arm setting: " + msg);
+    }
+  }
+
+  async function lmArmSet(on) {
+    const input = lmEl("lm-arm-toggle");
+    if (input) input.disabled = true;
+    try {
+      const r = await api("/api/labmaster/armed", { body: { armed: !!on } });
+      if (!r || r.ok === false) throw new Error((r && r.error) || "it was refused");
+      LM.armed = !!r.armed;
+      LM.armedKnown = true;
+      lmArmRender();
+      lmSafeToast(LM.armed ? "AI may start this sequence" : "The AI will ask you before it starts");
+    } catch (e) {
+      if (input) input.checked = !!LM.armed;
+      lmMsg("lm-seq-msg", "Could not change “AI may start runs”: " + ((e && e.message) || e), true);
+      lmArmRender();
+    }
+  }
+
+  // ------------------------------------------------------------------ History / Runs (the engine's history + Kelvin's runs)
+  function lmHistoryPollStart() {
+    lmHistoryPollStop();
+    LM.histTimer = setInterval(() => { if (LM.tab === "seq") lmHistoryLoad(); }, 10000);
+  }
+  function lmHistoryPollStop() { if (LM.histTimer) { clearInterval(LM.histTimer); LM.histTimer = 0; } }
+
+  async function lmHistoryLoad() {
+    if (LM.histBusy) return;
+    LM.histBusy = true;
+    try {
+      const r = await api("/api/labmaster/history");
+      if (!r || r.ok === false) throw new Error((r && r.error) || "no answer");
+      LM.history = Array.isArray(r.runs) ? r.runs : [];
+      LM.historyLoaded = true;
+      const box = lmEl("lm-history-msg");
+      if (box) box.hidden = true;
+      lmHistoryRender();
+    } catch (e) {
+      const box = lmEl("lm-history-msg");
+      if (box) { box.textContent = lmErrText(e, "/api/labmaster/history"); box.hidden = false; }
+    } finally { LM.histBusy = false; }
+  }
+
+  function lmHistoryStatusClass(status) {
+    const s = String(status || "").toLowerCase();
+    if (/fail|error|cancel/.test(s)) return "error";
+    if (/run|start|progress/.test(s)) return "running";
+    if (/queue|wait|pending/.test(s)) return "pending";
+    if (/done|ok|complete|success|finish/.test(s)) return "done";
+    return "idle";
+  }
+
+  function lmHistoryRender() {
+    const list = lmEl("lm-history-list");
+    if (!list) return;
+    const runs = LM.history;
+    const count = lmEl("lm-history-count");
+    if (count) count.textContent = runs.length ? runs.length + " run" + (runs.length === 1 ? "" : "s") : "";
+    if (!runs.length) {
+      LM.histSig = "";
+      list.replaceChildren(h("div", { class: "lm-history-empty" },
+        "No runs yet. Start the sequence here, or ask Kelvin to measure: every run lands here with its name and status."));
+      return;
+    }
+    const sig = JSON.stringify(runs.slice(0, 40).map((r) => [r.source, r.run_id, r.name, r.status, r.started, r.detail]));
+    if (sig === LM.histSig) return;
+    LM.histSig = sig;
+    list.replaceChildren(...runs.slice(0, 40).map(lmHistoryRow));
+  }
+
+  function lmHistoryRow(run) {
+    const source = String(run.source || "panel").toLowerCase() === "kelvin" ? "kelvin" : "panel";
+    const name = String(run.name || run.run_id || "(unnamed)");
+    const status = String(run.status || "");
+    const detail = String(run.detail || "");
+    const when = lmDate(run.started || run.finished, false);
+    return h("div", { class: "lm-history-row", title: detail || name },
+      h("span", { class: "lm-history-src " + source }, source),
+      h("span", { class: "lm-history-name" }, name),
+      h("span", { class: "lm-chip " + lmHistoryStatusClass(status) }, status || "—"),
+      h("span", { class: "lm-history-when" }, when),
+      detail ? h("span", { class: "lm-history-detail" }, detail) : null);
+  }
+
+  // ------------------------------------------------------------------ the sequence's name (click it to rename it)
+  function lmSeqNameRender(name) {
+    LM.seqName = String(name || "");
+    const btn = lmEl("lm-seq-name");
+    const input = lmEl("lm-seq-name-input");
+    if (input && !input.hidden) return;   // the person is typing: keep what they typed
+    if (!btn) return;
+    const text = lmEl("lm-seq-name-text");
+    if (text) text.textContent = LM.seqName || "Name this sequence";
+    btn.classList.toggle("empty", !LM.seqName);
+    btn.title = LM.seqName ? "Click to rename this sequence" : "Click to give this sequence a name";
+  }
+
+  function lmSeqNameEdit() {
+    const btn = lmEl("lm-seq-name");
+    const input = lmEl("lm-seq-name-input");
+    if (!btn || !input || !input.hidden) return;
+    input.value = LM.seqName || "";
+    btn.hidden = true;
+    input.hidden = false;
+    input.focus();
+    input.select();
+  }
+
+  function lmSeqNameEnd(commit) {
+    const btn = lmEl("lm-seq-name");
+    const input = lmEl("lm-seq-name-input");
+    if (!input || input.hidden) return;
+    const name = String(input.value || "").trim();
+    input.hidden = true;
+    if (btn) btn.hidden = false;
+    if (!commit || !name || name === LM.seqName) return;
+    lmSeqRename(name);
+  }
+
+  async function lmSeqRename(name) {
+    try {
+      const r = await api("/api/labmaster/seq", { body: { action: "rename", name } });
+      if (!r || r.ok === false) throw new Error((r && r.error) || "it was refused");
+      if (r.state) { LM.state = r.state; LM.seqSig = ""; }
+      lmSeqRenderState();
+      lmSeqNameRender(name);
+      lmMsg("lm-seq-msg", "", false);
+      lmSafeToast("This sequence is now “" + name + "”");
+    } catch (e) {
+      lmSeqNameRender(LM.seqName);
+      lmMsg("lm-seq-msg", "Renaming failed: " + ((e && e.message) || e), true);
     }
   }
 
@@ -6842,8 +7251,7 @@
       chip.className = "lm-chip " + lmRunClass(run);
       chip.title = st.message ? run + " · " + st.message : run;
     }
-    const nameEl = lmEl("lm-seq-name");
-    if (nameEl) nameEl.textContent = seq.name ? "“" + seq.name + "”" : "";
+    lmSeqNameRender(seq.name || "");
     const start = lmEl("lm-btn-start"), pause = lmEl("lm-btn-pause");
     const stop = lmEl("lm-btn-stop"), safe = lmEl("lm-btn-safe");
     if (start) { start.disabled = run === "running" || run === "stopping"; start.textContent = run === "paused" ? "Resume" : "Start"; }
@@ -6929,11 +7337,12 @@
 
   async function lmSeqControl(action) {
     if (action === "stop" && !confirm("Stop the sequence now? The block that runs is stopped where it is.")) return;
-    if (action === "safe_stop" && !confirm("Safe stop: stop everything, then run labMaster's safe-stop script.\n\nContinue?")) return;
+    if (action === "safe_stop" && !confirm("Safe stop: stop everything, then run the safe-stop script.\n\nContinue?")) return;
     const body = { action };
     if (action === "safe_stop") body.reason = "Kelvin UI";
-    await lmSeqPost("/api/labmaster/control", body, "“" + action + "”",
+    const r = await lmSeqPost("/api/labmaster/control", body, "“" + action + "”",
       action === "safe_stop" ? "Safe stop sent" : action.charAt(0).toUpperCase() + action.slice(1) + " sent");
+    if (r) lmHistoryLoad();   // a start/stop shows up in History at once, not only on the next poll
   }
 
   async function lmSeqSaveCurrent() {
@@ -7028,6 +7437,22 @@
     });
     click("lm-btn-save", lmSeqSaveCurrent);
     click("lm-btn-import", lmSeqImport);
+    // the sequence's name: click it, type, Enter (or blur) renames; Escape cancels
+    const nameBtn = lmEl("lm-seq-name");
+    if (nameBtn) nameBtn.addEventListener("click", lmSeqNameEdit);
+    const nameInput = lmEl("lm-seq-name-input");
+    if (nameInput) {
+      nameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); lmSeqNameEnd(true); }
+        else if (e.key === "Escape") { e.preventDefault(); lmSeqNameEnd(false); }
+      });
+      nameInput.addEventListener("blur", () => lmSeqNameEnd(true));
+    }
+    // the arm switch: a person's only way to let the AI start runs by itself
+    const arm = lmEl("lm-arm-toggle");
+    if (arm) arm.addEventListener("change", () => lmArmSet(!!arm.checked));
+    // the compact History under the sequence points at the full History page
+    click("lm-history-all", () => lmSetTab("history", true));
     const sel = lmEl("lm-script-select");
     if (sel) sel.addEventListener("change", () => {
       const p = lmEl("lm-import-path");
@@ -7042,6 +7467,396 @@
         if (id === "lm-import-path") lmSeqImport(); else lmSeqSaveCurrent();
       });
     }
+  }
+
+  // ------------------------------------------------------------------ History: every run, its analysis and reports
+  // One page for everything the lab has run: Kelvin's own measurement runs (source "kelvin", with their plan,
+  // automatic analysis and report files) and the in-process sequence engine's runs (source "panel", with blocks
+  // and a dataset). GET /api/history/all merges and pages them; a kelvin run's detail is GET /api/runs/{run_id}.
+  const LMH = { loaded: false, busy: false, runs: [], total: 0, counts: {}, source: "all", status: "", q: "",
+                hasMore: false, selected: null, gen: 0, detailGen: 0, debounce: 0, lastLoad: 0 };
+  const LMH_LIMIT = 50;
+
+  function lmhKey(run) {
+    return [String((run && run.source) || "panel"), String((run && (run.run_id || run.id)) || ""),
+      String((run && (run.started || run.at)) || ""), String((run && run.name) || "")].join("|");
+  }
+  function lmhMsg(text, bad) {
+    const box = lmEl("lmh-msg");
+    if (!box) return;
+    box.textContent = text || "";
+    box.classList.toggle("bad", !!bad);
+    box.hidden = !text;
+  }
+  function lmhDuration(seconds) {
+    const n = Number(seconds);
+    if (!isFinite(n) || n < 0) return "—";
+    if (n < 90) return (n < 10 ? n.toFixed(1) : String(Math.round(n))) + " s";
+    const m = Math.floor(n / 60), s = Math.round(n % 60);
+    return m + " min" + (s ? " " + s + " s" : "");
+  }
+  function lmhSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n >= 1048576) return (n / 1048576).toFixed(1) + " MB";
+    if (n >= 1024) return Math.round(n / 1024) + " KB";
+    return n + " B";
+  }
+  function lmhLabel(key) {
+    return String(key || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+  function lmhScalar(v, depth) {
+    const d = depth || 0;
+    if (v == null) return "—";
+    if (typeof v === "number") return String(Number.isFinite(v) ? Math.round(v * 1000) / 1000 : v);
+    if (typeof v === "boolean") return v ? "yes" : "no";
+    if (typeof v === "string") return v.length > 400 ? v.slice(0, 400) + "…" : v;
+    if (d >= 2) return Array.isArray(v) ? v.length + " items" : Object.keys(v).length + " fields";
+    if (Array.isArray(v)) {   // a list of fits/curves/readings: each item, in words
+      const parts = v.slice(0, 5).map((x) => {
+        if (x && typeof x === "object") {
+          if (typeof x.summary === "string" && x.summary) return x.summary;
+          if (x.name != null) return String(x.name) + ": " + lmhScalar(x.value != null ? x.value : x.num, d + 1);
+          return Object.keys(x).slice(0, 3).map((k) => k + "=" + lmhScalar(x[k], d + 1)).join(", ");
+        }
+        return lmhScalar(x, d + 1);
+      });
+      return parts.join(" · ") + (v.length > 5 ? " …" : "");
+    }
+    if (typeof v === "object") {   // a fit, an assessment: its summary, else its fields, never raw JSON quotes
+      if (typeof v.summary === "string" && v.summary) return v.summary;
+      const keys = Object.keys(v);
+      return keys.slice(0, 6).map((k) => lmhLabel(k) + ": " + lmhScalar(v[k], d + 1)).join(" · ") +
+        (keys.length > 6 ? " …" : "");
+    }
+    return String(v);
+  }
+  function lmhAnalysisNode(analysis) {
+    if (analysis == null || (typeof analysis === "object" && !Array.isArray(analysis) && !Object.keys(analysis).length)) {
+      return h("p", { class: "muted small" }, "No automatic analysis for this run.");
+    }
+    if (typeof analysis === "string") return h("p", { class: "lmh-text" }, analysis);
+    if (Array.isArray(analysis)) return h("ul", { class: "lmh-listul" }, ...analysis.map((x) => h("li", {}, lmhScalar(x))));
+    return h("div", { class: "lmh-analysis" }, ...Object.keys(analysis).map((k) => {
+      const v = analysis[k];
+      if (v == null || v === "") return null;
+      return h("div", { class: "lmh-an-row" }, h("span", { class: "lmh-an-key" }, lmhLabel(k)),
+        h("span", { class: "lmh-an-val" }, lmhScalar(v)));
+    }).filter(Boolean));
+  }
+  async function lmhCopy(text, label) {
+    try { await navigator.clipboard.writeText(String(text)); toast(label + " copied"); }
+    catch (e) { toast("Could not copy it: " + ((e && e.message) || e)); }
+  }
+  async function lmhOpenAnalysis(run) {
+    if (!run || !run.run_id) return;
+    try {
+      lmSetTab("chat", true);
+      await openAnalysis({ runs: [String(run.run_id)] }, null, { x: true, y: true, group: false });
+    } catch (e) { toast("Could not open the analysis: " + ((e && e.message) || e)); }
+  }
+
+  function lmhCount() {
+    const el = lmEl("lmh-count");
+    if (!el) return;
+    if (!LMH.loaded) { el.textContent = "Loading…"; return; }
+    const c = LMH.counts || {};
+    const bits = [LMH.total + " run" + (LMH.total === 1 ? "" : "s")];
+    if (c.kelvin != null || c.panel != null) bits.push((Number(c.kelvin) || 0) + " Kelvin", (Number(c.panel) || 0) + " engine");
+    el.textContent = bits.join(" · ");
+  }
+  function lmhMoreBusy() {
+    const b = lmEl("lmh-more");
+    if (!b) return;
+    b.hidden = !LMH.hasMore;
+    b.disabled = !!LMH.busy;
+  }
+  function lmhClearDetail() {
+    const empty = lmEl("lmh-detail-empty"), body = lmEl("lmh-detail-body");
+    if (empty) empty.hidden = false;
+    if (body) { body.hidden = true; body.replaceChildren(); }
+  }
+
+  function lmhEnter() {
+    if (!LMH.loaded || Date.now() - LMH.lastLoad > 30000) lmhLoad(true);
+    else { lmhRender(); lmhMoreBusy(); }
+  }
+
+  async function lmhLoad(reset) {
+    const first = !!reset || !LMH.loaded;
+    const gen = ++LMH.gen;
+    if (first) { LMH.loaded = false; LMH.runs = []; lmhRender(); }
+    LMH.busy = true;
+    lmhMoreBusy();
+    try {
+      const qs = new URLSearchParams();
+      qs.set("limit", String(LMH_LIMIT));
+      qs.set("offset", String(first ? 0 : LMH.runs.length));
+      qs.set("source", LMH.source || "all");
+      if (LMH.status) qs.set("status", LMH.status);
+      if (LMH.q) qs.set("q", LMH.q);
+      const r = await api("/api/history/all?" + qs.toString());
+      if (gen !== LMH.gen) return;
+      if (!r || r.ok === false) throw new Error((r && r.error) || "no answer");
+      const runs = Array.isArray(r.runs) ? r.runs : [];
+      LMH.runs = first ? runs : LMH.runs.concat(runs);
+      LMH.total = Number.isFinite(Number(r.total)) ? Number(r.total) : LMH.runs.length;
+      LMH.counts = r.counts && typeof r.counts === "object" ? r.counts : {};
+      LMH.hasMore = !!r.has_more;
+      LMH.loaded = true;
+      LMH.lastLoad = Date.now();
+      lmhMsg("");
+      lmhRender();
+      if (LMH.selected) {
+        const keep = LMH.runs.find((x) => lmhKey(x) === lmhKey(LMH.selected));
+        if (keep) { LMH.selected = keep; lmhSelect(keep); } else lmhClearDetail();
+      }
+    } catch (e) {
+      if (gen === LMH.gen) lmhMsg(lmErrText(e, "/api/history/all"), true);
+    } finally {
+      if (gen === LMH.gen) { LMH.busy = false; lmhMoreBusy(); lmhCount(); }
+    }
+  }
+
+  function lmhRender() {
+    lmhCount();
+    const list = lmEl("lmh-list");
+    if (!list) return;
+    if (!LMH.loaded) {
+      list.replaceChildren(h("div", { class: "lmh-empty" }, h("span", { class: "spinner" }), " Loading the history…"));
+      return;
+    }
+    if (!LMH.runs.length) {
+      list.replaceChildren(h("div", { class: "lmh-empty" },
+        h("div", {}, "No runs match this view yet."),
+        h("div", { class: "muted small" }, "Runs Kelvin measures, and runs the sequence engine executes, appear here with their analysis and reports.")));
+      lmhMoreBusy();
+      return;
+    }
+    list.replaceChildren(...LMH.runs.map(lmhRow));
+    lmhMoreBusy();
+  }
+
+  function lmhRow(run) {
+    const key = lmhKey(run);
+    const source = String(run.source || "panel") === "kelvin" ? "kelvin" : "panel";
+    const status = String(run.status || "");
+    const meta = [];
+    if (run.points != null) meta.push(String(run.points) + " points");
+    if (run.blocks != null) meta.push(String(run.blocks) + " block" + (Number(run.blocks) === 1 ? "" : "s"));
+    // a kelvin row has no structured points: its detail says them ("3/3 points"), so show that instead
+    if (!meta.length && run.detail) meta.push(String(run.detail));
+    const reports = Array.isArray(run.report_files) ? run.report_files.length : 0;
+    if (reports) meta.push(reports + " report" + (reports === 1 ? "" : "s"));
+    const when = lmDate(run.at || run.started, false);
+    if (when) meta.push(when);
+    const row = h("button", { class: "lmh-row" + (LMH.selected && lmhKey(LMH.selected) === key ? " selected" : ""),
+      type: "button", "data-run": key, title: String(run.detail || run.name || "") },
+      h("span", { class: "lm-history-src " + source }, source === "kelvin" ? "kelvin" : "panel"),
+      h("span", { class: "lmh-main" },
+        h("span", { class: "lmh-name" }, String(run.name || run.run_id || "(unnamed run)")),
+        h("span", { class: "lmh-sub" }, meta.join(" · "))),
+      h("span", { class: "lm-chip " + lmHistoryStatusClass(status) }, status || "—"));
+    row.addEventListener("click", () => lmhSelect(run));
+    return row;
+  }
+
+  function lmhSelect(run) {
+    LMH.selected = run;
+    for (const el of document.querySelectorAll("#lmh-list .lmh-row")) {
+      el.classList.toggle("selected", el.getAttribute("data-run") === lmhKey(run));
+    }
+    const empty = lmEl("lmh-detail-empty"), body = lmEl("lmh-detail-body");
+    if (empty) empty.hidden = true;
+    if (body) { body.hidden = false; body.replaceChildren(h("div", { class: "lmh-loading" }, "Loading the run…")); }
+    const source = String(run.source || "panel") === "kelvin" ? "kelvin" : "panel";
+    if (source === "kelvin" && run.run_id) lmhKelvinDetail(run);
+    else if (source === "panel" && run.run_id) lmhPanelDetail(run);
+    else lmhDetailRender(run, null, null, null);
+  }
+
+  async function lmhKelvinDetail(run) {
+    const gen = ++LMH.detailGen;
+    try {
+      const d = await api("/api/runs/" + encodeURIComponent(String(run.run_id)));
+      if (gen !== LMH.detailGen) return;
+      lmhDetailRender(run, d || {}, null, null);
+    } catch (e) {
+      if (gen !== LMH.detailGen) return;
+      lmhDetailRender(run, null, lmErrText(e, "the run's detail"), null);
+    }
+  }
+  async function lmhPanelDetail(run) {
+    const gen = ++LMH.detailGen;
+    try {
+      const d = await api("/api/history/panel-run?id=" + encodeURIComponent(String(run.run_id)));
+      if (gen !== LMH.detailGen) return;
+      lmhDetailRender(run, null, null, d || null);
+    } catch (e) {   // the route is optional: the row alone still says blocks, dataset and detail
+      if (gen !== LMH.detailGen) return;
+      lmhDetailRender(run, null, null, null);
+    }
+  }
+
+  function lmhReportsSection(reports, source) {
+    if (source !== "kelvin") {
+      return h("div", { class: "lmh-section" }, h("h3", {}, "Reports"),
+        h("p", { class: "muted small" }, "engine run: no report or automatic analysis here (its history is the sequence's own)."));
+    }
+    if (!reports.length) {
+      return h("div", { class: "lmh-section" }, h("h3", {}, "Reports"),
+        h("p", { class: "muted small" }, "No report files were made for this run."));
+    }
+    return h("div", { class: "lmh-section" }, h("h3", {}, "Reports"),
+      h("div", { class: "lmh-reports" }, ...reports.map((f) => {
+        const name = String((f && f.name) || "report");
+        const url = String((f && f.url) || "");
+        const b = h("button", { class: "btn small", type: "button", title: "Download " + name },
+          icon("download"), h("span", { class: "lmh-report-name" }, name + (f && f.size ? " · " + lmhSize(f.size) : "")));
+        b.addEventListener("click", () => {
+          if (!url) { toast("This report has no download link."); return; }
+          fetchDownload(url, name, "report");
+        });
+        return b;
+      })));
+  }
+
+  function lmhDetailRender(run, detail, error, panelExtra) {
+    const body = lmEl("lmh-detail-body");
+    if (!body) return;
+    try {
+      const isKelvin = String(run.source || "panel").toLowerCase() === "kelvin";
+      const reports = Array.isArray(run.report_files) ? run.report_files : [];
+      const meta = (detail && detail.meta) || {};
+      const status = String(run.status || meta.status || "");
+      const facts = [];
+      const when = lmDate(run.at || run.started, false);
+      if (when) facts.push(["When", when]);
+      if (meta.points != null) facts.push(["Points", String(meta.points) + (meta.planned_points != null ? " / " + meta.planned_points : "")]);
+      else if (run.points != null) facts.push(["Points", String(run.points)]);
+      if (run.blocks != null) facts.push(["Blocks", String(run.blocks)]);
+      if (meta.duration_s != null) facts.push(["Duration", lmhDuration(meta.duration_s)]);
+      if (isKelvin && detail && Array.isArray(detail.rows)) facts.push(["Rows", String(detail.rows.length)]);
+      if (run.run_id) facts.push([isKelvin ? "Run id" : "Engine id", String(run.run_id)]);
+      const sections = [];
+      sections.push(h("div", { class: "lmh-detail-head" },
+        h("span", { class: "lm-history-src " + (isKelvin ? "kelvin" : "panel") }, isKelvin ? "kelvin" : "panel"),
+        h("h2", { class: "lmh-detail-name", title: String(run.name || "") }, String(run.name || run.run_id || "(unnamed run)")),
+        h("span", { class: "lm-chip " + lmHistoryStatusClass(status) }, status || "—")));
+      if (facts.length) {
+        sections.push(h("div", { class: "lmh-facts" }, ...facts.map(([k, v]) =>
+          h("div", { class: "lmh-fact" }, h("span", {}, k), h("b", {}, v)))));
+      }
+      // actions
+      const actions = [];
+      if (isKelvin && run.run_id) {
+        const an = h("button", { class: "btn small", type: "button", title: "Open this run in the Analysis pane" }, "Open in Analysis");
+        an.addEventListener("click", () => lmhOpenAnalysis(run));
+        actions.push(an);
+      }
+      const dataset = String(run.dataset || (panelExtra && (panelExtra.dataset || (panelExtra.run && panelExtra.run.dataset))) || "");
+      if (dataset) {
+        const cp = h("button", { class: "btn small ghost", type: "button", title: "Copy the dataset path" }, "Copy data path");
+        cp.addEventListener("click", () => lmhCopy(dataset, "Dataset path"));
+        actions.push(cp);
+      }
+      if (actions.length) sections.push(h("div", { class: "lmh-actions" }, ...actions));
+      if (error) sections.push(h("div", { class: "lmh-error" }, error));
+      // what happened
+      const said = String(run.detail || "");
+      if (said) {
+        sections.push(h("div", { class: "lmh-section" }, h("h3", {}, isKelvin ? "Summary" : "What it did"),
+          h("p", { class: "lmh-text" }, said)));
+      }
+      if (dataset) {
+        sections.push(h("div", { class: "lmh-section" }, h("h3", {}, "Dataset"),
+          h("p", { class: "lmh-path", title: dataset }, dataset)));
+      }
+      if (!isKelvin) {   // engine run: its blocks (when the panel-run route answers), else the row's count
+        const extra = panelExtra && (panelExtra.run || panelExtra.blocks ? panelExtra : null);
+        const blocks = extra && Array.isArray(extra.blocks) ? extra.blocks
+          : (Array.isArray(run.blocks) ? run.blocks : []);
+        if (blocks.length) {
+          sections.push(h("div", { class: "lmh-section" }, h("h3", {}, "Blocks"),
+            h("ol", { class: "lmh-blocks" }, ...blocks.map((b) => {
+              const nm = String((b && (b.name || b.block_id)) || "(block)");
+              const st = String((b && b.status) || "");
+              return h("li", {}, h("span", {}, nm), st ? h("span", { class: "lm-chip " + lmHistoryStatusClass(st) }, st) : null);
+            }))));
+        }
+        sections.push(lmhReportsSection(reports, "panel"));
+        body.replaceChildren(...sections);
+        return;
+      }
+      // plan
+      const planText = String((detail && detail.plan_text) || "");
+      if (planText) {
+        sections.push(h("details", { class: "lmh-section lmh-plan", open: true },
+          h("summary", {}, "Plan"), h("pre", {}, planText)));
+      }
+      // automatic analysis
+      sections.push(h("div", { class: "lmh-section" }, h("h3", {}, "Automatic analysis"),
+        lmhAnalysisNode(detail && detail.analysis)));
+      // warnings
+      const warnings = Array.isArray(meta.warnings) ? meta.warnings : [];
+      if (warnings.length) {
+        sections.push(h("div", { class: "lmh-section lmh-warn" }, h("h3", {}, "Warnings"),
+          h("ul", {}, ...warnings.map((w) => h("li", {}, lmhScalar(w))))));
+      }
+      // data summary: axes, readings, traces
+      const axes = Array.isArray(detail && detail.axes) ? detail.axes : [];
+      const scalars = Array.isArray(detail && detail.scalars) ? detail.scalars : [];
+      const traces = Array.isArray(detail && detail.traces) ? detail.traces : [];
+      if (axes.length || scalars.length || traces.length) {
+        const chip = (a, kind) => h("span", { class: "lmh-chip", title: kind }, String(a.key) + (a.unit ? " [" + a.unit + "]" : ""));
+        sections.push(h("div", { class: "lmh-section" }, h("h3", {}, "Data"),
+          h("div", { class: "lmh-chips" },
+            ...axes.map((a) => chip(a, "axis")),
+            ...scalars.map((a) => chip(a, "reading")),
+            ...traces.map((a) => chip(a, "trace")))));
+      }
+      sections.push(lmhReportsSection(reports, "kelvin"));
+      body.replaceChildren(...sections);
+    } catch (e) {
+      body.replaceChildren(h("div", { class: "lmh-error" }, "Could not show this run: " + ((e && e.message) || e)));
+    }
+  }
+
+  function lmhInit() {
+    const seg = lmEl("lmh-sources");
+    if (seg) seg.addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-source]");
+      if (!b) return;
+      LMH.source = String(b.dataset.source || "all");
+      for (const x of seg.querySelectorAll("button[data-source]")) {
+        const on = x === b;
+        x.classList.toggle("on", on);
+        x.setAttribute("aria-pressed", String(on));
+      }
+      LMH.selected = null;
+      lmhClearDetail();
+      lmhLoad(true);
+    });
+    const status = lmEl("lmh-status");
+    if (status) status.addEventListener("change", () => {
+      LMH.status = status.value || "";
+      LMH.selected = null;
+      lmhClearDetail();
+      lmhLoad(true);
+    });
+    const q = lmEl("lmh-q");
+    if (q) q.addEventListener("input", () => {
+      clearTimeout(LMH.debounce);
+      LMH.debounce = setTimeout(() => {
+        LMH.q = String(q.value || "").trim();
+        LMH.selected = null;
+        lmhClearDetail();
+        lmhLoad(true);
+      }, 300);
+    });
+    const more = lmEl("lmh-more");
+    if (more) more.addEventListener("click", () => lmhLoad(false));
+    const refresh = lmEl("lmh-refresh");
+    if (refresh) refresh.addEventListener("click", () => lmhLoad(true));
   }
 
   // ------------------------------------------------------------------ start
@@ -7322,3 +8137,4 @@
   }
   init();
 })();
+

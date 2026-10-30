@@ -46,7 +46,11 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 labharness = ["data/*.yaml", "data/*.md", "data/*.json", "data/cards/*.yaml", "data/cards/*/*.yaml", "data/bridge/*.py", "data/sandbox/*.py",
-              "data/scriptshim/*.py", "data/skills/*.md", "agent/ui.html", "web/static/*"]
+              "data/scriptshim/*.py", "data/skills/*.md", "agent/ui.html", "web/static/*",
+              # v1-A: the vendored labMaster sequence engine (tools/vendor_sequence.py generates it):
+              # the runners are plain .py files started as a child process, VERSION/blocks.json data
+              "sequence/*.py", "sequence/*.json", "sequence/VERSION", "sequence/runners/*.py",
+              "sequence/runners/guard_site/*.py"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

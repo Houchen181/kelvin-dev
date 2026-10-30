@@ -66,6 +66,17 @@ datas.append((str(ROOT / "src" / "labharness" / "data" / "sandbox" / "kelvin_san
 datas += [(str(ROOT / "src" / "labharness" / "data" / "scriptshim" / name), "labharness/data/scriptshim")
           for name in ("kelvin_shim.py", "sitecustomize.py")]
 
+# the vendored labMaster sequence engine (labharness/sequence/, V1_SPEC.md v1-A): the runners are plain .py
+# files started as a child process, and VERSION/blocks.default.json are data - collect_data_files() above
+# skips .py, so they are named here. (A frozen app's sys.executable is Kelvin.exe, not a Python: running
+# the engine's runner scripts from a packaged app is phase B; from source/venv they run with sys.executable.)
+datas += [(str(ROOT / "src" / "labharness" / "sequence" / name), "labharness/sequence")
+          for name in ("VERSION", "blocks.default.json")]
+datas += [(str(ROOT / "src" / "labharness" / "sequence" / "runners" / name), "labharness/sequence/runners")
+          for name in ("run_block.py", "run_myscript.py", "myscript_guard.py")]
+datas.append((str(ROOT / "src" / "labharness" / "sequence" / "runners" / "guard_site" / "sitecustomize.py"),
+              "labharness/sequence/runners/guard_site"))
+
 a = Analysis(
     [str(ROOT / "packaging" / "kelvin_app.py")],
     pathex=[str(ROOT / "src")],

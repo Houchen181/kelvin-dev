@@ -9,10 +9,12 @@ from __future__ import annotations
 import argparse
 import functools
 import json
+import re
 import sys
 import webbrowser
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 import anyio
 import anyio.to_thread
@@ -211,18 +213,18 @@ def lab_memory_part(rt: LabRuntime) -> str:
     return "\n\n" + brief + "\n(As it was when this server started; shared_memory has the latest.)" if brief else ""
 
 
-# --- labMaster: the panel's sequence, its function library and Kelvin's home page, for the main AI ---------------
-# labMaster (the lab's own panel, in simulation on 127.0.0.1:8770) keeps a queue of measurement blocks, a library of
-# functions and the Python scripts it runs; web/labmaster.py talks to it (4 s timeouts, and a call it cannot make comes
-# back as {"ok": False, "error": ...}, never as an exception). These helpers turn that into the line or two a tool
-# answers with, and say how to start the panel when it is not running. labMaster is not part of the lab Kelvin's safety
-# gate watches: its drives are the panel's own queue (see labmaster_control).
+# --- the Sequence engine: its measurement sequence, its function library and Kelvin's Home page, for the main AI ------
+# labMaster's engine is vendored into Kelvin (labharness/sequence/, wrapped by web/labmaster.py): it runs in this
+# process, with no panel on a port and no HTTP, so a call that cannot be made comes back as
+# {"ok": False, "error": ...} instead of a connection failure. These helpers turn that into the line or two a tool
+# answers with, and record the AI's own measurements in the Sequence page. The engine's queue is not watched by
+# Kelvin's safety gate: its drives are the sequence's own (see labmaster_control). A person arms AI starts in the
+# Sequence page: while that switch is off, every start asks a person on the approval card first.
 
-LABMASTER_COMMAND = "python -u panel_server.py --sim --port 8770"
 LABMASTER_ACTIONS = ("start", "pause", "pause_rep", "next_rep", "skip", "stop", "reset", "end_wait", "set_wait",
                      "safe_stop")
-# start is not here: it is not the AI's to give at all. It asks a person on the approval card first (approver.approve),
-# and the sequence runs only after that person's own yes - the AI can never start the panel's queue itself.
+# start: with 'AI may start runs' switched on in the Sequence page - only a person can switch it on - the AI starts
+# the sequence itself; with it off, a person answers the approval card first, and the AI never switches it on.
 LABMASTER_CONFIRM = ("skip", "reset", "end_wait", "set_wait", "next_rep")
 # stop and safe_stop are not here either: they only end a run, and someone may need them at once.
 LABMASTER_WHY = {
@@ -233,6 +235,8 @@ LABMASTER_WHY = {
     "next_rep": "it ends the running block after its current rep and starts the next block",
 }
 LABMASTER_CARD_KINDS = ("note", "metric", "checklist", "link", "sequence")
+LABMASTER_ARM_HINT = ("To let Kelvin's AI start the sequence directly next time, switch on 'AI may start runs' in the "
+                      "Sequence page: only a person can switch it on.")
 
 
 def _labmaster_start_request(lm: Any) -> ApprovalRequest:
@@ -244,7 +248,7 @@ def _labmaster_start_request(lm: Any) -> ApprovalRequest:
     state = state if isinstance(state, dict) else {}
     seq = state.get("sequence") if isinstance(state.get("sequence"), dict) else {}
     blocks = _labmaster_items(state)
-    name = str(seq.get("name") or "the panel's sequence")
+    name = str(seq.get("name") or "the sequence")
     items.append("Sequence %r: %d block(s)" % (name, len(blocks)))
     for number, item in enumerate(blocks[:8], 1):
         bits = []
@@ -265,7 +269,8 @@ def _labmaster_start_request(lm: Any) -> ApprovalRequest:
                  "limit or watch them, and its Stop cannot bring them to safe values.")
     if any(str(item.get("kind") or "") == "script" for item in blocks):
         items.append("The scripts drive the instruments as they do: check their parameters above before you approve.")
-    items.append("Only a person at this computer can start this sequence; Kelvin's AI cannot.")
+    items.append("While 'AI may start runs' is off in the Sequence page, only your own yes here starts the sequence. "
+                 + LABMASTER_ARM_HINT)
     return ApprovalRequest("Start labMaster's measurement sequence?", items)
 
 
@@ -273,8 +278,8 @@ def _labmaster_ask_to_start(lm: Any, rt: Any) -> str:
     """"" when a person approved the start, else why it did not run. Blocks the tool call until they answer."""
     approver = getattr(rt, "approver", None)
     if approver is None or not hasattr(approver, "approve"):
-        return ("not started: this Kelvin has no approval card to ask a person with, so the panel's sequence is the "
-                "person's to start in the Sequence page")
+        return ("not started: this Kelvin has no approval card to ask a person with, so the sequence is the person's "
+                "to start in the Sequence page (or they switch on 'AI may start runs' there)")
     request = _labmaster_start_request(lm)
     try:
         approved = bool(approver.approve(request))
@@ -290,7 +295,7 @@ def _labmaster_bridge():
     try:
         from ..web import labmaster
     except Exception as e:   # noqa: BLE001 - a broken bridge must not take every other tool down
-        return None, ("labMaster unavailable: labharness/web/labmaster.py did not import (%s: %s)"
+        return None, ("the sequence engine is unavailable: labharness/web/labmaster.py did not import (%s: %s)"
                       % (type(e).__name__, e))
     return labmaster, ""
 
@@ -303,48 +308,33 @@ def _labmaster_call(fn: Callable[..., Any], *args: Any, **kw: Any):
         return None, "%s: %s" % (type(e).__name__, e)
 
 
-def _labmaster_url(lm) -> str:
+def _labmaster_armed(lm: Any) -> bool:
+    """Whether a person switched on 'AI may start runs' in the Sequence page. Fail-soft: False when it cannot be read,
+    so an engine that cannot say asks the person rather than starting anything."""
     try:
-        return str(lm.panel_url())
-    except Exception:   # noqa: BLE001
-        return "http://127.0.0.1:8770"
+        return bool(lm.armed())
+    except Exception:   # noqa: BLE001 - an engine that cannot answer is not an arm
+        return False
 
 
-def _labmaster_down(lm, detail: str = "") -> str:
-    """The line for a panel that does not answer, with the command that starts it (and why, when one is known)."""
-    detail = str(detail or "").strip().rstrip(".")
-    if detail.startswith("labMaster panel not reachable at"):
-        detail = ""   # the address is already in the line
-    return ("labMaster panel not running at %s%s. Start it in the labMaster folder: %s"
-            % (_labmaster_url(lm), (": " + detail) if detail else "", LABMASTER_COMMAND))
+def _labmaster_engine_error(detail: str = "") -> str:
+    """The line for an in-process engine call that failed: there is no panel to start and no address to show."""
+    said = _labmaster_short(" ".join(str(detail or "").split()), 200).rstrip(".")
+    if said.lower().startswith("the sequence engine"):
+        return said
+    return "the sequence engine could not answer" + ((": " + said) if said else "")
 
 
-def _labmaster_down_if(lm, error: str = "") -> str:
-    """The down line when the panel answers nothing at all (a call it refused keeps its own words): '' otherwise."""
-    error = str(error or "")
-    if error.startswith("labMaster panel not reachable at"):   # the bridge already knows: no second, slow attempt
-        return _labmaster_down(lm)
-    ping, why = _labmaster_call(lm.ping)
-    if why:
-        return _labmaster_down(lm, why)
-    if not isinstance(ping, dict) or not ping.get("ok"):
-        return _labmaster_down(lm, str((ping if isinstance(ping, dict) else {}).get("error") or error or ""))
-    return ""
+def _labmaster_failed(error: str, verb: str) -> str:
+    """A call that did not happen: the engine's own reason after the verb ('not added: ...')."""
+    why = str(error or "").strip()
+    return "%s: %s" % (verb, why or _labmaster_engine_error())
 
 
-def _labmaster_failed(lm, error: str, verb: str) -> str:
-    """A call that did not happen: the panel is not there, or its own reason ('not added: ...')."""
-    down = _labmaster_down_if(lm, error)
-    if down:
-        return down + "; nothing was changed"
-    return "%s: %s" % (verb, str(error or "the panel refused it"))
-
-
-def _labmaster_panel_error(lm, answer: Any) -> str:
-    """The line for a READ the panel did not answer: the down line, or what the panel said."""
+def _labmaster_read_error(answer: Any) -> str:
+    """The line for a READ the engine did not answer."""
     error = str((answer if isinstance(answer, dict) else {}).get("error") or "")
-    down = _labmaster_down_if(lm, error)
-    return down if down else "labMaster: %s" % (error or "the panel gave no answer")
+    return _labmaster_engine_error(error) if error else "the sequence engine gave no answer"
 
 
 def _labmaster_short(text: Any, limit: int = 160) -> str:
@@ -360,7 +350,7 @@ def _labmaster_int(value: Any, default: int = 0) -> int:
 
 
 def _labmaster_items(state: Any) -> List[Dict[str, Any]]:
-    """The sequence's blocks, from a panel state (never the panel's whole answer)."""
+    """The sequence's blocks, from the engine's state (never its whole answer)."""
     seq = state.get("sequence") if isinstance(state, dict) else None
     items = seq.get("items") if isinstance(seq, dict) else None
     return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
@@ -399,7 +389,7 @@ def _labmaster_result(lm, answer: Any, done: str, verb: str) -> str:
     """A write's answer as text: the bridge's own message, then the sequence as it now stands."""
     r = answer if isinstance(answer, dict) else {}
     if not r.get("ok"):
-        return _labmaster_failed(lm, str(r.get("error") or ""), verb)
+        return _labmaster_failed(str(r.get("error") or ""), verb)
     text = str(r.get("message") or done).strip()
     warnings = r.get("warnings")
     if isinstance(warnings, list) and warnings:
@@ -413,6 +403,116 @@ def _labmaster_home(lm):
         return lm.HomeStore(), ""
     except Exception as e:   # noqa: BLE001
         return None, "Kelvin's home page is unavailable (%s: %s)" % (type(e).__name__, e)
+
+
+# --- the AI's own measurements go into the Sequence page: a run line in its History, and a name for the sequence ---
+# Every measurement the AI makes (a plan, a script, a recipe; a queued item) is recorded with the engine's
+# record_kelvin_run, so the Sequence page's History/Runs list shows it beside the engine's own runs. While the
+# sequence's name is still the default date-time one (or empty), ensure_sequence_name gives it the measurement's
+# name and today's date. Both are fail-soft: a recording that cannot be made never changes what the tool answers.
+
+_KELVIN_RUN_LINE = re.compile(r"(?m)^run (\S+) (done|aborted)\b")
+_KELVIN_SCRIPT_LINE = re.compile(r"(?m)^script (.+?) (done|stopped after)\b")
+_KELVIN_SCRIPT_SAVED = re.compile(r"(?m)^saved in (.+?): script\.py")
+
+
+def _yaml_name(text: Any, key: str) -> str:
+    """The name a plan/step/recipe gives (its top-level `key:` line), '' when it has none."""
+    source = str(text or "")
+    match = re.search(r"(?m)^\s*%s\s*:\s*(.+?)\s*$" % re.escape(key), source)
+    if match:
+        name = match.group(1).strip().strip("'\"")
+        if name and not name.startswith(("{", "[")):
+            return name
+    stripped = source.strip()
+    if stripped.startswith("{"):   # a plan as JSON, which YAML accepts too
+        try:
+            data = json.loads(stripped)
+        except ValueError:
+            return ""
+        value = data.get(key) if isinstance(data, dict) else None
+        return str(value).strip() if value is not None else ""
+    return ""
+
+
+def _labmaster_plan_name(plan: Any) -> str:
+    """A plan's name for the Sequence: its `plan:` line, else just 'plan'."""
+    return _yaml_name(plan, "plan") or "plan"
+
+
+def _labmaster_script_name(script: Any) -> str:
+    """A script's name for the Sequence: its file name without the extension."""
+    text = str(script or "").replace("\\", "/").strip()
+    base = text.rsplit("/", 1)[-1] or "script"
+    for suffix in (".py", ".ipynb"):
+        if base.lower().endswith(suffix):
+            return base[:-len(suffix)] or "script"
+    return base
+
+
+def _labmaster_recipe_name(recipe: Any) -> str:
+    """A recipe's name for the Sequence: its `recipe:` line; a kept recipe is named by its own name."""
+    name = _yaml_name(recipe, "recipe")
+    if name:
+        return name
+    first = next((line.strip() for line in str(recipe or "").splitlines() if line.strip()), "")
+    return first if first and len(first) <= 80 and ":" not in first else "recipe"
+
+
+def _labmaster_queue_name(item: Any) -> str:
+    """A queued item's name for the Sequence: its plan's or step's name."""
+    return _yaml_name(item, "plan") or _yaml_name(item, "step") or "queued measurement"
+
+
+def _labmaster_run_outcome(text: Any) -> Tuple[str, str]:
+    """(status, run_id) when the text says a Kelvin run happened - done, or failed when it was aborted/stopped -
+    else ("", ""): a plan that never ran (invalid, declined, busy) is not a measurement."""
+    said = str(text or "")
+    match = _KELVIN_RUN_LINE.search(said)
+    if match:
+        return ("done" if match.group(2) == "done" else "failed"), match.group(1)
+    match = _KELVIN_SCRIPT_LINE.search(said)
+    if match:
+        saved = _KELVIN_SCRIPT_SAVED.search(said)
+        run_id = re.split(r"[\\/]", saved.group(1).strip())[-1] if saved else ""
+        return ("done" if match.group(2) == "done" else "failed"), run_id
+    return "", ""
+
+
+def _labmaster_detail(text: Any, limit: int = 300) -> str:
+    """The first line of a run's answer: what the Sequence page's History shows under the name."""
+    for line in str(text or "").splitlines():
+        if line.strip():
+            return _labmaster_short(line, limit)
+    return ""
+
+
+def _labmaster_keep_run(name: str, kind: str, status: str, text: Any, run_id: str = "") -> None:
+    """Record an AI measurement in the Sequence page's runs, and name the sequence after the measurement.
+
+    Fail-soft: recording is a convenience, never a step of the measurement, so any failure here - no bridge, an
+    engine that refuses, a name it cannot set - is ignored and the tool's own answer is unchanged."""
+    try:
+        lm, _missing = _labmaster_bridge()
+        if lm is None:
+            return
+        label = _labmaster_short(" ".join(str(name or "").split()), 80) or kind
+        record = getattr(lm, "record_kelvin_run", None)
+        if callable(record):
+            try:
+                record(label, kind=kind, status=status, detail=_labmaster_detail(text), run_id=str(run_id or ""))
+            except Exception:   # noqa: BLE001 - the measurement already happened
+                pass
+        if status not in ("done", "failed"):
+            return
+        ensure = getattr(lm, "ensure_sequence_name", None)
+        if callable(ensure):
+            try:
+                ensure("%s--%s" % (label, datetime.now().strftime("%Y-%m-%d")))
+            except Exception:   # noqa: BLE001
+                pass
+    except Exception:   # noqa: BLE001 - the bridge itself never keeps a tool from answering
+        pass
 
 
 def build_server(rt: LabRuntime) -> MCPServer:
@@ -637,8 +737,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
         know it ({"smu.V": [0, 5]}), else such a drive is approved within its limits. A refusal, a person's no or
         Stop ends the script (its own finally: still runs), and Kelvin brings what it drove back to safe. Returns
         what it did, its readings as a run (get_run_data, analyze_run), the files it wrote and its last output."""
-        return rt.run_script(script, params or {}, args or [], drives or {},
-                             mark=lambda text: outside(rt, "the lab's script output", text))
+        result = rt.run_script(script, params or {}, args or [], drives or {},
+                               mark=lambda text: outside(rt, "the lab's script output", text))
+        status, run_id = _labmaster_run_outcome(result)
+        if status:   # a script that never started (declined, refused, cancelled) is not a measurement
+            _labmaster_keep_run(_labmaster_script_name(script), "script", status, result, run_id)
+        return result
 
     @server.tool(annotations=READ, structured_output=False)
     def try_card(card: str, instrument: str) -> str:
@@ -921,7 +1025,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
         asks, or to show how long it takes): nothing runs on the instruments, and the real run is another call.
         To measure while a temperature or field ramps, sweep its set point with ramp: (validate_plan has the
         format); in setup: it only waits. Returns the assessment, key results and the run id."""
-        return rt.run(plan, dry_run=bool(dry_run)) + rt.lab_notes_at_use(rt.named_in(plan))
+        result = rt.run(plan, dry_run=bool(dry_run)) + rt.lab_notes_at_use(rt.named_in(plan))
+        if not dry_run:   # a rehearsal is not a measurement: only a real run appears in the Sequence
+            status, run_id = _labmaster_run_outcome(result)
+            if status:
+                _labmaster_keep_run(_labmaster_plan_name(plan), "plan", status, result, run_id)
+        return result
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -932,7 +1041,11 @@ def build_server(rt: LabRuntime) -> MCPServer:
         its YAML (recipe, description, values, stages: [{name, plan, pass, keep, retries, retry}]; plans may use
         {{value}} and {{arithmetic}}), or in Kelvin's portal the name of a kept recipe. values: numbers that replace
         the recipe's own for this run."""
-        return rt.run_recipe(recipe, values or {})
+        result = rt.run_recipe(recipe, values or {})
+        if str(result).startswith("recipe "):   # it ran (some stages): stopped early is a failed measurement
+            status = "failed" if re.search(r"(?m)^stopped[ :]", str(result)) else "done"
+            _labmaster_keep_run(_labmaster_recipe_name(recipe), "recipe", status, result)
+        return result
 
     @server.tool(annotations=READ, structured_output=False)
     def queue_show() -> str:
@@ -946,7 +1059,12 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Add to the scan queue (it does not start it): a plan (YAML, as for run_plan) or a step between scans, e.g.
         "step: cool to 2 K\nset: {tc.T_set: 2}\nstabilize: {read: tc.T, within: 0.02, for: 120, timeout: 7200}\n
         wait: 600". position: 1 = first; default last. note: a line kept with the run."""
-        return rt.queue_add(item, position, note)
+        result = rt.queue_add(item, position, note)
+        if str(result).startswith("added "):   # a queued measurement shows in the Sequence page too (not run yet)
+            match = re.search(r"(?m)^added (?:plan|step) (.+?) as #\d+", str(result))
+            _labmaster_keep_run((match.group(1).strip() if match else "") or _labmaster_queue_name(item),
+                                "queue", "queued", result)
+        return result
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
@@ -1220,28 +1338,29 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Let time pass (e.g. for thermalization), up to 3600 s."""
         return rt.wait(seconds)
 
-    # --- labMaster: the panel's home page, its measurement sequence and its function library (web/labmaster.py) ---
-    # The same access the panel's own agent has, for the chat AI and any outside MCP client. The panel's queue is not
-    # watched by Kelvin's safety gate: a block it runs is the panel's own measurement, not one of Kelvin's runs.
+    # --- the Sequence engine: Kelvin's Home page, its measurement sequence and its function library (web/labmaster.py) -
+    # The same access the panel's own agent had, for the chat AI and any outside MCP client. The engine runs inside
+    # Kelvin (in-process, no port); its queue is not watched by Kelvin's safety gate: a block it runs is the sequence's
+    # own measurement, not one of Kelvin's runs.
 
     @server.tool(annotations=READ, structured_output=False)
     def labmaster_status() -> str:
-        """The labMaster panel this Kelvin is bridged to (the simulated one or the real one), its version, and its
-        measurement sequence: run state, progress, the running and next block with the uid the other labmaster tools
-        take, any fault, the saved sequences and how many runs its history holds. Says how to start the panel when it
-        is not running."""
+        """The Sequence engine inside Kelvin (in-process, its version and mode) and its measurement sequence: run
+        state, progress, the running and next block with the uid the other labmaster tools take, any fault, the saved
+        sequences and how many runs its history holds; and whether a person has switched on 'AI may start runs', which
+        lets the AI start the sequence directly."""
         lm, missing = _labmaster_bridge()
         if lm is None:
             return missing
         ping, why = _labmaster_call(lm.ping)
         if why:
-            return _labmaster_down(lm, why)
+            return _labmaster_engine_error(why)
         ping = ping if isinstance(ping, dict) else {}
         if not ping.get("ok"):
-            return _labmaster_down(lm, str(ping.get("error") or ""))
+            return _labmaster_engine_error(str(ping.get("error") or ""))
         mode = "SIM" if ping.get("sim") is True else ("real" if ping.get("sim") is False else "mode unknown")
-        head = "labMaster panel at %s: %s, %s" % (
-            ping.get("url") or _labmaster_url(lm), mode,
+        head = "Sequence engine (%s): %s, %s" % (
+            str(ping.get("url") or "in-process"), mode,
             ("v" + str(ping["version"])) if ping.get("version") else "version unknown")
         answer, why = _labmaster_call(lm.state)
         if why:
@@ -1281,6 +1400,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
                                                      else json.dumps(fault, ensure_ascii=False), 160))
         bits.append("saved %d" % len(state.get("saved") or []))
         bits.append("history %d run(s)" % _labmaster_int(state.get("history_runs")))
+        bits.append("AI may start runs " + ("on (a person switched it on in the Sequence page)" if _labmaster_armed(lm)
+                                            else "off (a person approves each start)"))
         lines = [head, line + ("; " + "; ".join(bits) if bits else "")]
         if items:   # every block with its uid: update and delete take it
             blocks = ["%d %s %s [%s]" % (n, str(item.get("status") or "?"), _labmaster_name(item) or "?",
@@ -1293,22 +1414,22 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def labmaster_functions() -> str:
-        """labMaster's function library (its palette): every function that can be added to a measurement sequence,
-        with the id labmaster_add_block takes, its kind, its default parameters and the script it runs, and the Python
-        scripts the panel has that labmaster_import_script can add to the library."""
+        """The Sequence engine's function library (its palette): every function that can be added to a measurement
+        sequence, with the id labmaster_add_block takes, its kind, its default parameters and the script it runs, and
+        the Python scripts the engine offers that labmaster_import_script can add to the library."""
         lm, missing = _labmaster_bridge()
         if lm is None:
             return missing
         answer, why = _labmaster_call(lm.palette)
         if why:
-            return _labmaster_down(lm, why)
+            return _labmaster_engine_error(why)
         answer = answer if isinstance(answer, dict) else {}
         if not answer.get("ok"):
-            return _labmaster_panel_error(lm, answer)
+            return _labmaster_read_error(answer)
         entries = [e for e in (answer.get("palette") or []) if isinstance(e, dict)]
         if not entries:
-            return "labMaster functions: the library is empty (labmaster_import_script adds a Python script)"
-        lines = ["labMaster functions (%d, palette rev %s):"
+            return "the sequence functions: the library is empty (labmaster_import_script adds a Python script)"
+        lines = ["sequence functions (%d, palette rev %s):"
                  % (len(entries), _labmaster_short(answer.get("rev") or "?", 24))]
         for e in entries[:40]:
             bits = []
@@ -1334,22 +1455,22 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def labmaster_saved() -> str:
-        """labMaster's saved measurement sequences: the id, name, how many blocks each has and when it was saved.
-        Load or save them on the panel's Sequence page."""
+        """The Sequence engine's saved measurement sequences: the id, name, how many blocks each has and when it was
+        saved. Load or save them on the Sequence page."""
         lm, missing = _labmaster_bridge()
         if lm is None:
             return missing
         answer, why = _labmaster_call(lm.saved)
         if why:
-            return _labmaster_down(lm, why)
+            return _labmaster_engine_error(why)
         answer = answer if isinstance(answer, dict) else {}
         if not answer.get("ok"):
-            return _labmaster_panel_error(lm, answer)
+            return _labmaster_read_error(answer)
         saved = [s for s in (answer.get("saved") or []) if isinstance(s, dict)]
         if not saved:
-            return "labMaster saved sequences: none (Save on the panel's Sequence page keeps one)"
+            return "saved sequences: none (Save on the Sequence page keeps one)"
         import time
-        lines = ["labMaster saved sequences (%d):" % len(saved)]
+        lines = ["saved sequences (%d):" % len(saved)]
         for s in saved[:40]:
             when = ""
             try:
@@ -1402,10 +1523,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     def labmaster_add_block(block: str, params: Optional[Dict[str, Any]] = None,
                             index: Optional[int] = None) -> str:
-        """Add one of labMaster's functions (a block) to the end of its measurement sequence, or insert it at index
+        """Add one of the sequence's functions (a block) to the end of the live Sequence, or insert it at index
         (0-based). block: a function's id or name from labmaster_functions; params: settings that override its
-        defaults (e.g. {"minutes": 2} for Wait, {"reps": 3} for a script). A warning the panel gives must be told to
-        the person. Adding changes the queue only; the sequence runs on the instruments when it is started
+        defaults (e.g. {"minutes": 2} for Wait, {"reps": 3} for a script). A warning the engine gives must be told to
+        the person. Adding changes the sequence only; it runs on the instruments when it is started
         (labmaster_control)."""
         lm, missing = _labmaster_bridge()
         if lm is None:
@@ -1417,7 +1538,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         index = index if isinstance(index, int) and not isinstance(index, bool) else None
         answer, why = _labmaster_call(lm.seq_add, block=block, params=params, index=index)
         if why:
-            return _labmaster_failed(lm, why, "not added")
+            return _labmaster_failed(why, "not added")
         text = _labmaster_result(lm, answer, "added %s" % block, "not added")
         r = answer if isinstance(answer, dict) else {}
         items = _labmaster_items(r.get("state")) if r.get("ok") else []
@@ -1430,9 +1551,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     def labmaster_update_block(uid: str, params: Optional[Dict[str, Any]] = None,
                                name: Optional[str] = None) -> str:
-        """Change one block of labMaster's measurement sequence: its parameter overrides (params) and/or its name.
+        """Change one block of the live sequence: its parameter overrides (params) and/or its name.
         uid: the block's uid from labmaster_status (it lists every block with its uid); only what is passed changes.
-        A warning the panel gives must be told to the person."""
+        A warning the engine gives must be told to the person."""
         lm, missing = _labmaster_bridge()
         if lm is None:
             return missing
@@ -1445,52 +1566,53 @@ def build_server(rt: LabRuntime) -> MCPServer:
             return "not updated: pass params (the settings to change) and/or name"
         answer, why = _labmaster_call(lm.seq_update, uid, params=params, name=new_name)
         if why:
-            return _labmaster_failed(lm, why, "not updated")
+            return _labmaster_failed(why, "not updated")
         return _labmaster_result(lm, answer, "updated %s" % uid, "not updated")
 
     @server.tool(annotations=ACT, structured_output=False)
     def labmaster_delete_block(uid: str, confirm: bool = False) -> str:
-        """Remove one block from labMaster's measurement sequence. uid: the block's uid from labmaster_status (it lists
-        every block); deleting changes the queue only, and a block that is running may be refused. Removing a block
-        that FAILED decides what becomes of that failure (the person's Retry or Skip), so that one needs confirm=true,
-        which the user must have agreed to before the call - ask them first (as the panel's own MCP does)."""
+        """Remove one block from the live sequence. uid: the block's uid from labmaster_status (it lists every block);
+        deleting changes the sequence only, and a block that is running may be refused. Removing a block that FAILED
+        decides what becomes of that failure (the person's Retry or Skip), so that one needs confirm=true, which the
+        user must have agreed to before the call - ask them first (as labMaster's own MCP does)."""
         lm, missing = _labmaster_bridge()
         if lm is None:
             return missing
         uid = str(uid or "").strip()
         if not uid:
             return "not deleted: say which block (its uid from labmaster_status)"
-        if not confirm:   # the panel's MCP rules: a failed block's removal is the person's Retry/Skip choice
+        if not confirm:   # labMaster's MCP rules: a failed block's removal is the person's Retry/Skip choice
             answer, why = _labmaster_call(lm.state)
             if why:
-                return _labmaster_failed(lm, why, "not deleted")
+                return _labmaster_failed(why, "not deleted")
             answer = answer if isinstance(answer, dict) else {}
             if not answer.get("ok"):
-                return _labmaster_panel_error(lm, answer)
+                return _labmaster_read_error(answer)
             state = answer.get("state") if isinstance(answer.get("state"), dict) else {}
             for number, item in enumerate(_labmaster_items(state), 1):
                 if _labmaster_uid(item) != uid or str(item.get("status") or "") != "error":
                     continue
                 said = _labmaster_short(item.get("message") or "", 200)
-                return ("needs the user's confirmation first: labMaster delete, block #%d %r failed%s. Removing it "
+                return ("needs the user's confirmation first: sequence delete, block #%d %r failed%s. Removing it "
                         "decides what becomes of that failure (the person's Retry or Skip): tell them which block "
                         "failed and why, then call again with confirm=true if they agree."
                         % (number, _labmaster_name(item) or "?", (": " + said) if said else "."))
         answer, why = _labmaster_call(lm.seq_delete, uid)
         if why:
-            return _labmaster_failed(lm, why, "not deleted")
+            return _labmaster_failed(why, "not deleted")
         return _labmaster_result(lm, answer, "deleted %s" % uid, "not deleted")
 
     @server.tool(annotations=ACT, structured_output=False)
     def labmaster_control(action: str, confirm: bool = False, minutes: float = 0.0, uid: str = "") -> str:
-        """Control labMaster's measurement sequence. start is not yours to give: it asks a person on their approval card
-        first, with every block and parameter listed, and the call blocks until they answer - the sequence runs only
-        after that person's own yes (the AI can never start it). pause (after the block) | pause_rep (after the rep) arm
-        the pause, a second call takes it back. next_rep | skip | reset | end_wait | set_wait (minutes: the time left of
-        the running wait, above 0) change a run: they need confirm=true, which the user must have agreed to before the
-        call - ask them first. stop and safe_stop (stops the sequence, then runs the safe-stop script that switches the
-        instruments' outputs off) need no confirmation: they only end a run. uid: the running block's or the wait's uid
-        (labmaster_status: current), for skip, next_rep, end_wait and set_wait."""
+        """Control the live measurement sequence. start: when a person has switched on 'AI may start runs' in the
+        Sequence page (only a person can) the AI starts it directly; while that switch is off the call asks a person
+        on their approval card first, with every block and parameter listed, and blocks until they answer. pause
+        (after the block) | pause_rep (after the rep) arm the pause, a second call takes it back. next_rep | skip |
+        reset | end_wait | set_wait (minutes: the time left of the running wait, above 0) change a run: they need
+        confirm=true, which the user must have agreed to before the call - ask them first. stop and safe_stop (stops
+        the sequence, then runs the safe-stop script that switches the instruments' outputs off) need no
+        confirmation: they only end a run. uid: the running block's or the wait's uid (labmaster_status: current), for
+        skip, next_rep, end_wait and set_wait."""
         lm, missing = _labmaster_bridge()
         if lm is None:
             return missing
@@ -1499,12 +1621,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
             return "not run: unknown action %r (one of %s)" % (act or "", ", ".join(LABMASTER_ACTIONS))
         note = ""
         if act == "start":
-            declined = _labmaster_ask_to_start(lm, rt)
-            if declined:
-                return declined
-            note = " (a person approved the start on the approval card)"
+            if _labmaster_armed(lm):   # a person switched on 'AI may start runs' in the Sequence page
+                note = " (a person switched on 'AI may start runs' in the Sequence page)"
+            else:
+                declined = _labmaster_ask_to_start(lm, rt)
+                if declined:
+                    return declined
+                note = " (a person approved the start on the approval card)"
         elif act in LABMASTER_CONFIRM and not confirm:
-            return ("needs the user's confirmation first: labMaster %s, %s. Ask the user, then call again with "
+            return ("needs the user's confirmation first: sequence %s, %s. Ask the user, then call again with "
                     "confirm=true if they agree." % (act, LABMASTER_WHY[act]))
         uid = str(uid or "").strip()
         if act == "set_wait" and not minutes > 0:
@@ -1518,34 +1643,56 @@ def build_server(rt: LabRuntime) -> MCPServer:
         else:
             answer, why = _labmaster_call(lm.control, act)
         if why:
-            return _labmaster_failed(lm, why, "not run")
+            return _labmaster_failed(why, "not run")
         text = _labmaster_result(lm, answer, "%s: ok" % act, "not run")
         return (text + note) if note else text
 
     @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_rename_sequence(name: str) -> str:
+        """Give the live sequence a name, so the person sees what it is for on the Sequence page (e.g. "laser
+        check", "real measurement--2026-10-30"). name: the name to show; it must not be empty. The AI's own
+        measurements name a still unnamed (default date-time) sequence by themselves."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        new_name = str(name or "").strip()
+        if not new_name:
+            return "not renamed: give the sequence a name (e.g. 'laser check' or 'real measurement--2026-10-30')"
+        answer, why = _labmaster_call(lm.seq_rename, new_name)
+        if why:
+            return _labmaster_failed(why, "not renamed")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not renamed")
+        state = answer.get("state") if isinstance(answer.get("state"), dict) else {}
+        seq = state.get("sequence") if isinstance(state.get("sequence"), dict) else {}
+        shown = str(seq.get("name") or new_name)
+        return "renamed the sequence: %s" % shown
+
+    @server.tool(annotations=ACT, structured_output=False)
     def labmaster_import_script(path: str, name: str = "") -> str:
-        """Add a Python measurement script from the panel's PC to labMaster's function library: its main()'s parameters
-        are discovered and the script becomes a function labmaster_add_block can add to a sequence. path: the script's
-        file (labmaster_functions lists the ones the panel offers, e.g. scripts/example_measurement.py); name: the
-        function's name, default the script's."""
+        """Add a Python measurement script from this computer to the sequence's function library: its main()'s
+        parameters are discovered and the script becomes a function labmaster_add_block can add to a sequence. path:
+        the script's file (labmaster_functions lists the ones the engine offers, e.g. scripts/example_measurement.py);
+        name: the function's name, default the script's."""
         lm, missing = _labmaster_bridge()
         if lm is None:
             return missing
         path = str(path or "").strip()
         if not path:
-            return "not imported: say the script's path (labmaster_functions lists the panel's scripts)"
+            return "not imported: say the script's path (labmaster_functions lists the engine's scripts)"
         answer, why = _labmaster_call(lm.import_script, path, str(name or "").strip())
         if why:
-            return _labmaster_failed(lm, why, "not imported")
+            return _labmaster_failed(why, "not imported")
         answer = answer if isinstance(answer, dict) else {}
         if not answer.get("ok"):
-            return _labmaster_failed(lm, str(answer.get("error") or ""), "not imported")
+            return _labmaster_failed(str(answer.get("error") or ""), "not imported")
         text = _labmaster_short(answer.get("message") or ("imported %s into the function library" % path), 400)
         entry = answer.get("entry") or answer.get("block") or answer.get("item")
         if isinstance(entry, dict) and entry.get("id"):
             text += ": %s [%s]" % (entry.get("name") or "?", entry.get("id"))
         library = answer.get("palette")
-        if not isinstance(library, list):   # the panel answered without the saved list: ask for it
+        if not isinstance(library, list):   # the engine answered without the saved list: ask for it
             listed, why = _labmaster_call(lm.palette)
             library = listed.get("palette") if isinstance(listed, dict) and listed.get("ok") else None
         if isinstance(library, list):

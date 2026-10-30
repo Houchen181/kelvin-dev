@@ -1474,3 +1474,354 @@ body.rail-home .scrim, body.rail-seq .scrim { display: none; }
   .lm-panel-side .lm-side-block:last-child { border-left: 0; border-top: 1px solid var(--line); }
   .lm-panel-side { max-height: none; }
 }
+
+/* ============================================================================
+   v1: the sequence engine is in-process, and the Sequence page is the only
+   sequence. The header says so, the sequence's name is editable in place, a
+   person can arm the AI here ("AI may start runs"), and History / Runs sits
+   under the sequence. The Runs pane's queue view is retired at the end.
+   ============================================================================ */
+.lm-head-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.lm-conn.ok { background: var(--accent-soft); color: var(--accent); }
+.lm-conn.bad { background: var(--danger-soft); color: var(--danger); }
+
+/* the arm switch: the one place a person lets the AI start runs by itself */
+.lm-arm {
+  display: inline-flex; align-items: center; gap: 8px; padding: 5px 11px 5px 9px;
+  border: 1px solid var(--line-strong); border-radius: 999px; background: var(--raised);
+  cursor: pointer; font-size: 13px; font-weight: 550; white-space: nowrap; user-select: none;
+}
+.lm-arm:hover { border-color: var(--accent); }
+.lm-arm-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.lm-arm-track {
+  position: relative; flex: none; width: 34px; height: 18px; border-radius: 999px;
+  background: var(--line-strong); transition: background .15s;
+}
+.lm-arm-thumb {
+  position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--panel); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .15s;
+}
+.lm-arm-input:checked + .lm-arm-track { background: var(--ok); }
+.lm-arm-input:checked + .lm-arm-track .lm-arm-thumb { transform: translateX(16px); }
+.lm-arm-input:focus-visible + .lm-arm-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lm-arm-input:disabled + .lm-arm-track { opacity: .45; }
+.lm-arm-input:disabled ~ .lm-arm-label { color: var(--muted); }
+.lm-arm-label { line-height: 1.2; }
+
+.lm-arm-banner {
+  display: flex; align-items: flex-start; gap: 10px; margin: 0 16px 10px; padding: 8px 12px;
+  border: 1px solid var(--line-strong); border-radius: 10px; background: var(--raised);
+}
+.lm-arm-banner .lm-arm-dot { flex: none; width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: var(--muted); }
+.lm-arm-banner.on { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); background: color-mix(in srgb, var(--ok) 9%, transparent); }
+.lm-arm-banner.on .lm-arm-dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+.lm-arm-banner.off .lm-arm-dot { background: var(--warn-line); }
+.lm-arm-banner.bad { border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); background: var(--danger-soft); }
+.lm-arm-banner.bad .lm-arm-dot { background: var(--danger); }
+.lm-arm-banner-body { display: grid; gap: 1px; min-width: 0; }
+.lm-arm-banner-body b { font-size: 13.5px; font-weight: 650; }
+.lm-arm-banner-body span { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+
+/* the sequence's name: a click turns it into an input */
+.lm-seq-head { gap: 8px; }
+.lm-name-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 44ch; padding: 2px 7px; border: 1px dashed transparent; border-radius: 7px;
+  background: none; color: var(--text); font: inherit; font-size: 13.5px; font-weight: 600;
+  cursor: text; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lm-name-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lm-name-pencil { width: 13px; height: 13px; flex: none; opacity: .45; }
+.lm-name-btn:hover .lm-name-pencil { opacity: 1; }
+.lm-name-btn:hover { border-color: var(--line-strong); background: var(--hover); }
+.lm-name-btn.empty { color: var(--muted); font-weight: 500; font-style: italic; }
+.lm-name-input {
+  min-width: 12ch; max-width: 44ch; padding: 2px 8px; border: 1px solid var(--accent); border-radius: 7px;
+  background: var(--raised); color: var(--text); font: inherit; font-size: 13.5px; font-weight: 600;
+  outline: none; box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* History / Runs under the sequence */
+.lm-panel-seq .lm-seq-list { flex: 3 1 0; min-height: 70px; }
+.lm-history {
+  flex: 2 1 0; min-height: 140px; display: flex; flex-direction: column;
+  border-top: 1px solid var(--line);
+}
+.lm-history-head { padding-top: 10px; padding-bottom: 6px; }
+.lm-history-head h2 { font-size: 13.5px; }
+.lm-history-msg { margin: 0 12px 6px 14px; font-size: 12.5px; color: var(--danger); overflow-wrap: anywhere; }
+.lm-history-list { flex: 1; min-height: 0; overflow-y: auto; display: grid; gap: 5px; align-content: start; padding: 0 8px 10px; }
+.lm-history-empty {
+  padding: 14px; border: 1px dashed var(--line-strong); border-radius: 12px;
+  color: var(--muted); font-size: 13px; text-align: center;
+}
+.lm-history-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 2px 8px;
+  align-items: center; padding: 6px 9px; border: 1px solid var(--line); border-radius: 10px; background: var(--raised);
+}
+.lm-history-row:hover { border-color: var(--line-strong); }
+.lm-history-src {
+  flex: none; padding: 1px 7px; border-radius: 999px; background: var(--hover); color: var(--muted);
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+}
+.lm-history-src.kelvin { background: var(--accent-soft); color: var(--accent); }
+.lm-history-src.panel { background: var(--hover); color: var(--text-2); }
+.lm-history-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lm-history-when { font-size: 11.5px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.lm-history-detail {
+  grid-column: 2 / -1; font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* v1: the chat's Runs pane queue view is retired - the Sequence page is the only sequence. */
+#open-queue, #queue-view { display: none !important; }
+
+@media (max-width: 1240px) {
+  .lm-panel-seq .lm-history { min-height: 160px; }
+}
+@media (max-width: 900px) {
+  .lm-head-right { justify-content: flex-start; }
+  .kview-head-seq { flex-wrap: wrap; align-items: flex-start; }
+  .lm-name-btn, .lm-name-input { max-width: 28ch; }
+  .lm-history-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .lm-history-when { display: none; }
+}
+
+/* ============================================================================
+   v1 team chat: the lab's people, as labMaster's chat has them (peoplechat.py).
+   Names write under their own color, a message may quote another, "@agent"
+   wakes Kelvin, and the newest id in /api/state marks what you haven't read.
+   ============================================================================ */
+.teampanel { container-type: inline-size; }
+.team-sub { font-size: 11.5px; color: var(--muted); white-space: nowrap; margin-left: 2px; }
+.team-unread {
+  position: absolute; top: -5px; right: -6px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 999px; background: var(--accent); color: var(--accent-ink);
+  font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; box-shadow: 0 0 0 2px var(--raised);
+}
+.team-btn:has(.team-unread:not([hidden])) .team-dot { display: none; }
+
+/* who writes here, each in their color; a click mentions them */
+.team-people {
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 12px 6px; border-bottom: 1px solid var(--line);
+  max-height: 62px; overflow-y: auto;
+}
+.team-people[hidden] { display: none; }
+.team-person {
+  display: inline-flex; align-items: center; gap: 5px; max-width: 140px; padding: 2px 8px 2px 6px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--raised);
+  color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer;
+}
+.team-person:hover { border-color: var(--line-strong); background: var(--hover); }
+.team-person.you { border-color: var(--accent); background: var(--accent-soft); }
+.team-person .tm-dot { width: 7px; height: 7px; }
+.team-person-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.team-body { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.team-list { padding: 6px 14px 14px; }
+.team-new {
+  position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+  padding: 5px 12px; border: 1px solid var(--accent); border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink); font: inherit; font-size: 12.5px; font-weight: 600;
+  cursor: pointer; box-shadow: var(--shadow); white-space: nowrap;
+}
+.team-new[hidden] { display: none; }
+
+/* a message: the writer's color on the dot and the name, a quote, actions on hover */
+.tm-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.tm-head { align-items: center; gap: 6px; }
+.tm-head b { color: color-mix(in srgb, var(--tm-color, var(--text)) 78%, var(--text)); }
+.tm-account { font-size: 11px; color: var(--muted); }
+.tm-via { font-size: 10.5px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 5px; }
+.tm-badge {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px; line-height: 1.5;
+}
+.tm-badge.ai { background: color-mix(in srgb, #c9701f 16%, transparent); color: #c9701f; }
+.tm-badge.agent { background: var(--accent-soft); color: var(--accent); }
+.tm-agent { font-weight: 650; color: var(--accent); }
+.tm-quote {
+  display: flex; align-items: baseline; gap: 2px; max-width: 100%; margin: 0 4px 2px; padding: 2px 8px;
+  border: 0; border-left: 2px solid color-mix(in srgb, var(--tm-color, var(--accent)) 55%, transparent);
+  background: var(--hover); border-radius: 0 8px 8px 0; color: var(--text-2); font: inherit; font-size: 12px;
+  text-align: left; cursor: pointer; overflow: hidden;
+}
+.tm-quote:hover { background: var(--active); }
+.tm-quote b { color: color-mix(in srgb, var(--tm-color, var(--text)) 78%, var(--text)); font-weight: 650; }
+.tm-quote-arrow { color: var(--muted); }
+.tm.mine .tm-head { justify-content: flex-end; }
+.tm.mine .tm-quote { margin-left: auto; }
+.tm-actions { display: flex; justify-content: flex-start; padding: 2px 4px 0; }
+.tm.mine .tm-actions { justify-content: flex-end; }
+.tm-act {
+  border: 0; background: none; color: var(--muted); font: inherit; font-size: 11.5px;
+  padding: 1px 6px; border-radius: 6px; cursor: pointer; opacity: 0; transition: opacity .12s;
+}
+.tm:hover .tm-act, .tm-act:focus-visible { opacity: 1; }
+.tm-act:hover { color: var(--text); background: var(--hover); }
+@media (hover: none) { .tm-act { opacity: 1; } }
+.tm-text a { color: var(--accent); overflow-wrap: anywhere; }
+.tm-flash .tm-text { box-shadow: 0 0 0 2px var(--accent); }
+.tm.mine .tm-text a { color: var(--accent); }
+
+/* the reply chip above the composer, and the composer's tools */
+.team-reply {
+  display: flex; align-items: center; gap: 6px; margin: 0 12px 6px; padding: 4px 4px 4px 10px;
+  border-left: 2px solid var(--accent); border-radius: 0 8px 8px 0; background: var(--accent-soft);
+  color: var(--text-2); font-size: 12.5px;
+}
+.team-reply[hidden] { display: none; }
+.team-reply-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-reply-label b { color: var(--text); font-weight: 650; }
+.team-form { display: grid; gap: 6px; align-items: stretch; }
+.team-tools { display: flex; align-items: center; gap: 8px; min-height: 18px; }
+.team-tool {
+  border: 1px solid var(--line-strong); border-radius: 999px; background: var(--raised);
+  color: var(--text-2); font: inherit; font-size: 11.5px; font-weight: 650; padding: 1px 9px; cursor: pointer;
+}
+.team-tool:hover { border-color: var(--accent); color: var(--accent); }
+.team-hint { font-size: 11.5px; color: var(--danger); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-hint[hidden] { display: none; }
+.team-input-row { display: flex; align-items: flex-end; gap: 8px; }
+.team-input-row textarea { flex: 1; min-width: 0; }
+.team-name-form { margin-top: 0; }
+
+@container (max-width: 330px) {
+  .team-sub { display: none; }
+  .tm { max-width: 94%; }
+  .team-people { max-height: 44px; }
+}
+
+/* ============================================================================
+   v1 History page (the fourth rail tab): every run - Kelvin's own and the
+   sequence engine's - with its analysis and report files, a filter bar, paging
+   and a detail pane. The Sequence page's compact History links here.
+   ============================================================================ */
+.lm-link-btn {
+  margin-left: 6px; padding: 1px 5px; border: 0; border-radius: 6px; background: none;
+  color: var(--accent); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.lm-link-btn:hover { background: var(--accent-soft); }
+
+body.rail-history #kview-history { display: flex; }
+body.rail-history .sidebar, body.rail-history .topbar, body.rail-history #scroller,
+body.rail-history .composer-wrap, body.rail-history #termpane, body.rail-history .dock-col,
+body.rail-history .scrim { display: none; }
+
+.kview-history { overflow: hidden; }
+.kview-head-hist { padding: 18px 20px 8px; }
+.lmh-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 20px 10px; }
+.lmh-seg {
+  display: inline-flex; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 999px;
+  background: var(--raised);
+}
+.lmh-seg button {
+  border: 0; background: none; color: var(--text-2); font: inherit; font-size: 12.5px; font-weight: 600;
+  padding: 5px 12px; cursor: pointer;
+}
+.lmh-seg button + button { border-left: 1px solid var(--line); }
+.lmh-seg button:hover { background: var(--hover); }
+.lmh-seg button.on { background: var(--accent); color: var(--accent-ink); }
+.lmh-toolbar select, .lmh-toolbar input[type=search] {
+  border: 1px solid var(--line-strong); border-radius: 9px; padding: 5px 9px;
+  background: var(--raised); color: var(--text); font: inherit; font-size: 12.5px;
+}
+.lmh-toolbar input[type=search] { flex: 1 1 200px; min-width: 140px; max-width: 320px; }
+.lmh-toolbar #lmh-count { margin-left: auto; white-space: nowrap; }
+.kview-history .kview-msg { margin: 0 20px 8px; }
+
+.lmh-body {
+  flex: 1; min-height: 0; display: grid; gap: 12px; padding: 0 16px 16px;
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 40%);
+}
+.lmh-listwrap { min-height: 0; display: flex; flex-direction: column; gap: 8px; }
+.lmh-list { flex: 1; min-height: 0; overflow-y: auto; display: grid; gap: 5px; align-content: start; padding: 2px; }
+.lmh-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  padding: 28px 16px; border: 1px dashed var(--line-strong); border-radius: 12px;
+  color: var(--text-2); font-size: 13.5px; text-align: center;
+}
+.lmh-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center;
+  width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--raised); color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.lmh-row:hover { border-color: var(--line-strong); background: var(--hover); }
+.lmh-row.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.lmh-main { display: grid; gap: 1px; min-width: 0; }
+.lmh-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lmh-sub {
+  font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.lmh-listwrap > #lmh-more { align-self: flex-start; }
+
+.lmh-detail {
+  min-height: 0; overflow-y: auto; padding: 12px 14px 18px;
+  border: 1px solid var(--line); border-radius: 14px; background: var(--panel);
+}
+.lmh-detail-empty {
+  height: 100%; display: grid; place-content: center; justify-items: center; gap: 10px;
+  padding: 40px 16px; color: var(--muted); font-size: 13.5px; text-align: center;
+}
+.lmh-detail-empty svg { width: 28px; height: 28px; color: var(--line-strong); }
+.lmh-detail-body { display: grid; gap: 10px; align-content: start; }
+.lmh-detail-body[hidden] { display: none; }
+.lmh-loading { padding: 20px 4px; color: var(--muted); font-size: 13px; }
+.lmh-detail-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lmh-detail-name { margin: 0; font-size: 16px; font-weight: 650; overflow-wrap: anywhere; }
+.lmh-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(102px, 1fr)); gap: 6px 10px; }
+.lmh-fact {
+  display: grid; padding: 6px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-1);
+}
+.lmh-fact span { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.lmh-fact b { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.lmh-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.lmh-error { color: var(--danger); font-size: 12.5px; overflow-wrap: anywhere; }
+.lmh-section { display: grid; gap: 4px; }
+.lmh-section h3 {
+  margin: 6px 0 0; font-size: 12px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.lmh-text { margin: 0; font-size: 13px; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.lmh-path {
+  margin: 0; padding: 6px 9px; border-radius: 8px; background: var(--code); color: var(--text-2);
+  font: 12px/1.4 ui-monospace, Consolas, monospace; overflow-wrap: anywhere;
+}
+.lmh-plan summary { cursor: pointer; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.lmh-plan pre {
+  margin: 6px 0 0; padding: 8px 10px; max-height: 260px; overflow: auto; border-radius: 8px; background: var(--code);
+  font: 12px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap;
+}
+.lmh-analysis { display: grid; gap: 2px; }
+.lmh-an-row {
+  display: grid; grid-template-columns: minmax(80px, 34%) minmax(0, 1fr); gap: 8px;
+  padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 12.5px;
+}
+.lmh-an-row:last-child { border-bottom: 0; }
+.lmh-an-key { color: var(--text-2); }
+.lmh-an-val { color: var(--text); overflow-wrap: anywhere; }
+.lmh-listul { margin: 0; padding-left: 18px; color: var(--text-2); font-size: 12.5px; }
+.lmh-warn ul { margin: 0; padding-left: 18px; color: var(--warn); font-size: 12.5px; }
+.lmh-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.lmh-chip {
+  padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--hover); color: var(--text-2); font-size: 11.5px;
+}
+.lmh-reports { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; }
+.lmh-reports .btn { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
+.lmh-reports .btn svg { width: 14px; height: 14px; }
+.lmh-report-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lmh-blocks { margin: 0; padding-left: 18px; color: var(--text-2); font-size: 12.5px; }
+.lmh-blocks li { display: flex; gap: 8px; align-items: center; padding: 2px 0; }
+
+@media (max-width: 1240px) {
+  .lmh-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+}
+@media (max-width: 900px) {
+  .kview-history { overflow-y: auto; }
+  .lmh-body { display: flex; flex-direction: column; overflow: visible; }
+  .lmh-list, .lmh-detail { max-height: 48vh; }
+  .lmh-toolbar { padding: 0 16px 8px; }
+  .kview-history .kview-msg { margin: 0 16px 8px; }
+}

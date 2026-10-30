@@ -1,0 +1,26 @@
+{
+ "palette": [
+  {
+   "id": "blk_wait",
+   "name": "Wait",
+   "kind": "wait",
+   "target": "",
+   "params": {"minutes": 1},
+   "overrides": {},
+   "override_base": {},
+   "note": "",
+   "color": "#8a93a6"
+  },
+  {
+   "id": "blk_safe_stop",
+   "name": "Safe stop",
+   "kind": "safe_stop",
+   "target": "",
+   "params": {},
+   "overrides": {},
+   "override_base": {},
+   "note": "Runs the configured safe-stop script (paths.safe_stop_script) - replace scripts/example_safe_stop.py with one that switches your instruments' outputs off.",
+   "color": "#ff6b6b"
+  }
+ ]
+}

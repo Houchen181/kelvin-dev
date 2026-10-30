@@ -317,6 +317,10 @@ OFF_LAB = LOOKUPS | READINGS | BESIDE_THE_LAB | {"find_tools", "remember", "wake
                                                  "save_sequence",   # a written pulse sequence: drives nothing
                                                  "save_paper", "make_report", "write_file", "measurement_chain"}
 OFF_LAB |= {"export_eln"}   # reads kept runs and the record, writes its own folder (eln.py)
+# the Sequence engine's own page (in-process in Kelvin): its reads and Home page cards touch no instrument, and a
+# person arms AI starts in the Sequence page (its start/control keep their approval card and stay on the lab's lock)
+OFF_LAB |= {"labmaster_status", "labmaster_functions", "labmaster_saved", "labmaster_home_cards",
+            "labmaster_home_add_card", "labmaster_home_remove_card", "labmaster_rename_sequence"}
 # the analysis tools read kept runs and write only their own results (datatools.py): side by side, never the lab
 ANALYSIS = {"fit_run", "plot_runs", "export_run", "run_python"}
 LOOKUPS |= ANALYSIS
