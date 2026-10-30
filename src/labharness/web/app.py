@@ -3469,6 +3469,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     # the first request) so the MCP tools and the page share the same instance; the engine itself starts
     # lazily on the first call, and a test's second portal with another home replaces it.
     seq_service = sequence_service.service(home, settings)
+    seq_service.attach_gate(runtime.gate)   # v2 phase B: a block script's instrument commands go through the gate
 
     home_store = bridge.HomeStore(home / "home.json")
 

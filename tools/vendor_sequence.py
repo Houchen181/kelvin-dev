@@ -114,6 +114,15 @@ ENGINE_FIXES: Tuple[Tuple[str, str], ...] = (
 )
 
 # paths.py: where the engine reads and writes (the vendored file's header says why)
+#
+# Every Kelvin customisation of this file lives HERE, in this list: running this tool again must
+# produce exactly the paths.py Kelvin ships (packaging and the frozen runner included), so a vendor
+# pass can never silently drop one. `python tools/vendor_sequence.py --check` proves it.
+#   v1-A  the data root is ~/Kelvin/sequence (KELVIN_SEQUENCE_DIR overrides), code/runners/VERSION
+#         in the package, use_root() for a service/test root
+#   v2-B  frozen_runner(): in a packaged app the engine's children run KelvinRunner.exe (beside
+#         Kelvin.exe), never sys.executable (= Kelvin.exe, which would start a second Kelvin);
+#         paths.python_exe still wins, then frozen_runner(), then sys.executable
 PATHS_FIXES: Tuple[Tuple[str, str], ...] = (
     ("PANEL_DIR = os.path.dirname(os.path.abspath(__file__))\n",
      "# --- Kelvin (v1-A): vendored from labMaster. The engine's DATA root is ~/Kelvin/sequence\n"
@@ -157,7 +166,66 @@ PATHS_FIXES: Tuple[Tuple[str, str], ...] = (
      "    AGENT_SESSION_PATH = os.path.join(STATE_DIR, 'agent_session.json')\n"
      "    SESSION_LOG = os.path.join(LOG_DIR, 'session.log')\n"
      "    return root\n"),
+    # v2-B: a packaged app's child processes run KelvinRunner.exe, not sys.executable (= Kelvin.exe)
+    ("def python_exe(cfg):\n"
+     "    \"\"\"paths.python_exe, or - when it is empty - the Python that runs the panel.\"\"\"\n"
+     "    p = (cfg.get('paths') or {}).get('python_exe') or ''\n"
+     "    if p:\n"
+     "        return resolve(p)\n"
+     "    return sys.executable\n",
+     "def frozen_runner():\n"
+     "    \"\"\"The program a packaged Kelvin starts instead of a Python for this engine's child processes - the\n"
+     "    Sequence runners, the safe stop, the analysis scripts: KelvinRunner.exe beside Kelvin.exe\n"
+     "    (packaging/kelvin_runner.py, built by packaging/kelvin.spec). '' when this is not a packaged app, or\n"
+     "    that file is not there. Never raises.\n"
+     "\n"
+     "    Kelvin v2-B patch: tools/vendor_sequence.py must keep this function and the frozen branch of\n"
+     "    python_exe() when it regenerates this file from labMaster.\"\"\"\n"
+     "    if not getattr(sys, 'frozen', False):\n"
+     "        return ''\n"
+     "    try:\n"
+     "        name = 'KelvinRunner.exe' if os.name == 'nt' else 'KelvinRunner'\n"
+     "        path = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), name)\n"
+     "        return path if os.path.isfile(path) else ''\n"
+     "    except Exception:                                    # noqa: BLE001 - no sys.executable, no permission, ...\n"
+     "        return ''\n"
+     "\n"
+     "\n"
+     "def python_exe(cfg):\n"
+     "    \"\"\"paths.python_exe, or the Python that runs the panel.\n"
+     "\n"
+     "    In a packaged app sys.executable is Kelvin.exe, and starting that would start a second Kelvin, not\n"
+     "    run the runner script; the engine's child processes get the app's own KelvinRunner.exe instead\n"
+     "    (frozen_runner). A path named in the settings always wins - that is how a lab points the engine at\n"
+     "    a real Python with the instrument libraries, and the fallback for scripts that need more than the\n"
+     "    app carries (PACKAGING.md).\"\"\"\n"
+     "    p = (cfg.get('paths') or {}).get('python_exe') or ''\n"
+     "    if p:\n"
+     "        return resolve(p)\n"
+     "    return frozen_runner() or sys.executable\n"),
 )
+
+# What this tool changes in each vendored file, recorded in VENDORED.json (a vendor pass must keep
+# every one of them; `same_as_source: false` says the file is not a verbatim copy of labMaster's).
+PATCHES_BY_DEST: Dict[str, List[str]] = {
+    "paths.py": ["v1-A data root: ~/Kelvin/sequence (KELVIN_SEQUENCE_DIR overrides)",
+                 "v1-A code/runners/VERSION in the package, use_root() for a service's root",
+                 "v2-B frozen_runner(): KelvinRunner.exe for a packaged app's children; "
+                 "paths.python_exe -> frozen_runner() -> sys.executable"],
+    "engine.py": ["package-relative imports", "runners/myscript path: P.RUNNERS_DIR"],
+    "datafolder.py": ["package-relative imports"],
+    "dataindex.py": ["package-relative imports"],
+    "history_export.py": ["package-relative imports"],
+    "myscripts.py": ["package-relative imports"],
+    "scan.py": [],
+    "__init__.py": ["generated (not from labMaster)"],
+    "runners/run_block.py": ["import paths as _P"],
+    "runners/run_myscript.py": ["loads paths.py by file name"],
+    "runners/myscript_guard.py": [],
+    "runners/guard_site/sitecustomize.py": [],
+    "VERSION": [],
+    "blocks.default.json": [],
+}
 
 # runners: plain scripts (not a package), so their imports stay flat, pointing at paths.py
 RUNNER_FIXES: Dict[str, Tuple[Tuple[str, str], ...]] = {
@@ -260,6 +328,16 @@ def build(source: Path) -> Dict[str, bytes]:
     return out
 
 
+def source_bytes(source: Path) -> Dict[str, bytes]:
+    """{relative destination: the labMaster source bytes}, to tell a verbatim copy from a patched one."""
+    out: Dict[str, bytes] = {}
+    for src_name, dest_name in PACKAGE_FILES.items():
+        out[dest_name] = read_source(source, src_name)
+    for runner in RUNNER_FILES:
+        out["runners/" + runner] = read_source(source, "runners/" + runner)
+    return out
+
+
 def main(argv: List[str] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Vendor labMaster's sequence engine into labharness/sequence/.")
@@ -272,6 +350,7 @@ def main(argv: List[str] = None) -> int:
     if not (source / "panel_engine.py").is_file():
         raise SystemExit("vendor_sequence: %s is not a labMaster folder (no panel_engine.py)" % source)
     files = build(source)
+    originals = source_bytes(source)
     rows: List[Dict[str, object]] = []
     written = changed = 0
     for rel in sorted(files):
@@ -279,8 +358,13 @@ def main(argv: List[str] = None) -> int:
         target = dest / rel
         digest = sha256(data)
         same = target.is_file() and target.read_bytes() == data
+        patches = list(PATCHES_BY_DEST.get(rel, []))
         rows.append({"path": rel.replace("\\", "/"), "sha256": digest, "bytes": len(data),
-                     "same": same})
+                     "same": same,
+                     # a Kelvin customisation is expected: the vendored file is NOT labMaster's bytes
+                     "customized": bool(patches) or rel not in originals,
+                     "same_as_source": originals.get(rel) == data,
+                     "patches": patches})
         if same:
             continue
         changed += 1
@@ -292,10 +376,12 @@ def main(argv: List[str] = None) -> int:
     digest = sha256("\n".join("%s %s" % (r["sha256"], r["path"]) for r in rows).encode("utf-8"))
     manifest = {"source": str(source), "dest": str(dest), "files": rows,
                 "count": len(rows), "changed": changed, "digest": digest,
-                "source_version": files.get("VERSION", b"").decode("utf-8").strip()}
+                "source_version": files.get("VERSION", b"").decode("utf-8").strip(),
+                "customizations": {row["path"]: row["patches"] for row in rows if row["patches"]}}
     if args.check:
         for row in rows:
-            print("%s  %s" % (row["sha256"], row["path"]))
+            print("%s  %s  (customized: %s)" % (row["sha256"], row["path"],
+                                                ", ".join(row["patches"]) or "no"))
         print(json.dumps(manifest, indent=2))
         if changed:
             print("vendor_sequence: %d file(s) are out of date under %s" % (changed, dest),

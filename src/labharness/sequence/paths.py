@@ -331,12 +331,36 @@ def rel_to_root(path):
         return os.path.abspath(path).replace('\\', '/')
 
 
+def frozen_runner():
+    """The program a packaged Kelvin starts instead of a Python for this engine's child processes - the
+    Sequence runners, the safe stop, the analysis scripts: KelvinRunner.exe beside Kelvin.exe
+    (packaging/kelvin_runner.py, built by packaging/kelvin.spec). '' when this is not a packaged app, or
+    that file is not there. Never raises.
+
+    Kelvin v2-B patch: tools/vendor_sequence.py must keep this function and the frozen branch of
+    python_exe() when it regenerates this file from labMaster."""
+    if not getattr(sys, 'frozen', False):
+        return ''
+    try:
+        name = 'KelvinRunner.exe' if os.name == 'nt' else 'KelvinRunner'
+        path = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), name)
+        return path if os.path.isfile(path) else ''
+    except Exception:                                    # noqa: BLE001 - no sys.executable, no permission, ...
+        return ''
+
+
 def python_exe(cfg):
-    """paths.python_exe, or - when it is empty - the Python that runs the panel."""
+    """paths.python_exe, or the Python that runs the panel.
+
+    In a packaged app sys.executable is Kelvin.exe, and starting that would start a second Kelvin, not
+    run the runner script; the engine's child processes get the app's own KelvinRunner.exe instead
+    (frozen_runner). A path named in the settings always wins - that is how a lab points the engine at
+    a real Python with the instrument libraries, and the fallback for scripts that need more than the
+    app carries (PACKAGING.md)."""
     p = (cfg.get('paths') or {}).get('python_exe') or ''
     if p:
         return resolve(p)
-    return sys.executable
+    return frozen_runner() or sys.executable
 
 
 def work_dir(cfg):

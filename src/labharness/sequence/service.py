@@ -157,8 +157,32 @@ class SequenceService:
         self._lock = threading.RLock()    # the arm switch + state/kelvin_runs.json
         self._build_lock = threading.RLock()
         self._armed_memory = False        # used only when no settings object was given
+        self._gate = None                 # Kelvin's SafetyGate, when attached (v2 phase B)
+        self._gated = False               # True: the engine running is a gated one
 
     # ------------------------------------------------------------------ starting the engine
+
+    def attach_gate(self, gate: Any = None) -> Dict[str, Any]:
+        """Send every measurement block's instrument commands through Kelvin's SafetyGate (v2 phase B).
+
+        `gate` is the running Kelvin's SafetyGate (runtime.gate). Attach it before the engine starts -
+        the portal does it right after `service()` - and the engine is built gated (`sequence/gate.py`):
+        a block's runner gets the stand-in environment, every command is checked and approved as
+        Kelvin's own, and the engine's stop reaches the script. A service already running is not
+        rebuilt: the answer says so (the gate then takes effect at the next Kelvin start), so a
+        half-gated engine can never be mistaken for a gated one."""
+        with self._build_lock:
+            if self._engine is not None:
+                if self._gate is gate:
+                    return {"ok": True, "gated": bool(self._gated), "rebuilt": False,
+                            "note": "the gate was already attached"}
+                return {"ok": False, "gated": bool(self._gated), "rebuilt": False,
+                        "error": "the sequence engine is already running; the gate takes effect at "
+                                 "the next Kelvin start"}
+            self._gate = gate
+            return {"ok": True, "gated": gate is not None, "rebuilt": False,
+                    "note": "the next start of the sequence engine is gated" if gate is not None
+                    else "the sequence engine runs without a gate (as before v2)"}
 
     def _root(self) -> str:
         env = (os.environ.get("KELVIN_SEQUENCE_DIR") or "").strip()
@@ -200,7 +224,14 @@ class SequenceService:
                 self._panel_engine = panel_engine
                 cfg = P.load_config()
                 self._cfg = cfg if isinstance(cfg, dict) else {}
-                self._engine = panel_engine.Engine(self._cfg)
+                if self._gate is not None:
+                    # every block's instrument commands go through Kelvin's safety gate (v2 phase B)
+                    from . import gate as gate_bridge
+                    self._engine = gate_bridge.make_engine(self._cfg, self._gate)
+                    self._gated = True
+                else:
+                    self._engine = panel_engine.Engine(self._cfg)   # the old path: no gate
+                    self._gated = False
                 self._error = ""
             except Exception as exc:                              # noqa: BLE001 - never raise
                 self._engine = None
@@ -454,7 +485,14 @@ class SequenceService:
         """The saved sequence an id or a name means: {"ok", "id", "error", "name"}."""
         wanted = str(item_id or "").strip()
         if wanted:
-            return {"ok": True, "id": wanted, "name": ""}
+            label = ""     # its name, so the answer can say which sequence (the id alone says nothing to a person)
+            listed = self.saved()
+            if listed.get("ok"):
+                for entry in listed.get("saved") or []:
+                    if str(entry.get("id") or "") == wanted:
+                        label = str(entry.get("name") or "")
+                        break
+            return {"ok": True, "id": wanted, "name": label}
         label = str(name or "").strip()
         if not label:
             return {"ok": False, "id": "", "name": "",
@@ -899,6 +937,644 @@ class SequenceService:
         except Exception:                                         # noqa: BLE001
             pass
 
+    # ================================================================== v2-C: the whole engine, for the AI
+    # The function library's own edits, writing and reading scripts (measurement and analysis), the full
+    # History with each run's blocks, and the data folder. Each one is the same call the panel's page
+    # makes (save_palette_from, analysis_run, ...), with the answers the MCP tools turn into text.
+
+    def _cfg_now(self) -> Dict[str, Any]:
+        """The engine's config (paths, script dirs, data root), or {} before it started."""
+        try:
+            cfg = getattr(self._engine, "cfg", None)
+        except Exception:                                         # noqa: BLE001
+            cfg = None
+        if isinstance(cfg, dict):
+            return cfg
+        return self._cfg if isinstance(self._cfg, dict) else {}
+
+    def _palette_now(self, engine: Any):
+        """(entries, rev): the function library read together with its revision."""
+        if hasattr(engine, "palette_with_rev"):
+            entries, rev = engine.palette_with_rev()
+        else:
+            entries, rev = engine.palette(), engine.palette_rev()
+        return [dict(e) for e in (entries or []) if isinstance(e, dict)], rev
+
+    def function_update(self, entry_id: str, name: Optional[str] = None, note: Optional[str] = None,
+                        params: Optional[Dict[str, Any]] = None,
+                        color: Optional[str] = None) -> Dict[str, Any]:
+        """Change one function of the library (its name, note, default params or colour) - the whole library
+        is written back with the revision it was read at, so an edit by a person meanwhile is refused, not
+        lost. Returns {"ok", "error", "entry", "palette", "message"}."""
+        from . import paths as _P
+        eid = str(entry_id or "").strip()
+        if not eid:
+            return {"ok": False, "error": "function update: say which function (its palette id)",
+                    "entry": None, "palette": None, "message": ""}
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "entry": None, "palette": None, "message": ""}
+        try:
+            entries, rev = self._palette_now(engine)
+            at = next((k for k, e in enumerate(entries) if str(e.get("id") or "") == eid), None)
+            if at is None:
+                return {"ok": False, "entry": None, "palette": entries, "message": "",
+                        "error": 'function update: no function "%s" in the library (see labmaster_functions)'
+                                 % eid}
+            entry, changed = dict(entries[at]), []
+            if isinstance(name, str) and name.strip():
+                entry["name"] = name.strip()[:200]
+                changed.append("name")
+            if note is not None:
+                entry["note"] = _short(note, 2000)
+                changed.append("note")
+            if params is not None:
+                if not isinstance(params, dict):
+                    return {"ok": False, "entry": None, "palette": entries, "message": "",
+                            "error": "function update: params must be an object of the function's settings"}
+                entry["params"] = dict(params)
+                changed.append("params")
+            if isinstance(color, str) and color.strip():
+                entry["color"] = color.strip()[:40]
+                changed.append("color")
+            if not changed:
+                return {"ok": False, "entry": None, "palette": entries, "message": "",
+                        "error": "function update: nothing to change (give name, note, params or color)"}
+            entries[at] = entry
+            saved = engine.save_palette_from(entries, rev)
+            saved_list = [dict(e) for e in (saved or []) if isinstance(e, dict)]
+            now = next((e for e in saved_list if str(e.get("id") or "") == eid), entry)
+            return {"ok": True, "error": None, "entry": now, "palette": saved_list,
+                    "message": 'Updated the function "%s" (%s); the library is at %s'
+                               % (now.get("name") or eid, ", ".join(changed), _P.BLOCKS_PATH)}
+        except Exception as exc:                                  # noqa: BLE001 - a refusal is an answer
+            return {"ok": False, "error": _why(exc), "entry": None, "palette": None, "message": ""}
+
+    def function_duplicate(self, entry_id: str) -> Dict[str, Any]:
+        """Copy one function right after itself, as the page's Duplicate does ("<name> (copy)"): a new
+        palette entry, its id given by the engine on the whole-library write."""
+        eid = str(entry_id or "").strip()
+        if not eid:
+            return {"ok": False, "error": "function duplicate: say which function (its palette id)",
+                    "entry": None, "palette": None, "message": ""}
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "entry": None, "palette": None, "message": ""}
+        try:
+            entries, rev = self._palette_now(engine)
+            at = next((k for k, e in enumerate(entries) if str(e.get("id") or "") == eid), None)
+            if at is None:
+                return {"ok": False, "entry": None, "palette": entries, "message": "",
+                        "error": 'function duplicate: no function "%s" in the library' % eid}
+            made = dict(entries[at])
+            made["id"] = ""
+            same = [e for e in entries if str(e.get("name") or "") == made.get("name")]
+            base = str(made.get("name") or "function").strip().rstrip("0123456789 ()") or "function"
+            label = str(made.get("name") or "function")
+            made["name"] = (label + " (copy)")[:200]
+            old_ids = {str(e.get("id") or "") for e in entries}
+            entries.insert(at + 1, made)
+            saved = engine.save_palette_from(entries, rev)
+            saved_list = [dict(e) for e in (saved or []) if isinstance(e, dict)]
+            fresh = [e for e in saved_list if str(e.get("id") or "") not in old_ids]
+            now = fresh[0] if fresh else made
+            return {"ok": True, "error": None, "entry": now, "palette": saved_list,
+                    "message": 'Copied the function "%s" as "%s" [%s]; it is right after it in the library'
+                               % (label, now.get("name") or made["name"], now.get("id") or "?")}
+        except Exception as exc:                                  # noqa: BLE001
+            return {"ok": False, "error": _why(exc), "entry": None, "palette": None, "message": ""}
+
+    def function_remove(self, entry_id: str) -> Dict[str, Any]:
+        """Remove one function from the library (the whole library written back with its revision). The
+        sequence blocks that use it are not touched: a block keeps its own copy of what it ran."""
+        eid = str(entry_id or "").strip()
+        if not eid:
+            return {"ok": False, "error": "function remove: say which function (its palette id)",
+                    "entry": None, "palette": None, "message": ""}
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "entry": None, "palette": None, "message": ""}
+        try:
+            entries, rev = self._palette_now(engine)
+            at = next((k for k, e in enumerate(entries) if str(e.get("id") or "") == eid), None)
+            if at is None:
+                return {"ok": False, "entry": None, "palette": entries, "message": "",
+                        "error": 'function remove: no function "%s" in the library' % eid}
+            gone = dict(entries[at])
+            rest = entries[:at] + entries[at + 1:]
+            saved = engine.save_palette_from(rest, rev)
+            return {"ok": True, "error": None, "entry": gone,
+                    "palette": [dict(e) for e in (saved or []) if isinstance(e, dict)],
+                    "message": 'Removed the function "%s" [%s] from the library; %d left'
+                               % (gone.get("name") or eid, eid, len(rest))}
+        except Exception as exc:                                  # noqa: BLE001
+            return {"ok": False, "error": _why(exc), "entry": None, "palette": None, "message": ""}
+
+    def script_dir(self) -> str:
+        """The folder the AI writes measurement scripts into: the engine's own scripts/ under its data
+        root (~/Kelvin/sequence/scripts), which is the first script search dir."""
+        return os.path.join(P.scripts_base(), P.SCRIPTS_DIRNAME)
+
+    def write_script(self, name: str, code: str, overwrite: bool = False) -> Dict[str, Any]:
+        """Write a measurement script (a .py a sequence block can run) into the engine's scripts/ folder,
+        then let the engine's own scan (vendored scan.scan) report the parameters, groups and comments it
+        finds. Only a plain file name inside that folder: no folder, "..", drive or slash - and a script
+        that is already there is not replaced unless overwrite. The code is parsed before anything is
+        written, so a syntax error never leaves a broken script behind."""
+        fname, problem = _plain_file(name, ".py")
+        if problem:
+            return {"ok": False, "error": "write script: " + problem, "path": "", "abs_path": "",
+                    "name": "", "params": [], "scan": None, "message": ""}
+        source = str(code or "")
+        if not source.strip():
+            return {"ok": False, "error": "write script: give the script's code", "path": "", "abs_path": "",
+                    "name": fname, "params": [], "scan": None, "message": ""}
+        if len(source) > 200_000:
+            return {"ok": False, "error": "write script: the code is longer than 200000 characters",
+                    "path": "", "abs_path": "", "name": fname, "params": [], "scan": None, "message": ""}
+        try:
+            compile(source, fname, "exec")
+        except SyntaxError as exc:
+            return {"ok": False, "name": fname, "path": "", "abs_path": "", "params": [], "scan": None,
+                    "message": "",
+                    "error": "write script: the code does not parse (line %s: %s) - nothing was written"
+                             % (exc.lineno or "?", exc.msg)}
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "path": "", "abs_path": "", "name": fname,
+                    "params": [], "scan": None, "message": ""}
+        folder = self.script_dir()
+        path = os.path.join(folder, fname)
+        existed = os.path.exists(path)
+        if existed and not overwrite:
+            return {"ok": False, "name": fname, "path": P.rel_to_root(path), "abs_path": path,
+                    "params": [], "scan": None, "message": "",
+                    "error": 'write script: "%s" is already there - pass overwrite=true to replace it' % fname}
+        try:
+            os.makedirs(folder, exist_ok=True)
+            tmp = path + ".tmp-" + uuid.uuid4().hex[:8]
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(source)
+            os.replace(tmp, path)
+        except OSError as exc:
+            return {"ok": False, "error": 'write script: "%s" could not be written (%s)' % (fname, exc),
+                    "path": "", "abs_path": "", "name": fname, "params": [], "scan": None, "message": ""}
+        scan_info = self._scan_file(path)
+        params = [p for p in (scan_info.get("params") or []) if isinstance(p, dict)]
+        return {"ok": True, "error": None, "name": fname, "path": P.rel_to_root(path), "abs_path": path,
+                "overwritten": existed, "scan": scan_info, "params": params,
+                "message": 'Wrote "%s" to %s%s; the engine finds %d parameter(s) in it'
+                           % (fname, _slash(folder), " (replacing the one there)" if existed else "",
+                              len(params))}
+
+    def _scan_file(self, path: str) -> Dict[str, Any]:
+        """The engine's scan of one script: {'params', 'error', ...} (vendored scan.scan, never raises)."""
+        try:
+            from . import scan as _scan
+            info = _scan.scan(path)
+            return info if isinstance(info, dict) else {"params": [], "error": None}
+        except Exception as exc:                                  # noqa: BLE001
+            return {"params": [], "error": _why(exc)}
+
+    def read_script(self, path: str) -> Dict[str, Any]:
+        """One of the engine's measurement scripts, whole, with the parameters the engine's scan finds in
+        it. `path` is as labmaster_functions lists it (scripts/foo.py) or a file name no other script
+        shares; a path outside the engine's script folders is refused."""
+        wanted = str(path or "").strip()
+        if not wanted:
+            return {"ok": False, "error": "read script: say which script (as labmaster_functions lists it)",
+                    "path": "", "name": "", "code": "", "params": [], "scan": None, "message": ""}
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "path": "", "name": "", "code": "", "params": [],
+                    "scan": None, "message": ""}
+        try:
+            found = [s for s in engine.list_scripts() if isinstance(s, dict)]
+        except Exception as exc:                                  # noqa: BLE001
+            return {"ok": False, "error": _why(exc), "path": "", "name": "", "code": "", "params": [],
+                    "scan": None, "message": ""}
+        record = _find_script(found, wanted)
+        if record is None:
+            return {"ok": False, "path": "", "name": "", "code": "", "params": [], "scan": None,
+                    "message": "",
+                    "error": 'read script: no script "%s" under the engine\'s script folders (%s)'
+                             % (wanted, ", ".join(_script_dirs(self._cfg_now())))}
+        abs_path = P.resolve(record.get("path") or wanted)
+        if not _inside_any(abs_path, _script_dirs(self._cfg_now())):
+            return {"ok": False, "error": "read script: that path is not under the engine's script folders",
+                    "path": "", "name": "", "code": "", "params": [], "scan": None, "message": ""}
+        try:
+            size = os.path.getsize(abs_path)
+            if size > 2 * 1024 * 1024:
+                return {"ok": False, "path": record.get("path") or "", "name": record.get("name") or "",
+                        "code": "", "params": [], "scan": None, "message": "",
+                        "error": "read script: %s is %.1f MB - too big to bring into a chat"
+                                 % (record.get("name") or wanted, size / (1024.0 * 1024.0))}
+            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
+                code = f.read()
+        except OSError as exc:
+            return {"ok": False, "error": "read script: %s" % exc, "path": record.get("path") or "",
+                    "name": record.get("name") or "", "code": "", "params": [], "scan": None, "message": ""}
+        scan_info = self._scan_file(abs_path)
+        params = [p for p in (scan_info.get("params") or []) if isinstance(p, dict)]
+        return {"ok": True, "error": None, "path": record.get("path") or "", "name": record.get("name") or "",
+                "abs_path": abs_path, "code": code, "scan": scan_info, "params": params,
+                "has_main": bool(record.get("has_main")), "message": ""}
+
+    def history_runs(self, limit: int = 20, query: str = "") -> Dict[str, Any]:
+        """The engine's finished runs (batches), newest first, each with its blocks (name, kind, status,
+        params, datasets): what was measured and with which settings - for proposing the next run.
+        `query` keeps the runs whose name, a block's name or a dataset's path holds it. Never raises."""
+        wanted = _limit(limit, 20, high=200)
+        text = str(query or "").strip().lower()
+        engine, why = self._ready()
+        if engine is None:
+            return _empty("runs", why)
+        try:
+            runs = engine.get_history(10 ** 6)
+        except Exception as exc:                                  # noqa: BLE001
+            return _empty("runs", _why(exc))
+        out: List[Dict[str, Any]] = []
+        for run in runs if isinstance(runs, list) else []:
+            if not isinstance(run, dict):
+                continue
+            raw_blocks = run.get("blocks") if isinstance(run.get("blocks"), list) else []
+            blocks: List[Dict[str, Any]] = []
+            datasets: List[str] = []
+            for block in raw_blocks:
+                if not isinstance(block, dict):
+                    continue
+                block_datasets = []
+                for path in block.get("datasets") or []:
+                    rel = _slash(path)
+                    if rel and rel not in block_datasets:
+                        block_datasets.append(rel)
+                        if rel not in datasets:
+                            datasets.append(rel)
+                blocks.append({"n": block.get("n"), "uid": str(block.get("uid") or ""),
+                               "name": str(block.get("name") or ""), "kind": str(block.get("kind") or ""),
+                               "status": str(block.get("status") or ""),
+                               "message": _short(block.get("message") or "", 300),
+                               "params": block.get("params") if isinstance(block.get("params"), dict) else {},
+                               "overrides": (block.get("overrides")
+                                             if isinstance(block.get("overrides"), dict) else {}),
+                               "datasets": block_datasets})
+            name = str(run.get("name") or run.get("run_id") or "").strip()
+            hay = " ".join([name, str(run.get("run_id") or "")]
+                           + [b["name"] for b in blocks] + datasets).lower()
+            if text and text not in hay:
+                continue
+            n_error = _int_or_zero(run.get("n_error"))
+            started = _epoch_or_none(run.get("started"))
+            out.append({"run_id": str(run.get("run_id") or ""), "name": name,
+                        "status": "failed" if n_error else "done",
+                        "started": started, "finished": _epoch_or_none(run.get("finished")),
+                        "at": _iso_at(started),
+                        "n_blocks": _int_or_zero(run.get("n_blocks")) or len(blocks),
+                        "n_error": n_error, "n_datasets": len(datasets),
+                        "datasets": datasets, "blocks": blocks, "sim": run.get("sim")})
+            if len(out) >= wanted:
+                break
+        return {"ok": True, "error": None, "runs": out}
+
+    def run_detail(self, run_id: str) -> Dict[str, Any]:
+        """One run's detail: a panel run (its blocks with params and datasets, panel_run) or one of
+        Kelvin's own recorded measurements (the AI's plans/scripts/queues). {"ok","error","source","run"}."""
+        wanted = str(run_id or "").strip()
+        if not wanted:
+            return {"ok": False, "error": "give the run's id (labmaster_history lists them)",
+                    "source": "", "run": None}
+        panel = self.panel_run(wanted)
+        if panel.get("ok") and isinstance(panel.get("run"), dict):
+            run = dict(panel["run"])
+            run["source"] = SOURCE_PANEL
+            return {"ok": True, "error": None, "source": SOURCE_PANEL, "run": run}
+        for record in self.kelvin_runs():
+            if isinstance(record, dict) and str(record.get("run_id") or "") == wanted:
+                run = _kelvin_run(dict(record))
+                return {"ok": True, "error": None, "source": SOURCE_KELVIN, "run": run}
+        return {"ok": False, "source": "", "run": None,
+                "error": 'no run "%s" in the engine\'s History or in Kelvin\'s record of its own measurements'
+                         % wanted}
+
+    def analysis_scripts(self, classes: Any = ()) -> Dict[str, Any]:
+        """The Scripts tab's list: my_analysis.dirs, the templates, and every analysis script with its
+        declarations (id my:<k>:<file.py>, name, params, classes). Read fresh on every call."""
+        engine, why = self._ready()
+        if engine is None:
+            return _empty("scripts dirs templates", why)
+        try:
+            got = engine.analysis_scripts(classes)
+        except Exception as exc:                                  # noqa: BLE001
+            return _empty("scripts dirs templates", _why(exc))
+        got = got if isinstance(got, dict) else {}
+        scripts = [s for s in (got.get("scripts") or []) if isinstance(s, dict)]
+        return {"ok": True, "error": None, "scripts": scripts,
+                "dirs": [d for d in (got.get("dirs") or []) if isinstance(d, dict)],
+                "templates": [t for t in (got.get("templates") or []) if isinstance(t, dict)],
+                "guard": got.get("guard")}
+
+    def write_analysis(self, name: str, code: str, overwrite: bool = False) -> Dict[str, Any]:
+        """Write an analysis script into my_analysis.dirs[0] (where the Scripts tab's "New script" writes
+        too), then return the record the engine finds for it (id, params from its PARAMS, classes). A name
+        that hides an importable module is refused (it would break the folder's other scripts); a file that
+        is already there is not replaced unless overwrite; the code is parsed first."""
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "path": "", "name": "", "record": None, "message": ""}
+        fname, problem = _plain_file(name, ".py")
+        if problem:
+            return {"ok": False, "error": "write analysis: " + problem, "path": "", "name": "",
+                    "record": None, "message": ""}
+        source = str(code or "")
+        if not source.strip():
+            return {"ok": False, "error": "write analysis: give the script's code", "path": "", "name": fname,
+                    "record": None, "message": ""}
+        if len(source) > 200_000:
+            return {"ok": False, "error": "write analysis: the code is longer than 200000 characters",
+                    "path": "", "name": fname, "record": None, "message": ""}
+        try:
+            compile(source, fname, "exec")
+        except SyntaxError as exc:
+            return {"ok": False, "path": "", "name": fname, "record": None, "message": "",
+                    "error": "write analysis: the code does not parse (line %s: %s) - nothing was written"
+                             % (exc.lineno or "?", exc.msg)}
+        try:
+            from . import myscripts as _myscripts
+            folders = _myscripts.dirs(self._cfg_now())
+        except Exception as exc:                                  # noqa: BLE001
+            return {"ok": False, "error": "write analysis: the my_analysis folder could not be found (%s)"
+                                          % _why(exc), "path": "", "name": fname, "record": None, "message": ""}
+        if not folders:
+            return {"ok": False, "error": "write analysis: there is no my_analysis folder configured",
+                    "path": "", "name": fname, "record": None, "message": ""}
+        stem = fname[:-3]
+        try:
+            shadow = _myscripts.name_problem(stem, self._cfg_now())
+        except Exception:                                         # noqa: BLE001
+            shadow = ""
+        if shadow:
+            return {"ok": False, "error": "write analysis: " + shadow, "path": "", "name": fname,
+                    "record": None, "message": ""}
+        folder = folders[0]
+        path = os.path.join(folder, fname)
+        existed = os.path.exists(path)
+        if existed and not overwrite:
+            return {"ok": False, "name": fname, "path": _slash(path), "record": None, "message": "",
+                    "error": 'write analysis: "%s" is already there - pass overwrite=true to replace it' % fname}
+        try:
+            os.makedirs(folder, exist_ok=True)
+            tmp = path + ".tmp-" + uuid.uuid4().hex[:8]
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                f.write(source)
+            os.replace(tmp, path)
+        except OSError as exc:
+            return {"ok": False, "error": 'write analysis: "%s" could not be written (%s)' % (fname, exc),
+                    "path": "", "name": fname, "record": None, "message": ""}
+        record = self._analysis_record(folder, fname)
+        params = record.get("params") if isinstance(record, dict) else None
+        return {"ok": True, "error": None, "path": _slash(path), "name": fname, "overwritten": existed,
+                "record": record, "params": params if isinstance(params, list) else [],
+                "message": 'Wrote the analysis script "%s" to %s%s; the engine finds %d parameter(s) in it'
+                           % (fname, _slash(folder), " (replacing the one there)" if existed else "",
+                              len(params) if isinstance(params, list) else 0)}
+
+    def _analysis_record(self, folder: str, fname: str) -> Dict[str, Any]:
+        """The engine's record of one analysis script just written ([] when the scan does not list it)."""
+        try:
+            engine, _why_not = self._ready()
+            if engine is not None:
+                listing = engine.analysis_scripts()
+                for rec in (listing.get("scripts") or []) if isinstance(listing, dict) else []:
+                    if isinstance(rec, dict) and str(rec.get("id") or "") == "my:0:%s" % fname:
+                        return dict(rec)
+        except Exception:                                         # noqa: BLE001 - the file is written
+            pass
+        return {}
+
+    def _analysis_script(self, engine: Any, wanted: str):
+        """The record of the analysis script `wanted` (its id, or its file name): (record, why)."""
+        try:
+            listing = engine.analysis_scripts()
+        except Exception as exc:                                  # noqa: BLE001
+            return None, "the analysis scripts could not be listed: %s" % _why(exc)
+        scripts = [s for s in (listing.get("scripts") or []) if isinstance(s, dict)] \
+            if isinstance(listing, dict) else []
+        want = str(wanted or "").strip()
+        hit = next((s for s in scripts if str(s.get("id") or "") == want), None)
+        if hit is None:
+            same = [s for s in scripts if want and want in (str(s.get("name") or ""),
+                                                            str(s.get("file") or ""),
+                                                            os.path.basename(str(s.get("file") or "")))]
+            hit = same[0] if len(same) == 1 else None
+        if hit is None:
+            return None, ('no analysis script "%s" (labmaster_analysis_scripts lists them: my:<folder>:<file.py>)'
+                          % want)
+        return hit, ""
+
+    def run_analysis(self, script: str, datasets: Any = None, run_id: str = "",
+                     params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Run one of the my_analysis scripts on dataset folders: the engine's own analysis_run (one job,
+        one item). `datasets`: the dataset folders (from labmaster_datasets, or a panel run's datasets when
+        `run_id` is given), `params` its PARAMS values. Returns the job id; labmaster_analysis_status
+        follows it."""
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "job": "", "status": None, "message": ""}
+        record, problem = self._analysis_script(engine, script)
+        if record is None:
+            return {"ok": False, "error": "run analysis: " + problem, "job": "", "status": None, "message": ""}
+        if params is not None and not isinstance(params, dict):
+            return {"ok": False, "error": "run analysis: params must be an object of the script's settings",
+                    "job": "", "status": None, "message": ""}
+        cfg = self._cfg_now()
+        root = os.path.normpath(P.data_root(cfg))
+        wanted = _paths_arg(datasets)
+        paths: List[str] = []
+        bad: List[str] = []
+        for raw in wanted:
+            path = os.path.normpath(P.resolve(raw))
+            if not os.path.isdir(path) or not _inside_dir(root, path):
+                bad.append(raw)
+            else:
+                paths.append(path)
+        if bad:
+            return {"ok": False, "job": "", "status": None, "message": "",
+                    "error": "run analysis: not dataset folder(s) under %s: %s (labmaster_datasets lists them)"
+                             % (_slash(root), ", ".join(bad[:5]))}
+        if not paths and str(run_id or "").strip():
+            detail = self.panel_run(str(run_id).strip())
+            if detail.get("ok") and isinstance(detail.get("run"), dict):
+                paths = [os.path.normpath(P.resolve(d)) for d in detail["run"].get("datasets") or []
+                         if isinstance(d, str) and d]
+        if not paths:
+            return {"ok": False, "job": "", "status": None, "message": "",
+                    "error": "run analysis: give the dataset folder(s) (labmaster_datasets) or a panel run id"}
+        jobs = [{"script": record.get("id"), "params": dict(params or {}), "paths": paths,
+                 "label": str(record.get("name") or record.get("id") or "analysis")[:200]}]
+        try:
+            job_id = engine.analysis_run(jobs)
+        except Exception as exc:                                  # noqa: BLE001 - refused in words
+            running = getattr(exc, "data", None)
+            if isinstance(running, dict) and running.get("running"):
+                now = running["running"]
+                return {"ok": False, "job": "", "status": engine.analysis_status() if callable(
+                    getattr(engine, "analysis_status", None)) else None, "message": "",
+                    "error": "run analysis: an analysis is already running (%s, %s of %s) - "
+                             "labmaster_analysis_status follows it, labmaster_analysis_cancel stops it"
+                             % (now.get("label") or now.get("id") or "?", now.get("done"), now.get("total"))}
+            return {"ok": False, "error": "run analysis: " + _why(exc), "job": "", "status": None,
+                    "message": ""}
+        return {"ok": True, "error": None, "job": str(job_id or ""),
+                "status": engine.analysis_status() if callable(getattr(engine, "analysis_status", None)) else None,
+                "script": record.get("id"), "n_datasets": len(paths),
+                "message": 'Started the analysis "%s" on %d dataset(s) (job %s); labmaster_analysis_status '
+                           'follows it' % (record.get("name") or record.get("id"), len(paths), job_id)}
+
+    def analysis_status(self) -> Dict[str, Any]:
+        """The analysis job as the Scripts tab reads it: {"ok","error","status"} - {'state': 'idle'} before
+        the first, else id/state/started/finished/done/total/items (each item: script, label, state,
+        error, out, tail, records, n_figures)."""
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "status": None}
+        try:
+            got = engine.analysis_status()
+        except Exception as exc:                                  # noqa: BLE001
+            return {"ok": False, "error": _why(exc), "status": None}
+        return {"ok": True, "error": None, "status": got if isinstance(got, dict) else {"state": "idle"}}
+
+    def analysis_cancel(self, job_id: str = "") -> Dict[str, Any]:
+        """Stop the analysis job (never a measurement): `job_id` only that job - one that has ended
+        meanwhile is not cancelled, so a new one is never hit by a stale request."""
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "status": None, "message": ""}
+        wanted = str(job_id or "").strip() or None
+        try:
+            cancelled = engine.analysis_cancel(wanted)
+        except Exception as exc:                                  # noqa: BLE001
+            return {"ok": False, "error": _why(exc), "status": None, "message": ""}
+        status = engine.analysis_status() if callable(getattr(engine, "analysis_status", None)) else None
+        state = status.get("state") if isinstance(status, dict) else None
+        if not cancelled:
+            return {"ok": False, "status": status, "message": "",
+                    "error": ("run analysis: that analysis had already ended - nothing was cancelled"
+                              if state != "running" else
+                              "run analysis: another analysis runs now - nothing was cancelled")}
+        return {"ok": True, "error": None, "status": status,
+                "message": "Stopped the analysis job%s; the measurement is not touched."
+                           % (" %s" % wanted if wanted else "")}
+
+    def datasets(self, limit: int = 20) -> Dict[str, Any]:
+        """The History data folder (the datasets every block wrote), newest first: each dataset folder's
+        path, its class, size, .dat files and when it was last written (the vendored datafolder's own
+        record of the folder, read_folder - no index thread needed)."""
+        wanted = _limit(limit, 20, high=100)
+        engine, why = self._ready()
+        if engine is None:
+            return _empty("datasets", why)
+        try:
+            from . import dataindex as _DI
+            cfg = self._cfg_now()
+            root = os.path.normpath(P.data_root(cfg))
+        except Exception as exc:                                  # noqa: BLE001
+            return _empty("datasets", _why(exc))
+        if not os.path.isdir(root):
+            return _empty("datasets", "the data folder is not there yet: %s" % _slash(root))
+        found = []                                                # (day, name, path)
+        try:
+            days = sorted((n for n in os.listdir(root)
+                           if _DI.DAY_RE.match(n) and os.path.isdir(os.path.join(root, n))), reverse=True)
+        except OSError as exc:
+            return _empty("datasets", "the data folder cannot be listed: %s" % exc)
+        for day in days:
+            try:
+                names = sorted(os.listdir(os.path.join(root, day)), reverse=True)
+            except OSError:
+                continue
+            for name in names:
+                path = os.path.join(root, day, name)
+                if _DI.FOLDER_RE.match(name) and os.path.isdir(path):
+                    found.append((day, name, path))
+        found.sort(key=lambda t: (t[0], t[1].rsplit("_", 1)[-1]), reverse=True)
+        out: List[Dict[str, Any]] = []
+        for day, name, path in found[:wanted]:
+            record = _DI.read_folder(day, name, path, "msmt")
+            out.append({"path": _slash(os.path.normpath(path)), "rel": "%s/%s" % (day, name),
+                        "day": day, "folder": name, "class": str(record.get("cls") or ""),
+                        "bytes": _int_or_zero(record.get("bytes")),
+                        "dat": [str(n) for n in (record.get("dat") or [])][:40],
+                        "modified": _iso_at(_epoch_or_none(record.get("lw"))),
+                        "started": _iso_at(_epoch_or_none(record.get("start"))),
+                        "finished": _iso_at(_epoch_or_none(record.get("end"))),
+                        "warn": record.get("warn")})
+        return {"ok": True, "error": None, "root": _slash(root), "datasets": out}
+
+    def dataset_files(self, path: str) -> Dict[str, Any]:
+        """List one dataset folder's files and subfolders (read only): name, size, when it was last
+        written. Only a folder under the History data root; anything else is refused."""
+        wanted = str(path or "").strip()
+        if not wanted:
+            return {"ok": False, "error": "dataset files: give the dataset's path (labmaster_datasets lists "
+                                          "them)", "path": "", "files": [], "dirs": []}
+        engine, why = self._ready()
+        if engine is None:
+            return {"ok": False, "error": why, "path": "", "files": [], "dirs": []}
+        root = os.path.normpath(P.data_root(self._cfg_now()))
+        full = os.path.normpath(os.path.join(root, wanted)
+                                if not os.path.isabs(wanted) else _plain_path(wanted))
+        if not _inside_dir(root, full):
+            return {"ok": False, "error": "dataset files: %r is outside the data folder %s"
+                                          % (wanted, _slash(root)), "path": "", "files": [], "dirs": []}
+        if not os.path.isdir(full):
+            return {"ok": False, "error": "dataset files: no such dataset folder: %s" % _slash(full),
+                    "path": _slash(full), "files": [], "dirs": []}
+        files: List[Dict[str, Any]] = []
+        folders: List[Dict[str, Any]] = []
+        try:
+            for name in sorted(os.listdir(full))[:400]:
+                entry = os.path.join(full, name)
+                try:
+                    if os.path.isdir(entry):
+                        folders.append({"name": name})
+                    else:
+                        st = os.stat(entry)
+                        files.append({"name": name, "bytes": int(st.st_size),
+                                      "modified": _iso_at(st.st_mtime)})
+                except OSError:
+                    continue
+        except OSError as exc:
+            return {"ok": False, "error": "dataset files: %s cannot be listed (%s)" % (_slash(full), exc),
+                    "path": _slash(full), "files": [], "dirs": []}
+        return {"ok": True, "error": None, "path": _slash(full),
+                "rel": _slash(os.path.relpath(full, root)), "files": files, "dirs": folders}
+
+    def log_lines(self, lines: int = 50) -> Dict[str, Any]:
+        """The engine's own log, newest `lines` rows (what the panel's Log pane shows): time, level and
+        text of each. Never raises."""
+        wanted = _limit(lines, 50, high=400)
+        engine, why = self._ready()
+        if engine is None:
+            return _empty("lines", why, seq=0)
+        try:
+            got = engine.get_log(since=0, limit=wanted)
+        except Exception as exc:                                  # noqa: BLE001
+            return _empty("lines", _why(exc), seq=0)
+        rows = got.get("lines") if isinstance(got, dict) else None
+        out: List[Dict[str, Any]] = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                at = datetime.fromtimestamp(float(row.get("ts") or 0)).strftime("%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError, OSError, OverflowError):
+                at = ""
+            out.append({"n": row.get("n"), "at": at, "lvl": str(row.get("lvl") or ""),
+                        "uid": str(row.get("uid") or ""), "text": _short(row.get("text") or "", 20000)})
+        return {"ok": True, "error": None, "lines": out,
+                "seq": got.get("seq") if isinstance(got, dict) else 0}
+
 
 # ---------------------------------------------------------------- one service per process
 
@@ -1079,3 +1755,96 @@ def _new_palette_entry(target: str, name: str, kind: str) -> Dict[str, Any]:
             "target": target if kind == "script" else "",
             "params": {"reps": 1} if kind == "script" else {},
             "overrides": {}, "override_base": {}, "note": "", "color": DEFAULT_COLOR}
+
+
+# ---------------------------------------------------------------- v2-C: file names, folders, arguments
+# What the AI may write and read: one plain file name inside the folder it is meant for (never a path), and
+# paths that stay under the engine's own folders. Everything here returns words, never raises.
+
+_BAD_NAME_CHARS = '<>:"/\\|?*'
+_RESERVED_NAMES = ({"CON", "PRN", "AUX", "NUL"}
+                   | {"COM%d" % i for i in range(1, 10)} | {"LPT%d" % i for i in range(1, 10)})
+
+
+def _plain_file(name: Any, suffix: str = ".py"):
+    """(file name, ""): one plain file name with `suffix`, inside the folder the caller names - or ("", why
+    not). No folder, no "..", no drive, no slash, no character Windows refuses; leading "." / "_" are
+    helpers (the pages hide them) and reserved device names are refused."""
+    label = str(name or "").strip()
+    if not label:
+        return "", "give the file a name (a plain file name, no folder)"
+    if len(label) > 160:
+        return "", "the file name is longer than 160 characters"
+    if (".." in label or "/" in label or "\\" in label or ":" in label
+            or os.path.isabs(label) or os.path.basename(label) != label):
+        return "", ('the name must be a plain file name inside its folder (no folder, "..", drive or slash '
+                    'in it)')
+    if any(c in _BAD_NAME_CHARS or ord(c) < 32 for c in label):
+        return "", ("the name holds a character Windows cannot use (< > : \" / \\ | ? * or a control "
+                    "character)")
+    if not label.lower().endswith(suffix.lower()):
+        label += suffix
+    stem = label[:-len(suffix)]
+    if not stem or stem.startswith(".") or stem.startswith("_"):
+        return "", "the name must not start with '.' or '_' (such a file is a helper, not a script)"
+    if stem.split(".")[0].upper() in _RESERVED_NAMES:
+        return "", "%r is a reserved Windows device name - choose another name" % stem
+    if label[-1] in ". ":
+        return "", "the name cannot end with a dot or a space"
+    return label, ""
+
+
+def _plain_path(text: Any) -> str:
+    """A path as given, expanded and normalised (an ~ is the person's home)."""
+    return os.path.normpath(os.path.expanduser(str(text or "").strip()))
+
+
+def _inside_dir(root: Any, path: Any) -> bool:
+    """Is `path` (its real path, links followed) inside `root` (its real path)? Another drive is not."""
+    try:
+        real_root = os.path.normcase(os.path.realpath(str(root)))
+        real = os.path.normcase(os.path.realpath(str(path)))
+        return os.path.commonpath([real, real_root]) == real_root
+    except (ValueError, OSError):
+        return False
+
+
+def _script_dirs(cfg: Any) -> List[str]:
+    """[absolute] of the engine's script search dirs (paths.script_search_dirs), the first the folder
+    Kelvin's own scripts/ is. Never raises."""
+    raw = None
+    try:
+        raw = (cfg.get("paths") or {}).get("script_search_dirs") if isinstance(cfg, dict) else None
+    except Exception:                                             # noqa: BLE001
+        raw = None
+    dirs: List[str] = []
+    for entry in raw if isinstance(raw, list) else [P.SCRIPTS_DIRNAME]:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        try:
+            path = os.path.normpath(P.resolve(entry.strip()))
+        except Exception:                                         # noqa: BLE001
+            continue
+        if path not in dirs:
+            dirs.append(path)
+    return dirs or [os.path.normpath(os.path.join(P.ROOT, P.SCRIPTS_DIRNAME))]
+
+
+def _inside_any(path: Any, folders: List[str]) -> bool:
+    """Is `path` inside one of `folders` (real paths, links followed)?"""
+    return any(_inside_dir(folder, path) for folder in folders)
+
+
+def _paths_arg(value: Any) -> List[str]:
+    """The folder paths a tool's argument names: a list, or one text with ';' or a new line between the
+    paths (a comma is allowed in a Windows path, so it is not a separator)."""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        parts = [p.strip().strip('"') for p in re.split(r"[;\n]", text)]
+        return [p for p in parts if p]
+    if isinstance(value, (list, tuple)):
+        return [str(p).strip().strip('"') for p in value
+                if isinstance(p, (str, os.PathLike)) and str(p).strip()]
+    return []

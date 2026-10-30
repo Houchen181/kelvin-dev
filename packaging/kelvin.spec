@@ -66,16 +66,18 @@ datas.append((str(ROOT / "src" / "labharness" / "data" / "sandbox" / "kelvin_san
 datas += [(str(ROOT / "src" / "labharness" / "data" / "scriptshim" / name), "labharness/data/scriptshim")
           for name in ("kelvin_shim.py", "sitecustomize.py")]
 
-# the vendored labMaster sequence engine (labharness/sequence/, V1_SPEC.md v1-A): the runners are plain .py
-# files started as a child process, and VERSION/blocks.default.json are data - collect_data_files() above
-# skips .py, so they are named here. (A frozen app's sys.executable is Kelvin.exe, not a Python: running
-# the engine's runner scripts from a packaged app is phase B; from source/venv they run with sys.executable.)
-datas += [(str(ROOT / "src" / "labharness" / "sequence" / name), "labharness/sequence")
-          for name in ("VERSION", "blocks.default.json")]
-datas += [(str(ROOT / "src" / "labharness" / "sequence" / "runners" / name), "labharness/sequence/runners")
-          for name in ("run_block.py", "run_myscript.py", "myscript_guard.py")]
-datas.append((str(ROOT / "src" / "labharness" / "sequence" / "runners" / "guard_site" / "sitecustomize.py"),
-              "labharness/sequence/runners/guard_site"))
+# The vendored labMaster sequence engine (labharness/sequence/, V1_SPEC.md v1-A). The engine starts its
+# runners as CHILD PROCESSES: plain .py files on disk, and run_block.py/run_myscript.py import their sibling
+# module `paths` as a top-level module (`import paths`, with this folder on sys.path). A packaged app starts
+# KelvinRunner.exe for them (V2_SPEC.md v2-B; packaging/kelvin_runner.py, the second EXE below), because a
+# frozen app's sys.executable is Kelvin.exe, not a Python. So the package's .py files travel in the bundle as
+# FILES too - collect_data_files() above only takes non-Python data, so they are named here.
+SEQ = ROOT / "src" / "labharness" / "sequence"
+datas += [(str(SEQ / name), "labharness/sequence") for name in ("VERSION", "blocks.default.json")]
+datas += [(str(p), "labharness/sequence") for p in sorted(SEQ.glob("*.py"))]          # paths.py, scan.py, ...
+datas += [(str(p), "labharness/sequence/runners") for p in sorted((SEQ / "runners").glob("*.py"))]
+datas += [(str(p), "labharness/sequence/runners/guard_site")
+          for p in sorted((SEQ / "runners" / "guard_site").glob("*.py"))]
 
 a = Analysis(
     [str(ROOT / "packaging" / "kelvin_app.py")],
@@ -105,7 +107,41 @@ exe = EXE(
     console=False,
     icon=str(ICONS / ("kelvin.icns" if sys.platform == "darwin" else "kelvin.ico")),
 )
-coll = COLLECT(exe, a.binaries, a.datas, name="Kelvin")
+
+# The second executable: the "Python" a packaged Kelvin starts for the Sequence engine's child processes
+# (V2_SPEC.md v2-B). The engine calls [paths.python_exe(cfg), '-u', <runner.py>, ...]; from source that is the
+# venv's Python, in a frozen app it is KelvinRunner.exe beside Kelvin.exe (labharness/sequence/paths.py).
+# Console=True: the engine reads its stdout, the runner's ##PANEL event lines. It is a minimal interpreter -
+# the vendored runners need only the standard library; hiddenimports add what a lab's own measurement script
+# may import while a block runs in real mode (the app's bundle already carries these; DLLs and data come from
+# the main COLLECT below, this EXE only needs its own copy of the pure modules).
+RUNNER_HIDDEN = ["pyvisa", "pyvisa_py", "serial", "usb", "libusb_package", "numpy", "h5py", "yaml",
+                 "psutil", "zeroconf", "ifaddr"]
+for _package in ("pyvisa_py", "serial", "usb", "libusb_package", "zeroconf"):
+    try:
+        RUNNER_HIDDEN += collect_submodules(_package, on_error="ignore")
+    except Exception as e:                  # a package not installed on this build machine
+        print("skipping runner module", _package, e)
+a_runner = Analysis(
+    [str(ROOT / "packaging" / "kelvin_runner.py")],
+    pathex=[str(ROOT / "src")],
+    datas=[],
+    binaries=[],
+    hiddenimports=RUNNER_HIDDEN,
+    excludes=["tkinter", "pytest", "PyInstaller"],
+    noarchive=False,
+)
+pyz_runner = PYZ(a_runner.pure)
+exe_runner = EXE(
+    pyz_runner,
+    a_runner.scripts,
+    [],
+    exclude_binaries=True,
+    name="KelvinRunner",
+    console=True,
+    icon=str(ICONS / ("kelvin.icns" if sys.platform == "darwin" else "kelvin.ico")),
+)
+coll = COLLECT(exe, exe_runner, a.binaries, a.datas, name="Kelvin")
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,

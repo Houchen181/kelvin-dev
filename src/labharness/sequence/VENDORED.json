@@ -6,90 +6,185 @@
       "path": "VERSION",
       "sha256": "ba57e7c7f71876d645bcdd9fb070f2dea8e6db5ed284a7e3d85c6b7d2409fef1",
       "bytes": 6,
-      "same": true
+      "same": true,
+      "customized": false,
+      "same_as_source": false,
+      "patches": []
     },
     {
       "path": "__init__.py",
       "sha256": "1d560cdc36d7b83055fd14241980dbe451a03a962b8494ab08b627bf02990fb3",
       "bytes": 752,
-      "same": true
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "generated (not from labMaster)"
+      ]
     },
     {
       "path": "blocks.default.json",
       "sha256": "caf9b961d20074653b1e7febb2c0780671cd0d1d842c2333afbd3032f84f0b27",
       "bytes": 593,
-      "same": true
+      "same": true,
+      "customized": false,
+      "same_as_source": true,
+      "patches": []
     },
     {
       "path": "datafolder.py",
       "sha256": "4d3f9bb1d9e38b05a4bc50ef5b5853f4e5fddf20137a619d73c15cd19e9e31c7",
       "bytes": 40956,
-      "same": true
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "package-relative imports"
+      ]
     },
     {
       "path": "dataindex.py",
       "sha256": "1525650e3aa27c2b1753412e2cf915f190f922e393cad551f0578eda2e406f6f",
       "bytes": 48494,
-      "same": true
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "package-relative imports"
+      ]
     },
     {
       "path": "engine.py",
       "sha256": "bbb4971f076839376bb8a7eb9830b7aac50f166366748eaa691a4784ca318991",
       "bytes": 431414,
-      "same": true
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "package-relative imports",
+        "runners/myscript path: P.RUNNERS_DIR"
+      ]
     },
     {
       "path": "history_export.py",
       "sha256": "d10cdaf2eb0f03dfce2fd6f948d99cb637aed2cb38f0673b73a79252fa031f35",
       "bytes": 7401,
-      "same": true
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "package-relative imports"
+      ]
     },
     {
       "path": "myscripts.py",
       "sha256": "8b76f91e4e02c9fad06e735ac18aeb6e967bcf28d302369c9360292b4ee894bb",
       "bytes": 42085,
-      "same": true
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "package-relative imports"
+      ]
     },
     {
       "path": "paths.py",
-      "sha256": "b44b7068e80ce375786979386ed751c926ca756cc771af0c4b869b9ad454f640",
-      "bytes": 21763,
-      "same": false
+      "sha256": "4d341df85ff7524170848ba5bdcfc34c7bd2148656ce31b7250ee24a5cffacfb",
+      "bytes": 23141,
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "v1-A data root: ~/Kelvin/sequence (KELVIN_SEQUENCE_DIR overrides)",
+        "v1-A code/runners/VERSION in the package, use_root() for a service's root",
+        "v2-B frozen_runner(): KelvinRunner.exe for a packaged app's children; paths.python_exe -> frozen_runner() -> sys.executable"
+      ]
     },
     {
       "path": "runners/guard_site/sitecustomize.py",
       "sha256": "2ecc46d0ff9f4f203a4ba69b886ba2188f886b7dc3301575aa795403f813aa72",
       "bytes": 2770,
-      "same": true
+      "same": true,
+      "customized": false,
+      "same_as_source": false,
+      "patches": []
     },
     {
       "path": "runners/myscript_guard.py",
       "sha256": "57c08d3f0e468d389d6ab3ff0d9af4f89c37ee77e2cab3a3fa4897fe8fff749c",
       "bytes": 14558,
-      "same": true
+      "same": true,
+      "customized": false,
+      "same_as_source": false,
+      "patches": []
     },
     {
       "path": "runners/run_block.py",
       "sha256": "a63bd7c200fc1d6df7e0dc6f4fe1410af1acf9987927a7944c29b8768bce078f",
       "bytes": 65424,
-      "same": true
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "import paths as _P"
+      ]
     },
     {
       "path": "runners/run_myscript.py",
       "sha256": "f7c357c911c705867834df367ca15b15c67b42acd0b4b7f3ea5e34d602c69f55",
       "bytes": 34745,
-      "same": true
+      "same": true,
+      "customized": true,
+      "same_as_source": false,
+      "patches": [
+        "loads paths.py by file name"
+      ]
     },
     {
       "path": "scan.py",
       "sha256": "0953bcf995657b027bd59bf8f9fb1fb71e4ecd5d64d408c78bac10680554475e",
       "bytes": 108837,
-      "same": true
+      "same": true,
+      "customized": false,
+      "same_as_source": false,
+      "patches": []
     }
   ],
   "count": 14,
-  "changed": 1,
-  "digest": "ca273842af1122685300b359cf606bec2143b84f63d1f4bbe2346ae1807dc7c9",
+  "changed": 0,
+  "digest": "e72c13b4a3b12b18822905ab508db36bb6fcfc93db6df3aa55b1ae152d746973",
   "source_version": "0.1.7",
+  "customizations": {
+    "__init__.py": [
+      "generated (not from labMaster)"
+    ],
+    "datafolder.py": [
+      "package-relative imports"
+    ],
+    "dataindex.py": [
+      "package-relative imports"
+    ],
+    "engine.py": [
+      "package-relative imports",
+      "runners/myscript path: P.RUNNERS_DIR"
+    ],
+    "history_export.py": [
+      "package-relative imports"
+    ],
+    "myscripts.py": [
+      "package-relative imports"
+    ],
+    "paths.py": [
+      "v1-A data root: ~/Kelvin/sequence (KELVIN_SEQUENCE_DIR overrides)",
+      "v1-A code/runners/VERSION in the package, use_root() for a service's root",
+      "v2-B frozen_runner(): KelvinRunner.exe for a packaged app's children; paths.python_exe -> frozen_runner() -> sys.executable"
+    ],
+    "runners/run_block.py": [
+      "import paths as _P"
+    ],
+    "runners/run_myscript.py": [
+      "loads paths.py by file name"
+    ]
+  },
   "generated_by": "tools/vendor_sequence.py"
 }

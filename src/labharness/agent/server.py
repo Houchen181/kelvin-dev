@@ -405,6 +405,73 @@ def _labmaster_home(lm):
         return None, "Kelvin's home page is unavailable (%s: %s)" % (type(e).__name__, e)
 
 
+# --- v2-C: the rest of the engine's pages as tools (functions, scripts, History, analysis, data, log) -----------
+
+def _labmaster_value(value: Any, limit: int = 60) -> str:
+    """A parameter's value as one short line: 21, 0.5, 'x', [1, 2]."""
+    if isinstance(value, str):
+        return _labmaster_short(repr(value), limit)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (dict, list)):
+        try:
+            return _labmaster_short(json.dumps(value, ensure_ascii=False), limit)
+        except (TypeError, ValueError):
+            return _labmaster_short(str(value), limit)
+    return _labmaster_short(str(value), limit)
+
+
+def _labmaster_script_params(params: Any, limit: int = 12) -> str:
+    """'n_points (num = 21) - how many points; start (num = 0.0)' for a script's discovered parameters."""
+    lines: List[str] = []
+    for p in (params if isinstance(params, list) else [])[:limit]:
+        if not isinstance(p, dict):
+            continue
+        bits = ["%s (%s = %s)" % (p.get("name") or "?", p.get("type") or "value",
+                                  _labmaster_value(p.get("value", p.get("default"))))]
+        group = str(p.get("group") or "")
+        if group:
+            bits.append("[" + group + "]")
+        help_text = str(p.get("help") or "").strip()
+        if help_text:
+            bits.append("- " + _labmaster_short(help_text, 80))
+        lines.append(" ".join(bits))
+    if not lines:
+        return "no parameters"
+    if isinstance(params, list) and len(params) > limit:
+        lines.append("... %d more" % (len(params) - limit))
+    return "; ".join(lines)
+
+
+def _labmaster_needs_confirmation(what: str) -> str:
+    """The answer for a destructive call without confirm=true: ask the person first."""
+    return ("needs the user's confirmation first: %s. Ask the user, then call again with confirm=true if they "
+            "agree." % what)
+
+
+def _labmaster_library_count(answer: Any) -> str:
+    """'; the library now has N function(s)' from a palette-changing answer ('' when it carries none)."""
+    palette = (answer if isinstance(answer, dict) else {}).get("palette")
+    return ("; the library now has %d function(s)" % len(palette)) if isinstance(palette, list) else ""
+
+
+def _labmaster_at(epoch: Any) -> str:
+    """An epoch second as 'YYYY-MM-DD HH:MM' in this PC's time ('' when it is not one)."""
+    import time as _time
+    try:
+        value = float(epoch)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    try:
+        return _time.strftime("%Y-%m-%d %H:%M", _time.localtime(value))
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
 # --- the AI's own measurements go into the Sequence page: a run line in its History, and a name for the sequence ---
 # Every measurement the AI makes (a plan, a script, a recipe; a queued item) is recorded with the engine's
 # record_kelvin_run, so the Sequence page's History/Runs list shows it beside the engine's own runs. While the
@@ -1603,12 +1670,16 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return _labmaster_result(lm, answer, "deleted %s" % uid, "not deleted")
 
     @server.tool(annotations=ACT, structured_output=False)
-    def labmaster_control(action: str, confirm: bool = False, minutes: float = 0.0, uid: str = "") -> str:
+    def labmaster_control(action: str, confirm: bool = False, minutes: float = 0.0, uid: str = "",
+                          failed: str = "", failed_uids: Optional[List[str]] = None) -> str:
         """Control the live measurement sequence. start: when a person has switched on 'AI may start runs' in the
         Sequence page (only a person can) the AI starts it directly; while that switch is off the call asks a person
-        on their approval card first, with every block and parameter listed, and blocks until they answer. pause
-        (after the block) | pause_rep (after the rep) arm the pause, a second call takes it back. next_rep | skip |
-        reset | end_wait | set_wait (minutes: the time left of the running wait, above 0) change a run: they need
+        on their approval card first, with every block and parameter listed, and blocks until they answer. After a
+        failed block the engine refuses a bare start: give the person's own choice, failed="retry" (measure it again)
+        or "skip" (pass over it, with a record in History), and failed_uids, the uids of the failed blocks
+        (labmaster_status shows them as error; the Sequence page asks the person for the same choice). pause (after
+        the block) | pause_rep (after the rep) arm the pause, a second call takes it back. next_rep | skip | reset |
+        end_wait | set_wait (minutes: the time left of the running wait, above 0) change a run: they need
         confirm=true, which the user must have agreed to before the call - ask them first. stop and safe_stop (stops
         the sequence, then runs the safe-stop script that switches the instruments' outputs off) need no
         confirmation: they only end a run. uid: the running block's or the wait's uid (labmaster_status: current), for
@@ -1619,6 +1690,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
         act = str(action or "").strip().lower()
         if act not in LABMASTER_ACTIONS:
             return "not run: unknown action %r (one of %s)" % (act or "", ", ".join(LABMASTER_ACTIONS))
+        choice = str(failed or "").strip().lower()
+        if choice and choice not in ("retry", "skip"):
+            return "not run: failed must be 'retry' or 'skip' (the person's choice after a failed block)"
+        failed_list = [str(item).strip() for item in (failed_uids or []) if str(item).strip()]
+        if choice and act != "start":
+            return "not run: failed/failed_uids only mean something for start"
+        if choice and not failed_list:
+            return ("not run: failed=%r needs failed_uids - the failed blocks' uids, as labmaster_status shows them "
+                    "(the blocks marked error)" % choice)
         note = ""
         if act == "start":
             if _labmaster_armed(lm):   # a person switched on 'AI may start runs' in the Sequence page
@@ -1638,6 +1718,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
             answer, why = _labmaster_call(lm.safe_stop, "asked by Kelvin's AI")
         elif act == "set_wait":
             answer, why = _labmaster_call(lm.control, act, minutes=float(minutes), **({"uid": uid} if uid else {}))
+        elif act == "start" and choice:   # the person's Retry/Skip choice after a failed block
+            answer, why = _labmaster_call(lm.control, act, failed=choice, failed_uids=failed_list)
         elif act in ("skip", "next_rep", "end_wait") and uid:
             answer, why = _labmaster_call(lm.control, act, uid=uid)
         else:
@@ -1756,6 +1838,682 @@ def build_server(rt: LabRuntime) -> MCPServer:
         if isinstance(removed, dict) and removed.get("ok") is False:
             return "not removed: %s" % (removed.get("error") or "no card %s on the home page" % card_id)
         return "removed from the home page: %s" % card_id
+
+    # --- v2-C: the rest of the engine's pages, so the AI can do the work the panel's pages do -----------------
+    # Sequence editing beyond add/update/delete (move, duplicate, clear, the saved sequences), the function
+    # library's own edits, writing and reading scripts, the whole History, my_analysis scripts, the data
+    # folder and the log. Reads are READ; the destructive ones (a clear, a replacement, a removal, a
+    # cancel) need confirm=true, which the user must have agreed to first.
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_move_block(uid: str, index: int) -> str:
+        """Move one block of the live sequence to a new position. uid: the block's uid (labmaster_status lists every
+        block with its uid); index: 0 for the first position. The queue only: what runs does not change until the
+        sequence is started."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        uid = str(uid or "").strip()
+        if not uid:
+            return "not moved: say which block (its uid from labmaster_status)"
+        try:
+            at = int(index)
+        except (TypeError, ValueError):
+            return "not moved: index must be a whole number (0 is the first position)"
+        answer, why = _labmaster_call(lm.seq_move, uid, at)
+        if why:
+            return _labmaster_failed(why, "not moved")
+        return _labmaster_result(lm, answer, "moved %s to position %d" % (uid, at), "not moved")
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_duplicate_block(uid: str) -> str:
+        """Copy one block of the live sequence right after itself ("<name> (copy)", pending, with the settings it
+        has now). uid: the block's uid from labmaster_status. The copy runs at its turn: change or move it before
+        the sequence is started."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        uid = str(uid or "").strip()
+        if not uid:
+            return "not duplicated: say which block (its uid from labmaster_status)"
+        answer, why = _labmaster_call(lm.seq_duplicate, uid)
+        if why:
+            return _labmaster_failed(why, "not duplicated")
+        text = _labmaster_result(lm, answer, "duplicated %s" % uid, "not duplicated")
+        answer = answer if isinstance(answer, dict) else {}
+        state = answer.get("state") if isinstance(answer.get("state"), dict) else {}
+        items = _labmaster_items(state)
+        at = next((k for k, item in enumerate(items) if _labmaster_uid(item) == uid), None)
+        if at is not None and at + 1 < len(items):
+            copy = items[at + 1]
+            if len(text) < 300:
+                text += "; the copy is %s [%s]" % (_labmaster_name(copy) or "?", _labmaster_uid(copy) or "?")
+        return text
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_clear_sequence(keep_done: bool = False, confirm: bool = False) -> str:
+        """Empty the live sequence (the saved sequences and the History are not touched). keep_done: keep the blocks
+        that finished (done/skipped) instead of removing every one. It discards the queue, so it needs confirm=true,
+        which the user must have agreed to first."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        if not confirm:
+            return _labmaster_needs_confirmation(
+                "sequence clear, it discards the queued block(s)%s"
+                % (" (the finished ones are kept)" if keep_done else ""))
+        answer, why = _labmaster_call(lm.seq_clear, bool(keep_done))
+        if why:
+            return _labmaster_failed(why, "not cleared")
+        return _labmaster_result(lm, answer, "cleared the sequence", "not cleared")
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_saved_save(name: str, overwrite: bool = False, confirm: bool = False) -> str:
+        """Save the live sequence under a name, so it can be loaded again later (labmaster_saved_load). name: the
+        saved sequence's name; overwrite: replace a saved sequence already called that - it is the person's to
+        lose, so that needs confirm=true, which the user must have agreed to first."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        name = str(name or "").strip()
+        if not name:
+            return "not saved: give the saved sequence a name"
+        if overwrite and not confirm:
+            return _labmaster_needs_confirmation(
+                'sequence save, overwrite=true replaces the saved sequence called "%s"' % name)
+        answer, why = _labmaster_call(lm.saved_save, name, bool(overwrite))
+        if why:
+            return _labmaster_failed(why, "not saved")
+        text = _labmaster_result(lm, answer, 'saved the sequence as "%s"' % name, "not saved")
+        entry = (answer if isinstance(answer, dict) else {}).get("entry")
+        if isinstance(entry, dict) and entry.get("id") and len(text) < 300:
+            text += "; its id is %s (labmaster_saved_load and labmaster_saved_delete take it)" % entry["id"]
+        return text
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_saved_load(id: str = "", name: str = "", append: bool = False,
+                             replace: bool = False, confirm: bool = False) -> str:
+        """Load a saved sequence into the live sequence. id (from labmaster_saved) or name (when only one saved
+        sequence has it): which one; append: add it after the live blocks; replace: discard the live blocks first -
+        that needs confirm=true, which the user must have agreed to first (the engine refuses it while the live
+        sequence has progress)."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        wanted = str(id or "").strip()
+        label = str(name or "").strip()
+        if not wanted and not label:
+            return "not loaded: say which saved sequence (its id or name, labmaster_saved lists them)"
+        if append and replace:
+            return "not loaded: append and replace are different - choose one"
+        if replace and not confirm:
+            return _labmaster_needs_confirmation(
+                "sequence load, replace=true discards the live sequence's blocks")
+        answer, why = _labmaster_call(lm.saved_load, wanted, label, bool(append), bool(replace))
+        if why:
+            return _labmaster_failed(why, "not loaded")
+        return _labmaster_result(lm, answer, "loaded the saved sequence", "not loaded")
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_saved_delete(id: str = "", name: str = "", confirm: bool = False) -> str:
+        """Delete a saved sequence (by its id from labmaster_saved, or a name no other saved sequence has). It is
+        gone from the panel, so it needs confirm=true, which the user must have agreed to first."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        wanted = str(id or "").strip()
+        label = str(name or "").strip()
+        if not wanted and not label:
+            return "not deleted: say which saved sequence (its id or name, labmaster_saved lists them)"
+        if not confirm:
+            return _labmaster_needs_confirmation(
+                'sequence delete saved, "%s" is removed for good' % (label or wanted))
+        answer, why = _labmaster_call(lm.saved_delete, wanted, label)
+        if why:
+            return _labmaster_failed(why, "not deleted")
+        return _labmaster_result(lm, answer, "deleted the saved sequence", "not deleted")
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_write_script(name: str, code: str, overwrite: bool = False, confirm: bool = False) -> str:
+        """Write a Python measurement script into the engine's own scripts/ folder (~/Kelvin/sequence/scripts),
+        where the sequence's blocks find it: the code is parsed first (a syntax error writes nothing), then the
+        engine's own scan reports the parameters, groups and comments it discovers. name: a plain file name (no
+        folder, ".." or slash); it becomes <name>.py. overwrite: replace a script already there - it needs
+        confirm=true, which the user must have agreed to first. Then labmaster_import_script(path) puts it in the
+        function library (or say the path and the person imports it on the Sequence page)."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        fname = str(name or "").strip()
+        if not fname:
+            return "not written: give the script a name (a plain file name, it becomes <name>.py)"
+        source = str(code or "")
+        if not source.strip():
+            return "not written: give the script's code (the whole file)"
+        if overwrite and not confirm:
+            probe, why = _labmaster_call(lm.write_script, fname, source, False)
+            if why:
+                return _labmaster_failed(why, "not written")
+            probe = probe if isinstance(probe, dict) else {}
+            if probe.get("ok"):
+                overwrite = False          # there was no file there: nothing to replace, nothing to confirm
+            elif "already there" in str(probe.get("error") or ""):
+                shown = fname if fname.lower().endswith(".py") else fname + ".py"
+                return _labmaster_needs_confirmation(
+                    'sequence write script, overwrite=true replaces the script "%s" in the engine\'s scripts '
+                    'folder' % shown)
+            else:
+                return _labmaster_failed(str(probe.get("error") or ""), "not written")
+        answer, why = _labmaster_call(lm.write_script, fname, source, bool(overwrite))
+        if why:
+            return _labmaster_failed(why, "not written")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not written")
+        text = _labmaster_short(answer.get("message") or "wrote the script", 400)
+        params = answer.get("params") if isinstance(answer.get("params"), list) else []
+        if params:
+            text += "; parameters: " + _labmaster_script_params(params, 10)
+        scan_error = (answer.get("scan") or {}).get("error") if isinstance(answer.get("scan"), dict) else None
+        if scan_error:
+            text += "; the engine could not analyse it: " + _labmaster_short(scan_error, 160)
+        text += "; at %s" % (answer.get("path") or fname)
+        return text
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_read_script(path: str) -> str:
+        """One of the engine's measurement scripts, whole (its code), with the parameters the engine finds in it.
+        path: as labmaster_functions lists it (scripts/example_measurement.py) or a file name no other script
+        shares. For editing a script: write the new one with labmaster_write_script(overwrite=true, confirm=true)."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        path = str(path or "").strip()
+        if not path:
+            return "not read: say which script (labmaster_functions lists them)"
+        answer, why = _labmaster_call(lm.read_script, path)
+        if why:
+            return _labmaster_failed(why, "not read")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not read")
+        code = str(answer.get("code") or "")
+        params = answer.get("params") if isinstance(answer.get("params"), list) else []
+        head = "script %s%s, %d parameter(s): %s" % (
+            answer.get("path") or path, " (main())" if answer.get("has_main") else " (no main())",
+            len(params), _labmaster_script_params(params, 10))
+        limit = 20000
+        if len(code) > limit:
+            code = code[:limit] + "\n... (%d more characters; read it in the person's editor)" % (len(code) - limit)
+        return head + "\n```python\n" + code.rstrip() + "\n```"
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_function_update(id: str, name: str = "", note: Optional[str] = None,
+                                  params: Optional[Dict[str, Any]] = None, color: str = "") -> str:
+        """Change one function of the library: its name, its note (the line the Sequence page shows under it), its
+        default parameters (params, an object) or its colour (color, a CSS colour). id: the function's palette id
+        from labmaster_functions. Only what is passed changes; the whole library is written back with the revision
+        it was read at, so a change by a person meanwhile is refused rather than lost."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        entry_id = str(id or "").strip()
+        if not entry_id:
+            return "not updated: say which function (its palette id, labmaster_functions lists them)"
+        answer, why = _labmaster_call(lm.function_update, entry_id, name or None, note, params, color or None)
+        if why:
+            return _labmaster_failed(why, "not updated")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not updated")
+        return _labmaster_short(answer.get("message") or "updated the function", 400) + \
+            _labmaster_library_count(answer)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_function_duplicate(id: str) -> str:
+        """Copy one function of the library right after itself, as the Sequence page's Duplicate does ("<name>
+        (copy)"). id: the function's palette id from labmaster_functions; the copy has a new id, and can be
+        changed with labmaster_function_update."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        entry_id = str(id or "").strip()
+        if not entry_id:
+            return "not duplicated: say which function (its palette id)"
+        answer, why = _labmaster_call(lm.function_duplicate, entry_id)
+        if why:
+            return _labmaster_failed(why, "not duplicated")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not duplicated")
+        return _labmaster_short(answer.get("message") or "duplicated the function", 400) + \
+            _labmaster_library_count(answer)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_function_remove(id: str, confirm: bool = False) -> str:
+        """Remove one function from the library (id: its palette id from labmaster_functions). The sequence blocks
+        that use it are not changed - a block keeps what it ran. Removing a function is the person's call, so it
+        needs confirm=true, which the user must have agreed to first."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        entry_id = str(id or "").strip()
+        if not entry_id:
+            return "not removed: say which function (its palette id, labmaster_functions lists them)"
+        if not confirm:
+            return _labmaster_needs_confirmation(
+                'sequence remove function, "%s" is removed from the library' % entry_id)
+        answer, why = _labmaster_call(lm.function_remove, entry_id)
+        if why:
+            return _labmaster_failed(why, "not removed")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not removed")
+        return _labmaster_short(answer.get("message") or "removed the function", 400) + \
+            _labmaster_library_count(answer)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_history(limit: int = 20, query: str = "") -> str:
+        """The sequence engine's finished runs, newest first: each run's name, status, when, and its blocks with
+        their parameters and datasets - what was already measured, to propose the next run from it. limit: how many
+        runs; query: keep only the runs whose name, a block's name or a dataset's path holds it.
+        labmaster_run_detail has one run whole."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        wanted = _labmaster_int(limit, 20) or 20
+        text_query = str(query or "").strip()
+        answer, why = _labmaster_call(lm.history_runs, wanted, text_query)
+        if why:
+            return _labmaster_failed(why, "history could not be read")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_read_error(answer)
+        runs = [r for r in (answer.get("runs") or []) if isinstance(r, dict)]
+        if not runs:
+            return ("no runs in the sequence engine's History yet"
+                    + (' matching "%s"' % text_query if text_query else ""))
+        lines = ["sequence History: %d run(s), newest first%s:"
+                 % (len(runs), (' matching "%s"' % text_query) if text_query else "")]
+        for number, run in enumerate(runs, 1):
+            when = _labmaster_at(run.get("started"))
+            if when and run.get("finished"):
+                when = "%s - %s" % (when, _labmaster_at(run.get("finished")).split(" ")[-1])
+            lines.append("%d. %s - %s%s, %d block(s), %d dataset(s)%s [run_id %s]"
+                         % (number, run.get("name") or "(unnamed)", run.get("status") or "?",
+                            (", " + when) if when else "",
+                            _labmaster_int(run.get("n_blocks")), _labmaster_int(run.get("n_datasets")),
+                            (" (%d error(s))" % _labmaster_int(run.get("n_error"))
+                             if _labmaster_int(run.get("n_error")) else ""),
+                            run.get("run_id") or "?"))
+            blocks = [b for b in (run.get("blocks") or []) if isinstance(b, dict)]
+            for block in blocks[:6]:
+                params = block.get("params") if isinstance(block.get("params"), dict) else {}
+                bits = []
+                if block.get("kind"):
+                    bits.append(str(block["kind"]))
+                if block.get("status"):
+                    bits.append(str(block["status"]))
+                if params:
+                    bits.append("params " + ", ".join("%s=%s" % (k, _labmaster_short(v, 30))
+                                                      for k, v in list(params.items())[:6]))
+                datasets = [str(d) for d in (block.get("datasets") or []) if d]
+                if datasets:
+                    bits.append("dataset " + _labmaster_short(datasets[0], 100))
+                message = str(block.get("message") or "").strip()
+                if message and block.get("status") == "error":
+                    bits.append("error: " + _labmaster_short(message, 120))
+                lines.append("   - %s%s" % (block.get("name") or "?",
+                                            (" (" + "; ".join(bits) + ")") if bits else ""))
+            if len(blocks) > 6:
+                lines.append("   - ... and %d more block(s)" % (len(blocks) - 6))
+        return "\n".join(lines)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_run_detail(run_id: str) -> str:
+        """One run whole: a run of the engine's History (its blocks with every parameter and dataset, when each
+        ran) or one of Kelvin's own recorded measurements (a plan, a script, a recipe, a queued item).
+        run_id: from labmaster_history."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            return "not read: give the run's id (labmaster_history lists them)"
+        answer, why = _labmaster_call(lm.run_detail, run_id)
+        if why:
+            return _labmaster_failed(why, "not read")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not read")
+        run = answer.get("run") if isinstance(answer.get("run"), dict) else {}
+        source = str(answer.get("source") or "")
+        if source == "kelvin":
+            return ("Kelvin's own measurement %s: %s - %s, %s%s"
+                    % (run_id, run.get("name") or "?", run.get("status") or "?",
+                       _labmaster_at(run.get("started")) or "time not known",
+                       (", kind " + str(run.get("kind"))) if run.get("kind") else "")
+                    + (("\n" + _labmaster_short(run.get("detail"), 800)) if run.get("detail") else ""))
+        blocks = [b for b in (run.get("blocks") or []) if isinstance(b, dict)]
+        datasets = [str(d) for d in (run.get("datasets") or []) if d]
+        lines = ["run %s: %s - %s, %s, %d block(s), %d dataset(s)"
+                 % (run_id, run.get("name") or "(unnamed)", run.get("status") or "?", 
+                    _labmaster_at(run.get("started")) or "time not known",
+                    _labmaster_int(run.get("n_blocks"), len(blocks)), len(datasets))]
+        for number, block in enumerate(blocks, 1):
+            params = block.get("params") if isinstance(block.get("params"), dict) else {}
+            overrides = block.get("overrides") if isinstance(block.get("overrides"), dict) else {}
+            bits = [str(block.get("kind") or "block"), str(block.get("status") or "?")]
+            if block.get("started"):
+                bits.append("ran " + (_labmaster_at(block.get("started")) or "?"))
+            if params:
+                bits.append("params " + ", ".join("%s=%s" % (k, _labmaster_short(v, 40))
+                                                  for k, v in list(params.items())[:10]))
+            if overrides:
+                bits.append("overrides " + ", ".join("%s=%s" % (k, _labmaster_short(v, 40))
+                                                     for k, v in list(overrides.items())[:10]))
+            message = str(block.get("message") or "").strip()
+            if message:
+                bits.append("message " + _labmaster_short(message, 200))
+            lines.append("%d. %s (%s)" % (number, block.get("name") or "?", "; ".join(bits)))
+            for dataset in (block.get("datasets") or [])[:4]:
+                lines.append("   dataset: %s" % dataset)
+        for dataset in datasets[:12]:
+            lines.append("dataset: %s" % dataset)
+        if len(datasets) > 12:
+            lines.append("... and %d more dataset(s)" % (len(datasets) - 12))
+        return "\n".join(lines)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_analysis_scripts() -> str:
+        """The analysis scripts of the Scripts tab: every script of the person's my_analysis folder(s), with its id
+        (my:<folder>:<file.py>), its parameters (PARAMS) and the measurement classes it fits; the templates a new
+        script starts from; and where the folders are. labmaster_run_analysis runs one on datasets."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        answer, why = _labmaster_call(lm.analysis_scripts)
+        if why:
+            return _labmaster_failed(why, "analysis scripts could not be read")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_read_error(answer)
+        scripts = [s for s in (answer.get("scripts") or []) if isinstance(s, dict)]
+        dirs = [d for d in (answer.get("dirs") or []) if isinstance(d, dict)]
+        where = ", ".join(str(d.get("path") or d.get("rel") or "") for d in dirs if d.get("exists")) or "no folder"
+        if not scripts:
+            return ("analysis scripts: none in %s (labmaster_write_analysis writes one; templates: %s)"
+                    % (where, ", ".join(str(t.get("id")) for t in (answer.get("templates") or [])
+                                        if isinstance(t, dict)) or "none"))
+        lines = ["analysis scripts: %d in %s:" % (len(scripts), where)]
+        for script in scripts[:30]:
+            params = script.get("params") if isinstance(script.get("params"), list) else []
+            bits = [("%d parameter(s)" % len(params)) + ((": " + ", ".join(
+                "%s (%s = %s)" % (p.get("name"), p.get("type") or "value", _labmaster_value(p.get("default")))
+                for p in params[:6] if isinstance(p, dict))) if params else "")]
+            classes = [str(c) for c in (script.get("classes") or []) if c]
+            if classes:
+                bits.append("classes " + ", ".join(classes[:4]))
+            problems = [str(p) for p in (script.get("problems") or []) if p]
+            if problems:
+                bits.append("problem: " + _labmaster_short(problems[0], 160))
+            lines.append("- %s: %s (%s)" % (script.get("id") or "?", script.get("name") or "?",
+                                            "; ".join(b for b in bits if b)))
+        templates = [t for t in (answer.get("templates") or []) if isinstance(t, dict)]
+        if templates:
+            lines.append("templates for a new script: " + ", ".join(
+                "%s (%s)" % (t.get("id"), t.get("title") or "") for t in templates[:8]))
+        return "\n".join(lines)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_write_analysis(name: str, code: str, overwrite: bool = False,
+                                 confirm: bool = False) -> str:
+        """Write an analysis script into the person's my_analysis folder (where the Scripts tab's "New script"
+        writes), then return the record the engine finds for it (its id, its PARAMS). The code is parsed first; a
+        name that hides an importable module is refused (it would break the folder's other scripts). name: a plain
+        file name, no folder/".."/slash; it becomes <name>.py. overwrite: replace a script already there - it needs
+        confirm=true, which the user must have agreed to first. labmaster_run_analysis runs it on datasets."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        fname = str(name or "").strip()
+        if not fname:
+            return "not written: give the analysis script a name (a plain file name)"
+        source = str(code or "")
+        if not source.strip():
+            return "not written: give the script's code (the whole file)"
+        if overwrite and not confirm:
+            probe, why = _labmaster_call(lm.write_analysis, fname, source, False)
+            if why:
+                return _labmaster_failed(why, "not written")
+            probe = probe if isinstance(probe, dict) else {}
+            if probe.get("ok"):
+                overwrite = False
+            elif "already there" in str(probe.get("error") or ""):
+                shown = fname if fname.lower().endswith(".py") else fname + ".py"
+                return _labmaster_needs_confirmation(
+                    'sequence write analysis, overwrite=true replaces the analysis script "%s"' % shown)
+            else:
+                return _labmaster_failed(str(probe.get("error") or ""), "not written")
+        answer, why = _labmaster_call(lm.write_analysis, fname, source, bool(overwrite))
+        if why:
+            return _labmaster_failed(why, "not written")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not written")
+        record = answer.get("record") if isinstance(answer.get("record"), dict) else {}
+        text = _labmaster_short(answer.get("message") or "wrote the analysis script", 400)
+        params = answer.get("params") if isinstance(answer.get("params"), list) else []
+        if params:
+            text += "; parameters: " + _labmaster_script_params(params, 10)
+        text += "; at %s" % (answer.get("path") or fname)
+        if record.get("id"):
+            text += "; run it with labmaster_run_analysis(script=%r)" % record["id"]
+        return text
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_run_analysis(script: str, dataset: Optional[Union[str, List[str]]] = None,
+                               run: str = "", params: Optional[Dict[str, Any]] = None) -> str:
+        """Run one of the my_analysis scripts on dataset folders: script: its id from
+        labmaster_analysis_scripts (my:<folder>:<file.py>), or its file name; dataset: the dataset folder(s) from
+        labmaster_datasets (one path, a list, or paths separated by ';'); run: a panel run's id instead (its
+        datasets are analysed); params: the script's PARAMS values. The job starts and the answer returns: follow it
+        with labmaster_analysis_status."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        script = str(script or "").strip()
+        if not script:
+            return "not run: say which analysis script (labmaster_analysis_scripts lists them)"
+        answer, why = _labmaster_call(lm.run_analysis, script, dataset, str(run or "").strip(), params)
+        if why:
+            return _labmaster_failed(why, "not run")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not run")
+        return _labmaster_short(answer.get("message") or "started the analysis", 400) + \
+            "; job id %s" % (answer.get("job") or "?")
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_analysis_status(job_id: str = "") -> str:
+        """The analysis job the Scripts tab shows: idle, or the job (id, state, started, done/total) with each item -
+        the script, the datasets it ran on, its state, an error in words, what it printed and the figures it
+        wrote. job_id: the job you started, when you want to be sure this is still it."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        answer, why = _labmaster_call(lm.analysis_status)
+        if why:
+            return _labmaster_failed(why, "analysis status could not be read")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_read_error(answer)
+        status = answer.get("status") if isinstance(answer.get("status"), dict) else {"state": "idle"}
+        state = str(status.get("state") or "idle")
+        if state == "idle":
+            return "analysis: idle (nothing has run; labmaster_run_analysis starts one)"
+        wanted = str(job_id or "").strip()
+        head = "analysis %s: job %s, %d of %d run(s) done, started %s%s" % (
+            state, status.get("id") or "?", _labmaster_int(status.get("done")),
+            _labmaster_int(status.get("total")), _labmaster_at(status.get("started")) or "?",
+            (", finished " + _labmaster_at(status.get("finished"))) if status.get("finished") else "")
+        if wanted and str(status.get("id") or "") != wanted:
+            head += " (you asked about job %s: it has ended; this is the latest)" % wanted
+        lines = [head]
+        for number, item in enumerate([i for i in (status.get("items") or []) if isinstance(i, dict)][:8], 1):
+            bits = ["%s on %d dataset(s)" % (item.get("script") or item.get("analysis") or "?",
+                                             len(item.get("paths") or [])),
+                    str(item.get("state") or "?")]
+            if item.get("error"):
+                bits.append("error: " + _labmaster_short(item.get("error"), 200))
+            if item.get("n_figures") is not None:
+                bits.append("%d figure(s)" % _labmaster_int(item.get("n_figures")))
+            lines.append("%d. %s" % (number, "; ".join(bits)))
+            out = str(item.get("out") or "").strip()
+            if out:
+                lines.append("   out: " + _labmaster_short(out.replace("\n", " | "), 300))
+            tail = [str(t) for t in (item.get("tail") or []) if t][-2:]
+            for line in tail:
+                lines.append("   log: " + _labmaster_short(line, 240))
+        if len(status.get("items") or []) > 8:
+            lines.append("... and %d more run(s)" % (len(status["items"]) - 8))
+        for left in (status.get("left_out_jobs") or [])[:3]:
+            lines.append("left out: " + _labmaster_short(left, 240))
+        return "\n".join(lines)
+
+    @server.tool(annotations=ACT, structured_output=False)
+    def labmaster_analysis_cancel(job_id: str = "", confirm: bool = False) -> str:
+        """Stop the running analysis job (the measurement is never touched). job_id: only that job - one that ended
+        meanwhile is not cancelled, so a new one is not hit by a stale request; empty: the job that runs now.
+        Stopping an analysis the person asked for needs confirm=true, which they must have agreed to first."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        if not confirm:
+            return _labmaster_needs_confirmation(
+                "sequence cancel analysis, it stops the analysis job (the measurement is not touched)")
+        answer, why = _labmaster_call(lm.analysis_cancel, str(job_id or "").strip())
+        if why:
+            return _labmaster_failed(why, "not cancelled")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not cancelled")
+        return _labmaster_short(answer.get("message") or "stopped the analysis job", 300)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_datasets(limit: int = 20) -> str:
+        """The datasets the sequence's blocks wrote (the History data folder), newest first: each dataset folder's
+        path, its measurement class, size, .dat files and when it was last written. dataset: pass one of these paths
+        to labmaster_run_analysis; labmaster_dataset_files lists a folder's files."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        answer, why = _labmaster_call(lm.datasets, _labmaster_int(limit, 20) or 20)
+        if why:
+            return _labmaster_failed(why, "datasets could not be read")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_read_error(answer)
+        entries = [d for d in (answer.get("datasets") or []) if isinstance(d, dict)]
+        year = answer.get("root") or "?"
+        if not entries:
+            return "data folder %s: no datasets yet (a sequence block writes one when it runs)" % year
+        lines = ["data folder %s: %d dataset(s), newest first:" % (year, len(entries))]
+        for entry in entries:
+            bits = []
+            if entry.get("class"):
+                bits.append(str(entry["class"]))
+            bits.append("%d bytes of .dat" % _labmaster_int(entry.get("bytes")))
+            dat = [str(n) for n in (entry.get("dat") or []) if n]
+            if dat:
+                bits.append("%d .dat file(s)" % len(dat))
+            if entry.get("modified"):
+                bits.append("written " + str(entry["modified"]))
+            if entry.get("warn"):
+                bits.append("warning")
+            lines.append("- %s (%s) %s" % (entry.get("rel") or entry.get("path") or "?",
+                                            "; ".join(bits), entry.get("path") or ""))
+        return "\n".join(lines)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_dataset_files(path: str) -> str:
+        """List one dataset folder's files and subfolders (read only): name, size, when each was last written.
+        path: a dataset path from labmaster_datasets (absolute, or relative to the data folder)."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        path = str(path or "").strip()
+        if not path:
+            return "not listed: give the dataset's path (labmaster_datasets lists them)"
+        answer, why = _labmaster_call(lm.dataset_files, path)
+        if why:
+            return _labmaster_failed(why, "not listed")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_failed(str(answer.get("error") or ""), "not listed")
+        files = [f for f in (answer.get("files") or []) if isinstance(f, dict)]
+        dirs = [d for d in (answer.get("dirs") or []) if isinstance(d, dict)]
+        lines = ["dataset %s: %d file(s), %d subfolder(s)"
+                 % (answer.get("rel") or answer.get("path") or path, len(files), len(dirs))]
+        for entry in files[:60]:
+            lines.append("- %s, %d bytes%s" % (entry.get("name") or "?", _labmaster_int(entry.get("bytes")),
+                                               (", " + str(entry["modified"])) if entry.get("modified") else ""))
+        if len(files) > 60:
+            lines.append("... and %d more file(s)" % (len(files) - 60))
+        for entry in dirs[:10]:
+            lines.append("- %s/ (a subfolder)" % (entry.get("name") or "?"))
+        return "\n".join(lines)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_log(lines: int = 50) -> str:
+        """The sequence engine's own log, newest rows first-line-last: time, level and text (what the panel's Log pane
+        shows: blocks starting and ending, scripts' prints, analysis and data-folder notes). lines: how many, up to
+        400. For a failed block, labmaster_history's error line says which message to look for."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        answer, why = _labmaster_call(lm.log_lines, _labmaster_int(lines, 50) or 50)
+        if why:
+            return _labmaster_failed(why, "the log could not be read")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_read_error(answer)
+        rows = [r for r in (answer.get("lines") or []) if isinstance(r, dict)]
+        if not rows:
+            return "the sequence engine's log: no rows yet"
+        out = ["the sequence engine's log, newest %d row(s):" % len(rows)]
+        for row in rows:
+            out.append("%s [%s]%s %s" % (row.get("at") or "?", row.get("lvl") or "info",
+                                         (" <" + str(row["uid"]) + ">") if row.get("uid") else "",
+                                         _labmaster_short(row.get("text"), 400)))
+        return "\n".join(out)
+
+    @server.tool(annotations=READ, structured_output=False)
+    def labmaster_home() -> str:
+        """Kelvin's Home page as the person sees it: the greeting, the five tiles (measurement progress, history,
+        saved sequences, the function library, the Sequence engine) and how many AI cards are on it (their text is
+        labmaster_home_cards). Use it to answer "what does my Home page say" or before adding a card."""
+        lm, missing = _labmaster_bridge()
+        if lm is None:
+            return missing
+        answer, why = _labmaster_call(lm.snapshot)
+        if why:
+            return _labmaster_failed(why, "the Home page could not be read")
+        answer = answer if isinstance(answer, dict) else {}
+        if not answer.get("ok"):
+            return _labmaster_read_error(answer)
+        tiles = [t for t in (answer.get("tiles") or []) if isinstance(t, dict)]
+        cards = [c for c in (answer.get("cards") or []) if isinstance(c, dict)]
+        lines = ["Kelvin Home: " + (str(answer.get("greeting") or "").strip() or "the sequence engine's page")]
+        for tile in tiles:
+            lines.append("- %s: %s %s%s" % (tile.get("title") or tile.get("id") or "?",
+                                            tile.get("value") if tile.get("value") is not None else "-",
+                                            ("- " + str(tile.get("detail"))) if tile.get("detail") else "",
+                                            (" [" + str(tile["tone"]) + "]") if tile.get("tone") else ""))
+        shown = ", ".join(str(c.get("title") or "?") for c in cards[:6])
+        lines.append("AI cards: %d%s (labmaster_home_cards has their text)" % (
+            len(cards), (": " + shown + (", ..." if len(cards) > 6 else "")) if shown else ""))
+        return "\n".join(lines)
 
     return server
 

@@ -168,6 +168,91 @@ def import_script(path: str, name: str = "", kind: str = "script") -> Dict[str, 
     return _service().import_script(path, name, kind)
 
 
+# ---------------------------------------------------------------- v2-C: the whole engine for the AI
+# The rest of what the panel's pages do, so the AI can do it too: the function library's own edits,
+# writing and reading scripts (measurement and analysis), the full History, the data folder and the log.
+# Every one is one call into the service, and none raises.
+
+def function_update(entry_id: str, name: Optional[str] = None, note: Optional[str] = None,
+                    params: Optional[Dict[str, Any]] = None,
+                    color: Optional[str] = None) -> Dict[str, Any]:
+    """Change one function of the library (name, note, default params, colour): the whole library is
+    written back with the revision it was read at, so an edit meanwhile is refused, not lost."""
+    return _service().function_update(entry_id, name=name, note=note, params=params, color=color)
+
+
+def function_duplicate(entry_id: str) -> Dict[str, Any]:
+    """Copy one function right after itself ("<name> (copy)"), as the page's Duplicate does."""
+    return _service().function_duplicate(entry_id)
+
+
+def function_remove(entry_id: str) -> Dict[str, Any]:
+    """Remove one function from the library. Sequence blocks that use it keep what they ran."""
+    return _service().function_remove(entry_id)
+
+
+def write_script(name: str, code: str, overwrite: bool = False) -> Dict[str, Any]:
+    """Write a measurement script into the engine's scripts/ folder and let the engine's own scan report
+    the parameters, groups and comments in it. A plain file name only; an existing file needs overwrite."""
+    return _service().write_script(name, code, overwrite)
+
+
+def read_script(path: str) -> Dict[str, Any]:
+    """One measurement script, whole, with the parameters the engine finds in it."""
+    return _service().read_script(path)
+
+
+def history_runs(limit: int = 20, query: str = "") -> Dict[str, Any]:
+    """The engine's finished runs (blocks, params, datasets, status, times), newest first, filterable."""
+    return _service().history_runs(limit, query)
+
+
+def run_detail(run_id: str) -> Dict[str, Any]:
+    """One run's detail: a panel run (blocks/params/datasets) or one of Kelvin's recorded measurements."""
+    return _service().run_detail(run_id)
+
+
+def analysis_scripts(classes: Any = ()) -> Dict[str, Any]:
+    """The Scripts tab's list: my_analysis folders, templates and every analysis script with its params."""
+    return _service().analysis_scripts(classes)
+
+
+def write_analysis(name: str, code: str, overwrite: bool = False) -> Dict[str, Any]:
+    """Write an analysis script into my_analysis.dirs[0] and return the record the engine finds for it."""
+    return _service().write_analysis(name, code, overwrite)
+
+
+def run_analysis(script: str, datasets: Any = None, run_id: str = "",
+                 params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Run one analysis script on dataset folders (the engine's analysis_run): the job id comes back."""
+    return _service().run_analysis(script, datasets=datasets, run_id=run_id, params=params)
+
+
+def analysis_status() -> Dict[str, Any]:
+    """The analysis job as the Scripts tab reads it: idle, or the job with its items and their results."""
+    return _service().analysis_status()
+
+
+def analysis_cancel(job_id: str = "") -> Dict[str, Any]:
+    """Stop the analysis job (never a measurement): `job_id` only that job."""
+    return _service().analysis_cancel(job_id)
+
+
+def datasets(limit: int = 20) -> Dict[str, Any]:
+    """The History data folder's dataset folders, newest first: path, class, size, files, when written."""
+    return _service().datasets(limit)
+
+
+def dataset_files(path: str) -> Dict[str, Any]:
+    """List one dataset folder's files and subfolders (read only): name, size, last written."""
+    return _service().dataset_files(path)
+
+
+def log_lines(lines: int = 50) -> Dict[str, Any]:
+    """The engine's own log, newest rows: time, level and text of each."""
+    return _service().log_lines(lines)
+
+
 # ---------------------------------------------------------------- v1-A: Kelvin's own runs and names
 
 def merged_runs(limit: int = 20) -> Dict[str, Any]:
