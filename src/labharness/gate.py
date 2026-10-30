@@ -421,19 +421,32 @@ class SafetyGate:
     # ------------------------------------------------------------------ auto mode
 
     def auto_verdict(self, inst: Instrument, spec: ParamSpec, values: List[Any]) -> Tuple[bool, str]:
-        """Is driving this parameter to these values low-risk enough to skip the human? And why, in words."""
+        """Is driving this parameter to these values low-risk enough to skip the human? And why, in words. A mounted
+        device's protection narrows the lab's own auto range too: auto mode stays within auto_fraction of the way to
+        the device's limit (a gate protected to ±6 V once went to 5 V unasked, inside the lab's auto range ±5 V)."""
         key = "%s.%s" % (inst.name, spec.name)
         rule = inst.config.auto.get(spec.name, inst.config.auto.get("*"))
         if rule == "never":
             return False, "%s is never auto-approved in this lab" % key
+        device = spec.numeric and spec.name in inst.device_limits
         if isinstance(rule, Allowed):
-            if all(rule.covers(v) for v in values):
+            if not all(rule.covers(v) for v in values):
+                return False, "%s leaves its auto range %s" % (key, rule.show(spec))
+            if not device:
                 return True, "%s stays in its auto range %s" % (key, rule.show(spec))
-            return False, "%s leaves its auto range %s" % (key, rule.show(spec))
+            ok, why = self._fraction_verdict(inst, spec, values)
+            return ok, "%s stays in its auto range %s, %s" % (key, rule.show(spec), why) if ok else why
         if not spec.numeric:
             if all(spec.distance(v) <= 1 for v in values):
                 return True, "%s is one step from safe" % key
             return False, "%s goes more than one step from safe" % key
+        ok, why = self._fraction_verdict(inst, spec, values)
+        return ok, "%s %s" % (key, why) if ok else why
+
+    def _fraction_verdict(self, inst: Instrument, spec: ParamSpec, values: List[Any]) -> Tuple[bool, str]:
+        """Whether these values stay within auto_fraction of the way from safe to the drive's limit (the lab's, or a
+        mounted device's where it is tighter), and why in words."""
+        key = "%s.%s" % (inst.name, spec.name)
         lim = inst.limits(spec.name)
         if lim is None or spec.safe is None:
             return False, "%s has no limits to measure the step against" % key
@@ -443,10 +456,13 @@ class SafetyGate:
             span = abs(edge - spec.safe)
             worst = max(worst, abs(v - spec.safe) / span if span > 0 else (0.0 if v == spec.safe else math.inf))
         fraction = self.lab.config.auto_fraction
+        src = inst.limits_source(spec.name)
+        whose = "its limit" if src in ("lab", "vendor") else "%s's limit, [%s, %s]%s" % (
+            src, num(lim[0]), num(lim[1]), " " + spec.unit if spec.unit else "")
         if worst <= fraction + 1e-9:
-            return True, "%s stays within %.0f%% of the way from safe to its limit" % (key, 100 * worst)
-        return False, "%s goes %.0f%% of the way from safe to its limit (auto mode covers %.0f%%)" % (
-            key, 100 * worst, 100 * fraction)
+            return True, "stays within %.0f%% of the way from safe to %s" % (100 * worst, whose)
+        return False, "%s goes %.0f%% of the way from safe to %s (auto mode covers %.0f%%)" % (
+            key, 100 * worst, whose, 100 * fraction)
 
     def note_outside(self, source: str) -> None:
         """The model has read text from the web: until it has been a while, auto mode asks a person (a portal chat
