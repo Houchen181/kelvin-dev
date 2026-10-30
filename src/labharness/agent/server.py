@@ -776,7 +776,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Stop what the lab is doing now, as the person's Stop button does, when they ask you to stop (in any chat,
         whoever started it): the running plan or queue scan ends and the drives it touched go to safe (or hold where
         the lab config says), the queue stops after it, a ramp or wait ends where it is, and open approval cards are
-        declined. It works at once, also while another chat's run holds the lab. reason: the person's words."""
+        declined. It works at once, also while another chat's run holds the lab, then says what is still on (outputs,
+        field, temperature): tell the person. reason: the person's words."""
         return rt.stop_work(reason)
 
     @server.tool(annotations=ACT, structured_output=False)

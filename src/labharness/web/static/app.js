@@ -1609,6 +1609,13 @@
     $("hands-msg").textContent = "";
     $("hands-dialog").showModal();
   }
+  async function bringToSafe() {   // a person's press is the approval: every instrument to its declared safe values
+    $("lab-safe").disabled = true;   // no dialog: a browser can suppress one, and this only ever moves toward safe
+    try { const r = await api("/api/safe", { body: {} }); toast(r.lines.join("; ")); }
+    catch (e) { toast(e.message); }
+    finally { $("lab-safe").disabled = false; }
+    pollState();
+  }
   async function unlock() {
     const v = $("hands-device").value, body = { on: false };
     if (v !== $("mount-select").value) {
@@ -3885,11 +3892,13 @@
       });
       return b;
     };
-    const on = i.outputs.length && !i.safe.length;
+    const stop = i.kind === "stop";   // after a person's Stop: what it left on, and Bring to safe
+    const on = (stop || i.outputs.length) && !i.safe.length;
+    const at = i.at ? " at " + String(i.at).slice(11, 16) : "";
     return h("div", { class: "alert incident" }, icon("warn"), h("div", { class: "alert-body" },
-      h("b", {}, "Kelvin restarted" + (i.at ? " at " + String(i.at).slice(11, 16) : "") + ". Check the lab before you go on:"),
+      h("b", {}, stop ? "Stopped" + at + ". Check what it left on:" : "Kelvin restarted" + at + ". Check the lab before you go on:"),
       ...i.lines.map((l) => h("span", {}, l))),
-      on ? act("Bring the outputs to safe", "safe", true) : null, act("Dismiss", "dismiss", false));
+      on ? act(stop ? "Bring to safe" : "Bring the outputs to safe", "safe", true) : null, act("Dismiss", "dismiss", false));
   }
   function renderAlerts(alarms, incident) {
     const live = (alarms || []).filter((a) => !a.cleared && !a.acknowledged);
@@ -6615,6 +6624,7 @@
     $("protect-save").addEventListener("click", () => saveProtection(false));
     $("protect-clear").addEventListener("click", () => saveProtection(true));
     $("hands-on").addEventListener("click", handsOn);
+    $("lab-safe").addEventListener("click", bringToSafe);
     $("hands-done").addEventListener("click", openUnlock);
     $("wake-cancel").addEventListener("click", async () => {
       if (!S.chatId) return;

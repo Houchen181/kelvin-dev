@@ -2983,6 +2983,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             stopped = True
         return JSONResponse({"ok": stopped, "message": STOPPED if stopped and (not chat_id or body.get("lab")) else ""})
 
+    async def safe_view(request: Request) -> Response:
+        """POST: a person's Bring to safe (runtime.bring_to_safe): what runs stops, and every instrument goes to the
+        safe values its card declares. People only: no agent tool reaches this. A watch-only phone can't."""
+        if role_of(request) == "watch":
+            return error(403, "This phone can watch, not act. Use the Kelvin computer, or Hands on the sample.")
+        lines = await asyncio.to_thread(runtime.bring_to_safe, person(request))
+        return JSONResponse({"ok": True, "lines": lines})
+
     async def incident(request: Request) -> Response:
         """The card Kelvin shows after a restart that left something behind (outputs on, runs or a queue cut short).
         POST {action: "safe"}: the outputs still on go to safe; {action: "dismiss"}: the card goes."""
@@ -3250,6 +3258,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/stop", stop, methods=["POST"]),
         Route("/api/approvals/{request_id}", approval, methods=["POST"]),
         Route("/api/incident", incident, methods=["POST"]),
+        Route("/api/safe", safe_view, methods=["POST"]),
         Route("/api/owner-pin", owner_pin, methods=["GET", "POST"]),
         Route("/api/state", state),
         Route("/api/mode", approval_mode, methods=["GET", "POST"]),

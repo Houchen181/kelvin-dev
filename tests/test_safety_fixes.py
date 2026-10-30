@@ -4,10 +4,12 @@ reading, a stop that froze a magnet and left a laser on without a word, hold def
 broken gate again, a stage moving under someone's hands, cards that missed what mattered, one undo list for the whole
 lab, and a PIN asked for tightening a limit."""
 import json
+import time
 
 import pytest
 
 from labharness import ScriptedApprover, cardlang, protection
+from labharness.monitor import Monitor
 from simlab import build_virtual_lab
 
 GATE_D1 = {"gates": [{"drive": "smu.V", "dielectric": "hBN", "thickness_nm": 20, "leak": "smu.I"}]}   # ±6 V
@@ -139,6 +141,124 @@ def test_a_card_says_what_heating_the_sample_sets_off_and_auto_mode_leaves_it_to
     assert "at 25 K, the lab watch on tc.T_sample (above 20 K) sets laser.emission off" in card
     assert card[-1] == "Auto mode does not cover this: it sets off what is listed above"
     assert cardlang.card(approver.requests[-1].title, card, None, "zh-Hans")["english"] == 0   # read in Chinese too
+
+
+# ------------------------------------------------------------------- 3. a stop never freezes a magnet
+
+def test_a_stop_keeps_the_magnets_rate_so_the_field_can_come_down(lab, make_engine):
+    """t02: a stop set magnet.rate to its "safe" 0 T/min: the field stayed at -2.5 T, and bringing it down needed an
+    approval and then waited 10 minutes for a field that couldn't move."""
+    engine, gate, _ = make_engine([True])
+    stop_at_first_point(engine, gate.request_abort)
+    report = engine.run(FIELD_AT.format(b=0.5))
+    assert report.status == "aborted"
+    assert lab.read("magnet", "rate") == 0.5 and "magnet.rate" not in report.message   # its rate stays
+    assert gate.set("magnet", "B", 0).ok                                         # toward safe: no approval, it moves
+    lab.instruments["magnet"].backend.state.update(rate=0.0, B=1.0, B_actual=1.0)
+    t0 = lab.clock.now()
+    r = gate.set("magnet", "B", 0)                                               # a zero rate: said at once
+    assert r.action == "refused" and lab.clock.now() - t0 < 1
+    assert r.message == "refused: magnet.rate is 0 T/min, so magnet.B can't move: set magnet.rate first"
+
+
+def test_a_stopped_run_and_stop_run_say_what_is_still_on(tmp_path):
+    """t02, t07: after a stop the chat never said where the field was, nor that the laser was still on."""
+    rt = runtime(tmp_path, [True, True, True])
+    for param, value in (("emission", True), ("power", 6), ("shutter", True)):
+        assert rt.gate.set("laser", param, value).ok
+    stop_at_first_point(rt.engine, rt.gate.request_abort)
+    said = rt.run("plan: stage_scan\nsweep: { stage.position: {from: 0, to: 5, step: 1} }\n"
+                  "measure: [laser.P_detected]\n")
+    assert "aborted after" in said
+    assert "still on: laser.emission on, laser.power 6 mW, laser.shutter open" in said
+    said = rt.stop_work("stop")
+    assert said.startswith("nothing to stop") and "still on: laser.emission on" in said
+
+
+# ------------------------------------------------------------------- 4. hold doesn't defeat an interlock
+
+def test_an_interlock_that_fails_sends_a_held_drive_to_safe_and_says_so(lab, make_engine):
+    """t10: with safe_actions: {magnet.B: hold}, the interlock tripped and the field stayed at 1 T; the model only
+    saw "stop requested"."""
+    engine, gate, _ = make_engine([True])
+    assert lab.config.safe_actions["magnet.B"] == "hold"
+    notes = []
+    monitor = Monitor(lab, gate, lambda *a: notes.append(a))
+
+    def warm_up():
+        hold_temperature(lab, 10.5)
+        monitor.tick()
+    stop_at_first_point(engine, warm_up)
+    report = engine.run("plan: field\nsetup: { magnet.B: 0.5 }\ntime: { every: 30, points: 3 }\nmeasure: [lockin.X]\n")
+    assert report.status == "aborted" and "stopped by the interlock on magnet.B (it needs tc.T_sample < 10" in \
+        report.message
+    assert lab.read("magnet", "B") == 0                                          # to safe, not held at 0.5 T
+    assert [a.kind for a in monitor.alarms] == ["interlock"]
+
+
+def test_an_interlock_alarm_does_not_flap_while_the_sample_sits_at_its_edge(lab, make_gate, monkeypatch):
+    """t10: at the interlock's own 10 K the alarm went up and cleared six times in 15 s."""
+    gate, _ = make_gate([])
+    monkeypatch.setattr(gate, "abort_to_safe", lambda keys, by, hold=True: [])   # a drive that won't go to safe
+    lab.instruments["magnet"].backend.state.update(B=1.0, B_actual=1.0)
+    monitor = Monitor(lab, gate, lambda *a: None)
+    for k in range(8):                                                           # 10.01 K, 9.99 K, ...
+        hold_temperature(lab, 10.01 if k % 2 == 0 else 9.99)
+        monitor.tick()
+        lab.clock.sleep(5)
+    assert len(monitor.alarms) == 1 and monitor.alarms[0].cleared is None
+    hold_temperature(lab, 5.0)
+    for _ in range(14):                                                          # holds again for a minute: clears
+        monitor.tick()
+        lab.clock.sleep(5)
+    assert len(monitor.alarms) == 1 and monitor.alarms[0].cleared is not None
+
+
+# ------------------------------------------------------------------- 6. Bring to safe
+
+def test_bring_to_safe_sets_every_declared_safe_value_from_the_card_after_a_stop(tmp_path):
+    """t07: Stop left the laser on and said nothing, and there was no "bring everything to safe"."""
+    rt = runtime(tmp_path, [True, True, True, True])
+    lab = rt.lab
+    for param, value in (("emission", True), ("power", 6), ("shutter", True)):
+        assert rt.gate.set("laser", param, value).ok
+    assert rt.gate.set("tc", "heater_range", "low").ok
+    lab.instruments["magnet"].backend.state.update(B=1.5, B_actual=1.5, rate=0.2)
+    lab.instruments["stage"].backend.state.update(position=12.0, position_actual=12.0)
+    rt.stop("human (portal)")
+    deadline = time.time() + 10
+    while (rt.incident or {}).get("kind") != "stop" and time.time() < deadline:
+        time.sleep(0.05)
+    lines = rt.incident_lines()
+    assert lines[0].startswith("still on: laser.emission on, laser.power 6 mW, laser.shutter open")
+    assert "magnet.B 1.5 T (B_actual 1.5 T)" in lines[0] and "tc.heater_range low" in lines[0]
+    assert "magnet.rate" not in lines[0]
+    said = rt.incident_safe("human (portal)")                                    # the card's Bring to safe
+    assert not lab.read("laser", "emission") and lab.read("laser", "power") == 0 and not lab.read("laser", "shutter")
+    assert lab.read("tc", "heater_range") == "off" and lab.read("magnet", "B") == 0   # the lab's hold is for stops
+    assert lab.read("magnet", "rate") == 0.2 and lab.read("stage", "position") == 12.0   # rate and positions stay
+    assert rt.incident is None and any("laser.emission on → off" in line for line in said)
+    assert "bring_to_safe" in [e["type"] for e in rt.gate.log.events()]
+
+
+def test_bring_to_safe_is_a_persons_in_the_portal(tmp_path):
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+    from labharness.web.app import STATIC, create_app
+    from labharness.web.settings import Settings
+    from labharness.web.store import ChatStore
+    rt = runtime(tmp_path, [True])
+    assert rt.gate.set("smu", "output", True).ok
+    home = tmp_path / "Kelvin"
+    settings = Settings(home / "settings.json")
+    client = TestClient(create_app(rt, settings, ChatStore(home / "chats"), hosts=["testserver"], providers={}))
+    with client:
+        r = client.post("/api/safe", json={}, headers={"X-Kelvin-Token": settings.access_key})
+    assert r.status_code == 200 and not rt.lab.read("smu", "output")
+    assert any("smu.output on → off" in line for line in r.json()["lines"])
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert '$("lab-safe").addEventListener("click", bringToSafe)' in js and '"/api/safe"' in js
+    assert 'id="lab-safe"' in (STATIC / "index.html").read_text(encoding="utf-8")
 
 
 # ------------------------------------------------------------------- 7. hands on the sample holds a stage

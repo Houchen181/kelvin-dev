@@ -1395,10 +1395,13 @@ class ScriptRun:
         """Every drive the script touched goes back to safe (or holds, where the lab says so), as a stopped plan's
         do; an instrument it sent a drive command the gate couldn't read goes to its safe state."""
         out = []
+        from .gate import paces
         for key in self.touched:
             if self.lab.config.safe_actions.get(key) == "hold":
                 continue
             instr, _, param = key.partition(".")
+            if paces(self.lab.instrument(instr).card, param) is not None:
+                continue   # a ramp rate stays: at its safe 0 the drive it paces couldn't come back to safe
             spec = self.lab.instrument(instr).spec(param)
             r = self.gate._set(instr, param, spec.safe, True, "abort:" + self.prep.name)
             if r.action != "no-change":

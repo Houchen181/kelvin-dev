@@ -53,6 +53,7 @@ BACKGROUND_S = 5.0    # how often Kelvin looks for that, and (once, after a star
 BUSY_WAIT_S = 30.0   # how long a request waits for the lab while another holds it, before it answers "busy"
 READ_WAIT_S = 10.0   # how long a reading waits for another reading of the same instrument, before it gives the latest
 PANEL_WAIT_S = 0.2   # the same, for the Lab panel's look every few seconds: it shows the latest values meanwhile
+AFTER_STOP_S = 900.0   # how long the card after a Stop waits, in the background, for the stopped work to end
 MAX_CONFIG_CHARS = 30000   # of the lab config shown at once; an instrument's own entry is always shown whole
 SETUP_STEPS = ("connecting", "scanning", "drafting", "reading")   # the instrument setup at work (autosetup.py)
 # a rehearsal is never a run (field tests: run_plan with dry_run: true went on to run for real)
@@ -157,6 +158,10 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "after a restart: %s" % "; ".join(
             "%s %s" % (k, ", ".join(map(str, v)) if isinstance(v, list) else v) for k, v in e.items()
             if k in ("outputs", "runs", "queue", "alarms", "safe"))
+    elif kind == "left_on":
+        text = "after the stop: %s" % ("still on: " + ", ".join(e["left"]) if e.get("left") else "nothing left on")
+    elif kind == "bring_to_safe":
+        text = "Bring to safe: %s" % "; ".join(e.get("steps") or [])
     elif kind == "idle_off":
         text = "left on for %s with nothing happening, put to safe: %s" % (e.get("idle"),
                                                                           "; ".join(e.get("steps") or []))
@@ -716,7 +721,8 @@ class LabRuntime:
                              "without asking; the rest still wait for a human")
             lines += ["ALARM: %s%s" % (a.text, " (%s)" % "; ".join(a.actions) if a.actions else "")
                       for a in self.monitor.active()]
-            lines += ["AFTER KELVIN RESTARTED (the person sees this in the portal until they dismiss it): " + line
+            after = "AFTER THE STOP" if (self.incident or {}).get("kind") == "stop" else "AFTER KELVIN RESTARTED"
+            lines += ["%s (the person sees this in the portal until they dismiss it): %s" % (after, line)
                       for line in self.incident_lines()]
             if self.hands:
                 lines.append("HANDS ON THE SAMPLE: %s is handling it (since %s); every drive stays at safe until a "
@@ -1056,11 +1062,11 @@ class LabRuntime:
                                 account=self.user, channel=channel, device=device, vouched=who.get("vouched"))
         return ok
 
-    def stop(self, by: str = "human", note: str = "") -> int:
+    def stop(self, by: str = "human", note: str = "", report: bool = True) -> int:
         """A person's stop: decline open requests and stop the current ramp or plan. Drives stay where they are
         (a stopped plan still runs its own on_abort steps). The queue stops after the scan it ends, and a call still
         waiting for the lab is not run (_do). Takes no lock, so it never waits. Returns how many requests were
-        declined."""
+        declined. report: once the stopped work has finished its safe-stop steps, say what is left on (_after_stop)."""
         decline_all = getattr(self.approver, "decline_all", None)
         declined = decline_all("stop button") if decline_all else 0
         with self.queue.lock:   # a stop also stops the queue: nothing else starts after the stopped scan
@@ -1069,6 +1075,9 @@ class LabRuntime:
                 self.queue.save()
         self.gate.request_abort()
         self.gate.log.write("stop", by=by, account=self.user, declined=declined, note=note or None)
+        if report:
+            threading.Thread(target=self._after_stop, args=(by, self.gate.stop_generation), daemon=True,
+                             name="kelvin-after-stop").start()
         return declined
 
     def stop_work(self, reason: str = "", by: str = "agent") -> str:
@@ -1079,9 +1088,8 @@ class LabRuntime:
         what = self.held_by() if run or self.lock.owner()[0] is not None else None
         queue = self.queue.state in ("running", "pausing")
         declined = self.stop(by, note=" ".join(str(reason or "").split())[:200])
-        if what is None and not queue and not declined:
-            return "nothing to stop: no run, ramp, wait or queue was going"
-        lines = []
+        idle = what is None and not queue and not declined
+        lines = ["nothing to stop: no run, ramp, wait or queue was going"] if idle else []
         if run:
             lines.append("stopped %s: it ends now, and the drives it touched go to safe (or hold where the lab config "
                          "says hold)" % what)
@@ -1091,6 +1099,17 @@ class LabRuntime:
             lines.append("the queue stops after the scan it is on; queue_start starts it again")
         if declined:
             lines.append("%d open approval request%s declined" % (declined, "" if declined == 1 else "s"))
+        if self.lock.acquire(blocking=False):   # what is left on, when nothing is still stopping (a stop never waits)
+            try:
+                left = self.left_on()
+            finally:
+                self.lock.release()
+            if left:
+                lines.append("still on: %s (the person can press Bring to safe)" % ", ".join(left))
+            elif not idle:
+                lines.append("nothing is left on")
+        else:
+            lines.append("once it has stopped, lab_status says what is still on")
         return "; ".join(lines)
 
     @contextlib.contextmanager
@@ -1235,6 +1254,9 @@ class LabRuntime:
         if report.dry_run is not None and report.status in ("done", "aborted"):
             lines.append(report.dry_run.message)
         lines.append(report.message)
+        if report.status == "aborted":   # what it leaves on, as it stopped (a laser it didn't set once stayed on)
+            left = self.left_on()
+            lines.append("still on: %s" % ", ".join(left) if left else "nothing is left on")
         if report.analysis:
             lines += self._analysis_lines(report.analysis)
         else:
@@ -1733,6 +1755,8 @@ class LabRuntime:
             return False
         self.gate.request_abort()
         self.gate.log.write("stop", by=by, account=self.user, run=live["run_id"])
+        threading.Thread(target=self._after_stop, args=(by, self.gate.stop_generation), daemon=True,
+                         name="kelvin-after-stop").start()
         return True
 
     # ------------------------------------------------------------------ the scan queue
@@ -1884,7 +1908,7 @@ class LabRuntime:
         stay as they are. Measuring still works. Waits for a stopped plan to finish its own safe-stop steps."""
         self.hands = {"by": by, "since": datetime.now().isoformat(timespec="seconds")}
         self.lab.hands_on = self.hands   # at once: nothing moves away from safe from here on, even before the stop lands
-        self.stop(by)
+        self.stop(by, report=False)
         with self.lock:
             lines: List[str] = []
             kept: List[str] = []
@@ -5384,6 +5408,83 @@ class LabRuntime:
         self._refresh()
         return lines
 
+    def left_on(self) -> List[str]:
+        """What is away from safe now, read from the instruments, in words: what a stop left on (a stop once left a
+        laser emitting 6 mW with its shutter open, and a magnet at -2.5 T, and nothing said so). Each output that
+        reaches the sample with its levels, and temperature, field and the like, a set point with its reading. A level
+        whose switch is off doesn't reach the sample and isn't listed, nor is how a drive is applied (its rate, range,
+        current limit). What reaches the sample comes first. The caller holds the lock."""
+        out: List[str] = []
+        for name, inst in sorted(self.lab.instruments.items(),
+                                 key=lambda kv: not protection.applies_to_sample(kv[1].card)):
+            if not inst.enabled:
+                continue
+            hows = {n for p in inst.card.drives for n in (p.rate_param, p.range_param, p.autorange_param,
+                                                          p.current_limit) if n}
+            for spec in inst.card.drives:
+                if spec.name in hows or spec.type in ("str", "trace", "image") or \
+                        (spec.get_cmd is None and spec.name not in inst._last):
+                    continue
+                try:
+                    v = inst.read(spec.name)
+                    if v is None or spec.distance(v) == 0:
+                        continue
+                    switch = self.gate._switch_of(inst, spec)
+                    state = self.gate._current(inst, switch) if switch is not None else None
+                except Exception:
+                    continue
+                if state is not None and switch.distance(state) == 0:
+                    continue   # its switch is off: it doesn't reach the sample
+                text = "%s.%s %s" % (name, spec.name, spec.show(v))
+                if spec.readback:
+                    try:
+                        text += " (%s %s)" % (spec.readback, inst.spec(spec.readback).show(inst.read(spec.readback)))
+                    except Exception:
+                        pass
+                out.append(text)
+        return out
+
+    def _after_stop(self, by: str, gen: int) -> None:
+        """Once the work a person's Stop ended has finished its safe-stop steps, say what is left on: in the record,
+        as a notice, and on a card above the chat with Bring to safe (unless the restart's card is showing). A later
+        stop says it instead. Never raises: lab_status says what is on anyway."""
+        try:
+            if not self.lock.acquire(timeout=AFTER_STOP_S):
+                return
+            try:
+                if self.gate.stop_generation != gen:
+                    return
+                left = self.left_on()
+            finally:
+                self.lock.release()
+            self.gate.log.write("left_on", by="kelvin", stopped_by=by, left=left or None)
+            if self.incident is not None and self.incident.get("kind") != "stop":
+                return   # the restart's card says more, and stays
+            self.incident = None if not left else {
+                "kind": "stop", "at": datetime.now().isoformat(timespec="seconds"), "by": by, "outputs": [],
+                "on": left, "away": [], "runs": [], "queue": [], "alarms": [], "watches": {}, "unattended": False,
+                "safe": []}
+            if left:
+                self.notifier("run", "Stopped: still on", ", ".join(left)[:300])
+        except Exception:
+            pass
+
+    def bring_to_safe(self, by: str = "human") -> List[str]:
+        """A person's Bring to safe (the Lab panel; the card after a Stop): what runs stops, then every instrument
+        goes to the safe values its card declares (gate.all_to_safe): outputs off, levels to safe, a field ramped
+        down, a heater off. Positions and a drive's rate stay. Pressing it is the approval: nothing asks. Says what it
+        did, and what is still on."""
+        self.stop(by, note="bring to safe", report=False)
+        with self.lock:
+            with self.gate.acting_as(by):
+                lines = [r.message for r in self.gate.all_to_safe(by)] or ["everything was at safe already"]
+            left = self.left_on()
+            self._refresh()
+        if self.incident is not None and self.incident.get("kind") == "stop":
+            self.incident = None   # done: the card goes
+        self.gate.log.write("bring_to_safe", by=by, steps=lines, left=left or None)
+        return lines + (["still on: %s" % ", ".join(left)] if left else [])
+
     def _incident_check(self) -> None:
         """Once after Kelvin starts, when its instruments are connected: what the last stop left behind, on a card
         until a person dismisses it. Outputs on (sources, light, RF away from safe), runs and a queue it cut short,
@@ -5428,10 +5529,13 @@ class LabRuntime:
             self.lock.release()
 
     def incident_lines(self) -> List[str]:
-        """The restart's card in words (lab_status, notices)."""
+        """The restart's card in words (lab_status, notices); or, after a person's Stop, what it left on."""
         i = self.incident
         if not i:
             return []
+        if i.get("kind") == "stop":
+            return ["still on: %s" % ", ".join(i["on"])] + (["put to safe: %s" % "; ".join(i["safe"])]
+                                                           if i["safe"] else [])
         lines = []
         if i["outputs"]:
             lines.append("left on: %s" % ", ".join(i.get("on") or i["outputs"]))
@@ -5454,7 +5558,9 @@ class LabRuntime:
 
     def incident_safe(self, by: str = "human") -> List[str]:
         """A person's answer to the restart's card: the outputs still on go to safe (as at Hands on: temperature,
-        field and positions stay)."""
+        field and positions stay). On the card after a Stop: Bring to safe (bring_to_safe)."""
+        if self.incident is not None and self.incident.get("kind") == "stop":
+            return self.bring_to_safe(by)
         with self.lock:
             on = self._outputs_on()
             lines = self._outputs_to_safe(sorted(on), by) if on else ["nothing that reaches the sample is on"]

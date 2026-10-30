@@ -251,7 +251,8 @@ def test_a_stop_from_anywhere_never_waits_for_the_lab(tmp_path):
     assert held.wait(5)
     t0 = time.time()
     said = rt.stop_work("stop it", by="agent (in “fan”)")
-    assert time.time() - t0 < 0.5 and said == "stopped setting smu.V: it ends now (a ramp stops where it is)"
+    assert time.time() - t0 < 0.5 and said == ("stopped setting smu.V: it ends now (a ramp stops where it is); once "
+                                               "it has stopped, lab_status says what is still on")
     release.set()
     t.join(5)
     assert any("agent (in “fan”)" in line and "stop" in line for line in rt.events(5).splitlines())

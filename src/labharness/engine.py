@@ -16,7 +16,7 @@ from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
 from .forecast import Forecast, action_of, runs
-from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur, feeds_of
+from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur, feeds_of, paces
 from .instrument import InstrumentOff, SensorError, Stopped
 from .monitor import Approach, rate_per_s
 from .plans import MAX_POINTS, Axis, Plan, PlanError, Stabilize, Step, load_plan
@@ -354,7 +354,7 @@ class RunEngine:
         """Steps in the order they can be applied: a switch that applies other drives to the sample (an output, an
         RF or laser emission: its card's enables) is switched on before the levels it applies. Switching it on parks
         those levels at safe first, so a level set before its switch would end up at safe, and the run measure dark.
-        Otherwise as written."""
+        A rate goes before the set point it paces (a field doesn't move at a rate of 0). Otherwise as written."""
         where: Dict[str, int] = {}
         for i, s in enumerate(steps):
             where.setdefault(s.key, i)
@@ -362,14 +362,17 @@ class RunEngine:
         for i, s in enumerate(steps):
             rank: float = i
             try:
-                spec = self.lab.resolve(s.key)[1]
+                inst, spec = self.lab.resolve(s.key)
                 on = bool(spec.enables) and spec.is_drive and spec.distance(spec.coerce(s.value)) > 0
+                paced = paces(inst.card, spec.name)
             except (KeyError, ValueError):
-                on = False
+                on, paced = False, None
             if on:
                 levels = [where[k] for k in ("%s.%s" % (s.instr, d) for d in spec.enables) if k in where]
                 if levels and min(levels) < i:
                     rank = min(levels) - 0.5
+            elif paced is not None and where.get("%s.%s" % (s.instr, paced.name), i) < i:
+                rank = where["%s.%s" % (s.instr, paced.name)] - 0.5
             ranked.append((rank, i, s))
         return [s for _, _, s in sorted(ranked, key=lambda r: (r[0], r[1]))]
 
@@ -688,7 +691,7 @@ class RunEngine:
                                    spec.show(swing) if numbers else "not a number", far))
                 return {"read": st.key, "settled": False, "after_s": round(now - t0, 3)}
             if self.gate.stop_generation != gen:
-                raise _Abort("stop requested")
+                raise _Abort(self.gate.stop_words())
             pause = max(0.05, min(2.0, st.duration / 10))
             if record is not None and st.every:
                 if logged is None or now - logged >= st.every - 1e-9:
@@ -720,7 +723,7 @@ class RunEngine:
 
         def apply(instr: str, param: str, value: Any) -> None:
             if gate.stop_generation != gen:   # a stop that came between steps (or while the run was starting)
-                raise _Abort("stop requested")
+                raise _Abort(gate.stop_words())
             if action_of(lab, instr, param) is not None:   # the card's action, run once; on the run's card if it drives
                 if lab.instrument(instr).simulated:
                     return   # a twin has nothing to start
@@ -733,7 +736,7 @@ class RunEngine:
         def aim(instr: str, param: str, value: Any) -> None:
             """A ramp's set point, set without waiting for its reading: the ramp measures while it gets there."""
             if gate.stop_generation != gen:
-                raise _Abort("stop requested")
+                raise _Abort(gate.stop_words())
             r = gate._set(instr, param, value, False, "plan:" + plan.name, gen=gen)
             if not r.ok:
                 raise _Abort(r.message)
@@ -814,7 +817,7 @@ class RunEngine:
                     gate.log.write("retry", by=gate.operator, run=rec.run_id, point=n, attempt=tries,
                                    error=str(e).splitlines()[0][:200] if str(e) else type(e).__name__)
                     if not lab.stops.sleep(clock, plan.retry.wait, stops) or gate.stop_generation != gen:
-                        raise _Abort("stop requested")
+                        raise _Abort(gate.stop_words())
             if first is None:
                 return 0.0
             wrong = self.readback_problems(plan.setup, swept)
@@ -843,7 +846,7 @@ class RunEngine:
             self._emit(event="point", run_id=rec.run_id, done=n, total=max(plan.points, n), row=row,
                        eta_s=time_left(n))
             if gate.stop_generation != gen:
-                raise _Abort("stop requested")
+                raise _Abort(gate.stop_words())
             return row
 
         def ends(until: Any, while_: Any, row: Dict[str, Any]) -> Optional[str]:
@@ -879,16 +882,16 @@ class RunEngine:
                     settled.append(dict(info, axis=axis.key, value=v, t=round(clock.now() - t0, 3)))
                 hold = axis.settle_at(k)
                 if not lab.stops.sleep(clock, hold if hold is not None else plan.settle, stops):
-                    raise _Abort("stop requested")   # a stop ends a settle at once
+                    raise _Abort(gate.stop_words())   # a stop ends a settle at once
             elif axis.kind == "time" and v:
                 if not lab.stops.sleep(clock, axis.every, stops):
-                    raise _Abort("stop requested")
+                    raise _Abort(gate.stop_words())
             elif axis.kind == "technique":   # one of a technique's parameters: its next runs use this value
                 name, _, param = axis.param.partition(".")
                 tvalues["%s.%s" % (axis.instr, name)][param] = v
                 hold = axis.settle_at(k)
                 if not lab.stops.sleep(clock, hold if hold is not None else plan.settle, stops):
-                    raise _Abort("stop requested")
+                    raise _Abort(gate.stop_words())
 
         def loop(j: int, at: Dict[str, Any]) -> bool:
             """Loop j and the ones inside it, at the outer loops' values; False once the plan's until: or while:
@@ -950,14 +953,14 @@ class RunEngine:
                                         spec.show(value) if _num(value) else repr(value)))
                     due = max(due + axis.every, clock.now())
                     if not lab.stops.sleep(clock, max(0.0, due - clock.now()), stops):
-                        raise _Abort("stop requested")   # a stop ends the wait for the next point at once
+                        raise _Abort(gate.stop_words())   # a stop ends the wait for the next point at once
                 info["ended_t"] = round(clock.now() - t0, 3)
             return True
 
         try:
             with gate.preapproved(grants):
                 if gate.stop_generation != gen:   # stopped before it began: not even its setup
-                    raise _Abort("stop requested")
+                    raise _Abort(gate.stop_words())
                 for step in self.ordered(plan.setup):
                     began = clock.now()
                     apply(step.instr, step.param, step.value)
@@ -985,7 +988,7 @@ class RunEngine:
         except _Abort as e:
             status, reason = "aborted", str(e)
         except Stopped:   # a stop that came while an instrument was still taking a reading
-            status, reason = "aborted", "stop requested"
+            status, reason = "aborted", gate.stop_words()
         except Exception as e:
             status, reason = "aborted", "error: %s" % e
         if gaps:   # the data say where: each such point's gap_s
