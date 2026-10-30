@@ -3219,7 +3219,7 @@
       if (!st.signed_in) return;
       clearInterval(GPT.timer);
       showChatGPT(st);
-      try { const b = await api("/api/bootstrap"); applyModels(b.models.groups, b.default_model, b.auto_model); } catch (e) { /* the list updates on reload */ }
+      try { const b = await api("/api/bootstrap"); applyModels(b.models.groups, b.default_model, b.auto_model, b.models.hub); } catch (e) { /* the list updates on reload */ }
       if (st.plan && !st.welcomed) { $("chatgpt-dialog").showModal(); api("/api/chatgpt/welcomed", { body: {} }).catch(() => {}); }
     }, 2000);
   }
@@ -3230,7 +3230,7 @@
       showChatGPT(st);
       toast(st.revoked ? "Signed out of ChatGPT." : "Signed out here; OpenAI did not confirm the sign-out, so you can also disconnect Kelvin in ChatGPT's settings.");
       const b = await api("/api/bootstrap");
-      applyModels(b.models.groups, b.default_model, b.auto_model);
+      applyModels(b.models.groups, b.default_model, b.auto_model, b.models.hub);
     } catch (e) { $("chatgpt-status").textContent = e.message; }
   }
   // ------------------------------------------------------------------ the Kelvin hub (accounts across labs)
@@ -3363,7 +3363,7 @@
     }));
   }
   function refreshModels(r) {   // r: the models, with the default (Settings' choice, else Claude Opus)
-    applyModels(r.models.groups, r.default_model, r.auto_model);
+    applyModels(r.models.groups, r.default_model, r.auto_model, r.models.hub);
     fillDefaultModel();
     fillModels($("reviewer"), S.groups, (S.settings && S.settings.reviewer) || "", true);
     $("reviewer").options[0].textContent = "Off";
@@ -5423,18 +5423,29 @@
   }
   // preferred: the model a new chat starts with (Settings → Models → Default model for new chats; Automatic is
   // Claude Opus: settings.default_model); a chat that is open keeps its own
-  function applyModels(groups, preferred, auto) {
+  function applyModels(groups, preferred, auto, hub) {
     const current = S.chatId && S.labels && S.labels[$("model").value] ? $("model").value : "";
     S.groups = groups;
+    showHubUsage(hub);
     S.labels = {};
     for (const g of groups) for (const m of g.models) S.labels[m.key] = m.label;
     if (preferred !== undefined) S.defaultModel = preferred || "";
     if (auto !== undefined) S.autoModel = auto || "";
     fillModels($("model"), groups, (current && S.labels[current]) ? current : S.defaultModel);
     if ($("rules-chip")) applyRules();
-    if (!$("model").value) $("input").placeholder = "Add an API key in Settings to start";
+    if (!$("model").value) $("input").placeholder = S.settings && S.settings.own_keys === false
+      ? "Sign in with your Kelvin account, or set up a local model in Settings" : "Add an API key in Settings to start";
     else $("input").placeholder = "Ask Kelvin…";
     updateSend();
+  }
+  // Settings → Models: the month so far with the Kelvin hub's models (hub/llm.py), while signed in to the hub
+  function showHubUsage(hub) {
+    const el = $("hub-usage");
+    if (!el) return;
+    el.hidden = !hub;
+    if (hub) el.textContent = "Kelvin hub models: $" + Number(hub.spent || 0).toFixed(2) + " of $" + Number(hub.budget).toFixed(2) +
+      " this month" + (hub.renews ? " · renews " + hub.renews : "") + (hub.lab ? " · your lab: $" + Number(hub.lab.spent || 0).toFixed(2) +
+      " of $" + Number(hub.lab.budget).toFixed(2) : "");
   }
   // Settings → Models → Default model for new chats: Automatic says which model it is now (Claude Opus when there)
   function fillDefaultModel() {
@@ -5482,6 +5493,7 @@
   function openSettings() {
     settingsPage(store("lh.settingsPage") || "models");
     showZoom();
+    for (const el of document.querySelectorAll(".own-keys")) el.hidden = !!(S.settings && S.settings.own_keys === false);   // the user version
     const keys = (S.settings && S.settings.keys) || {};
     for (const hint of document.querySelectorAll("[data-hint]")) {
       const src = keys[hint.dataset.hint];
@@ -5758,7 +5770,7 @@
     try {
       const r = await api("/api/settings", { body });
       S.settings = r.settings;
-      applyModels(r.models.groups, r.default_model, r.auto_model);
+      applyModels(r.models.groups, r.default_model, r.auto_model, r.models.hub);
       $("settings-dialog").close();
       toast("Settings saved.");
     } catch (e) {
@@ -5883,7 +5895,7 @@
       b.addEventListener("click", () => sendMessage(text));
       return b;
     }));
-    applyModels(boot.models.groups, boot.default_model, boot.auto_model);
+    applyModels(boot.models.groups, boot.default_model, boot.auto_model, boot.models.hub);
     initRunsPane();
     initLabPanel();
     fitLayout();

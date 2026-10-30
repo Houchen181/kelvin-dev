@@ -26,13 +26,8 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 def enabled() -> bool:
     """Is the bridge part of this copy of Kelvin? From source yes; frozen only in the private build."""
-    if not getattr(sys, "frozen", False):
-        return True
-    try:
-        from . import _private_bridge  # noqa: F401  (written only for the private build)
-        return True
-    except ImportError:
-        return False
+    from .edition import private
+    return private()
 
 
 def find_cli(configured: str = "") -> Optional[str]:

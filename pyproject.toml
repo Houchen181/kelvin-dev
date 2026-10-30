@@ -28,7 +28,8 @@ basler = ["pypylon"]            # Basler cameras
 pylablib = ["pylablib"]         # attocube ANC300/ANC350, Andor Shamrock/Kymera spectrographs
 desktop = ["kelvin-lab[web,hardware]", "pywebview>=5"]
 hub = ["starlette", "uvicorn", "websockets>=13",  # the Kelvin hub server (accounts, the phones' relay): `kelvin-hub`
-       "pypdfium2>=4"]   # draws PDF pages as pictures for Kelvins (hub/pdfdraw.py); never in the app
+       "pypdfium2>=4",   # draws PDF pages as pictures for Kelvins (hub/pdfdraw.py); never in the app
+       "httpx>=0.27", "cryptography>=3.4"]   # the model gateway (hub/llm.py): the services, the sealed keys
 dev = ["pytest>=6", "httpx", "pypdf>=4"]
 
 [project.scripts]

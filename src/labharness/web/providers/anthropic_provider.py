@@ -36,7 +36,8 @@ def _document(doc: Dict[str, str]) -> Dict[str, Any]:
     return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": doc["data"]}}
 
 
-def to_messages(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def to_messages(history: List[Dict[str, Any]], own: str = "anthropic") -> List[Dict[str, Any]]:
+    """own: this provider's name; its own turns go back as they came (raw: thinking blocks and all)."""
     out: List[Dict[str, Any]] = []
     n = 0
     for m in history:
@@ -48,7 +49,7 @@ def to_messages(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             else:
                 out.append({"role": "user", "content": content})
         elif m["role"] == "assistant":
-            if m.get("provider") == "anthropic" and m.get("raw"):
+            if m.get("provider") == own and m.get("raw"):
                 content = m["raw"]
             else:
                 content = []
@@ -81,8 +82,10 @@ class AnthropicProvider(Provider):
     sees_pdfs = True
     can_search = True
 
-    def __init__(self, api_key: Optional[str]):
-        self.client = anthropic.AsyncAnthropic(api_key=api_key) if api_key else None
+    def __init__(self, api_key: Optional[str], base_url: Optional[str] = None, name: str = "", label: str = ""):
+        """base_url, name, label: Claude through the Kelvin hub (hubmodels.py), with the hub token as the key."""
+        self.name, self.label = name or self.name, label or self.label
+        self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url) if api_key else None
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
         """Claude's web search (a server tool: Anthropic runs the searches). The results it found, with Claude's
@@ -116,7 +119,7 @@ class AnthropicProvider(Provider):
             model=model,
             max_tokens=64000,
             system=system,
-            messages=to_messages(history),
+            messages=to_messages(history, self.name),
             tools=[{"name": t["name"], "description": t["description"], "input_schema": t["schema"],
                     "eager_input_streaming": True} for t in tools],
             cache_control={"type": "ephemeral"},

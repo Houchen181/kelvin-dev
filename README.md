@@ -46,7 +46,7 @@ Only people change the limits, the lab config and the approval mode. **Hands on 
 - **Windows 10/11:** run [`Kelvin-Setup-private.exe`](https://github.com/Houchen181/kelvin-dev/releases/download/private-latest/Kelvin-Setup-private.exe); no admin rights needed. If Windows warns you, choose **More info → Run anyway**.
 - **macOS (Apple silicon):** move `Kelvin.app` from the [latest public release](https://github.com/Houchen181/Kelvin/releases/latest) to Applications; the first time, right-click it and choose **Open**.
 
-Then **Lab → Set up…** finds your instruments, and an API key in Settings (or your ChatGPT plan) gives Kelvin a model. Kelvin keeps itself up to date.
+Then **Lab → Set up…** finds your instruments, and your Kelvin account gives Kelvin its models through the Kelvin hub (or use your ChatGPT plan, or a model server on your own computer). Kelvin keeps itself up to date.
 
 ## Documentation
 

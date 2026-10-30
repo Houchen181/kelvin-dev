@@ -28,7 +28,7 @@ from starlette.routing import Route
 from .._version import __version__
 from ..accounts import Accounts, LabRoles, OwnerPin, RoleRefused, cipher_for, has_legacy
 from ..configversions import ConfigVersions, widens as config_widens
-from .. import central
+from .. import central, edition
 from ..agent.approval import WebApprover
 from ..agent.runtime import SETUP_STEPS, LabRuntime, writable_folder
 from ..agent.server import build_server
@@ -53,7 +53,7 @@ from .relay import RelayLink
 from .remote import (API as PHONE_API, ROLES, Remote, addresses, allow_through_firewall, allowed, firewall_state,
                      pairing_link, remote_host_ok)
 from .providers.base import Provider, sees_images
-from .settings import Settings, default_model
+from .settings import ENV as OWN_KEYS, Settings, default_model
 from .store import ChatStore
 
 log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/kelvin.log
@@ -75,27 +75,34 @@ COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument c
 
 
 def make_providers(settings: Settings, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
+    """The model connections: the Kelvin hub's for a person signed in with their Kelvin account (hubmodels.py), a
+    model server on this computer, the ChatGPT plan; and in the private build (edition.py) the person's own keys and
+    other model services too."""
+    from .. import edition
+    from .hubmodels import hub_providers
     from .providers.anthropic_provider import AnthropicProvider
     from .providers.gemini_provider import GeminiProvider
     from .providers.openai_provider import OpenAIProvider
 
+    own = edition.private()
     providers: Dict[str, Provider] = {
         "anthropic": AnthropicProvider(settings.get("anthropic_api_key")),
         "openai": OpenAIProvider("openai", "GPT", settings.get("openai_api_key")),
         "gemini": GeminiProvider(settings.get("gemini_api_key")),
-    }
+    } if own else {}
     from .vision import Vision
 
-    def hub() -> Optional[Tuple[str, str]]:   # the hub's list of models that see pictures, for a person signed in
+    def hub() -> Optional[Tuple[str, str]]:   # the hub, for a person signed in there: its models, its picture list
         token, address = settings.get("account_token"), settings.account_hub or central.DEFAULT_HUB
         return (address, token) if token and address else None
     vision = Vision(Path(settings.path).parent if settings.path else None, hub)
+    providers.update(hub_providers(hub(), vision))
     if settings.get("local_base_url"):
         models = [m.strip() for m in (settings.get("local_models") or "").split(",")]
         providers["local"] = OpenAIProvider("local", "Local", settings.get("local_api_key"),
                                             base_url=settings.get("local_base_url"), models=models, vision=vision)
     from .services import PRESETS
-    for s in settings.services:   # OpenRouter, OpenCode, DeepSeek... each under its own name
+    for s in settings.services if own else []:   # OpenRouter, OpenCode, DeepSeek... each under its own name
         p = PRESETS.get(s.get("preset", "custom"), PRESETS["custom"])
         providers[s["id"]] = OpenAIProvider(
             s["id"], s["name"], settings.service_key(s), base_url=s["base_url"],
@@ -1705,6 +1712,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """GET: the services set up, and the ones Kelvin knows. POST {preset, name, base_url, api_key, models}: add."""
         from .services import presets_view
         if request.method == "POST":
+            if not edition.private():
+                return error(400, "This version of Kelvin uses models through your Kelvin account, not services of "
+                                  "your own.")
             try:
                 settings.add_service(await request.json())
             except ValueError as e:
@@ -2926,7 +2936,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if request.method == "POST":
             was_on = collection_on() is not None
             try:
-                settings.update(await request.json())
+                values = await request.json()
+                if isinstance(values, dict) and not edition.private():   # the user version takes no API keys
+                    values = {k: v for k, v in values.items() if k not in OWN_KEYS}
+                settings.update(values)
             except ValueError as e:
                 return error(400, str(e))
             configure_notifications()

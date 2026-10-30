@@ -12,7 +12,8 @@ _SKIP = ("image", "tts", "embedding", "live", "audio", "aqa", "learnlm")
 _OWN_ID = "lh_call_"
 
 
-def to_contents(history: List[Dict[str, Any]]) -> List[types.Content]:
+def to_contents(history: List[Dict[str, Any]], own: str = "gemini") -> List[types.Content]:
+    """own: this provider's name; its own turns go back as they came (raw: thought signatures and all)."""
     out: List[types.Content] = []
     for m in history:
         if m["role"] == "user":   # PDFs and pictures (both inline data), then the words about them
@@ -23,7 +24,7 @@ def to_contents(history: List[Dict[str, Any]]) -> List[types.Content]:
             else:
                 out.append(types.Content(role="user", parts=parts))
         elif m["role"] == "assistant":
-            if m.get("provider") == "gemini" and m.get("raw"):
+            if m.get("provider") == own and m.get("raw"):
                 out.append(types.Content.model_validate(m["raw"]))  # keeps thought signatures
                 continue
             parts = []
@@ -60,8 +61,11 @@ class GeminiProvider(Provider):
     sees_images = True
     sees_pdfs = True
 
-    def __init__(self, api_key: Optional[str]):
-        self.client = genai.Client(api_key=api_key) if api_key else None
+    def __init__(self, api_key: Optional[str], base_url: Optional[str] = None, name: str = "", label: str = ""):
+        """base_url, name, label: Gemini through the Kelvin hub (hubmodels.py), with the hub token as the key."""
+        self.name, self.label = name or self.name, label or self.label
+        options = types.HttpOptions(base_url=base_url) if base_url else None
+        self.client = genai.Client(api_key=api_key, http_options=options) if api_key else None
         self._cache: Optional[List[ModelInfo]] = None
 
     async def search(self, model: str, query: str, limit: int = 8) -> List[Dict[str, str]]:
@@ -106,7 +110,7 @@ class GeminiProvider(Provider):
         parts: List[types.Part] = []
         finish = None
         async for chunk in await self.client.aio.models.generate_content_stream(
-                model=model, contents=to_contents(history), config=config):
+                model=model, contents=to_contents(history, self.name), config=config):
             cand = chunk.candidates[0] if chunk.candidates else None
             if cand is None:
                 continue

@@ -42,8 +42,9 @@ from starlette.responses import FileResponse, HTMLResponse, JSONResponse, Redire
 from starlette.routing import Route
 
 from .._version import __version__
-from . import drawing
+from . import drawing, llm
 from . import relay as relaying
+from .catalog import Catalog
 from .db import DEFAULTS, SESSION_TTL, Busy, Hub, HubError, TooMuch, installation, loopback, log, previous_ids
 
 COOKIE = "kelvin_hub"
@@ -115,6 +116,8 @@ TERMS = """<p class="note"><b>Draft.</b> The Kelvin team must review these terms
 <li>Share only work you are allowed to share. Mark unpublished or confidential projects as such in Kelvin: the hub
 never receives them.</li>
 <li>Labs have no owner: anyone with a lab's join code can join it and see what its members share there.</li>
+<li>The hub's models (Claude, GPT, Gemini, OpenCode with the Kelvin team's keys) come with a monthly budget. The
+Kelvin team decides which models are offered and how large budgets are, and may change both.</li>
 <li>The Kelvin team may disable an account that abuses the hub.</li>
 <li>The hub is provided as it is, without warranty. Keep your own copies of your data; Kelvin keeps them on your
 computer anyway.</li>
@@ -125,10 +128,13 @@ PRIVACY = """<p class="note"><b>Draft.</b> The Kelvin team must review this noti
 <li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password),
 your labs, the Kelvins you connected, and what they share: normal projects, unfiled chats with their whole
 conversations, and runs with their files.</li>
-<li><b>What it never receives:</b> unpublished, confidential or model-limited projects, incognito chats, API keys,
-and ChatGPT or Claude Code sign-ins.</li>
+<li><b>What is never shared to it:</b> unpublished, confidential or model-limited projects and incognito chats.
+API keys and ChatGPT or Claude Code sign-ins never reach it.</li>
 <li><b>PDF pages to draw:</b> when your chat's model sees pictures but can't read PDFs, Kelvin sends the hub the
 pages it needs, from shared work only, and gets them back as pictures. The hub keeps nothing of them.</li>
+<li><b>The hub's models:</b> a chat with one of them passes through the hub to that model's service (Anthropic,
+OpenAI, Google or OpenCode). The hub keeps who used which model, how many tokens and what it cost, never the text.
+Confidential projects never use them.</li>
 <li><b>Who sees your shared work:</b> you, and the members of the lab it was shared in while you are a member too.
 Leaving a lab takes your work out of its view.</li>
 <li><b>Records:</b> the hub logs sign-ins, connections and changes, with the IP address, for security.</li>
@@ -142,8 +148,11 @@ TERMS_ACCOUNTS = """<p class="note"><b>Draft.</b> The Kelvin team must review th
 public.</p>
 <ul class="plain">
 <li>The hub keeps your Kelvin account, so the same email and password sign you in to Kelvin on any computer.</li>
-<li>Your work stays on your computers: the hub receives no chats, projects, runs or data, except PDF pages Kelvin
-asks it to draw as pictures, which it keeps nothing of.</li>
+<li>Your work stays on your computers: the hub keeps no chats, projects, runs or data. Chats with the hub's
+models pass through it to the model's service, and PDF pages Kelvin asks it to draw as pictures; it keeps none of
+their text. Confidential projects never use the hub's models.</li>
+<li>The hub's models (Claude, GPT, Gemini, OpenCode with the Kelvin team's keys) come with a monthly budget. The
+Kelvin team decides which models are offered and how large budgets are, and may change both.</li>
 <li>The Kelvin team runs the hub and may disable an account that abuses it.</li>
 <li>The hub is provided as it is, without warranty.</li>
 </ul>"""
@@ -153,11 +162,15 @@ the public.</p>
 <ul class="plain">
 <li><b>What the hub keeps:</b> your name, email, optional ORCID iD, a hash of your password (never the password), and
 the computers you sign in to Kelvin on: their name, operating system and Kelvin version, and when.</li>
-<li><b>What it never receives:</b> your work (chats, projects, runs, data), API keys, and ChatGPT or Claude Code
-sign-ins. They stay on your computers.</li>
-<li><b>PDF pages to draw:</b> the one exception. When your chat's model sees pictures but can't read PDFs, Kelvin
-sends the hub the pages it needs (never from incognito chats or unpublished, confidential or model-limited projects)
-and gets them back as pictures. The hub keeps nothing of them.</li>
+<li><b>What it never keeps:</b> your work (chats, projects, runs, data), which stays on your computers. Your API
+keys and ChatGPT or Claude Code sign-ins never reach it.</li>
+<li><b>The hub's models:</b> when your chat uses one of them (Claude, GPT, Gemini or OpenCode with the Kelvin
+team's keys), your messages pass through the hub to that model's service: Anthropic, OpenAI, Google or OpenCode. The
+hub keeps who used which model, how many tokens and what it cost, never the text. Confidential projects never use
+them.</li>
+<li><b>PDF pages to draw:</b> when your chat's model sees pictures but can't read PDFs, Kelvin sends the hub the
+pages it needs (never from incognito chats or unpublished, confidential or model-limited projects) and gets them back
+as pictures. The hub keeps nothing of them.</li>
 <li><b>Who sees your account:</b> you, and the Kelvin team, who run the hub. No other user does.</li>
 <li><b>Records:</b> the hub logs sign-ins and changes, with the IP address, for security.</li>
 <li><b>Your rights:</b> download your account with <b>Export</b>, and delete it with <b>Delete account</b>, both on
@@ -278,7 +291,9 @@ class Gate:
         await self.app(scope, receive, secured)
 
 
-def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None, backups: bool = True) -> Any:
+def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None, backups: bool = True,
+               llm_transport: Any = None) -> Any:
+    """llm_transport: how the model gateway reaches the model services (httpx; tests pass a pretend service)."""
     if hosts is None:
         hosts = {urlsplit(hub.base_url).netloc, "127.0.0.1:%d" % port, "localhost:%d" % port}
     signin_tries = Limiter(10, 900)
@@ -289,7 +304,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     exported: Dict[int, float] = {}            # when each person last exported
     in_flight: Dict[int, int] = {}             # each person's syncs, uploads and drawings running now
     heavy_limit: Dict[str, Any] = {}           # the limiter for syncs and uploads, made on the event loop
-    pictures = drawing.PictureList(hub.home)   # which models see pictures (models.dev, once a day)
+    catalog = Catalog(hub.home)                # models.dev, once a day: which models see pictures, their prices
+    gateway = llm.Gateway(hub, catalog, llm_transport)   # the model gateway (llm.py)
 
     # ------------------------------------------------------------------ helpers
 
@@ -579,6 +595,11 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                          'Send it again</button></form></div>' % (e(user["email"]), csrf))
         if hub.sharing:
             await sharing_sections(parts, uid, csrf)
+        offered, usage = await asyncio.gather(call(gateway.offered), call(gateway.usage_of, uid))
+        if offered:   # the model gateway (llm.py): what this person used of their budget
+            parts.append('<h2>Models through Kelvin</h2><p>$%.2f of your $%.2f this month (%s). It renews on %s.</p>'
+                         % (usage["spent"], usage["budget"], e(", ".join(s["name"] for s in offered)),
+                            e(usage["renews"])))
         parts.append(
             '<h2>Your profile</h2><form class="stack" method="post" action="/account/profile">%s'
             '<label>Email<input type="email" value="%s" disabled></label>'
@@ -925,7 +946,38 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         {"at", "services": {"opencode": {"yes": [...], "no": [...]}, ...}}."""
         if await app_of(request) is None:
             return api_error("not connected", 401)
-        return JSONResponse(await call(pictures.current))
+        return JSONResponse(await call(catalog.pictures))
+
+    async def llm_app(request: Request) -> Optional[Dict[str, Any]]:
+        """The signed-in Kelvin behind a model call: its token, where each service's SDK puts its key."""
+        auth = request.headers.get("authorization", "")
+        token = request.headers.get("x-api-key") or request.headers.get("x-goog-api-key") or (
+            auth[7:].strip() if auth.lower().startswith("bearer ") else "")
+        return await call(hub.app, token) if token else None
+
+    async def llm_call(request: Request) -> Response:
+        """A signed-in Kelvin's call to a model service, passed on with the hub's key (llm.py)."""
+        app = await llm_app(request)
+        if app is None:
+            return llm.refusal(401, "Sign in to Kelvin with your Kelvin account again to use the hub's models.")
+        if hub.needs_consent(app["user"]):
+            return llm.refusal(403, "The Kelvin hub's terms changed. Agree to them at %s/consent first." % hub.base_url)
+        try:
+            body = await read_body(request, llm.MAX_BODY) if request.method == "POST" else b""
+        except TooMuch:
+            return llm.refusal(413, "That message is larger than the Kelvin hub passes on (%d MB)." % (
+                llm.MAX_BODY // 2 ** 20))
+        return await gateway.forward(app, request.path_params["service"], request.method, request.path_params["path"],
+                                     request.query_params.multi_items(), dict(request.headers), body)
+
+    async def llm_status(request: Request) -> Response:
+        """For a signed-in Kelvin: the model services the hub offers, and the person's month so far."""
+        app = await app_of(request)
+        if app is None:
+            return api_error("not connected", 401)
+        services, usage = await asyncio.gather(call(gateway.offered),
+                                               call(gateway.usage_of, app["user"]["id"], app.get("lab_id")))
+        return JSONResponse(dict(usage, services=services))
 
     async def pdf_pages(request: Request) -> Response:
         """A signed-in Kelvin's PDF pages (only those a model needs) drawn as pictures, for a model that sees pictures
@@ -1190,8 +1242,9 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
 
     def admin_page(op: Dict[str, Any], body: str, error: Optional[str] = None, note: Optional[str] = None) -> Response:
         """The owner console: for the Kelvin team, who run the hub (operator key), never for its users."""
-        nav = ('<a href="/admin">Everyone</a><form class="inline" method="post" action="/admin/signout"><input '
-               'type="hidden" name="csrf" value="%s"><button>Leave</button></form>' % e(op["csrf"]))
+        nav = ('<a href="/admin">Everyone</a><a href="/admin/models">Models</a><form class="inline" method="post" '
+               'action="/admin/signout"><input type="hidden" name="csrf" value="%s"><button>Leave</button></form>'
+               % e(op["csrf"]))
         return page("Owner console", body, error=error, note=note, status=400 if error else 200, nav=nav)
 
     async def admin(request: Request, error: Optional[str] = None, note: Optional[str] = None) -> Response:
@@ -1261,9 +1314,9 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             user = await call(hub.user, uid)
         except HubError as err:
             return await admin(request, error="Account %d: %s" % (uid, err))
-        computers, activity, labs = await asyncio.gather(
+        computers, activity, labs, usage = await asyncio.gather(
             call(hub.connections, uid), call(hub.activity_of, uid, 200),
-            call(hub.labs_of, uid) if hub.sharing else asyncio.sleep(0, []))
+            call(hub.labs_of, uid) if hub.sharing else asyncio.sleep(0, []), call(gateway.usage_of, uid))
         csrf = '<input type="hidden" name="csrf" value="%s">' % e(op["csrf"])
         facts = [("Email", e(user["email"])), ("ORCID iD", e(user["orcid"] or "–")),
                  ("Email confirmed", when(user["email_confirmed_at"]) if user["email_confirmed_at"] else "not yet"),
@@ -1285,13 +1338,19 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             '<form class="inline" method="post" action="/admin/users/%d/%s">%s<input type="hidden" name="back" '
             'value="person"><button class="plain">%s this account</button></form>'
             '<h2>Computers</h2>%s'
+            '<h2>Models</h2><p>$%.2f of $%.2f this month%s.</p><form class="row" method="post" '
+            'action="/admin/users/%d/budget">%s<input type="hidden" name="back" value="person"><label>Own budget per '
+            'month <input name="usd" value="%s" placeholder="the default" style="max-width:7rem"></label><button '
+            'class="plain">Save</button></form>'
             '<h2>Activity</h2><div class="scroll"><table><tr><th>When</th><th>Who</th><th>What</th><th>Detail</th>'
             '<th>IP</th></tr>%s</table></div>'
             % (e(user["name"]), uid, "".join('<tr><th>%s</th><td>%s</td></tr>' % kv for kv in facts), uid, verb, csrf,
                verb.capitalize(),
                '<div class="scroll"><table><tr><th>Computer</th><th>System</th><th>Kelvin</th><th>First signed in'
                '</th><th>Last used</th></tr>%s</table></div>' % machines if computers else
-               '<p class="muted">Not signed in on any computer now.</p>', record)),
+               '<p class="muted">Not signed in on any computer now.</p>', usage["spent"], usage["budget"],
+               " (their own budget)" if usage["own_budget"] else "", uid, csrf,
+               "%g" % usage["budget"] if usage["own_budget"] else "", record)),
             error=error, note=note)
 
     async def admin_people_csv(request: Request) -> Response:
@@ -1317,6 +1376,127 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                         headers={"Content-Disposition": 'attachment; filename="kelvin-people.csv"',
                                  "Cache-Control": "no-store"})
 
+    def month_asked(request: Request) -> Optional[str]:
+        m = request.query_params.get("month", "")
+        return m if re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", m) else None
+
+    async def admin_models(request: Request, error: Optional[str] = None, note: Optional[str] = None) -> Response:
+        """The model gateway, for the operator (llm.py): the services' keys, what is offered, budgets, and the month's
+        use by person, model and lab."""
+        op = operator_of(request)
+        if op is None:
+            return RedirectResponse("/admin", 303)
+        keys, rep = await asyncio.gather(call(gateway.keys), call(gateway.report, month_asked(request)))
+        csrf = '<input type="hidden" name="csrf" value="%s"><input type="hidden" name="back" value="models">' % e(
+            op["csrf"])
+        services = "".join(
+            '<tr><td><b>%s</b></td><td>%s</td><td><form class="row" method="post" action="/admin/models/key">%s'
+            '<input type="hidden" name="service" value="%s"><input type="password" name="key" autocomplete="off" '
+            'placeholder="%s" style="max-width:14rem"><button class="plain">%s</button></form>%s</td>'
+            '<td><form class="row" method="post" action="/admin/models/offers">%s<input type="hidden" name="service" '
+            'value="%s"><input name="models" value="%s" placeholder="every model it lists" style="max-width:18rem">'
+            '<button class="plain">Save</button></form></td></tr>'
+            % (e(k["name"]), "key …%s, set %s" % (e(k["hint"]), when(k["set_at"])) if k["set"] else
+               '<span class="muted">no key</span>', csrf, e(k["service"]), "Replace the key" if k["set"] else "API key",
+               "Replace" if k["set"] else "Set",
+               ('<form class="inline" method="post" action="/admin/models/key/remove">%s<input type="hidden" '
+                'name="service" value="%s"><button class="plain">Remove</button></form>' % (csrf, e(k["service"])))
+               if k["set"] else "", csrf, e(k["service"]), e(k["models"])) for k in keys)
+
+        def money(v: Any) -> str:
+            return "$%.2f" % (v or 0)
+        people = "".join(
+            '<tr><td><a href="/admin/users/%d">%s</a><br><span class="muted">%s</span></td><td>%d</td><td>%s</td>'
+            '<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+            % (p["user_id"], e(p["name"]), e(p["email"]), p["requests"], "{:,}".format(p["input"] or 0),
+               "{:,}".format(p["output"] or 0), money(p["usd"]), money(p["budget"]),
+               "%d%%" % round(100 * (p["usd"] or 0) / p["budget"]) if p["budget"] else "–") for p in rep["people"])
+        models = "".join('<tr><td>%s</td><td>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>'
+                         % (e(llm.SERVICES.get(m["service"], {}).get("name", m["service"])), e(m["model"]),
+                            m["requests"], "{:,}".format(m["input"] or 0), "{:,}".format(m["output"] or 0),
+                            money(m["usd"])) for m in rep["models"])
+        labs = "".join(
+            '<tr><td>%s</td><td>%s</td><td><form class="row" method="post" action="/admin/models/budget">%s<input '
+            'type="hidden" name="scope" value="lab"><input type="hidden" name="ref" value="%d"><input name="usd" '
+            'value="%s" placeholder="none" style="max-width:7rem"><button class="plain">Save</button></form></td></tr>'
+            % (e(lab["name"]), money(lab["usd"]), csrf, lab["lab_id"],
+               "" if lab["budget"] is None else "%g" % lab["budget"]) for lab in rep["labs"])
+        t = rep["total"]
+        return admin_page(op, (
+            '<p><a href="/admin">← Everyone</a></p><h2>Model services</h2><p class="muted">Kelvins signed in with a '
+            'Kelvin account use these keys through the hub. Keys stay here, sealed; nobody sees them again.</p>'
+            '<div class="scroll"><table><tr><th>Service</th><th>Key</th><th></th><th>Models offered</th></tr>%s'
+            '</table></div>'
+            '<h2>Budgets</h2><form class="row" method="post" action="/admin/models/budget">%s<input type="hidden" '
+            'name="scope" value="default"><input type="hidden" name="ref" value="0"><label>Each person, per month '
+            '<input name="usd" value="%g" style="max-width:7rem"></label><button class="plain">Save</button></form>'
+            '<p class="muted">A person\'s own budget is set on their page. Past 80%%, they get a mail; past 100%%, '
+            'the hub stops their requests until %s.</p>'
+            '<h2>Use in %s</h2><form class="row" method="get" action="/admin/models"><input name="month" value="%s" '
+            'placeholder="YYYY-MM" style="max-width:8rem"><button class="plain">Show</button>'
+            '<a href="/admin/models/usage.csv?month=%s">Download (CSV)</a></form>'
+            '<p>%s · %d requests · %s tokens in · %s out</p>'
+            '<div class="scroll"><table><tr><th>Person</th><th>Requests</th><th>Tokens in</th><th>Tokens out</th>'
+            '<th>Cost</th><th>Budget</th><th>Used</th></tr>%s</table></div>'
+            '<h3>By model</h3><div class="scroll"><table><tr><th>Service</th><th>Model</th><th>Requests</th>'
+            '<th>Tokens in</th><th>Tokens out</th><th>Cost</th></tr>%s</table></div>%s'
+            '<p class="muted">Costs use models.dev\'s prices, read once a day; a model it doesn\'t list counts at $%g '
+            'in and $%g out per million tokens. The services\' own bills are what you pay.</p>'
+            % (services, csrf, rep["default_budget"], rep["renews"], e(rep["month"]), e(rep["month"]), e(rep["month"]),
+               money(t["usd"]), t["requests"], "{:,}".format(t["input"]), "{:,}".format(t["output"]),
+               people or '<tr><td colspan="7" class="muted">Nobody yet.</td></tr>',
+               models or '<tr><td colspan="6" class="muted">None yet.</td></tr>',
+               ('<h3>By lab</h3><div class="scroll"><table><tr><th>Lab</th><th>Cost</th><th>Lab budget</th></tr>%s'
+                '</table></div>' % labs) if labs else "",
+               gateway.limits()["fallback_price"]["input"], gateway.limits()["fallback_price"]["output"])),
+            error=error, note=note)
+
+    async def admin_models_csv(request: Request) -> Response:
+        """A month's model use, one row per person and model: no text, only counts and costs."""
+        if operator_of(request) is None:
+            return RedirectResponse("/admin", 303)
+        rep = await call(gateway.report, month_asked(request))
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow(["month", "user_id", "name", "email", "requests", "tokens_in", "tokens_out", "usd", "budget_usd"])
+        for p in rep["people"]:
+            w.writerow([rep["month"], p["user_id"], p["name"], p["email"], p["requests"], p["input"], p["output"],
+                        "%.4f" % (p["usd"] or 0), "%.2f" % p["budget"]])
+        return Response(out.getvalue(), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="kelvin-models-%s.csv"' % rep["month"],
+                                 "Cache-Control": "no-store"})
+
+    async def admin_model_key(request: Request, f: Dict[str, str]) -> str:
+        service = f.get("service", "")
+        try:
+            await call(gateway.set_key, service, f.get("key"))
+        except ValueError as err:
+            raise HubError(str(err))
+        return "%s's key is set." % llm.SERVICES[service]["name"]
+
+    async def admin_model_key_remove(request: Request, f: Dict[str, str]) -> str:
+        service = f.get("service", "")
+        if service not in llm.SERVICES:
+            raise HubError("No such service.")
+        await call(gateway.remove_key, service)
+        return "%s's key is removed: its models are no longer offered." % llm.SERVICES[service]["name"]
+
+    async def admin_model_offers(request: Request, f: Dict[str, str]) -> str:
+        try:
+            await call(gateway.set_offers, f.get("service", ""), f.get("models"))
+        except ValueError as err:
+            raise HubError(str(err))
+        return "Saved."
+
+    async def admin_model_budget(request: Request, f: Dict[str, str]) -> str:
+        scope = f.get("scope", "")
+        try:
+            ref = int(request.path_params["user_id"]) if "user_id" in request.path_params else int(f.get("ref") or 0)
+            await call(gateway.set_budget, "user" if "user_id" in request.path_params else scope, ref, f.get("usd"))
+        except ValueError as err:
+            raise HubError(str(err))
+        return "Budget saved."
+
     async def admin_signin(request: Request) -> Response:
         ip = ip_of(request) or "?"
         f = await form_of(request)
@@ -1341,7 +1521,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             f = await form_of(request)
             if op is None or not hmac.compare_digest(f.get("csrf", ""), op["csrf"]):
                 return RedirectResponse("/admin", 303)
-            back = admin_person if f.get("back") == "person" and "user_id" in request.path_params else admin
+            back = admin_person if f.get("back") == "person" and "user_id" in request.path_params else \
+                admin_models if f.get("back") == "models" else admin
             try:
                 note = await fn(request, f)
             except HubError as err:
@@ -1396,6 +1577,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         yield
         if task:
             task.cancel()
+        await gateway.close()
 
     relay, relay_routes = relaying.routes(hub, call, read_body, api_error)
     routes = [
@@ -1430,7 +1612,14 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/admin/signin", admin_signin, methods=["POST"]),
         Route("/admin/signout", admin_signout, methods=["POST"]),
         Route("/admin/users/{user_id:int}", admin_person),
+        Route("/admin/users/{user_id:int}/budget", operator_action(admin_model_budget), methods=["POST"]),
         Route("/admin/users/{user_id:int}/{verb}", operator_action(admin_disable), methods=["POST"]),
+        Route("/admin/models", admin_models),
+        Route("/admin/models/usage.csv", admin_models_csv),
+        Route("/admin/models/key", operator_action(admin_model_key), methods=["POST"]),
+        Route("/admin/models/key/remove", operator_action(admin_model_key_remove), methods=["POST"]),
+        Route("/admin/models/offers", operator_action(admin_model_offers), methods=["POST"]),
+        Route("/admin/models/budget", operator_action(admin_model_budget), methods=["POST"]),
         Route("/admin/backup", operator_action(admin_backup), methods=["POST"]),
         Route("/api/health", health),
         Route("/api/token", sharing_only(token), methods=["POST", "DELETE"]),
@@ -1442,6 +1631,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/api/account/delete", api_account_delete, methods=["POST"]),
         Route("/api/models/pictures", model_pictures),
         Route("/api/pdf/pages", pdf_pages, methods=["POST"]),
+        Route("/api/llm", llm_status),
+        Route("/llm/{service}/{path:path}", llm_call, methods=["GET", "POST"]),
         *relay_routes,
         Route("/api/me", sharing_only(me)),
         Route("/api/sync", sharing_only(sync), methods=["POST"]),

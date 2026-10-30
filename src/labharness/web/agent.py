@@ -31,6 +31,7 @@ from ..agent.server import INSTRUCTIONS, OUTSIDE
 from ..folderfiles import MAX_PDF_PAGES
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
+from .hubmodels import through_hub
 from .providers.base import Emit, ModelInfo, Provider, sees_images, text_of
 from . import brevity, compaction, memory, review, rules as rulebook
 from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
@@ -555,11 +556,16 @@ class ChatAgent:
         await self._exit.aclose()
 
     async def models(self) -> Dict[str, Any]:
-        """Available models grouped by provider; a provider that fails to list says why."""
+        """Available models grouped by provider; a provider that fails to list says why. The Kelvin hub's are there
+        while the hub offers them (hubmodels.py), with the person's month so far ("hub")."""
+        hubs = [p for p in self.providers.values() if callable(getattr(p, "prepare", None))]
+        if hubs:
+            await asyncio.gather(*(p.prepare() for p in hubs), return_exceptions=True)
         groups = []
         for p in self.providers.values():
             if not p.available():
-                groups.append({"provider": p.name, "label": p.label, "models": [], "missing_key": True})
+                if not through_hub(p.name):   # the hub's not offered now: not listed at all
+                    groups.append({"provider": p.name, "label": p.label, "models": [], "missing_key": True})
                 continue
             try:
                 models: List[ModelInfo] = await p.models()
@@ -567,7 +573,9 @@ class ChatAgent:
                                "models": [{"key": "%s:%s" % (m.provider, m.id), "label": m.label} for m in models]})
             except Exception as e:
                 groups.append({"provider": p.name, "label": p.label, "models": [], "error": describe_error(p, e)})
-        return {"groups": groups}
+        status = hubs[0].hub.status() if hubs else None
+        month = {k: status.get(k) for k in ("month", "spent", "budget", "renews", "lab")} if status else None
+        return dict({"groups": groups}, **({"hub": month} if month and month.get("budget") is not None else {}))
 
     # ------------------------------------------------------------------ memory
 
@@ -766,10 +774,26 @@ class ChatAgent:
             chat["rules"] = rulebook.merge(chat.get("rules"), project["rules"])
 
     def check_model(self, chat: Dict[str, Any], model_key: str, what: str = "") -> None:
+        why = self.not_here(chat, model_key)
+        if why:
+            raise ValueError("%s%s" % (why, " " + what if what else ""))
+
+    def not_here(self, chat: Dict[str, Any], model_key: str) -> str:
+        """Why this model may not see this chat ("": it may): the project's rules, or confidential work, which never
+        goes through the Kelvin hub (hubmodels.py)."""
         rules = self.chat_rules(chat)
         if not rulebook.allows(rules, model_key):
-            raise ValueError("%s is not allowed here: this project's rules say %s.%s" % (
-                self.label(model_key), rulebook.describe(rules), " " + what if what else ""))
+            return "%s is not allowed here: this project's rules say %s." % (self.label(model_key),
+                                                                           rulebook.describe(rules))
+        if through_hub(model_key.partition(":")[0]) and self._confidential(chat):
+            return ("%s goes through the Kelvin hub, and confidential work never does. Pick a model on this computer "
+                    "(Settings → Models → Local model)." % self.label(model_key))
+        return ""
+
+    def _confidential(self, chat: Dict[str, Any]) -> bool:
+        """A chat in a confidential project, or one that left such a project (store.py keeps the mark)."""
+        return bool(chat.get("confidential") or (self.store.memory_of(chat["id"]) or {}).get("confidential")
+                    if chat.get("id") else chat.get("confidential"))
 
     def recall(self, chat: Dict[str, Any], message: Dict[str, Any]) -> None:
         """Attach the notes that bear on this message (and were not given earlier in the chat) to the message."""
@@ -1413,10 +1437,13 @@ class ChatAgent:
             return None
         plan = str(call["input"].get("plan") or "")
         await emit({"type": "review_start", "call_id": call["id"], "kind": "plan", "model": key})
-        if not rulebook.allows(self.chat_rules(chat), key):
+        why = self.not_here(chat, key)
+        if why:
+            rules = self.chat_rules(chat)
             await emit({"type": "review", "call_id": call["id"], "kind": "plan", "model": key, "label": self.label(key),
-                        "verdict": "", "text": "No second opinion: %s may not see this project (%s)." % (
-                            self.label(key), rulebook.describe(self.chat_rules(chat)))})
+                        "verdict": "", "text": "No second opinion: %s" % (
+                            "%s may not see this project (%s)." % (self.label(key), rulebook.describe(rules))
+                            if not rulebook.allows(rules, key) else why)})
             return None
         try:
             provider, model_id = self.provider_for(key)

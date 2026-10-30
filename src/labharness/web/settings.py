@@ -51,12 +51,17 @@ CARD_LANGUAGES = ("zh-Hans",)   # approval cards shown in another language (card
 # The model a chat starts with when nobody chose one under Settings → Models → Default model for new chats: Claude
 # Opus, through a Claude API key, else through the Claude Code on this computer (the owner's choice, 2026-10-29).
 # Settings says which model Automatic is, since F3 #25 found it silently Opus; a person who wants another picks it there.
-DEFAULT_MODELS = ("anthropic:claude-opus-5-5", "claudecode:opus")
+DEFAULT_MODELS = ("anthropic:claude-opus-5-5", "hub-anthropic:claude-opus-5-5", "claudecode:opus")
 # Claude's models named without their service, as Claude Code takes them ("sonnet") or by their id alone
 # ("claude-sonnet-5-5"): F3 #25 found "claudecode:sonnet" needed in some places while "sonnet" worked in others
 CLAUDE = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "haiku": "claude-haiku-5-5",
           "fable": "claude-fable-5-1"}
 BRIDGE = {"claude-sonnet-5-5": "sonnet", "claude-opus-5-5": "opus", "claude-haiku-5-5": "haiku"}   # Claude Code's
+
+
+def _own_keys() -> bool:
+    from ..edition import private
+    return private()
 
 
 def default_model(keys: List[str], chosen: Optional[str] = "") -> Optional[str]:
@@ -73,8 +78,9 @@ def default_model(keys: List[str], chosen: Optional[str] = "") -> Optional[str]:
 def resolve_model(key: str, available: Any) -> str:
     """A model key as the services know it ("anthropic:claude-sonnet-5-5"), from one written as people and Claude Code
     write it: "sonnet", "claude-sonnet-5-5", "anthropic:sonnet", "claudecode:claude-sonnet-5-5". A bare Claude model
-    goes to the Claude API key when there is one, else to Claude Code. available(service): is it set up here? Anything
-    else comes back as it was (the caller says why it can't be used)."""
+    goes to the Claude API key when there is one, else through the Kelvin hub, else to Claude Code.
+    available(service): is it set up here? Anything else comes back as it was (the caller says why it can't be
+    used)."""
     text = str(key or "").strip()
     service, colon, model = text.partition(":")
     if not colon:   # no service named: a Claude model's name or id alone
@@ -85,6 +91,8 @@ def resolve_model(key: str, available: Any) -> str:
         return text
     if service == "anthropic" or (not service and available("anthropic")):
         return "anthropic:" + full
+    if service == "hub-anthropic" or (not service and available("hub-anthropic")):   # through the Kelvin hub
+        return "hub-anthropic:" + full
     if (service == "claudecode" or not service) and full in BRIDGE and (service or available("claudecode")):
         return "claudecode:" + BRIDGE[full]
     return text
@@ -423,6 +431,7 @@ class Settings:
             "checklist": self._user.get("checklist") != "hidden",
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
+            "own_keys": _own_keys(),   # the private build: the person's own API keys and services (edition.py)
             "claude_code_path": self._user.get("claude_code_path", ""),
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
             "idle_off": self.idle_off_minutes,

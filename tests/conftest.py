@@ -20,9 +20,17 @@ homelab._BUILTIN_IDS = None
 
 @pytest.fixture(autouse=True)
 def no_real_hub(monkeypatch):
-    """Tests never reach the real Kelvin hub: one that needs a hub names its own."""
+    """Tests never reach the real Kelvin hub: one that needs a hub names its own. Nor models.dev: a test hub's
+    catalog (hub/catalog.py) reads a list of its own, or none."""
     from labharness import central
     monkeypatch.setattr(central, "DEFAULT_HUB", "")
+    try:
+        from labharness.hub import catalog
+    except ImportError:
+        return
+    monkeypatch.setattr(catalog, "_read_models_dev", lambda: {})
+    from labharness.web import hubmodels
+    hubmodels._SEEN.clear()   # what a hub said in one test is never another's
 
 
 @pytest.fixture

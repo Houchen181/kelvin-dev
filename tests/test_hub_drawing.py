@@ -14,7 +14,7 @@ pytest.importorskip("starlette")
 pytest.importorskip("httpx")
 
 from labharness import central  # noqa: E402
-from labharness.hub import drawing, pdfdraw  # noqa: E402
+from labharness.hub import catalog, drawing, pdfdraw  # noqa: E402
 from test_hub_web import make, through  # noqa: E402
 
 CATALOG = {
@@ -50,36 +50,36 @@ def test_png_rows_are_written_as_they_are():
 
 
 def test_which_models_see_pictures_from_models_dev(tmp_path):
-    assert drawing.pictures_in(CATALOG) == {"opencode": {"yes": ["deepseek-v4.1-flash"], "no": ["glm-5.3"]},
+    assert catalog.pictures_in(CATALOG) == {"opencode": {"yes": ["deepseek-v4.1-flash"], "no": ["glm-5.3"]},
                                             "deepseek": {"yes": ["deepseek-flash"], "no": []}}
     reads = []
 
     def read():
         reads.append(1)
         return CATALOG
-    kept = drawing.PictureList(tmp_path, read)
-    assert kept.current()["services"]["opencode"]["yes"] == ["deepseek-v4.1-flash"]
-    assert kept.current()["at"] and len(reads) == 1                            # once a day
-    again = drawing.PictureList(tmp_path, read)
-    assert again.current()["services"]["deepseek"]["yes"] == ["deepseek-flash"] and len(reads) == 1   # kept on disk
+    kept = catalog.Catalog(tmp_path, read)
+    assert kept.pictures()["services"]["opencode"]["yes"] == ["deepseek-v4.1-flash"]
+    assert kept.pictures()["at"] and len(reads) == 1                           # once a day
+    again = catalog.Catalog(tmp_path, read)
+    assert again.pictures()["services"]["deepseek"]["yes"] == ["deepseek-flash"] and len(reads) == 1   # kept on disk
 
     def down():
         raise OSError("models.dev is down")
-    stale = drawing.PictureList(tmp_path, down)
-    stale._kept["at"] = time.time() - drawing.LIST_EVERY - 1
-    assert stale.current()["services"]["opencode"]["no"] == ["glm-5.3"]        # what it had, tried again later
+    stale = catalog.Catalog(tmp_path, down)
+    stale._kept["at"] = time.time() - catalog.EVERY - 1
+    assert stale.pictures()["services"]["opencode"]["no"] == ["glm-5.3"]       # what it had, tried again later
     assert stale._kept["tried"] > stale._kept["at"]
 
 
 def test_the_api_needs_a_signed_in_kelvin(tmp_path, monkeypatch):
-    monkeypatch.setattr(drawing, "_read_models_dev", lambda: CATALOG)
+    monkeypatch.setattr(catalog, "_read_models_dev", lambda: CATALOG)
     hub, client, token = signed_in(tmp_path)
     auth = {"Authorization": "Bearer " + token}
     assert client.get("/api/models/pictures").status_code == 401
     assert client.post("/api/pdf/pages", content=b"%PDF-1.4").status_code == 401
     r = client.get("/api/models/pictures", headers=auth)
     assert r.status_code == 200 and r.json()["services"]["opencode"]["no"] == ["glm-5.3"]
-    assert (tmp_path / "hub" / drawing.LIST_FILE).exists()
+    assert (tmp_path / "hub" / catalog.FILE).exists()
     assert "draws_pdfs" in client.get("/api/health").json()
 
 
@@ -111,7 +111,7 @@ def test_pages_are_drawn_within_limits_and_never_kept(tmp_path, monkeypatch):
 
 
 def test_kelvin_asks_the_hub(tmp_path, monkeypatch):
-    monkeypatch.setattr(drawing, "_read_models_dev", lambda: CATALOG)
+    monkeypatch.setattr(catalog, "_read_models_dev", lambda: CATALOG)
     monkeypatch.setattr(drawing, "can_draw", lambda: True)
     page = {"mime": "image/png", "data": base64.b64encode(a_png()).decode()}
     monkeypatch.setattr(drawing, "draw", lambda pdf: [page])

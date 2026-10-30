@@ -112,9 +112,10 @@ class OpenAIProvider(Provider):
                  models: Optional[List[str]] = None, models_url: Optional[str] = None, exclude: Iterable[str] = (),
                  tools_only: bool = False, headers: Optional[Dict[str, str]] = None,
                  fetch: Callable[[str, Optional[str]], Any] = _fetch_json, preset: str = "", pictures: str = "",
-                 vision: Any = None):
+                 vision: Any = None, api: str = ""):
         """preset: the service Kelvin knows it as (services.py; for the hub's list of models that see pictures).
-        pictures: the person's switch for the service, "on" or "off" ("": model by model). vision: vision.Vision."""
+        pictures: the person's switch for the service, "on" or "off" ("": model by model). vision: vision.Vision.
+        api: "openai" for OpenAI's own API at another address (through the Kelvin hub: hubmodels.py)."""
         self.name, self.label = name, label
         self._static = [m for m in (models or []) if m]
         self.models_url = models_url
@@ -127,8 +128,9 @@ class OpenAIProvider(Provider):
             self.client = openai.AsyncOpenAI(api_key=api_key or "local", base_url=base_url or None,
                                              default_headers=headers or None)
         self._cache: Optional[List[ModelInfo]] = None
-        self.can_search = name == "openai" and not base_url   # OpenAI's own web search (local services have none)
-        self.sees_images = name == "openai" and not base_url  # all of OpenAI's own; another service's, model by model
+        self.own = api == "openai" or (name == "openai" and not base_url)   # OpenAI's own API, here or via the hub
+        self.can_search = self.own    # OpenAI's own web search (local services have none)
+        self.sees_images = self.own   # all of OpenAI's own models; another service's, model by model
         self.sees_pdfs = self.sees_images                    # OpenAI's models read PDFs as files
         self.preset = preset or name
         self.pictures = pictures if pictures in ("on", "off") else ""
@@ -176,7 +178,7 @@ class OpenAIProvider(Provider):
             found = []
             for m in listed:
                 mid = m.id
-                if self.name == "openai" and (not mid.startswith(("gpt-", "o1", "o3", "o4", "o5", "chatgpt"))
+                if self.own and (not mid.startswith(("gpt-", "o1", "o3", "o4", "o5", "chatgpt"))
                                               or any(s in mid for s in _SKIP)):
                     continue
                 if self.exclude and mid.split("/")[-1].lower().startswith(self.exclude):
@@ -190,7 +192,7 @@ class OpenAIProvider(Provider):
                     self._inputs[mid] = "image" in inputs
                 found.append((getattr(m, "created", 0) or 0, mid))
             ordered = sorted(found, reverse=True)
-            if self.name not in ("openai", "local"):
+            if not self.own and self.name != "local":
                 ordered = ordered[:MAX_LISTED]
             self._cache = [ModelInfo(mid, mid, self.name) for _, mid in ordered]
         return self._cache

@@ -374,27 +374,28 @@
         </section>
         <section class="set-page" data-page="models" hidden>
           <h3 class="set-title">Models</h3>
-          <p class="muted small">Keys stay on this computer. An empty field keeps its key.</p>
-          <div class="field">
+          <p id="hub-usage" class="hint" hidden></p>
+          <p class="muted small own-keys">Keys stay on this computer. An empty field keeps its key.</p>
+          <div class="field own-keys">
             <label for="k-anthropic">Claude — Anthropic API key</label>
             <div class="key-row"><input id="k-anthropic" name="anthropic_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="anthropic_api_key">Remove</button></div>
             <span class="hint" data-hint="anthropic_api_key"></span>
           </div>
-          <div class="field">
+          <div class="field own-keys">
             <label for="k-openai">GPT — OpenAI API key</label>
             <div class="key-row"><input id="k-openai" name="openai_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="openai_api_key">Remove</button></div>
             <span class="hint" data-hint="openai_api_key"></span>
           </div>
           <div class="field">
             <div class="field-row"><span class="field-label">ChatGPT plan</span><span id="chatgpt-status" class="hint"></span></div>
-            <span class="hint">Instead of an OpenAI API key.</span>
+            <span class="hint own-keys">Instead of an OpenAI API key.</span>
             <div class="chatgpt-row">
               <button id="chatgpt-signin" class="chatgpt-btn" type="button">Continue with ChatGPT</button>
               <a id="chatgpt-usage" class="link soft" href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer" hidden>Manage usage</a>
               <button id="chatgpt-signout" class="link soft" type="button" hidden>Sign out</button>
             </div>
           </div>
-          <div class="field">
+          <div class="field own-keys">
             <label for="k-gemini">Gemini — Google AI API key</label>
             <div class="key-row"><input id="k-gemini" name="gemini_api_key" type="password" autocomplete="off" spellcheck="false"><button type="button" class="link" data-clear="gemini_api_key">Remove</button></div>
             <span class="hint" data-hint="gemini_api_key"></span>
@@ -408,7 +409,7 @@
             <label for="local-key">API key (if the server needs one)</label>
             <input id="local-key" name="local_api_key" type="password" autocomplete="off">
           </details>
-          <div class="field">
+          <div class="field own-keys">
             <span class="field-label">Other model services</span>
             <span class="hint">Any OpenAI-compatible service: OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI or your own. Its models must call tools.</span>
             <ul id="service-list" class="memory-notes"></ul>

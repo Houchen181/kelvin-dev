@@ -113,6 +113,11 @@ class Central:
             raise Unreachable("The Kelvin hub isn't answering (%s)." % status)
         raise CentralError(str(answer.get("error") or "The hub said no (%s)." % status), status, answer)
 
+    def llm(self, token: str) -> Dict[str, Any]:
+        """The model services the hub offers through its gateway, and this person's month so far (web/hubmodels.py):
+        {"services": [{"id", "name", "models"}], "month", "spent", "budget", "renews", "lab"}."""
+        return self._send("GET", "/api/llm", None, token, missing="This Kelvin hub offers no models yet.")
+
     def pictures(self, token: str) -> Dict[str, Any]:
         """Which models see pictures, service by service: {"services": {"opencode": {"yes": [...], "no": [...]}}}
         (web/vision.py)."""

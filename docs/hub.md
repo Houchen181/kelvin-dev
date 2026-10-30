@@ -15,7 +15,7 @@ The sections below on sharing describe it for when it is switched on.
 **Status:**
 - **Built and tested:** the server, its database, a Kelvin's client (`hub/client.py`), Kelvin's sign-in with Kelvin accounts (`central.py`), and sharing (Settings → **Account** → Kelvin hub, and syncing in the background: `web/hubsync.py`; switched off).
 - **Drafts:** the terms and privacy notice.
-- **To do:** putting the hub on the internet for good. Kelvin's built-in hub address (`central.DEFAULT_HUB`) stays empty until then.
+- **To do:** moving the hub to a server for good ([Moving the hub to a server](#moving-the-hub-to-a-server)); Kelvin's built-in address (`central.DEFAULT_HUB`) then changes with an update.
 
 ## What is shared
 
@@ -91,12 +91,39 @@ The hub needs the `websockets` package for this (the `hub` extra brings it), and
 
 Two things the hub does for a Kelvin where someone is signed in with their Kelvin account, so that no Kelvin needs them itself (`hub/drawing.py`; Kelvin's side `web/vision.py` and `web/agent.py`):
 
-- **Which models see pictures:** `GET /api/models/pictures` answers, for each of Kelvin's ready-made services (OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI), the models that take pictures and those that don't. The hub reads them from [models.dev](https://models.dev), a public list of models, at most once a day, and keeps them in `model-pictures.json`. When models.dev can't be read, the hub keeps what it has and tries again an hour later. Each Kelvin fetches the list once a day ([portal.md](portal.md#in-the-portal)).
+- **Which models see pictures:** `GET /api/models/pictures` answers, for each of Kelvin's ready-made services (OpenRouter, OpenCode, DeepSeek, Groq, Mistral, xAI), the models that take pictures and those that don't. The hub reads them from [models.dev](https://models.dev), a public list of models, at most once a day, and keeps them in `models-dev.json`. When models.dev can't be read, the hub keeps what it has and tries again an hour later. Each Kelvin fetches the list once a day ([portal.md](portal.md#in-the-portal)).
 - **PDF pages drawn as pictures:** `POST /api/pdf/pages`, for a chat whose model sees pictures but can't read PDFs. Kelvin sends only the pages that model needs (at most 6), as one small PDF, and gets back one PNG per page.
   - **What never goes:** pages from incognito chats or from unpublished, confidential or model-limited projects. Those chats get the pages' text.
   - **Nothing kept:** the hub draws in memory and answers; it keeps and logs nothing of the pages.
   - **Its own process:** `hub/pdfdraw.py` draws with pypdfium2 (PDFium, Chrome's PDF engine) in a separate process, so a broken or hostile PDF can't stop the hub. Limits: 10 MB in, 8 pages, 60 seconds, 1600 pixels on a page's longest side. One person has at most 3 drawings and syncs running at once.
   - **Without pypdfium2:** the hub answers 501, and Kelvin gives the model the pages' text. The `hub` extra brings pypdfium2; the Kelvin app never does.
+
+## Models through the hub
+
+People signed in to Kelvin with their Kelvin account use Claude, GPT, Gemini and OpenCode with the keys the owner sets on the hub, so nobody needs keys of their own (`hub/llm.py`; Kelvin's side `web/hubmodels.py` and `web/providers/hub.py`).
+
+- **In Kelvin:** the model picker shows **Claude · Kelvin hub**, **GPT · Kelvin hub**, **Gemini · Kelvin hub** and **OpenCode · Kelvin hub** while the hub has a key for each, and Settings → **Models** shows the month so far. A new chat starts on Claude Opus through the hub when the person has no Claude key of their own.
+- **The user version** of Kelvin (the app other people install: `edition.py`) takes no API keys: its models are the hub's, a model server on the person's own computer, and their ChatGPT plan. The private build and Kelvin from source also take the person's own keys and other model services.
+- **Each service's own API, unchanged:** `/llm/<service>/<path>` passes a request on and streams the answer back as it comes. Kelvin's model connections only change their address and send the person's hub token as their key, so prompt caching, thinking, pictures, PDFs and web search work as with a key of one's own. Only Kelvin's calls pass: answers, token counts and model lists (`llm.SERVICES`); anything else is 404 and never reaches a service.
+- **Keys:** set, replaced and removed on the owner console's **Models** page. They stay on the hub, sealed with `gateway.key` in its folder, and never go to anyone's computer; the console shows only their last 4 characters. Back up `gateway.key` apart from the database: without it, the keys must be set again.
+- **Which models:** each service offers every model it lists, or only those the owner names on the Models page. A model that isn't offered is refused (403).
+- **What is kept:** for each answer, who, which lab, which service and model, the tokens (prompt, cached, written to cache, answer) and what it cost. Never the text. Costs use [models.dev](https://models.dev)'s prices, read once a day with the list of models that see pictures (`hub/catalog.py`, `models-dev.json`), with dearer tiers past a context size and Claude's web searches at $0.01 each; a model models.dev doesn't list counts at $15 in and $75 out per million tokens. The services' own bills are what the owner pays.
+- **Budgets:** each person has a monthly budget in dollars: $20 until the owner sets another default, or their own on their page in the console. A lab can have one too (with labs switched on). A request past either is refused (402) with what to do, which Kelvin shows in the chat. Months are UTC calendar months.
+- **The 80% mail:** an answer that takes a person past 80% of their budget sends them a mail, once a month.
+- **Limits:** per person, 60 requests a minute and 4 answers at once; 40 MB a request. `"llm": {"per_minute", "at_once", "alert_at", "fallback_price"}` in `hub.json` changes them.
+- **Confidential work never goes through the hub:** Kelvin refuses the hub's models in confidential projects and in chats that left one. Other chats (unpublished projects and incognito chats too) pass through the hub to the model's service; the hub keeps none of their text. The terms and privacy notice say so; their version (`CONSENT_VERSION`) moved to 2026-10-29, so people agree to them again.
+- **What a person sees when it fails:** a sign-in that ended (401: sign out and in again), a budget used up (402), a model not offered or new terms (403), too many at once (429), the service refusing the hub's key or out of reach (502: tell the hub's owner), no key on the hub for that service (503).
+
+### Moving the hub to a server
+
+Model traffic for many labs is more than Tailscale Funnel carries, so the hub moves to a server before other labs use these models. Nothing in the hub changes:
+
+1. **A server:** any always-on Linux machine. A small cloud VM (2 CPUs, 2–4 GB, 40 GB disk) carries thousands of people; answers stream through it, so its network matters more than its CPU.
+2. **Install:** Python 3.10 or newer, a checkout of this repository, and `pip install -e ".[hub]"`.
+3. **Move the folder:** stop the hub, run `kelvin-hub backup`, and copy the whole hub folder (`hub.sqlite3`, `hub.json`, `gateway.key`, `files/`) to the server.
+4. **Run it as a service:** a systemd unit that runs `kelvin-hub --home /srv/kelvin-hub` as its own user and restarts it. It still listens on `127.0.0.1:8780` only.
+5. **Put it online:** Cloudflare Tunnel (or Caddy with a domain name) to `127.0.0.1:8780`, then `--base-url https://hub.example.org` and, behind Cloudflare, `"client_ip_header": "CF-Connecting-IP"` ([Putting it online](#putting-it-online)).
+6. **Point Kelvin at it:** an update of Kelvin (`central.DEFAULT_HUB`) and the iPhone app (`Account.defaultHub`) changes the built-in address. Until people have that update, keep the old address answering.
 
 ## Connecting a Kelvin
 
@@ -190,7 +217,8 @@ The hub's folder:
 | `outbox/` | Mail the hub would have sent, while no SMTP server is set |
 | `terms.html`, `privacy.html` | Optional: your own terms and privacy notice, replacing the built-in drafts |
 | `hub.log` | Sign-ins, connections, syncs and errors by account number; never addresses, passwords or tokens |
-| `model-pictures.json` | Which models see pictures, from models.dev, read again once a day |
+| `models-dev.json` | Which models see pictures and what they cost, from models.dev, read again once a day |
+| `gateway.key` | Seals the model services' keys in the database ([Models through the hub](#models-through-the-hub)). Back it up apart from the database |
 
 **Backups:** the daily copy covers the database only. Back up `files/` with the rest of the machine.
 
@@ -198,6 +226,7 @@ The hub's folder:
 
 `/admin` asks for the operator key. It is the Kelvin team's, not an account or a role. No user sees any of this.
 - **The hub:** people, confirmed, disabled, active in 30 days, computers, sign-ins, the database's size and the last backup. **Back up the database now** makes a backup at once.
+- **Models** (`/admin/models`): each model service's key (set, replace, remove; only its last 4 characters shown), the models it offers, the default monthly budget, and the month's use: by person (requests, tokens, cost, budget, share used), by model and by lab, with a CSV of it. A person's page shows their month and takes their own budget ([Models through the hub](#models-through-the-hub)).
 - **People:** everyone, newest first, 200 to a page (**Older** and **Newer**), and searchable by name or email. Each row shows whether the email is confirmed, how many computers the person is signed in on, the Kelvin version they last used, when they joined and when they were last seen. **Disable** stops an account from signing in and ends its sign-ins on every computer; **Enable** undoes it.
 - **Download everyone (CSV):** `kelvin-people.csv`, one row per person: id, name, email, ORCID iD, email confirmed, joined, last seen, disabled, computers, Kelvin version, terms agreed. It never includes a password or its hash.
 - **A person's page** (`/admin/users/<id>`, from their name): the account, the computers they sign in to Kelvin on (name, system, Kelvin version, first sign-in, last used), and the hub's record of the account (sign-ins, changes, resets, with IP addresses), newest first.
@@ -245,6 +274,8 @@ Kelvin accepts a hub address on the internet only with https.
 | Call | What it does |
 |---|---|
 | `GET /api/health` | `{"ok": true, "hub": version, "draws_pdfs"}` |
+| `GET /api/llm` | A signed-in Kelvin's: the model services offered `{"services": [{"id", "name", "models"}], "month", "spent", "budget", "renews", "lab"}` |
+| `GET, POST /llm/<service>/<path>` | A signed-in Kelvin's call to a model service (`anthropic`, `openai`, `gemini`, `opencode`), passed on with the hub's key; its token in `x-api-key`, `x-goog-api-key` or `Authorization: Bearer`. Errors in the services' own shape: 401, 402, 403, 404, 413, 429, 502, 503 |
 | `GET /api/models/pictures` | A signed-in Kelvin's: `{"at", "services": {"opencode": {"yes": [...], "no": [...]}, ...}}` |
 | `POST /api/pdf/pages` | A signed-in Kelvin's: PDF pages as the raw body → `{"pages": [{"mime": "image/png", "data"}]}`. 403 until new terms are agreed to, 413 over 10 MB, 422 when they can't be drawn, 429 with 3 already running, 501 without pypdfium2 |
 | `POST /api/signin` | Kelvin's sign-in: `{"email", "password", "installation"}` → `{"access_token", "user", "needs_consent", "account_url"}` |

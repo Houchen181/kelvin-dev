@@ -92,6 +92,14 @@ def describe(label: str, service: str, e: BaseException) -> str:
     if "Connection" in cls or "ConnectError" in cls or isinstance(e, ConnectionError):
         return ("Kelvin couldn't reach %s: check this computer's internet connection, or a proxy or firewall that may "
                 "block it." % label)
+    if service.startswith("hub-"):   # through the Kelvin hub (hub/llm.py), which says why in plain words
+        if status == 401:
+            return "Your sign-in to the Kelvin hub has ended: sign out of Kelvin and in again to use %s." % label
+        if status in (402, 403, 413, 429, 502, 503) and said:
+            return "%s: %s" % (label, said)
+        if AUTH.search(kinds) or (KEYISH.search(said) and (WRONG.search(said) or EXPIRED.search(said)
+                                                          or MISSING.search(said))):
+            return "%s refused the Kelvin hub's key (%s): tell the hub's owner." % (label, said)
     if service == "claudecode":   # Claude Code says why in its own result text (claudecode.failure)
         if CREDIT.search(kinds):
             return ("Your Claude account has no credit left (Claude Code says: %s). Add credit or check the plan, or "

@@ -9,6 +9,10 @@ import re
 from typing import Any, Dict, Iterable, Optional
 
 PROVIDERS = {"anthropic": "Claude", "openai": "GPT", "gemini": "Gemini", "local": "local models"}
+# how other providers are named in what Kelvin says: the Kelvin hub's (hubmodels.py)
+LABELS = dict(PROVIDERS, **{"hub-anthropic": "Claude through the Kelvin hub", "hub-openai": "GPT through the Kelvin hub",
+                           "hub-gemini": "Gemini through the Kelvin hub",
+                           "hub-opencode": "OpenCode through the Kelvin hub"})
 OPEN = {"providers": None, "literature": True}
 
 
@@ -56,7 +60,7 @@ def describe(rules: Optional[Dict[str, Any]]) -> str:
     r = normalize(rules)
     parts = []
     if r["providers"] is not None:
-        names = [PROVIDERS.get(p, p) for p in r["providers"]]
+        names = [LABELS.get(p, p) for p in r["providers"]]
         parts.append("only %s may see it" % (" and ".join(names) if names else "no model"))
     if not r["literature"]:
         parts.append("no literature search")
@@ -64,4 +68,4 @@ def describe(rules: Optional[Dict[str, Any]]) -> str:
 
 
 def names(providers: Iterable[str]) -> str:
-    return " and ".join(PROVIDERS.get(p, p) for p in providers)
+    return " and ".join(LABELS.get(p, p) for p in providers)
