@@ -195,6 +195,17 @@ def test_runs_are_filed_with_their_chat_never_under_another_projects_confidentia
     assert "Acme" not in status
 
 
+
+def test_a_run_keeps_its_marks_for_the_hub_whatever_its_project_is_marked_later(rt, tmp_path):
+    from labharness.web.hubsync import run_items
+    p = Portal(tmp_path, rt)
+    p.turn(p.secret, [("run_plan", {"plan": NDA})])
+    p.turn(p.other, [("run_plan", {"plan": OPEN})])
+    p.store.set_sharing(p.nda, "")
+    p.store.set_rules(p.nda, None)   # the project shared later: its earlier runs stay as they were made
+    shared = [item["id"] for item, _ in run_items(rt.runs, {p.nda}, None)[0]]
+    assert any(r.endswith("thesis_gate") for r in shared) and not any(r.endswith("acme_gate") for r in shared)
+
 # ------------------------------------------------------------------ the portal's reports and records (t06)
 
 def test_the_portals_day_records_reports_and_analysis_list_follow_the_chat_they_are_made_from(rt, tmp_path):

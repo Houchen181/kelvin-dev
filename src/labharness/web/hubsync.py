@@ -124,10 +124,11 @@ def run_items(runs: Any, shared: Set[str], person: Optional[str] = None,
               old_runs: bool = False) -> Tuple[List[Tuple[Dict[str, Any], Path]], int]:
     """The finished runs (those with a meta.json) that may be shared, oldest first, and how many older ones stay
     here. A run is shared if this person made it (meta "user"; None without accounts), in a shared project or in
-    none, and no incognito chat started it. A run of a project that is gone is not shared: Kelvin can't tell whether
-    that project was. Runs from before Kelvin noted who made them (no "user"; or made without accounts, now that
-    there are) are shared only with old_runs: one may have come from an incognito chat, or from someone else using
-    the same data folder."""
+    none, and no incognito chat started it, nor work under model rules or marked confidential or unpublished (the
+    run keeps them, whatever its project is marked later). A run of a project that is gone is not shared: Kelvin
+    can't tell whether that project was. Runs from before Kelvin noted who made them (no "user"; or made without
+    accounts, now that there are) are shared only with old_runs: one may have come from an incognito chat, or from
+    someone else using the same data folder."""
     try:
         folders = sorted((d for d in runs.iterdir() if d.is_dir()), key=lambda d: d.name)   # runs: RunFolders
     except OSError:
@@ -142,8 +143,9 @@ def run_items(runs: Any, shared: Set[str], person: Optional[str] = None,
             continue
         if meta.get("status") in (None, "running"):
             continue   # still running, or never finished
-        if not isinstance(meta, dict) or meta.get("incognito") or meta.get("unshared"):
-            continue   # from an incognito chat, or one that keeps unshared work's marks
+        if not isinstance(meta, dict) or any(meta.get(k) for k in ("incognito", "unshared", "confidential",
+                                                                    "unpublished", "rules")):
+            continue   # from an incognito chat, one that keeps unshared work's marks, or work under its rules or marks
         project = meta.get("project") or None
         project = None if project == GENERAL else project
         if project is not None and project not in shared:
