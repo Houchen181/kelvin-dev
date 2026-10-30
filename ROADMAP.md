@@ -302,3 +302,7 @@ Also asked for (2026-10-29, testing 0.3.28): the hub's models didn't show, thoug
 
 Also asked for (2026-10-29, testing 0.3.29): the key on the hub is an OpenCode Go key. Status: in Kelvin 0.3.30.
 - **OpenCode Go** is OpenCode's subscription, with its own addresses (`https://opencode.ai/inference/go/...`) where only a Go key works; the hub sent it to OpenCode's pay-per-use addresses, where it was refused. The hub now has it as a service of its own (`opencode-go`), next to **OpenCode Zen** (the pay-per-use one, `opencode`), with models.dev's prices and list of models that see pictures for each; Kelvin shows **OpenCode Go · Kelvin hub** with every model Go offers (Go's own address translates the others' formats). Kelvin from source has an OpenCode Go preset too.
+
+Also asked for (2026-10-29, testing 0.3.30): OpenCode Go said "Request is missing x-opencode-session"; make it work in the hub, kept to the owner's own account for now. Status: in Kelvin 0.3.31.
+- **Sessions:** Kelvin sends one `x-opencode-session` per chat to OpenCode Zen and Go through the hub, which passes it on, and sends one per person for a Kelvin that sends none (0.3.30 and older), so the hub's update alone made Go answer.
+- **Who may use a service:** the owner console's Models page keeps a service to the accounts it names (emails), for keys that are one person's, such as OpenCode Go's single-person plans; Kelvin doesn't show it to others, and the hub refuses them.

@@ -32,7 +32,7 @@ from ..folderfiles import MAX_PDF_PAGES
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
 from .hubmodels import through_hub
-from .providers.base import Emit, ModelInfo, Provider, sees_images, text_of
+from .providers.base import SESSION, Emit, ModelInfo, Provider, sees_images, text_of
 from . import brevity, compaction, memory, review, rules as rulebook
 from .skills import GUIDE as SKILLS_GUIDE, READ_GUIDE, READ_SKILL_FILE, SAVE_RECIPE, SAVE_SKILL, USE_SKILL, Know
 from .wakeups import WAKE_ME, Waker
@@ -1036,6 +1036,7 @@ class ChatAgent:
         model_id = model_key.partition(":")[2]
         turn = self.turns.setdefault(chat_id, _Turn({"chat_id": chat_id, "model": model_key}))   # claim() made it
         held = _TURN.set(turn)   # this task's turn, and the tasks it starts
+        session = SESSION.set(chat_id)   # the conversation its model requests belong to
         try:
             chat = self.store.load(chat_id)
             message: Dict[str, Any] = {"role": "user", "text": text}
@@ -1076,6 +1077,7 @@ class ChatAgent:
             if self.turns.get(chat_id) is turn:
                 del self.turns[chat_id]
             _TURN.reset(held)
+            SESSION.reset(session)
             self._steer.pop(chat_id, None)   # not read in time: the portal sends it as the next message
 
     def _attribution(self, chat: Dict[str, Any]) -> Dict[str, Any]:
@@ -1613,6 +1615,7 @@ class ChatAgent:
         keys = [k for k, _, _ in lanes]
         turn = self.turns.setdefault(chat_id, _Turn({"chat_id": chat_id, "model": keys[0], "compare": keys}))
         held = _TURN.set(turn)
+        session = SESSION.set(chat_id)
         try:
             chat = self.store.load(chat_id)
             message: Dict[str, Any] = {"role": "user", "text": text,
@@ -1664,6 +1667,7 @@ class ChatAgent:
             if self.turns.get(chat_id) is turn:
                 del self.turns[chat_id]
             _TURN.reset(held)
+            SESSION.reset(session)
 
     async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
                     base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit,

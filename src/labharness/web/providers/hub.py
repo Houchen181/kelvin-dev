@@ -2,12 +2,21 @@
 connections, with the hub as their address and the person's hub token as their key, under names of their own."""
 from __future__ import annotations
 
-from typing import Any, List
+import hashlib
+from typing import Any, Dict, List
 
 from ..hubmodels import SERVICES, HubModels
 from .anthropic_provider import AnthropicProvider
 from .gemini_provider import GeminiProvider
+from .base import SESSION
 from .openai_provider import OpenAIProvider
+
+
+def opencode_session() -> Dict[str, str]:
+    """OpenCode routes and caches by conversation, and its Go plan refuses a request without one: a stable session
+    for each chat, not the chat's own id (the hub sends one per person for a request outside any chat)."""
+    chat = SESSION.get()
+    return {"x-opencode-session": "kelvin-" + hashlib.sha256(chat.encode()).hexdigest()[:24]} if chat else {}
 
 
 class _ThroughHub:
@@ -65,6 +74,9 @@ class HubOpenCode(_ThroughHub, OpenAIProvider):
                                 exclude=PRESETS["opencode"]["exclude"], preset="opencode", vision=vision)
         self.hub = hub
 
+    def extra_headers(self) -> Dict[str, str]:
+        return opencode_session()
+
 
 class HubOpenCodeGo(_ThroughHub, OpenAIProvider):
     """OpenCode's Go subscription: its Chat Completions address serves every model it offers (OpenCode translates
@@ -77,6 +89,9 @@ class HubOpenCodeGo(_ThroughHub, OpenAIProvider):
                                 models_url=hub.url + "/llm/opencode-go/v1/models", preset="opencode-go",
                                 vision=vision)
         self.hub = hub
+
+    def extra_headers(self) -> Dict[str, str]:
+        return opencode_session()
 
 
 KINDS = (HubClaude, HubGPT, HubGemini, HubOpenCode, HubOpenCodeGo)

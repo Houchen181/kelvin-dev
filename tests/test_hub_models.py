@@ -99,6 +99,9 @@ class Services:
             go = path.startswith("/inference/go/")
             if request.headers.get("authorization") != "Bearer " + self.keys["opencode-go" if go else "opencode"]:
                 return httpx.Response(401, json={"error": {"message": "Invalid API key."}})
+            if go and not request.headers.get("x-opencode-session"):   # as OpenCode Go answers
+                return httpx.Response(400, json={"error": {"message": "Request is missing x-opencode-session and "
+                                                                      "cannot be routed efficiently."}})
             if path == "/inference/v1/models":
                 return httpx.Response(200, json={"object": "list", "data": [
                     {"id": "deepseek-v4.1-flash"}, {"id": "glm-5.3"}, {"id": "kimi-k3"}]})
@@ -394,3 +397,41 @@ def test_opencode_go_is_a_service_of_its_own(gateway):
     g.set_key("opencode", services.keys["opencode-go"])                       # the Go key where Zen's goes
     r = client.get("/llm/opencode/v1/models", headers=auth)
     assert r.status_code == 502 and "OpenCode Zen refused the Kelvin hub's key" in r.json()["error"]["message"]
+
+
+def test_opencode_go_gets_a_session_and_can_be_one_persons(gateway):
+    """OpenCode Go refuses a request without x-opencode-session: Kelvin sends one per chat, which the hub passes on,
+    and for a Kelvin that sends none the hub sends one per person. Its single-person plan can be kept to one account."""
+    hub, client, services, token = gateway
+    g = owner_keys(hub, services, ("opencode-go",))
+    auth = {"Authorization": "Bearer " + token}
+    ask = {"model": "glm-5.3", "stream": True, "messages": [{"role": "user", "content": "x"}]}
+    assert client.get("/llm/opencode-go/v1/models", headers=auth).status_code == 200
+    first = services.seen[-1][2]["x-opencode-session"]
+    assert client.post("/llm/opencode-go/openai/v1/chat/completions", headers=auth, json=ask).status_code == 200
+    assert services.seen[-1][2]["x-opencode-session"] == first and first.startswith("kelvin-")   # one per person
+    r = client.post("/llm/opencode-go/openai/v1/chat/completions", headers=dict(auth, **{
+        "x-opencode-session": "kelvin-chat-abc"}), json=ask)
+    assert r.status_code == 200 and services.seen[-1][2]["x-opencode-session"] == "kelvin-chat-abc"   # Kelvin's own
+    g.set_access("opencode-go", "ben@example.org")
+    r = client.post("/llm/opencode-go/openai/v1/chat/completions", headers=auth, json=ask)
+    assert r.status_code == 403 and "only for some accounts" in r.json()["error"]["message"]
+    assert "opencode-go" not in [s["id"] for s in client.get("/api/llm", headers=auth).json()["services"]]
+    g.set_access("opencode-go", " ADA@example.org ")
+    assert client.post("/llm/opencode-go/openai/v1/chat/completions", headers=auth, json=ask).status_code == 200
+    assert [k["who"] for k in g.keys() if k["service"] == "opencode-go"] == ["ada@example.org"]
+    with pytest.raises(ValueError):
+        g.set_access("opencode-go", "not an address")
+    g.set_access("opencode-go", "")
+    assert g.allows("opencode-go", {"email": "anyone@example.org"})
+
+
+def test_the_console_says_who_may_use_a_service(gateway):
+    hub, client, services, token = gateway
+    key = hub.ensure_operator_key().read_text(encoding="utf-8").split()[-1]
+    client.post("/admin/signin", data={"key": key})
+    page = client.get("/admin/models")
+    assert "Who may use it" in page.text
+    r = client.post("/admin/models/access", data={"csrf": csrf(page), "back": "models", "service": "opencode-go",
+                                                  "who": "ada@example.org"})
+    assert "Saved." in r.text and 'value="ada@example.org"' in r.text

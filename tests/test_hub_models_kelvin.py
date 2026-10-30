@@ -285,3 +285,36 @@ def test_new_hub_terms_are_said_beside_the_hubs_models(tmp_path):
     claude = next(g for g in listed["groups"] if g["provider"] == "hub-anthropic")
     assert claude["models"] and "agree to the hub's new terms first" in claude["error"]   # still listed
     assert listed["hub"]["needs_consent"] and listed["hub"]["consent_url"] == "https://hub.test/consent"
+
+
+def test_each_chat_is_one_opencode_session():
+    """OpenCode routes and caches by conversation: the hub's OpenCode connections send one session per chat, not
+    the chat's id itself; outside a chat they send none, and the hub sends the person's."""
+    from types import SimpleNamespace
+    from labharness.web.providers.base import SESSION
+    from test_pictures_by_model import Chunks
+    providers = hub_providers(("https://hub.test", "khub_s"))
+    go, zen = providers["hub-opencode-go"], providers["hub-opencode"]
+    assert go.extra_headers() == {} and providers["hub-anthropic"].name == "hub-anthropic"
+    sent = []
+
+    class Completions:
+        async def create(self, **request):
+            sent.append(request)
+            return Chunks("Six points.")
+    go.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+
+    async def emit(e):
+        pass
+
+    async def chat(chat_id):
+        held = SESSION.set(chat_id)
+        try:
+            await go.stream("glm-5.3", "Be brief.", [{"role": "user", "text": "hi"}], [], emit)
+            return zen.extra_headers()
+        finally:
+            SESSION.reset(held)
+    one, again, other = (asyncio.run(chat(c)) for c in ("chat-1", "chat-1", "chat-2"))
+    sessions = [r["extra_headers"]["x-opencode-session"] for r in sent]
+    assert sessions[0] == sessions[1] != sessions[2] and sessions[0].startswith("kelvin-")
+    assert "chat-1" not in sessions[0] and one == again == {"x-opencode-session": sessions[0]} != other

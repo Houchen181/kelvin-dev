@@ -145,6 +145,10 @@ class OpenAIProvider(Provider):
         self.vision = vision
         self._inputs: Dict[str, bool] = {}   # what the service's own list says: does the model take pictures?
 
+    def extra_headers(self) -> Dict[str, str]:
+        """Headers a service wants with each request beyond its key (OpenCode's session: providers/hub.py)."""
+        return {}
+
     def model_sees_images(self, model: str) -> bool:
         """Whether Kelvin sends this model pictures (vision.py): unknown ones get them, and fall back if they refuse."""
         if self.sees_images or self.pictures:
@@ -211,6 +215,9 @@ class OpenAIProvider(Provider):
         if tools:   # an empty list is refused by OpenAI and others: leave it out (e.g. for a second opinion)
             request["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                                   "parameters": t["schema"]}} for t in tools]
+        extra = self.extra_headers()
+        if extra:
+            request["extra_headers"] = extra
         left_out = ""
         try:
             response = await self.client.chat.completions.create(**request)

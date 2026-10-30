@@ -977,7 +977,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         app = await app_of(request)
         if app is None:
             return api_error("not connected", 401)
-        services, usage = await asyncio.gather(call(gateway.offered),
+        services, usage = await asyncio.gather(call(gateway.offered, app["user"]),
                                                call(gateway.usage_of, app["user"]["id"], app.get("lab_id")))
         return JSONResponse(dict(usage, services=services, needs_consent=hub.needs_consent(app["user"]),
                                  consent_url=hub.base_url + "/consent"))
@@ -1398,13 +1398,17 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             'placeholder="%s" style="max-width:14rem"><button class="plain">%s</button></form>%s</td>'
             '<td><form class="row" method="post" action="/admin/models/offers">%s<input type="hidden" name="service" '
             'value="%s"><input name="models" value="%s" placeholder="every model it lists" style="max-width:18rem">'
+            '<button class="plain">Save</button></form></td>'
+            '<td><form class="row" method="post" action="/admin/models/access">%s<input type="hidden" name="service" '
+            'value="%s"><input name="who" value="%s" placeholder="everyone" style="max-width:16rem">'
             '<button class="plain">Save</button></form></td></tr>'
             % (e(k["name"]), "key …%s, set %s" % (e(k["hint"]), when(k["set_at"])) if k["set"] else
                '<span class="muted">no key</span>', csrf, e(k["service"]), "Replace the key" if k["set"] else "API key",
                "Replace" if k["set"] else "Set",
                ('<form class="inline" method="post" action="/admin/models/key/remove">%s<input type="hidden" '
                 'name="service" value="%s"><button class="plain">Remove</button></form>' % (csrf, e(k["service"])))
-               if k["set"] else "", csrf, e(k["service"]), e(k["models"])) for k in keys)
+               if k["set"] else "", csrf, e(k["service"]), e(k["models"]), csrf, e(k["service"]), e(k["who"]))
+            for k in keys)
 
         def money(v: Any) -> str:
             return "$%.2f" % (v or 0)
@@ -1428,8 +1432,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         return admin_page(op, (
             '<p><a href="/admin">← Everyone</a></p><h2>Model services</h2><p class="muted">Kelvins signed in with a '
             'Kelvin account use these keys through the hub. Keys stay here, sealed; nobody sees them again.</p>'
-            '<div class="scroll"><table><tr><th>Service</th><th>Key</th><th></th><th>Models offered</th></tr>%s'
-            '</table></div>'
+            '<div class="scroll"><table><tr><th>Service</th><th>Key</th><th></th><th>Models offered</th>'
+            '<th>Who may use it <span class="muted">(emails)</span></th></tr>%s</table></div>'
             '<h2>Budgets</h2><form class="row" method="post" action="/admin/models/budget">%s<input type="hidden" '
             'name="scope" value="default"><input type="hidden" name="ref" value="0"><label>Each person, per month '
             '<input name="usd" value="%g" style="max-width:7rem"></label><button class="plain">Save</button></form>'
@@ -1483,6 +1487,13 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             raise HubError("No such service.")
         await call(gateway.remove_key, service)
         return "%s's key is removed: its models are no longer offered." % llm.SERVICES[service]["name"]
+
+    async def admin_model_access(request: Request, f: Dict[str, str]) -> str:
+        try:
+            await call(gateway.set_access, f.get("service", ""), f.get("who"))
+        except ValueError as err:
+            raise HubError(str(err))
+        return "Saved."
 
     async def admin_model_offers(request: Request, f: Dict[str, str]) -> str:
         try:
@@ -1629,6 +1640,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         Route("/admin/models/key", operator_action(admin_model_key), methods=["POST"]),
         Route("/admin/models/key/remove", operator_action(admin_model_key_remove), methods=["POST"]),
         Route("/admin/models/offers", operator_action(admin_model_offers), methods=["POST"]),
+        Route("/admin/models/access", operator_action(admin_model_access), methods=["POST"]),
         Route("/admin/models/budget", operator_action(admin_model_budget), methods=["POST"]),
         Route("/admin/backup", operator_action(admin_backup), methods=["POST"]),
         Route("/api/health", health),

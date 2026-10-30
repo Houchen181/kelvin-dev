@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import hashlib
 import json
 import logging
 import os
@@ -51,11 +52,12 @@ SERVICES: Dict[str, Dict[str, Any]] = {
                "keep": ()},
     "opencode": {"name": "OpenCode Zen", "upstream": "https://opencode.ai/inference", "header": "authorization",
                  "form": "Bearer {}", "calls": [("POST", r"openai/v1/chat/completions"), ("GET", r"v1/models")],
-                 "keep": ()},
-    # OpenCode's Go subscription: its own addresses, and a key that works only there
+                 "keep": ("x-opencode-session",)},
+    # OpenCode's Go subscription: its own addresses, and a key that works only there. Go routes and caches by a
+    # session per conversation (x-opencode-session), and refuses a request without one
     "opencode-go": {"name": "OpenCode Go", "upstream": "https://opencode.ai/inference/go", "header": "authorization",
                     "form": "Bearer {}", "calls": [("POST", r"openai/v1/chat/completions"), ("GET", r"v1/models")],
-                    "keep": ()},
+                    "keep": ("x-opencode-session",)},
 }
 MODEL_LISTS = {"anthropic": "v1/models", "openai": "v1/models", "gemini": "v1beta/models", "opencode": "v1/models",
                "opencode-go": "v1/models"}
@@ -69,6 +71,7 @@ TABLES = """
 CREATE TABLE IF NOT EXISTS llm_keys (service TEXT PRIMARY KEY, sealed TEXT NOT NULL, hint TEXT NOT NULL,
     set_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS llm_offers (service TEXT PRIMARY KEY, models TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS llm_access (service TEXT PRIMARY KEY, emails TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS llm_budgets (scope TEXT NOT NULL, ref INTEGER NOT NULL, usd REAL NOT NULL,
     PRIMARY KEY (scope, ref));
 CREATE TABLE IF NOT EXISTS llm_usage (id INTEGER PRIMARY KEY, at REAL NOT NULL, month TEXT NOT NULL,
@@ -245,13 +248,38 @@ class Gateway:
             return None
 
     def keys(self) -> List[Dict[str, Any]]:
-        """For the owner console: each service, whether it has a key (its last 4 characters), never the key."""
+        """For the owner console: each service, whether it has a key (its last 4 characters), never the key; the
+        models it offers, and who may use it ("": everyone)."""
         with self.hub.connect() as con:
             rows = {r["service"]: r for r in con.execute("SELECT service, hint, set_at FROM llm_keys")}
             offers = {r["service"]: r["models"] for r in con.execute("SELECT service, models FROM llm_offers")}
+            access = {r["service"]: r["emails"] for r in con.execute("SELECT service, emails FROM llm_access")}
         return [{"service": s, "name": spec["name"], "set": s in rows, "hint": rows[s]["hint"] if s in rows else "",
-                 "set_at": rows[s]["set_at"] if s in rows else None, "models": offers.get(s, "")}
-                for s, spec in SERVICES.items()]
+                 "set_at": rows[s]["set_at"] if s in rows else None, "models": offers.get(s, ""),
+                 "who": access.get(s, "")} for s, spec in SERVICES.items()]
+
+    # ------------------------------------------------------------------ who may use a service
+
+    def set_access(self, service: str, text: Any) -> None:
+        """Only these accounts (emails, comma-separated) may use the service; "" lets everyone. For a key that is
+        one person's, such as OpenCode Go's single-person plan."""
+        if service not in SERVICES:
+            raise ValueError("no service %r" % service)
+        emails = [e.strip().lower() for e in str(text or "").split(",") if e.strip()]
+        bad = [e for e in emails if "@" not in e]
+        if bad:
+            raise ValueError("Not an email address: %s" % ", ".join(bad))
+        with self.hub.connect() as con:
+            if emails:
+                con.execute("INSERT OR REPLACE INTO llm_access (service, emails) VALUES (?, ?)",
+                            (service, ",".join(emails)[:4000]))
+            else:
+                con.execute("DELETE FROM llm_access WHERE service = ?", (service,))
+
+    def allows(self, service: str, user: Dict[str, Any]) -> bool:
+        with self.hub.connect() as con:
+            row = con.execute("SELECT emails FROM llm_access WHERE service = ?", (service,)).fetchone()
+        return row is None or str(user.get("email") or "").lower() in row["emails"].split(",")
 
     # ------------------------------------------------------------------ what is offered
 
@@ -271,10 +299,11 @@ class Gateway:
             row = con.execute("SELECT models FROM llm_offers WHERE service = ?", (service,)).fetchone()
         return row["models"].split(",") if row else None
 
-    def offered(self) -> List[Dict[str, Any]]:
-        """The services with a key, for Kelvins: [{id, name, models (None: all)}]."""
+    def offered(self, user: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """The services with a key (that this person may use), for Kelvins: [{id, name, models (None: all)}]."""
         return [{"id": k["service"], "name": k["name"], "models": k["models"].split(",") if k["models"] else None}
-                for k in self.keys() if k["set"]]
+                for k in self.keys() if k["set"] and (user is None or not k["who"] or str(user.get("email") or "")
+                                                      .lower() in k["who"].split(","))]
 
     # ------------------------------------------------------------------ budgets and what was used
 
@@ -441,6 +470,11 @@ class Gateway:
             await self._client[1].aclose()
             self._client = None
 
+    def session_of(self, user: Dict[str, Any]) -> str:
+        """A stable session for a person, for a service that routes by one, when their Kelvin sends none: the same
+        each time, and not their account number."""
+        return "kelvin-" + hashlib.sha256(("%s %s" % (self.hub.base_url, user["id"])).encode()).hexdigest()[:24]
+
     @staticmethod
     def call_of(service: str, method: str, path: str) -> Optional[Any]:
         """The match for a call the gateway passes on (None: it doesn't)."""
@@ -465,6 +499,8 @@ class Gateway:
         if not key:
             return refusal(503, "The Kelvin hub has no key for %s yet: the hub's owner adds one in the owner console."
                            % spec["name"])
+        if not await call(self.allows, service, app["user"]):
+            return refusal(403, "%s on this Kelvin hub is only for some accounts. Pick another model." % spec["name"])
         model, body = self._model_of(service, found, body)
         offers = await call(self.offers, service)
         if model and offers is not None and model not in offers:
@@ -483,6 +519,8 @@ class Gateway:
         sent = {k: v for k, v in headers.items() if k in ("content-type", "accept") + tuple(spec["keep"])}
         sent.update({spec["header"]: spec["form"].format(key), "accept-encoding": "identity",
                      "user-agent": "Kelvin-hub/%s" % __version__})
+        if "x-opencode-session" in spec["keep"] and not sent.get("x-opencode-session"):
+            sent["x-opencode-session"] = self.session_of(user)   # an older Kelvin: one session per person
         client = self._http()
         try:
             answer = await client.send(client.build_request(

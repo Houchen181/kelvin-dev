@@ -14,11 +14,15 @@ provider so reasoning state (thinking blocks, thought signatures) survives.
 """
 from __future__ import annotations
 
+import contextvars
 import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 Emit = Callable[[Dict[str, Any]], Awaitable[None]]
+# the chat a model request belongs to (agent.py sets it for each turn), for services that route and cache by
+# conversation (OpenCode's x-opencode-session)
+SESSION: contextvars.ContextVar = contextvars.ContextVar("kelvin_session", default="")
 
 
 @dataclass
