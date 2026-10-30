@@ -2628,6 +2628,7 @@
         p.summary = $("project-summary").value;
       }
       applyRules();
+      renderChats();   // its lock in the sidebar, and its chats', at once
       $("project-dialog").close();
       toast("Saved. Conversations in " + p.name + " use it from their next message.");
     } catch (e) {

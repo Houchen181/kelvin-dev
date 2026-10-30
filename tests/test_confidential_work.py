@@ -334,6 +334,7 @@ def test_a_confidential_project_and_its_chats_show_a_lock_and_one_switch_sets_it
     assert "lockMark(chatPrivacy(c))" in js and "lockMark(privacyOf(p.rules, p))" in js   # the sidebar's locks
     assert 'id="project-confidential"' in page and '$("project-confidential").addEventListener' in js
     assert "privacy.label" in js and '"Unpublished"' in js                                 # the chip says which
+    assert "renderChats();   // its lock in the sidebar" in js                             # a save shows it at once
     store = ChatStore(tmp_path / "chats")
     settings = Settings(tmp_path / "settings.json")
     client = TestClient(create_app(rt, settings, store, hosts=["testserver"], providers={"scripted": Scripted([])}))
