@@ -1,4 +1,5 @@
 import KelvinKit
+import Security
 import SwiftUI
 import UserNotifications
 
@@ -7,6 +8,7 @@ struct KelvinApp: App {
     @StateObject var app = AppModel()
 
     init() {
+        if Launch.fresh { Launch.forgetEverything() }   // before AppModel reads what the phone kept
         UNUserNotificationCenter.current().delegate = Notifier.shared
     }
 
@@ -44,10 +46,18 @@ struct RootView: View {
     }
 }
 
-/// Launch arguments, for screenshots: -KelvinDemo YES -KelvinTab runs -KelvinOpen <a run or chat id>
-/// -KelvinAnalysis <a spec as JSON, opened in Analysis for that run>.
+/// Launch arguments, for screenshots and UI tests: -KelvinDemo YES -KelvinTab runs -KelvinOpen <a run or chat id>
+/// -KelvinAnalysis <a spec as JSON, opened in Analysis for that run>; -KelvinFresh YES starts as a new install.
 enum Launch {
     static var demo: Bool { UserDefaults.standard.bool(forKey: "KelvinDemo") }
+    static var fresh: Bool { UserDefaults.standard.bool(forKey: "KelvinFresh") }
+
+    /// What this phone kept (its computers, account, settings) and the tokens in the Keychain, as on a new install.
+    static func forgetEverything() {
+        if let id = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: id) }
+        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: Keychain().service]
+                      as CFDictionary)
+    }
     static var tab: String { UserDefaults.standard.string(forKey: "KelvinTab") ?? "lab" }
     private static var opened = false
     private static var analyzed = false
