@@ -35,6 +35,7 @@
     memory: '<path d="M7 3h10a1 1 0 0 1 1 1v17l-6-4-6 4V4a1 1 0 0 1 1-1z"/>',
     doc: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
+    download: '<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/>',
     dots: '<circle cx="5" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="19" cy="12" r="1.1"/>',
     folder: '<path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H9l2 2h7.5A2.5 2.5 0 0 1 21 9.5v7a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5z"/>',
     "folder-open": '<path d="M3 7.5V5.5A1.5 1.5 0 0 1 4.5 4H9l2 2h6.5A1.5 1.5 0 0 1 19 7.5V9"/><path d="M2.6 10.2A1 1 0 0 1 3.6 9h16.8a1 1 0 0 1 1 1.2l-1.5 7.5a2 2 0 0 1-2 1.6H6a2 2 0 0 1-2-1.6z"/>',
@@ -717,7 +718,9 @@
     const { series, xKey, xUnit, yUnit } = opts;
     const fit = series.length === 1 ? opts.fit : null;  // fitted curve over a single measured series
     const xs = series.flatMap((s) => s.points.map((p) => p.x));
-    const ys = series.flatMap((s) => s.points.map((p) => p.y)).concat(fit ? fit.y : []);
+    const fits = opts.fits && opts.fits.some(Boolean) ? opts.fits : null;   // each curve's own fit (the Analysis pane)
+    const ys = series.flatMap((s) => s.points.map((p) => p.y)).concat(fit ? fit.y.filter((v) => typeof v === "number") : [])
+      .concat(fits ? fits.flatMap((f) => (f ? f.y.filter((v) => typeof v === "number") : [])) : []);
     const X = niceTicks(Math.min(...xs), Math.max(...xs), 5);
     const Y = niceTicks(Math.min(...ys), Math.max(...ys), 4);
     const xRange = [Math.min(...xs), Math.max(...xs)];
@@ -750,7 +753,7 @@
     return box;
 
     function build(W) {
-    const H = 200, M = { l: 48, r: series.length <= 4 && !fit ? 62 : 14, t: 10, b: 26 };
+    const H = opts.height || 200, M = { l: 48, r: series.length <= 4 && !fit && !fits ? 62 : 14, t: 10, b: 26 };
     const sx = (x) => M.l + (x - xRange[0]) / (xRange[1] - xRange[0]) * (W - M.l - M.r);
     const sy = (y) => H - M.b - (y - Y.lo) / (Y.hi - Y.lo) * (H - M.t - M.b);
     const root = svg("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, role: "img", "aria-label": opts.title });
@@ -770,14 +773,14 @@
     series.forEach((s, k) => {
       const color = series.length > 1 ? "var(--s" + (k + 1) + ")" : "var(--series-1)";
       const d = s.points.map((p, i) => (i ? "L" : "M") + sx(p.x).toFixed(1) + "," + sy(p.y).toFixed(1)).join("");
-      root.append(svg("path", { class: fit ? "line thin" : "line", d, style: "stroke:" + color }));
-      if (fit && s.points.length <= 120) {
+      root.append(svg("path", { class: fit || fits ? "line thin" : "line", d, style: "stroke:" + color }));
+      if ((fit || fits) && s.points.length <= 120) {
         for (const p of s.points) root.append(svg("circle", { class: "datapt", cx: sx(p.x), cy: sy(p.y), r: 2.6, style: "fill:" + color }));
       }
       const last = s.points[s.points.length - 1];
-      if (!fit) root.append(svg("circle", { class: "end", cx: sx(last.x), cy: sy(last.y), r: 4, style: "fill:" + color }));
+      if (!fit && !fits) root.append(svg("circle", { class: "end", cx: sx(last.x), cy: sy(last.y), r: 4, style: "fill:" + color }));
       const ly = sy(last.y) + 4;
-      if (series.length <= 4 && !fit && !taken.some((t) => Math.abs(t - ly) < 13)) {
+      if (series.length <= 4 && !fit && !fits && !taken.some((t) => Math.abs(t - ly) < 13)) {
         taken.push(ly);
         const label = svg("text", { class: "endlabel", x: sx(last.x) + 8, y: ly });
         label.textContent = series.length > 1 ? s.name.split(" = ").pop() : fmt(last.y, yUnit);
@@ -785,8 +788,16 @@
       }
     });
     if (fit) {
-      const inRange = fit.x.map((x, i) => [x, fit.y[i]]).filter(([x]) => x >= xRange[0] && x <= xRange[1]);
+      const inRange = fit.x.map((x, i) => [x, fit.y[i]]).filter(([x, y]) => typeof y === "number" && x >= xRange[0] && x <= xRange[1]);
       root.append(svg("path", { class: "fitline", d: inRange.map(([x, y], i) => (i ? "L" : "M") + sx(x).toFixed(1) + "," + sy(y).toFixed(1)).join("") }));
+    }
+    if (fits) {
+      fits.forEach((f, k) => {
+        if (!f || k >= series.length) return;
+        const pts = f.x.map((x, i) => [x, f.y[i]]).filter(([x, y]) => typeof y === "number" && x >= xRange[0] && x <= xRange[1]);
+        root.append(svg("path", { class: "fitline", style: "stroke:" + (series.length > 1 ? "var(--s" + (k + 1) + ")" : "var(--fit)") + ";stroke-dasharray:6 3",
+          d: pts.map(([x, y], i) => (i ? "L" : "M") + sx(x).toFixed(1) + "," + sy(y).toFixed(1)).join("") }));
+      });
     }
     // hover layer: crosshair + tooltip
     const cross = svg("line", { class: "cross", y1: M.t, y2: H - M.b, visibility: "hidden" });
@@ -978,6 +989,7 @@
   }
   function toggleRuns(open) {
     RUNS.open = open === undefined ? !RUNS.open : open;
+    if (RUNS.open && ANA.open) toggleAnalysis(false);   // they take turns beside the chat
     $("runpane").hidden = !RUNS.open;
     $("toggle-runs").setAttribute("aria-pressed", String(RUNS.open));
     $("toggle-runs").classList.toggle("on", RUNS.open);
@@ -994,7 +1006,8 @@
     if (RUNS.tabs.has(runId) || RUNS.dismissed.has(runId)) return;
     const tab = runTab(runId, plan);
     setTabStatus(tab, "running");
-    openRun(runId, plan);
+    if (ANA.open) selectRun(runId);   // the Analysis pane keeps its place; the dot on Runs says a run is on
+    else openRun(runId, plan);
     pollLive();
   }
   async function pollLive() {
@@ -1148,41 +1161,38 @@
   function fitLayout() {
     const app = $("app"), w = window.innerWidth;
     const floating = w <= 1100;
-    const runs = RUNS.open && !floating ? RUNS_MIN : 0;
-    const lab = S.labOpen && !floating ? LAB_W : 0;
+    const runs = (RUNS.open || ANA.open) && !floating ? RUNS_MIN : 0;
+    const lab = (S.labOpen || TEAM.open) && !floating ? LAB_W : 0;
     const compact = w > 820 && SIDEBAR_W + CHAT_MIN + runs + lab > w;
     app.classList.toggle("compact", compact);
     app.classList.toggle("float-lab", lab > 0 && (compact ? 0 : SIDEBAR_W) + CHAT_MIN + runs + LAB_W > w);
     if (!compact && w > 820) app.classList.remove("side-open");
-    if (S.labOpen && !floating) setLabWidth(LAB_W);
-    if (RUNS.open) setPaneWidth($("runpane").getBoundingClientRect().width);
+    if ((S.labOpen || TEAM.open) && !floating) setLabWidth(LAB_W);
+    if (RUNS.open || ANA.open) setPaneWidth(parseInt($("runpane").style.width, 10));
     syncScrim();
   }
   function setLabWidth(w) {
     const app = $("app"), vw = window.innerWidth;
     const sidebar = vw <= 820 || app.classList.contains("compact") ? 0 : SIDEBAR_W;
-    const runs = RUNS.open && vw > 1100 && !app.classList.contains("float-lab") ? RUNS_MIN : 0;
+    const runs = (RUNS.open || ANA.open) && vw > 1100 && !app.classList.contains("float-lab") ? RUNS_MIN : 0;
     const max = Math.max(LAB_MIN, vw - sidebar - runs - CHAT_MIN);
     LAB_W = Math.round(Math.min(max, Math.max(LAB_MIN, w || 0)));
-    $("labpanel").style.width = LAB_W + "px";
+    $("labpanel").style.width = $("teampanel").style.width = LAB_W + "px";
     return LAB_W;
   }
-  function initLabPanel() {
-    const saved = Number(store("lh.labWidth"));
-    if (saved > 0) LAB_W = saved;
-    $("labpanel").style.width = LAB_W + "px";
-    const handle = $("labpanel-resize");
+  // a side panel's left edge, dragged or moved with the arrow keys, sets its width: set(w) takes the width and keeps it
+  // in bounds, done() keeps it for next time
+  function edgeResize(handle, pane, set, done) {
     handle.addEventListener("pointerdown", (e) => {
       e.preventDefault();
-      const right = $("labpanel").getBoundingClientRect().right;
+      const right = pane.getBoundingClientRect().right;
       handle.setPointerCapture(e.pointerId);
       document.body.classList.add("resizing");
-      const move = (ev) => setLabWidth(right - ev.clientX);
+      const move = (ev) => set(right - ev.clientX);
       const up = () => {
         handle.removeEventListener("pointermove", move);
         document.body.classList.remove("resizing");
-        store("lh.labWidth", String(LAB_W));
-        fitLayout();
+        done();
       };
       handle.addEventListener("pointermove", move);
       handle.addEventListener("pointerup", up, { once: true });
@@ -1190,43 +1200,33 @@
     handle.addEventListener("keydown", (e) => {
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       e.preventDefault();
-      store("lh.labWidth", String(setLabWidth(LAB_W + (e.key === "ArrowLeft" ? 32 : -32))));
-      fitLayout();
+      set(pane.getBoundingClientRect().width + (e.key === "ArrowLeft" ? 32 : -32));
+      done();
     });
+  }
+  function initLabPanel() {
+    const saved = Number(store("lh.labWidth"));
+    if (saved > 0) LAB_W = saved;
+    for (const id of ["labpanel", "teampanel"]) {   // they take turns at the side, at one width
+      $(id).style.width = LAB_W + "px";
+      edgeResize($(id + "-resize"), $(id), setLabWidth, () => { store("lh.labWidth", String(LAB_W)); fitLayout(); });
+    }
   }
   function setPaneWidth(w) {
     const app = $("app"), vw = window.innerWidth;
     const sidebar = vw <= 820 || app.classList.contains("compact") ? 0 : SIDEBAR_W;
-    const lab = S.labOpen && vw > 1100 && !app.classList.contains("float-lab") ? LAB_W : 0;
+    const lab = (S.labOpen || TEAM.open) && vw > 1100 && !app.classList.contains("float-lab") ? LAB_W : 0;
     const max = Math.max(RUNS_MIN, vw - sidebar - lab - CHAT_MIN);
     const width = Math.round(Math.min(max, Math.max(RUNS_MIN, w || 0)));
-    $("runpane").style.width = width + "px";
+    $("runpane").style.width = $("anpane").style.width = width + "px";
     return width;
   }
   function initRunsPane() {
     const saved = Number(store("lh.runsWidth"));
     setPaneWidth(saved > 0 ? saved : Math.min(720, Math.max(420, window.innerWidth * 0.42)));
-    const handle = $("runpane-resize");
-    handle.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      const right = $("runpane").getBoundingClientRect().right;
-      handle.setPointerCapture(e.pointerId);
-      document.body.classList.add("resizing");
-      const move = (ev) => setPaneWidth(right - ev.clientX);
-      const up = () => {
-        handle.removeEventListener("pointermove", move);
-        document.body.classList.remove("resizing");
-        store("lh.runsWidth", String(parseInt($("runpane").style.width, 10)));
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", up, { once: true });
-    });
-    handle.addEventListener("keydown", (e) => {
-      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-      e.preventDefault();
-      const w = $("runpane").getBoundingClientRect().width;
-      store("lh.runsWidth", String(setPaneWidth(w + (e.key === "ArrowLeft" ? 32 : -32))));
-    });
+    for (const id of ["runpane", "anpane"]) {   // they take turns beside the chat, at one width
+      edgeResize($(id + "-resize"), $(id), setPaneWidth, () => store("lh.runsWidth", String(parseInt($(id).style.width, 10))));
+    }
     $("toggle-runs").addEventListener("click", () => toggleRuns());
     $("close-runs").addEventListener("click", () => toggleRuns(false));
     $("runs-history").addEventListener("click", showRunsMenu);
@@ -1330,16 +1330,27 @@
     });
     const eln = h("button", { class: "btn small ghost", type: "button", title: "The run's record as Markdown with its plots, for a lab notebook (ELN)" }, "Lab notebook");
     eln.addEventListener("click", () => fetchDownload("/api/runs/" + encodeURIComponent(runId) + "/eln", runId + ".zip", "lab notebook record"));
-    return h("span", { class: "run-downloads" }, h("span", { class: "hint" }, "Download data:"), ...choices, eln);
+    const analyze = h("button", { class: "btn small ghost", type: "button", title: "Open this run in the Analysis pane" }, "Analyze");
+    analyze.addEventListener("click", () => openAnalysis({ runs: [runId] }, null, { x: true, y: true, group: true }));
+    return h("span", { class: "run-downloads" }, h("span", { class: "dl", title: "Download the data" }, icon("download"), ...choices, eln),
+      analyze);
   }
   // a file Kelvin's code writes, downloaded with the access key (its name from its Content-Disposition)
-  async function fetchDownload(url, fallback, what) {
+  function fileName(res, fallback) {   // filename*=UTF-8''… first: a run's own name in any script
+    const cd = res.headers.get("Content-Disposition") || "";
+    const star = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+    if (star) { try { return decodeURIComponent(star[1]); } catch (e) { /* the plain one */ } }
+    const named = /filename="([^"]+)"/.exec(cd);
+    return named ? named[1] : fallback;
+  }
+  async function fetchDownload(url, fallback, what, body) {
     try {
-      const res = await fetch(url, { headers: { "X-Kelvin-Token": token } });
+      const res = await fetch(url, body ? { method: "POST", headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
+        body: JSON.stringify(body) } : { headers: { "X-Kelvin-Token": token } });
       if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).error) || "HTTP " + res.status);
-      const named = /filename="([^"]+)"/.exec(res.headers.get("Content-Disposition") || "");
+      const name = fileName(res, fallback);
       const href = URL.createObjectURL(await res.blob());
-      const a = h("a", { href, download: named ? named[1] : fallback });
+      const a = h("a", { href, download: name });
       document.body.append(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(href), 30000);
     } catch (e) { toast("Could not download the " + what + ": " + e.message); }
@@ -3581,6 +3592,7 @@
       case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images); pollState(); break;
       case "run_progress": reply.runProgress(ev); break;
       case "computer_step": reply.computerStep(ev); break;
+      case "analysis": if (here) openAnalysis(ev.spec, ev.result); break;
       case "note": reply.note(ev.text); break;
       case "memory": reply.memory(ev.notes); break;
       case "review_start": reply.reviewStart(ev); break;
@@ -3763,6 +3775,7 @@
     renderAlerts(s.alarms, s.incident);
     renderWatches(s.watches || [], s.status);
     if (s.lab_memory && s.lab_memory !== LABMEM.stamp) { LABMEM.stamp = s.lab_memory; loadLabMemory(); }
+    teamState(s.team);
     notifySystem(s.notices);
     $("lab-name").textContent = s.lab;
     const problem = s.lab_info && s.lab_info.error;
@@ -4241,7 +4254,7 @@
     const focused = document.activeElement && document.activeElement.closest && document.activeElement.closest(".q-item");
     const focusIdx = focused ? [...$("queue-list").children].indexOf(focused) : -1;
     $("queue-list").replaceChildren(...(items.length ? items.map((i, n) => queueItem(i, n + 1, items.length))
-      : [h("li", { class: "muted small" }, "Nothing queued. Add scans below, or ask Kelvin to line them up.")]));
+      : [h("li", { class: "muted small" }, "Nothing queued.")]));
     if (focusIdx >= 0 && $("queue-list").children[focusIdx]) $("queue-list").children[focusIdx].focus();
     const saved = q.saved || [];
     $("queue-saved").replaceChildren(...(saved.length ? saved.map((s) => h("option", { value: s }, s)) : [h("option", { value: "" }, "No saved queues")]));
@@ -4909,6 +4922,7 @@
 
   function toggleLab(open) {
     S.labOpen = open === undefined ? !S.labOpen : open;
+    if (S.labOpen && TEAM.open) toggleTeam(false);   // they take turns at the side
     $("labpanel").hidden = !S.labOpen;
     fitLayout();
     if (S.labOpen) pollState();
@@ -5398,7 +5412,7 @@
       const found = r.passages || [{ where, text: r.text }];
       box.replaceChildren(...(found.length ? found.map((p) => h("div", { class: "help-passage" },
         h("div", { class: "muted small" }, p.where), h("div", { class: "md", html: md(p.text) })))
-        : [h("p", { class: "muted small" }, "Nothing in Kelvin's help about that. Ask Kelvin in a chat: it can look further.")]));
+        : [h("p", { class: "muted small" }, "Nothing in the help. Ask Kelvin in a chat.")]));
       box.scrollIntoView({ block: "nearest" });
     } catch (e) { box.replaceChildren(h("p", { class: "muted small" }, e.message)); }
   }
@@ -5844,13 +5858,546 @@
   function closeSidebar() { $("app").classList.remove("side-open"); syncScrim(); }
   function syncScrim() {
     const narrow = window.matchMedia("(max-width: 1100px)").matches;
-    $("scrim").hidden = !($("app").classList.contains("side-open") || ((S.labOpen || RUNS.open) && narrow));
+    $("scrim").hidden = !($("app").classList.contains("side-open") || ((S.labOpen || RUNS.open || TEAM.open || ANA.open) && narrow));
+  }
+
+
+  // ------------------------------------------------------------------ team chat: the lab's people, to each other
+  // Everyone signed in here, and their phones, read the same chat (teamchat.py); Kelvin reads it with team_chat. The
+  // name you write under is this browser's (lh.teamName), so people who share an account each write under their own.
+  const TEAM = { open: false, msgs: [], shown: 0, seen: Number(store("lh.teamSeen")) || 0, told: null, more: false,
+                 busy: false, drawn: false };
+  const teamName = () => store("lh.teamName") || "";
+
+  function toggleTeam(open) {
+    TEAM.open = open === undefined ? !TEAM.open : open;
+    if (TEAM.open && S.labOpen) toggleLab(false);   // they take turns at the side
+    $("teampanel").hidden = !TEAM.open;
+    $("toggle-team").setAttribute("aria-pressed", String(TEAM.open));
+    $("toggle-team").classList.toggle("on", TEAM.open);
+    fitLayout();
+    if (!TEAM.open) return;
+    showTeamName();
+    loadTeam();
+    fitTeamInput();
+    if (teamName()) $("team-input").focus();
+  }
+  function showTeamName(edit) {
+    const name = teamName(), asking = !!edit || !name;
+    $("team-name-form").hidden = !asking;
+    $("team-form").hidden = asking;
+    $("team-name").hidden = !name;
+    $("team-name-text").textContent = name;
+    if (!asking) return;
+    $("team-name-input").value = name || (S.account && S.account.user ? S.account.user.name : "") || "";
+    $("team-name-input").focus();
+    $("team-name-input").select();
+  }
+  function saveTeamName(e) {
+    e.preventDefault();
+    const name = $("team-name-input").value.replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!name) { $("team-name-input").focus(); return; }
+    store("lh.teamName", name);
+    showTeamName();
+    renderTeam();
+    fitTeamInput();   // sized now it shows (it was hidden while the name was asked)
+    $("team-input").focus();
+  }
+  function dayLabel(d) {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const day = new Date(d); day.setHours(0, 0, 0, 0);
+    const n = Math.round((today - day) / 86400000);
+    if (n === 0) return "Today";
+    if (n === 1) return "Yesterday";
+    return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric",
+      year: day.getFullYear() === today.getFullYear() ? undefined : "numeric" });
+  }
+  function teamItems(m, prev) {
+    const at = new Date(m.at), before = prev ? new Date(prev.at) : null;
+    const out = [];
+    const newDay = !before || before.toDateString() !== at.toDateString();
+    if (newDay) out.push(h("div", { class: "tm-day" }, dayLabel(at)));
+    const cont = !newDay && prev.name === m.name && at - before < 5 * 60000;
+    const who = m.name + (m.account && m.account !== m.name ? " (" + m.account + ")" : "") +
+      (m.via && m.via !== "portal" ? " · " + m.via : "");
+    out.push(h("div", { class: "tm" + (cont ? " cont" : "") + (m.name === teamName() ? " mine" : ""), title: who + " · " + at.toLocaleString() },
+      cont ? null : h("div", { class: "tm-head" }, h("b", {}, m.name),
+        h("time", { datetime: m.at }, at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }))),
+      h("div", { class: "tm-text" }, m.text)));
+    return out;
+  }
+  function renderTeam(older) {
+    const list = $("team-list");
+    const atEnd = list.scrollHeight - list.scrollTop - list.clientHeight < 48;
+    const fromEnd = list.scrollHeight - list.scrollTop;
+    const items = TEAM.msgs.flatMap((m, i) => teamItems(m, TEAM.msgs[i - 1]));
+    list.replaceChildren(...(items.length ? items : [h("div", { class: "team-empty" }, "No messages yet")]));
+    if (older) list.scrollTop = list.scrollHeight - fromEnd;   // what you were reading stays in place
+    else if (atEnd || !TEAM.drawn) list.scrollTop = list.scrollHeight;
+    TEAM.drawn = true;
+  }
+  function addTeam(messages, older) {
+    const have = new Set(TEAM.msgs.map((m) => m.id));
+    const fresh = messages.filter((m) => !have.has(m.id));
+    if (!fresh.length && TEAM.drawn) return;
+    TEAM.msgs = TEAM.msgs.concat(fresh).sort((a, b) => a.id - b.id);
+    TEAM.shown = TEAM.msgs.length ? TEAM.msgs[TEAM.msgs.length - 1].id : 0;
+    renderTeam(older);
+  }
+  async function loadTeam() {
+    if (TEAM.busy) return;
+    TEAM.busy = true;
+    try {
+      const first = !TEAM.drawn;
+      const r = await api("/api/team" + (TEAM.shown ? "?after=" + TEAM.shown : ""));
+      if (first) TEAM.more = r.messages.length >= 200;
+      addTeam(r.messages);
+      if (TEAM.open) markTeamSeen();
+    } catch (e) { /* the next poll tries again */ }
+    TEAM.busy = false;
+  }
+  async function loadOlderTeam() {
+    if (!TEAM.more || TEAM.busy || !TEAM.msgs.length) return;
+    TEAM.busy = true;
+    try {
+      const r = await api("/api/team?before=" + TEAM.msgs[0].id);
+      TEAM.more = r.messages.length >= 200;
+      addTeam(r.messages, true);
+    } catch (e) { /* stays as it is */ }
+    TEAM.busy = false;
+  }
+  function markTeamSeen() {
+    TEAM.seen = Math.max(TEAM.seen, TEAM.shown);
+    TEAM.told = Math.max(TEAM.told || 0, TEAM.shown);
+    store("lh.teamSeen", String(TEAM.seen));
+    $("team-dot").hidden = true;
+  }
+  async function sendTeam(e) {
+    e.preventDefault();
+    const input = $("team-input"), text = input.value.trim();
+    if (!text) return;
+    if (!teamName()) { showTeamName(true); return; }
+    $("team-send").disabled = true;
+    try {
+      const r = await api("/api/team", { body: { name: teamName(), text } });
+      input.value = "";
+      fitTeamInput();
+      addTeam([r.message]);
+      markTeamSeen();
+    } catch (err) { toast(err.message); }
+    $("team-send").disabled = false;
+    input.focus();
+  }
+  function fitTeamInput() {
+    const t = $("team-input");
+    t.style.height = "auto";
+    t.style.height = Math.min(t.scrollHeight, 160) + "px";
+    t.style.overflowY = t.scrollHeight > 160 ? "auto" : "hidden";
+  }
+  // the state's poll says the newest message's id: a dot on the button, and who wrote what while the chat is closed
+  async function teamState(last) {
+    if (typeof last !== "number") return;
+    if (TEAM.told === null) TEAM.told = last;   // what was there before this page opened is not news
+    if (TEAM.open) { if (last > TEAM.shown) loadTeam(); return; }
+    $("team-dot").hidden = !(last > TEAM.seen);
+    if (last <= TEAM.told) return;
+    const from = TEAM.told;
+    TEAM.told = last;
+    try {
+      const theirs = (await api("/api/team?after=" + from)).messages.filter((m) => m.name !== teamName());
+      const m = theirs[theirs.length - 1];
+      if (m) toast(m.name + ": " + (m.text.length > 90 ? m.text.slice(0, 90) + "…" : m.text), () => toggleTeam(true));
+    } catch (e) { /* the dot still says */ }
+  }
+  function initTeam() {
+    $("toggle-team").addEventListener("click", () => toggleTeam());
+    $("close-team").addEventListener("click", () => toggleTeam(false));
+    $("team-form").addEventListener("submit", sendTeam);
+    $("team-name-form").addEventListener("submit", saveTeamName);
+    $("team-name").addEventListener("click", () => showTeamName(true));
+    $("team-name-input").addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && teamName()) { e.preventDefault(); showTeamName(); }
+    });
+    $("team-input").addEventListener("input", fitTeamInput);
+    $("team-input").addEventListener("keydown", (e) => {   // Enter sends, Shift+Enter starts a new line
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) sendTeam(e);
+    });
+    $("team-list").addEventListener("scroll", () => { if ($("team-list").scrollTop < 40) loadOlderTeam(); });
+  }
+
+  // ------------------------------------------------------------------ analysis: post-processing kept runs
+  // A run's columns, or expressions of them, through steps, then a fit; the server works it out (workbench.py). Kelvin's
+  // analyze tool opens this pane with its own spec, which the person changes here; Keep fit keeps it with its run.
+  const ANA = { open: false, spec: { runs: [], x: "", y: "", where: "", steps: [], fit: null }, result: null, runs: [],
+               models: [], gen: 0, timer: null, auto: { x: true, y: true, group: true }, traces: new Map() };
+  // op: [its name, its fields: {key, hint (the placeholder), value (its default), choices: [[value, label]], before and
+  // after (a word beside the box, so a filled-in number still says what it is)}]
+  const X_FROM = { key: "lo", hint: "from x" }, X_TO = { key: "hi", hint: "to x" };
+  const AN_STEPS = {
+    crop: ["Crop", [X_FROM, X_TO]],
+    bin: ["Bin", [{ key: "width", hint: "x width" }]],
+    smooth: ["Smooth", [{ key: "points", value: 5, after: "points" }]],
+    deriv: ["d/dx", []],
+    integrate: ["∫ dx", []],
+    background: ["Background", [{ key: "order", value: 1, choices: [[0, "constant"], [1, "linear"], [2, "quadratic"], [3, "cubic"]] },
+      X_FROM, X_TO]],
+    normalize: ["Normalize", [{ key: "how", value: "max", choices: [["max", "to its max"], ["range", "0 to 1"], ["first", "to the first point"], ["mean", "to its mean"]] }]],
+    scale: ["Scale", [{ key: "factor", value: 1, before: "×" }, { key: "offset", value: 0, before: "+" }]],
+    symmetrize: ["Symmetrize", []],
+    antisymmetrize: ["Antisymmetrize", []],
+    fft: ["FFT", []],
+    abs: ["|y|", []],
+    log10: ["log₁₀ |y|", []],
+  };
+  const anWhen = (r) => r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
+  const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "");
+
+  function toggleAnalysis(open) {
+    ANA.open = open === undefined ? !ANA.open : open;
+    if (ANA.open && RUNS.open) toggleRuns(false);   // they take turns beside the chat
+    $("anpane").hidden = !ANA.open;
+    $("toggle-analysis").setAttribute("aria-pressed", String(ANA.open));
+    $("toggle-analysis").classList.toggle("on", ANA.open);
+    fitLayout();
+    if (!ANA.open) return;
+    if (!ANA.spec.runs.length) startAnalysis();
+    else loadAnalysisRuns().then(renderAnalysisForm);   // runs measured since it was last open
+  }
+  async function loadAnalysisRuns() {
+    try { ANA.runs = (await api("/api/runs?limit=100")).runs; } catch (e) { ANA.runs = []; }
+    $("an-run").replaceChildren(...ANA.runs.map((r) => h("option", { value: r.run_id }, anRunLabel(r))));
+  }
+  // the pane opened by a person: the run the Runs pane shows, else the latest
+  async function startAnalysis() {
+    await loadAnalysisRuns();
+    if (!ANA.runs.length) { anMessage("No runs yet."); return; }
+    const shown = RUNS.active && ANA.runs.some((r) => r.run_id === RUNS.active) ? RUNS.active : ANA.runs[0].run_id;
+    ANA.spec = { runs: [shown], x: "", y: "", where: "", group: "", steps: [], fit: null };
+    ANA.auto = { x: true, y: true, group: true };
+    await anColumns(shown);
+    renderAnalysisForm();
+    computeAnalysis(true);
+  }
+  // Kelvin's analyze tool: its spec in the form, its result drawn (a run's Analyze: that run, its defaults)
+  async function openAnalysis(spec, result, auto) {
+    spec = spec || {};
+    const runs = result && result.curves.length ? [...new Set(result.curves.map((c) => c.run))] : (spec.runs || []);
+    ANA.spec = { runs, x: spec.x || "", y: spec.y || "", where: spec.where || "", group: spec.group || "", row: spec.row,
+      steps: Array.isArray(spec.steps) ? spec.steps.map((s) => Object.assign({}, s)) : [],
+      fit: spec.fit ? Object.assign({}, spec.fit) : null };
+    ANA.auto = auto || { x: !spec.x, y: !spec.y, group: false };   // what Kelvin left out follows the run, as the server's does
+    if (!ANA.open) {
+      ANA.open = true;   // shown without starting the pane's own default
+      if (RUNS.open) toggleRuns(false);
+      $("anpane").hidden = false;
+      $("toggle-analysis").setAttribute("aria-pressed", "true");
+      $("toggle-analysis").classList.add("on");
+      fitLayout();
+    }
+    await loadAnalysisRuns();
+    if (runs.length) await anColumns(runs[0]);
+    renderAnalysisForm();
+    if (result) {
+      ANA.gen += 1;   // what the person asked before is not drawn over it
+      clearTimeout(ANA.timer);
+      ANA.timer = null;
+      ANA.again = ANA.pending = false;
+      $("an-plot").classList.remove("busy");
+      ANA.resultSpec = JSON.parse(JSON.stringify(anSpec()));
+      showAnalysis(result);
+    } else computeAnalysis(true);
+  }
+  // a run's columns: the suggestions under x and y, the models. Until the person picks them, x and y follow the run (its
+  // innermost swept axis and first reading) and a map is drawn a curve per value of its outer axis
+  async function anColumns(runId) {
+    let cols;
+    try { cols = await api("/api/analysis/columns?run=" + encodeURIComponent(runId)); }
+    catch (e) { anMessage(e.message, true); return; }
+    ANA.models = cols.models.filter((m) => m !== "resonator");
+    const all = cols.axes.concat(cols.readings, cols.traces);
+    ANA.traces = new Map(cols.traces.map((c) => [c.key, c.x_unit === "Hz" ? "frequency" : "x"]));
+    $("an-where").placeholder = (cols.axes.length ? cols.axes[0].key : "t") + " > 0";
+    $("an-cols").replaceChildren(...all.map((c) => h("option", { value: c.key, label: c.unit || "" })));
+    const keys = new Set(all.map((c) => c.key));
+    const plain = (t) => /^[\w.]+$/.test(t);   // a column's name, not an expression of columns
+    const s = ANA.spec, auto = ANA.auto;
+    const gone = (t) => plain(t) && !keys.has(t) && t !== "t" && t !== "i";   // a column this run doesn't have
+    if (auto.x || !s.x || gone(s.x)) { s.x = cols.axes.length ? cols.axes[cols.axes.length - 1].key : "t"; auto.x = true; }
+    if (auto.y || !s.y || gone(s.y)) {
+      s.y = cols.readings.length ? cols.readings[0].key : cols.traces.length ? cols.traces[0].key : "";
+      auto.y = true;
+    }
+    if (auto.group) s.group = cols.axes.length > 1 ? cols.axes[0].key : "";
+  }
+  function renderAnalysisForm() {
+    const s = ANA.spec;
+    if (s.runs.length && !ANA.runs.some((r) => r.run_id === s.runs[0])) {   // a run older than the list's
+      $("an-run").append(h("option", { value: s.runs[0] }, s.runs[0]));
+    }
+    $("an-run").value = s.runs[0] || "";
+    traceAxis();
+    $("an-y").value = s.y || "";
+    $("an-where").value = s.where || "";
+    const chips = s.runs.slice(1).map((id) => {
+      const r = ANA.runs.find((x) => x.run_id === id);
+      return anChip(r ? anRunLabel(r) : id, () => { s.runs = s.runs.filter((x) => x !== id); renderAnalysisForm(); computeAnalysis(true); });
+    });
+    if (s.group) chips.push(anChip("per " + s.group, () => { s.group = ""; ANA.auto.group = false; renderAnalysisForm(); computeAnalysis(true); }));
+    if (s.row !== undefined && s.row !== null && s.row !== "") chips.push(anChip("row " + s.row, () => { s.row = null; renderAnalysisForm(); computeAnalysis(true); }));
+    $("an-chips").replaceChildren(...chips);
+    $("an-chips").hidden = !chips.length;
+    renderSteps();
+    const f = s.fit || {};
+    const known = ANA.models.includes(f.model);
+    $("an-model").replaceChildren(h("option", { value: "" }, "No fit"),
+      ...ANA.models.map((m) => h("option", { value: m }, m.replace(/_/g, " "))), h("option", { value: "expr" }, "f(x) = …"));
+    $("an-model").value = !f.model ? "" : known ? f.model : "expr";
+    $("an-expr").hidden = $("an-model").value !== "expr";
+    $("an-expr").value = f.model && !known ? f.model : "";
+    $("an-lo").value = f.lo === undefined || f.lo === null ? "" : f.lo;
+    $("an-hi").value = f.hi === undefined || f.hi === null ? "" : f.hi;
+  }
+  function traceAxis() {   // a trace is drawn against its own x
+    const own = ANA.traces && ANA.traces.get(ANA.spec.y);
+    $("an-x").disabled = !!own;
+    $("an-x").placeholder = own || "";
+    $("an-x").value = own ? "" : ANA.spec.x || "";
+  }
+  function anChip(text, remove) {
+    return h("span", { class: "an-chip" }, h("span", {}, text),
+      h("button", { class: "icon-btn", type: "button", "aria-label": "Remove " + text, onclick: remove }, icon("x")));
+  }
+  function renderSteps() {
+    $("an-steps").replaceChildren(...ANA.spec.steps.map((st, i) => {
+      const [name, fields] = AN_STEPS[st.op] || [st.op, []];
+      const row = h("div", { class: "an-step" }, h("span", { class: "an-step-name" }, name));
+      for (const { key, hint, value, choices, before, after } of fields) {
+        if (st[key] === undefined && value !== undefined) st[key] = value;
+        const input = choices
+          ? h("select", { "aria-label": name + ": " + key }, ...choices.map(([v, label]) => h("option", { value: String(v) }, label)))
+          : h("input", { type: "number", step: "any", placeholder: hint || "", "aria-label": name + ": " + (hint || after || key) });
+        input.value = st[key] === undefined || st[key] === null ? "" : String(st[key]);
+        input.addEventListener(choices ? "change" : "input", () => {
+          const v = input.value.trim();
+          if (choices) st[key] = typeof choices[0][0] === "number" ? Number(v) : v;
+          else if (v === "") delete st[key];
+          else st[key] = Number(v);
+          computeAnalysis();
+        });
+        if (before) row.append(h("span", { class: "an-unit" }, before));
+        row.append(input);
+        if (after) row.append(h("span", { class: "an-unit" }, after));
+      }
+      row.append(h("button", { class: "icon-btn", type: "button", "aria-label": "Remove " + name,
+        onclick: () => { ANA.spec.steps.splice(i, 1); renderSteps(); computeAnalysis(true); } }, icon("x")));
+      return row;
+    }));
+  }
+  function anMessage(text, bad) {
+    $("an-msg").textContent = text || "";
+    $("an-msg").classList.toggle("bad", !!bad);
+    $("an-msg").hidden = !text;
+  }
+  function anSpec() {
+    const s = ANA.spec;
+    const out = { runs: s.runs, x: s.x, y: s.y, where: s.where, steps: s.steps };
+    if (s.group) out.group = s.group;
+    if (s.row !== undefined && s.row !== null && s.row !== "") out.row = s.row;
+    if (s.fit && s.fit.model) out.fit = s.fit;
+    return out;
+  }
+  // one request at a time: what the person changes meanwhile goes once it is back (the server's threads stay free)
+  function computeAnalysis(now) {
+    clearTimeout(ANA.timer);
+    ANA.pending = true;
+    $("an-keep").disabled = true;   // a fit is kept as shown, never one being worked out
+    ANA.timer = setTimeout(runAnalysis, now ? 0 : 450);
+  }
+  async function runAnalysis() {
+    ANA.timer = null;
+    if (!ANA.spec.runs.length) { ANA.pending = false; return; }
+    if (ANA.busy) { ANA.again = true; return; }
+    ANA.busy = true;
+    ANA.again = false;
+    const gen = ANA.gen, sent = JSON.parse(JSON.stringify(anSpec()));
+    $("an-plot").classList.add("busy");
+    let r = null;
+    try { r = await api("/api/analysis", { body: { spec: sent } }); }
+    catch (e) { if (gen === ANA.gen && !ANA.again && !ANA.timer) anMessage(e.message, true); }
+    ANA.busy = false;
+    if (gen !== ANA.gen) {   // Kelvin's analysis came meanwhile, and stays; an edit made since still goes
+      if (ANA.again && !ANA.timer) runAnalysis();
+      return;
+    }
+    if (ANA.again || ANA.timer) {   // changed meanwhile: the newest spec now (or when its pause ends)
+      if (!ANA.timer) runAnalysis();
+      return;
+    }
+    ANA.pending = false;
+    $("an-plot").classList.remove("busy");
+    if (r) { ANA.resultSpec = sent; showAnalysis(r); }
+  }
+  function showAnalysis(r) {
+    ANA.result = r;
+    const curves = r.curves.slice(0, SERIES), a = r.axes || {};
+    const notes = (r.notes || []).slice();
+    if (r.curves.length > SERIES) notes.push(r.curves.length + " curves: the first " + SERIES + " are drawn");
+    anMessage(notes.join(" · "));
+    const many = new Set(curves.map((c) => c.run)).size > 1;
+    for (const c of curves) {   // a curve's name: its group, and which run only when there are several
+      const r = ANA.runs.find((x) => x.run_id === c.run);
+      const rest = c.label.startsWith(c.run) ? c.label.slice(c.run.length).replace(/^ · /, "") : c.label;
+      const run = r ? r.plan + " " + anWhen(r) : c.run;
+      c.name = many ? run + (rest ? " · " + rest : "") : rest || run;
+    }
+    const series = curves.map((c) => ({ name: c.name, points: c.x.map((x, i) => ({ x, y: c.y[i] }))
+      .filter((p) => typeof p.x === "number" && typeof p.y === "number") })).filter((s) => s.points.length);
+    const fits = curves.map((c) => (c.fit && !c.fit.error ? c.fit.curve : null));
+    const one = series.length === 1 && fits[0] ? { x: fits[0].x, y: fits[0].y, label: curves[0].fit.model + " fit" } : null;
+    $("an-plot").replaceChildren(series.length ? lineChart({ title: a.y || "y", series, xKey: a.x || "x", xUnit: a.x_unit || "",
+      yUnit: a.y_unit || "", height: 260, fit: one, fits: one ? null : fits }) : h("div", { class: "pane-empty" }, "No points"));
+    renderFit(curves);
+    $("an-keep").disabled = !curves.some((c) => c.fit && !c.fit.error);
+    $("an-csv").disabled = !series.length;
+  }
+  function pm(v, err, unit) {   // 4.0012 ± 0.0003 GHz
+    if (typeof v !== "number") return "—";
+    if (typeof err !== "number" || !(err > 0)) return fmt(v, unit);
+    const [f, p] = prefixFor(Math.abs(v) || err, unit);
+    const d = Math.max(0, Math.min(8, 1 - Math.floor(Math.log10(err / f))));
+    return (v / f).toFixed(d) + " ± " + (err / f).toFixed(d) + (unit ? " " + p + unit : "");
+  }
+  const sig = (v, n) => (typeof v === "number" ? String(Number(v.toPrecision(n || 3))) : "—");
+  function renderFit(curves) {
+    const fitted = curves.filter((c) => c.fit);
+    $("an-fit").replaceChildren(...fitted.map((c) => {
+      const head = fitted.length > 1 ? h("div", { class: "an-fit-head" }, c.name || c.label) : null;
+      if (c.fit.error) return h("div", { class: "an-fit-card bad" }, head, c.fit.error);
+      const rows = c.fit.params.map((p) => h("tr", {}, h("th", {}, p.name), h("td", {}, pm(p.value, p.error, p.unit) + (p.held ? " (held)" : ""))));
+      for (const d of c.fit.derived || []) rows.push(h("tr", { class: "derived" }, h("th", {}, d.name), h("td", {}, pm(d.value, d.error, d.unit))));
+      return h("div", { class: "an-fit-card" }, head, h("table", { class: "an-params" }, ...rows),
+        h("div", { class: "an-fit-foot" }, "χ²ᵣ " + sig(c.fit.chi2_red) + " · R² " + sig(c.fit.r2, 4) + (c.fit.converged ? "" : " · not converged")),
+        c.fit.warnings && c.fit.warnings.length ? h("ul", { class: "an-warn" }, ...c.fit.warnings.map((w) => h("li", {}, w))) : null);
+    }));
+  }
+  // the drawn curves' fits, as shown (the spec that made them); a fit kept under the same name is replaced only on a yes
+  async function keepAnalysisFit() {
+    const r = ANA.result, spec = ANA.resultSpec;
+    if (!r || !spec || ANA.pending) return;
+    $("an-keep").disabled = true;
+    let kept = 0;
+    const failed = [];
+    for (let i = 0; i < Math.min(r.curves.length, SERIES); i++) {
+      const c = r.curves[i];
+      if (!c.fit || c.fit.error) continue;
+      const body = { spec, curve: i };
+      try {
+        try { await api("/api/analysis/keep", { body }); }
+        catch (e) {
+          if (!(e.data && e.data.exists)) throw e;
+          if (!confirm("“" + e.data.exists + "” is kept with " + (c.name || c.label) + " already. Replace it?")) continue;
+          await api("/api/analysis/keep", { body: Object.assign({ replace: true }, body) });
+        }
+        kept += 1;
+      } catch (e) { failed.push((c.name || c.label) + ": " + e.message); }
+    }
+    toast(failed.length ? "Not kept: " + failed.join("; ") : !kept ? "Nothing kept" : kept === 1 ? "Fit kept with its run" : kept + " fits kept with their runs");
+    $("an-keep").disabled = ANA.pending;   // a compute started meanwhile: Keep waits for its result
+  }
+  function askAboutAnalysis() {
+    const s = ANA.spec;
+    if (!s.runs.length) return;
+    const parts = [s.runs.join(", "), "y = " + s.y, "x = " + s.x];
+    if (s.where) parts.push("where " + s.where);
+    if (s.steps.length) parts.push("steps: " + s.steps.map((st) => st.op + Object.entries(st).filter(([k]) => k !== "op")
+      .map(([k, v]) => " " + k + "=" + v).join("")).join(", "));
+    if (s.fit && s.fit.model) parts.push("fit: " + s.fit.model);
+    const input = $("input");
+    input.value = "In the Analysis pane (" + parts.join("; ") + "): ";
+    autosize();
+    updateSend();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  }
+  function showCompareMenu() {
+    const menu = $("an-run-menu");
+    if (!menu.hidden) { menu.hidden = true; $("an-more-run").setAttribute("aria-expanded", "false"); return; }
+    const free = ANA.runs.filter((r) => !ANA.spec.runs.includes(r.run_id));
+    menu.replaceChildren(...(free.length ? free.map((r) => {
+      const b = h("button", { class: "pane-menu-item", type: "button", role: "menuitem" }, h("span", {}),
+        h("span", { class: "pm-plan" }, r.plan), h("span", { class: "pm-meta" }, anWhen(r)));
+      b.addEventListener("click", () => {
+        menu.hidden = true;
+        $("an-more-run").setAttribute("aria-expanded", "false");
+        if (ANA.spec.runs.length >= 8) { toast("At most 8 runs at once"); return; }
+        ANA.spec.runs.push(r.run_id);
+        renderAnalysisForm();
+        computeAnalysis(true);
+      });
+      return b;
+    }) : [h("div", { class: "pane-menu-note" }, "No other runs.")]));
+    menu.hidden = false;
+    $("an-more-run").setAttribute("aria-expanded", "true");
+  }
+  function initAnalysis() {
+    $("toggle-analysis").addEventListener("click", () => toggleAnalysis());
+    $("close-analysis").addEventListener("click", () => toggleAnalysis(false));
+    $("an-add-step").replaceChildren(h("option", { value: "" }, "+ Step"),
+      ...Object.entries(AN_STEPS).map(([op, [name]]) => h("option", { value: op }, name)));
+    $("an-add-step").addEventListener("change", (e) => {
+      const op = e.target.value;
+      e.target.value = "";
+      if (!op) return;
+      ANA.spec.steps.push({ op });
+      renderSteps();
+      computeAnalysis(true);
+    });
+    $("an-run").addEventListener("change", async () => {
+      const id = $("an-run").value;
+      ANA.spec.runs = [id].concat(ANA.spec.runs.slice(1).filter((x) => x !== id));
+      await anColumns(id);
+      renderAnalysisForm();
+      computeAnalysis(true);
+    });
+    for (const [id, key] of [["an-x", "x"], ["an-y", "y"], ["an-where", "where"]]) {
+      $(id).addEventListener("input", () => {
+        ANA.spec[key] = $(id).value.trim();
+        if (key !== "where") ANA.auto[key] = false;   // the person's choice now, kept when the run changes
+        if (key === "y") traceAxis();
+        computeAnalysis();
+      });
+    }
+    const fitChanged = (now) => {
+      const m = $("an-model").value;
+      $("an-expr").hidden = m !== "expr";
+      const model = m === "expr" ? $("an-expr").value.trim() : m;
+      const num = (id) => ($(id).value.trim() === "" ? null : Number($(id).value));
+      ANA.spec.fit = model ? { model, lo: num("an-lo"), hi: num("an-hi") } : null;
+      computeAnalysis(now);
+    };
+    $("an-model").addEventListener("change", () => {
+      const expr = $("an-model").value === "expr";
+      fitChanged(!expr);
+      if (expr) $("an-expr").focus();
+    });
+    for (const id of ["an-expr", "an-lo", "an-hi"]) $(id).addEventListener("input", () => fitChanged(false));
+    $("an-keep").addEventListener("click", keepAnalysisFit);
+    $("an-csv").addEventListener("click", () => fetchDownload("/api/analysis/csv", (ANA.spec.runs[0] || "analysis") + "-analysis.csv",
+      "data", { spec: Object.assign(anSpec(), { fit: undefined }) }));
+    $("an-ask").addEventListener("click", askAboutAnalysis);
+    $("an-more-run").addEventListener("click", (e) => { e.stopPropagation(); showCompareMenu(); });
+    document.addEventListener("click", (e) => {
+      if (!$("an-run-menu").hidden && !e.target.closest("#anpane .pane-menu-wrap")) {
+        $("an-run-menu").hidden = true;
+        $("an-more-run").setAttribute("aria-expanded", "false");
+      }
+    });
   }
 
   const SUGGESTIONS = [
     ["Check the lab", "What is on, and is anything away from safe?"],
     ["Set up my instruments", "Find the instruments connected to this computer and set them up."],
-    ["Plan an experiment", "Plan how to measure the field dependence of the resistance at base temperature."],
+    ["Plan an experiment", "Help me plan an experiment: ask me what I want to find out, then propose a plan."],
     ["Look at my data", "Plot my latest run and tell me what you see."],
   ];
 
@@ -5897,13 +6444,15 @@
       if (S.incognito && S.chatId) fetch("/api/chats/" + S.chatId, { method: "DELETE", keepalive: true, headers: { "X-Kelvin-Token": token } });
     });
     $("suggestions").replaceChildren(...SUGGESTIONS.map(([title, text]) => {
-      const b = h("button", { class: "suggestion", type: "button" }, h("b", {}, title), h("span", {}, text));
+      const b = h("button", { class: "suggestion", type: "button", title: text }, h("b", {}, title));
       b.addEventListener("click", () => sendMessage(text));
       return b;
     }));
     applyModels(boot.models.groups, boot.default_model, boot.auto_model, boot.models.hub);
     initRunsPane();
     initLabPanel();
+    initTeam();
+    initAnalysis();
     fitLayout();
     initTerminal();
     renderChats();
@@ -6087,7 +6636,13 @@
     $("new-chat").addEventListener("click", () => newChat(null, true));
     $("folder-btn").addEventListener("click", (e) => { e.stopPropagation(); folderMenu(); });
     $("toggle-sidebar").addEventListener("click", () => { $("app").classList.toggle("side-open"); syncScrim(); });
-    $("scrim").addEventListener("click", () => { closeSidebar(); if (S.labOpen) toggleLab(false); if (RUNS.open) toggleRuns(false); });
+    $("scrim").addEventListener("click", () => {
+      closeSidebar();
+      if (S.labOpen) toggleLab(false);
+      if (RUNS.open) toggleRuns(false);
+      if (TEAM.open) toggleTeam(false);
+      if (ANA.open) toggleAnalysis(false);
+    });
     $("toggle-lab").addEventListener("click", () => toggleLab());
     $("inst-filter").addEventListener("input", (e) => { PANEL.filter = e.target.value; renderInstruments(); });
     for (const b of document.querySelectorAll("#inst-seg button")) {
@@ -6116,7 +6671,7 @@
       });
     }
     window.addEventListener("resize", syncScrim);
-    setInterval(() => { if (S.labOpen || S.live.size || S.answering.size || !$("lab-badge").hidden) pollState(); }, 1500);
+    setInterval(() => { if (S.labOpen || TEAM.open || S.live.size || S.answering.size || !$("lab-badge").hidden) pollState(); }, 1500);
     setInterval(pollState, 4000);   // often enough that an alarm shows within seconds
     pollState();
     $("input").focus();

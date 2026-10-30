@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -43,6 +44,8 @@ from ..labconfig import ConfigError, load_lab_config, same_setup
 from .. import carddraft
 from .. import protection
 from .. import rundata
+from .. import workbench
+from ..teamchat import TeamChat, TeamChatError
 from ..homelab import build_lab, builtin_ids, collection_ids, kelvin_ids, lab_registry, open_home_lab
 from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import labops, review, rules as rulebook
@@ -70,7 +73,8 @@ HUB_SHARING = False
 LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
                           "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/folder",
                           "/api/phone", "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount",
-                          "/api/quit", "/api/update", "/api/hub", "/api/skills/", "/api/know/", "/api/collection")
+                          "/api/quit", "/api/update", "/api/hub", "/api/skills/", "/api/know/", "/api/collection",
+                          "/api/team", "/api/analysis/keep")
 COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
 
 
@@ -281,6 +285,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     home = lab_file.parent
     runtime.home = home                                   # each instrument's folder: ~/Kelvin/instruments/<name>
     runtime.lab_memory_dir = home                         # the lab's memory, everyone's (labmemory.py)
+    team = TeamChat(home)                                 # the lab's team chat, everyone's (teamchat.py)
     runtime.scripts_folder = lambda: settings.lab_scripts or None   # run_script runs only the scripts in it
     runtime.scripts_python = lambda: settings.lab_scripts_python
     from .. import envs
@@ -609,11 +614,37 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     NOT_THROUGH_HUB = ("That is unshared work (unpublished, confidential or limited to some models, or incognito), "
                        "so it doesn't go through the Kelvin hub. Open it on the lab network or through Tailscale.")
 
-    def relay_private(method: str, path: str, body: bytes) -> Optional[str]:
+    def analysis_runs(path: str, body: bytes, query: str) -> List[str]:
+        """The runs an Analysis pane request names, read as its route reads them (workbench.run_ids): its spec's,
+        "last" when it names none, or every ?run= given."""
+        from urllib.parse import parse_qs
+        if path.rstrip("/").endswith("/columns"):
+            asked = parse_qs(query or "").get("run") or ["last"]
+        else:
+            try:
+                ask = json.loads(body or b"{}")
+            except ValueError:
+                ask = {}
+            try:
+                asked = workbench.run_ids(ask.get("spec") if isinstance(ask, dict) else None)
+            except workbench.AnalysisError:   # the route refuses it too
+                asked = []
+        return [str(r).strip() or "last" for r in asked]
+
+    NAME_THE_RUN = ("Through the Kelvin hub, Analysis reads only the runs a request names (the pane names them), so "
+                    "unshared work never passes the hub: name the run.")
+
+    def relay_private(method: str, path: str, body: bytes, query: str = "") -> Optional[str]:
         """Why a phone's request through the Kelvin hub would reach unshared work (None: it doesn't). The hub sees
         what passes through it, and unshared work never goes to the hub."""
         parts = path.strip("/").split("/")   # ["api", "chats", <id>, ...]
         kind = parts[1] if len(parts) > 1 else ""
+        if kind == "analysis":
+            named = analysis_runs(path, body, query)
+            if "last" in named:   # resolved later, on the pane's own threads: a run that starts meanwhile could be read
+                return NAME_THE_RUN
+            if any(unshared_run(r) for r in named):
+                return NOT_THROUGH_HUB
         if kind == "reports":
             return "Reports open through the Kelvin hub from a run; the report library is on the Kelvin computer."
         if kind == "chats" and len(parts) == 2 and method == "POST":
@@ -665,11 +696,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             hidden += len(data["runs"]) - len(kept)
             data = dict(data, runs=kept)
         elif path in ("/api/state", "/api/live") and isinstance(data, dict):
-            live = data.get("live") if path == "/api/state" else data
+            live = data.get("live")   # both answer {"live": the running plan's view, ...}
             if isinstance(live, dict) and live.get("status") == "running" and unshared_meta(runtime.running_meta):
-                live = dict(live, plan="a scan of unshared work", rows=[], trace=None)
+                live = dict(live, plan="a scan of unshared work", rows=[], trace=None, run_id="unshared")
                 hidden += 1
-                data = dict(data, live=live) if path == "/api/state" else live
+                data = dict(data, live=live)
             mounted = data.get("mounted") if path == "/api/state" else None
             if isinstance(mounted, dict) and unshared_project(mounted.get("project")):
                 data = dict(data, mounted=dict(mounted, project_name="unshared work"))
@@ -705,6 +736,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             raise RuntimeError(str(e))
 
     agent.draw = draw_pages
+    agent.team = team
 
     def central_sign_in(email: str, password: str, link: Optional[str] = None, link_password: str = "",
                         old_password: str = "", answer: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2220,6 +2252,92 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def notify_test(request: Request) -> Response:
         return JSONResponse({"result": await asyncio.to_thread(runtime.notifier.test)})
 
+    async def team_view(request: Request) -> Response:
+        """GET ?after=<id> (or ?before=<id>, scrolling back): the team chat's messages, oldest first, and the newest's
+        id. POST {name, text}: a message under the name its writer chose; the account signed in and where it came
+        from go with it (teamchat.py). Everyone here reads the same chat, as the lab's memory."""
+        if request.method == "POST":
+            body = await request.json()
+            if not isinstance(body, dict):
+                return error(400, "send {name, text}")
+            user = session["user"]
+            account = str(user.get("display") or user.get("name") or "") if user else ""
+            where, phone = channel(request)
+            try:
+                m = await asyncio.to_thread(team.post, body.get("name"), body.get("text"), account,
+                                            "phone %s" % phone if where == "phone" else "portal")
+            except TeamChatError as e:
+                return error(400, str(e))
+            return JSONResponse({"message": m, "last": m["id"]})
+        q = request.query_params
+        try:
+            after, before, limit = int(q.get("after") or 0), int(q.get("before") or 0), int(q.get("limit") or 200)
+        except ValueError:
+            return error(400, "after, before and limit are numbers")
+        messages = team.before(before, limit) if before else team.since(after, limit)
+        return JSONResponse({"messages": messages, "last": team.last})
+
+    async def analysis_view(request: Request) -> Response:
+        """POST {spec}: the Analysis panel's spec worked out (workbench.py): each curve after its steps, and its fit.
+        It reads runs and changes nothing."""
+        body = await request.json()
+        spec = body.get("spec") if isinstance(body, dict) else None
+        try:
+            return JSONResponse(await workbench.off_thread(workbench.compute, runtime, spec or {}))
+        except workbench.AnalysisError as e:
+            return error(400, str(e))
+        except Exception as e:   # said in words, never a bare 500
+            log.exception("analysis failed")
+            return error(500, "the analysis failed: %s" % (str(e) or e.__class__.__name__))
+
+    async def analysis_columns(request: Request) -> Response:
+        """GET ?run=<id>: what a run offers the Analysis panel: its axes, readings and traces with their units."""
+        asked = request.query_params.getlist("run")
+        if len(asked) > 1:
+            return error(400, "one run at a time")
+        try:
+            return JSONResponse(await workbench.off_thread(workbench.columns, runtime, (asked or ["last"])[0] or "last"))
+        except workbench.AnalysisError as e:
+            return error(404, str(e))
+        except Exception as e:
+            log.exception("analysis columns failed")
+            return error(500, "the run can't be read: %s" % (str(e) or e.__class__.__name__))
+
+    async def analysis_csv(request: Request) -> Response:
+        """POST {spec}: the Analysis panel's curves as CSV, every point, written by Kelvin's code (workbench.table)."""
+        body = await request.json()
+        spec = body.get("spec") if isinstance(body, dict) else None
+        try:
+            name, text = await workbench.off_thread(workbench.table, runtime, spec or {})
+        except workbench.AnalysisError as e:
+            return error(400, str(e))
+        except Exception as e:
+            log.exception("analysis CSV failed")
+            return error(500, "the analysis failed: %s" % (str(e) or e.__class__.__name__))
+        from urllib.parse import quote
+        plain = re.sub(r"[^A-Za-z0-9._-]+", "_", name)   # headers are Latin-1: the run's own name goes in filename*
+        return Response(text, media_type="text/csv; charset=utf-8", headers={
+            "Content-Disposition": "attachment; filename=\"%s\"; filename*=UTF-8''%s" % (plain, quote(name))})
+
+    async def analysis_keep(request: Request) -> Response:
+        """POST {spec, curve, name}: a person keeps one curve's fit with its run (run.h5: /fits/<name>), as theirs; the
+        lab's record says so."""
+        body = await request.json()
+        if not isinstance(body, dict) or not isinstance(body.get("spec"), dict):
+            return error(400, "send {spec, curve, name}")
+        try:
+            said = await workbench.off_thread(workbench.keep, runtime, body["spec"], body.get("curve") or 0,
+                                              str(body.get("name") or ""), person(request), runtime.user,
+                                              bool(body.get("replace")))
+        except workbench.KeptAlready as e:   # the pane asks the person before it replaces a kept fit
+            return JSONResponse({"error": str(e), "exists": e.name}, status_code=409)
+        except workbench.AnalysisError as e:
+            return error(400, str(e))
+        except Exception as e:   # run.h5 held by another program, the run removed meanwhile...
+            log.exception("keeping a fit failed")
+            return error(500, "not kept: %s" % (str(e) or e.__class__.__name__))
+        return JSONResponse({"ok": True, "said": said})
+
     # ------------------------------------------------------------------ the lab Kelvin controls (people only)
 
     def busy_problem() -> Optional[str]:
@@ -2902,6 +3020,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         from ..cardlang import shown   # each card also as this person reads it (Settings → Display), for the phone too
         data["pending"] = [shown(p, settings.card_language) for p in data.get("pending") or []]
         data["lab_memory"] = runtime.lab_memory_stamp()   # the Lab panel reloads the lab's memory when it changes
+        data["team"] = team.last   # the team chat's newest message: the portal marks what you haven't read
         return JSONResponse(data)
 
     async def scripts_folder(request: Request) -> Response:
@@ -2995,7 +3114,12 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"live": runtime.live_view(since)})
 
     async def runs(request: Request) -> Response:
-        return JSONResponse({"runs": await asyncio.to_thread(runtime.runs_index, 20)})
+        """GET ?limit=<n>: the latest runs (20; the Analysis panel's run picker asks for more)."""
+        try:
+            limit = max(1, min(int(request.query_params.get("limit") or 20), 200))
+        except ValueError:
+            limit = 20
+        return JSONResponse({"runs": await asyncio.to_thread(runtime.runs_index, limit)})
 
     async def stop_run(request: Request) -> Response:
         try:
@@ -3146,6 +3270,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/alarms/{alarm_id}/ack", alarm_ack, methods=["POST"]),
         Route("/api/lab-memory", lab_memory_view, methods=["GET", "POST"]),
         Route("/api/lab-memory/{note_id}", lab_memory_note, methods=["POST", "DELETE"]),
+        Route("/api/team", team_view, methods=["GET", "POST"]),
+        Route("/api/analysis", analysis_view, methods=["POST"]),
+        Route("/api/analysis/columns", analysis_columns),
+        Route("/api/analysis/keep", analysis_keep, methods=["POST"]),
+        Route("/api/analysis/csv", analysis_csv, methods=["POST"]),
         Route("/api/notify/test", notify_test, methods=["POST"]),
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
         Route("/api/instruments/scripts", scripts_view, methods=["POST"]),

@@ -1422,9 +1422,9 @@ class LabRuntime:
         """Most recent runs first: run_id, plan, status, points, planned_points, reason."""
         dirs = sorted(self.runs.iterdir(), key=lambda d: d.name, reverse=True)[:limit]
         out = []
+        live = self.live_view(10 ** 9)
         for d in dirs:
             entry: Dict[str, Any] = {"run_id": d.name, "plan": d.name.split("-", 2)[-1], "status": "unfinished"}
-            live = self.live_view(10 ** 9)
             if live and live["run_id"] == d.name and live["status"] == "running":
                 entry.update(status="running", points=live["done"], planned_points=live["total"])
             else:

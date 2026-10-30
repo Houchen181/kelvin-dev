@@ -485,7 +485,7 @@ def export_run(rt: Any, run_id: str = "last", format: str = "csv") -> str:   # n
     live = " (a snapshot: the run is still being measured)" if rundata.being_recorded(folder) else ""
     return "\n".join(["%s exported%s:" % (rid, live)] + ["  %s (%s)" % (p, _size(p.stat().st_size)) for p in paths] +
                      ["left out: " + n for n in notes] +
-                     ["The person can also download it from the run's tab in the Runs pane (Download data)."])
+                     ["The person can also download it from the run's tab in the Runs pane (CSV, Excel, NumPy)."])
 
 
 def _size(n: int) -> str:

@@ -88,7 +88,7 @@
     <div class="side-top">
       <div class="brand">
         <span class="logo" aria-hidden="true" data-mark></span>
-        <span class="brand-text"><span>Kelvin</span><small>The coolest cat in the lab</small></span>
+        <span class="brand-text"><span>Kelvin</span></span>
       </div>
       <button id="new-chat" class="side-btn" type="button">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New chat
@@ -123,6 +123,12 @@
       </button>
       <button id="toggle-term" class="pill icon-only" type="button" aria-label="Show the terminal" aria-pressed="false" title="Terminal (Ctrl+`)">
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15H17"/></svg>
+      </button>
+      <button id="toggle-team" class="pill icon-only team-btn" type="button" aria-label="Team chat" aria-pressed="false" title="Team chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 9V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v5a2 2 0 0 0 2 2h1v3l3.5-3"/><path d="M12 10h7a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-1v3l-3.5-3H12a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2z"/></svg><span id="team-dot" class="team-dot" hidden></span>
+      </button>
+      <button id="toggle-analysis" class="pill" type="button" aria-label="Show the analysis pane" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 16l3.5-4 2.5 2.5"/><circle cx="16.5" cy="8.5" r="3"/><path d="M18.7 10.7L21 13"/></svg><span class="pill-text">Analysis</span>
       </button>
       <button id="toggle-runs" class="pill" type="button" aria-label="Show the runs pane" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V5M4 19h16"/><path d="M7 15l4-5 3 3 5-7"/></svg><span class="pill-text">Runs</span><span id="runs-dot" class="live-dot" hidden></span>
@@ -170,8 +176,8 @@
             <span class="sr-only">Approvals</span>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.4-3 7.8-7 9-4-1.2-7-4.6-7-9V6z"/></svg>
             <select id="approval-mode">
-              <option value="ask">Ask before drive changes</option>
-              <option value="auto">Auto for low-risk steps and runs</option>
+              <option value="ask">Ask first</option>
+              <option value="auto">Auto for low risk</option>
             </select>
           </label>
           <label class="model-picker">
@@ -240,6 +246,49 @@
     <div id="run-body" class="pane-body">
       <div class="pane-empty"><p>No run open.</p></div>
       <div id="queue-view" class="queue-view" hidden></div>
+    </div>
+  </section>
+
+  <section id="anpane" class="runpane anpane" aria-label="Analysis" hidden>
+    <div id="anpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the analysis pane" tabindex="0"></div>
+    <header class="pane-head">
+      <h2 class="pane-title">Analysis</h2>
+      <div class="spacer"></div>
+      <button id="an-ask" class="btn small ghost" type="button" title="Ask Kelvin about this analysis">Ask Kelvin</button>
+      <button id="close-analysis" class="icon-btn" type="button" aria-label="Close the analysis pane">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="an-body" class="pane-body an-body">
+      <div class="an-row">
+        <select id="an-run" class="an-run" aria-label="Run"></select>
+        <div class="pane-menu-wrap">
+          <button id="an-more-run" class="icon-btn" type="button" aria-label="Compare with another run" title="Compare with another run" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+          <div id="an-run-menu" class="pane-menu" role="menu" hidden></div>
+        </div>
+      </div>
+      <div id="an-chips" class="an-chips" hidden></div>
+      <div class="an-row">
+        <label class="an-field"><span>y</span><input id="an-y" list="an-cols" spellcheck="false" autocomplete="off" aria-label="y: a column or an expression of columns"></label>
+        <label class="an-field"><span>x</span><input id="an-x" list="an-cols" spellcheck="false" autocomplete="off" aria-label="x: a column or an expression of columns"></label>
+      </div>
+      <label class="an-field an-where"><span>where</span><input id="an-where" placeholder="smu.V &gt; 0" spellcheck="false" autocomplete="off" aria-label="Only the points where"></label>
+      <datalist id="an-cols"></datalist>
+      <div id="an-steps" class="an-steps"></div>
+      <select id="an-add-step" class="an-add-step" aria-label="Add a step"></select>
+      <div id="an-msg" class="an-msg" role="status" hidden></div>
+      <div id="an-plot" class="an-plot"></div>
+      <div class="an-row an-fitrow">
+        <select id="an-model" aria-label="Fit"></select>
+        <input id="an-expr" placeholder="a*exp(-x/tau) + c" spellcheck="false" autocomplete="off" aria-label="Model: an expression in x" hidden>
+        <input id="an-lo" type="number" step="any" placeholder="from" aria-label="Fit from x">
+        <input id="an-hi" type="number" step="any" placeholder="to" aria-label="Fit to x">
+      </div>
+      <div id="an-fit" class="an-fit"></div>
+      <div class="an-row an-actions">
+        <button id="an-keep" class="btn small" type="button" disabled title="Keep the fit with its run: in its run.h5 and its report">Keep fit</button>
+        <button id="an-csv" class="btn small ghost" type="button" disabled title="Every point, as CSV">CSV</button>
+      </div>
     </div>
   </section>
 
@@ -314,6 +363,27 @@
       <div class="inst-head-row"><h3>Activity</h3><button id="activity-all" class="link soft" type="button" aria-pressed="false" hidden>Everyone</button></div>
       <ol id="lab-events" class="lab-events"></ol>
     </div>
+  </aside>
+
+  <aside id="teampanel" class="labpanel teampanel" aria-label="Team chat" hidden>
+    <div id="teampanel-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the team chat" tabindex="0"></div>
+    <header class="lab-head">
+      <h2>Team chat</h2>
+      <div class="spacer"></div>
+      <button id="team-name" class="team-me" type="button" title="Your name in the team chat, on this browser"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg><span id="team-name-text"></span></button>
+      <button id="close-team" class="icon-btn" type="button" aria-label="Close the team chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="team-list" class="team-list" role="log" aria-live="polite"></div>
+    <form id="team-name-form" class="team-name-form" hidden>
+      <input id="team-name-input" maxlength="40" placeholder="Your name" aria-label="Your name in the team chat" autocomplete="name" spellcheck="false">
+      <button class="btn small primary" type="submit">OK</button>
+    </form>
+    <form id="team-form" class="team-form">
+      <textarea id="team-input" rows="1" maxlength="4000" placeholder="Message the team" aria-label="Message the team"></textarea>
+      <button id="team-send" class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+    </form>
   </aside>
 </div>
 
@@ -465,14 +535,14 @@
             <div id="roles-actions" class="field-actions" hidden>
               <button id="roles-save" class="btn small primary" type="button">Save roles</button>
               <button id="roles-cancel" class="link soft" type="button">Cancel</button></div>
-            <span class="hint">Owner, operator or trainee: whoever has no role is a trainee. An operator or the owner confirms a trainee's yes on a request with their password (or the owner's PIN). Only an owner changes the roles, with the PIN.</span>
+            <span class="hint">No role: trainee. An operator or the owner confirms a trainee's yes. Only the owner changes roles (with the PIN).</span>
           </div>
           <div class="field">
             <div class="field-row"><span class="field-label">Safety changes go to the owner</span>
               <button id="owner-notify-mine" class="btn small" type="button">Where my notifications go</button>
               <button id="owner-notify-off" class="link soft" type="button" hidden>Stop</button></div>
             <span id="owner-notify-state" class="hint"></span>
-            <span class="hint">A limit widened, an interlock taken out, auto mode on, Hands on the sample unlocked, a card's limits changed: whoever does it, the owner hears of it. Kelvin keeps a copy of the owner's webhook and email settings for this, readable on this computer. <button id="history-open" class="link" type="button">Lab config history…</button></span>
+            <span class="hint">Widened limits, removed interlocks, auto mode, unlocking, a card's limits changed: the owner hears of each, from anyone. A copy of the owner's webhook and email settings is kept for this, readable by anyone who uses this computer. <button id="history-open" class="link" type="button">Lab config history…</button></span>
           </div>
           <h3 class="set-title">Instruments</h3>
           <p class="muted small">For everyone on this computer.</p>
@@ -595,7 +665,7 @@
             <span class="hint" data-hint="smtp_password"></span>
             <input id="smtp-from" type="text" autocomplete="off" spellcheck="false" placeholder="From (if not the user name)" aria-label="From address">
             <input id="smtp-to" type="text" autocomplete="off" spellcheck="false" placeholder="To: you@example.edu, a colleague's address" aria-label="Send to">
-            <span class="hint">The notices you tick above go to these addresses too, which reaches a phone with no other service. The password is kept like an API key and never shown again. Off until a server and an address are set.</span>
+            <span class="hint">The ticked notices go here too. The password is kept like an API key.</span>
           </div>
           <div class="field">
             <label for="k-heartbeat">Heartbeat <span class="muted">(a healthchecks.io check, or an Uptime Kuma push monitor)</span></label>
@@ -606,7 +676,7 @@
               <option value="5">Every 5 minutes</option>
               <option value="15">Every 15 minutes</option>
             </select>
-            <span class="hint">While Kelvin runs and watches the lab it pings this address, and sends it nothing else. If Kelvin or this computer stops in the night, the pings stop and that service tells you.</span>
+            <span class="hint">Kelvin only pings it; if the pings stop, that service tells you.</span>
           </div>
           <div class="field">
             <label for="approval-wait">When nobody answers a request at this computer</label>
@@ -617,7 +687,7 @@
               <option value="240">After 5 minutes, ask your phone and wait 4 hours more</option>
               <option value="720">After 5 minutes, ask your phone and wait 12 hours more</option>
             </select>
-            <span id="approval-wait-hint" class="hint">Your phone: the Kelvin app on a paired phone, the email or the webhook above (with alarms ticked). Without any of them a request is declined after 5 minutes. Nothing moves while a request waits; a queue waits on it.</span>
+            <span id="approval-wait-hint" class="hint">Without a paired phone, or the email or webhook above (alarms ticked), a request is declined after 5 minutes. Nothing moves while it waits.</span>
           </div>
           <div class="field">
             <label for="idle-off">Switch off outputs left idle</label>
@@ -629,7 +699,7 @@
               <option value="off">Never</option>
             </select>
             <label class="check"><input id="idle-off-all" type="checkbox"> Other outputs too (sources, excitations, RF)</label>
-            <span id="idle-off-hint" class="hint">When no command, run or queue has touched the lab for that long, Kelvin brings lasers and light sources to safe and tells you. Other outputs it only tells you about, unless you tick them too. Temperature, field and positions stay.</span>
+            <span id="idle-off-hint" class="hint">Lasers and light sources go to safe; other outputs only send you a notice, unless ticked. Temperature, field and positions stay.</span>
           </div>
         </section>
         <section class="set-page" data-page="phone" hidden>
@@ -673,7 +743,7 @@
               <option value="">English, as Kelvin writes them</option>
               <option value="zh-Hans" lang="zh-Hans">简体中文 (Simplified Chinese)</option>
             </select>
-            <span class="hint">Cards are translated as they are shown, here and on your phone. Names, numbers, units and values stay as Kelvin wrote them, a line Kelvin can't translate stays in English, and <b>English</b> on each card shows the original. The lab's record keeps English. Yours: it follows you when you sign in on this computer.</span>
+            <span class="hint">Names, numbers and units stay; <b>English</b> on a card shows the original. The record stays in English.</span>
           </div>
         </section>
         <section class="set-page" data-page="updates" hidden>
@@ -773,7 +843,7 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
     </header>
-    <p class="muted small">Every version of the lab config and of the lab's own cards, with who changed it, when and why, and each change to who may do what (auto mode, Hands on the sample, the roles, the PIN). <b>widens</b> marks what widened Kelvin's reach: the lab owner hears of it. <b>Roll back</b> puts an earlier version back as a change of its own, with the PIN where the change itself needs it.</p>
+    <p class="muted small">Who changed what, when and why. <b>widens</b>: widened Kelvin's reach (the owner hears of it). <b>Roll back</b> puts a version back as a new change.</p>
     <div class="field-row history-filters">
       <select id="history-subject" aria-label="What">
         <option value="">Everything</option>
@@ -882,7 +952,7 @@
     <div class="field">
       <span class="field-label">For a lab notebook (ELN)</span>
       <div class="key-row"><input id="eln-day" type="date" aria-label="The day"><button id="eln-day-go" class="btn small" type="button">Download the day's record</button></div>
-      <span class="hint">That day's runs and the lab's record (approvals, stops, alarms, changes) as Markdown with the plots, in a .zip to paste or upload into your notebook. A single run's is in the Runs pane, under its data. A copy stays in the data folder's eln folder.</span>
+      <span class="hint">That day's runs and record as Markdown with plots, in a .zip. A copy stays in the data folder's eln folder.</span>
     </div>
     <div id="report-files" class="report-files" hidden></div>
     <footer class="dialog-foot">

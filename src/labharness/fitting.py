@@ -1058,6 +1058,11 @@ def _attr(v: Any) -> Any:
     return json.dumps(v, ensure_ascii=False)
 
 
+def fit_name(name: Any) -> str:
+    """A fit's name as run.h5 keeps it: letters, digits, spaces and ._-=@ (anything else becomes _), 80 at most."""
+    return "".join(c if c.isalnum() or c in "._-=@ " else "_" for c in str(name or "").strip())[:80]
+
+
 def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any], by: str = "agent",
           account: Optional[str] = None) -> str:
     """Keep a fit in the run's run.h5 as /fits/<name> (replacing one of that name): the model and how it was asked
@@ -1067,7 +1072,7 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
     import h5py
     np = _np()
     from .rundata import RUN_FILE
-    name = "".join(c if c.isalnum() or c in "._-=@ " else "_" for c in str(name).strip())[:80] or result["model"]
+    name = fit_name(name) or result["model"]
     path = Path(folder) / RUN_FILE
     data = {k: np.asarray(result[k], dtype=float) for k in ("x", "y", "fit", "residuals") if result.get(k) is not None}
     if result.get("sigma") is not None:

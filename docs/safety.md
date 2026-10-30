@@ -78,7 +78,7 @@ Kelvin can run one of your lab's measurement scripts as it is (`run_script`), an
 
 ### Auto mode
 
-A person can switch approvals from **Ask before drive changes** to **Auto for low-risk steps and runs**, in the portal (next to the model picker) or on the approval page. No agent tool can switch it. Kelvin goes back to asking every time it restarts. Auto mode lets everything simple and safe go ahead without asking: small drive changes, runs and queues, and the requests that change nothing on the sample.
+A person can switch approvals from **Ask first** to **Auto for low risk**, in the portal (next to the model picker) or on the approval page. No agent tool can switch it. Kelvin goes back to asking every time it restarts. Auto mode lets everything simple and safe go ahead without asking: small drive changes, runs and queues, and the requests that change nothing on the sample.
 
 In auto mode, a drive change, a run or a queue goes ahead without asking when all of these hold:
 - Every drive stays within `auto_fraction` (default 25%) of the way from its safe value to its lab limit. Kelvin judges the target's distance from safe, not the step size, so creeping up in small steps doesn't get around the rule.

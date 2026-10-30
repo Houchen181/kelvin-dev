@@ -57,13 +57,13 @@ class RelayLink:
     phone requests that come through it with the portal's own app."""
 
     def __init__(self, app: Any, target: Callable[[], Optional[Target]], hello: Callable[[], Dict[str, Any]],
-                 private: Optional[Callable[[str, str, bytes], Optional[str]]] = None,
+                 private: Optional[Callable[[str, str, bytes, str], Optional[str]]] = None,
                  trim: Optional[Callable[[str, str, Any], Tuple[Any, int]]] = None,
                  connect: Callable[[str, str], Any] = _connect):
         self.app = app            # the portal inside its guard: what answers a paired phone's requests
         self.target = target
         self.hello = hello        # {"name", "version", "direct"} for the hub
-        self.private = private    # (method, path, body) -> why this request reaches unshared work, or None
+        self.private = private    # (method, path, body, query) -> why this request reaches unshared work, or None
         self.trim = trim          # (method, path, answer) -> (the answer without unshared work, how much was left out)
         self.connect = connect
         self.state = "off"        # off | connecting | online | offline | signed out
@@ -190,7 +190,7 @@ class RelayLink:
         if (method, target) not in RELAY_ONLY and not allowed("control", method, target):
             await reply(403, {"error": "A phone can't do that. Use the Kelvin computer."})
             return
-        why = self.private(method, target, body) if self.private else None
+        why = self.private(method, target, body, query) if self.private else None
         if why:
             await reply(403, {"error": why, "unshared": True})
             return
