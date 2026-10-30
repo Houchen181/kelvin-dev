@@ -289,7 +289,8 @@ class ClientCall:
 
 
 # whose a piece of work is: the project and chat it is filed under, and the marks that keep it unshared (an
-# incognito chat, a chat that keeps unshared work's marks, the rules it ran under, a confidential or unpublished project)
+# incognito chat, a chat that keeps unshared work's marks, the rules it ran under, a confidential or unpublished
+# project)
 WHOSE = ("project", "chat", "incognito", "unshared", "rules", "confidential", "unpublished")
 
 
@@ -305,7 +306,7 @@ class Viewer:
         self.chat = chat          # the chat asking (a second opinion or a Compare lane asks as its chat)
         self.project = project    # that chat's project
         self.allows = allows      # {rules: [rule sets], confidential} -> may its model see that work; None: never
-        self.whose = whose        # the asking chat's own marks (WHOSE): what it adds to the lab's records is its
+        self.whose = whose        # the asking chat's own marks (WHOSE), kept with what it adds to the lab's records
 
 
 # the viewer of this thread's work (LabRuntime.viewing), passed on to the threads and tasks it starts with their
@@ -418,9 +419,10 @@ class LabRuntime:
         self._apply_protection(recheck=True)
         self.running_meta: Dict[str, Any] = {}      # the running plan's project and marks (_attribute), while it runs
         self.live_meta: Dict[str, Any] = {}         # and the marks of the run the live view shows, after it ends too
-        self.unshared_watches: Dict[str, Dict[str, Any]] = {}   # the watches unshared work added, with whose: their
-        # notes are that work's own
-        # what Kelvin knows about a project (name, devices, notes, references, summary, rules, marks); the portal sets this
+        # the watches unshared work added, with whose work it is: their notes are that work's own
+        self.unshared_watches: Dict[str, Dict[str, Any]] = {}
+        # what Kelvin knows about a project (name, devices, notes, references, summary, rules, marks); the portal
+        # sets this
         self.project_info: Callable[[Optional[str]], Dict[str, Any]] = default_project_info
         self.project_ids: Callable[[], List[Optional[str]]] = lambda: [None]   # None is the General workspace
         self.project_chat_runs: Callable[[Optional[str]], List[str]] = lambda pid: []   # runs its chats started
@@ -1667,7 +1669,7 @@ class LabRuntime:
             if not self.may_see(meta, cache):
                 hidden += 1
                 continue
-            if self.unshared_work(meta, cache):   # the portal marks it with a lock
+            if self.unshared_work(meta, cache):   # the portal marks it (the Analysis list)
                 entry["unshared"] = True
             out.append(entry)
         return out, hidden
@@ -5556,8 +5558,9 @@ class LabRuntime:
         return True
 
     def _monitor_said(self, kind: str, title: str, text: str = "") -> Any:
-        """The monitor raised or cleared an alarm: kept with the alarm history, then told to people. One that says the
-        note of a watch unshared work added is marked so: phones through the Kelvin hub get its reading, not its note."""
+        """The monitor raised or cleared an alarm: kept with the alarm history, then told to people. One that says
+        the note of a watch unshared work added is marked so: phones through the Kelvin hub get its reading, not its
+        note."""
         self._save_alarms()
         notes = [w.note for i, w in list(self.monitor.watches.items()) if i in self.unshared_watches and w.note] \
             if getattr(self, "monitor", None) is not None else []
