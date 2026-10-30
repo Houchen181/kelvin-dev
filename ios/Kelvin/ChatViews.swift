@@ -173,6 +173,8 @@ struct Composer: View {
             } else {
                 Button {
                     voice.cancel()
+                    typing.wrappedValue = false   // sent: the keyboard goes, the answer has the room and the tabs show
+                    Keyboard.dismiss()
                     model.send()
                 } label: {
                     Image(systemName: "arrow.up.circle.fill").font(.title)

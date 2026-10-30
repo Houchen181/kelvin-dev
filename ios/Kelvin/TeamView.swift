@@ -240,6 +240,8 @@ struct TeamView: View {
     private func send() {
         guard !app.teamName.isEmpty else { return askName(thenSend: true) }
         let name = app.teamName
+        typing = false            // sent: the keyboard goes, and with it what covered the tabs
+        Keyboard.dismiss()
         Task {
             if await model.send(as: name) { markRead() }
         }

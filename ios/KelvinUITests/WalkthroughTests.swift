@@ -63,6 +63,7 @@ final class WalkthroughTests: XCTestCase {
         launch([])
         must(app.buttons["Pair with a code"], "see the welcome screen").tap()
         must(app.navigationBars["Pair with Kelvin"], "open pairing")
+        must(app.buttons["Type it"], "choose to type the code").tap()   // it opens on the camera
         must(app.textFields["Address, e.g. 192.168.1.20"], "find the address field").tap()
         app.typeText("192.168.1.20")
         must(app.textFields["6-digit code"], "find the code field").tap()
@@ -106,6 +107,7 @@ final class WalkthroughTests: XCTestCase {
         app.typeText("Fridge at base")
         tap("Send", "send to the team")
         must(text(containing: "Fridge at base"), "see the message sent")
+        gone(app.keyboards.firstMatch, "put the keyboard away on sending")   // else it covers the tabs
 
         // a chat with Kelvin
         app.tabBars.buttons["Chat"].tap()
