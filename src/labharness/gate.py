@@ -267,6 +267,7 @@ class SafetyGate:
         self._undo: List[Tuple[str, str, Any]] = []
         self._stop_gen = 0
         self.stop_reason = ""   # why the latest stop came, when not from a person (an interlock): said with its result
+        self.trip_count = 0     # guard trips so far: an item that trips one pauses the queue, whatever on_error says
         self._prefixes: Dict[int, Template] = {}
         self._acting = threading.local()   # a person's own command (the portal's terminal), on this thread only
 
@@ -1487,6 +1488,7 @@ class SafetyGate:
         else:
             end = self._cut(inst, spec, at)[1]
         msg = "%s tripped at %s: %s; %s" % (key, spec.show(at), detail, end)
+        self.trip_count += 1
         self.log.write("trip", by=self._who(), target=key, at=at, guard=g.key,
                        reading=val if not isinstance(val, Exception) else str(val), message=msg)
         return Result(False, "tripped", key, value=at, message=msg)

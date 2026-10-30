@@ -214,6 +214,23 @@ def test_an_interlock_alarm_does_not_flap_while_the_sample_sits_at_its_edge(lab,
     assert len(monitor.alarms) == 1 and monitor.alarms[0].cleared is not None
 
 
+# ------------------------------------------------------------------- 5. a guard trip stops the queue
+
+def test_a_guard_trip_pauses_the_queue_whatever_on_error_says(tmp_path):
+    """t05: with on a failure: continue, a gate that broke down at 12.05 V was swept again by the next item."""
+    rt = runtime(tmp_path, [True])
+    rt.queue_set_on_error("continue")
+    rt.queue_add(GATE_SWEEP.format(name="wide", top=13))
+    rt.queue_add(GATE_SWEEP.format(name="again", top=12.5))
+    assert rt.queue_start().startswith("queue started")
+    rt._queue_thread.join(120)
+    (first, second) = rt.queue.items
+    assert first.status == "failed" and "tripped" in first.message and second.status == "waiting"
+    assert rt.queue.state == "paused" and "a guard tripped, so the queue pauses" in rt.queue.reason
+    [card] = rt.gate.approver.requests
+    assert "If an item fails, the queue goes on to the next (on a failure: continue)" in str(card)
+
+
 # ------------------------------------------------------------------- 6. Bring to safe
 
 def test_bring_to_safe_sets_every_declared_safe_value_from_the_card_after_a_stop(tmp_path):

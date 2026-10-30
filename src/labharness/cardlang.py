@@ -48,6 +48,8 @@ _ZH_TITLES = _rules([
 ])
 
 _ZH_LINES = _rules([
+    (r"If an item fails, the queue goes on to the next \(on a failure: continue\); a stop, a guard trip or an "
+     r"interlock still pauses it", "若某项失败，队列会继续下一项（失败时：继续）；停止、保护跳闸或联锁仍会让它暂停"),
     (r"This approval covers every item now waiting; anything outside these ranges asks again\.",
      "此批准涵盖队列中现在等待的每一项；超出这些范围的操作会再次询问。"),
     (r"You switched it off in the Lab panel\. On, Kelvin connects to it again and reads it; output changes still ask "

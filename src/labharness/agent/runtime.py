@@ -2342,8 +2342,10 @@ class LabRuntime:
             title = "Run the queue: %d scan%s%s%s" % (scans, "" if scans == 1 else "s", " and %d step%s" % (
                 steps, "" if steps == 1 else "s") if steps else "", forecast.duration())
             if lines or starting or running:
+                going_on = ["If an item fails, the queue goes on to the next (on a failure: continue); a stop, a "
+                            "guard trip or an interlock still pauses it"] if self.queue.on_error == "continue" else []
                 request = ApprovalRequest(title, lines + forecast.action_lines(starting) + technique_lines
-                                          + forecast.closing()
+                                          + forecast.closing() + going_on
                                           + self._dry_run_note("\n".join(item.text for item in items)) + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
                 covered = False
@@ -2403,15 +2405,18 @@ class LabRuntime:
                     break
                 q.mark(item, "running")
                 position = q.items.index(item) + 1
-            lost, t0 = self.monitor.mark(), time.time()
+            lost, t0, trips = self.monitor.mark(), time.time(), self.gate.trip_count
             ok, message = self._queue_item(item, position, grants, by)
+            tripped = self.gate.trip_count != trips   # a guard tripped (a gate's leakage): not swept again tonight
             if not ok:   # an instrument that stopped answering ended it: its alarm goes up now, with the pause
                 self.monitor.lost_since(lost)   # and the pause says which alarm stopped it ("stop requested" doesn't)
                 said = [a.text for a in list(self.monitor.alarms) if a.raised >= t0 and a.text not in message]
                 message += "; alarm: " + "; ".join(said) if said else ""
-            with q.lock:   # a person's stop of the scan is never an error to go on after
-                if not ok and q.state == "running" and (q.on_error == "pause" or item.status == "stopped"):
-                    q.state, q.reason = "pausing", "%s: %s" % (item.name, message)
+            with q.lock:   # a person's stop of the scan, or a guard trip, is never an error to go on after
+                if not ok and q.state == "running" and (q.on_error == "pause" or item.status == "stopped" or tripped):
+                    q.state, q.reason = "pausing", "%s: %s%s" % (item.name, message, "; a guard tripped, so the "
+                                                                 "queue pauses whatever on a failure says"
+                                                                 if tripped and q.on_error != "pause" else "")
                     q.save()
         done = sum(1 for i in q.items if i.status == "done")
         self.gate.log.write("queue_end", by=by, state=q.state, reason=q.reason, done=done)
