@@ -24,6 +24,7 @@ final class AnalysisModel: ObservableObject {
     private var waiting: Task<Void, Never>?                  // the moment after a change
     private var asking = false                               // Kelvin works on a spec
     private var again = false                                // and the person changed it since
+    private var changes = 0, answeredChange = 0              // changes made, and the one Kelvin's answer is for
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     init(session: LabSession, run: String, preset: AnalysisSpec? = nil) {
@@ -156,6 +157,7 @@ final class AnalysisModel: ObservableObject {
     @discardableResult
     func compute(now: Bool = false) -> Task<Void, Never> {
         waiting?.cancel()
+        changes += 1
         working = true
         let task = Task { [weak self] in
             if !now { try? await Task.sleep(nanoseconds: 600_000_000) }
@@ -173,8 +175,10 @@ final class AnalysisModel: ObservableObject {
             return
         }
         asking = true
+        working = true
         repeat {
             again = false
+            answeredChange = changes
             let asked = spec
             do {
                 let r = try await session.analyze(asked)
@@ -189,7 +193,7 @@ final class AnalysisModel: ObservableObject {
             }
         } while again
         asking = false
-        working = false
+        working = answeredChange != changes   // a change still in its moment's wait: its plot is on the way
         let done = waiters
         waiters = []
         for w in done { w.resume() }

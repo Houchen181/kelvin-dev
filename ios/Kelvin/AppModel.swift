@@ -208,7 +208,7 @@ final class LabSession: ObservableObject {
     private let tokens: TokenStore
     private var client: KelvinClient?
     private var loop: Task<Void, Never>?
-    private var teamBehind = false   // the last look found the team chat behind what this phone showed
+    private var lastTeam: Int?       // the team chat's newest message at the last look (it goes down only when it begins again)
     static let every: UInt64 = 3_000_000_000
 
     init(computer: Computer, app: AppModel) {
@@ -258,9 +258,9 @@ final class LabSession: ObservableObject {
             let s = try await c.state()
             state = s
             problem = nil
-            if let last = s.team {   // the first look: what was there is not news
-                if teamRead == nil || (teamBehind && last < (teamRead ?? 0)) { readTeam(upTo: last, force: true) }
-                teamBehind = last < (teamRead ?? 0)   // behind this phone twice running: the team chat began again
+            if let last = s.team {   // the first look: what was there is not news; lower than the look before:
+                if teamRead == nil || last < (lastTeam ?? last) { readTeam(upTo: last, force: true) }   // begun again
+                lastTeam = last
             }
             Notifier.shared.look(at: s, on: computer)
             await follow(s.live, with: c)

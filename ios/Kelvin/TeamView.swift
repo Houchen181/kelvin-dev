@@ -30,10 +30,10 @@ final class TeamModel: ObservableObject {
             again = false
             do {
                 let page = try await session.team(after: thread.through)
-                if !thread.take(page) {   // the team chat began again
-                    session.readTeam(upTo: page.last, force: true)
+                if !thread.take(page) {   // the team chat began again: what is shown now is what is read
                     let fresh = try await session.team(after: 0)
                     thread.take(fresh)
+                    session.readTeam(upTo: thread.through, force: true)
                 }
                 loaded = true
                 problem = nil
@@ -158,6 +158,7 @@ struct TeamView: View {
             .onChange(of: model.thread.last) { _ in
                 withAnimation { proxy.scrollTo("end", anchor: .bottom) }
             }
+            .onChange(of: model.thread.through) { _ in markRead() }   // whatever load brought it on screen
         }
         .safeAreaInset(edge: .bottom) { composer }
         .refreshable { await model.load() }
