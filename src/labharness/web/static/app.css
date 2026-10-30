@@ -1041,6 +1041,7 @@ body.resizing .plot-svg { pointer-events: none; }
   .app.float-two #sidecol { top: 50%; }
   .dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }
   .dock-col > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
+  .dock-col, .scrim { top: 56px; }   /* below the top bar, whose buttons open and close each panel */
   .pane-resize { display: none; }
 }
 @media (max-width: 820px) {
@@ -1172,6 +1173,7 @@ body.resizing .plot-svg { pointer-events: none; }
 /* ---------- the Analysis pane: post-processing kept runs (workbench.py) ---------- */
 .pane-title { font-size: 15px; font-weight: 600; margin: 0 0 0 8px; }
 .an-body { padding: 12px 14px 20px; display: flex; flex-direction: column; gap: 8px; }
+.an-body > * { flex-shrink: 0; }   /* in half a column the pane scrolls; the plot never squeezes over the fit's fields */
 .an-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .an-run { flex: 1; min-width: 0; }
 .an-body select, .an-body input { border: 1px solid var(--line-strong); border-radius: 8px; padding: 6px 8px; background: var(--raised);

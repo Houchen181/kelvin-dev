@@ -1165,18 +1165,31 @@
     teampanel: [() => TEAM.open, "sidecol", 280, "lh.teamWidth"],
   };
   const PANE_W = {};   // each pane's width as the person left it
+  let PINNED = null;   // the pane last dragged: it keeps that width while the others make room
   const sum = (xs) => xs.reduce((a, b) => a + b, 0);
   const openPanes = () => Object.keys(PANES).filter((id) => PANES[id][0]());
   const colPanes = (col) => openPanes().filter((id) => PANES[id][1] === col);
   const paneWant = (id) => PANE_W[id] || PANES[id][2];
   const colWant = (col) => Math.max(0, ...colPanes(col).map(paneWant));
   const colLeast = (col) => Math.max(0, ...colPanes(col).map((id) => PANES[id][2]));
-  // widths that fit in `room`: each as wanted, or, when they don't fit, all shrunk alike and none below its least
-  function share(want, least, room) {
+  // widths that fit in `room`: each as wanted, or, when they don't fit, shrunk alike, none below its least, in whole
+  // pixels that add up to the room; the one at `pin` keeps its width while the others can make room
+  function share(want, least, room, pin = -1) {
     if (sum(want) <= room) return want;
+    if (pin >= 0 && want.length > 1) {
+      const rest = want.map((_, i) => i).filter((i) => i !== pin);
+      const kept = Math.max(least[pin], Math.min(want[pin], room - sum(rest.map((i) => least[i]))));
+      const got = share(rest.map((i) => want[i]), rest.map((i) => least[i]), room - kept);
+      const out = want.slice();
+      out[pin] = kept;
+      rest.forEach((i, k) => { out[i] = got[k]; });
+      return out;
+    }
     const slack = want.map((w, i) => w - least[i]);
     const k = Math.max(0, room - sum(least)) / Math.max(1, sum(slack));
-    return want.map((w, i) => Math.round(least[i] + slack[i] * k));
+    const out = want.map((w, i) => Math.floor(least[i] + slack[i] * k));
+    out[out.length - 1] += Math.max(0, room - sum(out));
+    return out;
   }
   // the width the panes may take beside the conversation
   function paneRoom() {
@@ -1198,40 +1211,38 @@
     app.classList.toggle("float-two", floating && both);
     if (!compact && w > 820) app.classList.remove("side-open");
     if (!floating) {
-      const room = paneRoom();
+      const room = paneRoom(), pinned = open.includes(PINNED) ? PINNED : null;
       if (stacked) {   // a column for each pair, as wide as its wider pane
         const cols = ["workcol", "sidecol"].filter((c) => !$(c).hidden && !(floatLab && c === "sidecol"));
-        const got = share(cols.map(colWant), cols.map(colLeast), room);
+        const got = share(cols.map(colWant), cols.map(colLeast), room, pinned ? cols.indexOf(PANES[pinned][1]) : -1);
         cols.forEach((c, i) => { $(c).style.width = got[i] + "px"; });
-        if (floatLab) $("sidecol").style.width = Math.min(colWant("sidecol"), w - 40) + "px";
+        if (floatLab) {   // over the Runs column, never over the conversation
+          $("sidecol").style.width = Math.max(colLeast("sidecol"), Math.min(colWant("sidecol"), w - CHAT_MIN)) + "px";
+        }
       } else {
         $("workcol").style.width = $("sidecol").style.width = "";
-        const got = share(open.map(paneWant), open.map((id) => PANES[id][2]), room);
+        const got = share(open.map(paneWant), open.map((id) => PANES[id][2]), room, open.indexOf(pinned));
         open.forEach((id, i) => { $(id).style.width = got[i] + "px"; });
       }
     }
     syncScrim();
   }
-  // a pane's left edge, dragged: its width (in a shared column, the column's), as much as fits beside the others,
-  // which keep the widths they show now
+  // a pane's left edge, dragged: its width (in a shared column, the column's). The other panes make room, down to
+  // their least widths, and keep the widths they want for when there is room again.
   function sizePane(id, want) {
     const app = $("app"), col = PANES[id][1], floatLab = app.classList.contains("float-lab");
-    const shown = (el) => Math.round($(el).getBoundingClientRect().width);
-    let least = PANES[id][2], most, mates = [id];
-    if (app.classList.contains("stacked")) {
-      mates = colPanes(col);
+    const stacked = app.classList.contains("stacked");
+    let least = PANES[id][2], others = openPanes().filter((p) => p !== id).map((p) => PANES[p][2]);
+    if (stacked) {
       least = colLeast(col);
       const other = col === "workcol" ? "sidecol" : "workcol";
-      const beside = $(other).hidden || floatLab ? 0 : shown(other);
-      if (beside) for (const p of colPanes(other)) PANE_W[p] = beside;
-      most = floatLab && col === "sidecol" ? window.innerWidth - 40 : paneRoom() - beside;
-    } else {
-      const others = openPanes().filter((p) => p !== id);
-      for (const p of others) PANE_W[p] = shown(p);
-      most = paneRoom() - sum(others.map((p) => PANE_W[p]));
+      others = $(other).hidden || floatLab ? [] : [colLeast(other)];
     }
+    const most = floatLab && col === "sidecol" ? window.innerWidth - CHAT_MIN : paneRoom() - sum(others);
     const width = Math.round(Math.min(Math.max(least, most), Math.max(least, want || 0)));
-    for (const p of mates) PANE_W[p] = width;
+    PANE_W[id] = width;
+    if (stacked) for (const p of colPanes(col)) if (p !== id) PANE_W[p] = Math.min(paneWant(p), width);   // as wide at most
+    PINNED = id;
     fitLayout();
   }
   // a side panel's left edge, dragged or moved with the arrow keys, sets its width: set(w) takes the width and keeps it
