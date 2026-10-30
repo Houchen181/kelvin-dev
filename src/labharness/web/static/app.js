@@ -6458,6 +6458,592 @@
     ["Look at my data", "Plot my latest run and tell me what you see."],
   ];
 
+  // ------------------------------------------------------------------ rail: Chat / Home / Sequence
+  // The leftmost rail switches between the chat (as it always was) and two native pages:
+  //   Home     — labMaster's overview as tiles, plus the cards Kelvin's AI keeps for this person (/api/home)
+  //   Sequence — labMaster's function library, the sequence, Start/Pause/Stop/Safe stop, saved sequences and
+  //              "+ Import Python" (/api/labmaster/*, which the Kelvin server proxies to the panel on :8770)
+  // A body class (rail-home / rail-seq) shows one kview and hides the chat plus the conversations column, so
+  // the chat's own DOM and code paths are untouched. Everything here is defensive: a page that cannot load
+  // says so inside its own container and the chat keeps working.
+  const LM_RAIL_KEY = "kelvin.rail";
+  const LM = {
+    tab: "chat",                    // "chat" | "home" | "seq"
+    homeTimer: 0, seqTimer: 0,
+    homeBusy: false, seqBusy: false,
+    homeLoaded: false, seqLoaded: false,
+    paletteLoaded: false, savedLoaded: false, scriptsLoaded: false,
+    palette: [], saved: [], scripts: [],
+    state: null,                    // the labMaster snapshot: sequence / run_state / progress / …
+    seqSig: "",                     // the sequence as last drawn, so polling only redraws when it changes
+  };
+  const LM_TILES = [
+    { id: "measurement", title: "Measurement" },
+    { id: "history", title: "History" },
+    { id: "saved", title: "Saved sequences" },
+    { id: "functions", title: "Functions" },
+    { id: "panel", title: "labMaster panel" },
+  ];
+
+  function lmEl(id) { return document.getElementById(id); }
+  function lmSafeToast(text) { try { toast(text); } catch (e) { /* a toast is a nicety */ } }
+
+  function lmMsg(id, text, bad) {
+    const box = lmEl(id);
+    if (!box) return;
+    box.textContent = text || "";
+    box.classList.toggle("bad", !!bad);
+    box.hidden = !text;
+  }
+
+  function lmErrText(e, what) {
+    const m = String((e && e.message) || e || "unknown error");
+    if (/HTTP 404/.test(m)) return what + " is not ready yet: the Kelvin server does not have this route (the labMaster bridge is still being added).";
+    if (/Failed to fetch|NetworkError|Load failed|network/i.test(m)) return what + " failed: the Kelvin server is not answering.";
+    return what + " failed: " + m;
+  }
+
+  function lmDate(value, short) {
+    try {
+      if (value == null || value === "") return "";
+      let d;
+      if (typeof value === "number") d = new Date(value < 1e11 ? value * 1000 : value);
+      else if (/^\d+(\.\d+)?$/.test(String(value))) { const n = Number(value); d = new Date(n < 1e11 ? n * 1000 : n); }
+      else d = new Date(String(value));
+      if (!d || isNaN(d.getTime())) return "";
+      const diff = (Date.now() - d.getTime()) / 1000;
+      if (diff >= 0 && diff < 60) return "just now";
+      if (diff >= 0 && diff < 3600) return Math.max(1, Math.round(diff / 60)) + " min ago";
+      if (diff >= 0 && diff < 86400) return Math.round(diff / 3600) + " h ago";
+      return short ? d.toLocaleDateString() : d.toLocaleString();
+    } catch (e) { return ""; }
+  }
+
+  // ------------------------------------------------------------------ the rail and the view switch
+  function lmSetTab(tab, remember) {
+    if (tab !== "home" && tab !== "seq") tab = "chat";
+    LM.tab = tab;
+    document.body.classList.remove("rail-chat", "rail-home", "rail-seq");
+    document.body.classList.add("rail-" + tab);
+    for (const b of document.querySelectorAll("#rail .rail-btn")) {
+      const on = b.dataset.rail === tab;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", String(on));
+    }
+    lmHomeStop();
+    lmSeqPollStop();
+    // the side panels measure the top bar, which Home and Sequence hide: let the layout settle again
+    try { window.dispatchEvent(new Event("resize")); } catch (e) { /* a very old browser */ }
+    if (tab === "home") {
+      lmHomePollStart();
+      lmHomeLoad();
+    } else if (tab === "seq") {
+      lmSeqPollStart();
+      if (!LM.seqLoaded) { LM.seqLoaded = true; lmSeqRefresh(true); }
+      else lmSeqRefresh(false);
+    }
+    if (remember) store(LM_RAIL_KEY, tab);
+  }
+
+  function lmInit() {
+    try {
+      lmSeqInit();
+      const refresh = lmEl("lm-home-refresh");
+      if (refresh) refresh.addEventListener("click", () => lmHomeLoad());
+      const rail = lmEl("rail");
+      if (rail) for (const b of rail.querySelectorAll(".rail-btn")) b.addEventListener("click", () => lmSetTab(b.dataset.rail, true));
+      // the tab survives a reload (localStorage), and ?view=home / ?view=seq opens one straight away
+      let start = "chat";
+      try {
+        const q = new URLSearchParams(location.search);
+        const want = q.get("view") || q.get("tab");
+        start = want || store(LM_RAIL_KEY) || "chat";
+      } catch (e) { start = "chat"; }
+      const tab = start === "home" ? "home" : start === "seq" || start === "sequence" ? "seq" : "chat";
+      lmSetTab(tab, tab !== "chat");
+    } catch (e) {
+      try { document.body.classList.add("rail-chat"); } catch (e2) { /* never break the chat */ }
+    }
+  }
+
+  // ------------------------------------------------------------------ Home
+  function lmHomePollStart() {
+    lmHomeStop();
+    LM.homeTimer = setInterval(() => { if (LM.tab === "home") lmHomeLoad(); }, 5000);
+  }
+  function lmHomeStop() { if (LM.homeTimer) { clearInterval(LM.homeTimer); LM.homeTimer = 0; } }
+
+  async function lmHomeLoad() {
+    if (LM.homeBusy) return;
+    LM.homeBusy = true;
+    try {
+      const r = await api("/api/home");
+      if (!r || r.ok === false) throw new Error((r && r.error) || "no answer");
+      LM.homeLoaded = true;
+      lmHomeRender(r);
+    } catch (e) {
+      lmMsg("lm-home-msg", lmErrText(e, "/api/home"), true);
+    } finally { LM.homeBusy = false; }
+  }
+
+  function lmHomeRender(d) {
+    const panel = d.panel || {};
+    const greet = lmEl("lm-home-greet");
+    if (greet) greet.textContent = String(d.greeting || "Home");
+    const sub = lmEl("lm-home-sub");
+    if (sub) {
+      const bits = [];
+      if (panel.ok) bits.push("labMaster panel" + (panel.version ? " v" + panel.version : "") + (panel.sim ? " · SIMULATION" : ""));
+      else bits.push("labMaster panel not connected (" + (panel.url || "http://127.0.0.1:8770") + ")");
+      if (d.updated_at) { const at = lmDate(d.updated_at); if (at) bits.push("updated " + at); }
+      sub.textContent = bits.join(" · ");
+    }
+    // the tiles come from the server as they are (id/title/value/detail/tone); if it sent none (older server
+    // or a page that could not build them), the five the overview is made of stand in
+    const tiles = Array.isArray(d.tiles) && d.tiles.length ? d.tiles : LM_TILES.map((t) => ({ id: t.id, title: t.title,
+      value: "—", detail: panel.ok ? "" : "labMaster is not running", tone: panel.ok ? "idle" : "down" }));
+    const tileBox = lmEl("lm-home-tiles");
+    if (tileBox) tileBox.replaceChildren(...tiles.map((t) => lmHomeTile(t || {})));
+    // cards the AI (or the person) added
+    const cards = Array.isArray(d.cards) ? d.cards : [];
+    const cardBox = lmEl("lm-home-cards");
+    if (cardBox) cardBox.replaceChildren(...(cards.length ? cards.map(lmHomeCard) :
+      [h("div", { class: "lm-empty" }, "No cards yet. In the chat, ask Kelvin to put something here: a note, a metric, a checklist, a link or a sequence.")]));
+    if (!panel.ok) lmMsg("lm-home-msg", "labMaster panel is not connected (" + (panel.url || "http://127.0.0.1:8770") + "): the tiles show what Kelvin last knew; the chat and cards still work.", false);
+    else lmMsg("lm-home-msg", "", false);
+  }
+
+  function lmHomeTile(t) {
+    const tone = ["ok", "busy", "warn", "idle", "down"].includes(t.tone) ? t.tone : "idle";
+    const value = t.value == null || t.value === "" ? "—" : String(t.value);
+    return h("div", { class: "lm-tile tone-" + tone, title: t.detail ? String(t.detail) : "" },
+      h("div", { class: "lm-tile-title" }, h("span", { class: "lm-dot " + tone }), h("span", {}, String(t.title || t.id || ""))),
+      h("div", { class: "lm-tile-value" }, value),
+      t.detail ? h("div", { class: "lm-tile-detail" }, String(t.detail)) : null);
+  }
+
+  function lmHomeCard(c) {
+    const kind = String(c.kind || "note");
+    const kindClass = ["note", "metric", "checklist", "link", "sequence"].includes(kind) ? kind : "note";
+    const items = Array.isArray(c.items) ? c.items : [];
+    const del = h("button", { class: "lm-card-del", type: "button", title: "Remove this card", "aria-label": "Remove this card" }, icon("trash"));
+    del.addEventListener("click", async () => {
+      if (!confirm("Remove the card “" + (c.title || "untitled") + "” from your home?")) return;
+      del.disabled = true;
+      try {
+        const r = await api("/api/home/cards/" + encodeURIComponent(String(c.id || "")), { method: "DELETE" });
+        if (!r || r.ok === false) throw new Error((r && r.error) || "it was not removed");
+        lmSafeToast("Card removed");
+        await lmHomeLoad();
+      } catch (e) {
+        del.disabled = false;
+        lmMsg("lm-home-msg", lmErrText(e, "Removing the card"), true);
+      }
+    });
+    const foot = [];
+    if (c.source) foot.push(c.source === "ai" ? "From Kelvin's AI" : c.source === "person" ? "From you" : String(c.source));
+    const at = c.created ? lmDate(c.created) : "";
+    if (at) foot.push(at);
+    return h("article", { class: "lm-card" },
+      h("div", { class: "lm-card-head" },
+        h("span", { class: "lm-kind lm-kind-" + kindClass }, kind),
+        h("h3", {}, String(c.title || "Untitled")),
+        del),
+      c.text ? h("p", { class: "lm-card-text" }, String(c.text)) : null,
+      items.length ? h("ul", { class: "lm-card-items" }, ...items.map((it) => h("li", {},
+        typeof it === "string" ? it : it && (it.text || it.title || it.label) || String(it)))) : null,
+      c.url ? h("a", { class: "lm-card-link", href: String(c.url), target: "_blank", rel: "noopener noreferrer" }, String(c.url)) : null,
+      c.detail ? h("div", { class: "lm-card-detail" }, String(c.detail)) : null,
+      foot.length ? h("div", { class: "lm-card-foot" }, h("span", {}, foot.join(" · "))) : null);
+  }
+
+  // ------------------------------------------------------------------ Sequence
+  function lmSeqPollStart() {
+    lmSeqPollStop();
+    LM.seqTimer = setInterval(() => { if (LM.tab === "seq") lmSeqRefresh(false); }, 2000);
+  }
+  function lmSeqPollStop() { if (LM.seqTimer) { clearInterval(LM.seqTimer); LM.seqTimer = 0; } }
+
+  async function lmSeqRefresh(loadAux) {
+    if (LM.seqBusy) return;
+    LM.seqBusy = true;
+    try {
+      const r = await api("/api/labmaster/state");
+      if (!r || r.ok === false) {
+        lmSeqConn(false, r);
+        lmMsg("lm-seq-msg", "labMaster is not connected (" + ((r && r.url) || "http://127.0.0.1:8770") + "): " +
+          ((r && r.error) || "the panel is not running") + ". Start it with: python -u panel_server.py --sim --port 8770", true);
+        return;
+      }
+      LM.state = r.state || null;
+      lmSeqConn(true, r);
+      lmSeqRenderState();
+      lmMsg("lm-seq-msg", "", false);
+      if (loadAux || !LM.paletteLoaded) await lmSeqLoadPalette();
+      if (loadAux || !LM.savedLoaded) await lmSeqLoadSaved();
+      if (!LM.scriptsLoaded) await lmSeqLoadScripts();
+    } catch (e) {
+      lmSeqConn(null, null);
+      lmMsg("lm-seq-msg", lmErrText(e, "/api/labmaster/state"), true);
+    } finally { LM.seqBusy = false; }
+  }
+
+  async function lmSeqLoadPalette() {
+    try {
+      const r = await api("/api/labmaster/palette");
+      if (!r || r.ok === false) throw new Error((r && r.error) || "the function library is unavailable");
+      LM.palette = Array.isArray(r.palette) ? r.palette : [];
+      LM.paletteLoaded = true;
+      lmSeqRenderPalette();
+    } catch (e) {
+      lmMsg("lm-seq-msg", lmErrText(e, "Function library"), true);
+    }
+  }
+
+  function lmSeqRenderPalette() {
+    const box = lmEl("lm-palette-list");
+    if (!box) return;
+    if (!LM.palette.length) { box.replaceChildren(h("div", { class: "lm-empty" }, "The function library is empty.")); return; }
+    box.replaceChildren(...LM.palette.map((p) => {
+      const name = String(p.name || p.id || "block");
+      const tip = "Add “" + name + "” to the sequence" + (p.target ? "\n" + String(p.target) : "") + (p.note ? "\n" + String(p.note) : "");
+      const b = h("button", { class: "lm-row lm-choose", type: "button", title: tip },
+        h("span", { class: "lm-dot", style: p.color ? "background:" + String(p.color) : null }),
+        h("span", { class: "lm-choose-main" },
+          h("span", { class: "lm-choose-name" }, name),
+          h("span", { class: "lm-choose-meta" }, lmBlockMeta(p))),
+        h("span", { class: "lm-plus", "aria-hidden": "true" }, "+"));
+      b.addEventListener("click", async () => {
+        b.disabled = true;
+        try { await lmSeqAdd(p); } finally { b.disabled = false; }
+      });
+      return b;
+    }));
+  }
+
+  function lmBlockMeta(p) {
+    const parts = [String(p.kind || "script")];
+    if (p.target) parts.push(String(p.target).split(/[\\/]/).pop() || String(p.target));
+    const params = p.params && typeof p.params === "object" ? Object.keys(p.params) : [];
+    if (params.length) parts.push(params.slice(0, 3).join(", ") + (params.length > 3 ? "…" : ""));
+    return parts.join(" · ");
+  }
+
+  async function lmSeqAdd(entry) {
+    if (!entry || !entry.id) return;
+    const name = String(entry.name || entry.id);
+    await lmSeqPost("/api/labmaster/seq", { action: "add", block_id: entry.id, params: {}, index: null },
+      "Adding “" + name + "”", "Added " + name + " to the sequence");
+  }
+
+  async function lmSeqLoadSaved() {
+    try {
+      const r = await api("/api/labmaster/saved");
+      if (!r || r.ok === false) throw new Error((r && r.error) || "saved sequences are unavailable");
+      LM.saved = Array.isArray(r.saved) ? r.saved : [];
+      LM.savedLoaded = true;
+      lmSeqRenderSaved();
+    } catch (e) {
+      lmMsg("lm-seq-msg", lmErrText(e, "Saved sequences"), true);
+    }
+  }
+
+  function lmSeqRenderSaved() {
+    const box = lmEl("lm-saved-list");
+    if (!box) return;
+    if (!LM.saved.length) { box.replaceChildren(h("div", { class: "lm-empty" }, "Nothing saved yet.")); return; }
+    box.replaceChildren(...LM.saved.map((s) => {
+      const load = h("button", { class: "btn small", type: "button", title: "Load this saved sequence" }, "Load");
+      load.addEventListener("click", () => lmSeqLoadSavedOne(s, load));
+      const del = lmMiniButton("trash", "Delete this saved sequence", "", false, () => lmSeqDeleteSaved(s), "danger");
+      const meta = [];
+      if (s.n_blocks != null) meta.push(String(s.n_blocks) + " blocks");
+      if (s.saved) meta.push(lmDate(s.saved, true));
+      return h("div", { class: "lm-saved-row" },
+        h("div", { class: "lm-saved-main" },
+          h("div", { class: "lm-saved-name", title: s.name || "" }, String(s.name || "(unnamed)")),
+          h("div", { class: "lm-saved-meta" }, meta.join(" · "))),
+        h("div", { class: "lm-row-actions" }, load, del));
+    }));
+  }
+
+  async function lmSeqLoadScripts() {
+    try {
+      const r = await api("/api/labmaster/scripts");
+      if (!r || r.ok === false) throw new Error((r && r.error) || "the script list is unavailable");
+      LM.scripts = Array.isArray(r.scripts) ? r.scripts : [];
+      LM.scriptsLoaded = true;
+      lmSeqRenderScripts();
+    } catch (e) {
+      const hint = lmEl("lm-import-hint");
+      if (hint) hint.textContent = "The script list is unavailable (labMaster is not connected); type a path instead.";
+    }
+  }
+
+  function lmSeqRenderScripts() {
+    const sel = lmEl("lm-script-select");
+    if (!sel) return;
+    const opts = [h("option", { value: "" }, "Choose a script…")];
+    for (const s of LM.scripts) {
+      const sig = s.has_main ? String(s.main || "") : "no main()";
+      opts.push(h("option", { value: s.path || "" },
+        String(s.name || s.path || "script") + (sig ? " — " + sig.slice(0, 70) : "")));
+    }
+    sel.replaceChildren(...opts);
+  }
+
+  function lmSeqConn(ok, info) {
+    const badge = lmEl("lm-seq-conn");
+    if (!badge) return;
+    const url = (info && info.url) || "http://127.0.0.1:8770";
+    badge.classList.remove("ok", "bad", "sim");
+    const st = LM.state || {};
+    if (ok === true) {
+      const sim = !!st.sim;
+      badge.textContent = sim ? "SIMULATION" : "panel";
+      badge.classList.add(sim ? "sim" : "ok");
+      badge.title = "labMaster panel · " + url + (st.panel_version ? " · v" + st.panel_version : "");
+      const sub = lmEl("lm-seq-sub");
+      if (sub) sub.textContent = "labMaster panel" + (st.panel_version ? " v" + st.panel_version : "") +
+        (sim ? " · SIMULATION" : "") + " · " + url;
+    } else if (ok === false) {
+      badge.textContent = "not connected";
+      badge.classList.add("bad");
+      badge.title = url;
+      const sub = lmEl("lm-seq-sub");
+      if (sub) sub.textContent = "labMaster panel · " + url;
+    } else {
+      badge.textContent = "…";
+      badge.title = "connecting";
+    }
+  }
+
+  function lmRunClass(run) {
+    if (run === "running" || run === "paused" || run === "stopping" || run === "error") return run;
+    return "idle";
+  }
+
+  function lmStatusClass(status) {
+    const s = String(status || "");
+    return ["running", "paused", "done", "error", "pending", "new", "skipped"].includes(s) ? s : "pending";
+  }
+
+  function lmSeqRenderState() {
+    const st = LM.state || {};
+    const seq = st.sequence || {};
+    const items = Array.isArray(seq.items) ? seq.items : [];
+    const run = String(st.run_state || "idle");
+    const prog = st.progress || {};
+    const chip = lmEl("lm-seq-run");
+    if (chip) {
+      const total = Number(prog.total) || 0;
+      const done = Number(prog.done) || 0;
+      chip.textContent = (st.trial && st.trial.name ? "trial · " : "") + run + (total ? " · " + done + "/" + total : "");
+      chip.className = "lm-chip " + lmRunClass(run);
+      chip.title = st.message ? run + " · " + st.message : run;
+    }
+    const nameEl = lmEl("lm-seq-name");
+    if (nameEl) nameEl.textContent = seq.name ? "“" + seq.name + "”" : "";
+    const start = lmEl("lm-btn-start"), pause = lmEl("lm-btn-pause");
+    const stop = lmEl("lm-btn-stop"), safe = lmEl("lm-btn-safe");
+    if (start) { start.disabled = run === "running" || run === "stopping"; start.textContent = run === "paused" ? "Resume" : "Start"; }
+    if (pause) pause.disabled = run !== "running";
+    if (stop) stop.disabled = !(run === "running" || run === "stopping" || run === "paused");
+    if (safe) safe.disabled = !!st.safe_stop_running;
+    const curUid = st.current && st.current.uid ? String(st.current.uid) : "";
+    const sig = JSON.stringify([curUid, items.map((it) => [it.uid, it.name, it.kind, it.target, it.status,
+      it.message, (it.progress || {}).done, (it.progress || {}).total, !!it.ended_early])]);
+    if (sig !== LM.seqSig) {
+      LM.seqSig = sig;
+      const list = lmEl("lm-seq-list");
+      if (list) list.replaceChildren(...(items.length ? items.map((it, i) => lmSeqRow(it, i, items.length)) :
+        [h("div", { class: "lm-empty" }, "No blocks yet. Add one from the function library, or import a Python script.")]));
+    }
+    const nameInput = lmEl("lm-saved-name");
+    if (nameInput && !nameInput.value && seq.name) nameInput.placeholder = String(seq.name);
+  }
+
+  function lmSeqRow(it, index, count) {
+    const status = String(it.status || "pending");
+    const prog = it.progress || {};
+    const total = Number(prog.total) || 0;
+    const done = Number(prog.done) || 0;
+    const current = !!(LM.state && LM.state.current && LM.state.current.uid === it.uid);
+    const meta = [String(it.kind || "script")];
+    if (it.target) meta.push(String(it.target));
+    if (it.by && it.by !== "you") meta.push("by " + it.by);
+    if (it.uid) meta.push(String(it.uid));
+    const pct = total ? Math.max(2, Math.min(100, Math.round((done / total) * 100))) : 0;
+    return h("div", { class: "lm-seq-row st-" + lmStatusClass(status) + (current ? " current" : "") },
+      h("span", { class: "lm-idx" }, String(index + 1)),
+      h("div", { class: "lm-seq-main" },
+        h("div", { class: "lm-seq-title", title: String(it.name || "") }, String(it.name || it.block_id || "(unnamed)")),
+        h("div", { class: "lm-seq-meta", title: meta.join(" · ") }, meta.join(" · ")),
+        total ? h("div", { class: "lm-progress" + (status === "done" ? " done" : status === "error" ? " error" : "") },
+          h("i", { style: "width:" + pct + "%" })) : null),
+      h("span", { class: "lm-chip " + lmStatusClass(status), title: it.message ? String(it.message) : "" }, status),
+      h("div", { class: "lm-row-actions" },
+        lmMiniButton("chev", "Move up", "-90deg", index <= 0, () => lmSeqMove(it, index - 1)),
+        lmMiniButton("chev", "Move down", "90deg", index >= count - 1, () => lmSeqMove(it, index + 1)),
+        lmMiniButton("trash", "Remove from the sequence", "", false, () => lmSeqDelete(it), "danger")));
+  }
+
+  function lmMiniButton(iconName, title, rotate, disabled, onClick, extraClass) {
+    const b = h("button", { class: "lm-mini" + (extraClass ? " " + extraClass : ""), type: "button", title, "aria-label": title }, icon(iconName));
+    if (rotate) { const s = b.querySelector("svg"); if (s) s.style.transform = "rotate(" + rotate + ")"; }
+    b.disabled = !!disabled;
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  async function lmSeqPost(path, body, errWhat, okText) {
+    try {
+      const r = await api(path, { body });
+      if (!r || r.ok === false) throw new Error((r && r.error) || "it was refused");
+      if (r.state) { LM.state = r.state; LM.seqSig = ""; lmSeqRenderState(); }
+      lmMsg("lm-seq-msg", "", false);
+      if (okText) lmSafeToast(okText);
+      return r;
+    } catch (e) {
+      lmMsg("lm-seq-msg", errWhat + " failed: " + ((e && e.message) || e), true);
+      return null;
+    }
+  }
+
+  async function lmSeqMove(item, index) {
+    const items = (LM.state && LM.state.sequence && LM.state.sequence.items) || [];
+    if (!item || !item.uid || index < 0 || index >= items.length) return;
+    await lmSeqPost("/api/labmaster/seq", { action: "move", uid: item.uid, index }, "Move", "Moved");
+  }
+
+  async function lmSeqDelete(item) {
+    if (!item || !item.uid) return;
+    if (!confirm("Remove “" + (item.name || "this block") + "” from the sequence?")) return;
+    await lmSeqPost("/api/labmaster/seq", { action: "delete", uid: item.uid }, "Remove", "Removed");
+  }
+
+  async function lmSeqClear() {
+    if (!confirm("Empty the sequence? Its blocks are removed; the function library stays.")) return;
+    await lmSeqPost("/api/labmaster/seq", { action: "clear", keep_done: false }, "Clear", "Sequence cleared");
+  }
+
+  async function lmSeqControl(action) {
+    if (action === "stop" && !confirm("Stop the sequence now? The block that runs is stopped where it is.")) return;
+    if (action === "safe_stop" && !confirm("Safe stop: stop everything, then run labMaster's safe-stop script.\n\nContinue?")) return;
+    const body = { action };
+    if (action === "safe_stop") body.reason = "Kelvin UI";
+    await lmSeqPost("/api/labmaster/control", body, "“" + action + "”",
+      action === "safe_stop" ? "Safe stop sent" : action.charAt(0).toUpperCase() + action.slice(1) + " sent");
+  }
+
+  async function lmSeqSaveCurrent() {
+    const input = lmEl("lm-saved-name");
+    const seq = (LM.state && LM.state.sequence) || {};
+    const name = String((input && input.value) || "").trim() || String(seq.name || "").trim();
+    if (!name) {
+      lmMsg("lm-seq-msg", "Give the sequence a name first (or type one next to Save current).", true);
+      if (input) input.focus();
+      return;
+    }
+    const clash = LM.saved.some((s) => String(s.name || "").toLowerCase() === name.toLowerCase());
+    let overwrite = false;
+    if (clash) {
+      if (!confirm("A saved sequence called “" + name + "” already exists. Replace it?")) return;
+      overwrite = true;
+    }
+    const btn = lmEl("lm-btn-save");
+    if (btn) btn.disabled = true;
+    try {
+      const r = await lmSeqPost("/api/labmaster/saved", { action: "save", name, overwrite }, "Save", "Saved “" + name + "”");
+      if (r) {
+        if (input) input.value = "";
+        await lmSeqLoadSaved();
+        await lmSeqRefresh(false);
+      }
+    } finally { if (btn) btn.disabled = false; }
+  }
+
+  async function lmSeqLoadSavedOne(s, btn) {
+    if (!s || !s.id) return;
+    const name = String(s.name || s.id);
+    if (!confirm("Load “" + name + "”? The current sequence is replaced.")) return;
+    if (btn) btn.disabled = true;
+    try {
+      let r = await api("/api/labmaster/saved", { body: { action: "load", id: s.id } });
+      if (r && r.ok === false && /replace|progress|nothing was loaded/i.test(String(r.error || ""))) {
+        if (!confirm("The current sequence has progress.\n\n" + r.error + "\n\nDiscard it and load anyway?")) return;
+        r = await api("/api/labmaster/saved", { body: { action: "load", id: s.id, replace: true } });
+      }
+      if (!r || r.ok === false) throw new Error((r && r.error) || "it was refused");
+      if (r.state) { LM.state = r.state; LM.seqSig = ""; lmSeqRenderState(); }
+      lmMsg("lm-seq-msg", "", false);
+      lmSafeToast("Loaded “" + name + "”");
+      await lmSeqRefresh(false);
+    } catch (e) {
+      lmMsg("lm-seq-msg", "Load failed: " + ((e && e.message) || e), true);
+    } finally { if (btn) btn.disabled = false; }
+  }
+
+  async function lmSeqDeleteSaved(s) {
+    if (!s || !s.id) return;
+    const name = String(s.name || s.id);
+    if (!confirm("Delete the saved sequence “" + name + "”? This cannot be undone.")) return;
+    const r = await lmSeqPost("/api/labmaster/saved", { action: "delete", id: s.id }, "Delete", "Deleted “" + name + "”");
+    if (r) await lmSeqLoadSaved();
+  }
+
+  async function lmSeqImport() {
+    const pathInput = lmEl("lm-import-path");
+    const sel = lmEl("lm-script-select");
+    const path = String((pathInput && pathInput.value) || (sel && sel.value) || "").trim();
+    if (!path) { lmMsg("lm-seq-msg", "Choose a script, or type a .py path, first.", true); return; }
+    const btn = lmEl("lm-btn-import");
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api("/api/labmaster/import", { body: { path } });
+      if (!r || r.ok === false) throw new Error((r && r.error) || "it was refused");
+      const entry = r.entry || {};
+      lmMsg("lm-seq-msg", "", false);
+      lmSafeToast("Imported " + String(entry.name || path) + " into the function library");
+      if (Array.isArray(r.palette)) { LM.palette = r.palette; LM.paletteLoaded = true; lmSeqRenderPalette(); }
+      else await lmSeqLoadPalette();
+      if (pathInput) pathInput.value = "";
+      if (sel) sel.value = "";
+      await lmSeqLoadScripts();
+    } catch (e) {
+      lmMsg("lm-seq-msg", "Import failed: " + ((e && e.message) || e), true);
+    } finally { if (btn) btn.disabled = false; }
+  }
+
+  function lmSeqInit() {
+    const click = (id, fn) => { const el = lmEl(id); if (el) el.addEventListener("click", fn); };
+    click("lm-btn-start", () => lmSeqControl("start"));
+    click("lm-btn-pause", () => lmSeqControl("pause"));
+    click("lm-btn-stop", () => lmSeqControl("stop"));
+    click("lm-btn-safe", () => lmSeqControl("safe_stop"));
+    click("lm-btn-clear", lmSeqClear);
+    click("lm-palette-refresh", () => {
+      LM.paletteLoaded = false; LM.savedLoaded = false; LM.scriptsLoaded = false;
+      lmSeqLoadPalette(); lmSeqLoadSaved(); lmSeqLoadScripts();
+    });
+    click("lm-btn-save", lmSeqSaveCurrent);
+    click("lm-btn-import", lmSeqImport);
+    const sel = lmEl("lm-script-select");
+    if (sel) sel.addEventListener("change", () => {
+      const p = lmEl("lm-import-path");
+      if (p && sel.value) p.value = sel.value;
+    });
+    for (const id of ["lm-import-path", "lm-saved-name"]) {
+      const el = lmEl(id);
+      if (!el) continue;
+      el.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        if (id === "lm-import-path") lmSeqImport(); else lmSeqSaveCurrent();
+      });
+    }
+  }
+
   // ------------------------------------------------------------------ start
   async function init() {
     if (!token) { $("nokey").hidden = false; return; }
@@ -6472,6 +7058,7 @@
     }
     $("app").hidden = false;
     for (const slot of document.querySelectorAll("[data-mark]")) slot.innerHTML = MARK;
+    lmInit();   // the left rail (Chat / Home / Sequence): never let it break the chat
     S.settings = boot.settings;
     applyZoom();   // this person's text size (desktop window)
     S.claudeCode = !!boot.claude_code;   // Claude Code bridge (temporary)

@@ -84,6 +84,23 @@
 <div id="app" class="app" hidden>
   <div id="scrim" class="scrim" hidden></div>
 
+  <!-- the leftmost rail: Chat / Home / Sequence (the view itself is in app.js, lmInit) -->
+  <nav id="rail" class="rail" aria-label="Views">
+    <div class="rail-brand" aria-hidden="true"><span class="logo" data-mark></span></div>
+    <button id="rail-chat" class="rail-btn" type="button" data-rail="chat" aria-pressed="true" title="Chat">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-9.5 8.4 9.1 9.1 0 0 1-3.4-.7L3 21l1.9-5.2A8.4 8.4 0 0 1 12 3.1a8.4 8.4 0 0 1 9 8.4z"/></svg>
+      <span class="rail-label">Chat</span>
+    </button>
+    <button id="rail-home" class="rail-btn" type="button" data-rail="home" aria-pressed="false" title="Home: the lab at a glance, and cards Kelvin keeps for you">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5L12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/><path d="M10 20v-5.5h4V20"/></svg>
+      <span class="rail-label">Home</span>
+    </button>
+    <button id="rail-seq" class="rail-btn" type="button" data-rail="seq" aria-pressed="false" title="Measurement sequence: labMaster's functions, sequence and run controls">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h2.5M4 12h2.5M4 18h2.5"/><path d="M10 6h10M10 12h10M10 18h10"/></svg>
+      <span class="rail-label">Sequence</span>
+    </button>
+  </nav>
+
   <aside id="sidebar" class="sidebar" aria-label="Conversations">
     <div class="side-top">
       <div class="brand">
@@ -149,6 +166,95 @@
       <div class="hb-body"><b>Hands on the sample</b><span id="hands-text"></span></div>
       <button id="hands-done" class="btn small primary" type="button">Done: unlock…</button>
     </div>
+
+    <!-- Home: labMaster's overview, and the cards Kelvin's AI keeps for this person (app.js: lmHome*) -->
+    <div id="kview-home" class="kview kview-home" aria-label="Home">
+      <div class="kview-scroll">
+        <header class="kview-head">
+          <div class="kview-titles">
+            <h1 id="lm-home-greet">Home</h1>
+            <p id="lm-home-sub" class="muted small"></p>
+          </div>
+          <div class="spacer"></div>
+          <button id="lm-home-refresh" class="btn small ghost" type="button" title="Fetch it again now">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>Refresh
+          </button>
+        </header>
+        <div id="lm-home-msg" class="kview-msg" role="status" hidden></div>
+        <div id="lm-home-tiles" class="lm-tiles" aria-label="The lab at a glance"></div>
+        <section class="lm-home-ai" aria-label="Cards from Kelvin">
+          <div class="lm-sec-head">
+            <h2>From Kelvin</h2>
+            <span class="muted small">Cards Kelvin adds here as you work</span>
+          </div>
+          <div id="lm-home-cards" class="lm-cards"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Sequence: labMaster's function library, sequence, run controls, saved sequences and Python import
+         (app.js: lmSeq*) -->
+    <div id="kview-seq" class="kview kview-seq" aria-label="Measurement sequence">
+      <header class="kview-head kview-head-seq">
+        <div class="kview-titles">
+          <h1>Measurement sequence</h1>
+          <p id="lm-seq-sub" class="muted small">labMaster panel · connecting…</p>
+        </div>
+        <div class="spacer"></div>
+        <span id="lm-seq-conn" class="lm-conn" title="The labMaster panel">…</span>
+      </header>
+      <div id="lm-seq-msg" class="kview-msg" role="status" hidden></div>
+      <div class="lm-seq-layout">
+        <section class="lm-panel lm-panel-palette" aria-label="Function library">
+          <div class="lm-sec-head">
+            <h2>Functions</h2>
+            <div class="spacer"></div>
+            <button id="lm-palette-refresh" class="lm-mini" type="button" title="Load the function library again">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg>
+            </button>
+          </div>
+          <p class="muted small lm-hint">Click a function to add it to the sequence.</p>
+          <div id="lm-palette-list" class="lm-list" aria-label="Functions"></div>
+        </section>
+        <section class="lm-panel lm-panel-seq" aria-label="The sequence">
+          <div class="lm-sec-head">
+            <h2>Sequence</h2>
+            <span id="lm-seq-name" class="muted small lm-seq-name"></span>
+            <div class="spacer"></div>
+            <span id="lm-seq-run" class="lm-chip idle">idle</span>
+          </div>
+          <div class="lm-controls">
+            <button id="lm-btn-start" class="btn small primary" type="button" title="Run the sequence">Start</button>
+            <button id="lm-btn-pause" class="btn small" type="button" title="Pause after the running block" disabled>Pause</button>
+            <button id="lm-btn-stop" class="btn small" type="button" title="Stop the block that is running" disabled>Stop</button>
+            <button id="lm-btn-safe" class="btn small danger" type="button" title="Stop everything, then run the safe-stop script">Safe stop</button>
+            <div class="spacer"></div>
+            <button id="lm-btn-clear" class="btn small ghost" type="button" title="Empty the sequence">Clear</button>
+          </div>
+          <div id="lm-seq-list" class="lm-list lm-seq-list" aria-label="Blocks in the sequence"></div>
+        </section>
+        <section class="lm-panel lm-panel-side" aria-label="Saved sequences and import">
+          <div class="lm-side-block">
+            <div class="lm-sec-head"><h2>Saved sequences</h2></div>
+            <div class="lm-saved-save">
+              <input id="lm-saved-name" placeholder="Name…" aria-label="A name for the saved sequence" spellcheck="false">
+              <button id="lm-btn-save" class="btn small" type="button" title="Save the sequence as it is now">Save current</button>
+            </div>
+            <div id="lm-saved-list" class="lm-list lm-saved-list" aria-label="Saved sequences"></div>
+          </div>
+          <div class="lm-side-block">
+            <div class="lm-sec-head lm-import-head"><h2>+ Import Python</h2></div>
+            <div class="lm-import">
+              <select id="lm-script-select" aria-label="A script to import"><option value="">Choose a script…</option></select>
+              <input id="lm-import-path" placeholder="…or a path: scripts/my_script.py" aria-label="Path of the Python script" spellcheck="false">
+              <button id="lm-btn-import" class="btn small primary" type="button" title="Import the script's function into the library">Import</button>
+            </div>
+            <p id="lm-import-hint" class="muted small lm-hint">Imports a Python script as a function: labMaster finds its parameters.</p>
+          </div>
+        </section>
+      </div>
+    </div>
+
     <div id="scroller" class="scroller">
       <section id="empty" class="empty">
         <img class="hero-mark" src="/static/kelvin.svg" width="72" height="72" alt="Kelvin">

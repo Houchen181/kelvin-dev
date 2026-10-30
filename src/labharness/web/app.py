@@ -3179,6 +3179,184 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(400, msg)
         return JSONResponse(dict(runtime.queue_view(), message=msg))
 
+    # ---------------------------------------------------------------- the labMaster panel (web/labmaster.py)
+    # The panel's own HTTP API, its function library, and the cards on Kelvin's Home page. Every answer is
+    # JSON with ok true or false and HTTP 200 (the vectors in the bridge never raise); a panel that is down or
+    # slow is said in the answer, so the Home and Sequence pages still open and say "labMaster is not running".
+    from . import labmaster as bridge    # stdlib only: urllib to http://127.0.0.1:8770, the Home cards' file
+
+    home_store = bridge.HomeStore(home / "home.json")
+
+    async def bridge_call(fn: Any, *args: Any, **kw: Any) -> Any:
+        """One bridge call on a worker thread: its 4 s panel timeout must never stall the portal's loop."""
+        def run() -> Any:
+            try:
+                return fn(*args, **kw)
+            except KeyError as e:
+                return {"ok": False, "error": "not found: %s" % (e.args[0] if e.args else e)}
+            except Exception as e:                   # noqa: BLE001 - a slip here must not become a 500
+                return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        return await asyncio.to_thread(run)
+
+    def bridge_json(value: Any) -> JSONResponse:
+        """A bridge answer as the page gets it: HTTP 200 either way."""
+        if not isinstance(value, dict):
+            value = {"ok": False, "error": "the labMaster bridge answered something unexpected"}
+        return JSONResponse(value)
+
+    async def home_view(request: Request) -> Response:
+        """GET: the Home page - greeting, five tiles and the AI's cards; with the panel down, still a page."""
+        return bridge_json(await bridge_call(bridge.snapshot, home_store))
+
+    async def home_cards(request: Request) -> Response:
+        """POST {kind, title, text, items, url, detail, source}: add one card; {"ok", "card"}."""
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the card was not sent as JSON"})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "a card is a JSON object"})
+        card = await bridge_call(home_store.add, body)
+        if isinstance(card, dict) and card.get("ok") is False:
+            return bridge_json(card)
+        return bridge_json({"ok": True, "card": card})
+
+    async def home_card(request: Request) -> Response:
+        """POST {fields}: change them on one card. DELETE: remove it."""
+        card_id = str(request.path_params.get("card_id") or "")
+        if request.method == "DELETE":
+            answer = await bridge_call(home_store.remove, card_id)
+            if isinstance(answer, dict) and answer.get("ok"):
+                return bridge_json({"ok": True})
+            return bridge_json(answer)
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the fields were not sent as JSON"})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the fields are a JSON object"})
+        card = await bridge_call(home_store.update, card_id, **body)
+        if isinstance(card, dict) and card.get("ok") is False:
+            return bridge_json(card)
+        return bridge_json({"ok": True, "card": card})
+
+    async def labmaster_state(request: Request) -> Response:
+        """GET: the panel's snapshot ({ok, url, error, state}); state is null when the panel is not running."""
+        return bridge_json(await bridge_call(bridge.state))
+
+    async def labmaster_palette(request: Request) -> Response:
+        """GET: the function library (palette) and its revision (a save names it as base_rev)."""
+        return bridge_json(await bridge_call(bridge.palette))
+
+    async def labmaster_scripts(request: Request) -> Response:
+        """GET: the .py scripts under the panel's search dirs (what + New function may pick)."""
+        return bridge_json(await bridge_call(bridge.scripts))
+
+    async def labmaster_saved(request: Request) -> Response:
+        """GET: the saved sequences. POST {action: save|load|delete, name?, id?, overwrite?, append?,
+        replace?}: save the live sequence, load a saved one (append or replace), or delete one."""
+        if request.method == "GET":
+            return bridge_json(await bridge_call(bridge.saved))
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the change was not sent as JSON", "state": None,
+                                "message": ""})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the change is a JSON object", "state": None,
+                                "message": ""})
+        action = str(body.get("action") or "").strip().lower()
+        item_id = str(body.get("id") or body.get("item_id") or "")
+        if action == "save":
+            answer = await bridge_call(bridge.saved_save, str(body.get("name") or ""),
+                                       bool(body.get("overwrite")))
+        elif action == "load":
+            answer = await bridge_call(bridge.saved_load, item_id, str(body.get("name") or ""),
+                                       bool(body.get("append")), bool(body.get("replace")))
+        elif action == "delete":
+            answer = await bridge_call(bridge.saved_delete, item_id, str(body.get("name") or ""))
+        else:
+            answer = {"ok": False, "error": "unknown saved action %r" % action, "state": None,
+                      "message": ""}
+        return bridge_json(answer)
+
+    async def labmaster_history(request: Request) -> Response:
+        """GET ?limit=: the newest finished runs (the panel's History, newest first)."""
+        try:
+            limit = max(1, min(int(request.query_params.get("limit") or 5), 50))
+        except ValueError:
+            limit = 5
+        return bridge_json(await bridge_call(bridge.history, limit))
+
+    async def labmaster_seq(request: Request) -> Response:
+        """POST {action: add|update|delete|move|duplicate|clear|rename, ...}: change the sequence."""
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the change was not sent as JSON", "state": None,
+                                "message": ""})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the change is a JSON object", "state": None,
+                                "message": ""})
+        action = str(body.get("action") or "").strip().lower()
+        uid = str(body.get("uid") or "").strip()
+        params = body.get("params") if isinstance(body.get("params"), dict) else None
+        if action == "add":
+            answer = await bridge_call(bridge.seq_add, str(body.get("block") or ""),
+                                       str(body.get("block_id") or ""), params, body.get("index"))
+        elif action == "update":
+            answer = await bridge_call(bridge.seq_update, uid, params, str(body.get("name") or ""),
+                                       bool(body.get("reset")))
+        elif action == "delete":
+            answer = await bridge_call(bridge.seq_delete, uid)
+        elif action == "move":
+            answer = await bridge_call(bridge.seq_move, uid, body.get("index"))
+        elif action == "duplicate":
+            answer = await bridge_call(bridge.seq_duplicate, uid)
+        elif action == "clear":
+            answer = await bridge_call(bridge.seq_clear, bool(body.get("keep_done")))
+        elif action == "rename":
+            answer = await bridge_call(bridge.seq_rename, str(body.get("name") or ""))
+        else:
+            answer = {"ok": False, "error": "unknown sequence action %r" % action, "state": None,
+                      "message": ""}
+        return bridge_json(answer)
+
+    async def labmaster_control(request: Request) -> Response:
+        """POST {action, want?, uid?, minutes?, failed?, failed_uids?, reason?}: start, pause, stop,
+        safe_stop (and the rest of /api/control's actions). stop/skip/reset are the caller's to confirm."""
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the action was not sent as JSON", "state": None,
+                                "message": ""})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the action is a JSON object", "state": None,
+                                "message": ""})
+        action = str(body.get("action") or "").strip().lower()
+        if not action:
+            return bridge_json({"ok": False, "error": "control: say which action", "state": None,
+                                "message": ""})
+        fields = {k: body.get(k) for k in ("want", "uid", "minutes", "failed", "failed_uids", "reason")
+                  if body.get(k) is not None}
+        return bridge_json(await bridge_call(bridge.control, action, **fields))
+
+    async def labmaster_import(request: Request) -> Response:
+        """POST {path, name?, kind?}: put a script into the function library, as + New function does (the whole
+        palette is written back with base_rev - the panel refuses a list older than the one it has)."""
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001 - a body that is not JSON
+            return bridge_json({"ok": False, "error": "the import was not sent as JSON", "entry": None,
+                                "palette": None, "message": ""})
+        if not isinstance(body, dict):
+            return bridge_json({"ok": False, "error": "the import is a JSON object", "entry": None,
+                                "palette": None, "message": ""})
+        path = str(body.get("path") or "").strip()
+        name = str(body.get("name") or "").strip()
+        kind = str(body.get("kind") or "script").strip() or "script"
+        return bridge_json(await bridge_call(bridge.import_script, path, name, kind))
+
     routes = [
         Route("/", index),
         Route("/m", mobile),
@@ -3300,6 +3478,18 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/runs/{run_id}/files/{name}", run_file),
         Route("/api/runs/{run_id}/files/{name}/open", run_open, methods=["POST"]),
         Route("/api/runs/{run_id}/export", run_export),
+        # labMaster: the Home page (tiles and the AI's cards) and the panel's own API (web/labmaster.py)
+        Route("/api/home", home_view),
+        Route("/api/home/cards", home_cards, methods=["POST"]),
+        Route("/api/home/cards/{card_id}", home_card, methods=["POST", "DELETE"]),
+        Route("/api/labmaster/state", labmaster_state),
+        Route("/api/labmaster/palette", labmaster_palette),
+        Route("/api/labmaster/scripts", labmaster_scripts),
+        Route("/api/labmaster/saved", labmaster_saved, methods=["GET", "POST"]),
+        Route("/api/labmaster/history", labmaster_history),
+        Route("/api/labmaster/seq", labmaster_seq, methods=["POST"]),
+        Route("/api/labmaster/control", labmaster_control, methods=["POST"]),
+        Route("/api/labmaster/import", labmaster_import, methods=["POST"]),
         Route("/static/{name}", static),
         # Help and the first-run checklist, ELN records, calibration, cards in the reader's language (labops.py)
         *labops.routes(runtime, settings, home, lambda request: runtime.user or person(request)),
