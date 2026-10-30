@@ -346,30 +346,34 @@ class Collector:
             tables.append(table)
         if len(kept) > MAX_KEPT:
             tables.append(Table(["Fit", "Model", "Kept"], [
-                [str(f.get("name")), str(f.get("model") or ""), _stamp(f.get("by"), f.get("account"), f.get("stored"))]
+                [str(f.get("name")), str(f.get("model") or "") + (" (failed)" if f.get("failed") else ""),
+                 _stamp(f.get("by"), f.get("account"), f.get("stored"))]
                 for f in kept[MAX_KEPT:]], "Other fits kept with the run (in run.h5)"))
         return charts, tables
 
     @staticmethod
     def _kept_fit(f: Dict[str, Any], fitting: Any) -> Tuple[Chart, Table]:
         """One kept fit: a plot of its points with the model dashed, and a table of its values, each titled by its
-        name (the slides pair them by it)."""
+        name (the slides pair them by it). A failed fit, kept on purpose, says so first."""
         spec = f.get("spec") if isinstance(f.get("spec"), dict) else {}
         name, model = str(f.get("name") or "fit"), str(f.get("model") or "model")
         x_key, y_key = str(spec.get("x") or "x"), str(spec.get("y") or name)
         who = "kept " + _stamp(f.get("by"), f.get("account"), f.get("stored"))
         chi2 = f.get("chi2_red")
-        title = "Kept fit “%s”" % name
+        failed = str(f.get("failed") or "")
+        title = "Kept fit “%s”%s" % (name, " (failed)" if failed else "")
         xs, ys = fitting.kept_points(f)
         fx, fy = fitting.kept_curve(f)
         chart = Chart(title, x_key, str(f.get("x_unit") or ""), str(f.get("y_unit") or ""),
                       [Series(y_key, xs, ys), Series("fit", fx, fy, fit=True)],
-                      "Dashed: the %s fit “%s”, %s%s." % (model, name, who, "; reduced chi-squared %s" % num(chi2)
-                                                          if _numbers(chi2) else ""))
+                      "%sDashed: the %s fit “%s”, %s%s." % (
+                          "Failed (%s): its numbers are no result. " % failed if failed else "", model, name, who,
+                          "; reduced chi-squared %s" % num(chi2) if _numbers(chi2) else ""))
         held = set(f.get("held") or [])
-        rows = [[str(p), fitting.fmt(v, e, u or "") + (" (held)" if p in held else "")]
-                for p, v, e, u in zip(f.get("params") or [], f.get("values") or [], f.get("errors") or [],
-                                      f.get("units") or [])]
+        rows = [["failed", failed]] if failed else []
+        rows += [[str(p), fitting.fmt(v, e, u or "") + (" (held)" if p in held else "")]
+                 for p, v, e, u in zip(f.get("params") or [], f.get("values") or [], f.get("errors") or [],
+                                       f.get("units") or [])]
         rows += [[str(d.get("name")), fitting.fmt(d.get("value"), d.get("error"), d.get("unit") or "")]
                  for d in f.get("derived") or [] if isinstance(d, dict)]
         if _numbers(chi2):

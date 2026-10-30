@@ -811,13 +811,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
         "expression or one number), which weights the fit; start: starting values; fix: values held; bounds: "
         "{name: [low, high]}. phase: the phase column or trace for resonator (y: its magnitude, dB or linear). "
         "x_values and y_values: numbers you give instead of a run's (Hc2 against T from several runs). A resonance "
-        "recorded in dB is fitted on linear power. name: what to keep it as; keep: false only looks."
+        "recorded in dB is fitted on linear power. A fit that finds nothing a flat line doesn't says 'not "
+        "significant'; one that failed (no convergence, parameters the data can't fix) says FAILED and is kept only "
+        "with keep: true, marked failed. name: what to keep it as; keep: false only looks."
         % ", ".join(fitting.MODELS)))
     def fit_run(model: str, run_id: str = "last", x: str = "", y: str = "", where: str = "",
                 sigma: Optional[Union[float, str]] = None, start: Optional[Dict[str, float]] = None,
                 fix: Optional[Dict[str, float]] = None, bounds: Optional[Dict[str, List[Optional[float]]]] = None,
                 x_range: Optional[List[Optional[float]]] = None, row: Optional[int] = None, phase: str = "",
-                name: str = "", keep: bool = True, x_values: Optional[List[float]] = None,
+                name: str = "", keep: Optional[bool] = None, x_values: Optional[List[float]] = None,
                 y_values: Optional[List[float]] = None, x_unit: str = "", y_unit: str = "") -> List[Any]:
         try:
             png, text = datatools.fit_run(rt, run_id, model, x, y, where, sigma, start, fix, bounds, x_range, row,

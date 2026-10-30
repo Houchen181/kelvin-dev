@@ -149,10 +149,11 @@ def _numbers(v: Any, what: str) -> Any:
 def fit_run(rt: Any, run_id: str = "last", model: str = "", x: str = "", y: str = "", where: str = "",
             sigma: Any = None, start: Optional[Dict[str, Any]] = None, fix: Optional[Dict[str, Any]] = None,
             bounds: Optional[Dict[str, Any]] = None, x_range: Optional[Sequence[Any]] = None,
-            row: Optional[int] = None, phase: str = "", name: str = "", keep: bool = True,
+            row: Optional[int] = None, phase: str = "", name: str = "", keep: Optional[bool] = None,
             x_values: Optional[Sequence[Any]] = None, y_values: Optional[Sequence[Any]] = None,
             x_unit: str = "", y_unit: str = "") -> Tuple[Optional[bytes], str]:
-    """The fit_run tool: (a picture of the fit and its residuals, the fit in words)."""
+    """The fit_run tool: (a picture of the fit and its residuals, the fit in words). keep: None keeps it unless it
+    failed; True keeps even a failed fit (marked failed); False only looks."""
     from . import fitting, plotting
     np = _np()
     if not str(model or "").strip():
@@ -250,9 +251,14 @@ def fit_run(rt: Any, run_id: str = "last", model: str = "", x: str = "", y: str 
         result = fitting.fit(m, xv, yv, sig, start, fix, bounds, extra, xu, yu, deadline=time.monotonic() + FIT_S)
     except fitting.FitError as e:
         raise ToolError(str(e))
+    if key == "resonator" and result.get("failed") and _rises(np, np.abs(yv)):
+        notes.append("the notch model is for a dip in S21 (a resonator beside the line); this trace rises at its "
+                     "resonance, a transmission peak: fit lorentzian")
     what = "%s vs %s" % (yn, xn)
     lines = (["%s:" % src.run_id] if src else []) + fitting.fit_text(result, what) + ["note: " + n for n in notes]
-    if keep and src is not None:
+    if keep is None and src is not None and result.get("failed"):
+        lines.append("not kept: the fit failed (keep: true keeps it anyway, marked failed)")
+    elif (keep or keep is None) and src is not None:
         lines.append(_keep_fit(rt, src, m, result, name, {
             "model": model, "x": xn, "y": yn, "where": where, "sigma": sigma if isinstance(sigma, (int, float, str))
             else None, "start": start, "fix": fix, "bounds": bounds, "x_range": list(x_range) if x_range else None,
@@ -265,6 +271,16 @@ def fit_run(rt: Any, run_id: str = "last", model: str = "", x: str = "", y: str 
     except Exception as e:   # the numbers stand without the picture
         lines.append("(no picture: %s)" % e)
     return picture, "\n".join(lines)
+
+
+def _rises(np: Any, y: Any) -> bool:
+    """Whether a trace's largest excursion from its ends' level is upward (a transmission peak, not a notch)."""
+    y = y[np.isfinite(y)]
+    if y.size < 5:
+        return False
+    edge = max(2, y.size // 10)
+    base = float(np.median(np.concatenate([y[:edge], y[-edge:]])))
+    return float(y.max()) - base > base - float(y.min())
 
 
 def _keep_fit(rt: Any, src: Source, model: Any, result: Dict[str, Any], name: str, spec: Dict[str, Any]) -> str:
@@ -394,8 +410,10 @@ def plot_runs(rt: Any, curves: Optional[List[Dict[str, Any]]] = None, title: str
                 raise ToolError("%s keeps no fit %r (it keeps: %s)" % (src.run_id, spec["fit"], ", ".join(fits) or
                                                                        "none"))
             fx, fy = kept_curve(f)
-            drawn.append(plotting.Curve(np.asarray(fx) * xfactor, np.asarray(fy) * factor, "%s fit" % f.get("model"),
-                                        FIT, "fit"))
+            drawn.append(plotting.Curve(np.asarray(fx) * xfactor, np.asarray(fy) * factor, "%s fit%s" % (
+                f.get("model"), " (failed)" if f.get("failed") else ""), FIT, "fit"))
+            if f.get("failed"):
+                notes.append("the kept fit %s failed (%s): it is no result" % (f["name"], f["failed"]))
         xs_seen.append(xn)
         ys_seen.append(yn)
         units_y.append(shown_unit)

@@ -9,7 +9,12 @@ run, a function or a named constant (expr.py) is a parameter.
 NumPy only (the app brings no SciPy): weighted Levenberg-Marquardt with bounds and a numerical Jacobian. Errors are
 one standard error from the covariance at the minimum: scaled by the reduced chi-squared when the points carry no sigma
 of their own (their scatter sets the errors), taken as they are when they do (then the reduced chi-squared says
-whether those sigma were right)."""
+whether those sigma were right).
+
+A fit says when it found nothing: its chi-squared is compared with a flat line's (an F test, times the places a peak
+or a frequency could have been), and below SIGNIFICANT it is "not significant" (a Rabi "π time" of 29.77 ± 0.36 ns
+once came from flat data). A fit that did not converge, whose parameters the data can't tell apart, or that leaves
+what it is for undetermined ("fr = 4 ± 77642376 GHz") is FAILED, in its text and wherever it is kept."""
 from __future__ import annotations
 
 import ast
@@ -28,7 +33,13 @@ QE = 1.602176634e-19
 PHI0 = 2.067833848e-15
 MAX_POINTS = 200_000          # a fit's points (a long trace is fitted whole up to this)
 CURVE_POINTS = 400            # the model drawn over the data's range
+SIGNIFICANT = 1e-3            # a fit that beats a flat line by less than noise does this often is no finding
 _STORE = threading.Lock()     # one writer of run.h5 at a time in this Kelvin
+OHMS = {"Ω": 1.0, "ohm": 1.0, "Ohm": 1.0, "ohms": 1.0, "mΩ": 1e-3, "kΩ": 1e3, "MΩ": 1e6, "GΩ": 1e9,
+        "mOhm": 1e-3, "kOhm": 1e3, "MOhm": 1e6}
+TESLA = {"T": 1.0, "mT": 1e-3, "µT": 1e-6, "uT": 1e-6, "G": 1e-4, "kG": 0.1}
+LOCATIONS = ("x0", "x1", "x2", "fr", "V_D", "t0")   # parameters that say where along x a feature is
+PEAK_MODELS = ("lorentzian", "gaussian", "double_lorentzian")
 
 
 class FitError(ValueError):
@@ -188,6 +199,47 @@ def digamma(x: Any) -> Any:
     inv = 1.0 / (x * x)
     return acc + np.log(x) - 0.5 / x - inv * (1 / 12 - inv * (1 / 120 - inv * (1 / 252 - inv * (1 / 240 - inv / 132))))
 
+
+def _betacf(a: float, b: float, x: float) -> float:
+    """The incomplete beta function's continued fraction (Lentz's method, as in Numerical Recipes)."""
+    tiny = 1e-300
+    c, d = 1.0, 1.0 - (a + b) * x / (a + 1.0)
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 500):
+        for aa in (m * (b - m) * x / ((a - 1.0 + 2 * m) * (a + 2 * m)),
+                   -(a + m) * (a + b + m) * x / ((a + 2 * m) * (a + 1.0 + 2 * m))):
+            d = 1.0 + aa * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + aa / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+        if abs(d * c - 1.0) < 1e-14:
+            break
+    return h
+
+
+def betai(a: float, b: float, x: float) -> float:
+    """The regularised incomplete beta function I_x(a, b)."""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1) / (a + b + 2):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1 - x) / b
+
+
+def f_sf(f: float, d1: float, d2: float) -> float:
+    """How often noise alone gives an F statistic this large, with (d1, d2) degrees of freedom: the chance that a
+    model with d1 more parameters improves on a simpler one this much by luck."""
+    if not f > 0:
+        return 1.0
+    if not math.isfinite(f):
+        return 0.0
+    return betai(d2 / 2.0, d1 / 2.0, d2 / (d2 + d1 * f))
+
 # ------------------------------------------------------------------ models
 
 
@@ -210,6 +262,7 @@ class Model:
     x_ref: bool = False                                      # x is counted from the first x of the window
     columns: Tuple[str, ...] = ()                            # run columns an expression model reads
     sizes: Optional[Callable[[Any, Any], Dict[str, float]]] = None   # how much each parameter matters, for steps
+    must: Tuple[str, ...] = ()                               # what the fit is for: not determined, it failed
 
 
 def _median(np: Any, a: Any) -> float:
@@ -271,7 +324,7 @@ def _lorentzian() -> Model:
         return {"y0": b, "A": a, "x0": c, "fwhm": w}
     return Model("lorentzian", ("y0", "A", "x0", "fwhm"), f, "y0 + A / (1 + ((x - x0) / (fwhm/2))²)", guess,
                  lambda xu, yu: {"y0": yu, "A": yu, "x0": xu, "fwhm": xu}, "a Lorentzian peak or dip",
-                 lower={"fwhm": 0.0}, derived=_q)
+                 lower={"fwhm": 0.0}, derived=_q, must=("x0", "fwhm"))
 
 
 def _gaussian() -> Model:
@@ -284,7 +337,7 @@ def _gaussian() -> Model:
         return {"y0": b, "A": a, "x0": c, "fwhm": w}
     return Model("gaussian", ("y0", "A", "x0", "fwhm"), f, "y0 + A·exp(-4 ln2 (x - x0)²/fwhm²)", guess,
                  lambda xu, yu: {"y0": yu, "A": yu, "x0": xu, "fwhm": xu}, "a Gaussian peak or dip",
-                 lower={"fwhm": 0.0}, derived=_q)
+                 lower={"fwhm": 0.0}, derived=_q, must=("x0", "fwhm"))
 
 
 def _double_lorentzian() -> Model:
@@ -300,7 +353,8 @@ def _double_lorentzian() -> Model:
     return Model("double_lorentzian", ("y0", "A1", "x1", "w1", "A2", "x2", "w2"), f,
                  "y0 + A1/(1 + ((x - x1)/(w1/2))²) + A2/(1 + ((x - x2)/(w2/2))²)", guess,
                  lambda xu, yu: {"y0": yu, "A1": yu, "x1": xu, "w1": xu, "A2": yu, "x2": xu, "w2": xu},
-                 "two Lorentzian peaks (FWHM w1, w2)", lower={"w1": 0.0, "w2": 0.0})
+                 "two Lorentzian peaks (FWHM w1, w2)", lower={"w1": 0.0, "w2": 0.0},
+                 must=("x1", "w1", "x2", "w2"))
 
 
 def _decay_guess(np: Any, x: Any, y: Any) -> Tuple[float, float, float]:
@@ -324,7 +378,7 @@ def _exponential() -> Model:
         return {"y_inf": final, "A": amp, "tau": tau}
     return Model("exponential", ("y_inf", "A", "tau"), f, "y_inf + A·exp(-(x - x_start)/tau)", guess,
                  lambda xu, yu: {"y_inf": yu, "A": yu, "tau": xu}, "an exponential decay or rise",
-                 x_ref=True)
+                 x_ref=True, must=("tau",))
 
 
 def _stretched() -> Model:
@@ -338,7 +392,7 @@ def _stretched() -> Model:
     return Model("stretched_exponential", ("y_inf", "A", "tau", "beta"), f,
                  "y_inf + A·exp(-((x - x_start)/tau)^beta)", guess,
                  lambda xu, yu: {"y_inf": yu, "A": yu, "tau": xu, "beta": ""}, "a stretched exponential",
-                 lower={"tau": 0.0, "beta": 0.05}, upper={"beta": 5.0}, x_ref=True)
+                 lower={"tau": 0.0, "beta": 0.05}, upper={"beta": 5.0}, x_ref=True, must=("tau",))
 
 
 def _biexponential() -> Model:
@@ -353,7 +407,7 @@ def _biexponential() -> Model:
     return Model("biexponential", ("y_inf", "A1", "tau1", "A2", "tau2"), f,
                  "y_inf + A1·exp(-(x - x_start)/tau1) + A2·exp(-(x - x_start)/tau2)", guess,
                  lambda xu, yu: {"y_inf": yu, "A1": yu, "tau1": xu, "A2": yu, "tau2": xu}, "two exponential decays",
-                 lower={"tau1": 0.0, "tau2": 0.0}, x_ref=True)
+                 lower={"tau1": 0.0, "tau2": 0.0}, x_ref=True, must=("tau1", "tau2"))
 
 
 def _with_irf(np: Any, t: Any, t0: float, tau: float, fwhm: float) -> Any:
@@ -393,7 +447,7 @@ def _exp_irf() -> Model:
                  lambda x, y: _irf_guess(_np(), x, y, False),
                  lambda xu, yu: {"y0": yu, "A": yu, "tau": xu, "t0": xu, "irf": xu},
                  "an exponential decay starting at t0, convolved with a Gaussian instrument response",
-                 lower={"tau": 0.0, "irf": 0.0})
+                 lower={"tau": 0.0, "irf": 0.0}, must=("tau",))
 
 
 def _biexp_irf() -> Model:
@@ -406,7 +460,8 @@ def _biexp_irf() -> Model:
                  lambda x, y: _irf_guess(_np(), x, y, True),
                  lambda xu, yu: {"y0": yu, "A1": yu, "tau1": xu, "A2": yu, "tau2": xu, "t0": xu, "irf": xu},
                  "two exponential decays starting at t0, convolved with a Gaussian instrument response (pump-probe, "
-                 "time-resolved photoluminescence)", lower={"tau1": 0.0, "tau2": 0.0, "irf": 0.0})
+                 "time-resolved photoluminescence)", lower={"tau1": 0.0, "tau2": 0.0, "irf": 0.0},
+                 must=("tau1", "tau2"))
 
 
 def _damped_cosine() -> Model:
@@ -439,7 +494,7 @@ def _damped_cosine() -> Model:
                                  "phi": "rad", "tau": xu, "n": ""},
                  "a damped oscillation (Rabi, Ramsey); the envelope's power n is held at 1 (exponential) unless "
                  "start or fix gives it (n: 2 is a Gaussian envelope)",
-                 lower={"tau": 0.0, "f": 0.0}, held={"n": 1.0}, derived=derived, x_ref=True)
+                 lower={"tau": 0.0, "f": 0.0}, held={"n": 1.0}, derived=derived, x_ref=True, must=("f",))
 
 
 def _linear() -> Model:
@@ -547,7 +602,7 @@ def _resonator() -> Model:
                  "a notch-type resonator's complex S21 with the cable delay (circle fit, Probst et al. 2015): give "
                  "the phase with phase (a column or trace in deg or rad); with the magnitude alone, the delay and "
                  "alpha drop out",
-                 lower={"Ql": 0.0, "Qc": 0.0, "a": 0.0}, derived=_notch_derived, complex=True,
+                 lower={"Ql": 0.0, "Qc": 0.0, "a": 0.0}, derived=_notch_derived, complex=True, must=("fr", "Ql"),
                  sizes=lambda f, z: {"tau": 0.01 / (2 * math.pi * (float(_np().ptp(f)) or 1.0)), "phi": 0.01,
                                      "alpha": 0.01})
 
@@ -569,7 +624,8 @@ def _resonator_magnitude() -> Model:
     m = _resonator()
     return Model("resonator", ("fr", "Ql", "Qc", "phi", "a"), f, "|S21| = " + m.formula.replace("·exp(i(alpha - 2π f "
                  "tau))", ""), guess, m.units, "a notch-type resonator from its |S21| alone (no phase given)",
-                 lower={"Ql": 0.0, "Qc": 0.0, "a": 0.0}, derived=_notch_derived, sizes=lambda f, z: {"phi": 0.01})
+                 lower={"Ql": 0.0, "Qc": 0.0, "a": 0.0}, derived=_notch_derived, sizes=lambda f, z: {"phi": 0.01},
+                 must=("fr", "Ql"))
 
 # ------------------------------------------------------------------ transport and superconductors
 
@@ -599,7 +655,7 @@ def _graphene() -> Model:
                  "(puddle) density and the Dirac point. fix C_g (the gate's capacitance per area, F/m²; 285 nm "
                  "SiO2: 1.21e-4) and aspect (length/width of the channel)",
                  lower={"mu": 0.0, "n0": 0.0, "R_c": 0.0}, needs=("C_g", "aspect"), constants=("C_g", "aspect"),
-                 derived=derived)
+                 derived=derived, must=("mu", "V_D"))
 
 
 def _hall() -> Model:
@@ -613,11 +669,13 @@ def _hall() -> Model:
 
     def derived(v: Dict[str, float], xu: str, yu: str) -> List[Tuple[str, float, str]]:
         out: List[Tuple[str, float, str]] = []
-        if v["R_H"]:
-            out.append(("carrier density n = 1/(e·|R_H|)", 1e-4 / (QE * abs(v["R_H"])), "cm⁻²"))
-            out.append(("carriers", -1.0 if v["R_H"] < 0 else 1.0, "electrons" if v["R_H"] < 0 else "holes"))
+        ohms, tesla = OHMS.get(yu or "Ω"), TESLA.get(xu or "T")
+        if v["R_H"] and ohms and tesla:   # R_H in Ω/T whatever the prefixes (y in kΩ, x in mT)
+            rh = v["R_H"] * ohms / tesla
+            out.append(("carrier density n = 1/(e·|R_H|)", 1e-4 / (QE * abs(rh)), "cm⁻²"))
+            out.append(("carriers", -1.0 if rh < 0 else 1.0, "electrons" if rh < 0 else "holes"))
             if v.get("rho_xx"):
-                out.append(("Hall mobility |R_H|/rho_xx", abs(v["R_H"]) / v["rho_xx"] * 1e4, "cm²/(V·s)"))
+                out.append(("Hall mobility |R_H|/rho_xx", abs(rh) / v["rho_xx"] * 1e4, "cm²/(V·s)"))
         return out
     return Model("hall", ("R0", "R_H", "rho_xx"), f, "R0 + R_H·B", guess,
                  lambda xu, yu: {"R0": yu or "Ω", "R_H": _per(yu or "Ω", xu or "T"), "rho_xx": "Ω"},
@@ -643,7 +701,7 @@ def _gl_hc2() -> Model:
     return Model("gl_hc2", ("Bc2_0", "Tc"), f, "Bc2_0·(1 - (T/Tc)²)", guess,
                  lambda xu, yu: {"Bc2_0": yu or "T", "Tc": xu or "K"},
                  "the upper critical field against temperature, Ginzburg-Landau's empirical parabola (x: T in K, "
-                 "y: Bc2 in T)", lower={"Tc": 0.0}, derived=derived)
+                 "y: Bc2 in T)", lower={"Tc": 0.0}, derived=derived, must=("Bc2_0", "Tc"))
 
 
 def _whh_h(t: Any) -> Any:
@@ -682,7 +740,7 @@ def _whh_hc2() -> Model:
                  lambda xu, yu: {"Tc": xu or "K", "S": _per(yu or "T", xu or "K")},
                  "the upper critical field against temperature after Werthamer-Helfand-Hohenberg (dirty limit, no "
                  "spin effects): S is -dBc2/dT at Tc (x: T in K, y: Bc2 in T)", lower={"Tc": 0.0, "S": 0.0},
-                 derived=derived)
+                 derived=derived, must=("Tc", "S"))
 
 
 MODELS: Dict[str, Callable[[], Model]] = {
@@ -911,9 +969,113 @@ def fit(model: Model, x: Any, y: Any, sigma: Any = None, start: Optional[Dict[st
         out["params"].append({"name": k, "value": float(p[j]), "error": None if not math.isfinite(errs[j]) else
                               float(errs[j]), "unit": units.get(k, ""), "held": k in held, "at_bound": at_bound})
     _warnings(np, out, sol, model, free, cov, no_start, res, sig)
+    _shape(np, out, model, xs)
     if model.derived:
         out["derived"] = _derived(np, model, p, free, cov, x_unit, y_unit)
+    if model.name == "hall":
+        _hall_density(out, x_unit, y_unit)
+    _significance(np, out, model, xs, y, sig)
+    out["failed"] = _failed(out, sol, model, xs)
     return out
+
+
+def _significance(np: Any, out: Dict[str, Any], model: Model, x: Any, y: Any, sig: Any) -> None:
+    """Whether the model found anything noise wouldn't: its chi-squared against a flat line's (the points' own
+    level), by an F test; for a feature that could have sat anywhere along x (a peak's center, an oscillation's
+    frequency), times the number of places it could have been (look-elsewhere). p_flat: that chance."""
+    k, k0 = len(out["free"]), (2 if model.complex else 1)
+    m = 2 * out["n"] if model.complex else out["n"]
+    if k <= k0 or m <= k:
+        return
+    w = 1.0 / sig if sig is not None else np.ones(x.size)
+    level = (y * w * w).sum() / (w * w).sum()
+    flat = float((np.abs(y - level) ** 2 * w * w).sum())
+    chi2 = out["chi2"]
+    if not flat > 0:
+        return
+    f = ((flat - chi2) / (k - k0)) / (chi2 / (m - k)) if chi2 > 0 else math.inf
+    values = {p["name"]: p["value"] for p in out["params"]}
+    span = float(np.ptp(x)) or 1.0
+    trials = 1.0
+    if model.name in PEAK_MODELS and any(n in out["free"] for n in ("x0", "x1", "x2")):
+        widths = [abs(values[n]) for n in ("fwhm", "w1", "w2") if n in values]
+        trials = min(float(out["n"]), max([span / max(w, 1e-300) for w in widths] + [1.0]))
+    elif model.name == "damped_cosine" and "f" in out["free"]:
+        trials = max(1.0, out["n"] / 2.0)
+    out["p_flat"] = p = min(1.0, f_sf(f, k - k0, m - k) * trials)
+    if p > SIGNIFICANT:
+        out["warnings"].insert(0, "not significant: a flat line fits these points about as well (p = %.2g): the "
+                                  "parameters describe noise" % p)
+
+
+def _shape(np: Any, out: Dict[str, Any], model: Model, x: Any) -> None:
+    """What a model's own numbers say about the points: a line narrower than the step between them, an oscillation
+    faster than they can follow, a feature placed outside them."""
+    if x.size < 2:
+        return
+    values = {p["name"]: p for p in out["params"]}
+    step = _step(np, x)
+    lo, hi = float(x.min()), float(x.max())
+    for name in ("fwhm", "w1", "w2"):
+        prm = values.get(name)
+        if model.name not in PEAK_MODELS or not prm or prm["held"] or abs(prm["value"]) >= 2 * step:
+            continue
+        if abs(prm["value"]) < step:
+            out["warnings"].append("%s is narrower than the step between points: the fit follows a single point, so "
+                                   "the width (and Q) is not measured" % name)
+        else:
+            out["warnings"].append("%s is only %.1f steps between points: under-resolved, use a finer step"
+                                   % (name, abs(prm["value"]) / step))
+    f = values.get("f")
+    if model.name == "damped_cosine" and f and f["value"] > 0:
+        if f["value"] * step > 0.25:
+            out["warnings"].append("fewer than 4 points per period: the oscillation may be an alias of the step, not "
+                                   "the signal")
+        if f["value"] * (hi - lo) < 1:
+            out["warnings"].append("less than one period lies inside the points")
+    x0 = out["x_start"] or 0.0   # a model counted from the window's first x: said in the run's own x
+    for name in LOCATIONS:
+        prm = values.get(name)
+        if prm and not prm["held"] and not lo <= prm["value"] <= hi:
+            out["warnings"].append("%s = %.7g lies outside the points (%.7g to %.7g)"
+                                   % (name, prm["value"] + x0, lo + x0, hi + x0))
+
+
+def _failed(out: Dict[str, Any], sol: Solution, model: Model, x: Any) -> Optional[str]:
+    """Why a fit is no result, or None: it did not converge, the data can't fix its parameters, it fits worse than
+    a flat line, or what it is for (a width, a time, a place: the model's `must`) is not determined by the data."""
+    if not sol.converged:
+        return "it did not converge"
+    if sol.rank < len(out["free"]):
+        return "the data can't determine all its parameters"
+    free = [p for p in out["params"] if p["name"] in out["free"]]
+    if any(p["error"] is None for p in free):
+        return "its errors could not be worked out"
+    if out["r2"] < 0:
+        return "it fits worse than a flat line"
+    span = float(_np().ptp(x)) or 1.0
+    for p in free:
+        if p["name"] not in model.must:
+            continue
+        if (p["error"] > span) if p["name"] in LOCATIONS else (p["error"] > abs(p["value"])):
+            return "%s is not determined by the data (%s)" % (p["name"], fmt(p["value"], p["error"], p["unit"]))
+    return None
+
+
+def _hall_density(out: Dict[str, Any], x_unit: str, y_unit: str) -> None:
+    """A carrier density and type only from an R_H that stands out from 0 (3σ), with y a resistance and x a field."""
+    rh = next(p for p in out["params"] if p["name"] == "R_H")
+    if y_unit and y_unit not in OHMS:
+        out["warnings"].append("y is in %s, not ohms: R_H gives a carrier density only for a resistance (divide by "
+                               "the current, or record the measurement chain)" % y_unit)
+    elif x_unit and x_unit not in TESLA:
+        out["warnings"].append("x is in %s, not tesla: R_H gives a carrier density only against the field" % x_unit)
+    elif rh["error"] is None or abs(rh["value"]) < 3 * rh["error"]:
+        out["derived"] = [d for d in out["derived"] if not d["name"].startswith(("carrier", "Hall mobility"))]
+        out["warnings"].append("R_H = %s is within 3σ of 0: no carrier density or type follows from it"
+                               % fmt(rh["value"], rh["error"], rh["unit"]))
+    elif not y_unit:
+        out["warnings"].append("y has no unit: the carrier density takes it to be in ohms")
 
 
 def _plain(np: Any, a: Any) -> Any:
@@ -1031,11 +1193,13 @@ def fmt(value: Optional[float], err: Optional[float], unit: str) -> str:
 
 
 def fit_text(result: Dict[str, Any], what: str = "") -> List[str]:
-    """A fit in lines: its parameters with errors, what follows from them, how good it is, what to watch."""
-    lines = ["%s%s fit (%s) to %d points: chi² %.4g for %d degrees of freedom (reduced %.3g)%s; R² %.5f" % (
+    """A fit in lines: its parameters with errors, what follows from them, how good it is, what to watch. A failed
+    fit says so first: its numbers are no result."""
+    lines = ["FAILED: %s; the numbers below are not a result" % result["failed"]] if result.get("failed") else []
+    lines.append("%s%s fit (%s) to %d points: chi² %.4g for %d degrees of freedom (reduced %.3g)%s; R² %.5f" % (
         what + ": " if what else "", result["model"], result["formula"], result["n"], result["chi2"], result["dof"],
         result["chi2_red"], ", weighted by the sigma given" if result["weighted"] else
-        ", unweighted (errors from the scatter)", result["r2"])]
+        ", unweighted (errors from the scatter)", result["r2"]))
     if result.get("x_start"):
         lines.append("x is counted from x_start = %.6g (the window's first x)" % result["x_start"])
     for p in result["params"]:
@@ -1068,7 +1232,7 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
     """Keep a fit in the run's run.h5 as /fits/<name> (replacing one of that name): the model and how it was asked
     for as attributes, the values, errors and covariance, and the points with the model and residuals at each. Who
     kept it (by: the agent or a person; account: the person signed in, when people sign in) and when (stored) go with
-    it, for the run's reports."""
+    it, for the run's reports; so does why it failed (failed), for a failed fit kept on purpose."""
     import h5py
     np = _np()
     from .rundata import RUN_FILE
@@ -1085,6 +1249,7 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
              "errors": [p["error"] for p in result["params"]], "units": [p["unit"] for p in result["params"]],
              "held": [p["name"] for p in result["params"] if p["held"]], "free": result["free"],
              "derived": result["derived"], "warnings": result["warnings"], "x_start": result.get("x_start"),
+             "failed": result.get("failed"), "p_flat": result.get("p_flat"),
              "x_unit": result.get("x_unit", ""), "y_unit": result.get("y_unit", ""),
              "spec": {k: v for k, v in spec.items() if v not in (None, "", [], {})},
              "stored": datetime.now().isoformat(timespec="seconds"), "by": by or "agent", "account": account or None}
