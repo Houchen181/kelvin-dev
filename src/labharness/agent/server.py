@@ -337,7 +337,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def undo_last() -> str:
-        """Undo the last successful set_value (through the same safety rules)."""
+        """Undo this chat's latest set_value or send_raw change, through the same safety rules. Never a run's steps or
+        another chat's change, and never a value someone has changed since; an undo that drives the sample harder asks
+        a person."""
         return rt.undo()
 
     @server.tool(annotations=ACT, structured_output=False)

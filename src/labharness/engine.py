@@ -1078,7 +1078,7 @@ class RunEngine:
                 out.append("%s stays held: the lab config holds it on a stop (on_abort asked for %s)"
                            % (step.key, self.lab.resolve(step.key)[1].show(step.value)))
                 continue
-            r = self.gate._set(step.instr, step.param, step.value, False, by)
+            r = self.gate._set(step.instr, step.param, step.value, False, by, record_undo=False)
             if r.action != "no-change":
                 out.append(r.message)
         return out

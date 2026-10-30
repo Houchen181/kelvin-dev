@@ -319,3 +319,37 @@ def test_the_queue_card_says_its_dry_run_just_failed(tmp_path):
     assert "would fail: #1 wide" in rt.queue_start(dry_run=True)
     assert rt.queue_start().startswith("declined")
     assert "Its dry run at" in str(rt.gate.approver.requests[-1]) and "#1 wide" in str(rt.gate.approver.requests[-1])
+
+
+# ------------------------------------------------------------------- 9. undo is each chat's own
+
+def test_undo_takes_back_only_this_chats_own_direct_changes(tmp_path):
+    """t07, t10: undo_last walked back a run's sweep steps, then switched another chat's heater back on, and auto mode
+    approved it."""
+    rt = runtime(tmp_path, [True, True, False])
+    rt.attribution = {"chat": "c1"}
+    assert "(approved)" in rt.set("tc", "heater_range", "low")
+    assert "toward safe" in rt.set("tc", "heater_range", "off")
+    rt.attribution = {"chat": "c2"}
+    assert "(approved)" in rt.set("smu", "V", 1)
+    assert "done" in rt.run("plan: scan\nsweep: { stage.position: {values: [1, 2]} }\nmeasure: [laser.P_detected]\n")
+    assert rt.undo() == "undo: smu.V 1 V → 0 V, 2 s (toward safe)"               # not the run's stage steps
+    assert rt.undo().startswith("nothing to undo")                               # nor chat c1's heater
+    assert rt.lab.read("stage", "position") == 2 and rt.lab.read("tc", "heater_range") == "off"
+    rt.attribution = {"chat": "c1"}
+    rt.gate.auto = True
+    said = rt.undo()                                                             # off → low: a person decides
+    assert said.startswith("undo: declined") and rt.lab.read("tc", "heater_range") == "off"
+    card = rt.gate.approver.requests[-1]
+    assert card.title == "Undo: Approve drive change on tc?"
+    assert any(i.startswith("Undo of this chat's change at ") and "tc.heater_range low → off" in i for i in card.items)
+    assert "it undoes an earlier change, which a person approves" in card.items[-1]
+    assert cardlang.card(card.title, card.items, None, "zh-Hans")["english"] == 0
+    rt.gate.auto = False
+    rt.gate.approver.answers += [True]
+    assert "(approved)" in rt.set("smu", "V", 2)                                 # c1 sets 2 V; another chat 1.5 V
+    rt.attribution = {"chat": "c3"}
+    assert "toward safe" in rt.set("smu", "V", 1.5)
+    rt.attribution = {"chat": "c1"}
+    assert rt.undo().startswith("nothing undone: smu.V is 1.5 V now, not the 2 V this chat set at ")
+    assert rt.lab.read("smu", "V") == 1.5

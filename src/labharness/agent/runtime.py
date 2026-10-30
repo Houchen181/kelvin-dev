@@ -822,16 +822,25 @@ class LabRuntime:
         return self._not_read(instrument, parameter, why)
 
     def set(self, instrument: str, parameter: str, value: Any) -> str:
-        return self._do("setting %s.%s" % (instrument, parameter),
-                        lambda: self.gate.set(instrument, parameter, value).message, stoppable=True,
-                        uses=[instrument])
+        chat = self.attribution.get("chat")   # the change goes on this chat's undo list (None: a client's)
+
+        def run() -> str:
+            with self.gate.undoable(chat):
+                return self.gate.set(instrument, parameter, value).message
+        return self._do("setting %s.%s" % (instrument, parameter), run, stoppable=True, uses=[instrument])
 
     def raw(self, instrument: str, command: str) -> str:
-        return self._do("raw command to " + instrument, lambda: self.gate.raw(instrument, command).message,
-                        stoppable=True, uses=[instrument])
+        chat = self.attribution.get("chat")
+
+        def run() -> str:
+            with self.gate.undoable(chat):
+                return self.gate.raw(instrument, command).message
+        return self._do("raw command to " + instrument, run, stoppable=True, uses=[instrument])
 
     def undo(self) -> str:
-        return self._do("undo", lambda: self.gate.undo().message, stoppable=True)
+        """undo_last: this chat's own latest set_value or send_raw change, never a run's steps or another chat's."""
+        chat = self.attribution.get("chat")
+        return self._do("undo", lambda: self.gate.undo(chat).message, stoppable=True)
 
     # ------------------------------------------------------------------ where the data go (people only)
 

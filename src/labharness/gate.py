@@ -234,6 +234,7 @@ def _unreachable(spec: ParamSpec) -> bool:
             and isinstance(spec.safe, (int, float)) and spec.safe <= 0)
 
 
+UNDO_DEPTH = 20      # changes each chat can undo, the latest first
 OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
 ARRIVED_SETTLE = 5.0   # lab seconds a reading may take to settle once its stage's status says the move is over
 WAIT_STALL_S = 600.0   # a wait for a set point ends once its reading has not got closer for this long (lab seconds)
@@ -264,7 +265,11 @@ class SafetyGate:
         # the drive levels the running plan or queue item set: switching their enable on parks them at safe (_move),
         # then puts them back (_reapply), so a run measures at what was approved, not at safe. None: no plan running
         self._asked: Optional[Dict[str, Any]] = None
-        self._undo: List[Tuple[str, str, Any]] = []
+        # each chat's own direct changes (None: a client with no chats), (instr, param, before, after, when), latest
+        # last: undo takes back only its own chat's, never a run's steps or another chat's (an undo in one chat once
+        # switched another chat's heater back on)
+        self._undo: Dict[Any, List[Tuple[str, str, Any, Any, str]]] = {}
+        self._undoing = threading.local()   # whose direct change this thread makes (undoable)
         self._stop_gen = 0
         self.stop_reason = ""   # why the latest stop came, when not from a person (an interlock): said with its result
         self.trip_count = 0     # guard trips so far: an item that trips one pauses the queue, whatever on_error says
@@ -360,11 +365,45 @@ class SafetyGate:
                                  message="%s: %s%s" % (instr, action.label, " → " + said[-1] if said else "")),
                           "action", None, instrument=instr, name=name)
 
-    def undo(self) -> Result:
-        if not self._undo:
-            return Result(False, "refused", "", message="nothing to undo")
-        instr, param, before = self._undo.pop()
-        r = self._set(instr, param, before, True, self._who(), record_undo=False)
+    @contextmanager
+    def undoable(self, owner: Any) -> Iterator[None]:
+        """The agent's direct changes on this thread (set_value, send_raw) are owner's: its chat (None, outside any:
+        a client with no chats). What they change goes on that owner's undo list. A run's, a queue's or a script's
+        steps and a person's own commands never go on any."""
+        old = getattr(self._undoing, "owner", None)
+        self._undoing.owner = owner
+        try:
+            yield
+        finally:
+            self._undoing.owner = old
+
+    def undo(self, owner: Any = None) -> Result:
+        """Take back owner's (a chat's) latest direct change, through every check again. Only while the value is still
+        what that change left: one changed since (by another chat, a run, a person) is left alone, and said so. An
+        undo that moves away from safe asks a person, its card saying what it undoes."""
+        stack = self._undo.get(owner) or []
+        if not stack:
+            return Result(False, "refused", "", message="nothing to undo: this chat has made no change Kelvin can take "
+                                                        "back (a run's steps and other chats' changes aren't undone)")
+        instr, param, before, after, when = stack.pop()
+        key = "%s.%s" % (instr, param)
+        try:
+            inst = self.lab.instrument(instr)
+            spec = inst.spec(param)
+            now = self._current(inst, spec)
+        except Exception as e:
+            return Result(False, "refused", key, message="nothing undone: %s can't be read (%s)" % (key, e))
+        lim = inst.limits(spec.name) if spec.numeric else None
+        close = spec.numeric and now is not None and abs(now - after) <= max(
+            spec.tol, 0.01 * abs(after), 1e-3 * (lim[1] - lim[0]) if lim else 0.0, 1e-12)   # as it reads it back
+        if not (close or _same(spec, now, after)):
+            return self._done(Result(False, "refused", key, value=now, message=(
+                "nothing undone: %s is %s now, not the %s this chat set at %s; someone else (another chat, a run or a "
+                "person) has changed it since, so Kelvin leaves it" % (key, spec.show(now), spec.show(after), when))),
+                "set")
+        r = self._set(instr, param, before, True, self._who(), record_undo=False,
+                      undo="Undo of this chat's change at %s: %s %s → %s" % (when, key, spec.show(before),
+                                                                             spec.show(after)))
         r.message = "undo: " + r.message
         return r
 
@@ -728,9 +767,11 @@ class SafetyGate:
     # ------------------------------------------------------------------ internals
 
     def _set(self, instr: str, param: str, value: Any, wait: bool, by: str, record_undo: bool = True,
-             gen: Optional[int] = None) -> Result:
+             gen: Optional[int] = None, undo: str = "") -> Result:
         """gen: the stop generation a plan or queue item started at; a stop since then ends this change's waits and
-        refuses a move away from safe (by default, only a stop during the change itself counts)."""
+        refuses a move away from safe (by default, only a stop during the change itself counts). record_undo: the
+        change goes on its chat's undo list when the agent makes it directly (undoable). undo: this change undoes an
+        earlier one, in words: its card says so, and auto mode leaves it to a person."""
         key = "%s.%s" % (instr, param)
         try:
             inst = self.lab.instrument(instr)
@@ -818,9 +859,10 @@ class SafetyGate:
                 dark = self._dark(inst, spec, target) if direct or how is None else ""
                 tripped, acts = self.trips(key, [target], stops="this change" if wait else "") \
                     if direct or how is None else ([], False)
-                if how is None:   # the move (and whether it reaches the sample), what it sets off
+                if how is None:   # the move (and whether it reaches the sample), what it sets off, what it undoes
                     move = "; ".join([self._describe_move(inst, spec, current, target)] + ([dark] if dark else []))
-                    request = ApprovalRequest("Approve drive change on %s?" % inst.name, [move] + tripped)
+                    request = ApprovalRequest("%sApprove drive change on %s?" % ("Undo: " if undo else "", inst.name),
+                                              [move] + tripped + ([undo] if undo else []))
                     pulses.illustrate(request, inst, {spec.name: target})   # a generator's timing, if it starts one
                     if unsure:
                         request.items.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
@@ -831,6 +873,8 @@ class SafetyGate:
                             inst.name, self.review_steps(inst))
                     elif self.outside_reason():
                         ok, why = False, self.outside_reason()
+                    elif undo:
+                        ok, why = False, "it undoes an earlier change, which a person approves"
                     elif acts:
                         ok, why = False, "it sets off what is listed above"
                     else:
@@ -855,9 +899,13 @@ class SafetyGate:
         except Exception as e:
             res = Result(False, "error", key, message="%s: instrument error: %s" % (key, e))
             current = None
-        undoable = res.ok and record_undo and res.action != "no-change" and current is not None
+        # a direct change only: while a plan, a queue item or a script runs (_asked), its steps are its own, not undone
+        undoable = res.ok and record_undo and res.action != "no-change" and current is not None and \
+            self._asked is None
         if undoable and getattr(self._acting, "by", None) is None:
-            self._undo.append((instr, param, current))
+            stack = self._undo.setdefault(getattr(self._undoing, "owner", None), [])
+            stack.append((instr, param, current, target, time.strftime("%H:%M:%S")))
+            del stack[:-UNDO_DEPTH]
         if res.ok and spec.is_drive and self._asked is not None:
             self._asked[key] = target
         return self._done(res, "set", by)

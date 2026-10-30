@@ -1403,7 +1403,7 @@ class ScriptRun:
             if paces(self.lab.instrument(instr).card, param) is not None:
                 continue   # a ramp rate stays: at its safe 0 the drive it paces couldn't come back to safe
             spec = self.lab.instrument(instr).spec(param)
-            r = self.gate._set(instr, param, spec.safe, True, "abort:" + self.prep.name)
+            r = self.gate._set(instr, param, spec.safe, True, "abort:" + self.prep.name, record_undo=False)
             if r.action != "no-change":
                 out.append(r.message)
         for instr in self.unparsed:

@@ -31,6 +31,7 @@ _K = r"([A-Za-z_][\w-]*\.\w+)"   # an instrument's parameter, instr.param
 # {1}: the group as written; {t1}: the group as a part of its own (translated); {l1}: a list ("a, b and c")
 _ZH_TITLES = _rules([
     (r"Approve drive change on (\S+)\?", "批准 {1} 的驱动变更？"),
+    (r"Undo: Approve drive change on (\S+)\?", "撤销：批准 {1} 的驱动变更？"),
     (r"Change a setting on (\S+)\?", "更改 {1} 的设置？"),
     (r"Run plan (\S+): (.+)", "运行计划 {1}：{t2}"),
     (r"Run the queue: (.+)", "运行队列：{t1}"),
@@ -103,6 +104,7 @@ _ZH_PARTS = _rules([
     (r"stops (the run|this change)", "停止{t1}"),
     (r"the run", "运行"),
     (r"this change", "这次变更"),
+    (r"Undo of this chat's change at (\S+): " + _K + r" (.+?) → (.+)", "撤销本对话在 {1} 的变更：{2} {3} → {4}"),
     (r"interlock: needs (.+) \(now (.+)\)", "联锁：需要 {1}（当前 {2}）"),
     (r"its interlock needs (.+), which doesn't hold now(.*): an item before it works on that, and it is checked "
      r"again before (\S+) moves \(if it still doesn't hold, the queue pauses there\)",
@@ -120,6 +122,7 @@ _ZH_PARTS = _rules([
      "它是 Kelvin 自己加入实验室的，限值是厂家的：还没有人针对这套装置审核过"),
     (r"Auto mode does not cover this: (.+)", "自动模式不涵盖此项：{t1}"),
     (r"it sets off what is listed above", "它会触发上面列出的保护或监视"),
+    (r"it undoes an earlier change, which a person approves", "它撤销之前的一次变更，须由人批准"),
     (r"Not approved by Kelvin itself: (.+)", "Kelvin 不会自行批准：{t1}"),
     # what the run leaves, and what its time doesn't count
     (r"At the end it leaves (.+)", "结束时保持：{l1}"),
