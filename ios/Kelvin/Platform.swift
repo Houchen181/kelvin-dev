@@ -56,6 +56,14 @@ enum Device {
     static var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "" }
 }
 
+/// The keyboard, put away from whichever field has it: a SwiftUI focus binding doesn't always reach a field in a
+/// safe-area inset, such as the message boxes under the Team and Chat messages.
+enum Keyboard {
+    @MainActor static func dismiss() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+}
+
 /// Where each computer's token is kept.
 protocol TokenStore {
     func save(_ token: String, for id: UUID)

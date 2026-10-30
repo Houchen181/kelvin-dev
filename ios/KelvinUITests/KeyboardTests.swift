@@ -25,22 +25,32 @@ final class KeyboardTests: XCTestCase {
         return field
     }
 
-    func gone(_ element: XCUIElement) -> Bool {
+    /// Tap the messages where nothing else is: near their right edge, just above the message box and the keyboard.
+    func tapBeside(_ messages: XCUIElement, above field: XCUIElement, in app: XCUIApplication) {
+        let m = messages.frame
+        let bottom = min(m.maxY, field.frame.minY - 12, app.keyboards.firstMatch.frame.minY)
+        let point = CGVector(dx: m.maxX - 16, dy: bottom - 24)
+        app.coordinate(withNormalizedOffset: .zero).withOffset(point).tap()
+    }
+
+    func gone(_ element: XCUIElement, _ app: XCUIApplication, what: String) -> Bool {
         let gone = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: element)
-        return XCTWaiter().wait(for: [gone], timeout: 5) == .completed
+        if XCTWaiter().wait(for: [gone], timeout: 5) == .completed { return true }
+        print("KEYBOARD-DEBUG after \(what):\n\(app.debugDescription)")   // in the CI's build log, to see why
+        return false
     }
 
     func testTheKeyboardGoesAwayInTheTeamChat() throws {
         let app = launch(["-KelvinTab", "team"])
         let field = try type(in: app, "team-message")
         let messages = app.scrollViews["team-messages"]
-        messages.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()   // below the last message
-        XCTAssertTrue(gone(app.keyboards.firstMatch), "a tap on the messages left the keyboard up")
+        tapBeside(messages, above: field, in: app)
+        XCTAssertTrue(gone(app.keyboards.firstMatch, app, what: "a tap"), "a tap on the messages left the keyboard up")
 
         field.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         messages.swipeDown()
-        XCTAssertTrue(gone(app.keyboards.firstMatch), "a swipe down left the keyboard up")
+        XCTAssertTrue(gone(app.keyboards.firstMatch, app, what: "a swipe"), "a swipe down left the keyboard up")
 
         let lab = app.tabBars.buttons["Lab"]
         XCTAssertTrue(lab.isHittable, "the tabs can't be reached")
@@ -50,9 +60,9 @@ final class KeyboardTests: XCTestCase {
 
     func testTheKeyboardGoesAwayInAChat() throws {
         let app = launch(["-KelvinTab", "chat", "-KelvinOpen", "demo-chat"])
-        _ = try type(in: app, "chat-message")
-        app.scrollViews["chat-messages"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75)).tap()
-        XCTAssertTrue(gone(app.keyboards.firstMatch), "a tap on the conversation left the keyboard up")
+        let field = try type(in: app, "chat-message")
+        tapBeside(app.scrollViews["chat-messages"], above: field, in: app)
+        XCTAssertTrue(gone(app.keyboards.firstMatch, app, what: "a tap"), "a tap on the conversation left the keyboard up")
         XCTAssertTrue(app.tabBars.buttons["Team"].isHittable, "the tabs can't be reached")
     }
 }

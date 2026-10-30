@@ -102,7 +102,10 @@ struct ChatView: View {
                     .padding()
                     .frame(maxWidth: .infinity, minHeight: box.size.height, alignment: .topLeading)   // the empty space too
                     .contentShape(Rectangle())
-                    .onTapGesture { typing = false }   // a tap on the conversation puts the keyboard away (the tabs are under it)
+                    .onTapGesture {   // a tap on the conversation puts the keyboard away (the tabs are under it)
+                        typing = false
+                        Keyboard.dismiss()
+                    }
                 }
                 .scrollDismissesKeyboard(.immediately)   // and so does a swipe on it
                 .accessibilityIdentifier("chat-messages")

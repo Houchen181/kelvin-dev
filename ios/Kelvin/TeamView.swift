@@ -158,7 +158,10 @@ struct TeamView: View {
                     .padding()
                     .frame(maxWidth: .infinity, minHeight: box.size.height, alignment: .top)   // the empty space below too
                     .contentShape(Rectangle())
-                    .onTapGesture { typing = false }   // a tap on the messages puts the keyboard away (the tabs are under it)
+                    .onTapGesture {   // a tap on the messages puts the keyboard away (the tabs are under it)
+                        typing = false
+                        Keyboard.dismiss()
+                    }
                 }
                 .scrollDismissesKeyboard(.immediately)   // and so does a swipe on them
                 .accessibilityIdentifier("team-messages")
