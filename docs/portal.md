@@ -192,8 +192,11 @@ The phone then opens Kelvin's phone page: alarms with **Got it**, requests with 
 
 - **Lab:** alarms, requests waiting for you, the run in progress with a live plot and **Stop**, the instruments (drives not at their safe value in orange), recent notices.
 - **Chat** (control phones): your conversations, a new or incognito chat, the answer as it arrives with Kelvin's steps, and requests to approve right there. Tap the microphone to talk instead of typing: the iPhone turns your words into text itself, the audio never leaves it, and you check the message before sending.
-- **Runs:** recent runs with their plots, and their report and data to open on the phone.
+- **Team:** the lab's team chat, the same as on the computer. Set the name you write under once on the phone (a watch phone only reads). A badge counts the messages written since you last looked.
+- **Runs:** recent runs with their plots, and their report and data to open on the phone. **Analyze** (control phones) opens the run in Analysis, as on the computer: more runs over it, x and y (a column or a formula), the steps, a fit with its errors, **Keep fit** and the CSV to share.
 - **Computers:** your Kelvin account and its Kelvins, switch between computers, pair another, unpair, sign out.
+
+Team and Analysis need Kelvin 0.3.32 or later on the lab computer.
 
 Without a lab computer at hand, **Try a demo lab** shows a made-up one inside the app. The app tells you about new requests and alarms while it is open. For alerts while it is closed, add an email account or an ntfy topic under Notifications. A request nobody answers at the computer comes to the phone, and waits there for you (Settings → Notifications). Building the app: [ios.md](ios.md).
 

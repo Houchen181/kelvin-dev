@@ -27,6 +27,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
     private var alarm = true
     private var stopped: Int?
     private var hands: JSON?            // the hands-on-the-sample lock
+    private var team: [JSON] = DemoTransport.firstTeam()
 
     // ------------------------------------------------------------------ the lab
 
@@ -108,6 +109,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
                                        "Capped in the instruments: smu.compliance ≤ 10 nA"]
         s["mounted"] = mounted
         if let hands { s["hands_on"] = hands }
+        s["team"] = lastTeam()
 
         let volts = hands != nil ? "0.000 V" : String(format: "%.3f V", -0.5 + Double(max(0, n - 1)) * 0.025)
         var status: [String: [JSON]] = [:]
@@ -182,14 +184,15 @@ final class DemoTransport: Transport, @unchecked Sendable {
                 let b = -3 + Double(i) * 0.05
                 var row: JSON = [:]
                 row["magnet.field"] = b
-                row["lockin.x"] = 2.0e-6 * (1 + 0.08 * b * b) + 1e-7 * cos(6 * b)
+                row["lockin.x"] = DemoTransport.resistance(b)
+                row["lockin.y"] = DemoTransport.hall(b)
                 rows.append(row)
             }
             d["plan"] = "field-sweep-D3"
             d["axes"] = [DemoTransport.column("magnet.field", "T")]
-            d["scalars"] = [DemoTransport.column("lockin.x", "V")]
+            d["scalars"] = [DemoTransport.column("lockin.x", "V"), DemoTransport.column("lockin.y", "V")]
             d["rows"] = rows
-            d["plan_text"] = "plan: field-sweep-D3\naxes:\n  - sweep: magnet.field\n    from: -3 T\n    to: 3 T\n    points: 121\nmeasure: [lockin.x]\n"
+            d["plan_text"] = "plan: field-sweep-D3\naxes:\n  - sweep: magnet.field\n    from: -3 T\n    to: 3 T\n    points: 121\nmeasure: [lockin.x, lockin.y]\n"
             meta["status"] = "completed"
             meta["points"] = 121
             meta["planned_points"] = 121
@@ -245,6 +248,291 @@ final class DemoTransport: Transport, @unchecked Sendable {
                          DemoTransport.message("assistant", ["blocks": [text, read, start]]),
                          DemoTransport.message("tool", ["results": [readResult, startResult]])]
         return c
+    }
+
+    // ------------------------------------------------------------------ the team chat
+
+    private static func firstTeam() -> [JSON] {
+        func message(_ id: Int, _ minutesAgo: Double, _ name: String, _ via: String, _ text: String) -> JSON {
+            var m: JSON = ["id": id, "name": name, "account": "demo"]
+            m["via"] = via
+            m["at"] = DemoTransport.iso(Date(timeIntervalSinceNow: -minutesAgo * 60))
+            m["text"] = text
+            return m
+        }
+        return [message(1, 190, "Ana", "portal", "Fridge is at base. I'm on D3 until 6; please leave the magnet to me."),
+                message(2, 52, "Ben", "phone Ben's iPhone", "Helium refill is booked for Thursday 9:00."),
+                message(3, 12, "Ana", "portal", "Field sweep done. The Hall slope looks linear up to 3 T.")]
+    }
+
+    static func iso(_ date: Date) -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f.string(from: date)
+    }
+
+    private func lastTeam() -> Int { (team.last?["id"] as? Int) ?? 0 }
+
+    // ------------------------------------------------------------------ Analysis: some steps and a line, worked out here
+
+    private struct DemoError: Error {
+        let message: String
+        init(_ message: String) { self.message = message }
+    }
+
+    private struct Curve {
+        var run: String
+        var x: [Double]
+        var y: [Double]
+        var xu: String
+        var yu: String
+        var xn: String
+        var yn: String
+    }
+
+    static let models = ["linear", "lorentzian", "gaussian", "exponential", "damped_cosine", "hall"]
+
+    /// lockin.x of the field sweep: a magnetoresistance, even in the field.
+    static func resistance(_ b: Double) -> Double { 2.0e-6 * (1 + 0.08 * b * b) + 1e-7 * cos(6 * b) }
+
+    /// lockin.y of the field sweep: a Hall voltage with some of the resistance picked up, which antisymmetrizing removes.
+    static func hall(_ b: Double) -> Double { 4.0e-7 * b + 1.6e-8 * b * b + 3e-9 * sin(23 * b) }
+
+    /// A demo run's columns and points: the field sweep, else the IV sweep.
+    private func table(_ run: String) -> (axes: [String], readings: [String], units: [String: String],
+                                          rows: [[String: Double]]) {
+        if run.hasSuffix("field-sweep-D3") {
+            let rows = (0..<121).map { i -> [String: Double] in
+                let b = -3 + Double(i) * 0.05
+                var row: [String: Double] = ["magnet.field": b, "t": Double(i) * 30]
+                row["lockin.x"] = DemoTransport.resistance(b)
+                row["lockin.y"] = DemoTransport.hall(b)
+                return row
+            }
+            return (["magnet.field"], ["lockin.x", "lockin.y"],
+                    ["magnet.field": "T", "lockin.x": "V", "lockin.y": "V", "t": "s"], rows)
+        }
+        let rows = (0..<done()).map { DemoTransport.row($0).compactMapValues { $0 as? Double } }
+        return (["smu.voltage"], ["smu.current", "lockin.x"],
+                ["smu.voltage": "V", "smu.current": "A", "lockin.x": "V", "t": "s"], rows)
+    }
+
+    private func columns(_ run: String) -> JSON {
+        let t = table(run)
+        func listed(_ keys: [String]) -> [JSON] {
+            keys.map { key -> JSON in
+                var c: JSON = ["key": key]
+                c["unit"] = t.units[key] ?? ""
+                return c
+            }
+        }
+        var c: JSON = ["run": run, "status": "completed"]
+        c["plan"] = run.hasSuffix("field-sweep-D3") ? "field-sweep-D3" : "iv-sweep-D3"
+        c["points"] = t.rows.count
+        c["axes"] = listed(t.axes)
+        c["readings"] = listed(t.readings)
+        c["traces"] = [JSON]()
+        c["kept"] = [String]()
+        c["models"] = DemoTransport.models
+        return c
+    }
+
+    private static func number(_ v: Any?) -> Double? {
+        (v as? NSNumber)?.doubleValue ?? (v as? String).flatMap { Double($0) }
+    }
+
+    /// The spec's curves after its steps.
+    private func worked(_ spec: JSON) throws -> [Curve] {
+        let runs = (spec["runs"] as? [String]) ?? []
+        return try (runs.isEmpty ? [DemoTransport.runID] : runs).map { run -> Curve in
+            let t = table(run)
+            let xn = (spec["x"] as? String) ?? t.axes.last ?? "t"
+            let yn = (spec["y"] as? String) ?? t.readings.first ?? ""
+            for name in [xn, yn] where t.units[name] == nil {
+                throw DemoError("The demo lab draws its own columns (\((t.axes + t.readings).joined(separator: ", "))); "
+                                + "Kelvin on a lab computer also takes formulas of them.")
+            }
+            var c = Curve(run: run, x: t.rows.map { $0[xn] ?? .nan }, y: t.rows.map { $0[yn] ?? .nan },
+                          xu: t.units[xn] ?? "", yu: t.units[yn] ?? "", xn: xn, yn: yn)
+            for step in (spec["steps"] as? [JSON]) ?? [] { try DemoTransport.apply(step, to: &c) }
+            return c
+        }
+    }
+
+    private static func apply(_ step: JSON, to c: inout Curve) throws {
+        let op = (step["op"] as? String) ?? ""
+        switch op {
+        case "crop":
+            let lo = number(step["lo"]) ?? -.infinity, hi = number(step["hi"]) ?? .infinity
+            let keep = c.x.indices.filter { c.x[$0] >= lo && c.x[$0] <= hi }
+            c.x = keep.map { c.x[$0] }
+            c.y = keep.map { c.y[$0] }
+        case "scale":
+            let factor = number(step["factor"]) ?? 1, offset = number(step["offset"]) ?? 0
+            c.y = c.y.map { $0 * factor + offset }
+            if factor != 1 { c.yu = "" }
+        case "normalize":
+            let how = (step["how"] as? String) ?? "max"
+            var d = 1.0
+            switch how {
+            case "max": d = c.y.map { Swift.abs($0) }.max() ?? 1
+            case "first": d = c.y.first ?? 1
+            case "mean": d = c.y.reduce(0, +) / Double(Swift.max(1, c.y.count))
+            case "range":
+                let lo = c.y.min() ?? 0, hi = c.y.max() ?? 0
+                c.y = c.y.map { hi > lo ? ($0 - lo) / (hi - lo) : 0 }
+            default: throw DemoError("normalize by max, range, first or mean")
+            }
+            guard d != 0 else { throw DemoError("that is 0: normalize another way") }
+            c.y = c.y.map { $0 / d }
+            c.yu = ""
+            c.yn += " (normalized)"
+        case "deriv":
+            guard c.x.count >= 3 else { throw DemoError("a derivative needs 3 points or more") }
+            let n = c.x.count
+            c.y = (0..<n).map { i -> Double in
+                let a = Swift.max(0, i - 1), b = Swift.min(n - 1, i + 1)
+                return (c.y[b] - c.y[a]) / (c.x[b] - c.x[a])
+            }
+            c.yu = c.xu.isEmpty ? c.yu : (c.yu.isEmpty ? "1/" : c.yu + "/") + c.xu
+            c.yn = "d\(c.yn)/d\(c.xn)"
+        case "integrate":
+            guard c.x.count >= 2 else { throw DemoError("an integral needs 2 points or more") }
+            var total = 0.0
+            var out = [0.0]
+            for i in 1..<c.x.count {
+                total += (c.y[i] + c.y[i - 1]) / 2 * (c.x[i] - c.x[i - 1])
+                out.append(total)
+            }
+            c.y = out
+            c.yu = [c.yu, c.xu].filter { !$0.isEmpty }.joined(separator: "·")
+            c.yn = "∫\(c.yn) d\(c.xn)"
+        case "symmetrize", "antisymmetrize":
+            let order = c.x.indices.sorted { c.x[$0] < c.x[$1] }
+            let xs = order.map { c.x[$0] }, ys = order.map { c.y[$0] }
+            let lo = Swift.max(xs.first ?? 0, -(xs.last ?? 0)), hi = Swift.min(xs.last ?? 0, -(xs.first ?? 0))
+            guard lo < hi else { throw DemoError("to \(op), x must run on both sides of 0") }
+            let keep = xs.indices.filter { xs[$0] >= lo && xs[$0] <= hi }
+            let sign: Double = op == "symmetrize" ? 1 : -1
+            c.x = keep.map { xs[$0] }
+            c.y = keep.map { (ys[$0] + sign * DemoTransport.interpolate(-xs[$0], xs, ys)) / 2 }
+            c.yn += op == "symmetrize" ? " (symmetric part)" : " (antisymmetric part)"
+        case "abs":
+            c.y = c.y.map { Swift.abs($0) }
+            c.yn = "|\(c.yn)|"
+        case "log10":
+            c.y = c.y.map { log10(Swift.abs($0)) }
+            c.yu = ""
+            c.yn = "log10 |\(c.yn)|"
+        default:
+            throw DemoError("The demo lab doesn't do \(op.isEmpty ? "that step" : op); Kelvin on a lab computer does.")
+        }
+        let keep = c.x.indices.filter { c.x[$0].isFinite && c.y[$0].isFinite }
+        c.x = keep.map { c.x[$0] }
+        c.y = keep.map { c.y[$0] }
+        if c.x.isEmpty { throw DemoError("no points are left after \(op)") }
+    }
+
+    /// y at x, on the line between the points beside it (xs ascending).
+    private static func interpolate(_ x: Double, _ xs: [Double], _ ys: [Double]) -> Double {
+        guard let i = xs.firstIndex(where: { $0 >= x }) else { return ys.last ?? .nan }
+        if i == 0 || xs[i] == x { return ys[i] }
+        let f = (x - xs[i - 1]) / (xs[i] - xs[i - 1])
+        return ys[i - 1] + f * (ys[i] - ys[i - 1])
+    }
+
+    private static func value(_ name: String, _ v: Double, _ error: Double?, _ unit: String) -> JSON {
+        var p: JSON = ["name": name, "value": v, "unit": unit]
+        if let error { p["error"] = error } else { p["error"] = NSNull() }
+        p["held"] = false
+        return p
+    }
+
+    /// A line fitted by least squares, with the errors of its parameters; the demo fits nothing else.
+    private static func fit(_ c: Curve, model: String, lo: Double?, hi: Double?) -> JSON {
+        guard model == "linear" else {
+            return ["error": "The demo lab fits only a line (linear); Kelvin on a lab computer fits every model."]
+        }
+        let pts = zip(c.x, c.y).filter { p in (lo.map { p.0 >= $0 } ?? true) && (hi.map { p.0 <= $0 } ?? true) }
+        guard pts.count >= 3 else { return ["error": "a line needs 3 points or more"] }
+        let n = Double(pts.count)
+        let mx = pts.reduce(0.0) { $0 + $1.0 } / n, my = pts.reduce(0.0) { $0 + $1.1 } / n
+        var sxx = 0.0, sxy = 0.0, syy = 0.0
+        for (x, y) in pts {
+            sxx += (x - mx) * (x - mx)
+            sxy += (x - mx) * (y - my)
+            syy += (y - my) * (y - my)
+        }
+        guard sxx > 0 else { return ["error": "x doesn't change: no line to fit"] }
+        let b = sxy / sxx, a = my - b * mx
+        var ssr = 0.0
+        for (x, y) in pts { ssr += (y - a - b * x) * (y - a - b * x) }
+        let s2 = ssr / (n - 2)
+        let eb = (s2 / sxx).squareRoot(), ea = (s2 * (1 / n + mx * mx / sxx)).squareRoot()
+        let per = c.xu.isEmpty ? c.yu : (c.yu.isEmpty ? "1/" : c.yu + "/") + c.xu
+        var derived: [JSON] = []
+        if c.xu == "V" && c.yu == "A" && b != 0 {
+            derived.append(DemoTransport.value("resistance (1/slope)", 1 / b, eb / (b * b), "Ω"))
+        }
+        let x0 = pts.map { $0.0 }.min() ?? 0, x1 = pts.map { $0.0 }.max() ?? 0
+        let xs = (0...40).map { x0 + (x1 - x0) * Double($0) / 40 }
+        var curve: JSON = ["x": xs]
+        curve["y"] = xs.map { a + b * $0 }
+        var f: JSON = ["model": "linear", "formula": "a + b·x", "n": pts.count]
+        f["chi2_red"] = NSNull()
+        f["r2"] = syy > 0 ? 1 - ssr / syy : 1.0
+        f["converged"] = true
+        f["params"] = [DemoTransport.value("a", a, ea, c.yu), DemoTransport.value("b", b, eb, per)]
+        f["derived"] = derived
+        f["warnings"] = [String]()
+        f["curve"] = curve
+        f["text"] = "a + b·x: b = \(b) ± \(eb) \(per)"
+        return f
+    }
+
+    private func analysis(_ body: JSON?) -> (Int, JSON) {
+        guard let spec = body?["spec"] as? JSON else { return (400, ["error": "send {spec}"]) }
+        let curves: [Curve]
+        do {
+            curves = try worked(spec)
+        } catch {
+            return (400, ["error": (error as? DemoError)?.message ?? "\(error)"])
+        }
+        let fit = spec["fit"] as? JSON
+        let model = ((fit?["model"] as? String) ?? "").trimmingCharacters(in: .whitespaces)
+        var out: [JSON] = []
+        for c in curves {
+            var j: JSON = ["run": c.run, "label": c.run, "n": c.x.count]
+            j["x"] = c.x
+            j["y"] = c.y
+            if !model.isEmpty {
+                j["fit"] = DemoTransport.fit(c, model: model, lo: DemoTransport.number(fit?["lo"]),
+                                             hi: DemoTransport.number(fit?["hi"]))
+            }
+            out.append(j)
+        }
+        var axes: JSON = ["x": curves.first?.xn ?? "x", "x_unit": curves.first?.xu ?? ""]
+        axes["y"] = curves.first?.yn ?? "y"
+        axes["y_unit"] = curves.first?.yu ?? ""
+        var result: JSON = ["curves": out, "axes": axes]
+        result["notes"] = [String]()
+        return (200, result)
+    }
+
+    /// The curves as CSV: (status, the text, the file's name).
+    private func csv(_ request: URLRequest) -> (Int, String, String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? JSON
+        guard let spec = body?["spec"] as? JSON, let curves = try? worked(spec), let first = curves.first else {
+            return (400, "{\"error\": \"The demo lab can't write that.\"}", "")
+        }
+        var lines = [curves.flatMap { c in ["\(c.xn) [\(c.xu)]", "\(c.yn) [\(c.yu)]"] }.joined(separator: ",")]
+        for i in 0..<(curves.map { $0.x.count }.max() ?? 0) {
+            lines.append(curves.flatMap { c in i < c.x.count ? [String(c.x[i]), String(c.y[i])] : ["", ""] }
+                .joined(separator: ","))
+        }
+        return (200, lines.joined(separator: "\n") + "\n", first.run + "-analysis.csv")
     }
 
     // ------------------------------------------------------------------ the routes
@@ -319,12 +607,53 @@ final class DemoTransport: Transport, @unchecked Sendable {
             var c: JSON = ["id": String(path.dropFirst("/api/chats/".count)), "title": "New chat"]
             c["messages"] = [JSON]()
             return (200, c)
+        case ("GET", "/api/team"):
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            func asked(_ name: String) -> Int { items.first { $0.name == name }?.value.flatMap { Int($0) } ?? 0 }
+            let after = asked("after"), before = asked("before")
+            let shown = team.filter { m in
+                let id = m["id"] as? Int ?? 0
+                return before > 0 ? id < before : id > after
+            }
+            return (200, ["messages": shown, "last": lastTeam()])
+        case ("POST", "/api/team"):
+            let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? JSON
+            let name = ((body?["name"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = ((body?["text"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty { return (400, ["error": "say your name first"]) }
+            if text.isEmpty { return (400, ["error": "the message is empty"]) }
+            var m: JSON = ["id": lastTeam() + 1, "name": name, "account": "demo"]
+            m["via"] = "phone This phone"
+            m["at"] = DemoTransport.iso(Date())
+            m["text"] = text
+            team.append(m)
+            return (200, ["message": m, "last": lastTeam()])
+        case ("GET", "/api/analysis/columns"):
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            return (200, columns(items.first { $0.name == "run" }?.value ?? DemoTransport.runID))
+        case ("POST", "/api/analysis"):
+            return analysis((try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? JSON)
+        case ("POST", "/api/analysis/keep"):
+            let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? JSON
+            let spec = body?["spec"] as? JSON
+            let model = ((spec?["fit"] as? JSON)?["model"] as? String) ?? ""
+            if model.isEmpty { return (400, ["error": "fit a model first"]) }
+            let y = (spec?["y"] as? String) ?? "y"
+            return (200, ["ok": true, "said": "kept as /fits/\(y) \(model); the demo lab saves nothing"])
         default:
             return (404, ["error": "The demo lab doesn't do that."])
         }
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        if request.httpMethod == "POST", request.url?.path == "/api/analysis/csv" {   // a file, not JSON
+            let (status, text, name) = csv(request)
+            let headers = status == 200 ? ["Content-Type": "text/csv; charset=utf-8",
+                                           "Content-Disposition": "attachment; filename=\"\(name)\""]
+                                        : ["Content-Type": "application/json"]
+            return (Data(text.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil,
+                                                     headerFields: headers)!)
+        }
         let status: Int
         let body: Any
         if request.httpMethod == "GET", request.url?.path == "/api/chats" {   // a list, not an object

@@ -35,7 +35,7 @@ struct RunsView: View {
         }
         .navigationTitle("Runs")
         .navigationDestination(isPresented: Binding(get: { opened != nil }, set: { if !$0 { opened = nil } })) {
-            if let r = opened { RunDetailView(session: session, summary: r) }
+            if let r = opened { RunDetailView(session: session, summary: r, launched: true) }
         }
         .task { await load() }
         .refreshable { await load() }
@@ -54,15 +54,18 @@ struct RunsView: View {
     }
 }
 
-/// How a run went: its plot, how it ended, and its report and data to open on the phone.
+/// How a run went: its plot, how it ended, and its report and data to open on the phone; Analyze works on it.
 struct RunDetailView: View {
     @ObservedObject var session: LabSession
     let summary: RunSummary
+    var launched = false                // opened by the launch arguments (screenshots)
     @State var detail: RunDetail?
     @State var shown: Column?
     @State var failure: String?
     @State var preview: URL?
     @State var fetching: String?
+    @State var analyzing = false
+    @State var preset: AnalysisSpec?
 
     var body: some View {
         List {
@@ -117,6 +120,16 @@ struct RunDetailView: View {
         }
         .navigationTitle(summary.plan)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if session.role.canAnalyze && session.computer.hasTeamAndAnalysis {
+                    Button("Analyze") { analyzing = true }
+                }
+            }
+        }
+        .navigationDestination(isPresented: $analyzing) {
+            AnalysisView(session: session, run: summary.runID, preset: preset)
+        }
         .task { await load() }
         .refreshable { await load() }
         .quickLookPreview($preview)
@@ -156,6 +169,10 @@ struct RunDetailView: View {
             detail = try await session.run(summary.runID)
         } catch {
             failure = error.localizedDescription
+        }
+        if launched, let spec = Launch.analysis() {
+            preset = spec
+            analyzing = true
         }
     }
 

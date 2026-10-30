@@ -188,6 +188,95 @@ final class AppTests: XCTestCase {
         XCTAssertNil(tokens.token(for: c.id))
     }
 
+    func testTheTeamChatOnThePhone() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script)
+        script.on("GET /api/state", "{\"lab\": \"Cryostat lab\", \"team\": 3}")
+        let session = app.session(for: c)
+        await session.refresh()
+        XCTAssertEqual(session.teamUnread, 0)                                 // what was there before is not news
+        script.on("GET /api/state", "{\"lab\": \"Cryostat lab\", \"team\": 5}")
+        await session.refresh()
+        XCTAssertEqual(session.teamUnread, 2)
+        script.on("GET /api/team", "{\"messages\": [{\"id\": 4, \"at\": \"2026-10-30T09:12:44-04:00\", \"name\": \"Ben\","
+                  + " \"text\": \"Fridge at base\"}, {\"id\": 5, \"name\": \"Ben\", \"text\": \"On D3 until 6\"}], \"last\": 5}")
+        let team = TeamModel(session: session)
+        await team.load()
+        XCTAssertEqual(team.thread.messages.map(\.id), [4, 5])
+        session.readTeam(upTo: team.thread.last)
+        XCTAssertEqual(session.teamUnread, 0)
+        script.on("POST /api/team", "{\"message\": {\"id\": 6, \"name\": \"Ana\", \"via\": \"phone Ana's phone\","
+                  + " \"text\": \"Taking the magnet\"}, \"last\": 6}")
+        team.draft = "Taking the magnet"
+        let sent = await team.send(as: "Ana")
+        XCTAssertTrue(sent)
+        XCTAssertEqual(team.thread.last, 6)
+        XCTAssertEqual(team.draft, "")
+        XCTAssertEqual(session.teamRead, 6)                                   // its own message is read
+        app.teamName = "Ana"
+        let later = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        XCTAssertEqual(later.teamRead(c), 6)                                  // kept on the phone
+        XCTAssertEqual(later.teamName, "Ana")
+    }
+
+    func testTheDemoLabHasATeamChat() async throws {
+        let c = KelvinClient(base: DemoTransport.address, token: "demo", transport: DemoTransport.shared)
+        let first = try await c.team()
+        XCTAssertFalse(first.messages.isEmpty)
+        let sent = try await c.postTeam(name: "Tester", text: "Hello from the tests")
+        XCTAssertEqual(sent.id, first.last + 1)
+        let now = try await c.state()
+        XCTAssertEqual(now.team, sent.id)
+        let after = try await c.team(after: first.last)
+        XCTAssertEqual(after.messages.map(\.text), ["Hello from the tests"])
+    }
+
+    func testTheDemoLabWorksOutAHallSlope() async throws {
+        let c = KelvinClient(base: DemoTransport.address, token: "demo", transport: DemoTransport.shared)
+        let cols = try await c.analysisColumns(run: DemoTransport.fieldRunID)
+        XCTAssertEqual(cols.readings.map(\.key), ["lockin.x", "lockin.y"])
+        XCTAssertEqual(cols.defaultX, "magnet.field")
+        var spec = AnalysisSpec(runs: [DemoTransport.fieldRunID], x: "magnet.field", y: "lockin.y",
+                                steps: [AnalysisStep(.antisymmetrize)], fit: AnalysisFit(model: "linear"))
+        let r = try await c.analyze(spec)
+        XCTAssertEqual(r.y.key, "lockin.y (antisymmetric part)")
+        let slope = try XCTUnwrap(r.curves.first?.fit?.params.first { $0.name == "b" }?.value)
+        XCTAssertEqual(slope, 4.0e-7, accuracy: 2e-9)                         // the pickup of the resistance is gone
+        let (name, data) = try await c.analysisCSV(spec)
+        XCTAssertEqual(name, DemoTransport.fieldRunID + "-analysis.csv")
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).hasPrefix("magnet.field [T]"))
+        let kept = try await c.keepFit(spec, curve: 0)
+        guard case .kept(let said) = kept else { return XCTFail("not kept") }
+        XCTAssertEqual(KeepAnswer.name(said), "lockin.y linear")
+        spec.fit = AnalysisFit(model: "lorentzian")
+        let other = try await c.analyze(spec)
+        XCTAssertNotNil(other.curves.first?.fit?.error)                       // the demo fits only a line
+    }
+
+    func testAnalysisOnThePhone() async throws {
+        let app = AppModel(transport: Script(), defaults: defaults, tokens: tokens)
+        app.startDemo()
+        let session = app.session(for: try XCTUnwrap(app.current))
+        let model = AnalysisModel(session: session, run: DemoTransport.fieldRunID)
+        await model.start()
+        XCTAssertEqual(model.spec.x, "magnet.field")                         // x and y follow the run
+        XCTAssertEqual(model.spec.y, "lockin.x")
+        XCTAssertEqual(model.result?.curves.count, 1)
+        XCTAssertEqual(model.drawn?.y.unit, "µV")
+        model.setY("lockin.y")
+        model.addStep(.antisymmetrize)
+        model.setFit("linear", formula: false)
+        await model.compute(now: true).value
+        XCTAssertEqual(model.answered?.fit?.model, "linear")
+        XCTAssertEqual(model.result?.curves.first?.fit?.params.count, 2)
+        XCTAssertFalse(model.working)
+        model.addStep(.fft)                                                   // the demo lab can't: it says so
+        await model.compute(now: true).value
+        XCTAssertNotNil(model.problem)
+        XCTAssertEqual(model.answered?.steps.count, 1)                        // the last plot it could draw stays
+        if case .kept = try await model.keep(0) {} else { XCTFail("not kept") }
+    }
+
     func testTheKeychain() throws {
         let keychain = Keychain(service: "Kelvin tests")
         let id = UUID()

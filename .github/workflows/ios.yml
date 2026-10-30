@@ -64,13 +64,14 @@ jobs:
           mkdir -p shots
           xcrun simctl bootstatus "$udid" -b
           xcrun simctl install "$udid" build/dd/Build/Products/Debug-iphonesimulator/Kelvin.app
-          shot() {   # name, appearance, tab, what to open
+          shot() {   # name, appearance, tab, what to open, more launch arguments
             xcrun simctl ui "$udid" appearance "$2"
             xcrun simctl terminate "$udid" "$app" 2>/dev/null || true
-            xcrun simctl launch "$udid" "$app" -KelvinDemo YES -KelvinTab "$3" -KelvinOpen "$4"
+            xcrun simctl launch "$udid" "$app" -KelvinDemo YES -KelvinTab "$3" -KelvinOpen "$4" "${@:5}"
             sleep 8
             xcrun simctl io "$udid" screenshot "shots/$1.png"
           }
+          hall='{"y": "lockin.y", "steps": [{"op": "antisymmetrize"}], "fit": {"model": "linear"}}'
           xcrun simctl launch "$udid" "$app"          # nothing paired yet: the welcome screen
           sleep 6
           xcrun simctl io "$udid" screenshot shots/0-welcome.png
@@ -80,6 +81,10 @@ jobs:
           shot 4-run light runs field-sweep-D3
           shot 5-runs dark runs ""
           shot 6-computers light computers ""
+          shot 7-team light team ""
+          shot 8-team-dark dark team ""
+          shot 9-analysis light runs field-sweep-D3 -KelvinAnalysis "$hall"
+          shot 10-analysis-dark dark runs field-sweep-D3 -KelvinAnalysis "$hall"
       - if: always()
         uses: actions/upload-artifact@v4
         with:

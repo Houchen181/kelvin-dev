@@ -44,11 +44,23 @@ struct RootView: View {
     }
 }
 
-/// Launch arguments, for screenshots: -KelvinDemo YES -KelvinTab runs -KelvinOpen <a run or chat id>.
+/// Launch arguments, for screenshots: -KelvinDemo YES -KelvinTab runs -KelvinOpen <a run or chat id>
+/// -KelvinAnalysis <a spec as JSON, opened in Analysis for that run>.
 enum Launch {
     static var demo: Bool { UserDefaults.standard.bool(forKey: "KelvinDemo") }
     static var tab: String { UserDefaults.standard.string(forKey: "KelvinTab") ?? "lab" }
     private static var opened = false
+    private static var analyzed = false
+
+    /// Once, for the run opened at launch: the spec to open in Analysis. Read from the arguments themselves, as
+    /// UserDefaults would take a JSON object for a property list.
+    static func analysis() -> AnalysisSpec? {
+        let args = ProcessInfo.processInfo.arguments
+        guard !analyzed, let i = args.firstIndex(of: "-KelvinAnalysis"), i + 1 < args.count,
+              let json = JSONValue.parse(args[i + 1]) else { return nil }
+        analyzed = true
+        return AnalysisSpec(json: json)
+    }
 
     /// True once, for the run or chat named in the launch arguments.
     static func open(_ id: String) -> Bool {   // a chat id, or a run's id or plan name (field-sweep-D3)
@@ -76,6 +88,10 @@ struct LabTabs: View {
                     .tabItem { Label("Chat", systemImage: "bubble.left.and.bubble.right") }
                     .tag("chat")
             }
+            NavigationStack { TeamView(session: session, active: tab == "team") }
+                .tabItem { Label("Team", systemImage: "person.2") }
+                .badge(tab == "team" ? 0 : session.teamUnread)
+                .tag("team")
             NavigationStack { RunsView(session: session) }
                 .tabItem { Label("Runs", systemImage: "chart.xyaxis.line") }
                 .tag("runs")

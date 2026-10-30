@@ -1,19 +1,19 @@
 # Kelvin for iPhone
 
-A native iPhone and iPad app that is a remote for Kelvin on a lab computer: the lab at a glance, Kelvin's requests to approve or decline, the run in progress with a live plot and **Stop**, chats, and past runs with their reports. It talks to Kelvin directly, on the lab network or through Tailscale; nothing goes through anyone else's server.
+A native iPhone and iPad app that is a remote for Kelvin on a lab computer: the lab at a glance, Kelvin's requests to approve or decline, the run in progress with a live plot and **Stop**, chats, the lab's team chat, and past runs with their reports and Analysis. It talks to Kelvin directly, on the lab network or through Tailscale; nothing goes through anyone else's server.
 
 How people use it is in [portal.md](portal.md#phone-and-remote-access). This page is for building it.
 
-**Try a demo lab** on the welcome screen adds a made-up lab that answers inside the app: a run in progress, a request, an alarm, past runs and a chat. It is for trying the app before pairing, and for App Review, which has no Kelvin computer. CI screenshots it on every change (the `ios-screenshots` artifact of the iOS app workflow).
+**Try a demo lab** on the welcome screen adds a made-up lab that answers inside the app: a run in progress, a request, an alarm, past runs, a chat and a team chat. Its Analysis works out some steps and fits a line itself (a field sweep's Hall voltage, antisymmetrized, gives 0.4 µV/T); the other steps and models say they need Kelvin. It is for trying the app before pairing, and for App Review, which has no Kelvin computer. CI screenshots it on every change (the `ios-screenshots` artifact of the iOS app workflow).
 
 ## What's where
 
 | Path | What |
 |---|---|
 | `ios/project.yml` | The Xcode project, as an [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. `Kelvin.xcodeproj` and `Support/Info.plist` are generated from it and not committed. |
-| `ios/KelvinKit/` | A Swift package with no UI and only Foundation: pairing links, the phone API client, the models, the chat stream and transcript, plot data. Its tests run on Linux too. |
-| `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (paired computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Dictation.swift` (voice input), `Demo.swift` (the demo lab) and the screens. |
-| `ios/KelvinTests/` | App tests: pairing, the Keychain, falling back to the Tailscale address, a chat, notifications. |
+| `ios/KelvinKit/` | A Swift package with no UI and only Foundation: pairing links, the phone API client, the models, the chat stream and transcript, plot data, the team chat thread (`Team.swift`), Analysis specs and results and fitted values with their errors (`Analysis.swift`). Its tests run on Linux too. |
+| `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (paired computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Dictation.swift` (voice input), `Demo.swift` (the demo lab), `TeamView.swift` and `AnalysisView.swift` (with their models) and the other screens. |
+| `ios/KelvinTests/` | App tests: pairing, the Keychain, falling back to the Tailscale address, a chat, notifications, the team chat and its unread count, Analysis on the demo lab. |
 | `.github/workflows/ios.yml` | CI: KelvinKit's tests on Linux; when they pass, the app's build and tests on the iOS Simulator (macOS runner). |
 | `.github/workflows/ios-testflight.yml` | On a tag `ios-v*`: builds with the newest Xcode, signs with an App Store Connect API key and uploads to TestFlight. |
 
@@ -30,6 +30,8 @@ The phone listener (`src/labharness/web/remote.py`) and the routes a paired devi
 - The pairing QR code holds `http://<address>:<port>/pair#<code>&also=<host:port>,…`: the first address, then the others that fit. The app tries each in turn; only a computer that answers sees the code.
 - Watch and control: `GET /api/state`, `/api/live?since=n`, `/api/runs`, `/api/runs/{id}`, `/api/runs/{id}/files/{name}`; `POST /api/approvals/{id}` (control only for approving), `/api/alarms/{id}/ack`, `/api/runs/stop`, `/api/stop`, `/api/me/forget`, `/api/hands {on}` (the hands-on-the-sample lock: any phone can lock, control only can unlock). `/api/state` carries `mounted` (the sample, with `protection_lines`) and `hands_on` (who locked it and since when) from Kelvin 0.3.17; older Kelvins leave them out.
 - Control: `GET /api/bootstrap` (models), `/api/chats`, `/api/chats/{id}`; `POST /api/chats {model, incognito}`, `/api/chats/{id}/turn {text, model}` (the answer streams back as one JSON event per line).
+- The team chat (Kelvin 0.3.32 and later): `GET /api/team?after=<id>` (or `?before=<id>`, scrolling back) → `{messages, last}`, each message `{id, at, name, account, via, text}`, oldest first, 200 at most; any phone reads it. `POST /api/team {name, text}` (control) → `{message, last}`. `/api/state` carries `team`, the newest message's id: the tab's badge counts from the last one the phone showed (kept per computer in UserDefaults), and what was there at its first look is not news. The name a person writes under is the phone's own (`kelvin.teamName`).
+- Analysis (Kelvin 0.3.32 and later, control): `GET /api/analysis/columns?run=<id>` → the run's `axes`, `readings`, `traces`, `kept` fits and `models`; `POST /api/analysis {spec}` → `{curves, axes, notes}` (fits may take 45 s: the app waits 90); `POST /api/analysis/keep {spec, curve, replace}` → `{said}`, or 409 `{exists}` (the app asks before replacing); `POST /api/analysis/csv {spec}` → the CSV, named by `Content-Disposition`. The spec always names its runs: through the hub, Kelvin refuses "the last run" and unshared runs.
 
 Through the Kelvin account (Kelvin 0.3.19 and later; see [hub.md](hub.md#phones-through-the-hub)), at the one Kelvin hub built into the app (`Account.defaultHub`; **Use a test hub** on the sign-in screen names another):
 
