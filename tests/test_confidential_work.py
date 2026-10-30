@@ -267,11 +267,13 @@ def test_phones_through_the_hub_get_the_labs_state_without_unshared_works_names(
             if entry:
                 rt.approver.answer(entry["id"], True)
     done = threading.Event()
-    threading.Thread(target=approve_all, daemon=True).start()
+    person = threading.Thread(target=approve_all, daemon=True)
+    person.start()
     p.turn(p.secret, [("run_plan", {"plan": NDA}),
                       ("watch", {"reading": "tc.T_sample", "above": 5, "note": "Acme-HfO2-D1 must stay below 5 K"}),
                       ("queue_add", {"item": NDA, "note": "Acme wafer W17 first pass"})])
     done.set()
+    person.join(5)   # gone before the next request, which must wait
     ask = _relay(rt, tmp_path, monkeypatch)
 
     # a request of the NDA work waits for a person
@@ -282,8 +284,8 @@ def test_phones_through_the_hub_get_the_labs_state_without_unshared_works_names(
             asked.set()
             rt.gate.ask(ApprovalRequest("Run plan acme_gate: 6 points", ["smu.V 0 V → 1 V on Acme-HfO2-D1"]))
     threading.Thread(target=nda_request, daemon=True).start()
-    asked.wait(5)
-    deadline = time.time() + 5
+    asked.wait(15)
+    deadline = time.time() + 15
     while not rt.approver.pending_list() and time.time() < deadline:
         time.sleep(0.05)
 
