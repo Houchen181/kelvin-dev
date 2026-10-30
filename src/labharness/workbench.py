@@ -20,7 +20,8 @@ A spec, as the panel sends it and the analyze tool writes it:
         background {order, lo, hi} subtract a polynomial of this order fitted to x in [lo, hi] (all points if neither)
         normalize {how}            max: |y| at most 1; range: 0 to 1; first: the first point is 1; mean: the mean is 1
         scale {factor, offset, unit} y * factor + offset, in unit (default: y's, re-prefixed by a power of ten)
-        symmetrize, antisymmetrize (y(x) + y(-x)) / 2 and (y(x) - y(-x)) / 2 about x = 0: magnetoresistance, Hall
+        symmetrize, antisymmetrize (y(x) + y(-x)) / 2 and (y(x) - y(-x)) / 2 about x = 0, on x >= 0 only (each |x|
+                                   once, so a fit counts every point once): magnetoresistance, Hall
         fft                        the amplitude spectrum, x resampled evenly first
         abs, log10                 |y|, log10 |y|
     fit      {model, lo, hi, start, fix}: one of fitting.MODELS or an expression in x (a*exp(-x/tau) + c), fitted to
@@ -107,7 +108,26 @@ def _window(np: Any, x: Any, lo: Optional[float], hi: Optional[float]) -> Any:
 def _sorted_unique(np: Any, x: Any, y: Any) -> Tuple[Any, Any]:
     """x ascending, the points at one x averaged."""
     ux, inv = np.unique(x, return_inverse=True)
+    inv = inv.reshape(-1)
     return ux, np.bincount(inv, weights=y) / np.bincount(inv)
+
+
+def _mirrored(np: Any, x: Any, y: Any, odd: bool) -> Tuple[Any, Any]:
+    """The even (or odd) part of y about x = 0, once for each |x|: on the side of 0 with fewer points (x >= 0 when
+    both have as many), each taken with y at -x interpolated from the other side. Every point is used about once, so
+    a fit's errors are not halved by counting each point at x and at -x."""
+    ux, uy = _sorted_unique(np, x, y)
+    lo, hi = max(float(ux.min()), -float(ux.max())), min(float(ux.max()), -float(ux.min()))
+    inside = (ux >= lo) & (ux <= hi)
+    pos, neg = inside & (ux > 0), inside & (ux < 0)
+    if lo >= hi or not pos.any() or not neg.any():
+        raise AnalysisError("to %s, x must run on both sides of 0" % ("antisymmetrize" if odd else "symmetrize"))
+    side = neg if neg.sum() < pos.sum() else pos
+    at = np.sort(np.abs(ux[side]))
+    if not odd and (inside & (ux == 0)).any():   # at x = 0 the odd part is 0 by its definition: no point
+        at = np.concatenate([[0.0], at])
+    up, down = np.interp(at, ux, uy), np.interp(-at, ux, uy)
+    return at, (up - down) / 2 if odd else (up + down) / 2
 
 
 def _smooth(np: Any, y: Any, points: int) -> Any:
@@ -198,14 +218,7 @@ def step(np: Any, x: Any, y: Any, xu: Optional[str], yu: Optional[str], xn: str,
         y = y + offset
         yu = unit or yu
     elif op in ("symmetrize", "antisymmetrize"):
-        ux, uy = _sorted_unique(np, x, y)
-        lo, hi = max(float(ux.min()), -float(ux.max())), min(float(ux.max()), -float(ux.min()))
-        keep = (ux >= lo) & (ux <= hi)
-        if lo >= hi or keep.sum() < 2:
-            raise AnalysisError("to %s, x must run on both sides of 0" % op)
-        x = ux[keep]
-        mirror = np.interp(-x, ux, uy)
-        y = (uy[keep] + mirror) / 2 if op == "symmetrize" else (uy[keep] - mirror) / 2
+        x, y = _mirrored(np, x, y, op == "antisymmetrize")
         yn = "%s (%s)" % (yn, "symmetric part" if op == "symmetrize" else "antisymmetric part")
     elif op == "fft":
         ux, uy = _sorted_unique(np, x, y)

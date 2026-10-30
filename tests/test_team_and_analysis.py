@@ -129,10 +129,10 @@ def test_steps_on_a_curve_and_their_units():
     y = 3 * x ** 2 + 2 * x + 1
     _, d, _, du, _, dn = _run("deriv", x, y)
     assert np.allclose(d[5:-5], 6 * x[5:-5] + 2) and du == "S" and dn == "dy/dx"   # A/V: a conductance
-    _, s, _, _, _, sn = _run("symmetrize", x, y)
-    assert np.allclose(s, 3 * x ** 2 + 1) and sn == "y (symmetric part)"
-    _, a, _, _, _, _ = _run("antisymmetrize", x, y)
-    assert np.allclose(a, 2 * x)
+    sx, s, _, _, _, sn = _run("symmetrize", x, y)
+    assert np.allclose(s, 3 * sx ** 2 + 1) and sn == "y (symmetric part)" and sx.min() == 0 and sx.size == 41
+    ax, a, _, _, _, _ = _run("antisymmetrize", x, y)
+    assert np.allclose(a, 2 * ax) and ax.min() > 0   # at x = 0 the odd part is 0 by definition: no point
     _, b, _, _, _, bn = _run("background", x, 5 * x + 7 + np.sin(x * 20) * 1e-3, order=1)
     assert np.abs(b).max() < 2e-3 and bn == "y − background"
     _, n, _, nu, _, _ = _run("normalize", x, y, how="max")

@@ -71,6 +71,28 @@ def _js(name):
     return JS[start:JS.index("\n  }\n", start)]
 
 
+# ------------------------------------------------------------------ 1. symmetrize counts each point once
+
+def test_a_symmetrized_curve_keeps_one_point_per_x_so_a_fit_s_errors_are_not_shrunk(rt):
+    up = np.linspace(-1, 1, 41)
+    x = np.concatenate([up, up[::-1][1:] + 0.002])   # a loop: the way back a little off the way up
+    y = 2 + 0.2 * x ** 2 + 0.05 * x
+    for op, odd in (("symmetrize", False), ("antisymmetrize", True)):
+        sx, sy, _, _, _, _ = step(np, x, y, "T", "V", "B", "R", {"op": op})
+        assert sx.min() >= 0 and len(set(np.round(np.abs(sx), 9))) == sx.size   # each |x| once, never x and -x
+        assert sx.size <= 42 and (sx.min() > 0 if odd else True)
+        assert np.allclose(sy, 0.05 * sx if odd else 2 + 0.2 * sx ** 2, atol=1e-3)
+    rt.run(LOOP)
+    run = last(rt)
+    model = {"model": "R0*(1 + a*x**2)", "start": {"R0": 1e-5, "a": 0.1}}
+    raw = compute(rt, {"runs": [run], "x": "magnet.B", "y": "lockin.X", "fit": model})
+    sym = compute(rt, {"runs": [run], "x": "magnet.B", "y": "lockin.X", "steps": [{"op": "symmetrize"}], "fit": model})
+    assert raw["curves"][0]["n"] == 81 and sym["curves"][0]["n"] == 21   # -1 → 1 → -1 T by 0.05 T: 0 … 1 T once
+    a_raw, a_sym = fit_of(raw)["a"], fit_of(sym)["a"]
+    assert a_sym["value"] == pytest.approx(a_raw["value"], rel=1e-2)
+    assert a_sym["error"] > 0.8 * a_raw["error"]   # counting x and -x both made it 0.6 times as large
+
+
 # ------------------------------------------------------------------ 3. units
 
 def test_units_follow_expressions_scales_and_derivatives(rt):

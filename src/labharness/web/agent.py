@@ -460,7 +460,8 @@ ANALYZE = {
                                                   "integrate, background {order, lo, hi} (subtracted), normalize "
                                                   "{how: max|range|first|mean}, scale {factor, offset, unit} (the "
                                                   "unit of the result, when the factor carries one: a current), "
-                                                  "symmetrize, antisymmetrize (about x = 0), fft, abs, log10",
+                                                  "symmetrize, antisymmetrize (about x = 0, on x >= 0), fft, abs, "
+                                                  "log10",
                   "items": {"type": "object", "required": ["op"], "properties": {
                       "op": {"type": "string", "enum": list(workbench.OPS)}, "lo": _NUMBER, "hi": _NUMBER,
                       "width": _NUMBER, "points": {"type": "integer"}, "order": {"type": "integer"},
