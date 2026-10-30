@@ -308,3 +308,33 @@ def test_phones_through_the_hub_get_the_labs_state_without_unshared_works_names(
     assert status == 403 and b"Tailscale" in raw
     status, raw = ask("POST", "/api/approvals/" + card["id"], {"approve": False})
     assert status == 200
+
+
+# ------------------------------------------------------------------ at a glance (t09)
+
+def test_a_confidential_project_and_its_chats_show_a_lock_and_one_switch_sets_it(rt, tmp_path):
+    from starlette.testclient import TestClient
+    from labharness.web.app import STATIC, create_app
+    from labharness.web.settings import Settings
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+    assert "lockMark(chatPrivacy(c))" in js and "lockMark(privacyOf(p.rules, p))" in js   # the sidebar's locks
+    assert 'id="project-confidential"' in page and '$("project-confidential").addEventListener' in js
+    assert "privacy.label" in js and '"Unpublished"' in js                                 # the chip says which
+    store = ChatStore(tmp_path / "chats")
+    settings = Settings(tmp_path / "settings.json")
+    client = TestClient(create_app(rt, settings, store, hosts=["testserver"], providers={"scripted": Scripted([])}))
+    h = {"X-Kelvin-Token": settings.access_key}
+    p = client.post("/api/projects", headers=h, json={"name": "Acme NDA"}).json()
+    chat = client.post("/api/chats", headers=h, json={"model": "scripted:m1", "project": p["id"]}).json()
+    # the one switch sends both settings, which keep the form projects have always had
+    r = client.patch("/api/projects/" + p["id"], headers=h, json={
+        "rules": {"providers": ["local"], "literature": False}, "sharing": "confidential"})
+    assert r.json()["confidential"] is True and r.json()["rules"] == {"providers": ["local"], "literature": False}
+    listed = {x["id"]: x for x in client.get("/api/projects", headers=h).json()}
+    assert listed[p["id"]]["confidential"] and listed[p["id"]]["rules"]["providers"] == ["local"]
+    (mine,) = [c for c in client.get("/api/chats", headers=h).json() if c["id"] == chat["id"]]
+    assert mine["project"] == p["id"]        # what the lock beside the chat is drawn from
+    client.patch("/api/chats/" + chat["id"], headers=h, json={"project": None})   # out of it, it keeps the marks
+    (mine,) = [c for c in client.get("/api/chats", headers=h).json() if c["id"] == chat["id"]]
+    assert mine.get("confidential") is True and mine["rules"]["providers"] == ["local"]

@@ -2343,7 +2343,7 @@
     const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : "") + (mark ? " " + mark[0] : ""),
       role: "button", tabindex: "0", draggable: "true" },
       mark ? h("span", { class: "chat-dot", title: mark[1], "aria-label": mark[1] }) : null,
-      h("span", { class: "t" }, c.title || "New chat"), more);
+      h("span", { class: "t" }, c.title || "New chat"), lockMark(chatPrivacy(c)), more);
     item.addEventListener("click", () => openChat(c.id));
     item.addEventListener("keydown", (e) => { if (e.key === "Enter") openChat(c.id); });
     item.addEventListener("dragstart", (e) => {
@@ -2364,7 +2364,8 @@
     } else {
       head = h("div", { class: "proj-row" + (holdsActive && !S.chatId ? " active" : ""), role: "button", tabindex: "0", "aria-expanded": String(open), title: p.name },
         h("span", { class: "chev-s" + (open ? " open" : "") }, icon("chev")), icon("folder"),
-        h("span", { class: "t" }, p.name), h("span", { class: "count" }, chats.length ? String(chats.length) : ""),
+        h("span", { class: "t" }, p.name), lockMark(privacyOf(p.rules, p)),
+        h("span", { class: "count" }, chats.length ? String(chats.length) : ""),
         rowButton("plus", "New chat in " + p.name, () => newChat(p.id, true)),
         rowButton("dots", "Options for " + p.name, (e) => projectMenu(e.currentTarget, p, chats)));
       const toggle = () => {
@@ -2488,6 +2489,7 @@
     }));
     $("project-literature").checked = rules.literature !== false;
     $("project-sharing").value = p.unpublished ? "unpublished" : p.confidential ? "confidential" : "";
+    $("project-confidential").checked = !!p.confidential;
     $("rules-summary").textContent = rulesText(rules);
     $("project-msg").textContent = "";
     renderNotes(p);
@@ -2642,6 +2644,38 @@
     for (const p of chosen || []) if (!ids.includes(p)) ids.push(p);
     return ids.map((id) => [id, id === "local" ? "Local models" : providerName(id)]);
   }
+  // unshared work at a glance: a confidential, unpublished or model-limited project, and the chats that keep its marks
+  // (its runs stay inside it; it never goes to the Kelvin hub)
+  function mergeRules(...sets) {   // the stricter of several rule sets, as Kelvin combines them (rules.py)
+    let providers = null, literature = true;
+    for (const r of sets) {
+      if (!r) continue;
+      if (r.providers) providers = providers === null ? [...r.providers] : providers.filter((x) => r.providers.includes(x));
+      literature = literature && r.literature !== false;
+    }
+    return { providers, literature };
+  }
+  function privacyOf(rules, marks) {   // {label, why}, or null for shared work
+    const r = rules || {};
+    const m = marks || {};
+    const why = [];
+    if (r.providers) why.push("only " + r.providers.map(providerName).join(" and ") + " may see it");
+    if (r.literature === false) why.push("no literature or web search");
+    if (m.confidential) why.push("never through the Kelvin hub");
+    if (!why.length && !m.unpublished) return null;
+    why.push("not shared on the hub, and its runs stay in its own chats");
+    const label = m.confidential || r.providers ? "Confidential" : m.unpublished ? "Unpublished" : "No search";
+    return { label, why: label + ": " + why.join("; ") };
+  }
+  function chatPrivacy(c) {   // its own marks and rules (it left such a project, or ran under them), and its project's
+    if (!c) return null;
+    const p = c.project && S.projects.find((x) => x.id === c.project);
+    return privacyOf(mergeRules(c.rules, p && p.rules), { confidential: c.confidential || (p && p.confidential),
+      unpublished: c.unpublished || (p && p.unpublished) });
+  }
+  function lockMark(privacy) {
+    return privacy ? h("span", { class: "lock-mark", title: privacy.why, "aria-label": privacy.why }, icon("lock")) : null;
+  }
   function rulesText(rules) {
     if (!rules) return "";
     const parts = [];
@@ -2670,10 +2704,12 @@
     S.compare = S.compare.filter((k) => modelAllowed(k, rules));
     compareLabel();
     showPlanChip();
-    const text = rulesText(rules);
-    $("rules-chip").hidden = !text;
-    $("rules-chip").title = text ? "This chat's rules: " + text : "";
-    $("rules-chip-text").textContent = text ? "Confidential" : "";
+    const chat = S.chats.find((c) => c.id === S.chatId);   // a new chat: the project it starts in
+    const privacy = S.incognito ? null : chatPrivacy(Object.assign({ project: SIDE.newProject }, chat,
+      { rules: mergeRules(chat && chat.rules, rules) }));
+    $("rules-chip").hidden = !privacy;
+    $("rules-chip").title = privacy ? privacy.why : "";
+    $("rules-chip-text").textContent = privacy ? privacy.label : "";
     updateSend();
   }
 
@@ -6719,6 +6755,18 @@
     zoomKeys();
     $("save-settings").addEventListener("click", saveSettings);
     $("save-project").addEventListener("click", saveProjectSettings);
+    $("project-confidential").addEventListener("change", () => {   // one switch for the rules and the hub's mark
+      const on = $("project-confidential").checked;
+      if (on) {
+        for (const b of document.querySelectorAll("#project-providers input")) b.checked = b.value === "local";
+        $("project-literature").checked = false;
+      }
+      const sharing = $("project-sharing");
+      sharing.value = on ? "confidential" : sharing.value === "confidential" ? "" : sharing.value;
+    });
+    $("project-sharing").addEventListener("change", () => {
+      $("project-confidential").checked = $("project-sharing").value === "confidential";
+    });
     $("quit-app").hidden = !boot.can_quit;
     $("quit-app").addEventListener("click", async () => {
       if (!confirm("Quit Kelvin? The lab keeps its current settings.")) return;
