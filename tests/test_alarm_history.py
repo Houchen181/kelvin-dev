@@ -331,11 +331,12 @@ def real_runtime(tmp_path):
 
 
 WAIT_STEP = "step: wait for the fridge\nwait: 600"
+SETTLE_STEP = "step: let it settle\nstabilize: { read: tc.T_sample, within: 1.0e-9, for: 600, timeout: 3600 }"
 WATCH = "plan: next\ntime: { every: 30, points: 3 }\nmeasure: [smu.I]\n"
 
 
-def queue_in_its_wait(rt):
-    rt.queue_add(WAIT_STEP)
+def queue_in_its_wait(rt, step=WAIT_STEP):
+    rt.queue_add(step)
     rt.queue_add(WATCH)
     assert rt.queue_start().startswith("queue started")
     t0 = time.time()
@@ -352,17 +353,18 @@ def paused(rt, seconds=5):
     return rt.queue.state == "paused" and [i.status for i in rt.queue.items] == ["stopped", "waiting"]
 
 
-@pytest.mark.parametrize("path, body", [("/api/stop", {}), ("/api/runs/stop", {})])
-def test_the_phones_stop_ends_a_queue_waiting_between_its_scans(tmp_path, path, body):
+@pytest.mark.parametrize("path, step", [("/api/stop", WAIT_STEP), ("/api/runs/stop", WAIT_STEP),
+                                        ("/api/stop", SETTLE_STEP), ("/api/runs/stop", SETTLE_STEP)])
+def test_the_phones_stop_ends_a_queue_waiting_between_its_scans(tmp_path, path, step):
     """t05: during a queue's wait step the phone's Stop (POST /api/runs/stop {}) answered ok: false and the queue went
-    on to the next scan. The Stop for everything (POST /api/stop with no chat) ends it there too."""
+    on to the next scan. The Stop for everything (POST /api/stop with no chat) ends it there too, in a settle too."""
     pytest.importorskip("starlette")
     from test_stop import portal
     rt = real_runtime(tmp_path)
     client, headers, _ = portal(tmp_path, rt)
     with client:
-        queue_in_its_wait(rt)
-        r = client.post(path, json=body, headers=headers)
+        queue_in_its_wait(rt, step)
+        r = client.post(path, json={}, headers=headers)
         assert r.status_code == 200 and r.json()["ok"] is True
         assert paused(rt)
         assert rt.queue.items[0].message == "stopped while waiting" and rt.live is None
