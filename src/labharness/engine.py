@@ -9,14 +9,14 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from . import frames, pulses, techniques
 from ._version import __version__
 from .analysis import analyze_run
 from .eventlog import EventLog, RunStore
 from .forecast import Forecast, action_of, runs
-from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
+from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur, feeds_of
 from .instrument import InstrumentOff, SensorError, Stopped
 from .monitor import Approach, rate_per_s
 from .plans import MAX_POINTS, Axis, Plan, PlanError, Stabilize, Step, load_plan
@@ -373,6 +373,85 @@ class RunEngine:
             ranked.append((rank, i, s))
         return [s for _, _, s in sorted(ranked, key=lambda r: (r[0], r[1]))]
 
+    def interlock_problems(self, plan: Optional[Plan], state: Optional[Dict[str, Any]] = None, who: str = "the plan",
+                           sets: Optional[List[Tuple[str, str, Any]]] = None) -> List[str]:
+        """Where a plan would break an interlock, foreseen before it runs (a temperature series with a 12 K step at
+        -2.5 T ran 1.6 h before its interlock, T < 10 K, stopped it): a moment when an interlock's drive is away from
+        safe while the plan has its condition failing, by setting it or the set point that drives it (tc.setpoint
+        drives tc.T_sample: labs write interlocks on the reading). Setup and after steps in the engine's order; every
+        value of a sweep meets every other (its loops are nested). A condition that fails already, before the plan, is
+        the gate's to refuse (plan_approval). state: what the walk starts from, updated as it goes (a queue's items,
+        each from where the one before leaves the lab); who: what the lines name; sets: a queue's step between scans
+        (instr, param, value), in place of a plan."""
+        locks = self.lab.config.interlocks
+        state = {} if state is None else state
+        if not locks:
+            return []
+        problems: List[str] = []
+        done: set = set()
+
+        def now(key: str) -> Tuple[Any, Optional[str]]:
+            """(its value, what in the walk set it: None for the lab as it is now)."""
+            if key not in state:
+                try:
+                    state[key] = (self.lab.read(*key.split(".", 1)), None)
+                except Exception:
+                    state[key] = (None, None)
+            return state[key]
+
+        def values(changes: List[Tuple[str, Any, str]]) -> Dict[str, List[Tuple[Any, Optional[str]]]]:
+            """Each key these changes decide, with every value it takes and what sets it."""
+            out: Dict[str, List[Tuple[Any, Optional[str]]]] = {}
+            for key, value, where in changes:
+                try:
+                    inst, spec = self.lab.resolve(key)
+                    v = spec.coerce(value)
+                except (KeyError, ValueError):
+                    continue
+                cause = "%s sets %s to %s" % (where, key, spec.show(v))
+                for k in feeds_of(inst, spec):
+                    out.setdefault(k, []).append((v, cause))
+            return out
+
+        def check(moment: Dict[str, List[Tuple[Any, Optional[str]]]]) -> None:
+            for i, lock in enumerate(locks):
+                try:
+                    dspec = self.lab.resolve(lock.drive)[1]
+                except KeyError:
+                    continue
+                if i in done:
+                    continue
+                drives = moment.get(lock.drive) or [now(lock.drive)]
+                conds = moment.get(lock.require.key) or [now(lock.require.key)]
+                up = next((d for d, _ in drives if d is not None and dspec.distance(d) > 0), None)
+                bad = next(((c, cause) for c, cause in conds if c is not None and cause is not None
+                            and not lock.require.check(lambda _i, _p: c)[0]), None)
+                if up is not None and bad is not None:
+                    done.add(i)
+                    problems.append("interlock: %s needs %s, but it would be at %s while %s is at %s (%s)" % (
+                        lock.drive, lock.require.text, dspec.show(up), lock.require.key,
+                        self.lab.resolve(lock.require.key)[1].show(bad[0]), bad[1]))
+
+        def go(changes: List[Tuple[str, Any, str]], together: bool = False) -> None:
+            """Setup or after steps one at a time, as the engine sets them; a sweep's values all together."""
+            if not changes:
+                return
+            for moment in [values(changes)] if together else [values([one]) for one in changes]:
+                check(moment)
+                for k, vs in moment.items():
+                    state[k] = vs[-1]   # as it leaves it
+
+        if plan is None:
+            go([("%s.%s" % (instr, param), value, who) for instr, param, value in sets or []])
+            return problems
+        go([(s.key, s.value, "%s's setup" % who) for s in self.ordered(plan.setup)
+            if action_of(self.lab, s.instr, s.param) is None])
+        go([(a.key, v, "%s's sweep" % who) for a in plan.axes if a.kind in ("instrument", "ramp") for v in a.values],
+           together=True)
+        go([(s.key, s.value, "%s's after steps" % who) for s in plan.after
+            if action_of(self.lab, s.instr, s.param) is None])
+        return problems
+
     def readback_problems(self, steps: List[Step], skip: Any = ()) -> List[str]:
         """The drives that don't read back what these steps set (a switch parked its level at safe, the instrument
         clipped or refused it): one line each, saying which drive and what it reads. The run must not measure at a
@@ -465,11 +544,12 @@ class RunEngine:
         return report
 
     def run(self, plan: Any, dry_run: bool = False, meta: Optional[Dict[str, Any]] = None,
-            folder: Any = None) -> RunReport:
+            folder: Any = None, notes: Iterable[str] = ()) -> RunReport:
         """Validate, check the instruments, ask once for the drive ranges, run, log, analyse. No dry run unless asked
         (dry_run), or in auto mode for a run nobody approves: there the dry run stands in for the person's look.
         Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal.
-        folder: where the run's folder goes (its chat's folder; else the data folder's runs/)."""
+        folder: where the run's folder goes (its chat's folder; else the data folder's runs/).
+        notes: lines its card adds, if it asks (a dry run of it that just failed)."""
         since = self.gate.stop_generation, self.lab.stops.count   # a stop while it is checked or approved ends it too
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan)
@@ -501,6 +581,7 @@ class RunEngine:
         starting = [k for k in forecast.driving_actions() if not self.gate.action_covered(k)]
         items, grants, problems = self.gate.plan_approval(drives, forecast=forecast,
                                                           asking=bool(firing or starting or running))
+        problems += self.interlock_problems(plan)   # a step that would break an interlock: refused now, not hours in
         if problems:
             return self._refuse(plan.name, "; ".join(problems))
         if firing:   # an action that drives the sample at every point: the person approves the run
@@ -510,7 +591,7 @@ class RunEngine:
         if running or (items and plan.techniques):
             items = list(items) + techniques.lines(self.gate, plan)
         if items:
-            items = list(items) + forecast.closing()
+            items = list(items) + forecast.closing() + list(notes)
         sim = None
         # auto mode needs a clean dry run, unless a drive is on an instrument Kelvin isn't sure about (a person asks)
         could_auto = self.gate.auto and not any(self.gate.unsure(self.lab.resolve(k)[0]) for k in grants)

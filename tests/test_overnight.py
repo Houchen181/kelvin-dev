@@ -85,10 +85,12 @@ def test_a_queue_that_cools_first_starts_while_the_sample_is_still_warm(tmp_path
 
 
 def test_an_interlock_that_still_fails_when_its_item_comes_pauses_the_queue_there(tmp_path):
-    """Left for later is still checked: a cool-down that doesn't get below 10 K stops the queue at the field sweep."""
+    """Left for later is still checked: a cool-down that doesn't get below 10 K (the heater off, but only a second's
+    wait) stops the queue at the field sweep. A step whose own set point breaks the interlock (cooling to 11 K) is
+    refused before the queue starts (test_safety_fixes)."""
     rt = runtime(tmp_path, [True])
     warm(rt, 12.0)
-    rt.queue_add(COOL.replace("setpoint: 2", "setpoint: 11").replace("cool to 2 K", "cool to 11 K"))
+    rt.queue_add("step: heater off\nset: { tc.heater_range: off }\nwait: 1")
     rt.queue_add(INTERLOCKED)
     (_, first, _), (_, second, why) = run_queue(rt)
     assert first == "done" and second == "failed" and "interlock: magnet.B needs tc.T_sample < 10" in why

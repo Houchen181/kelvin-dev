@@ -53,7 +53,10 @@ measure: [smu.I]
     assert lab.read("tc", "heater_range") == "off"                  # the plan's heater, back to safe first
     assert lab.read("tc", "setpoint") == 5                          # held: the reading was there already
     lab.instruments["tc"].backend.state["T_sample"] = 3.0           # a stop while it is still on its way
-    assert gate.abort_to_safe(["tc.setpoint"], "test")[0].message == "tc.setpoint held at 3 K (its safe 0 K can't be reached)"
+    held = gate.abort_to_safe(["tc.setpoint"], "test")[0]                  # at the reading, give or take its noise
+    assert held.message.startswith("tc.setpoint held at ")
+    assert held.message.endswith(" K (its safe 0 K can't be reached)")
+    assert abs(held.value - 3.0) < 0.01
 
 
 def test_a_stop_ends_a_wait_toward_safe_at_once():

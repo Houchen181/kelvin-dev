@@ -392,6 +392,9 @@ class LabRuntime:
         self._report_lock = threading.Lock()
         self._queue_thread: Optional[threading.Thread] = None
         self.interrupted: List[str] = []   # the runs a crash or power cut ended, found when Kelvin started (tidy_runs)
+        # the latest dry runs that went wrong, by the plan's text (a queue's: its items'), as (when, what they said):
+        # the real run's card says so (a queue was approved minutes after its rehearsal said two items would fail)
+        self._failed_dry_runs: Dict[str, Tuple[str, List[str]]] = {}
         self.monitor = self._new_monitor()
         self.alarms_before = self._restore_alarms()   # the alarms still on when Kelvin last stopped
         self.restored: Dict[str, List[str]] = {"back": [], "dropped": []}
@@ -1161,6 +1164,7 @@ class LabRuntime:
             from ..forecast import Forecast
             forecast = Forecast(self.engine).plan(plan)   # as the run's own card: its setup actions, a draft's settings
             items, _, problems = self.gate.plan_approval(self.engine.drive_values(plan), forecast=forecast)
+            problems += self.engine.interlock_problems(plan)
             asked = forecast.asked + forecast.action_lines()
             lines = ["ok: %s, %s%s, instruments %s" % (plan.name, self.engine.shape(plan), forecast.duration(),
                                                       ", ".join(plan.requires))]
@@ -1178,11 +1182,28 @@ class LabRuntime:
             except PlanError as e:
                 return "invalid plan: %s" % e
             report = self.engine.simulate(plan)
+            self._dry_ran(plan_text, [] if report.ok else [report.message])
             lines = [report.message]
             lines += ["would ask: " + w.replace("\n", " | ") for w in report.would_ask]
             lines += self._preview(plan, report.rows)
             return "\n".join(lines)
         return self._do("dry run", run)
+
+    def _dry_ran(self, text: str, failed: List[str]) -> None:
+        """A dry run of this plan (or queue) just ran: what went wrong in it, if anything, for the real run's card."""
+        key = " ".join(text.split())
+        self._failed_dry_runs.pop(key, None)
+        if failed:
+            self._failed_dry_runs[key] = (time.strftime("%H:%M"), failed)
+            while len(self._failed_dry_runs) > 20:
+                self._failed_dry_runs.pop(next(iter(self._failed_dry_runs)))
+
+    def _dry_run_note(self, text: str) -> List[str]:
+        """For a run's card: its dry run that just went wrong, briefly."""
+        found = self._failed_dry_runs.get(" ".join(text.split()))
+        if not found:
+            return []
+        return ["Its dry run at %s did not go through: %s" % (found[0], "; ".join(found[1][:3]))]
 
     def run(self, plan_text: str, dry_run: bool = False) -> str:
         """run_plan. dry_run: only a rehearsal on the simulated lab, never followed by the real run."""
@@ -1200,7 +1221,8 @@ class LabRuntime:
         try:
             with self._device_protection(meta) as held, \
                     self.lock.only(self._involved(self._uses(plan_text, plan.requires))):   # the rest stay readable
-                report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"))
+                report = self.engine.run(plan, dry_run=dry_run, meta=meta, folder=self.attribution.get("folder"),
+                                         notes=self._dry_run_note(plan_text))
         except RunFolderError as e:   # nowhere to keep it: said in words, not a bare tool error (l09, l10)
             return "not run: %s" % e, None
         with self.lock.only([]):   # writing its report uses no instrument: all of them can be read meanwhile
@@ -2201,6 +2223,19 @@ class LabRuntime:
             used.update(keys)
         return later
 
+    def _queue_interlocks(self, items: List[Item]) -> List[str]:
+        """Where the queue would break an interlock, item after item, each from where the one before leaves the lab
+        (engine.interlock_problems): a warm-up step before a field sweep once got a card with no word of it."""
+        state: Dict[str, Any] = {}
+        out: List[str] = []
+        for n, item in enumerate(items, 1):
+            who = "#%d %s" % (n, item.name)
+            if item.kind == "plan":
+                out += self.engine.interlock_problems(self._plan(item.text), state, who)
+            else:
+                out += self.engine.interlock_problems(None, state, who, sets=load_step(item.text).sets)
+        return out
+
     def _rehearse(self, items: List[Item]) -> Tuple[float, List[str]]:
         """The whole queue, in order, on a simulated copy of the lab: (lab seconds it takes, what went wrong)."""
         from ..gate import SimulationApprover
@@ -2253,6 +2288,8 @@ class LabRuntime:
             duration, failed = self._rehearse(items)
             _, _, refusals = self.gate.plan_approval(self._queue_drives(items), whole_path=True,
                                                      later=self._queue_later(items))
+            refusals += self._queue_interlocks(items)
+            self._dry_ran("\n".join(item.text for item in items), failed + refusals)
             return "\n".join([REHEARSAL % "queue_start", "the %d waiting item%s would take ~%s" % (
                 len(items), "" if len(items) == 1 else "s", _dur(duration))]
                 + ["would fail: " + f for f in failed[:8]] + ["would be refused: " + r for r in refusals[:8]])
@@ -2272,6 +2309,7 @@ class LabRuntime:
             lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast=forecast,
                                                               asking=bool(starting or running), whole_path=True,
                                                               later=self._queue_later(items))
+            refusals += self._queue_interlocks(items)
             if refusals:
                 return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
             duration = forecast.seconds or None
@@ -2281,7 +2319,8 @@ class LabRuntime:
                 steps, "" if steps == 1 else "s") if steps else "", forecast.duration())
             if lines or starting or running:
                 request = ApprovalRequest(title, lines + forecast.action_lines(starting) + technique_lines
-                                          + forecast.closing() + [
+                                          + forecast.closing()
+                                          + self._dry_run_note("\n".join(item.text for item in items)) + [
                     "This approval covers every item now waiting; anything outside these ranges asks again."])
                 covered = False
                 if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
