@@ -68,6 +68,34 @@ final class TeamTests: XCTestCase {
         XCTAssertTrue(long.more)                                              // a full page: older ones may be there
     }
 
+    func testOwnMessageDoesNotSkipWhatOthersWroteJustBefore() throws {
+        let first = try JSONDecoder().decode(TeamPage.self, from: Data(page.utf8))
+        var thread = TeamThread()
+        thread.take(first)
+        XCTAssertEqual(thread.through, 9)
+        thread.sent(TeamMessage(id: 11, name: "Cleo", text: "Taking the magnet"))   // Ben wrote 10 meanwhile
+        XCTAssertEqual(thread.last, 11)
+        XCTAssertEqual(thread.through, 9)                                     // so the next fetch asks after 9
+        thread.take([TeamMessage(id: 10, name: "Ben", text: "Cooling down"), TeamMessage(id: 11, name: "Cleo", text: "Taking the magnet")])
+        XCTAssertEqual(thread.messages.map(\.id), [7, 8, 9, 10, 11])
+        XCTAssertEqual(thread.through, 11)
+    }
+
+    func testAChatThatBeganAgainOrRanAheadByAPage() throws {
+        var thread = TeamThread()
+        thread.take((1...40).map { TeamMessage(id: $0, name: "Ana", text: "m\($0)") })
+        let restarted = try JSONDecoder().decode(TeamPage.self, from: Data("{\"messages\": [], \"last\": 3}".utf8))
+        XCTAssertFalse(thread.take(restarted))                                // its newest is older than ours
+        XCTAssertEqual(thread.messages, [])
+        XCTAssertEqual(thread.through, 0)                                     // fetch again from the start
+
+        thread.take((1...10).map { TeamMessage(id: $0, name: "Ana", text: "m\($0)") })
+        thread.take((300..<(300 + TeamThread.page)).map { TeamMessage(id: $0, name: "Ben", text: "b\($0)") })
+        XCTAssertEqual(thread.messages.first?.id, 300)                        // a full page: no silent gap before it
+        XCTAssertTrue(thread.more)
+        XCTAssertEqual(thread.through, 300 + TeamThread.page - 1)
+    }
+
     func testADayStartsAndOnePersonRunsOn() throws {
         let first = try JSONDecoder().decode(TeamPage.self, from: Data(page.utf8))
         var thread = TeamThread()

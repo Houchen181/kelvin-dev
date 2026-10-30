@@ -19,7 +19,7 @@ final class TeamModel: ObservableObject {
         self.session = session
     }
 
-    /// What is new since the newest message here (the latest messages, the first time).
+    /// What is new since the messages here (the latest messages, the first time).
     func load() async {
         if loading {
             again = true
@@ -29,8 +29,12 @@ final class TeamModel: ObservableObject {
         repeat {
             again = false
             do {
-                let page = try await session.team(after: thread.last)
-                thread.take(page.messages)
+                let page = try await session.team(after: thread.through)
+                if !thread.take(page) {   // the team chat began again
+                    session.readTeam(upTo: page.last, force: true)
+                    let fresh = try await session.team(after: 0)
+                    thread.take(fresh)
+                }
                 loaded = true
                 problem = nil
             } catch {
@@ -44,16 +48,17 @@ final class TeamModel: ObservableObject {
     func older() async {
         guard !loading, thread.more, let first = thread.messages.first?.id else { return }
         loading = true
-        defer { loading = false }
         do {
             let page = try await session.team(before: first)
             thread.take(page.messages, older: true)
         } catch {
             problem = error.localizedDescription
         }
+        loading = false
+        if again { await load() }   // something new came meanwhile
     }
 
-    /// Send the draft under `name`. True when it was sent.
+    /// Send the draft under `name`, then fetch what others wrote meanwhile. True when it was sent.
     @discardableResult
     func send(as name: String) async -> Bool {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -63,13 +68,14 @@ final class TeamModel: ObservableObject {
         do {
             let m = try await session.postTeam(name: name, text: text)
             draft = ""
-            thread.take([m])
+            thread.sent(m)
             problem = nil
-            return true
         } catch {
             problem = error.localizedDescription
             return false
         }
+        await load()
+        return true
     }
 }
 
@@ -194,8 +200,8 @@ struct TeamView: View {
         .background(.bar)
     }
 
-    private func markRead() {
-        if active && model.thread.last > 0 { session.readTeam(upTo: model.thread.last) }
+    private func markRead() {   // every message up to `through` is on screen; one just sent beyond it waits for it
+        if active && model.thread.through > 0 { session.readTeam(upTo: model.thread.through) }
     }
 
     private func askName(thenSend: Bool) {

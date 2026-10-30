@@ -12,6 +12,7 @@ public struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
     public var account: String    // the account signed in when it was sent
     public var via: String        // "portal", or "phone <its name>"
     public var text: String
+    public var date: Date?        // `at`, if it reads
 
     enum CodingKeys: String, CodingKey { case id, at, name, account, via, text }
 
@@ -22,24 +23,26 @@ public struct TeamMessage: Decodable, Equatable, Identifiable, Sendable {
         self.account = account
         self.via = via
         self.text = text
+        date = TeamMessage.time.date(from: at)
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
-        at = c.value(.at, or: "")
+        let at: String = c.value(.at, or: "")
+        self.at = at
         name = c.value(.name, or: "")
         account = c.value(.account, or: "")
         via = c.value(.via, or: "portal")
         text = c.value(.text, or: "")
+        date = TeamMessage.time.date(from: at)
     }
 
-    /// When it was written, if Kelvin's time reads.
-    public var date: Date? {
+    private static let time: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
-        return f.date(from: at)
-    }
+        return f
+    }()
 }
 
 /// GET /api/team: messages, oldest first, and the newest one's id.
@@ -70,16 +73,40 @@ public struct TeamThread: Equatable, Sendable {
     public private(set) var messages: [TeamMessage] = []
     /// Kelvin has messages older than these (scroll back for them).
     public private(set) var more = false
+    /// Every message up to this one is here: the next fetch asks for what came after it. One this phone just sent may
+    /// stand beyond it, until that fetch brings what others wrote meanwhile.
+    public private(set) var through = 0
 
     public init() {}
 
-    /// The newest message here (0: none yet): the next fetch asks for what came after it.
+    /// The newest message here (0: none yet).
     public var last: Int { messages.last?.id ?? 0 }
 
-    /// Add what Kelvin answered: the latest messages (the first fetch), those after `last`, the one just sent, or
-    /// (older) a page from before the first.
+    /// What Kelvin answered to a fetch after `through`. False when its team chat began again (its newest message is
+    /// older than those here): the thread is emptied, to fetch again from the start.
+    @discardableResult
+    public mutating func take(_ page: TeamPage) -> Bool {
+        if page.last < through {
+            self = TeamThread()
+            return false
+        }
+        take(page.messages)
+        return true
+    }
+
+    /// Messages fetched after `through` (the latest ones, the first time), or (older) a page from before the first.
+    /// A full page of new ones starts the thread again from them, the ones between a scroll back away.
     public mutating func take(_ page: [TeamMessage], older: Bool = false) {
+        if !older && page.count >= TeamThread.page { messages = [] }
         if older || messages.isEmpty { more = page.count >= TeamThread.page }
+        if !older, let newest = page.map(\.id).max() { through = max(through, newest) }
+        merge(page)
+    }
+
+    /// A message this phone just sent, shown at once.
+    public mutating func sent(_ message: TeamMessage) { merge([message]) }
+
+    private mutating func merge(_ page: [TeamMessage]) {
         let have = Set(messages.map(\.id))
         let fresh = page.filter { !have.contains($0.id) }
         guard !fresh.isEmpty else { return }

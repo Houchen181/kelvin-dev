@@ -21,8 +21,10 @@ final class AnalysisModel: ObservableObject {
 
     let session: LabSession
     private var auto: (x: Bool, y: Bool, group: Bool)        // follows the run until the person picks it
-    private var gen = 0
-    private var waiting: Task<Void, Never>?
+    private var waiting: Task<Void, Never>?                  // the moment after a change
+    private var asking = false                               // Kelvin works on a spec
+    private var again = false                                // and the person changed it since
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 
     init(session: LabSession, run: String, preset: AnalysisSpec? = nil) {
         self.session = session
@@ -148,39 +150,54 @@ final class AnalysisModel: ObservableObject {
 
     // ------------------------------------------------------------------ Kelvin's answer
 
-    /// Ask Kelvin to work the spec out, a moment after the last change (while the person is typing), or now. An answer
-    /// to a spec changed since is dropped: the one for the change is on its way.
+    /// Ask Kelvin to work the spec out, a moment after the last change (while the person is typing), or now. One
+    /// request at a time, as on the computer: Kelvin finishes every one it starts (fits may take it 45 s), so a change
+    /// made meanwhile is sent when that answer comes, the newest spec only. The task ends when the newest has its answer.
     @discardableResult
     func compute(now: Bool = false) -> Task<Void, Never> {
         waiting?.cancel()
-        gen += 1
-        let mine = gen
-        let asked = spec
         working = true
         let task = Task { [weak self] in
             if !now { try? await Task.sleep(nanoseconds: 600_000_000) }
             guard !Task.isCancelled, let self else { return }
-            do {
-                let r = try await self.session.analyze(asked)
-                guard mine == self.gen else { return }
-                self.result = r
-                self.drawn = r.drawn()
-                self.answered = asked
-                self.problem = nil
-            } catch {
-                guard mine == self.gen else { return }
-                self.problem = error.localizedDescription
-            }
-            self.working = false
+            await Task { await self.ask() }.value   // not cancelled with the wait: Kelvin's answer is kept
         }
         waiting = task
         return task
     }
 
-    /// Keep curve `curve`'s fit with its run, as the plot shows it.
-    func keep(_ curve: Int, replace: Bool = false) async throws -> KeepAnswer {
-        guard let asked = answered else { throw KelvinError(.conflict, "Wait for the fit to be drawn.") }
-        return try await session.keepFit(asked, curve: curve, replace: replace)
+    private func ask() async {
+        if asking {
+            again = true
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in waiters.append(done) }
+            return
+        }
+        asking = true
+        repeat {
+            again = false
+            let asked = spec
+            do {
+                let r = try await session.analyze(asked)
+                if !again {   // else the newer spec's answer is drawn
+                    result = r
+                    drawn = r.drawn()
+                    answered = asked
+                    problem = nil
+                }
+            } catch {
+                if !again { problem = error.localizedDescription }
+            }
+        } while again
+        asking = false
+        working = false
+        let done = waiters
+        waiters = []
+        for w in done { w.resume() }
+    }
+
+    /// Keep curve `curve`'s fit with its run, worked out from `spec`: the one on screen when the person asked.
+    func keep(_ curve: Int, spec: AnalysisSpec, replace: Bool = false) async throws -> KeepAnswer {
+        try await session.keepFit(spec, curve: curve, replace: replace)
     }
 
     /// The curves as a CSV file, every point.
@@ -460,12 +477,18 @@ struct StepRow: View {
 
 /// One curve's fit: its parameters with their errors, how well it fits, and Keep fit.
 struct FitView: View {
+    /// A fit of that name is kept with the run already: replacing it keeps the fit the person asked to keep.
+    struct Replace {
+        let name: String
+        let spec: AnalysisSpec
+    }
+
     let index: Int
     let label: String?
     let fit: FitResult
     @ObservedObject var model: AnalysisModel
     @State var kept: String?
-    @State var replacing: String?
+    @State var replacing: Replace?
     @State var busy = false
     @State var failure: String?
 
@@ -490,19 +513,19 @@ struct FitView: View {
                     Label(w, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
                 }
                 HStack {
-                    Button(kept == nil ? "Keep fit" : "Kept") { keep(replace: false) }
+                    Button(kept == nil ? "Keep fit" : "Kept") { keep() }
                         .buttonStyle(.bordered)
-                        .disabled(busy || kept != nil)
+                        .disabled(busy || kept != nil || model.working)   // only what the plot shows now
                     if busy { ProgressView() }
                     if let kept { Text(kept).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
                 }
             }
         }
         .padding(.vertical, 2)
-        .confirmationDialog("A fit named \(replacing ?? "") is kept with this run already.",
+        .confirmationDialog("A fit named \(replacing?.name ?? "") is kept with this run already.",
                             isPresented: Binding(get: { replacing != nil }, set: { if !$0 { replacing = nil } }),
                             titleVisibility: .visible) {
-            Button("Replace it") { keep(replace: true) }
+            if let r = replacing { Button("Replace it") { keep(replacing: r) } }
         }
         .onChange(of: fit) { _ in kept = nil }   // another fit: it can be kept too
         .failure($failure)
@@ -517,13 +540,18 @@ struct FitView: View {
         return parts.joined(separator: " · ")
     }
 
-    private func keep(replace: Bool) {
+    /// Keep the fit on screen now (or, replacing, the one the person asked to keep before): the spec goes with it, so
+    /// a change made while Kelvin keeps it changes nothing kept.
+    private func keep(replacing old: Replace? = nil) {
+        guard let asked = old?.spec ?? model.answered else { return }
         busy = true
         attempt($failure) {
             defer { busy = false }
-            switch try await model.keep(index, replace: replace) {
-            case .kept(let said): kept = KeepAnswer.name(said).map { "as " + $0 } ?? said
-            case .exists(let name): replacing = name
+            switch try await model.keep(index, spec: asked, replace: old != nil) {
+            case .kept(let said):
+                if model.answered == asked { kept = KeepAnswer.name(said).map { "as " + $0 } ?? said }
+            case .exists(let name):
+                replacing = Replace(name: name, spec: asked)
             }
         }
     }

@@ -36,6 +36,45 @@ final class Script: Transport, @unchecked Sendable {
     }
 }
 
+/// A Kelvin whose analyses take a moment, counting how many it works on at once.
+final class Slow: Transport, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var asked: [String] = []     // each analysis's y, in the order asked
+    private(set) var most = 0                 // analyses at once, at most
+    private var now = 0
+
+    private func reply(_ request: URLRequest, _ body: String) -> (Data, HTTPURLResponse) {
+        (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        switch request.url?.path ?? "" {
+        case "/api/pair": return reply(request, "{\"token\": \"t\", \"name\": \"P\", \"role\": \"control\"}")
+        case "/api/me": return reply(request, "{\"role\": \"control\", \"version\": \"0.3.32\"}")
+        case "/api/runs": return reply(request, "{\"runs\": []}")
+        case "/api/analysis/columns":
+            return reply(request, "{\"run\": \"r1\", \"axes\": [{\"key\": \"B\", \"unit\": \"T\"}],"
+                         + " \"readings\": [{\"key\": \"y1\", \"unit\": \"V\"}, {\"key\": \"y2\", \"unit\": \"V\"}]}")
+        default:
+            let body = try? JSONDecoder().decode(JSONValue.self, from: request.httpBody ?? Data())
+            let y = body?["spec"]?["y"]?.string ?? ""
+            lock.withLock {
+                asked.append(y)
+                now += 1
+                most = max(most, now)
+            }
+            try await Task.sleep(nanoseconds: 300_000_000)
+            lock.withLock { now -= 1 }
+            return reply(request, "{\"curves\": [{\"run\": \"r1\", \"label\": \"r1\", \"n\": 2, \"x\": [0, 1], \"y\": [0, 1]}],"
+                         + " \"axes\": {\"x\": \"B\", \"x_unit\": \"T\", \"y\": \"\(y)\", \"y_unit\": \"V\"}, \"notes\": []}")
+        }
+    }
+
+    func lines(for request: URLRequest) async throws -> (HTTPURLResponse, AsyncThrowingStream<String, Error>) {
+        throw URLError(.unsupportedURL)
+    }
+}
+
 final class Tokens: TokenStore {
     var kept: [UUID: String] = [:]
     func save(_ token: String, for id: UUID) { kept[id] = token }
@@ -191,9 +230,11 @@ final class AppTests: XCTestCase {
     func testTheTeamChatOnThePhone() async throws {
         let script = Script()
         let (app, c) = try await paired(script)
+        script.on("GET /api/me", me.replacingOccurrences(of: "0.3.15", with: "0.3.32"))
         script.on("GET /api/state", "{\"lab\": \"Cryostat lab\", \"team\": 3}")
         let session = app.session(for: c)
         await session.refresh()
+        XCTAssertTrue(session.computer.hasTeamAndAnalysis)
         XCTAssertEqual(session.teamUnread, 0)                                 // what was there before is not news
         script.on("GET /api/state", "{\"lab\": \"Cryostat lab\", \"team\": 5}")
         await session.refresh()
@@ -205,18 +246,30 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(team.thread.messages.map(\.id), [4, 5])
         session.readTeam(upTo: team.thread.last)
         XCTAssertEqual(session.teamUnread, 0)
-        script.on("POST /api/team", "{\"message\": {\"id\": 6, \"name\": \"Ana\", \"via\": \"phone Ana's phone\","
-                  + " \"text\": \"Taking the magnet\"}, \"last\": 6}")
+        let mine = "{\"id\": 7, \"name\": \"Ana\", \"via\": \"phone Ana's phone\", \"text\": \"Taking the magnet\"}"
+        script.on("POST /api/team", "{\"message\": \(mine), \"last\": 7}")
+        script.on("GET /api/team", "{\"messages\": [{\"id\": 6, \"name\": \"Ben\", \"text\": \"The fridge is warming\"},"
+                  + " \(mine)], \"last\": 7}")                                // Ben wrote just before Ana sent hers
         team.draft = "Taking the magnet"
         let sent = await team.send(as: "Ana")
         XCTAssertTrue(sent)
-        XCTAssertEqual(team.thread.last, 6)
         XCTAssertEqual(team.draft, "")
-        XCTAssertEqual(session.teamRead, 6)                                   // its own message is read
+        XCTAssertEqual(team.thread.messages.map(\.id), [4, 5, 6, 7])          // Ben's is there too
+        XCTAssertEqual(team.thread.through, 7)
+        session.readTeam(upTo: team.thread.through)
+        XCTAssertEqual(session.teamUnread, 0)
         app.teamName = "Ana"
         let later = AppModel(transport: script, defaults: defaults, tokens: tokens)
-        XCTAssertEqual(later.teamRead(c), 6)                                  // kept on the phone
+        XCTAssertEqual(later.teamRead(c), 7)                                  // kept on the phone
         XCTAssertEqual(later.teamName, "Ana")
+
+        script.on("GET /api/state", "{\"lab\": \"Cryostat lab\", \"team\": 5}")   // a look that left before Ana sent
+        await session.refresh()
+        XCTAssertEqual(session.teamRead, 7)                                   // not taken back
+        script.on("GET /api/state", "{\"lab\": \"Cryostat lab\", \"team\": 2}")   // the team chat began again
+        await session.refresh()
+        await session.refresh()
+        XCTAssertEqual(session.teamRead, 2)
     }
 
     func testTheDemoLabHasATeamChat() async throws {
@@ -270,11 +323,36 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(model.answered?.fit?.model, "linear")
         XCTAssertEqual(model.result?.curves.first?.fit?.params.count, 2)
         XCTAssertFalse(model.working)
+        let asked = try XCTUnwrap(model.answered)                             // Keep fit pressed on this one
         model.addStep(.fft)                                                   // the demo lab can't: it says so
         await model.compute(now: true).value
         XCTAssertNotNil(model.problem)
         XCTAssertEqual(model.answered?.steps.count, 1)                        // the last plot it could draw stays
-        if case .kept = try await model.keep(0) {} else { XCTFail("not kept") }
+        model.removeSteps(at: IndexSet(integer: 1))
+        model.setY("lockin.x")                                                // changed while Kelvin keeps the fit
+        await model.compute(now: true).value
+        guard case .kept(let said) = try await model.keep(0, spec: asked) else { return XCTFail("not kept") }
+        XCTAssertEqual(KeepAnswer.name(said), "lockin.y linear")              // the fit asked for, not the newer one
+    }
+
+    func testOneAnalysisAtATimeAndTheNewestWins() async throws {
+        let slow = Slow()
+        let app = AppModel(transport: slow, defaults: defaults, tokens: tokens)
+        let c = try await app.pair(at: lan, code: "123456")
+        let model = AnalysisModel(session: app.session(for: c), run: "r1")
+        await model.start()
+        XCTAssertEqual(model.answered?.y, "y1")
+        model.setY("y2")
+        let first = model.compute(now: true)                                  // y2 goes to Kelvin
+        try await Task.sleep(nanoseconds: 50_000_000)
+        model.setY("y1")                                                      // changed while Kelvin works on y2
+        await model.compute(now: true).value
+        await first.value
+        XCTAssertEqual(slow.most, 1)                                          // never two at once
+        XCTAssertEqual(slow.asked, ["y1", "y2", "y1"])
+        XCTAssertEqual(model.answered?.y, "y1")                               // the newest is what is drawn
+        XCTAssertEqual(model.result?.y.key, "y1")
+        XCTAssertFalse(model.working)
     }
 
     func testTheKeychain() throws {
