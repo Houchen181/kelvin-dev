@@ -139,11 +139,21 @@ def test_the_portal_keeps_every_unseen_alarm_beyond_the_latest_ones(tmp_path):
     assert w["id"] in [v["id"] for v in rt.monitor.list()]
 
 
+def test_lab_status_names_the_latest_unseen_alarms_and_counts_the_rest(tmp_path):
+    rt = runtime(tmp_path)
+    for n in range(8):
+        a = rt.monitor._new("error", "x%d" % n, "x%d reports an error" % n)
+        rt.monitor._clear(a.id, "x%d reports no more errors" % n)
+    lines = rt.monitor.lines()
+    assert len(lines) == 6 and "x7 reports an error" in lines[0]                    # the newest first
+    assert lines[-1].startswith("and 3 more alarms that cleared before anyone said Got it")
+
+
 # ------------------------------------------------------------------- hysteresis and repeats folded into one alarm
 
 def test_a_noisy_reading_at_its_threshold_raises_one_alarm_not_ten(lab, tmp_path):
-    """t09 round 2: a set point of 5 K against a watch "above 5 K" raised 10 alarms, each a notice and a push, in 90 s on
-    +-4 mK of noise. It clears only once back past its threshold by more than its noise."""
+    """t09 round 2: a set point of 5 K against a watch "above 5 K" raised 10 alarms, each a notice and a push, in 90 s
+    on +-4 mK of noise. It clears only once back past its threshold by more than its noise."""
     gate, monitor, notices = watching(lab, tmp_path)
     w = monitor.add(Watch("tc.T_sample", above=5.0, every=1))
     for k in range(90):
@@ -174,7 +184,7 @@ def test_an_alarm_that_comes_back_before_anyone_looked_folds_into_one_with_a_cou
     assert [e["type"] for e in gate.log.events()].count("alarm_again") == 2        # the record has every one
     monitor.acknowledge(alarm.id, "Ada (portal)")
     reads(lab, 25.0, 30)
-    monitor.tick()                                                                 # seen: a new one goes up, and is told
+    monitor.tick()                                                         # seen: a new one goes up, and is told
     assert len(monitor.alarms) == 2 and monitor.alarms[0].count == 1 and notices[-1][0] == "alarm"
     reads(lab, 2.0, 30)
     monitor.tick()
@@ -246,6 +256,17 @@ def test_a_wait_that_gives_up_raises_the_alarm_the_prompt_promised(lab, tmp_path
         lab.clock.sleep(30)
         monitor.tick()
     assert alarm.cleared is None
+
+
+def test_a_ramp_that_stalls_on_a_heater_range_too_low_says_so(lab, make_engine):
+    """t07: a ramp stuck at what the heater's range allows was blamed on the instrument."""
+    engine, gate, _ = make_engine([True, True, True])
+    assert gate.set("tc", "heater_range", "low").ok
+    report = engine.run("plan: warm\nsweep:\n  tc.setpoint: { ramp: [{to: 25}], every: 10, stall: 120 }\n"
+                        "measure: [tc.T_sample]\n")
+    assert report.status == "aborted" and "has not got closer to 25 K" in report.message
+    assert "tc.heater_range is only low: a higher range may be needed" in report.message
+    assert "stuck" not in report.message
 
 
 def test_the_watchdogs_alarm_becomes_the_wait_that_gave_up(lab, tmp_path):

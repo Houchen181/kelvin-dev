@@ -2324,7 +2324,8 @@ class LabRuntime:
             self._queue_thread = threading.Thread(target=self._queue_loop, args=(grants, by), daemon=True,
                                                   name="kelvin-queue")
             self._queue_thread.start()
-            return "queue started: %s\n%s\n%s" % (title[len("Run the queue: "):], self.queue.text(), self.alarms_reach())
+            return "queue started: %s\n%s\n%s" % (title[len("Run the queue: "):], self.queue.text(),
+                                                  self.alarms_reach())
         return self._do("starting the queue", prepare, stoppable=True,
                         uses=self._uses("\n".join(item.text for item in items)))   # the rest stay readable
 

@@ -337,12 +337,16 @@ class Monitor:
         """The alarms that cleared before anyone said Got it (overnight, say): shown until someone does."""
         return [a for a in self.alarms if a.cleared is not None and not a.acknowledged]
 
-    def lines(self) -> List[str]:
-        """The alarms a person should hear of, for lab_status and the watches tool: those on, then those that went up
-        and cleared while nobody looked."""
+    def lines(self, most: int = 5) -> List[str]:
+        """The alarms a person should hear of, for lab_status and the watches tool: those on, then the latest that went
+        up and cleared while nobody looked (at most `most` of them, and how many more)."""
         out = ["ALARM: %s%s%s" % (a.text, " (%s)" % "; ".join(a.actions) if a.actions else "",
                                   " (%d times)" % a.count if a.count > 1 else "") for a in self.active()]
-        out += ["ALARM (cleared, nobody has said Got it yet): %s" % a.line() for a in self.unseen()]
+        unseen = self.unseen()
+        out += ["ALARM (cleared, nobody has said Got it yet): %s" % a.line() for a in unseen[:most]]
+        if len(unseen) > most:
+            out.append("and %d more alarms that cleared before anyone said Got it (the Lab panel's Alarm history)"
+                       % (len(unseen) - most))
         return out
 
     def acknowledge(self, alarm_id: str, by: str = "") -> Optional[Alarm]:

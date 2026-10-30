@@ -18,7 +18,7 @@ from .eventlog import EventLog, RunStore
 from .forecast import Forecast, action_of, runs
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
 from .instrument import InstrumentOff, SensorError, Stopped
-from .monitor import Approach, rate_per_s
+from .monitor import Approach, rate_per_s, switch_words
 from .plans import MAX_POINTS, Axis, Plan, PlanError, Stabilize, Step, load_plan
 from .timing import Took, away as away_from_safe, settings_of, steps as timing_steps
 
@@ -471,7 +471,8 @@ class RunEngine:
         (dry_run), or in auto mode for a run nobody approves: there the dry run stands in for the person's look.
         Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal.
         folder: where the run's folder goes (its chat's folder; else the data folder's runs/). since: (the gate's stop
-        generation, the lab's stops) from when the caller began (a queue picking its item): a stop since then ends it."""
+        generation, the lab's stops) from when the caller began (a queue picking its item): a stop since then ends
+        it."""
         # a stop while it is checked or approved ends it too
         since = since or (self.gate.stop_generation, self.lab.stops.count)
         try:
@@ -908,9 +909,10 @@ class RunEngine:
                     if there is not None and now - there >= leg.hold - 1e-9:
                         break
                     if there is None and axis.stall and stuck >= axis.stall:
-                        raise _Abort("%s has not got closer to %s for %s (it reads %s): the instrument may be stuck"
-                                     % (followed, spec.show(leg.to), _dur(stuck),
-                                        spec.show(value) if _num(value) else repr(value)))
+                        switch = switch_words(inst, spec)   # a heater range too low, not a stuck instrument
+                        raise _Abort("%s has not got closer to %s for %s (it reads %s%s)%s" % (
+                            followed, spec.show(leg.to), _dur(stuck), spec.show(value) if _num(value) else repr(value),
+                            "; " + switch if switch else "", "" if switch else ": the instrument may be stuck"))
                     due = max(due + axis.every, clock.now())
                     if not lab.stops.sleep(clock, max(0.0, due - clock.now()), stops):
                         raise _Abort("stop requested")   # a stop ends the wait for the next point at once

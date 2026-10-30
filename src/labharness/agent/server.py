@@ -65,7 +65,8 @@ You are connected to a physics lab through Kelvin.
   its reading gets there: in set_value, in a plan's setup: and at each value of a stepped sweep, and nothing is
   measured on the way (a 300 K to 2 K cool-down holds the run half an hour or more). To measure while it ramps
   (R(T) on a cool-down, a field sweep), sweep it with ramp: (validate_plan shows the form); to stop a loop on a
-  reading, until: or while:. A wait whose reading stops getting closer ends after 10 min, and an alarm says so.
+  reading, until: or while:. A wait whose reading stops getting closer ends after 10 min, and an alarm says so; a
+  set point whose switch is off (a heater range at off) isn't waited for, and the result says which switch.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - The lab's memory keeps what people and Kelvin learned about this lab, for every chat and agent: how it is wired,
   where references come from, what excites the sample, lessons (what to do first, what to avoid), each note with who
