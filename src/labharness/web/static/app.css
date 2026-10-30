@@ -1041,7 +1041,7 @@ body.resizing .plot-svg { pointer-events: none; }
   .app.float-two #sidecol { top: 50%; }
   .dock-col > * { width: auto !important; flex: 1 1 0; min-height: 0; }
   .dock-col > :not([hidden]) ~ :not([hidden]) { border-top: 1px solid var(--line); }
-  .dock-col, .scrim { top: 56px; }   /* below the top bar, whose buttons open and close each panel */
+  .dock-col, .scrim { top: var(--topbar-h, 57px); }   /* below the top bar (fitLayout measures it): its buttons open and close each panel */
   .pane-resize { display: none; }
 }
 @media (max-width: 820px) {
