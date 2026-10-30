@@ -59,6 +59,44 @@ final class WalkthroughTests: XCTestCase {
         shown.tap()
     }
 
+    /// Wholly on screen: below the navigation bar and above the tabs.
+    func onScreen(_ element: XCUIElement) -> Bool {
+        guard element.exists else { return false }
+        let f = element.frame
+        let top = app.navigationBars.firstMatch.exists ? app.navigationBars.firstMatch.frame.maxY : 0
+        let bottom = app.tabBars.firstMatch.exists ? app.tabBars.firstMatch.frame.minY : app.frame.maxY
+        return f.minY >= top && f.maxY <= bottom
+    }
+
+    /// Scroll the list until `element` is on screen, looking further down first (or up). A list holds only the rows
+    /// near the screen, so one far off isn't there until the list gets near it.
+    @discardableResult
+    func reach(_ element: XCUIElement, _ doing: String, down: Bool = true, file: StaticString = #filePath,
+               line: UInt = #line) -> XCUIElement {
+        let list = app.collectionViews.firstMatch
+        var moves = 0
+        while !onScreen(element) && moves < 16 {
+            let further = (moves < 8) == down
+            // dragged by the margin beside the rows, so no row's control takes the touch
+            let from = list.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: further ? 0.65 : 0.35))
+            let to = list.coordinate(withNormalizedOffset: CGVector(dx: 0.98, dy: further ? 0.35 : 0.65))
+            from.press(forDuration: 0.05, thenDragTo: to, withVelocity: .slow, thenHoldForDuration: 0.2)
+            moves += 1
+        }
+        if !onScreen(element) {
+            print("WALKTHROUGH-DEBUG while \(doing):\n\(app.debugDescription)")
+            XCTFail("can't \(doing)", file: file, line: line)
+        }
+        return element
+    }
+
+    /// Tap the list's row with something labelled `label` (or starting so) at `x` across it: a menu in a row opens
+    /// only from its own part of the row.
+    func tapRow(_ label: String, at x: CGFloat, _ doing: String, file: StaticString = #filePath, line: UInt = #line) {
+        let row = app.cells.containing(NSPredicate(format: "label BEGINSWITH %@", label)).firstMatch
+        reach(row, doing, file: file, line: line).coordinate(withNormalizedOffset: CGVector(dx: x, dy: 0.5)).tap()
+    }
+
     func testTheWelcomeScreensSheetsCanBeFilledInAndLeft() {
         launch([])
         must(app.buttons["Pair with a code"], "see the welcome screen").tap()
@@ -81,6 +119,8 @@ final class WalkthroughTests: XCTestCase {
         XCTAssertTrue(must(app.buttons["Sign in"], "find Sign in").isHittable, "Sign in is under the keyboard")
         app.navigationBars.buttons["Cancel"].tap()
         gone(app.navigationBars["Kelvin account"], "leave the account sheet")
+        let notNow = app.buttons["Not Now"]   // iOS offers to save the password typed, though nothing was signed in to
+        if notNow.waitForExistence(timeout: 5) { notNow.tap() }
 
         must(app.buttons["Try a demo lab"], "find the demo lab").tap()
         must(app.navigationBars["Demo lab"], "open the demo lab")
@@ -124,13 +164,18 @@ final class WalkthroughTests: XCTestCase {
         must(app.staticTexts["field-sweep-D3"], "find the field sweep").tap()
         must(app.buttons["Analyze"], "find Analyze").tap()
         must(app.navigationBars["Analysis"], "open Analysis")
-        must(app.buttons["lockin.x (V)"], "find y").tap()
+        tapRow("y, ", at: 0.9, "find y")   // its menu is on the right
         must(app.buttons["lockin.y (V)"], "choose another y").tap()
-        must(app.buttons["Add a step"], "find Add a step").tap()
+        must(app.buttons["y, lockin.y (V)"], "see the y chosen")
+        tapRow("Add a step", at: 0.15, "find Add a step")
         must(app.buttons["Antisymmetrize"], "choose a step").tap()
-        must(app.buttons["Model"], "find the fit's model").tap()
+        tapRow("Model", at: 0.9, "find the fit's model")
         must(app.buttons["linear"], "choose a model").tap()
-        must(app.buttons["Keep fit"], "see the fit", timeout: 20).tap()
+        let list = app.collectionViews.firstMatch
+        list.swipeDown()
+        list.swipeDown()   // back up to the plot, where the fit shows
+        let keep = must(app.buttons["Keep fit"], "see the fit", timeout: 20)
+        reach(keep, "get to Keep fit").tap()
         must(app.buttons["Kept"], "keep the fit", timeout: 20)
         app.buttons["Export CSV"].tap()
         must(app.navigationBars.buttons["Done"], "see the CSV", timeout: 20).tap()
