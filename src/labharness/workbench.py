@@ -112,13 +112,17 @@ def _times(y_unit: str, x_unit: str) -> str:
 
 
 def _smooth(np: Any, y: Any, points: int) -> Any:
+    """Savitzky-Golay; the first and last h points from the quadratic fitted to the first and last window, at their
+    own places (no padding past the ends, which flattened a slope there)."""
     h = max(1, int(points) // 2)
     if y.size < 2 * h + 1:
         raise AnalysisError("smoothing over %d points needs at least that many points" % (2 * h + 1))
     a = np.vander(np.arange(-h, h + 1, dtype=float), 3, increasing=True)
-    c = np.linalg.pinv(a)[0]
-    padded = np.concatenate([np.full(h, y[0]), y, np.full(h, y[-1])])
-    return np.convolve(padded, c[::-1], mode="valid")
+    fit = np.linalg.pinv(a)   # a window's quadratic: its coefficients from its points
+    inner = np.convolve(y, fit[0][::-1], mode="valid")
+    first = np.vander(np.arange(-h, 0, dtype=float), 3, increasing=True) @ (fit @ y[:2 * h + 1])
+    last = np.vander(np.arange(1, h + 1, dtype=float), 3, increasing=True) @ (fit @ y[-(2 * h + 1):])
+    return np.concatenate([first, inner, last])
 
 
 def step(np: Any, x: Any, y: Any, xu: str, yu: str, xn: str, yn: str, s: Dict[str, Any]

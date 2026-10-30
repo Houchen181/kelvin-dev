@@ -27,16 +27,30 @@ class ExprError(ValueError):
     pass
 
 
+def moving_average(np: Any, y: Any, n: int) -> Any:
+    """The mean of the n points around each (a point without a number keeps none). Near the ends the window holds
+    fewer points and the mean is over those, never over zeros past the sweep: zero padding pulled the ends down, so
+    at_min(smooth(...)) gave the sweep's first frequency, and a recipe tuned the next run off its resonance."""
+    y = np.asarray(y, dtype=float)
+    ok = np.isfinite(y)
+    k = np.ones(int(n))
+    lead = (int(n) - 1) // 2   # the window's points before its center, as numpy's mode="same" takes them
+    total = np.convolve(np.where(ok, y, 0.0), k, mode="full")[lead:lead + y.size]
+    count = np.convolve(ok.astype(float), k, mode="full")[lead:lead + y.size]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(ok & (count > 0), total / np.maximum(count, 1.0), np.nan)
+
+
 def functions(np: Any) -> Dict[str, Callable[..., Any]]:
     def deriv(y: Any, x: Any) -> Any:
         return np.gradient(y, x)
 
     def smooth(y: Any, n: Any) -> Any:
-        """A moving average over n points."""
+        """A moving average over n points; near the ends, over the points there are."""
         n = int(n)
-        if not 1 <= n <= min(1001, max(1, np.size(y))):
-            raise ExprError("smooth(y, n) needs 1 <= n <= %d" % min(1001, max(1, np.size(y))))
-        return np.convolve(y, np.ones(n) / n, mode="same")
+        if not 1 <= n <= 1001:
+            raise ExprError("smooth(y, n) needs 1 <= n <= 1001")
+        return moving_average(np, y, n)
 
     def interp(x0: Any, x: Any, y: Any) -> Any:
         order = np.argsort(x)

@@ -16,6 +16,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Optional, Sequence
 
+from .expr import moving_average
+
 
 def _model(np: Any, x: Any, p: Sequence[float]) -> Any:
     a, rho, t0, tc = p
@@ -59,7 +61,7 @@ def fit_g2(delays: Sequence[float], g2: Sequence[float], counts: Optional[Sequen
     if not a0 > 0:
         raise ValueError("no coincidences to fit")
     k = max(1, x.size // 50)   # the dip's centre from a lightly smoothed curve, not one noisy bin
-    smooth = np.convolve(y, np.ones(2 * k + 1) / (2 * k + 1), mode="same")
+    smooth = moving_average(np, y, 2 * k + 1)   # no zeros past the ends
     centre = np.abs(x - np.median(x)) < span / 4   # the dip (or peak) is where the curve is furthest from the wings
     i0 = int(np.argmax(np.where(centre, np.abs(smooth - a0), -np.inf)))
     t0 = float(x[i0])
