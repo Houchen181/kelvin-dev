@@ -3127,14 +3127,22 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"runs": await asyncio.to_thread(runtime.runs_index, limit)})
 
     async def stop_run(request: Request) -> Response:
+        """Stop the run in progress. {queue: true}: the queue too, nothing else starts after this scan. With no run in
+        progress while the queue runs (between its scans: a step's wait or settle), the queue's stop: a phone's Stop
+        there did nothing, and the queue went on to the next scan."""
         try:
             body = await request.json()
         except ValueError:
             body = {}
-        if isinstance(body, dict) and body.get("queue"):   # the queue too: nothing else starts after this scan
+        if isinstance(body, dict) and body.get("queue"):
             runtime.stop(person(request))
             return JSONResponse({"ok": True})
-        return JSONResponse({"ok": runtime.stop_run(person(request))})
+        if runtime.stop_run(person(request)):
+            return JSONResponse({"ok": True})
+        if runtime.queue.state in ("running", "pausing"):   # between its scans
+            runtime.stop(person(request))
+            return JSONResponse({"ok": True})
+        return JSONResponse({"ok": False})
 
     async def queue(request: Request) -> Response:
         """GET: the scan queue. POST {op, ...}: a person's change to it. start asks for the queue's approval as usual

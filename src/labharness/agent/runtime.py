@@ -2347,11 +2347,14 @@ class LabRuntime:
                     break
                 q.mark(item, "running")
                 position = q.items.index(item) + 1
+                # a stop from here on ends it: one between two items once let the next one start (Stop sets the
+                # queue pausing under this lock, then stops)
+                since = self.gate.stop_generation, self.lab.stops.count
             lost, t0 = self.monitor.mark(), time.time()
-            ok, message = self._queue_item(item, position, grants, by)
+            ok, message = self._queue_item(item, position, grants, by, since)
             if not ok:   # an instrument that stopped answering ended it: its alarm goes up now, with the pause
                 self.monitor.lost_since(lost)   # and the pause says which alarm stopped it ("stop requested" doesn't)
-                said = [a.text for a in list(self.monitor.alarms) if a.raised >= t0 and a.text not in message]
+                said = [a.text for a in list(self.monitor.alarms) if a.latest >= t0 and a.text not in message]
                 message += "; alarm: " + "; ".join(said) if said else ""
             with q.lock:   # a person's stop of the scan is never an error to go on after
                 if not ok and q.state == "running" and (q.on_error == "pause" or item.status == "stopped"):
@@ -2378,10 +2381,13 @@ class LabRuntime:
         except Exception:
             return None
 
-    def _queue_item(self, item: Item, position: int, grants: Dict[str, Allowed], by: str) -> Tuple[bool, str]:
-        """Run one item under the queue's approval. (ok, message)"""
+    def _queue_item(self, item: Item, position: int, grants: Dict[str, Allowed], by: str,
+                    since: Optional[Tuple[int, int]] = None) -> Tuple[bool, str]:
+        """Run one item under the queue's approval. (ok, message). since: the stops as they were when the queue
+        picked it (a stop since then ends it)."""
         q = self.queue
-        stops = self.gate.stop_generation
+        since = since or (self.gate.stop_generation, self.lab.stops.count)
+        stops = since[0]
         with self.lock:
             if self.gate.stop_generation != stops:   # stopped while it waited for the lab: it never starts
                 q.mark(item, "stopped", "a person pressed Stop before it started")
@@ -2396,7 +2402,8 @@ class LabRuntime:
                         meta = self._attribute(plan, item.project, item.incognito, item.unshared, item.legacy)
                         with self._device_protection(meta), self.lock.only(uses + self._involved(plan.requires)):
                             report = self.engine.run(plan, meta=dict(meta, queue={
-                                "item": item.id, "position": position, "note": item.note}), folder=item.folder)
+                                "item": item.id, "position": position, "note": item.note}), folder=item.folder,
+                                since=since)
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
@@ -2405,7 +2412,7 @@ class LabRuntime:
                             self._auto_report(report.run_id)
                         return status == "done", report.message
                     with self.lock.only(uses):
-                        return self._queue_step(item)
+                        return self._queue_step(item, stops)
             except Exception as e:   # an instrument that stopped answering, a plan that no longer parses...
                 q.mark(item, "failed", str(e)[:300])
                 return False, str(e)
@@ -2414,10 +2421,10 @@ class LabRuntime:
                 self._caps_if_waiting()
                 self._refresh()
 
-    def _queue_step(self, item: Item) -> Tuple[bool, str]:
+    def _queue_step(self, item: Item, gen: Optional[int] = None) -> Tuple[bool, str]:
         from ..engine import _Abort
         step, q = load_step(item.text), self.queue
-        gen = self.gate.stop_generation
+        gen = self.gate.stop_generation if gen is None else gen
         for instr, param, value in step.sets:
             if self.gate.stop_generation != gen:
                 q.mark(item, "stopped", "stopped before %s.%s was set" % (instr, param))

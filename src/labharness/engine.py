@@ -465,12 +465,14 @@ class RunEngine:
         return report
 
     def run(self, plan: Any, dry_run: bool = False, meta: Optional[Dict[str, Any]] = None,
-            folder: Any = None) -> RunReport:
+            folder: Any = None, since: Optional[Tuple[int, int]] = None) -> RunReport:
         """Validate, check the instruments, ask once for the drive ranges, run, log, analyse. No dry run unless asked
         (dry_run), or in auto mode for a run nobody approves: there the dry run stands in for the person's look.
         Caution for drives comes from the limits, the approval, ramps and guard readings, not a rehearsal.
-        folder: where the run's folder goes (its chat's folder; else the data folder's runs/)."""
-        since = self.gate.stop_generation, self.lab.stops.count   # a stop while it is checked or approved ends it too
+        folder: where the run's folder goes (its chat's folder; else the data folder's runs/). since: (the gate's stop
+        generation, the lab's stops) from when the caller began (a queue picking its item): a stop since then ends it."""
+        # a stop while it is checked or approved ends it too
+        since = since or (self.gate.stop_generation, self.lab.stops.count)
         try:
             plan = plan if isinstance(plan, Plan) else load_plan(plan)
         except PlanError as e:

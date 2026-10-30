@@ -150,13 +150,24 @@
 
     const live = s.live;
     const running = live && live.status === "running";
-    if (changed("run", running ? [live.run_id] : live)) {   // the card is built once per run; progress updates in place
+    // the queue between its scans (a step's wait or settle): Stop ends it there, as the computer's Stop does
+    const q = s.queue || {};
+    const queued = !running && (q.state === "running" || q.state === "pausing");
+    const item = queued ? (q.items || []).find((i) => i.id === q.running) : null;
+    const step = item ? [item.id, (q.items || []).indexOf(item) + 1, (q.items || []).length, q.state] : queued;
+    if (changed("run", running ? [live.run_id] : [live, step])) {   // the card is built once per run; progress updates in place
       if (running) {
         $("run").replaceChildren(h("h2", {}, "Running " + live.plan),
           h("div", { class: "bar" }, h("i", { id: "run-bar" })),
           h("div", { class: "row" }, h("span", { class: "grow muted", id: "run-info" }),
             act("Stop", "danger", async () => {   // at once: no dialog on the stop path
               await api("/api/runs/stop", {});
+            })));
+      } else if (queued) {
+        $("run").replaceChildren(h("h2", {}, item ? "Queue: " + item.name + " (" + step[1] + " of " + step[2] + ")" : "Queue running"),
+          h("div", { class: "row" }, h("span", { class: "grow muted" }, q.state === "pausing" ? "pauses after this item" : "between scans"),
+            act("Stop", "danger", async () => {   // at once: the queue and anything it is waiting on
+              await api("/api/stop", {});
             })));
       } else {
         $("run").replaceChildren(h("h2", {}, "No run in progress"),
