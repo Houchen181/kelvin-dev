@@ -8,6 +8,7 @@ their own, never that one.
 """
 import re
 import socket
+from typing import Any, List
 
 import pytest
 
@@ -20,13 +21,15 @@ from simlab import build_virtual_lab, demo_envelope  # noqa: E402
 from labharness.agent.approval import WebApprover  # noqa: E402
 from labharness.agent.runtime import LabRuntime  # noqa: E402
 from labharness.agent.server import build_server  # noqa: E402
+from labharness.gate import Approver  # noqa: E402
 
 LABMASTER_READ = ["labmaster_status", "labmaster_functions", "labmaster_saved", "labmaster_home_cards"]
 LABMASTER_ACT = ["labmaster_add_block", "labmaster_update_block", "labmaster_delete_block", "labmaster_control",
                  "labmaster_import_script", "labmaster_home_add_card", "labmaster_home_remove_card"]
 LABMASTER_TOOLS = LABMASTER_READ + LABMASTER_ACT
-# the calls that start, end or change a run: they need the user's own yes (confirm=true) before the panel is asked
-GATED = ("start", "stop", "skip", "reset", "end_wait", "set_wait", "next_rep", "safe_stop")
+# the calls that change a run: they need the user's own yes (confirm=true) before the panel is asked. start is not
+# among them: it asks a person on their approval card, and stop/safe_stop need no confirmation (they only end a run)
+GATED = ("skip", "reset", "end_wait", "set_wait", "next_rep")
 START = "python -u panel_server.py --sim --port 8770"
 DEFAULT_URL = "http://127.0.0.1:8770"
 
@@ -108,7 +111,7 @@ def test_every_tool_answers_when_the_panel_is_not_running(runtime, tmp_path, mon
                ("labmaster_add_block", {"block": "blk_wait"}),
                ("labmaster_update_block", {"uid": "blk_1", "params": {"minutes": 2}}),
                ("labmaster_delete_block", {"uid": "blk_1"}),
-               ("labmaster_control", {"action": "start", "confirm": True}),
+               ("labmaster_control", {"action": "stop"}),
                ("labmaster_import_script", {"path": "scripts/example_measurement.py"}),
                ("labmaster_home_add_card", {"kind": "note", "title": "Test note", "text": "From the test."}),
                ("labmaster_home_remove_card", {"card_id": "card_missing"}))
@@ -146,8 +149,93 @@ def test_gated_control_needs_the_users_yes_first(runtime, action):
 def test_confirmed_control_goes_to_the_panel(runtime, monkeypatch):
     url = closed_url()
     point_at(monkeypatch, url)
-    (text,) = call(runtime, ("labmaster_control", {"action": "stop", "confirm": True}))
+    (text,) = call(runtime, ("labmaster_control", {"action": "stop"}))
     assert "labMaster panel not running at " + url in text, text
+
+
+def test_stop_and_safe_stop_need_no_confirmation(runtime, monkeypatch):
+    """Only a run needs a person: stopping one never waits for a confirm the AI could give itself."""
+    url = closed_url()
+    point_at(monkeypatch, url)
+    stopped, safe = call(runtime, ("labmaster_control", {"action": "stop"}),
+                         ("labmaster_control", {"action": "safe_stop"}))
+    for text in (stopped, safe):
+        assert "labMaster panel not running at " + url in text, text
+        assert "confirmation first" not in text, text
+
+
+class RecordingApprover(Approver):
+    """A person who answers the approval card at once, and remembers what was asked."""
+
+    def __init__(self, answer: bool):
+        self.answer = answer
+        self.requests: List[Any] = []
+
+    def approve(self, request: Any) -> bool:
+        self.requests.append(request)
+        request.note = "approved by a person (portal)" if self.answer else "declined by a person (portal)"
+        return self.answer
+
+
+@pytest.fixture
+def panel_state(monkeypatch):
+    """The panel's own answer for the tests that must not reach a real one: two blocks and nothing running."""
+    lm = bridge()
+    snapshot = {"sequence": {"name": "R(T) demo", "items": [
+        {"uid": "it_1", "name": "example_measurement", "kind": "script",
+         "target": "scripts/example_measurement.py", "params": {"reps": 1}},
+        {"uid": "it_2", "name": "Safe stop", "kind": "safe_stop", "params": {}}]}}
+    monkeypatch.setattr(lm, "state", lambda: {"ok": True, "url": "u", "error": None, "state": snapshot})
+    return snapshot
+
+
+def person_runtime(tmp_path, answer):
+    lab = build_virtual_lab(seed=1)
+    return LabRuntime(lab, RecordingApprover(answer), tmp_path / "data", demo_envelope(lab))
+
+
+def test_start_asks_a_person_and_runs_only_after_a_yes(tmp_path, panel_state, monkeypatch):
+    """The AI cannot start the panel's sequence: the call blocks on a person's approval card, and the panel is asked
+    only after that yes."""
+    runtime = person_runtime(tmp_path, True)
+    lm = bridge()
+    asked: List[Any] = []
+    monkeypatch.setattr(lm, "control",
+                        lambda action, **kw: (asked.append((action, kw)),
+                                              {"ok": True, "error": None, "state": {}, "message": "started"})[1])
+    (text,) = call(runtime, ("labmaster_control", {"action": "start"}))
+    cards = runtime.approver.requests
+    assert len(cards) == 1, "start reached the panel without asking a person"
+    card = cards[0]
+    assert "labMaster" in card.title and "sequence" in card.title
+    assert any("R(T) demo" in line for line in card.items), card.items
+    assert any("example_measurement" in line for line in card.items), card.items
+    assert any("safety gate" in line for line in card.items), card.items     # says what cannot be checked
+    assert any("only a person" in line.lower() for line in card.items), card.items
+    assert asked == [("start", {})], asked
+    assert "started" in text, text
+    assert "approved" in text, text          # the answer says a person's card was what started it
+
+
+def test_start_declined_by_the_person_starts_nothing(tmp_path, panel_state, monkeypatch):
+    runtime = person_runtime(tmp_path, False)
+    lm = bridge()
+    asked: List[Any] = []
+    monkeypatch.setattr(lm, "control",
+                        lambda action, **kw: (asked.append(action),
+                                              {"ok": True, "error": None, "state": {}, "message": "x"})[1])
+    (text,) = call(runtime, ("labmaster_control", {"action": "start"}))
+    assert asked == [], "the panel was asked to start although the person declined"
+    assert text.startswith("not started: "), text
+    assert "declined" in text, text
+
+
+def test_start_without_a_person_to_ask_starts_nothing(tmp_path, panel_state):
+    runtime = person_runtime(tmp_path, True)
+    runtime.approver = None          # no approval card on this Kelvin: the AI still cannot start anything
+    (text,) = call(runtime, ("labmaster_control", {"action": "start"}))
+    assert text.startswith("not started: "), text
+    assert "person" in text
 
 
 def test_control_refuses_what_it_does_not_know(runtime):

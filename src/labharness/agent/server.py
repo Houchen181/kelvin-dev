@@ -23,6 +23,7 @@ from .. import carddraft, datatools, expr, fitting, guide
 from .._version import __version__
 from ..catalog import MAX_ROWS as QUERY_ROWS, SCHEMA_TEXT
 from ..collection import Collection
+from ..gate import ApprovalRequest
 from ..labconfig import load_envelope
 from ..homelab import open_home_lab
 from .approval import ApprovalServer, WebApprover
@@ -220,19 +221,68 @@ def lab_memory_part(rt: LabRuntime) -> str:
 LABMASTER_COMMAND = "python -u panel_server.py --sim --port 8770"
 LABMASTER_ACTIONS = ("start", "pause", "pause_rep", "next_rep", "skip", "stop", "reset", "end_wait", "set_wait",
                      "safe_stop")
-LABMASTER_CONFIRM = ("start", "stop", "skip", "reset", "end_wait", "set_wait", "next_rep",
-                     "safe_stop")   # a run starts or changes: the user's own yes first (panel_mcp.py's rule)
+# start is not here: it is not the AI's to give at all. It asks a person on the approval card first (approver.approve),
+# and the sequence runs only after that person's own yes - the AI can never start the panel's queue itself.
+LABMASTER_CONFIRM = ("skip", "reset", "end_wait", "set_wait", "next_rep")
+# stop and safe_stop are not here either: they only end a run, and someone may need them at once.
 LABMASTER_WHY = {
-    "start": "it runs the queued blocks on the instruments",
-    "stop": "it kills the running measurement",
     "skip": "it passes over the running block",
     "reset": "it discards the sequence and its progress",
     "end_wait": "it ends the running wait and starts the next block before its time",
     "set_wait": "it changes the time left of the running wait",
     "next_rep": "it ends the running block after its current rep and starts the next block",
-    "safe_stop": "it stops the sequence and runs the safe-stop script, which switches the instruments' outputs off",
 }
 LABMASTER_CARD_KINDS = ("note", "metric", "checklist", "link", "sequence")
+
+
+def _labmaster_start_request(lm: Any) -> ApprovalRequest:
+    """The card a person answers before labMaster runs its sequence: exactly what will run, and what Kelvin's gate
+    does not cover. Its `note` says afterwards who answered (the approver sets it)."""
+    items: List[str] = []
+    answer, _why = _labmaster_call(lm.state)
+    state = answer.get("state") if isinstance(answer, dict) and answer.get("ok") else {}
+    state = state if isinstance(state, dict) else {}
+    seq = state.get("sequence") if isinstance(state.get("sequence"), dict) else {}
+    blocks = _labmaster_items(state)
+    name = str(seq.get("name") or "the panel's sequence")
+    items.append("Sequence %r: %d block(s)" % (name, len(blocks)))
+    for number, item in enumerate(blocks[:8], 1):
+        bits = []
+        kind = str(item.get("kind") or "")
+        if kind:
+            bits.append(kind)
+        target = str(item.get("target") or "")
+        if target:
+            bits.append(target)
+        params = item.get("params") if isinstance(item.get("params"), dict) else {}
+        if params:
+            bits.append(", ".join("%s=%s" % (k, _labmaster_short(v, 30)) for k, v in list(params.items())[:4]))
+        items.append("%d. %s%s" % (number, _labmaster_name(item) or "?",
+                                   (" (" + "; ".join(bits) + ")") if bits else ""))
+    if len(blocks) > 8:
+        items.append("... and %d more block(s)" % (len(blocks) - 8))
+    items.append("labMaster runs these blocks itself, in its own Python: Kelvin's safety gate does not check, ramp, "
+                 "limit or watch them, and its Stop cannot bring them to safe values.")
+    if any(str(item.get("kind") or "") == "script" for item in blocks):
+        items.append("The scripts drive the instruments as they do: check their parameters above before you approve.")
+    items.append("Only a person at this computer can start this sequence; Kelvin's AI cannot.")
+    return ApprovalRequest("Start labMaster's measurement sequence?", items)
+
+
+def _labmaster_ask_to_start(lm: Any, rt: Any) -> str:
+    """"" when a person approved the start, else why it did not run. Blocks the tool call until they answer."""
+    approver = getattr(rt, "approver", None)
+    if approver is None or not hasattr(approver, "approve"):
+        return ("not started: this Kelvin has no approval card to ask a person with, so the panel's sequence is the "
+                "person's to start in the Sequence page")
+    request = _labmaster_start_request(lm)
+    try:
+        approved = bool(approver.approve(request))
+    except Exception as e:   # noqa: BLE001 - an approver that cannot ask must not start anything
+        return "not started: asking a person failed (%s: %s)" % (type(e).__name__, e)
+    if not approved:
+        return "not started: %s" % (request.note or "the person declined")
+    return ""
 
 
 def _labmaster_bridge():
@@ -1433,21 +1483,27 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=ACT, structured_output=False)
     def labmaster_control(action: str, confirm: bool = False, minutes: float = 0.0, uid: str = "") -> str:
-        """Run labMaster's measurement sequence: start (it runs the queued blocks on the panel's instruments) | pause
-        (after the block) | pause_rep (after the rep) - both arm the pause, a second call takes it back - | next_rep |
-        skip | stop | reset | end_wait | set_wait (minutes: the time left of the running wait, above 0) | safe_stop
-        (stops the sequence, then runs the safe-stop script that switches the instruments' outputs off). uid: the
-        running block's or the wait's uid (labmaster_status: current), for skip, next_rep, end_wait and set_wait.
-        start, next_rep, stop, skip, reset, end_wait, set_wait and safe_stop start, end or change a run: they need
-        confirm=true, which the user must have agreed to before the call - ask them first (as the panel's own MCP
-        does); pause and pause_rep only arm a pause."""
+        """Control labMaster's measurement sequence. start is not yours to give: it asks a person on their approval card
+        first, with every block and parameter listed, and the call blocks until they answer - the sequence runs only
+        after that person's own yes (the AI can never start it). pause (after the block) | pause_rep (after the rep) arm
+        the pause, a second call takes it back. next_rep | skip | reset | end_wait | set_wait (minutes: the time left of
+        the running wait, above 0) change a run: they need confirm=true, which the user must have agreed to before the
+        call - ask them first. stop and safe_stop (stops the sequence, then runs the safe-stop script that switches the
+        instruments' outputs off) need no confirmation: they only end a run. uid: the running block's or the wait's uid
+        (labmaster_status: current), for skip, next_rep, end_wait and set_wait."""
         lm, missing = _labmaster_bridge()
         if lm is None:
             return missing
         act = str(action or "").strip().lower()
         if act not in LABMASTER_ACTIONS:
             return "not run: unknown action %r (one of %s)" % (act or "", ", ".join(LABMASTER_ACTIONS))
-        if act in LABMASTER_CONFIRM and not confirm:
+        note = ""
+        if act == "start":
+            declined = _labmaster_ask_to_start(lm, rt)
+            if declined:
+                return declined
+            note = " (a person approved the start on the approval card)"
+        elif act in LABMASTER_CONFIRM and not confirm:
             return ("needs the user's confirmation first: labMaster %s, %s. Ask the user, then call again with "
                     "confirm=true if they agree." % (act, LABMASTER_WHY[act]))
         uid = str(uid or "").strip()
@@ -1463,7 +1519,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
             answer, why = _labmaster_call(lm.control, act)
         if why:
             return _labmaster_failed(lm, why, "not run")
-        return _labmaster_result(lm, answer, "%s: ok" % act, "not run")
+        text = _labmaster_result(lm, answer, "%s: ok" % act, "not run")
+        return (text + note) if note else text
 
     @server.tool(annotations=ACT, structured_output=False)
     def labmaster_import_script(path: str, name: str = "") -> str:
