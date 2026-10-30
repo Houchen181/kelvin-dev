@@ -177,6 +177,7 @@ def fit_run(rt: Any, run_id: str = "last", model: str = "", x: str = "", y: str 
         if trace_y:
             yn = (y or "").strip() or src.traces[0]
             xv, yv, xu, yu, r = src.trace(yn, row)
+            row = r   # kept with the fit: the point whose trace it was
             xn = "frequency" if xu == "Hz" else "x"
             ph = src.trace(phase, r)[1] if phase else None
             pu = src.units.get(phase, "") if phase else ""
@@ -256,7 +257,7 @@ def fit_run(rt: Any, run_id: str = "last", model: str = "", x: str = "", y: str 
         lines.append(_keep_fit(rt, src, m, result, name, {
             "model": model, "x": xn, "y": yn, "where": where, "sigma": sigma if isinstance(sigma, (int, float, str))
             else None, "start": start, "fix": fix, "bounds": bounds, "x_range": list(x_range) if x_range else None,
-            "row": row, "phase": phase}))
+            "row": row, "phase": phase, "notes": notes or None}))
     picture = None
     try:
         fig = plotting.fit_figure(result, fitting.curve(m, result), xn, yn,

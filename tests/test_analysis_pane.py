@@ -252,3 +252,22 @@ def test_a_map_is_a_curve_per_outer_value_for_the_api_kelvins_tool_and_keep(rt, 
     assert kept["spec"]["group"] == "magnet.B"
     spec = _js("anSpec")
     assert 'if (!ANA.auto.group) out.group = s.group || "";' in spec   # the pane leaves it to the server
+
+
+# ------------------------------------------------------------------ 7. what a kept fit records
+
+def test_a_kept_fit_records_linear_power_its_start_values_and_its_row(rt):
+    rt.run(VNA)
+    run = last(rt)
+    spec = {"runs": [run], "y": "vna.S21", "row": 0, "fit": {"model": "lorentzian", "start": {"fwhm": 1e6},
+                                                              "fix": {"y0": 0}, "lo": 3.995e9}}
+    assert "/fits/vna.S21 lorentzian @ row 0" in keep(rt, spec)
+    (kept,) = fitting.stored(rt._run_dir(run))
+    s = kept["spec"]
+    assert s["row"] == 0 and s["start"] == {"fwhm": 1e6} and s["fix"] == {"y0": 0} and s["kelvin"] == __version__
+    assert s["x_range"] == [3.995e9, None] and s["notes"] == ["fitted on linear power, 10^(dB/10): its widths are "
+                                                              "linewidths"]
+    assert "fitted on linear power, 10^(dB/10): its widths are linewidths" in kept["warnings"]
+    datatools.fit_run(rt, run, "lorentzian", y="vna.S21", name="by Kelvin")   # fit_run's own: the row it took too
+    by_kelvin = {f["name"]: f for f in fitting.stored(rt._run_dir(run))}["by Kelvin"]["spec"]
+    assert by_kelvin["row"] == 0 and any("linear power" in n for n in by_kelvin["notes"])

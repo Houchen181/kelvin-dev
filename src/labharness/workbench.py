@@ -44,6 +44,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import datatools, expr, fitting, rundata, units
+from ._version import __version__
 
 MAX_RUNS = 8
 MAX_CURVES = 24       # curves drawn at once (runs times groups)
@@ -599,9 +600,10 @@ def columns(rt: Any, run_id: str) -> Dict[str, Any]:
 
 def keep(rt: Any, spec: Dict[str, Any], curve: int = 0, name: str = "", by: str = "human (portal)",
          account: Optional[str] = None, replace: bool = False) -> str:
-    """Keep one curve's fit in its run's run.h5 (/fits/<name>), with the steps that made its data; the lab's record
-    says who kept it, and the run's scan report shows it. Its name says its curve (a map's "magnet.B = 1 T"), and a fit
-    already kept under that name is replaced only when asked (KeptAlready otherwise)."""
+    """Keep one curve's fit in its run's run.h5 (/fits/<name>), with what made it: the steps that made its data, its
+    start and fixed values, a trace's row and what the fit says of itself (a resonance in dB fitted on linear power);
+    the lab's record says who kept it, and the run's scan report shows it. Its name says its curve (a map's
+    "magnet.B = 1 T"), and a fit already kept under that name is replaced only when asked (KeptAlready otherwise)."""
     np = _np()
     found, _ = _curves(rt, spec, [])
     try:
@@ -612,7 +614,7 @@ def keep(rt: Any, spec: Dict[str, Any], curve: int = 0, name: str = "", by: str 
     if not isinstance(f, dict) or not str(f.get("model") or "").strip():
         raise AnalysisError("fit a model first")
     x, y, xu, yu, xn, yn = _worked(np, c, spec.get("steps") or [])
-    _, result, _, _ = _fitted(np, x, y, xu, yu, f, time.monotonic() + FITS_S)
+    _, result, notes, _ = _fitted(np, x, y, xu, yu, f, time.monotonic() + FITS_S)
     folder = rt._run_dir(c["run"])
     if not (folder / rundata.RUN_FILE).exists() or not rundata.have_h5():
         raise AnalysisError("this run has no run.h5 yet")
@@ -625,12 +627,14 @@ def keep(rt: Any, spec: Dict[str, Any], curve: int = 0, name: str = "", by: str 
     name = fitting.fit_name(name) or (head[:80 - len(tail)] + tail) or result["model"]   # as run.h5 will name it
     if not replace and name in [k.get("name") for k in fitting.stored(folder)]:
         raise KeptAlready(name)
+    result = dict(result, warnings=list(result.get("warnings") or []) + notes)   # as the panel showed them
     try:
         kept = fitting.store(folder, name, result, {
             "model": str(f.get("model")).strip(), "x": spec.get("x"), "y": spec.get("y"), "where": spec.get("where"),
-            "group": c["by"], "curve": c["label"], "steps": spec.get("steps") or None,
+            "group": c["by"], "curve": c["label"], "row": c.get("row"), "steps": spec.get("steps") or None,
             "x_range": [lo, hi] if lo not in (None, "") or hi not in (None, "") else None,
-            "from": "the Analysis panel"}, by=by, account=account)
+            "start": f.get("start") or None, "fix": f.get("fix") or None, "notes": notes or None,
+            "kelvin": __version__, "from": "the Analysis panel"}, by=by, account=account)
     except (fitting.FitError, OSError) as e:
         raise AnalysisError(str(e))
     rt.gate.log.write("fit_kept", by=by, account=account, run=c["run"], fit=kept, model=result["model"])
