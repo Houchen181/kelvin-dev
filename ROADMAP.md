@@ -299,3 +299,6 @@ Also asked for (2026-10-29, testing 0.3.28): the hub's models didn't show, thoug
 - **New hub terms** no longer hide the hub's models: the hub lists them before the person agrees (only chats wait), tells Kelvin, and Kelvin says it beside them and in Settings → Models, with a link to agree.
 - **A model list the hub refuses** says the hub's own words, not "HTTP Error 403"; while the hub offers nothing, Kelvin asks it again every minute, not every 10.
 - **No API keys in the app:** the private build now takes none either (it keeps the Claude Code bridge); only Kelvin from source does.
+
+Also asked for (2026-10-29, testing 0.3.29): the key on the hub is an OpenCode Go key. Status: built, not yet released.
+- **OpenCode Go** is OpenCode's subscription, with its own addresses (`https://opencode.ai/inference/go/...`) where only a Go key works; the hub sent it to OpenCode's pay-per-use addresses, where it was refused. The hub now has it as a service of its own (`opencode-go`), next to **OpenCode Zen** (the pay-per-use one, `opencode`), with models.dev's prices and list of models that see pictures for each; Kelvin shows **OpenCode Go · Kelvin hub** with every model Go offers (Go's own address translates the others' formats). Kelvin from source has an OpenCode Go preset too.

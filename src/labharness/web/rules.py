@@ -12,7 +12,8 @@ PROVIDERS = {"anthropic": "Claude", "openai": "GPT", "gemini": "Gemini", "local"
 # how other providers are named in what Kelvin says: the Kelvin hub's (hubmodels.py)
 LABELS = dict(PROVIDERS, **{"hub-anthropic": "Claude through the Kelvin hub", "hub-openai": "GPT through the Kelvin hub",
                            "hub-gemini": "Gemini through the Kelvin hub",
-                           "hub-opencode": "OpenCode through the Kelvin hub"})
+                           "hub-opencode": "OpenCode Zen through the Kelvin hub",
+                           "hub-opencode-go": "OpenCode Go through the Kelvin hub"})
 OPEN = {"providers": None, "literature": True}
 
 

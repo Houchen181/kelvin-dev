@@ -20,7 +20,8 @@ SERVICES = {   # the hub's service: (Kelvin's name for it, its label in the mode
     "anthropic": ("hub-anthropic", "Claude · Kelvin hub"),
     "openai": ("hub-openai", "GPT · Kelvin hub"),
     "gemini": ("hub-gemini", "Gemini · Kelvin hub"),
-    "opencode": ("hub-opencode", "OpenCode · Kelvin hub"),
+    "opencode": ("hub-opencode", "OpenCode Zen · Kelvin hub"),
+    "opencode-go": ("hub-opencode-go", "OpenCode Go · Kelvin hub"),
 }
 NAMES = {name: service for service, (name, _) in SERVICES.items()}
 EVERY = 600         # seconds between askings

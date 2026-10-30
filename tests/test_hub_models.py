@@ -25,7 +25,8 @@ PRICES = {"anthropic": {"models": {"claude-opus-5-5": {"cost": {"input": 4, "out
           "opencode": {"models": {"deepseek-v4.1-flash": {"cost": {"input": 0.3, "output": 1.2, "cache_read": 0.006}}}},
           "google": {"models": {"gemini-3.1-pro": {"cost": {"input": 2, "output": 12, "tiers": [
               {"input": 4, "output": 18, "tier": {"type": "context", "size": 200000}}]}}}},
-          "openai": {"models": {"gpt-6-sol": {"cost": {"input": 2, "output": 10, "cache_read": 0.2}}}}}
+          "openai": {"models": {"gpt-6-sol": {"cost": {"input": 2, "output": 10, "cache_read": 0.2}}}},
+          "opencode-go": {"models": {"glm-5.3": {"cost": {"input": 1.4, "output": 4.4, "cache_read": 0.26}}}}}
 
 
 def sse(*events):
@@ -72,7 +73,7 @@ class Services:
         self.seen = []
         self.down = False
         self.keys = {"anthropic": "sk-ant-owner-1234", "openai": "sk-openai-owner-5678",
-                     "gemini": "AIza-owner-9012", "opencode": "sk-oc-owner-3456"}
+                     "gemini": "AIza-owner-9012", "opencode": "sk-oc-owner-3456", "opencode-go": "sk-oc-go-7890"}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -94,11 +95,16 @@ class Services:
         if host == "generativelanguage.googleapis.com":
             assert request.headers["x-goog-api-key"] == self.keys["gemini"] and request.url.params.get("key") is None
             return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=GEMINI_STREAM)
-        if host == "opencode.ai":
-            assert request.headers["authorization"] == "Bearer " + self.keys["opencode"]
+        if host == "opencode.ai":   # Zen and Go: each key works only at its own addresses
+            go = path.startswith("/inference/go/")
+            if request.headers.get("authorization") != "Bearer " + self.keys["opencode-go" if go else "opencode"]:
+                return httpx.Response(401, json={"error": {"message": "Invalid API key."}})
             if path == "/inference/v1/models":
                 return httpx.Response(200, json={"object": "list", "data": [
                     {"id": "deepseek-v4.1-flash"}, {"id": "glm-5.3"}, {"id": "kimi-k3"}]})
+            if path == "/inference/go/v1/models":
+                return httpx.Response(200, json={"object": "list", "data": [
+                    {"id": "glm-5.3"}, {"id": "claude-haiku-5-5"}, {"id": "deepseek-v4.1-flash"}]})
             return httpx.Response(200, headers={"content-type": "text/event-stream"},
                                   content=chat_stream(body["model"], body.get("stream_options", {}).get(
                                       "include_usage", False)))
@@ -117,7 +123,7 @@ def gateway(tmp_path, monkeypatch):
     return hub, client, services, r.json()["access_token"]
 
 
-def owner_keys(hub, services, which=("anthropic", "openai", "gemini", "opencode")):
+def owner_keys(hub, services, which=("anthropic", "openai", "gemini", "opencode", "opencode-go")):
     g = llm.Gateway(hub, catalog.Catalog(hub.home))
     for s in which:
         g.set_key(s, services.keys[s])
@@ -367,3 +373,24 @@ def test_new_terms_hold_chats_but_not_the_model_list(gateway):
     assert r.status_code == 403 and "Agree to them at" in r.json()["error"]["message"]
     status = client.get("/api/llm", headers=auth).json()
     assert status["needs_consent"] is True and status["consent_url"].endswith("/consent")
+
+
+def test_opencode_go_is_a_service_of_its_own(gateway):
+    """OpenCode's Go subscription: its own addresses, where only a Go key works; a Go key given as OpenCode Zen's is
+    refused by OpenCode, and the hub says whose key it was."""
+    hub, client, services, token = gateway
+    g = owner_keys(hub, services, ("opencode-go",))
+    auth = {"Authorization": "Bearer " + token}
+    r = client.get("/llm/opencode-go/v1/models", headers=auth)
+    assert [m["id"] for m in r.json()["data"]] == ["glm-5.3", "claude-haiku-5-5", "deepseek-v4.1-flash"]
+    r = client.post("/llm/opencode-go/openai/v1/chat/completions", headers=auth,
+                    json={"model": "glm-5.3", "stream": True, "messages": [{"role": "user", "content": "x"}]})
+    assert r.status_code == 200 and b"Six points." in r.content
+    method, url, headers, body = services.seen[-1]
+    assert url == "https://opencode.ai/inference/go/openai/v1/chat/completions"
+    assert headers["authorization"] == "Bearer " + services.keys["opencode-go"] and body["stream_options"]
+    [row] = wait_for_usage(hub, 1)
+    assert row["service"] == "opencode-go" and row["usd"] == pytest.approx((500 * 1.4 + 1500 * 0.26 + 300 * 4.4) / 1e6)
+    g.set_key("opencode", services.keys["opencode-go"])                       # the Go key where Zen's goes
+    r = client.get("/llm/opencode/v1/models", headers=auth)
+    assert r.status_code == 502 and "OpenCode Zen refused the Kelvin hub's key" in r.json()["error"]["message"]

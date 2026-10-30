@@ -100,9 +100,9 @@ Two things the hub does for a Kelvin where someone is signed in with their Kelvi
 
 ## Models through the hub
 
-People signed in to Kelvin with their Kelvin account use Claude, GPT, Gemini and OpenCode with the keys the owner sets on the hub, so nobody needs keys of their own (`hub/llm.py`; Kelvin's side `web/hubmodels.py` and `web/providers/hub.py`).
+People signed in to Kelvin with their Kelvin account use Claude, GPT, Gemini and OpenCode (Zen, its pay-per-use service, and Go, its subscription: each with its own key) with the keys the owner sets on the hub, so nobody needs keys of their own (`hub/llm.py`; Kelvin's side `web/hubmodels.py` and `web/providers/hub.py`).
 
-- **In Kelvin:** the model picker shows **Claude · Kelvin hub**, **GPT · Kelvin hub**, **Gemini · Kelvin hub** and **OpenCode · Kelvin hub** while the hub has a key for each, and Settings → **Models** shows the month so far. A new chat starts on Claude Opus through the hub when the person has no Claude key of their own.
+- **In Kelvin:** the model picker shows **Claude · Kelvin hub**, **GPT · Kelvin hub**, **Gemini · Kelvin hub**, **OpenCode Zen · Kelvin hub** and **OpenCode Go · Kelvin hub** while the hub has a key for each, and Settings → **Models** shows the month so far. A new chat starts on Claude Opus through the hub when the person has no Claude key of their own.
 - **The Kelvin app** (the user version other people install, and the private build: `edition.py`) takes no API keys: its models are the hub's, a model server on the person's own computer, and their ChatGPT plan. Only Kelvin from source, for its developers, also takes the person's own keys and other model services.
 - **Each service's own API, unchanged:** `/llm/<service>/<path>` passes a request on and streams the answer back as it comes. Kelvin's model connections only change their address and send the person's hub token as their key, so prompt caching, thinking, pictures, PDFs and web search work as with a key of one's own. Only Kelvin's calls pass: answers, token counts and model lists (`llm.SERVICES`); anything else is 404 and never reaches a service.
 - **Keys:** set, replaced and removed on the owner console's **Models** page. They stay on the hub, sealed with `gateway.key` in its folder, and never go to anyone's computer; the console shows only their last 4 characters. Back up `gateway.key` apart from the database: without it, the keys must be set again.
@@ -275,7 +275,7 @@ Kelvin accepts a hub address on the internet only with https.
 |---|---|
 | `GET /api/health` | `{"ok": true, "hub": version, "draws_pdfs"}` |
 | `GET /api/llm` | A signed-in Kelvin's: the model services offered `{"services": [{"id", "name", "models"}], "month", "spent", "budget", "renews", "lab"}` |
-| `GET, POST /llm/<service>/<path>` | A signed-in Kelvin's call to a model service (`anthropic`, `openai`, `gemini`, `opencode`), passed on with the hub's key; its token in `x-api-key`, `x-goog-api-key` or `Authorization: Bearer`. Errors in the services' own shape: 401, 402, 403, 404, 413, 429, 502, 503 |
+| `GET, POST /llm/<service>/<path>` | A signed-in Kelvin's call to a model service (`anthropic`, `openai`, `gemini`, `opencode`, `opencode-go`), passed on with the hub's key; its token in `x-api-key`, `x-goog-api-key` or `Authorization: Bearer`. Errors in the services' own shape: 401, 402, 403, 404, 413, 429, 502, 503 |
 | `GET /api/models/pictures` | A signed-in Kelvin's: `{"at", "services": {"opencode": {"yes": [...], "no": [...]}, ...}}` |
 | `POST /api/pdf/pages` | A signed-in Kelvin's: PDF pages as the raw body → `{"pages": [{"mime": "image/png", "data"}]}`. 403 until new terms are agreed to, 413 over 10 MB, 422 when they can't be drawn, 429 with 3 already running, 501 without pypdfium2 |
 | `POST /api/signin` | Kelvin's sign-in: `{"email", "password", "installation"}` → `{"access_token", "user", "needs_consent", "account_url"}` |

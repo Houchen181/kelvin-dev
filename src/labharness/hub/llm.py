@@ -49,11 +49,16 @@ SERVICES: Dict[str, Dict[str, Any]] = {
                "calls": [("POST", r"v1beta/models/(?P<model>\w[\w.-]*):(?:generateContent|streamGenerateContent|"
                                   r"countTokens)"), ("GET", r"v1beta/models(?:/\w[\w.-]*)?")],
                "keep": ()},
-    "opencode": {"name": "OpenCode", "upstream": "https://opencode.ai/inference", "header": "authorization",
+    "opencode": {"name": "OpenCode Zen", "upstream": "https://opencode.ai/inference", "header": "authorization",
                  "form": "Bearer {}", "calls": [("POST", r"openai/v1/chat/completions"), ("GET", r"v1/models")],
                  "keep": ()},
+    # OpenCode's Go subscription: its own addresses, and a key that works only there
+    "opencode-go": {"name": "OpenCode Go", "upstream": "https://opencode.ai/inference/go", "header": "authorization",
+                    "form": "Bearer {}", "calls": [("POST", r"openai/v1/chat/completions"), ("GET", r"v1/models")],
+                    "keep": ()},
 }
-MODEL_LISTS = {"anthropic": "v1/models", "openai": "v1/models", "gemini": "v1beta/models", "opencode": "v1/models"}
+MODEL_LISTS = {"anthropic": "v1/models", "openai": "v1/models", "gemini": "v1beta/models", "opencode": "v1/models",
+               "opencode-go": "v1/models"}
 MAX_BODY = 40 * 2 ** 20       # bytes of one request: pictures and PDFs ride in it
 MAX_METERED = 32 * 2 ** 20    # bytes of a whole (not streamed) answer read for its token counts
 DEFAULT_BUDGET = 20.0         # dollars per person per month, until the owner sets another
@@ -536,8 +541,8 @@ class Gateway:
         if not isinstance(request, dict):
             return "", body
         model = str(request.get("model") or "")
-        if service in ("openai", "opencode") and request.get("stream") is True and found.re.pattern.endswith(
-                "chat/completions") and not (request.get("stream_options") or {}).get("include_usage"):
+        chat = service in ("openai", "opencode", "opencode-go") and found.re.pattern.endswith("chat/completions")
+        if chat and request.get("stream") is True and not (request.get("stream_options") or {}).get("include_usage"):
             request["stream_options"] = dict(request.get("stream_options") or {}, include_usage=True)
             body = json.dumps(request).encode("utf-8")
         return model, body

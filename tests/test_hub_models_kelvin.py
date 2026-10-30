@@ -80,7 +80,7 @@ def kelvin(tmp_path, providers):
 def test_the_hubs_models_show_while_it_offers_them(tmp_path):
     fetch, asked = told(OFFERED)
     providers = hub_providers(("https://hub.test", "khub_t"))
-    assert list(providers) == ["hub-anthropic", "hub-openai", "hub-gemini", "hub-opencode"]
+    assert list(providers) == ["hub-anthropic", "hub-openai", "hub-gemini", "hub-opencode", "hub-opencode-go"]
     for p in providers.values():
         p.hub.fetch = fetch
     providers["hub-opencode"].models = lambda: asyncio.sleep(0, [])          # no network for OpenCode's list here
@@ -145,7 +145,8 @@ def test_the_app_takes_no_keys_of_its_own(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "get", lambda name, _get=settings.get: "khub_t" if name == "account_token" else
                         _get(name))
     monkeypatch.setattr(Settings, "account_hub", property(lambda self: "https://hub.test"))
-    assert set(make_providers(settings)) == {"hub-anthropic", "hub-openai", "hub-gemini", "hub-opencode", "local"}
+    assert set(make_providers(settings)) == {"hub-anthropic", "hub-openai", "hub-gemini", "hub-opencode",
+                                             "hub-opencode-go", "local"}
 
 
 def test_the_private_build_keeps_the_bridge_but_not_keys(monkeypatch):

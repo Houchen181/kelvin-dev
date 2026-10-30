@@ -66,4 +66,17 @@ class HubOpenCode(_ThroughHub, OpenAIProvider):
         self.hub = hub
 
 
-KINDS = (HubClaude, HubGPT, HubGemini, HubOpenCode)
+class HubOpenCodeGo(_ThroughHub, OpenAIProvider):
+    """OpenCode's Go subscription: its Chat Completions address serves every model it offers (OpenCode translates
+    the others' formats), so none is left out."""
+    hub_service = "opencode-go"
+
+    def __init__(self, hub: HubModels, vision: Any = None):
+        name, label = SERVICES[self.hub_service]
+        OpenAIProvider.__init__(self, name, label, hub.token, base_url=hub.url + "/llm/opencode-go/openai/v1",
+                                models_url=hub.url + "/llm/opencode-go/v1/models", preset="opencode-go",
+                                vision=vision)
+        self.hub = hub
+
+
+KINDS = (HubClaude, HubGPT, HubGemini, HubOpenCode, HubOpenCodeGo)

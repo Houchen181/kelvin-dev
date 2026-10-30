@@ -18,9 +18,10 @@ from typing import Any, Callable, Dict, List, Optional
 log = logging.getLogger("kelvin.hub")
 MODELS_DEV = "https://models.dev/api.json"
 # Kelvin's ready-made services (web/services.py), which models.dev names the same
-SERVICES = ("openrouter", "opencode", "deepseek", "groq", "mistral", "xai")
+SERVICES = ("openrouter", "opencode", "opencode-go", "deepseek", "groq", "mistral", "xai")
 # the gateway's services (llm.py), as models.dev names them
-PRICED = {"anthropic": "anthropic", "openai": "openai", "gemini": "google", "opencode": "opencode"}
+PRICED = {"anthropic": "anthropic", "openai": "openai", "gemini": "google", "opencode": "opencode",
+          "opencode-go": "opencode-go"}
 FILE = "models-dev.json"
 EVERY = 24 * 3600          # read again after this...
 RETRY = 3600               # ...or this, after models.dev couldn't be read

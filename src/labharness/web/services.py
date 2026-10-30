@@ -26,6 +26,9 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                              "qwen3.8-flash", "qwen3.7", "qwen3.6-plus", "qwen3.5-plus"],   # other formats, per its docs
                  "hint": "OpenCode's Chat Completions models (Qwen, DeepSeek, Kimi, GLM, MiniMax, Mistral and its "
                          "free ones); its Claude, GPT and Gemini models use other formats."},
+    "opencode-go": {"name": "OpenCode Go", "base_url": "https://opencode.ai/inference/go/openai/v1",
+                    "models_url": "https://opencode.ai/inference/go/v1/models", "env": "OPENCODE_API_KEY",
+                    "hint": "OpenCode's Go subscription: its own key and addresses; every model it offers."},
     "deepseek": {"name": "DeepSeek", "base_url": "https://api.deepseek.com/v1", "env": "DEEPSEEK_API_KEY",
                  "hint": "DeepSeek's own API."},
     "groq": {"name": "Groq", "base_url": "https://api.groq.com/openai/v1", "env": "GROQ_API_KEY",
