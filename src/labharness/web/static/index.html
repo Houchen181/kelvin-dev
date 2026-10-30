@@ -350,8 +350,10 @@
         <input id="watch-below" type="number" step="any" placeholder="below" title="Alarm when the reading goes below this" aria-label="Alarm below">
         <input id="watch-for" type="number" step="any" min="0" placeholder="for (s)" title="Only if it stays there this many seconds" aria-label="For how many seconds">
         <button class="btn small" type="submit">Watch</button>
+        <label id="watch-sample-row" class="check watch-sample" hidden><input id="watch-sample" type="checkbox" checked> <span id="watch-sample-name">This sample only</span></label>
       </form>
       <ul id="watch-list" class="watch-list"></ul>
+      <details id="alarm-history" class="alarm-history" hidden><summary>Alarm history</summary><ul id="alarm-history-list" class="watch-list"></ul></details>
       <div class="inst-head-row"><h3>Lab memory</h3><span id="labmem-summary" class="inst-summary"></span>
         <button id="labmem-add" class="link soft" type="button">Add…</button></div>
       <form id="labmem-form" class="labmem-form" hidden>

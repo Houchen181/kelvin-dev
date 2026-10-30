@@ -132,8 +132,9 @@ class Notifier:
         self.email: Optional[Email] = None
         self.kinds = set(DEFAULT_KINDS)
         self.last_error: Optional[str] = None
-        # paired phones (the Kelvin app sees requests and alarms): set by the app; one counts as someone to reach
-        self.phones: Callable[[], bool] = lambda: False
+        # how many phones are paired (the Kelvin app sees requests and alarms): set by the app; one counts as someone
+        # to reach
+        self.phones: Callable[[], int] = lambda: 0
         # the heartbeat: pinged every heartbeat_s while alive() (Kelvin is watching the lab), never otherwise
         self.heartbeat: Optional[str] = None
         self.heartbeat_s = HEARTBEAT_S
@@ -171,11 +172,25 @@ class Notifier:
     def reaches_away(self, kind: str = "alarm") -> bool:
         """Can a notice of this kind reach someone away from the computer: a webhook or email that takes it, or a
         paired phone (the Kelvin app shows requests and alarms)?"""
+        return bool(self.away(kind))
+
+    def away(self, kind: str = "alarm") -> List[str]:
+        """What takes a notice of this kind to people away from this computer, in words (empty: nothing does): the
+        Kelvin app on paired phones (while it is open), email, the webhook by its host. Kelvin once told a person alarms
+        would reach them away from the lab with none of these set up. Never the webhook's address or the email
+        addresses themselves: these words go to the model."""
         try:
-            phones = bool(self.phones())
+            phones = int(self.phones() or 0)
         except Exception:
-            phones = False
-        return phones or (kind in self.kinds and bool(self.webhook or self.email))
+            phones = 0
+        out = ["the Kelvin app on %s (while it is open)" % ("a paired phone" if phones == 1 else
+                                                           "%d paired phones" % phones)] if phones else []
+        if kind in self.kinds and self.email is not None:
+            out.append("email")
+        if kind in self.kinds and self.webhook:
+            host = self.webhook.split("/")[2].rsplit("@", 1)[-1] if "://" in self.webhook else ""
+            out.append("the webhook" + (" (%s)" % host if host else ""))
+        return out
 
     def __call__(self, kind: str, title: str, text: str = "") -> Dict[str, Any]:
         notice = {"id": next(_ids), "kind": kind, "title": title, "text": text, "at": time.time()}

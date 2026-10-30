@@ -1,5 +1,6 @@
-// Kelvin on a phone: pairing, then alarms, approvals, the sample (with the hands-on lock), the run in progress (with
-// Stop) and the instruments.
+// Kelvin on a phone: pairing, then alarms (until someone says Got it, also those that cleared meanwhile), approvals,
+// the sample (with the hands-on lock), the run in progress or the queue (with Stop), the instruments and the alarms'
+// history.
 (() => {
   "use strict";
   const $ = (id) => document.getElementById(id);
@@ -92,12 +93,22 @@
     });
     return b;
   }
+  const hhmm = (t) => (t ? new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
+  const when = (a) => (a.count > 1 ? a.count + " times, last " + hhmm(a.last) : hhmm(a.raised))
+    + (a.cleared ? " · cleared " + hhmm(a.cleared) + (a.cleared_text ? ": " + a.cleared_text : "") : "");
   function render(s) {
-    const alarms = (s.alarms || []).filter((a) => !a.cleared && !a.acknowledged);
-    if (changed("alarms", alarms)) $("alarms").replaceChildren(...alarms.map((a) => h("div", { class: "card alarm" },
+    // every alarm until a person says Got it: one that cleared overnight stays, marked cleared
+    const alarms = (s.alarms || []).filter((a) => !a.acknowledged);
+    if (changed("alarms", alarms)) $("alarms").replaceChildren(...alarms.map((a) => h("div", { class: "card alarm" + (a.cleared ? " cleared" : "") },
       h("b", {}, "Alarm: " + a.text),
       a.actions && a.actions.length ? h("p", { class: "muted" }, "Kelvin " + a.actions.join("; ")) : null,
+      h("p", { class: "muted" }, when(a)),
       h("div", { class: "row" }, act("Got it", "", () => api("/api/alarms/" + a.id + "/ack", {}))))));
+    const history = s.alarms || [];
+    $("alarm-history-card").hidden = !history.length;
+    if (changed("history", history)) $("alarm-history").replaceChildren(...history.map((a) => h("li", {},
+      h("b", {}, a.text), h("br"), h("span", { class: "muted" }, when(a) + " · " + (a.acknowledged ? "Got it: "
+        + (a.acknowledged_by || "a person") + (a.acknowledged_at ? " " + hhmm(a.acknowledged_at) : "") : "nobody has said Got it yet")))));
 
     const pending = (s.pending || []).map((r) => Object.assign({}, r, { seconds_left: Math.ceil(r.seconds_left / 30) * 30 }));
     // a card in the language its person reads cards in (r.shown, cardlang.py); the English is the card itself

@@ -803,6 +803,13 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .alert > svg { color: var(--danger); width: 18px; height: 18px; flex: none; }
 .alert-body { flex: 1; min-width: 0; display: grid; gap: 2px; font-size: 14px; }
 .alert-body span { color: var(--text-2); font-size: 13px; }
+.alert.cleared { border-color: var(--line-strong); background: var(--raised); }
+.alert.cleared > svg { color: var(--muted); }
+.alert-body .alert-when { color: var(--muted); font-size: 12px; }
+.alarm-history { margin: 0 0 8px; font-size: 13px; }
+.alarm-history summary { cursor: pointer; color: var(--muted); }
+.alarm-history li { display: grid; gap: 1px; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.alarm-history li span { color: var(--muted); font-size: 12px; }
 .watch-list { list-style: none; margin: 0 0 6px; padding: 0; display: grid; gap: 2px; }
 .watch { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 8px; font-size: 13px; }
 .watch:hover { background: var(--hover); }
@@ -816,6 +823,7 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .watch .row-btn { opacity: 1; }
 .watch-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 6px; margin-bottom: 8px; }
 .watch-form select { grid-column: 1 / -1; }
+.watch-form .watch-sample { grid-column: 1 / -1; font-size: 12.5px; color: var(--muted); }
 .watch-form select, .watch-form input { min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 7px; background: var(--raised); color: var(--text); font-size: 13px; }
 .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; }
 .callout.small { font-size: 13px; padding: 8px 10px; margin-bottom: 8px; }

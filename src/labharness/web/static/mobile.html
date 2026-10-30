@@ -29,6 +29,7 @@ h1 { font-size: 22px; margin: 18px 0 4px; }
 h2 { font-size: 15px; margin: 0 0 8px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; }
 .card.alarm { border-color: var(--danger); background: var(--danger-soft); }
+.card.alarm.cleared { border-color: var(--line); background: var(--panel); }
 .card.ask { border-color: var(--warn); }
 .card.locked { border-color: var(--warn); background: var(--warn-bg); }
 .card p { margin: 0 0 6px; }
@@ -81,6 +82,7 @@ summary { cursor: pointer; font-weight: 600; font-size: 15px; }
     <div id="run" class="card"></div>
     <details class="card"><summary>Instruments</summary><ul id="instruments" class="inst"></ul></details>
     <div class="card"><h2>Recent</h2><ul id="notices" class="notices"></ul></div>
+    <details id="alarm-history-card" class="card" hidden><summary>Alarm history</summary><ul id="alarm-history" class="notices"></ul></details>
     <footer><span id="who"></span><a id="full" href="/" hidden>Open the full portal</a><button id="forget" class="link" type="button">Forget this phone</button></footer>
   </section>
 </main>

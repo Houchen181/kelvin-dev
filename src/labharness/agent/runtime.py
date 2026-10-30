@@ -170,6 +170,12 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "ALARM: %s%s" % (e.get("text"), " -> " + "; ".join(e["actions"]) if e.get("actions") else "")
     elif kind == "alarm_cleared":
         text = "cleared: %s" % e.get("text")
+    elif kind == "alarm_again":
+        text = "ALARM again (%s times): %s" % (e.get("count"), e.get("text"))
+    elif kind == "alarm_ack":
+        from .approval import who_text
+        text = "%s said Got it to the alarm: %s" % (who_text({"account": e.get("account"), "channel": e.get("channel"),
+                                                              "device": e.get("device")}), e.get("text"))
     elif kind == "watch":
         text = "%s watch %s: %s" % (e.get("change"), e.get("watch"), e.get("rule"))
     elif kind == "review":
@@ -711,8 +717,7 @@ class LabRuntime:
             if self.gate.auto:
                 lines.append("approvals: auto mode (a person turned it on): low-risk drive changes and runs go ahead "
                              "without asking; the rest still wait for a human")
-            lines += ["ALARM: %s%s" % (a.text, " (%s)" % "; ".join(a.actions) if a.actions else "")
-                      for a in self.monitor.active()]
+            lines += self.monitor.lines()   # alarms on, and those that cleared before anyone said Got it
             lines += ["AFTER KELVIN RESTARTED (the person sees this in the portal until they dismiss it): " + line
                       for line in self.incident_lines()]
             if self.hands:
@@ -1727,8 +1732,10 @@ class LabRuntime:
     def mount(self, project: Optional[str], device: Dict[str, Any], by: str = "human") -> Dict[str, Any]:
         """Record which sample is in the setup now. Every run from here on belongs to it (and to its project), and
         its protection holds (protection.py): its limits, its gates' leakage guards, and the caps written into the
-        instruments ("caps" in the answer says what was written)."""
+        instruments ("caps" in the answer says what was written). The watches made for the sample it replaces end
+        ("watches" in the answer says which)."""
         info = self.project_info(project)
+        ended = self._end_sample_watches(by) if (self.mounted or {}).get("device") != device.get("id") else []
         self.mounted = {"project": project or None, "project_name": info.get("name") or "General",
                         "device": device.get("id"), "device_name": device.get("name"),
                         "since": datetime.now().isoformat(timespec="seconds"), "by": by,
@@ -1738,7 +1745,7 @@ class LabRuntime:
                             protection=protection.summary(self.mounted["protection"]) or None)
         self._apply_protection()
         caps = self._write_caps(by)
-        return dict(self.mounted, caps=caps)
+        return dict(self.mounted, caps=caps, watches=ended)
 
     def protect(self, device: Dict[str, Any], by: str = "human") -> List[str]:
         """A person changed a device's protection: if it is the mounted one, it holds from now on. Returns the caps
@@ -1752,7 +1759,9 @@ class LabRuntime:
         self._apply_protection()
         return self._write_caps(by)
 
-    def unmount(self, by: str = "human") -> None:
+    def unmount(self, by: str = "human") -> List[str]:
+        """Nothing is mounted now. The watches made for the sample that was end with it: lines saying which."""
+        ended = self._end_sample_watches(by)
         if self.mounted:
             self.gate.log.write("unmount", by=by, device=self.mounted.get("device_name"),
                                 project=self.mounted.get("project_name"))
@@ -1762,6 +1771,7 @@ class LabRuntime:
             (self.data_dir / "mounted.json").unlink()
         except OSError:
             pass
+        return ended
 
     def _apply_protection(self, recheck: bool = False) -> None:
         """Hold this lab's instruments to the mounted device's protection, and to a person's hands-on lock.
@@ -2308,7 +2318,7 @@ class LabRuntime:
             self._queue_thread = threading.Thread(target=self._queue_loop, args=(grants, by), daemon=True,
                                                   name="kelvin-queue")
             self._queue_thread.start()
-            return "queue started: %s\n%s" % (title[len("Run the queue: "):], self.queue.text())
+            return "queue started: %s\n%s\n%s" % (title[len("Run the queue: "):], self.queue.text(), self.alarms_reach())
         return self._do("starting the queue", prepare, stoppable=True,
                         uses=self._uses("\n".join(item.text for item in items)))   # the rest stay readable
 
@@ -5158,30 +5168,71 @@ class LabRuntime:
     # ------------------------------------------------------------------ watching instruments
 
     def _new_monitor(self) -> Monitor:
-        monitor = Monitor(self.lab, self.gate, self._monitor_said)
+        monitor = Monitor(self.lab, self.gate, self._monitor_said)   # it hears the gate's trips too (gate.alarm)
+        monitor.on_change = self._save_alarms   # a repeat folded into an alarm, a Got it: kept with the history
         for w in self.lab.config.watches:
             monitor.add(Watch(w["read"], w["above"], w["below"], w["for"], w["every"], list(w["then"]),
                               w["stop_run"], "lab", w["note"]))
         return monitor
 
     def add_watch(self, key: str, above: Optional[float] = None, below: Optional[float] = None, for_s: float = 0.0,
-                  note: str = "", source: str = "person") -> Dict[str, Any]:
-        """A notify-only watch (actions on alarm are for the watches written in the lab config)."""
+                  note: str = "", source: str = "person", lab_wide: bool = False) -> Dict[str, Any]:
+        """A notify-only watch (actions on alarm are for the watches written in the lab config). Made while a sample
+        is mounted, it is that sample's and ends when the sample is taken out, unless lab_wide (a cryostat's helium)."""
         spec = self._spec(key)
         if spec is None:
             raise KeyError("%r is not a parameter in this lab" % key)
         if not spec.numeric or spec.get_cmd is None:
             raise ValueError("%s is not a numeric reading, so it has no range to watch" % key)
-        w = self.monitor.add(Watch(key, above, below, max(0.0, float(for_s)), 10.0, [], False, source, note[:200]))
+        device = "" if lab_wide else str((self.mounted or {}).get("device_name") or "")
+        w = self.monitor.add(Watch(key, above, below, max(0.0, float(for_s)), 10.0, [], False, source, note[:200],
+                                   device=device))
         self._save_watches()
         view = next(v for v in self.monitor.list() if v["id"] == w.id)
-        self.gate.log.write("watch", by=source, change="added", watch=w.id, rule=view["rule"])
+        self.gate.log.write("watch", by=source, change="added", watch=w.id, rule=view["rule"], device=device or None)
         return view
 
     def remove_watch(self, watch_id: str, source: str = "person") -> None:
-        w = self.monitor.remove(watch_id, source)   # watches from the lab config change only there
+        w = self.monitor.remove(watch_id, source, why="the watch was removed by %s" % source)   # lab config's: there
         self._save_watches()
         self.gate.log.write("watch", by=source, change="removed", watch=w.id, rule=w.rule())
+
+    def _end_sample_watches(self, by: str) -> List[str]:
+        """The watches made for the mounted sample end when it is taken out (one outlived its sample and alarmed on
+        the next one): their alarms clear, and the record and the notices say so. Lines saying what ended."""
+        device = str((self.mounted or {}).get("device_name") or "")
+        ended = self.monitor.end_for(device, "%s was taken out" % device) if device else []
+        if not ended:
+            return []
+        self._save_watches()
+        for w in ended:
+            self.gate.log.write("watch", by=by, change="ended", watch=w.id, rule=w.rule(), device=device)
+        rules = "; ".join(w.rule(self.lab.resolve(w.key)[1].unit) for w in ended)
+        self.notifier("watch", "Watches ended with %s" % device, rules)
+        return ["%d watch%s made for %s ended with it: %s" % (len(ended), "" if len(ended) == 1 else "es", device,
+                                                                rules)]
+
+    def acknowledge_alarm(self, alarm_id: str, by: str = "human", channel: str = "portal",
+                          device: Optional[str] = None) -> bool:
+        """A person's Got it: kept with the alarm and in the lab's record, with who said it and where."""
+        from .approval import who_text
+        who = who_text({"account": self.user, "channel": channel, "device": device})
+        a = self.monitor.acknowledge(alarm_id, who)
+        if a is None:
+            return False
+        self.gate.log.write("alarm_ack", by=by, alarm=a.id, text=a.text, account=self.user, channel=channel,
+                            device=device)
+        return True
+
+    def alarms_reach(self) -> str:
+        """Where alarms reach people now, in words, for the agent's watch and queue_start (it once promised the person
+        alarms would reach them away from the lab, with nothing set up to do it)."""
+        away = self.notifier.away("alarm")
+        if away:
+            return "alarms show in the portal on this computer and reach people away from it through " + ", ".join(away)
+        return ("alarms show only in the portal on this computer: nothing is set up to reach anyone away from it "
+                "(Settings → Notifications for email or a webhook such as ntfy; Settings → Phone access to pair a "
+                "phone)")
 
     # ------------------------------------------------------------------ watches and alarms outlast a restart
 
@@ -5216,8 +5267,9 @@ class LabRuntime:
             pass
 
     def _restore_alarms(self) -> List[Dict[str, Any]]:
-        """The alarm history as Kelvin kept it, back in the monitor. One still on when Kelvin stopped can't be known
-        to be on now: it shows as ended by the stop (its watch raises it again if it still holds). Returns those."""
+        """The alarm history as Kelvin kept it (who said Got it, how often each went up), back in the monitor. One
+        still on when Kelvin stopped can't be known to be on now: it shows as ended by the stop (its watch raises it
+        again if it still holds). Returns those."""
         from ..monitor import Alarm
         try:
             data = json.loads((self.data_dir / self.ALARMS).read_text(encoding="utf-8"))
@@ -5226,18 +5278,23 @@ class LabRuntime:
         kept, was_on = [], []
         for v in (data.get("alarms") if isinstance(data, dict) else None) or []:
             try:
-                a = Alarm("was-" + str(v["id"]).replace("was-", ""), str(v["kind"]), str(v["key"]), str(v["text"]),
-                          float(v["raised"]), [str(x) for x in v.get("actions") or []],
-                          float(v["cleared"]) if v.get("cleared") is not None else None, bool(v.get("acknowledged")))
+                a = Alarm.restore(dict(v, id="was-" + str(v["id"]).replace("was-", "")))
             except (KeyError, TypeError, ValueError):
                 continue
             if a.cleared is None:
                 was_on.append(a.view())
                 a.cleared, a.acknowledged = time.time(), True
+                a.cleared_text, a.acknowledged_by = "Kelvin stopped", a.acknowledged_by or "the restart's card"
                 a.text += " (on when Kelvin stopped)"
             kept.append(a)
         self.monitor.alarms[:] = kept[:50]
         return was_on
+
+    def alarms_view(self) -> List[Dict[str, Any]]:
+        """The alarms for the portal and the phones (/api/state): every one nobody has said Got it to yet, still on or
+        not, and the latest 20 with their history, newest first."""
+        alarms = list(self.monitor.alarms)
+        return [a.view() for n, a in enumerate(alarms) if n < 20 or not a.acknowledged]
 
     def _saved_watches(self) -> Dict[str, Any]:
         try:
@@ -5250,7 +5307,7 @@ class LabRuntime:
         """This lab's person and agent watches, kept next to the queue (the lab's own are in its config)."""
         labs = self._saved_watches()
         labs[self.lab.config.name] = [{"read": w.key, "above": w.above, "below": w.below, "for": w.for_s,
-                                       "every": w.every, "source": w.source, "note": w.note}
+                                       "every": w.every, "source": w.source, "note": w.note, "device": w.device}
                                       for w in list(self.monitor.watches.values()) if w.source != "lab"]
         try:
             _write_json(self.data_dir / self.WATCHES, {"labs": labs})
@@ -5259,16 +5316,22 @@ class LabRuntime:
 
     def _restore_watches(self) -> Dict[str, List[str]]:
         """The person's and agent's watches kept for this lab, watched again: each comes back unless one like it is
-        on already; one whose reading the lab no longer has is dropped, and said so once (the restart's card)."""
+        on already; one whose reading the lab no longer has, or made for a sample that is no longer mounted, is
+        dropped, and said so once (the restart's card)."""
         back, dropped = [], []
         have = {(w.key, w.above, w.below, w.for_s) for w in self.monitor.watches.values()}
+        mounted = str((self.mounted or {}).get("device_name") or "")
         for v in self._saved_watches().get(self.lab.config.name) or []:
             try:
                 key, for_s = str(v["read"]), max(0.0, float(v.get("for") or 0))
                 if (key, v.get("above"), v.get("below"), for_s) in have:
                     continue
+                device = str(v.get("device") or "")
+                if device and device != mounted:
+                    raise ValueError("made for %s, which is no longer mounted" % device)
                 w = self.monitor.add(Watch(key, v.get("above"), v.get("below"), for_s, float(v.get("every") or 10),
-                                           [], False, str(v.get("source") or "person"), str(v.get("note") or "")[:200]))
+                                           [], False, str(v.get("source") or "person"), str(v.get("note") or "")[:200],
+                                           device=device))
                 have.add((key, w.above, w.below, for_s))
                 back.append(w.rule(self.lab.resolve(key)[1].unit))
             except (KeyError, TypeError, ValueError) as e:
@@ -5407,7 +5470,7 @@ class LabRuntime:
         if i["watches"].get("back"):
             lines.append("watches back: %s" % "; ".join(i["watches"]["back"]))
         if i["watches"].get("dropped"):
-            lines.append("watches not back (this lab has no such reading): %s" % "; ".join(i["watches"]["dropped"]))
+            lines.append("watches not back: %s" % "; ".join(i["watches"]["dropped"]))
         return lines
 
     def incident_safe(self, by: str = "human") -> List[str]:
@@ -5465,9 +5528,8 @@ class LabRuntime:
             value = "" if v["value"] is None else " (now %s)" % self._spec(v["key"]).show(v["value"])
             lines.append("%s [%s, %s] %s%s%s" % (v["id"], v["source"], state, v["rule"], value,
                                                  " -> " + "; ".join(v["then"]) if v["then"] else ""))
-        for a in self.monitor.active():
-            lines.append("active alarm %s: %s" % (a.id, a.text))
-        return "\n".join(lines) or "nothing is watched"
+        lines += self.monitor.lines()   # alarms on, and those that cleared before anyone said Got it
+        return "\n".join(lines + [self.alarms_reach()]) if lines else "nothing is watched"
 
     def mark_reviewed(self, by: str = "human") -> List[str]:
         """A person reviewed the limits of the instruments Kelvin added (their lab config has no marks now, and
@@ -5662,7 +5724,7 @@ class LabRuntime:
                 "drafts": sorted(n for n, i in self.lab.instruments.items()
                                  if not i.simulated and i.card.status == "draft"),
                 "watches": self.monitor.list(),
-                "alarms": [a.view() for a in self.monitor.alarms[:10]],
+                "alarms": self.alarms_view(),
                 "incident": dict(self.incident, lines=self.incident_lines()) if self.incident else None,
                 "notices": list(self.notifier.notices)[-20:],
                 "instruments": self.instruments(),
