@@ -37,7 +37,7 @@ final class AnalysisTests: XCTestCase {
         XCTAssertEqual(json["runs"], .array([.string("r1"), .string("r2")]))
         XCTAssertEqual(json["y"], .string("lockin.y / smu.I"))
         XCTAssertNil(json["where"])                                           // left empty: left out
-        XCTAssertNil(json["group"])
+        XCTAssertEqual(json["group"], .string(""))                           // "–": one curve, also for a map
         let steps = json["steps"]?.array ?? []
         XCTAssertEqual(steps.count, 5)
         XCTAssertEqual(steps[0], .object(["op": .string("antisymmetrize")]))

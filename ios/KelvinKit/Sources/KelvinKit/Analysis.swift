@@ -202,13 +202,15 @@ public struct AnalysisSpec: Equatable, Sendable {
         self.fit = fit
     }
 
-    /// As Kelvin reads it, without what is left empty.
+    /// As Kelvin reads it, without what is left empty, but for the group: empty is one curve, where Kelvin 0.3.34 and
+    /// later would draw a map a curve per value of its outer axis.
     public var json: JSONValue {
         var o: [String: JSONValue] = ["runs": .array(runs.map { .string($0) })]
-        for (key, text) in [("x", x), ("y", y), ("where", condition), ("group", group)] {
+        for (key, text) in [("x", x), ("y", y), ("where", condition)] {
             let t = text.trimmingCharacters(in: .whitespaces)
             if !t.isEmpty { o[key] = .string(t) }
         }
+        o["group"] = .string(group.trimmingCharacters(in: .whitespaces))
         if let row { o["row"] = .number(Double(row)) }
         if !steps.isEmpty { o["steps"] = .array(steps.map(\.json)) }
         if let fit, !fit.model.trimmingCharacters(in: .whitespaces).isEmpty { o["fit"] = fit.json }
