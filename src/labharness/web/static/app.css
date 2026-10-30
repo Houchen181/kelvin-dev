@@ -383,6 +383,9 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn:disabled { opacity: .5; cursor: default; }
+@media (prefers-color-scheme: dark) {   /* at half its light, a dark button reads as a live ghost button (Keep fit beside CSV) */
+  :root:where(:not([data-theme="light"])) .btn:disabled { opacity: .35; }
+}
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.danger:hover { filter: brightness(1.08); }
 .account-delete { margin-top: 10px; }
@@ -1200,6 +1203,7 @@ body.resizing .plot-svg { pointer-events: none; }
 .an-add-step { align-self: flex-start; color: var(--text-2); }
 .an-where { flex: 2 1 180px; }
 .an-per { flex: 1 1 120px; }
+.an-body input::placeholder { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-style: italic; }   /* a hint, never a value */
 .an-body .an-field input:disabled { color: var(--muted); }
 .an-body .an-step input.an-text { width: 64px; font-family: ui-monospace, Consolas, monospace; }
 .an-plot { min-height: 60px; }

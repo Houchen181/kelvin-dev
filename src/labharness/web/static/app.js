@@ -6176,7 +6176,6 @@
     ANA.models = cols.models.filter((m) => m !== "resonator").concat(Object.keys(ANA.hold));
     const all = cols.axes.concat(cols.readings, cols.others || [], cols.traces);
     ANA.traces = new Map(cols.traces.map((c) => [c.key, c.x_unit === "Hz" ? "frequency" : "x"]));
-    $("an-where").placeholder = (cols.axes.length ? cols.axes[0].key : "t") + " > 0";
     $("an-cols").replaceChildren(...all.map((c) => h("option", { value: c.key, label: c.unit || "" })));
     const keys = new Set(all.map((c) => c.key));
     const plain = (t) => /^[\w.]+$/.test(t);   // a column's name, not an expression of columns

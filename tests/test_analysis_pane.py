@@ -271,3 +271,17 @@ def test_a_kept_fit_records_linear_power_its_start_values_and_its_row(rt):
     datatools.fit_run(rt, run, "lorentzian", y="vna.S21", name="by Kelvin")   # fit_run's own: the row it took too
     by_kelvin = {f["name"]: f for f in fitting.stored(rt._run_dir(run))}["by Kelvin"]["spec"]
     assert by_kelvin["row"] == 0 and any("linear power" in n for n in by_kelvin["notes"])
+
+
+# ------------------------------------------------------------------ 8. hints that look like hints
+
+def test_the_panes_hints_dont_look_like_values_and_a_disabled_button_looks_disabled():
+    where = re.search(r'<input id="an-where"[^>]*>', PAGE).group(0)
+    assert 'placeholder="all points"' in where and not re.search(r"&gt;|&lt;|>|<", html.unescape(
+        re.search(r'placeholder="([^"]*)"', where).group(1)))
+    assert 'placeholder="one curve"' in re.search(r'<input id="an-group"[^>]*>', PAGE).group(0)
+    assert '$("an-where").placeholder' not in JS   # no longer an example condition of the run's
+    css = (STATIC / "app.css").read_text(encoding="utf-8")
+    assert ".an-body input::placeholder" in css and "font-style: italic" in css.split(".an-body input::placeholder")[1]
+    dark = re.search(r"@media \(prefers-color-scheme: dark\) \{[^{}]*\{ opacity: \.35; \}", css)
+    assert dark and ".btn:disabled" in dark.group(0)
