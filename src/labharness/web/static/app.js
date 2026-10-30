@@ -6088,7 +6088,8 @@
   // A run's columns, or expressions of them, through steps, then a fit; the server works it out (workbench.py). Kelvin's
   // analyze tool opens this pane with its own spec, which the person changes here; Keep fit keeps it with its run.
   const ANA = { open: false, spec: { runs: [], x: "", y: "", where: "", steps: [], fit: null }, result: null, runs: [],
-               models: [], gen: 0, timer: null, auto: { x: true, y: true, group: true }, traces: new Map() };
+               models: [], hold: {}, params: [], paramsFor: "", gen: 0, timer: null, auto: { x: true, y: true, group: true },
+               traces: new Map() };
   // op: [its name, its fields: {key, hint (the placeholder), value (its default), choices: [[value, label]], text (a word,
   // not a number), before and after (a word beside the box, so a filled-in number still says what it is)}]
   const X_FROM = { key: "lo", hint: "from x" }, X_TO = { key: "hi", hint: "to x" };
@@ -6144,6 +6145,7 @@
       steps: Array.isArray(spec.steps) ? spec.steps.map((s) => Object.assign({}, s)) : [],
       fit: spec.fit ? Object.assign({}, spec.fit) : null };
     ANA.auto = auto || { x: !spec.x, y: !spec.y, group: spec.group === undefined || spec.group === null };   // what Kelvin left out follows the run, as the server's does
+    ANA.paramsFor = "";   // Kelvin's start and fixed values shown in the fit's fields
     if (!ANA.open) {
       ANA.open = true;   // shown without starting the pane's own default
       $("anpane").hidden = false;
@@ -6170,7 +6172,8 @@
     let cols;
     try { cols = await api("/api/analysis/columns?run=" + encodeURIComponent(runId)); }
     catch (e) { anMessage(e.message, true); return; }
-    ANA.models = cols.models.filter((m) => m !== "resonator");
+    ANA.hold = cols.hold || {};   // models fitted with values the person gives (graphene: C_g and aspect)
+    ANA.models = cols.models.filter((m) => m !== "resonator").concat(Object.keys(ANA.hold));
     const all = cols.axes.concat(cols.readings, cols.others || [], cols.traces);
     ANA.traces = new Map(cols.traces.map((c) => [c.key, c.x_unit === "Hz" ? "frequency" : "x"]));
     $("an-where").placeholder = (cols.axes.length ? cols.axes[0].key : "t") + " > 0";
@@ -6213,6 +6216,51 @@
     $("an-expr").value = f.model && !known ? f.model : "";
     $("an-lo").value = f.lo === undefined || f.lo === null ? "" : f.lo;
     $("an-hi").value = f.hi === undefined || f.hi === null ? "" : f.hi;
+    renderFitParams();
+  }
+  // under the fit, a row per parameter: where it starts from, or the value it is held at. They stay through changes
+  // to the window and the expression; drawn again only when the parameters change, so typing keeps its place
+  function renderFitParams() {
+    const f = ANA.spec.fit;
+    const names = f && f.model ? ANA.params : [];
+    const must = (f && ANA.hold[f.model]) || [];
+    const key = (f && f.model) + "|" + names.join(",");
+    if (key === ANA.paramsFor) return;
+    ANA.paramsFor = key;
+    $("an-fitparams").replaceChildren(...names.map((name) => {
+      const held = must.includes(name) || name in ((f && f.fix) || {});
+      const value = held ? (f.fix || {})[name] : (f.start || {})[name];
+      const input = h("input", { type: "number", step: "any", placeholder: held ? "value" : "start", "aria-label": name + (held ? ", held at" : ", starts from") });
+      input.value = value === undefined || value === null ? "" : String(value);
+      const box = h("input", { type: "checkbox", "aria-label": "Hold " + name });
+      box.checked = held;
+      box.disabled = must.includes(name);   // known values the model can't fit (graphene's C_g)
+      const changed = (now) => {
+        const fit = ANA.spec.fit;
+        if (!fit) return;
+        const start = Object.assign({}, fit.start), fix = Object.assign({}, fit.fix);
+        delete start[name];
+        delete fix[name];
+        const v = input.value.trim();
+        if (v !== "" && isFinite(Number(v))) (box.checked ? fix : start)[name] = Number(v);
+        if (Object.keys(start).length) fit.start = start; else delete fit.start;
+        if (Object.keys(fix).length) fit.fix = fix; else delete fit.fix;
+        input.placeholder = box.checked ? "value" : "start";
+        input.setAttribute("aria-label", name + (box.checked ? ", held at" : ", starts from"));
+        computeAnalysis(now);
+      };
+      input.addEventListener("input", () => changed(false));
+      box.addEventListener("change", () => {
+        if (box.checked && input.value.trim() === "") {   // held where the fit has it now
+          const c = ANA.result && ANA.result.curves.find((x) => x.fit && x.fit.params);
+          const p = c && c.fit.params.find((x) => x.name === name);
+          if (p && typeof p.value === "number") input.value = String(Number(p.value.toPrecision(6)));
+        }
+        changed(true);
+      });
+      return h("div", { class: "an-param" }, h("span", { class: "an-param-name" }, name), input,
+        h("label", { class: "an-hold" }, box, h("span", {}, "hold")));
+    }));
   }
   function traceAxis() {   // a trace is drawn against its own x
     const own = ANA.traces && ANA.traces.get(ANA.spec.y);
@@ -6298,6 +6346,9 @@
   function showAnalysis(r) {
     ANA.result = r;
     if (ANA.auto.group) { ANA.spec.group = r.group || ""; $("an-group").value = ANA.spec.group; }   // a map's own
+    if (r.params) ANA.params = r.params;   // an expression being typed keeps the rows it had
+    else if (!(ANA.spec.fit && ANA.spec.fit.model)) ANA.params = [];
+    renderFitParams();
     const curves = r.curves.slice(0, SERIES), a = r.axes || {};
     const notes = (r.notes || []).slice();
     if (r.curves.length > SERIES) notes.push(r.curves.length + " curves: the first " + SERIES + " are drawn");
@@ -6372,7 +6423,12 @@
     if (s.row !== undefined && s.row !== null && s.row !== "") parts.push("row " + s.row);
     if (s.steps.length) parts.push("steps: " + s.steps.map((st) => st.op + Object.entries(st).filter(([k]) => k !== "op")
       .map(([k, v]) => " " + k + "=" + v).join("")).join(", "));
-    if (s.fit && s.fit.model) parts.push("fit: " + s.fit.model);
+    if (s.fit && s.fit.model) {
+      const f = s.fit, set = (o) => Object.entries(o || {}).map(([k, v]) => k + "=" + v).join(" ");
+      const has = (v) => v !== undefined && v !== null && v !== "";
+      parts.push("fit: " + f.model + (has(f.lo) || has(f.hi) ? " from " + (has(f.lo) ? f.lo : "the start") + " to " + (has(f.hi) ? f.hi : "the end") : "")
+        + (set(f.start) ? ", start " + set(f.start) : "") + (set(f.fix) ? ", held " + set(f.fix) : ""));
+    }
     const input = $("input");
     input.value = "In the Analysis pane (" + parts.join("; ") + "): ";
     autosize();
@@ -6428,17 +6484,26 @@
         computeAnalysis();
       });
     }
+    // the fit's model and window; its start and held values stay (Kelvin's too), those of parameters it still has
     const fitChanged = (now) => {
       const m = $("an-model").value;
       $("an-expr").hidden = m !== "expr";
       const model = m === "expr" ? $("an-expr").value.trim() : m;
       const num = (id) => ($(id).value.trim() === "" ? null : Number($(id).value));
-      ANA.spec.fit = model ? { model, lo: num("an-lo"), hi: num("an-hi") } : null;
+      const old = ANA.spec.fit || {}, fit = model ? { model, lo: num("an-lo"), hi: num("an-hi") } : null;
+      const names = model.split(/[^\w.]+/);
+      for (const k of ["start", "fix"]) {
+        const kept = Object.entries((fit && old[k]) || {}).filter(([name]) => model === old.model || (m === "expr" && names.includes(name)));
+        if (kept.length) fit[k] = Object.fromEntries(kept);
+      }
+      ANA.spec.fit = fit;
       computeAnalysis(now);
     };
     $("an-model").addEventListener("change", () => {
       const expr = $("an-model").value === "expr";
+      ANA.params = [];   // the new model's, once Kelvin has worked it out
       fitChanged(!expr);
+      renderFitParams();
       if (expr) $("an-expr").focus();
     });
     for (const id of ["an-expr", "an-lo", "an-hi"]) $(id).addEventListener("input", () => fitChanged(false));

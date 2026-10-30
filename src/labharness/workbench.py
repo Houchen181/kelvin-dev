@@ -420,37 +420,41 @@ def _worked(np: Any, c: Dict[str, Any], steps: Sequence[Any]
     return x, y, xu, yu, xn, yn
 
 
+def _model(f: Dict[str, Any]) -> Tuple[Any, str]:
+    """The fit's model: (it, its name among fitting.MODELS, "" for an expression in x)."""
+    model = str(f.get("model") or "").strip()
+    key = fitting.ALIASES.get(model.lower(), model.lower())
+    if key == "resonator":
+        raise AnalysisError("a resonator's fit takes its phase too: ask Kelvin (fit_run)")
+    if key in fitting.MODELS:
+        return fitting.MODELS[key](), key
+    try:
+        return fitting.expression_model(model, [], "x"), ""
+    except (fitting.FitError, ValueError, TypeError) as e:
+        raise AnalysisError(str(e))
+
+
 def _fitted(np: Any, x: Any, y: Any, xu: Optional[str], yu: Optional[str], f: Dict[str, Any],
             deadline: Optional[float] = None) -> Tuple[Any, Dict[str, Any], List[str], bool]:
     """The fit asked for on these points, in its window: (the model, the result, notes, whether a resonance in dB
     was fitted on linear power, as fit_run fits it)."""
-    model = str(f.get("model") or "").strip()
     for k in ("start", "fix"):
         if f.get(k) is not None and not isinstance(f.get(k), dict):
             raise AnalysisError("%s: {name: value}" % k)
-    key = fitting.ALIASES.get(model.lower(), model.lower())
+    m, key = _model(f)
     keep = _window(np, x, _num(f.get("lo"), "the fit's low end"), _num(f.get("hi"), "the fit's high end"))
     x, y = x[keep], y[keep]
     notes = []
     db = False
-    if key == "resonator":
-        raise AnalysisError("a resonator's fit takes its phase too: ask Kelvin (fit_run)")
-    if key in fitting.MODELS:
-        m = fitting.MODELS[key]()
-        if yu in datatools.DB_UNITS and key in ("lorentzian", "gaussian", "double_lorentzian"):
-            y, yu, db = 10 ** (y / 10), "", True
-            notes.append("fitted on linear power, 10^(dB/10): its widths are linewidths")
-    else:
-        try:
-            m = fitting.expression_model(model, [], "x")
-        except (fitting.FitError, ValueError, TypeError) as e:
-            raise AnalysisError(str(e))
+    if yu in datatools.DB_UNITS and key in ("lorentzian", "gaussian", "double_lorentzian"):
+        y, yu, db = 10 ** (y / 10), "", True
+        notes.append("fitted on linear power, 10^(dB/10): its widths are linewidths")
     try:
         result = fitting.fit(m, x, y, None, f.get("start") or None, f.get("fix") or None, None, None, xu or "",
                              yu or "", deadline=min(time.monotonic() + FIT_S, deadline or math.inf))
     except (fitting.FitError, ValueError, TypeError, ArithmeticError) as e:   # ExprError is a ValueError
         raise AnalysisError(str(e) or e.__class__.__name__)
-    if key not in fitting.MODELS:   # the person's own model: its parameters' units, where its form fixes them
+    if not key:   # the person's own model: its parameters' units, where its form fixes them
         found = units.model_units(m.formula, m.params, xu, yu)
         for p in result["params"]:
             p["unit"] = p["unit"] or found.get(p["name"], "")
@@ -508,8 +512,8 @@ def _no_unit(axis: str, name: str) -> str:
 
 
 def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
-    """The spec worked out: each curve after the steps (and its fit), with the axes' names and units, and the group
-    the curves are drawn per."""
+    """The spec worked out: each curve after the steps (and its fit), with the axes' names and units, the group the
+    curves are drawn per, and the fit's parameters by name (for their start and fixed values)."""
     np = _np()
     steps = _steps(spec)
     f = spec.get("fit") or {}
@@ -531,8 +535,14 @@ def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
         if fit_on:
             out["fit"] = _fit(np, x, y, xu, yu, "%s vs %s" % (yn, xn), f, deadline)
         curves.append(out)
-    return _safe({"curves": curves, "axes": axes, "notes": notes + unknown,
-                  "group": next((c["by"] for c in found if c["by"]), "")})
+    result = {"curves": curves, "axes": axes, "notes": notes + unknown,
+              "group": next((c["by"] for c in found if c["by"]), "")}
+    if fit_on:
+        try:
+            result["params"] = list(_model(f)[0].params)
+        except AnalysisError:   # each curve's fit says why
+            pass
+    return _safe(result)
 
 
 def table(rt: Any, spec: Dict[str, Any]) -> Tuple[str, str]:
@@ -561,7 +571,8 @@ def table(rt: Any, spec: Dict[str, Any]) -> Tuple[str, str]:
 
 def columns(rt: Any, run_id: str) -> Dict[str, Any]:
     """What a run offers the panel: its swept axes, its readings and traces, each with its unit; its other columns of
-    numbers (i: each point's number, t: its time, a repeated sweep's repeat); its kept fits."""
+    numbers (i: each point's number, t: its time, a repeated sweep's repeat); its kept fits; the models it can fit,
+    and those that need values held (hold: graphene's C_g and aspect)."""
     try:
         src = datatools.Source(rt, run_id)
     except datatools.ToolError as e:
@@ -572,6 +583,7 @@ def columns(rt: Any, run_id: str) -> Dict[str, Any]:
     except (KeyError, OSError, ValueError):
         pass
     listed = set(src.axes) | set(src.scalars) | set(src.traces)
+    made = {name: make() for name, make in fitting.MODELS.items() if name != "resonator"}
     return _safe({"run": src.run_id, "plan": meta.get("plan") or src.run_id.split("-", 2)[-1],
                   "status": meta.get("status"), "points": src.table.n,
                   "axes": [{"key": k, "unit": src.units.get(k, "")} for k in src.axes],
@@ -581,8 +593,8 @@ def columns(rt: Any, run_id: str) -> Dict[str, Any]:
                   "others": [{"key": k, "unit": src.units.get(k, "")} for k in src.table.order
                              if k in src.table.numbers and k not in listed],
                   "kept": [k.get("name") for k in fitting.stored(src.folder)],
-                  "models": [name for name, make in fitting.MODELS.items()
-                             if name != "resonator" and not getattr(make(), "needs", ())]})
+                  "models": [name for name, m in made.items() if not m.needs],
+                  "hold": {name: list(m.needs) for name, m in made.items() if m.needs}})
 
 
 def keep(rt: Any, spec: Dict[str, Any], curve: int = 0, name: str = "", by: str = "human (portal)",

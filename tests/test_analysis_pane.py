@@ -155,6 +155,38 @@ def test_the_unit_algebra():
     assert units.model_units("a*x + b", ["a", "b"], "V", None) == {}   # y's unit unknown: nothing guessed
 
 
+# ------------------------------------------------------------------ 4. start and held values in the pane
+
+def test_a_fit_takes_start_and_held_values_and_says_its_parameters(rt):
+    rt.run(GATE)
+    run = last(rt)
+    gauss = "a*exp(-(x-x0)**2/w) + B"
+    bare = compute(rt, {"runs": [run], "y": "lockin.X / 1e-6", "fit": {"model": gauss}})
+    assert bare["params"] == ["a", "x0", "w", "B"]
+    assert any("started from 1" in w for w in bare["curves"][0]["fit"]["warnings"])
+    started = compute(rt, {"runs": [run], "y": "lockin.X / 1e-6", "fit": {
+        "model": gauss, "start": {"a": 10, "x0": 1.5, "w": 0.5}, "fix": {"B": 0}}})
+    p = fit_of(started)
+    assert p["x0"]["value"] == pytest.approx(1.5, abs=0.05) and p["B"]["held"] and p["B"]["value"] == 0
+    assert not any("started from 1" in w for w in started["curves"][0]["fit"]["warnings"])
+    wrong = compute(rt, {"runs": [run], "fit": {"model": "lorentzian", "start": {"offset": 1}}})
+    assert wrong["params"] == ["y0", "A", "x0", "fwhm"] and "no parameter offset" in wrong["curves"][0]["fit"]["error"]
+    assert columns(rt, run)["hold"] == {"graphene": ["C_g", "aspect"]}   # the pane offers it, with both held
+    held = compute(rt, {"runs": [run], "y": "lockin.X / smu.I", "fit": {
+        "model": "graphene", "fix": {"C_g": 1.21e-4, "aspect": 2}}})
+    assert "needs" not in str(held["curves"][0]["fit"].get("error"))
+
+
+def test_the_pane_has_start_and_hold_fields_and_keeps_them_through_edits():
+    assert 'id="an-fitparams"' in PAGE and 'id="an-group"' in PAGE
+    fields = _js("renderFitParams")
+    assert '"checkbox"' in fields and '"hold"' in fields and "fit.fix = fix" in fields and "fit.start = start" in fields
+    changed = JS[JS.index("const fitChanged = (now) => {"):JS.index('$("an-model").addEventListener("change"')]
+    assert "old[k]" in changed and "fit[k] = Object.fromEntries(kept)" in changed   # Kelvin's start and fix stay
+    assert "Object.keys(ANA.hold)" in _js("anColumns")   # graphene, with C_g and aspect held
+    assert '{ key: "unit", hint: "unit", text: true }' in JS   # the scale step says the unit of its result
+
+
 # ------------------------------------------------------------------ 5. i, t and repeat
 
 def test_i_t_and_repeat_are_columns_to_choose(rt):
