@@ -458,13 +458,14 @@ ANALYZE = {
         "row": {"type": "integer", "description": "For a trace column: the point whose trace (default the last)"},
         "steps": {"type": "array", "description": "In order: crop {lo, hi}, bin {width}, smooth {points}, deriv, "
                                                   "integrate, background {order, lo, hi} (subtracted), normalize "
-                                                  "{how: max|range|first|mean}, scale {factor, offset}, symmetrize, "
-                                                  "antisymmetrize (about x = 0), fft, abs, log10",
+                                                  "{how: max|range|first|mean}, scale {factor, offset, unit} (the "
+                                                  "unit of the result, when the factor carries one: a current), "
+                                                  "symmetrize, antisymmetrize (about x = 0), fft, abs, log10",
                   "items": {"type": "object", "required": ["op"], "properties": {
                       "op": {"type": "string", "enum": list(workbench.OPS)}, "lo": _NUMBER, "hi": _NUMBER,
                       "width": _NUMBER, "points": {"type": "integer"}, "order": {"type": "integer"},
                       "how": {"type": "string", "enum": ["max", "range", "first", "mean"]}, "factor": _NUMBER,
-                      "offset": _NUMBER}}},
+                      "offset": _NUMBER, "unit": {"type": "string"}}}},
         "fit": {"type": "object", "required": ["model"], "description": "Fitted to each curve after the steps",
                 "properties": {
                     "model": {"type": "string", "description": "One of Kelvin's (%s) or an expression in x, e.g. "

@@ -6089,8 +6089,8 @@
   // analyze tool opens this pane with its own spec, which the person changes here; Keep fit keeps it with its run.
   const ANA = { open: false, spec: { runs: [], x: "", y: "", where: "", steps: [], fit: null }, result: null, runs: [],
                models: [], gen: 0, timer: null, auto: { x: true, y: true, group: true }, traces: new Map() };
-  // op: [its name, its fields: {key, hint (the placeholder), value (its default), choices: [[value, label]], before and
-  // after (a word beside the box, so a filled-in number still says what it is)}]
+  // op: [its name, its fields: {key, hint (the placeholder), value (its default), choices: [[value, label]], text (a word,
+  // not a number), before and after (a word beside the box, so a filled-in number still says what it is)}]
   const X_FROM = { key: "lo", hint: "from x" }, X_TO = { key: "hi", hint: "to x" };
   const AN_STEPS = {
     crop: ["Crop", [X_FROM, X_TO]],
@@ -6101,7 +6101,7 @@
     background: ["Background", [{ key: "order", value: 1, choices: [[0, "constant"], [1, "linear"], [2, "quadratic"], [3, "cubic"]] },
       X_FROM, X_TO]],
     normalize: ["Normalize", [{ key: "how", value: "max", choices: [["max", "to its max"], ["range", "0 to 1"], ["first", "to the first point"], ["mean", "to its mean"]] }]],
-    scale: ["Scale", [{ key: "factor", value: 1, before: "×" }, { key: "offset", value: 0, before: "+" }]],
+    scale: ["Scale", [{ key: "factor", value: 1, before: "×" }, { key: "offset", value: 0, before: "+" }, { key: "unit", hint: "unit", text: true }]],
     symmetrize: ["Symmetrize", []],
     antisymmetrize: ["Antisymmetrize", []],
     fft: ["FFT", []],
@@ -6228,17 +6228,18 @@
     $("an-steps").replaceChildren(...ANA.spec.steps.map((st, i) => {
       const [name, fields] = AN_STEPS[st.op] || [st.op, []];
       const row = h("div", { class: "an-step" }, h("span", { class: "an-step-name" }, name));
-      for (const { key, hint, value, choices, before, after } of fields) {
+      for (const { key, hint, value, choices, text, before, after } of fields) {
         if (st[key] === undefined && value !== undefined) st[key] = value;
         const input = choices
           ? h("select", { "aria-label": name + ": " + key }, ...choices.map(([v, label]) => h("option", { value: String(v) }, label)))
-          : h("input", { type: "number", step: "any", placeholder: hint || "", "aria-label": name + ": " + (hint || after || key) });
+          : h("input", text ? { class: "an-text", spellcheck: "false", autocomplete: "off", placeholder: hint || "", "aria-label": name + ": " + (hint || key) }
+            : { type: "number", step: "any", placeholder: hint || "", "aria-label": name + ": " + (hint || after || key) });
         input.value = st[key] === undefined || st[key] === null ? "" : String(st[key]);
         input.addEventListener(choices ? "change" : "input", () => {
           const v = input.value.trim();
           if (choices) st[key] = typeof choices[0][0] === "number" ? Number(v) : v;
           else if (v === "") delete st[key];
-          else st[key] = Number(v);
+          else st[key] = text ? v : Number(v);
           computeAnalysis();
         });
         if (before) row.append(h("span", { class: "an-unit" }, before));

@@ -19,12 +19,15 @@ A spec, as the panel sends it and the analyze tool writes it:
         integrate                  the running integral, by trapezoids from the first point
         background {order, lo, hi} subtract a polynomial of this order fitted to x in [lo, hi] (all points if neither)
         normalize {how}            max: |y| at most 1; range: 0 to 1; first: the first point is 1; mean: the mean is 1
-        scale {factor, offset}     y * factor + offset
+        scale {factor, offset, unit} y * factor + offset, in unit (default: y's, re-prefixed by a power of ten)
         symmetrize, antisymmetrize (y(x) + y(-x)) / 2 and (y(x) - y(-x)) / 2 about x = 0: magnetoresistance, Hall
         fft                        the amplitude spectrum, x resampled evenly first
         abs, log10                 |y|, log10 |y|
     fit      {model, lo, hi, start, fix}: one of fitting.MODELS or an expression in x (a*exp(-x/tau) + c), fitted to
-             each curve in x in [lo, hi]"""
+             each curve in x in [lo, hi]
+
+Units follow the columns through expressions and steps (units.py); where one can't be told, the axis has none and a
+note says so."""
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +40,7 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import datatools, fitting, rundata
+from . import datatools, fitting, rundata, units
 
 MAX_RUNS = 8
 MAX_CURVES = 24       # curves drawn at once (runs times groups)
@@ -107,10 +110,6 @@ def _sorted_unique(np: Any, x: Any, y: Any) -> Tuple[Any, Any]:
     return ux, np.bincount(inv, weights=y) / np.bincount(inv)
 
 
-def _times(y_unit: str, x_unit: str) -> str:
-    return "·".join(u for u in (y_unit, x_unit) if u)
-
-
 def _smooth(np: Any, y: Any, points: int) -> Any:
     h = max(1, int(points) // 2)
     if y.size < 2 * h + 1:
@@ -121,9 +120,9 @@ def _smooth(np: Any, y: Any, points: int) -> Any:
     return np.convolve(padded, c[::-1], mode="valid")
 
 
-def step(np: Any, x: Any, y: Any, xu: str, yu: str, xn: str, yn: str, s: Dict[str, Any]
-         ) -> Tuple[Any, Any, str, str, str, str]:
-    """One step on a curve: (x, y, x unit, y unit, x name, y name) after it."""
+def step(np: Any, x: Any, y: Any, xu: Optional[str], yu: Optional[str], xn: str, yn: str, s: Dict[str, Any]
+         ) -> Tuple[Any, Any, Optional[str], Optional[str], str, str]:
+    """One step on a curve: (x, y, x unit, y unit, x name, y name) after it. A unit is None when it can't be told."""
     op = str(s.get("op") or "").strip().lower()
     if op == "crop":
         keep = _window(np, x, _num(s.get("lo"), "crop's low end"), _num(s.get("hi"), "crop's high end"))
@@ -150,12 +149,12 @@ def step(np: Any, x: Any, y: Any, xu: str, yu: str, xn: str, yn: str, s: Dict[st
         dx = np.gradient(x)
         with np.errstate(divide="ignore", invalid="ignore"):
             y = np.where(dx != 0, np.gradient(y) / dx, np.nan)
-        yu, yn = fitting._per(yu, xu), "d%s/d%s" % (yn, xn)
+        yu, yn = units.per(yu, xu), "d%s/d%s" % (yn, xn)
     elif op == "integrate":
         if x.size < 2:
             raise AnalysisError("an integral needs 2 points or more")
         y = np.concatenate([[0.0], np.cumsum((y[1:] + y[:-1]) / 2 * np.diff(x))])
-        yu, yn = _times(yu, xu), "∫%s d%s" % (yn, xn)
+        yu, yn = units.times(yu, xu), "∫%s d%s" % (yn, xn)
     elif op == "background":
         order = int(_num(s.get("order"), "the background's order") or 0)
         if not 0 <= order <= 5:
@@ -191,9 +190,13 @@ def step(np: Any, x: Any, y: Any, xu: str, yu: str, xn: str, yn: str, s: Dict[st
     elif op == "scale":
         factor = _num(s.get("factor"), "the factor")
         offset = _num(s.get("offset"), "the offset") or 0.0
+        unit = str(s.get("unit") or "").strip()
+        if len(unit) > 40:
+            raise AnalysisError("a unit of 40 characters at most")
         if factor is not None and factor != 1:
-            y, yu = y * factor, ""
+            y, yu = y * factor, units.scaled(yu, factor)
         y = y + offset
+        yu = unit or yu
     elif op in ("symmetrize", "antisymmetrize"):
         ux, uy = _sorted_unique(np, x, y)
         lo, hi = max(float(ux.min()), -float(ux.max())), min(float(ux.max()), -float(ux.min()))
@@ -213,8 +216,9 @@ def step(np: Any, x: Any, y: Any, xu: str, yu: str, xn: str, yn: str, s: Dict[st
         amp = 2 * np.abs(np.fft.rfft(even - even.mean())) / even.size
         freq = np.fft.rfftfreq(even.size, d=float(grid[1] - grid[0]))
         x, y = freq[1:], amp[1:]
-        xu = "Hz" if xu == "s" else ("1/%s" % xu if xu else "")
-        xn, yn = "frequency" if xu == "Hz" else "1/%s" % xn, "|FFT %s|" % yn
+        xu = units.inverse(xu)
+        base = (units.split(xu or "") or (0, ""))[1]
+        xn, yn = {"Hz": "frequency", "s": "time"}.get(base, "1/%s" % xn), "|FFT %s|" % yn
     elif op == "abs":
         y, yn = np.abs(y), "|%s|" % yn
     elif op == "log10":
@@ -251,8 +255,28 @@ def run_ids(spec: Any) -> List[str]:
     return [r.strip() for r in runs if r.strip()][:MAX_RUNS] or ["last"]
 
 
+def _unit_of(src: datatools.Source) -> Callable[[str], str]:
+    """A column's unit, for units.of (KeyError for a name that is no column of the run)."""
+    def unit_of(key: str) -> str:
+        if key not in src.table.numbers:
+            raise KeyError(key)
+        return src.units.get(key, "")
+    return unit_of
+
+
+def _values(src: datatools.Source, text: str) -> Tuple[Any, Optional[str]]:
+    """A column's or an expression's values at every point, and its unit (None when it can't be told)."""
+    try:
+        v, unit = src.values(text)
+    except datatools.ToolError as e:
+        raise AnalysisError(str(e))
+    if str(text).strip() in src.table.numbers:
+        return v, unit
+    return v, units.of(text, _unit_of(src))
+
+
 def _curves(rt: Any, spec: Dict[str, Any], notes: List[str]) -> List[Dict[str, Any]]:
-    """Each run's curves before the steps: {run, label, x, y, x/y units and names}."""
+    """Each run's curves before the steps: {run, label, x, y, x and y units (None: not known) and names}."""
     runs = run_ids(spec)
     out = []
     for run in runs:
@@ -274,9 +298,9 @@ def _curves(rt: Any, spec: Dict[str, Any], notes: List[str]) -> List[Dict[str, A
         yn = y_text or (src.scalars[0] if src.scalars else "")
         if not yn:
             raise AnalysisError("%s measured nothing to plot: say y" % src.run_id)
+        xv, xu = _values(src, xn)
+        yv, yu = _values(src, yn)
         try:
-            xv, xu = src.values(xn)
-            yv, yu = src.values(yn)
             mask = src.mask(str(spec.get("where") or "").strip())
             group = str(spec.get("group") or "").strip()
             parts = datatools._grouped(src, group, mask) if group else [("", mask)]
@@ -291,7 +315,8 @@ def _curves(rt: Any, spec: Dict[str, Any], notes: List[str]) -> List[Dict[str, A
     return out
 
 
-def _worked(np: Any, c: Dict[str, Any], steps: Sequence[Any]) -> Tuple[Any, Any, str, str, str, str]:
+def _worked(np: Any, c: Dict[str, Any], steps: Sequence[Any]
+            ) -> Tuple[Any, Any, Optional[str], Optional[str], str, str]:
     """A curve through the steps: (x, y, x unit, y unit, x name, y name)."""
     x, y = _finite(np, np.asarray(c["x"], dtype=float), np.asarray(c["y"], dtype=float))
     if not x.size:
@@ -306,8 +331,8 @@ def _worked(np: Any, c: Dict[str, Any], steps: Sequence[Any]) -> Tuple[Any, Any,
     return x, y, xu, yu, xn, yn
 
 
-def _fitted(np: Any, x: Any, y: Any, xu: str, yu: str, f: Dict[str, Any], deadline: Optional[float] = None
-            ) -> Tuple[Any, Dict[str, Any], List[str], bool]:
+def _fitted(np: Any, x: Any, y: Any, xu: Optional[str], yu: Optional[str], f: Dict[str, Any],
+            deadline: Optional[float] = None) -> Tuple[Any, Dict[str, Any], List[str], bool]:
     """The fit asked for on these points, in its window: (the model, the result, notes, whether a resonance in dB
     was fitted on linear power, as fit_run fits it)."""
     model = str(f.get("model") or "").strip()
@@ -332,14 +357,18 @@ def _fitted(np: Any, x: Any, y: Any, xu: str, yu: str, f: Dict[str, Any], deadli
         except (fitting.FitError, ValueError, TypeError) as e:
             raise AnalysisError(str(e))
     try:
-        result = fitting.fit(m, x, y, None, f.get("start") or None, f.get("fix") or None, None, None, xu, yu,
-                             deadline=min(time.monotonic() + FIT_S, deadline or math.inf))
+        result = fitting.fit(m, x, y, None, f.get("start") or None, f.get("fix") or None, None, None, xu or "",
+                             yu or "", deadline=min(time.monotonic() + FIT_S, deadline or math.inf))
     except (fitting.FitError, ValueError, TypeError, ArithmeticError) as e:   # ExprError is a ValueError
         raise AnalysisError(str(e) or e.__class__.__name__)
+    if key not in fitting.MODELS:   # the person's own model: its parameters' units, where its form fixes them
+        found = units.model_units(m.formula, m.params, xu, yu)
+        for p in result["params"]:
+            p["unit"] = p["unit"] or found.get(p["name"], "")
     return m, result, notes, db
 
 
-def _fit(np: Any, x: Any, y: Any, xu: str, yu: str, what: str, f: Dict[str, Any],
+def _fit(np: Any, x: Any, y: Any, xu: Optional[str], yu: Optional[str], what: str, f: Dict[str, Any],
          deadline: Optional[float] = None) -> Dict[str, Any]:
     if deadline is not None and time.monotonic() > deadline:
         return {"error": "not fitted: the fits took %d s; fit fewer curves at once" % FITS_S}
@@ -385,6 +414,10 @@ def _steps(spec: Any) -> List[Any]:
     return steps
 
 
+def _no_unit(axis: str, name: str) -> str:
+    return "the unit of %s (%s) can't be told%s" % (axis, name, ": a scale step's unit gives it" if axis == "y" else "")
+
+
 def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
     """The spec worked out: each curve after the steps (and its fit), with the axes' names and units."""
     np = _np()
@@ -394,16 +427,20 @@ def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
     notes: List[str] = []
     curves = []
     axes: Dict[str, str] = {}
+    unknown: List[str] = []
     deadline = time.monotonic() + FITS_S
     for c in _curves(rt, spec, notes):
         x, y, xu, yu, xn, yn = _worked(np, c, steps)
-        axes = {"x": xn, "x_unit": xu, "y": yn, "y_unit": yu}
+        axes = {"x": xn, "x_unit": xu or "", "y": yn, "y_unit": yu or ""}
+        for axis, u, n in (("x", xu, xn), ("y", yu, yn)):
+            if u is None and _no_unit(axis, n) not in unknown:
+                unknown.append(_no_unit(axis, n))
         sx, sy = _shown(np, x, y)
         out = {"run": c["run"], "label": c["label"], "n": int(x.size), "x": sx, "y": sy}
         if fit_on:
             out["fit"] = _fit(np, x, y, xu, yu, "%s vs %s" % (yn, xn), f, deadline)
         curves.append(out)
-    return _safe({"curves": curves, "axes": axes, "notes": notes})
+    return _safe({"curves": curves, "axes": axes, "notes": notes + unknown})
 
 
 def table(rt: Any, spec: Dict[str, Any]) -> Tuple[str, str]:
