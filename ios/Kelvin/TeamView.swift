@@ -129,39 +129,44 @@ struct TeamView: View {
     }
 
     private var chat: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    if model.thread.more {
-                        Button("Earlier messages") { Task { await model.older() } }
-                            .font(.footnote)
-                    }
-                    if model.loaded && model.thread.messages.isEmpty {
-                        Text("No messages yet").foregroundStyle(.secondary).padding(.top, 40)
-                    }
-                    ForEach(model.thread.lines()) { line in
-                        if let day = line.day {
-                            Text(TeamView.day(day))
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.top, 10)
+        GeometryReader { box in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        if model.thread.more {
+                            Button("Earlier messages") { Task { await model.older() } }
+                                .font(.footnote)
                         }
-                        TeamBubble(line: line, mine: !app.teamName.isEmpty && line.message.name == app.teamName)
-                            .id(line.id)
+                        if model.loaded && model.thread.messages.isEmpty {
+                            Text("No messages yet").foregroundStyle(.secondary).padding(.top, 40)
+                        }
+                        ForEach(model.thread.lines()) { line in
+                            if let day = line.day {
+                                Text(TeamView.day(day))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.top, 10)
+                            }
+                            TeamBubble(line: line, mine: !app.teamName.isEmpty && line.message.name == app.teamName)
+                                .id(line.id)
+                        }
+                        if let p = model.problem {
+                            Text(p).font(.footnote).foregroundStyle(.red)
+                        }
+                        Color.clear.frame(height: 1).id("end")
                     }
-                    if let p = model.problem {
-                        Text(p).font(.footnote).foregroundStyle(.red)
-                    }
-                    Color.clear.frame(height: 1).id("end")
+                    .padding()
+                    .frame(maxWidth: .infinity, minHeight: box.size.height, alignment: .top)   // the empty space below too
+                    .contentShape(Rectangle())
+                    .onTapGesture { typing = false }   // a tap on the messages puts the keyboard away (the tabs are under it)
                 }
-                .padding()
+                .scrollDismissesKeyboard(.immediately)   // and so does a swipe on them
+                .accessibilityIdentifier("team-messages")
+                .onChange(of: model.thread.last) { _ in
+                    withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+                }
+                .onChange(of: model.thread.through) { _ in markRead() }   // whatever load brought it on screen
             }
-            .scrollDismissesKeyboard(.immediately)   // a swipe on the messages puts the keyboard away (the tabs are under it)
-            .onTapGesture { typing = false }         // and so does a tap on them
-            .onChange(of: model.thread.last) { _ in
-                withAnimation { proxy.scrollTo("end", anchor: .bottom) }
-            }
-            .onChange(of: model.thread.through) { _ in markRead() }   // whatever load brought it on screen
         }
         .safeAreaInset(edge: .bottom) { composer }
         .refreshable { await model.load() }

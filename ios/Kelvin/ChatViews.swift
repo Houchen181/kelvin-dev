@@ -76,37 +76,42 @@ struct ChatView: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    if model.transcript.incognito {
-                        Label("Incognito: Kelvin uses no memory here and keeps none of it.", systemImage: "eye.slash")
-                            .font(.footnote).foregroundStyle(.secondary)
-                    }
-                    ForEach(model.transcript.lines) { line in
-                        LineView(line: line, model: model)
-                            .id(line.id)
-                    }
-                    if model.transcript.answering {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                            Text("Kelvin is working…").font(.footnote).foregroundStyle(.secondary)
+        GeometryReader { box in
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        if model.transcript.incognito {
+                            Label("Incognito: Kelvin uses no memory here and keeps none of it.", systemImage: "eye.slash")
+                                .font(.footnote).foregroundStyle(.secondary)
                         }
+                        ForEach(model.transcript.lines) { line in
+                            LineView(line: line, model: model)
+                                .id(line.id)
+                        }
+                        if model.transcript.answering {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text("Kelvin is working…").font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }
+                        if let p = model.problem {
+                            Text(p).font(.footnote).foregroundStyle(.red)
+                        }
+                        Color.clear.frame(height: 1).id("end")
                     }
-                    if let p = model.problem {
-                        Text(p).font(.footnote).foregroundStyle(.red)
-                    }
-                    Color.clear.frame(height: 1).id("end")
+                    .padding()
+                    .frame(maxWidth: .infinity, minHeight: box.size.height, alignment: .topLeading)   // the empty space too
+                    .contentShape(Rectangle())
+                    .onTapGesture { typing = false }   // a tap on the conversation puts the keyboard away (the tabs are under it)
                 }
-                .padding()
-            }
-            .scrollDismissesKeyboard(.immediately)   // a swipe on the conversation puts the keyboard away (the tabs are under it)
-            .onTapGesture { typing = false }         // and so does a tap on it
-            .onChange(of: model.transcript.lines.count) { _ in
-                withAnimation { proxy.scrollTo("end", anchor: .bottom) }
-            }
-            .onChange(of: model.transcript.lines.last?.text) { _ in
-                proxy.scrollTo("end", anchor: .bottom)
+                .scrollDismissesKeyboard(.immediately)   // and so does a swipe on it
+                .accessibilityIdentifier("chat-messages")
+                .onChange(of: model.transcript.lines.count) { _ in
+                    withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+                }
+                .onChange(of: model.transcript.lines.last?.text) { _ in
+                    proxy.scrollTo("end", anchor: .bottom)
+                }
             }
         }
         .safeAreaInset(edge: .bottom) { Composer(model: model, voice: voice, typing: $typing) }
