@@ -25,9 +25,9 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from mcp import Client
 
-from ..agent.runtime import LabRuntime
+from ..agent.runtime import LabRuntime, Viewer
 from .. import guide, workbench
-from ..agent.server import INSTRUCTIONS, OUTSIDE
+from ..agent.server import INSTRUCTIONS, OUTSIDE, VIEWER_META
 from ..folderfiles import MAX_PDF_PAGES
 from ..gate import ApprovalRequest
 from ..protection import summary as protection_summary
@@ -746,8 +746,8 @@ class ChatAgent:
         if not isinstance(args, dict):
             return "the arguments were not valid JSON; send the call again", True
         spec = {k: args[k] for k in ("runs", "x", "y", "where", "group", "row", "steps", "fit") if k in args}
-        try:
-            result = await workbench.off_thread(workbench.compute, self.runtime, spec)
+        try:   # on the pane's own threads, reading only the runs this chat's model may see (its viewer, passed on)
+            result = await workbench.off_thread(contextvars.copy_context().run, workbench.compute, self.runtime, spec)
         except Exception as e:   # AnalysisError says what is wrong; nothing leaves the chat without its result
             return "not worked out: %s" % (str(e) or e.__class__.__name__), True
         await emit({"type": "analysis", "spec": spec, "result": result})
@@ -864,11 +864,19 @@ class ChatAgent:
     def not_here(self, chat: Dict[str, Any], model_key: str) -> str:
         """Why this model may not see this chat ("": it may): the project's rules, or confidential work, which never
         goes through the Kelvin hub (hubmodels.py)."""
-        rules = self.chat_rules(chat)
+        return self._why_not(self.chat_rules(chat), self._confidential(chat), model_key)
+
+    def not_for_project(self, project: Optional[Dict[str, Any]], model_key: str) -> str:
+        """Why this model may not see this project's work, as a model writing its master report's opening ("": it
+        may): the project's rules, or confidential work, which never goes through the Kelvin hub."""
+        project = project or {}
+        return self._why_not(rulebook.merge(None, project.get("rules")), bool(project.get("confidential")), model_key)
+
+    def _why_not(self, rules: Dict[str, Any], confidential: bool, model_key: str) -> str:
         if not rulebook.allows(rules, model_key):
             return "%s is not allowed here: this project's rules say %s." % (self.label(model_key),
                                                                            rulebook.describe(rules))
-        if through_hub(model_key.partition(":")[0]) and self._confidential(chat):
+        if through_hub(model_key.partition(":")[0]) and confidential:
             return ("%s goes through the Kelvin hub, and confidential work never does. Pick a model on this computer "
                     "(Settings → Models → Local model)." % self.label(model_key))
         return ""
@@ -978,7 +986,8 @@ class ChatAgent:
                 "devices": self.store.devices(project_id), "notes": self.report_notes(project),
                 "references": self.report_references(project), "summary": self.store.summary_of(project_id),
                 "private": bool(project and rulebook.restrictive(project.get("rules"))),
-                "unshared": unshared(project)}
+                "unshared": unshared(project), "rules": (project or {}).get("rules"),
+                "confidential": bool((project or {}).get("confidential"))}
 
     def project_chat_runs(self, project_id: Optional[str]) -> List[str]:
         chats = []
@@ -1159,11 +1168,37 @@ class ChatAgent:
             self._steer.pop(chat_id, None)   # not read in time: the portal sends it as the next message
 
     def _attribution(self, chat: Dict[str, Any]) -> Dict[str, Any]:
-        """What a run this chat starts is filed under: its project (not an incognito chat's, and only when no device
-        is mounted), the chat, its folder, and whether the chat keeps unshared work's marks or limits (it left such a
-        project, or ran under its rules): its runs are then never shared, wherever they are filed."""
-        return {"project": None if chat.get("incognito") else self.store.project_of(chat["id"]), "chat": chat["id"],
-                "incognito": bool(chat.get("incognito")), "folder": chat.get("folder"), "unshared": unshared(chat)}
+        """What a run this chat starts is filed under, and whose work it is: its project (not an incognito chat's,
+        and only when no device is mounted), the chat, its folder, whether the chat keeps unshared work's marks or
+        limits (it left such a project, or ran under its rules): its runs are then never shared, wherever they are
+        filed; and the model rules it runs under and whether it is confidential or unpublished, which its runs
+        keep. private: is this chat's work unshared now, its project's included (LabRuntime._whose_now)."""
+        project = None if chat.get("incognito") else self.store.project_of(chat["id"])
+        rules = self.chat_rules(chat)
+        memory = self.store.memory_of(chat["id"]) or {}
+        out = {"project": project, "chat": chat["id"], "incognito": bool(chat.get("incognito")),
+               "folder": chat.get("folder"), "unshared": unshared(chat),
+               "rules": rules if rulebook.restrictive(rules) else None, "confidential": self._confidential(chat),
+               "unpublished": bool(chat.get("unpublished") or memory.get("unpublished"))}
+        out["private"] = bool(out["incognito"] or out["unshared"] or out["rules"] or out["confidential"]
+                              or out["unpublished"] or self._stays_here(chat))
+        return out
+
+    def viewer_for(self, chat: Dict[str, Any], model_key: Optional[str] = None, person: bool = False) -> Viewer:
+        """Who reads the lab's runs and records in a tool call of this chat (agent.runtime.Viewer): the chat, its
+        project, and which of that project's unshared work its model may see (model_key: a second opinion's or a
+        Compare lane's; the chat's own by default): what the work's rules allow, and never through the Kelvin hub
+        when it is confidential. person: the person at the portal, who sees what is inside the chat's project."""
+        key = str((chat.get("model") or "") if model_key is None else model_key)
+        whose = self._attribution(chat)
+
+        def allows(marks: Dict[str, Any]) -> bool:
+            if person:
+                return True
+            rules = rulebook.merge(*[r for r in marks.get("rules") or [] if r])
+            return rulebook.allows(rules, key) and not (marks.get("confidential")
+                                                        and through_hub(key.partition(":")[0]))
+        return Viewer(chat=chat.get("id"), project=whose["project"], allows=allows, whose=whose)
 
     async def _work(self, chat: Dict[str, Any], provider: Provider, context: Dict[str, Any], call: Dict[str, Any],
                     emit: Emit) -> Tuple[str, bool, Optional[Dict[str, Any]]]:
@@ -1196,9 +1231,11 @@ class ChatAgent:
     def _lab_busy(self) -> str:
         holder = self.lab_holder
         try:
-            title = self.store.load(holder).get("title") if holder else None
+            held = self.store.load(holder) if holder else None
         except KeyError:
-            title = None
+            held = None
+        # unshared work of another project or chat goes unnamed
+        title = held.get("title") if held and self.runtime.may_see(self._attribution(held)) else None
         return ("not run: %s is working the lab (%s). Kelvin changes the lab one thing at a time; readings (the latest "
                 "values of the instruments that work uses), lookups, the queue, watches and stop_run work meanwhile. "
                 "Try this again when it is done, or tell the person." % (
@@ -1289,7 +1326,8 @@ class ChatAgent:
             await emit({"type": "tool_start", "id": call["id"], "name": call["name"], "input": call["input"]})
             if call["name"] in DEFERRED_NAMES:   # called by its name before find_tools: it is loaded now
                 self._load_tools(chat, context, [call["name"]])
-            work = asyncio.ensure_future(self._work(chat, provider, context, call, emit))
+            with self.runtime.viewing(self.viewer_for(chat)):   # the runs and records this chat's model may see
+                work = asyncio.ensure_future(self._work(chat, provider, context, call, emit))
             while not work.done():   # a stop ends the call at once, even one an instrument holds up
                 await asyncio.wait({work}, timeout=STOP_POLL_S)
                 if self._stop and not work.done():
@@ -1536,11 +1574,13 @@ class ChatAgent:
             return None
         try:
             provider, model_id = self.provider_for(key)
-            status = await asyncio.to_thread(self.runtime.lab_status)
-            checks = await asyncio.to_thread(self.runtime.validate, plan)
+            viewer = self.viewer_for(chat, key)   # what the reviewer's model may see of the lab's runs and records
+            with self.runtime.viewing(viewer):
+                status = await asyncio.to_thread(self.runtime.lab_status)
+                checks = await asyncio.to_thread(self.runtime.validate, plan)
             prompt = review.plan_prompt(review.last_request(chat["messages"]), status, checks, plan)
-            text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.PLAN_CHECK, prompt),
-                                                   REVIEW_S)
+            text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.PLAN_CHECK, prompt,
+                                                                     viewer), REVIEW_S)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1565,8 +1605,8 @@ class ChatAgent:
         chat = self.store.load(chat_id)
         self.check_model(chat, model_key)
         prompt = review.answer_context(chat["messages"])   # ValueError when there is nothing to review
-        text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.ANSWER_CHECK, prompt),
-                                               REVIEW_S)
+        text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.ANSWER_CHECK, prompt,
+                                                                 self.viewer_for(chat, model_key)), REVIEW_S)
         opinion = dict(review.findings_of(text, "answer"), kind="answer", model=model_key, label=self.label(model_key),
                        lookups=lookups, at=time.time())
         chat = self.store.load(chat_id)   # it may have been saved meanwhile
@@ -1590,7 +1630,8 @@ class ChatAgent:
         if opinion.get("model") == model_key:
             raise ValueError("Pick a different model from the one that gave the second opinion.")
         prompt = review.recheck_prompt(review.answer_context(chat["messages"]), opinion)
-        text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.RECHECK, prompt), REVIEW_S)
+        text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.RECHECK, prompt,
+                                                                 self.viewer_for(chat, model_key)), REVIEW_S)
         checked = review.apply_recheck(copy.deepcopy(opinion), text, "answer", self.label(model_key))
         checked.update(given=False, recheck_lookups=lookups)   # the main model sees it with the next message
         chat = self.store.load(chat_id)
@@ -1600,9 +1641,11 @@ class ChatAgent:
             self.store.save(chat)
         return checked
 
-    async def _review_loop(self, provider: Provider, model_id: str, system: str, prompt: str) -> Tuple[str, int]:
+    async def _review_loop(self, provider: Provider, model_id: str, system: str, prompt: str,
+                           viewer: Optional[Viewer] = None) -> Tuple[str, int]:
         """The reviewer's answer after it has looked things up in the lab's records with read-only tools
-        (review.REVIEW_TOOLS; never a camera, never a change): (its answer, how many lookups it made)."""
+        (review.REVIEW_TOOLS; never a camera, never a change): (its answer, how many lookups it made). viewer: what
+        the reviewer's model may see of the lab's runs and records (the chat's project, under its rules)."""
         tools = [t for t in self.tools if t["name"] in review.REVIEW_TOOLS and t["name"] in self.read_only]
         allowed = {t["name"] for t in tools}
         sees = sees_images(provider, model_id)
@@ -1631,7 +1674,7 @@ class ChatAgent:
                     content, is_error = "the reviewer looks at saved runs and frames only, not at a camera", True
                 else:
                     try:
-                        r = await self.client.call_tool(call["name"], call["input"])
+                        r = await self._tool(call["name"], call["input"], viewer or Viewer())
                         content = "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text")
                         is_error = bool(r.is_error)
                         pictures = [{"mime": c.mime_type, "data": c.data} for c in r.content
@@ -1722,7 +1765,7 @@ class ChatAgent:
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
             self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit,
-                                                            chat_id))
+                                                            chat_id, self.viewer_for(chat, key)))
                            for i, (key, provider, model_id) in enumerate(lanes)]
             done = await asyncio.gather(*self._lanes, return_exceptions=True)
             results = []
@@ -1753,7 +1796,9 @@ class ChatAgent:
 
     async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
                     base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit,
-                    chat_id: str = "") -> Dict[str, Any]:
+                    chat_id: str = "", viewer: Optional[Viewer] = None) -> Dict[str, Any]:
+        """One model's answer while comparing. viewer: what this lane's model may see of the lab's runs and
+        records (the chat's project, under its rules)."""
         out: List[Dict[str, Any]] = []
 
         async def lane_emit(event: Dict[str, Any]) -> None:
@@ -1779,7 +1824,7 @@ class ChatAgent:
                         content, is_error = "the arguments were not valid JSON; send the call again", True
                     else:
                         try:
-                            r = await self.client.call_tool(call["name"], call["input"])
+                            r = await self._tool(call["name"], call["input"], viewer or Viewer())
                             content = "\n".join(c.text for c in r.content if getattr(c, "type", "") == "text")
                             is_error = bool(r.is_error)
                             self._images[call["id"]] = [(c.mime_type, base64.b64decode(c.data)) for c in r.content
@@ -1828,6 +1873,17 @@ class ChatAgent:
         self.store.save(chat)
         return {"chosen": index, "model": chat["model"]}
 
+    async def _tool(self, name: str, args: Any, viewer: Optional[Viewer]) -> Any:
+        """One of the lab's tools through the MCP client, reading the lab's runs and records as this viewer may (the
+        server takes it from the call's meta, by a token only this process knows: agent/server.py)."""
+        if viewer is None:
+            return await self.client.call_tool(name, args)
+        token = self.runtime.register_viewer(viewer)
+        try:
+            return await self.client.call_tool(name, args, meta={VIEWER_META: token})
+        finally:
+            self.runtime.forget_viewer(token)
+
     async def _call(self, call: Dict[str, Any], emit: Emit) -> Tuple[str, bool]:
         """Run one tool; while it waits for a human, show its approval requests inline."""
         if call["input"] is None:
@@ -1860,7 +1916,7 @@ class ChatAgent:
                 sent["key"] = key
                 await emit(event)
 
-        task = asyncio.ensure_future(self.client.call_tool(call["name"], call["input"]))
+        task = asyncio.ensure_future(self._tool(call["name"], call["input"], self.runtime.viewer))
         try:
             while not task.done():
                 getter = asyncio.ensure_future(requests.get())

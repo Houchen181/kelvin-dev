@@ -97,9 +97,17 @@ class Item:
     unshared: bool = False          # queued from a chat that left unshared work: nor are these
     legacy: bool = False            # queued before Kelvin noted either: its runs are held like older runs
     folder: Optional[str] = None    # the folder of the chat that queued it, where its runs go
+    chat: Optional[str] = None      # the chat that queued it, and the model rules and marks it was under: its
+    rules: Optional[Dict[str, Any]] = None   # runs keep them, as a chat's own runs do
+    confidential: bool = False
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def whose(self) -> Dict[str, Any]:
+        """Whose work it is, as its runs are filed (LabRuntime.attribution)."""
+        return {"project": self.project, "chat": self.chat, "incognito": self.incognito, "unshared": self.unshared,
+                "rules": self.rules, "confidential": self.confidential, "folder": self.folder}
 
 
 def parse_item(text: str) -> Tuple[str, str]:
@@ -189,10 +197,12 @@ class ScanQueue:
 
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "",
             project: Optional[str] = None, incognito: bool = False, unshared: bool = False,
-            folder: Optional[str] = None) -> Item:
+            folder: Optional[str] = None, chat: Optional[str] = None, rules: Optional[Dict[str, Any]] = None,
+            confidential: bool = False) -> Item:
         kind, name = parse_item(text)
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time(),
-                    project=project, incognito=incognito, unshared=unshared, folder=folder)
+                    project=project, incognito=incognito, unshared=unshared, folder=folder, chat=chat, rules=rules,
+                    confidential=confidential)
         with self.lock:
             if position is None or position > len(self.items):
                 self.items.append(item)
@@ -275,13 +285,14 @@ class ScanQueue:
                     "waiting": sum(1 for i in self.items if i.status == "waiting"), "changed": self.changed,
                     "last": self.last}
 
-    def summarize(self, started: float, alarms: List[Any],
-                  points: Callable[[str], Optional[Tuple[int, int]]]) -> List[str]:
+    def summarize(self, started: float, alarms: List[Any], points: Callable[[str], Optional[Tuple[int, int]]],
+                  unshared: Callable[[Item], bool] = lambda item: False) -> List[str]:
         """What happened since the queue started, in lines, for the person who comes in the morning, from the record
         alone: when it ran and how it ended, what was done, what stopped part-way and the data it kept, what stopped
         with none, what didn't run, and every alarm raised meanwhile (cleared or still on). Kept with the queue and
         shown with it until it runs again. alarms: the monitor's (raised, cleared, text); points(run_id): (points
-        taken, points planned) of a run."""
+        taken, points planned) of a run; unshared(item): an item of unshared work, which the account then names (it
+        is kept marked so)."""
         end = time.time()
         with self.lock:
             ran = [(n, i) for n, i in enumerate(self.items, 1) if i.started and i.started >= started]
@@ -312,21 +323,38 @@ class ScanQueue:
         lines.append("Alarms while it ran: " + "; ".join(
             "%s %s (%s)" % (_at(a.raised), a.text, "cleared %s" % _at(a.cleared) if a.cleared else "still on")
             for a in raised) if raised else "No alarm was raised while it ran.")
+        named = [i for _, i in ran + waiting]
         with self.lock:
-            self.last = {"started": started, "ended": end, "lines": lines}
+            self.last = {"started": started, "ended": end, "lines": lines, "items": [i.id for i in named]}
+            if any(unshared(i) for i in named):
+                self.last["unshared"] = True
             self.save()
         return lines
 
-    def text(self) -> str:
+    def text(self, hidden: Optional[Callable[[Item], bool]] = None) -> str:
+        """The queue in lines. hidden(item): an item of unshared work the reader may not see, which shows only its
+        place and state, without its name, note and run; nor is the reason it paused the queue, or the account of the
+        last run that names it, shown."""
         v = self.view()
-        lines = ["queue: %s%s" % (v["state"], " (%s)" % v["reason"] if v["reason"] else "")]
+        out = {i.id for i in self.items if hidden is not None and hidden(i)}
+        reason = v["reason"]
+        if reason and any(i.name in reason for i in self.items if i.id in out):
+            reason = "at an item of unshared work"
+        lines = ["queue: %s%s" % (v["state"], " (%s)" % reason if reason else "")]
         for n, i in enumerate(self.items, 1):
+            if i.id in out:
+                lines.append("%d. [%s] a %s of unshared work (another project's or chat's)" % (
+                    n, i.status, "scan" if i.kind == "plan" else "step"))
+                continue
             extra = (" → run %s" % i.run_id if i.run_id else "") + (": %s" % i.message if i.message else "")
             lines.append("%d. [%s] %s %s%s%s" % (n, i.status, i.kind, i.name, " (%s)" % i.note if i.note else "", extra))
         if not self.items:
             lines.append("(empty: add plans or steps with queue_add)")
         if self.last and v["state"] not in ("running", "pausing"):
-            lines += ["last run:"] + ["  " + line for line in self.last.get("lines") or []]
+            if out & set(self.last.get("items") or []):
+                lines.append("last run: its account names unshared work, which isn't shown here")
+            else:
+                lines += ["last run:"] + ["  " + line for line in self.last.get("lines") or []]
         return "\n".join(lines)
 
 

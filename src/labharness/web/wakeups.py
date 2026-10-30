@@ -256,7 +256,8 @@ class Waker:
             return   # its model is no longer there
         self.history.setdefault(w.chat_id, []).append(time.time())
         self.last = {"chat_id": w.chat_id, "at": time.time(), "why": why, "title": chat.get("title"), "root": w.root}
-        agent.runtime.notifier("run", "Kelvin continued “%s”" % (chat.get("title") or "a chat"), why)
+        agent.runtime.tell("run", "Kelvin continued “%s”" % (chat.get("title") or "a chat"), why,
+                           agent._stays_here(chat))   # an unshared chat's title never goes through the hub
         why = why[0].upper() + why[1:]
         text = "<wake>%s. You asked to continue then: %s</wake>" % (why, w.note)
 

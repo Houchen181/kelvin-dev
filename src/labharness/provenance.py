@@ -13,7 +13,7 @@ import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import chain as chains
 from . import rundata
@@ -231,11 +231,13 @@ def read_events(paths: Sequence[Path]) -> List[Dict[str, Any]]:
 
 
 def activity(events: Sequence[Dict[str, Any]], since: str = "", until: str = "", who: str = "", kinds: str = "",
-             limit: int = 60, now: Optional[datetime] = None) -> str:
+             limit: int = 60, now: Optional[datetime] = None,
+             hidden: Optional[Callable[[Dict[str, Any]], bool]] = None) -> str:
     """The lab record from since to until (wall-clock time; default the last 24 hours), each line with who: the
     signed-in person, where they answered, or Kelvin's AI, a queue or a plan. who: only events whose actor matches
     (a name, agent, human, phone...); kinds: groups (approvals, stops, runs, settings, alarms, lab, people,
-    computer) or event types, comma-separated."""
+    computer) or event types, comma-separated. hidden(event): unshared work the reader may not see, left out and
+    counted."""
     from .agent.runtime import event_line
     now = now or datetime.now()
     t0 = when(since, now) or now - timedelta(hours=24)
@@ -248,12 +250,16 @@ def activity(events: Sequence[Dict[str, Any]], since: str = "", until: str = "",
     needle = str(who or "").strip().lower()
     a, b = t0.isoformat(timespec="milliseconds"), t1.isoformat(timespec="milliseconds")
     picked = []
+    left = 0
     for e in events:
         wall = str(e.get("wall", ""))
         if not (a <= wall <= b) or (wanted and e.get("type") not in wanted):
             continue
         actor = " ".join(str(e.get(k) or "") for k in ("by", "account", "user", "channel", "device")).lower()
         if needle and needle not in actor:
+            continue
+        if hidden is not None and hidden(e):
+            left += 1
             continue
         picked.append(e)
     head = "the lab record from %s to %s (this computer's clock, not the simulated lab's time)%s%s: %d event%s" % (
@@ -262,6 +268,9 @@ def activity(events: Sequence[Dict[str, Any]], since: str = "", until: str = "",
     limit = max(1, min(int(limit or 60), 400))
     shown = picked[-limit:]
     lines = [head]
+    if left:
+        lines.append("(%d event%s of unshared work (another project's or chat's) not shown here)"
+                     % (left, "" if left == 1 else "s"))
     if len(picked) > len(shown):
         lines.append("(the %d before these are left out: narrow since/until, who or kinds to see them)"
                      % (len(picked) - len(shown)))

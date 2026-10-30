@@ -70,6 +70,15 @@ class WebApprover(Approver):
         self.notes: Optional[Callable[[ApprovalRequest], List[str]]] = None
         # the lab's lessons on the instruments a request names, shown on its card (LabRuntime.lab_lessons_for)
         self.lessons: Optional[Callable[[ApprovalRequest], List[str]]] = None
+        # whether a request is about unshared work, asked from the requesting thread (LabRuntime._unshared_request):
+        # its card is marked so, and phones through the Kelvin hub get it without its names
+        self.origin: Optional[Callable[[ApprovalRequest], bool]] = None
+
+    def _unshared(self, request: ApprovalRequest) -> bool:
+        try:
+            return bool(self.origin(request)) if self.origin else False
+        except Exception:   # unsure: the card goes as unshared work's, without its names through the hub
+            return True
 
     def subscribe(self, listener: Callable[[Dict[str, Any]], None]) -> Callable[[], None]:
         """Call `listener(request)` for every new request (from the requesting thread). Returns unsubscribe."""
@@ -94,13 +103,15 @@ class WebApprover(Approver):
             lessons = list(self.lessons(request)) if self.lessons else []
         except Exception:   # the lab's memory never holds up an approval
             lessons = []
+        unshared = self._unshared(request)
         with self._cv:
             self._seq += 1
             now = time.time()
             entry = {"id": "r%d" % self._seq, "title": request.title, "items": list(request.items),
                      "created": now, "expires": now + self.timeout, "answer": None, "by": None,
                      "thread": threading.get_ident(), "where": where, "lessons": lessons,
-                     "figures": list(getattr(request, "figures", None) or [])}   # a generator's timing, drawn
+                     "figures": list(getattr(request, "figures", None) or []),   # a generator's timing, drawn
+                     "unshared": unshared}
             if why:   # never shown: nobody is left to act on a yes
                 entry.update(answer=False, by=why, decided=now)
                 self._history.appendleft(entry)
@@ -110,6 +121,8 @@ class WebApprover(Approver):
             self._cv.notify_all()
         public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "seconds_left": int(self.timeout),
                   "where": where, "lessons": lessons, "figures": entry["figures"]}
+        if unshared:
+            public["unshared"] = True
         for listener in list(self._listeners):
             try:
                 listener(public)
@@ -163,14 +176,18 @@ class WebApprover(Approver):
     def inform(self, request: ApprovalRequest, reasons: List[str]) -> None:
         """Auto mode approved this without asking: show it with the reasons, like an answered request."""
         self._annotate(request)
+        unshared = self._unshared(request)
         with self._cv:
             self._seq += 1
             now = time.time()
             entry = {"id": "a%d" % self._seq, "title": request.title, "items": list(request.items), "created": now,
-                     "decided": now, "answer": True, "by": "auto mode", "reasons": list(reasons)}
+                     "decided": now, "answer": True, "by": "auto mode", "reasons": list(reasons),
+                     "unshared": unshared}
             self._history.appendleft(entry)
         public = {"id": entry["id"], "title": entry["title"], "items": entry["items"], "auto": True,
                   "reasons": entry["reasons"], "figures": list(getattr(request, "figures", None) or [])}
+        if unshared:
+            public["unshared"] = True
         for listener in list(self._listeners):
             try:
                 listener(public)
@@ -222,17 +239,19 @@ class WebApprover(Approver):
     def pending_list(self) -> List[Dict[str, Any]]:
         with self._cv:
             now = time.time()
-            return [{"id": e["id"], "title": e["title"], "items": e["items"],
-                     "seconds_left": max(0, int(e["expires"] - now)), "where": e.get("where"),
-                     "escalated": bool(e.get("escalated")), "lessons": e.get("lessons") or [],
-                     "figures": e.get("figures") or []}
+            return [dict({"id": e["id"], "title": e["title"], "items": e["items"],
+                          "seconds_left": max(0, int(e["expires"] - now)), "where": e.get("where"),
+                          "escalated": bool(e.get("escalated")), "lessons": e.get("lessons") or [],
+                          "figures": e.get("figures") or []}, **({"unshared": True} if e.get("unshared") else {}))
                     for e in self._pending.values() if e["answer"] is None]
 
     def history_list(self) -> List[Dict[str, Any]]:
         with self._cv:
-            return [{"title": e["title"], "items": e["items"], "answer": "approved" if e["answer"] else "declined",
-                     "by": who_text(e["who"]) if e.get("who") else e["by"], "where": e.get("where"),
-                     "at": time.strftime("%H:%M:%S", time.localtime(e["decided"]))}
+            return [dict({"title": e["title"], "items": e["items"],
+                          "answer": "approved" if e["answer"] else "declined",
+                          "by": who_text(e["who"]) if e.get("who") else e["by"], "where": e.get("where"),
+                          "at": time.strftime("%H:%M:%S", time.localtime(e["decided"]))},
+                         **({"unshared": True} if e.get("unshared") else {}))
                     for e in self._history]
 
 

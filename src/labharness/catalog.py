@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from . import rundata
 
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS runs (
   run_id TEXT PRIMARY KEY, plan TEXT, status TEXT, started TEXT, finished TEXT, duration_s REAL,
   points INTEGER, planned_points INTEGER, project TEXT, project_name TEXT, device TEXT, device_name TEXT,
   lab TEXT, simulated INTEGER, operator TEXT, user TEXT, swept TEXT, measured TEXT, assessment TEXT, reason TEXT,
-  card TEXT, mtime REAL);
+  card TEXT, mtime REAL, marks TEXT);
 CREATE TABLE IF NOT EXISTS columns (
   run_id TEXT, key TEXT, role TEXT, quantity TEXT, unit TEXT, kind TEXT,
   n INTEGER, min REAL, max REAL, mean REAL, first REAL, last REAL, PRIMARY KEY (run_id, key));
@@ -42,7 +42,8 @@ SCHEMA_TEXT = """runs: one row per finished run. run_id, plan (its name), status
   started and finished (ISO local time, e.g. 2026-10-24T15:30:12.123), duration_s, points, planned_points,
   project and project_name, device and device_name (the sample), lab, simulated (1 for a lab of simulated instruments),
   operator, user, swept and measured (comma-separated column keys), assessment (the automatic analysis' verdict),
-  reason (why it stopped early), card (the run's card as JSON: json_extract(card, '$.held') and so on).
+  reason (why it stopped early), card (the run's card as JSON: json_extract(card, '$.held') and so on), marks
+  (whose work it is, as JSON: the chat that started it, and incognito, unshared, rules, confidential).
 columns: one row per column of each run. run_id, key (instrument.parameter, or i and t), role (axis, measured,
   index or time), quantity (voltage, current, temperature, magnetic_field, frequency, power, phase, resistance,
   position, wavelength, counts...), unit, kind (scalar, trace or image), n, and for scalars min, max, mean,
@@ -54,6 +55,9 @@ results: the automatic fits. run_id, reading (the fitted column), grp (the group
   name, value, error, unit, text (as shown)."""
 MAX_ROWS = 200          # rows a query answers with at most
 QUERY_SECONDS = 5.0     # a query that runs longer is stopped
+TABLES = ("runs", "columns", "conditions", "results")
+# a run's marks of whose work it is (LabRuntime._attribute): who may see it (LabRuntime.may_see)
+MARKS = ("chat", "incognito", "unshared", "unpublished", "confidential", "rules")
 _lock = threading.Lock()
 
 
@@ -99,6 +103,11 @@ class Catalog:
                     pass
             con = sqlite3.connect(str(self.path), timeout=10)
             con.executescript(SCHEMA)
+            self.synced = 0.0
+        if "marks" not in [r[1] for r in con.execute("PRAGMA table_info(runs)")]:   # from before runs kept whose
+            con.execute("ALTER TABLE runs ADD COLUMN marks TEXT")                      # they are: each run is read
+            con.execute("UPDATE runs SET mtime = NULL")                                # again at the next look
+            con.commit()
             self.synced = 0.0
         return con
 
@@ -167,13 +176,14 @@ class Catalog:
         swept = [a["key"] for a in rec.columns.get("axes") or []]
         measured = [m["key"] for m in rec.columns.get("measures") or []]
         self._drop(con, run_id)
-        con.execute("INSERT INTO runs VALUES (%s)" % ",".join("?" * 22), (
+        marks = {k: meta[k] for k in MARKS if meta.get(k)}
+        con.execute("INSERT INTO runs VALUES (%s)" % ",".join("?" * 23), (
             run_id, meta.get("plan"), meta.get("status"), meta.get("started"), meta.get("finished"),
             _num(meta.get("duration_s")), meta.get("points"), meta.get("planned_points"), meta.get("project"),
             meta.get("project_name"), meta.get("device"), meta.get("device_name"), meta.get("lab"),
             1 if meta.get("simulated") else 0, meta.get("operator"), meta.get("user"), ",".join(swept),
             ",".join(measured), (rec.analysis or {}).get("assessment"), meta.get("reason"),
-            json.dumps(card, ensure_ascii=False), stamp))
+            json.dumps(card, ensure_ascii=False), stamp, json.dumps(marks, ensure_ascii=False) if marks else None))
         for key, s in stats.items():
             col = info.get(key) or {"role": "measured", "unit": "", "quantity": rundata.quantity_of(key, "")}
             kind = "image" if s.get("image") else "trace" if s.get("trace") else "scalar"
@@ -203,11 +213,17 @@ class Catalog:
     # ------------------------------------------------------------------ asking it
 
     def find(self, text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
-             since: str = "", until: str = "", quantity: str = "", limit: int = 20) -> List[Dict[str, Any]]:
+             since: str = "", until: str = "", quantity: str = "", limit: int = 20,
+             skip: Iterable[str] = ()) -> List[Dict[str, Any]]:
         """Runs matching every filter given, newest first. since/until: dates or times (2026-10-24, inclusive);
-        quantity: a swept or measured quantity (temperature) or column (smu.V, or smu for any of its columns)."""
+        quantity: a swept or measured quantity (temperature) or column (smu.V, or smu for any of its columns).
+        skip: runs left out (unshared work the asker may not see)."""
         where: List[str] = []
         args: List[Any] = []
+        skip = sorted(skip)
+        if skip:
+            where.append("run_id NOT IN (SELECT value FROM json_each(?))")
+            args.append(json.dumps(skip))
         for col, value in (("device_name", device), ("project_name", project), ("plan", plan)):
             if value:
                 where.append("%s LIKE ?" % col)
@@ -240,6 +256,7 @@ class Catalog:
         for r in rows:
             r["card"] = json.loads(r["card"] or "{}")
             r.pop("mtime", None)
+            r.pop("marks", None)
         return rows
 
     def count(self) -> int:
@@ -250,11 +267,41 @@ class Catalog:
             finally:
                 con.close()
 
-    def query(self, sql: str) -> Tuple[List[str], List[Tuple[Any, ...]], bool]:
+    def marks(self) -> List[Tuple[str, str, str, str, Dict[str, Any]]]:
+        """Every run's (run_id, plan, started, finished, whose it is: its project and marks)."""
+        with _lock:
+            con = self._connect()
+            try:
+                rows = con.execute("SELECT run_id, plan, started, finished, project, marks FROM runs").fetchall()
+            finally:
+                con.close()
+        out = []
+        for run_id, plan, started, finished, project, marks in rows:
+            try:
+                whose = json.loads(marks) if marks else {}
+            except ValueError:
+                whose = {"unshared": True}   # unreadable: kept apart
+            out.append((run_id, plan, started, finished, dict(whose if isinstance(whose, dict) else {},
+                                                              project=project)))
+        return out
+
+    def query(self, sql: str, skip: Iterable[str] = ()) -> Tuple[List[str], List[Tuple[Any, ...]], bool]:
         """A read-only SQL query: (column names, rows, whether there were more than MAX_ROWS). Only reading is
-        allowed (no writes, ATTACH or PRAGMA), and a query running longer than QUERY_SECONDS is stopped."""
+        allowed (no writes, ATTACH or PRAGMA), and a query running longer than QUERY_SECONDS is stopped. skip:
+        runs the query never reads (unshared work the asker may not see): it reads a copy of the catalog without
+        them."""
         self._connect().close()
-        con = sqlite3.connect(str(self.path), timeout=10)
+        skip = sorted(skip)
+        if skip:
+            con = sqlite3.connect(":memory:")
+            con.execute("ATTACH DATABASE ? AS whole", (str(self.path),))
+            for table in TABLES:
+                con.execute("CREATE TABLE %s AS SELECT * FROM whole.%s WHERE run_id NOT IN "
+                            "(SELECT value FROM json_each(?))" % (table, table), (json.dumps(skip),))
+            con.commit()
+            con.execute("DETACH DATABASE whole")
+        else:
+            con = sqlite3.connect(str(self.path), timeout=10)
         try:
             con.execute("PRAGMA query_only = 1")
             if hasattr(con, "setlimit"):   # Python 3.11+: no value over 10 MB (a huge string or blob)
