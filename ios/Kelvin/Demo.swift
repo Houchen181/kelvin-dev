@@ -40,7 +40,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
     private func running() -> Bool { stopped == nil && done() < DemoTransport.total }
 
     /// The IV sweep's status, the same on every screen.
-    private func status() -> String { stopped != nil ? "stopped" : running() ? "running" : "completed" }
+    private func runStatus() -> String { stopped != nil ? "stopped" : running() ? "running" : "completed" }
 
     private static func row(_ i: Int) -> JSON {
         let v = -0.5 + Double(i) * 0.025
@@ -130,7 +130,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
         live["done"] = n
         live["total"] = DemoTransport.total
         live["eta_s"] = running() ? Double(DemoTransport.total - n) * 2 : 0.0
-        live["status"] = status()
+        live["status"] = runStatus()
         s["live"] = live
         return s
     }
@@ -150,7 +150,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
         live["plan"] = "iv-sweep-D3"
         live["total"] = DemoTransport.total
         live["done"] = n
-        live["status"] = status()
+        live["status"] = runStatus()
         live["axes"] = [DemoTransport.column("smu.voltage", "V", "sweep")]
         live["measures"] = [DemoTransport.column("smu.current", "A"), DemoTransport.column("lockin.x", "V")]
         live["rows"] = (min(since, n)..<n).map(DemoTransport.row)
@@ -169,7 +169,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
             }
             return r
         }
-        let list: [JSON] = [run(DemoTransport.runID, "iv-sweep-D3", status(), nil),
+        let list: [JSON] = [run(DemoTransport.runID, "iv-sweep-D3", runStatus(), nil),
                             run(DemoTransport.fieldRunID, "field-sweep-D3", "completed", 121),
                             run(DemoTransport.cooldownRunID, "cooldown", "completed", 60)]
         return ["runs": list]
@@ -218,7 +218,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
             d["scalars"] = [DemoTransport.column("smu.current", "A"), DemoTransport.column("lockin.x", "V")]
             d["rows"] = (0..<n).map(DemoTransport.row)
             d["plan_text"] = "plan: iv-sweep-D3\naxes:\n  - sweep: smu.voltage\n    from: -0.5 V\n    to: 0.5 V\n    points: 41\nmeasure: [smu.current, lockin.x]\n"
-            meta["status"] = status()
+            meta["status"] = runStatus()
             meta["points"] = n
             meta["planned_points"] = DemoTransport.total
         }
