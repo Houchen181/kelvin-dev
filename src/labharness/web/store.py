@@ -20,6 +20,7 @@ import re
 import secrets
 import threading
 import time
+import zlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -77,6 +78,7 @@ class ChatStore:
             self._temp: Dict[str, Dict[str, Any]] = {}  # incognito chats: this process only
             self._temp_media: Dict[str, Dict[str, bytes]] = {}   # and their pictures and files
             self._kept_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
+            self._listed: Dict[str, Tuple[Any, Dict[str, Any]]] = {}   # what list() read of each chat's file
 
     def _path(self, chat_id: str) -> Path:
         if not _ID.match(chat_id or ""):
@@ -200,18 +202,41 @@ class ChatStore:
         index = self._read_index()
         assign = index["assign"]
         out = []
+        listed: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
         for path in self.root.glob("*.json"):
             if not _ID.match(path.stem):  # the projects index, or a stray file
                 continue
-            try:
-                chat = json.loads(path.read_text(encoding="utf-8"))
+            try:   # a chat read again only when its file changed: the sidebar reloads the list often
+                st = path.stat()
+                key = (st.st_mtime_ns, st.st_size)
+                seen = self._listed.get(path.name)
+                if seen is None or seen[0] != key:
+                    whole = json.loads(path.read_text(encoding="utf-8"))
+                    seen = (key, {k: whole[k] for k in ("id", "title", "updated", "model", "rules") if k in whole})
             except (OSError, ValueError):
                 continue
-            self._with_kept(chat, index)
+            listed[path.name] = seen
+            chat = self._with_kept(dict(seen[1]), index)
             out.append({"id": chat["id"], "title": chat.get("title", "Chat"), "updated": chat.get("updated", 0),
                         "model": chat.get("model"), "project": assign.get(chat["id"]),
                         "rules": chat.get("rules"), **{m: True for m in index["marks"].get(chat["id"], [])}})
+        self._listed = listed
         return sorted(out, key=lambda c: c["updated"], reverse=True)
+
+    def stamp(self) -> str:
+        """Changes whenever a chat is made, saved, filed, renamed or deleted, here or anywhere else (a phone, another
+        window, a chat Kelvin continues by itself): the portal's sidebar reloads the list when it does. Reads the
+        folder's listing only, never a chat."""
+        parts = []
+        try:
+            with os.scandir(self.root) as entries:
+                for e in entries:
+                    if e.name.endswith(".json"):
+                        st = e.stat()
+                        parts.append("%s:%d:%d" % (e.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            pass
+        return "%08x" % (zlib.crc32("|".join(sorted(parts)).encode("utf-8")) & 0xFFFFFFFF)
 
     def project_of(self, chat_id: str) -> Optional[str]:
         return self._read_index()["assign"].get(chat_id)

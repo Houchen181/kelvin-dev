@@ -383,6 +383,9 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn:disabled { opacity: .5; cursor: default; }
+@media (prefers-color-scheme: dark) {   /* at half its light, a dark button reads as a live ghost button (Keep fit beside CSV) */
+  :root:where(:not([data-theme="light"])) .btn:disabled { opacity: .35; }
+}
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.danger:hover { filter: brightness(1.08); }
 .account-delete { margin-top: 10px; }
@@ -1198,8 +1201,11 @@ body.resizing .plot-svg { pointer-events: none; }
 .an-body .an-step input { width: 84px; padding: 4px 6px; }
 .an-body .an-step select { padding: 4px 6px; }
 .an-add-step { align-self: flex-start; color: var(--text-2); }
-.an-body > .an-field { flex: none; }
+.an-where { flex: 2 1 180px; }
+.an-per { flex: 1 1 120px; }
+.an-body input::placeholder { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-style: italic; }   /* a hint, never a value */
 .an-body .an-field input:disabled { color: var(--muted); }
+.an-body .an-step input.an-text { width: 64px; font-family: ui-monospace, Consolas, monospace; }
 .an-plot { min-height: 60px; }
 .an-plot.busy { opacity: .55; transition: opacity .2s .25s; }
 .an-msg { font-size: 12.5px; color: var(--muted); }
@@ -1207,6 +1213,13 @@ body.resizing .plot-svg { pointer-events: none; }
 .an-fitrow #an-model { flex: 1 1 140px; }
 .an-body .an-fitrow input { width: 90px; }
 .an-body .an-fitrow #an-expr { flex: 2 1 180px; width: auto; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+.an-fitparams { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px 12px; }
+.an-fitparams:empty { display: none; }
+.an-param { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.an-param-name { font: 12.5px ui-monospace, Consolas, monospace; color: var(--text-2); min-width: 3ch; overflow-wrap: anywhere; }
+.an-body .an-param input[type="number"] { flex: 1; width: 0; min-width: 60px; padding: 4px 6px; }
+.an-hold { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: var(--muted); cursor: pointer; }
+.an-body .an-hold input { margin: 0; padding: 0; border: 0; accent-color: var(--accent); }
 .an-fit { display: flex; flex-direction: column; gap: 8px; }
 .an-fit:empty { display: none; }
 .an-fit-card { border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; background: var(--surface-1); font-size: 13px; }

@@ -128,17 +128,17 @@ def test_steps_on_a_curve_and_their_units():
     x = np.linspace(-2, 2, 81)
     y = 3 * x ** 2 + 2 * x + 1
     _, d, _, du, _, dn = _run("deriv", x, y)
-    assert np.allclose(d[5:-5], 6 * x[5:-5] + 2) and du == "A/V" and dn == "dy/dx"
-    _, s, _, _, _, sn = _run("symmetrize", x, y)
-    assert np.allclose(s, 3 * x ** 2 + 1) and sn == "y (symmetric part)"
-    _, a, _, _, _, _ = _run("antisymmetrize", x, y)
-    assert np.allclose(a, 2 * x)
+    assert np.allclose(d[5:-5], 6 * x[5:-5] + 2) and du == "S" and dn == "dy/dx"   # A/V: a conductance
+    sx, s, _, _, _, sn = _run("symmetrize", x, y)
+    assert np.allclose(s, 3 * sx ** 2 + 1) and sn == "y (symmetric part)" and sx.min() == 0 and sx.size == 41
+    ax, a, _, _, _, _ = _run("antisymmetrize", x, y)
+    assert np.allclose(a, 2 * ax) and ax.min() > 0   # at x = 0 the odd part is 0 by definition: no point
     _, b, _, _, _, bn = _run("background", x, 5 * x + 7 + np.sin(x * 20) * 1e-3, order=1)
     assert np.abs(b).max() < 2e-3 and bn == "y − background"
     _, n, _, nu, _, _ = _run("normalize", x, y, how="max")
     assert n.max() == pytest.approx(1) and nu == ""
     _, i, _, iu, _, _ = _run("integrate", x, np.ones_like(x))
-    assert i[-1] == pytest.approx(4) and iu == "A·V"
+    assert i[-1] == pytest.approx(4) and iu == "W"   # A·V
     cx, _, _, _, _, _ = _run("crop", x, y, lo=-1, hi=1)
     assert cx.min() >= -1 and cx.max() <= 1 and len(cx) == 41
     bx, by, _, _, _, _ = _run("bin", x, y, width=1)
@@ -149,7 +149,7 @@ def test_steps_on_a_curve_and_their_units():
     fx, fy, fxu, _, fxn, _ = _run("fft", t, np.sin(2 * math.pi * 50 * t), xu="s")
     assert fx[np.argmax(fy)] == pytest.approx(50, abs=2) and fxu == "Hz" and fxn == "frequency"
     _, sc, _, scu, _, _ = _run("scale", x, y, factor=1e3, offset=1)
-    assert sc[0] == pytest.approx(y[0] * 1e3 + 1) and scu == ""
+    assert sc[0] == pytest.approx(y[0] * 1e3 + 1) and scu == "mA"
     _, lg, _, _, _, _ = _run("log10", x, np.full_like(x, 100.0))
     assert np.allclose(lg, 2)
 
@@ -229,7 +229,7 @@ def test_the_csv_has_every_point_of_every_curve(rt):
     rows = text.strip().splitlines()
     assert name.endswith("-analysis.csv") and len(rows) == 1 + 31
     head = rows[0].split(",")
-    assert len(head) == 6 and head[0].startswith("smu.V [V]") and head[1].startswith("dlockin.X/dsmu.V [V/V]")
+    assert len(head) == 6 and head[0].startswith("smu.V [V]") and head[1].startswith("dlockin.X/dsmu.V (")   # V/V: none
 
 
 def test_the_pane_s_routes(rt, tmp_path):
