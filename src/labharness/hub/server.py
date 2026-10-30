@@ -961,7 +961,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         app = await llm_app(request)
         if app is None:
             return llm.refusal(401, "Sign in to Kelvin with your Kelvin account again to use the hub's models.")
-        if hub.needs_consent(app["user"]):
+        if request.method == "POST" and hub.needs_consent(app["user"]):   # model lists carry nothing of theirs
             return llm.refusal(403, "The Kelvin hub's terms changed. Agree to them at %s/consent first." % hub.base_url)
         try:
             body = await read_body(request, llm.MAX_BODY) if request.method == "POST" else b""
@@ -972,13 +972,15 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
                                      request.query_params.multi_items(), dict(request.headers), body)
 
     async def llm_status(request: Request) -> Response:
-        """For a signed-in Kelvin: the model services the hub offers, and the person's month so far."""
+        """For a signed-in Kelvin: the model services the hub offers, the person's month so far, and whether new
+        terms wait for them (their chats through the hub wait until they agree)."""
         app = await app_of(request)
         if app is None:
             return api_error("not connected", 401)
         services, usage = await asyncio.gather(call(gateway.offered),
                                                call(gateway.usage_of, app["user"]["id"], app.get("lab_id")))
-        return JSONResponse(dict(usage, services=services))
+        return JSONResponse(dict(usage, services=services, needs_consent=hub.needs_consent(app["user"]),
+                                 consent_url=hub.base_url + "/consent"))
 
     async def pdf_pages(request: Request) -> Response:
         """A signed-in Kelvin's PDF pages (only those a model needs) drawn as pictures, for a model that sees pictures

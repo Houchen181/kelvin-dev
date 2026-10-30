@@ -5443,7 +5443,13 @@
     const el = $("hub-usage");
     if (!el) return;
     el.hidden = !hub;
-    if (hub) el.textContent = "Kelvin hub models: $" + Number(hub.spent || 0).toFixed(2) + " of $" + Number(hub.budget).toFixed(2) +
+    if (!hub) return;
+    if (hub.needs_consent) {   // the hub's terms changed: its models wait until the person agrees (hub/llm.py)
+      el.replaceChildren("Kelvin hub models wait until you ",
+        h("a", { href: hub.consent_url, target: "_blank", rel: "noopener noreferrer" }, "agree to the hub's new terms"), ".");
+      return;
+    }
+    el.textContent = "Kelvin hub models: $" + Number(hub.spent || 0).toFixed(2) + " of $" + Number(hub.budget).toFixed(2) +
       " this month" + (hub.renews ? " · renews " + hub.renews : "") + (hub.lab ? " · your lab: $" + Number(hub.lab.spent || 0).toFixed(2) +
       " of $" + Number(hub.lab.budget).toFixed(2) : "");
   }

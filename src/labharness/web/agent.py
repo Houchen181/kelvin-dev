@@ -574,7 +574,12 @@ class ChatAgent:
             except Exception as e:
                 groups.append({"provider": p.name, "label": p.label, "models": [], "error": describe_error(p, e)})
         status = hubs[0].hub.status() if hubs else None
-        month = {k: status.get(k) for k in ("month", "spent", "budget", "renews", "lab")} if status else None
+        month = {k: status.get(k) for k in ("month", "spent", "budget", "renews", "lab", "needs_consent",
+                                            "consent_url")} if status else None
+        if status and status.get("needs_consent"):   # said beside the hub's models, where the person looks
+            for g in groups:
+                if through_hub(g["provider"]) and not g.get("error"):
+                    g["error"] = "agree to the hub's new terms first (Settings → Models)"
         return dict({"groups": groups}, **({"hub": month} if month and month.get("budget") is not None else {}))
 
     # ------------------------------------------------------------------ memory

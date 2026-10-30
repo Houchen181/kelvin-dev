@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -103,8 +104,15 @@ def _fetch_json(url: str, api_key: Optional[str]) -> Any:
     if api_key:
         headers["Authorization"] = "Bearer %s" % api_key
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:   # the service's own words, for modelerrors (not "HTTP Error 403")
+        try:
+            e.body = json.loads(e.read())
+        except (ValueError, OSError):
+            pass
+        raise
 
 
 class OpenAIProvider(Provider):

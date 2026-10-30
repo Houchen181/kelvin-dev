@@ -352,3 +352,18 @@ def test_the_meter_reads_whole_answers_too():
     assert m.used["searches"] == 2 and llm.cost({"input": 4, "output": 20}, m.used) == pytest.approx(
         (12 * 4 + 3 * 20) / 1e6 + 0.02)
     assert re.fullmatch(r"\d{4}-\d{2}", llm.month_of()) and llm.renews("2026-12") == "January 1"
+
+
+def test_new_terms_hold_chats_but_not_the_model_list(gateway):
+    """Agreeing to new terms is what lets chats through: the models are listed meanwhile, and Kelvin is told why."""
+    hub, client, services, token = gateway
+    owner_keys(hub, services, ("opencode",))
+    hub.config["consent_version"] = "2099-01-01"
+    auth = {"Authorization": "Bearer " + token}
+    r = client.get("/llm/opencode/v1/models", headers=auth)
+    assert r.status_code == 200 and "kimi-k3" in r.text                       # nothing of theirs passes
+    r = client.post("/llm/opencode/openai/v1/chat/completions", headers=auth,
+                    json={"model": "kimi-k3", "messages": [{"role": "user", "content": "x"}]})
+    assert r.status_code == 403 and "Agree to them at" in r.json()["error"]["message"]
+    status = client.get("/api/llm", headers=auth).json()
+    assert status["needs_consent"] is True and status["consent_url"].endswith("/consent")

@@ -60,8 +60,8 @@ BRIDGE = {"claude-sonnet-5-5": "sonnet", "claude-opus-5-5": "opus", "claude-haik
 
 
 def _own_keys() -> bool:
-    from ..edition import private
-    return private()
+    from ..edition import own_keys
+    return own_keys()
 
 
 def default_model(keys: List[str], chosen: Optional[str] = "") -> Optional[str]:
@@ -431,7 +431,7 @@ class Settings:
             "checklist": self._user.get("checklist") != "hidden",
             "updates": self.updates,
             "claude_code": self._user.get("claude_code") != "off",          # Claude Code bridge (temporary)
-            "own_keys": _own_keys(),   # the private build: the person's own API keys and services (edition.py)
+            "own_keys": _own_keys(),   # Kelvin from source: the person's own API keys and services (edition.py)
             "claude_code_path": self._user.get("claude_code_path", ""),
             "hub_old_runs": self._user.get("hub_old_runs") == "on",
             "idle_off": self.idle_off_minutes,

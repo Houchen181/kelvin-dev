@@ -91,7 +91,8 @@ def test_the_hubs_models_show_while_it_offers_them(tmp_path):
     assert [m["key"] for m in groups["hub-anthropic"]["models"]] == ["hub-anthropic:claude-opus-5-5",
                                                                       "hub-anthropic:claude-sonnet-5-5"]
     assert groups["hub-anthropic"]["label"] == "Claude · Kelvin hub" and "missing_key" not in groups["hub-anthropic"]
-    assert listed["hub"] == {"month": "2026-10", "spent": 3.2, "budget": 20.0, "renews": "November 1", "lab": None}
+    assert listed["hub"] == {"month": "2026-10", "spent": 3.2, "budget": 20.0, "renews": "November 1", "lab": None,
+                             "needs_consent": None, "consent_url": None}   # an older hub doesn't say
     assert len(asked) == 1                                                    # one asking for all four
     assert resolve_model("opus", lambda s: s in groups) == "hub-anthropic:claude-opus-5-5"
 
@@ -128,13 +129,17 @@ def test_the_hub_says_why_in_plain_words():
     assert "refused the Kelvin hub's key" in said and "Settings" not in said
 
 
-def test_the_user_version_takes_no_keys_of_its_own(tmp_path, monkeypatch):
+def test_the_app_takes_no_keys_of_its_own(tmp_path, monkeypatch):
+    """The Kelvin app, the private build too, uses the hub's models; only Kelvin from source takes keys."""
+    from labharness import claudecode
     settings = Settings(tmp_path / "settings.json")
     settings.update({"anthropic_api_key": "sk-ant-mine-1234", "local_base_url": "http://localhost:11434/v1",
                      "local_models": "qwen3:32b"})
     settings.add_service({"preset": "custom", "name": "Lab vLLM", "base_url": "http://127.0.0.1:8000/v1"})
-    assert {"anthropic", "openai", "gemini", "local", "lab-vllm"} <= set(make_providers(settings))   # private build
-    monkeypatch.setattr(edition, "private", lambda: False)
+    assert {"anthropic", "openai", "gemini", "local", "lab-vllm"} <= set(make_providers(settings))   # from source
+    monkeypatch.setattr(edition.sys, "frozen", True, raising=False)          # the app: private build or user version
+    monkeypatch.setattr(claudecode, "enabled", lambda: False)                # (the bridge: test_claude_code.py)
+    assert not edition.own_keys()
     providers = make_providers(settings)
     assert set(providers) == {"local"} and settings.public()["own_keys"] is False
     monkeypatch.setattr(settings, "get", lambda name, _get=settings.get: "khub_t" if name == "account_token" else
@@ -143,9 +148,17 @@ def test_the_user_version_takes_no_keys_of_its_own(tmp_path, monkeypatch):
     assert set(make_providers(settings)) == {"hub-anthropic", "hub-openai", "hub-gemini", "hub-opencode", "local"}
 
 
+def test_the_private_build_keeps_the_bridge_but_not_keys(monkeypatch):
+    import sys
+    import types
+    monkeypatch.setattr(edition.sys, "frozen", True, raising=False)
+    monkeypatch.setitem(sys.modules, "labharness._private_bridge", types.ModuleType("labharness._private_bridge"))
+    assert edition.private() and not edition.own_keys()
+
+
 def test_the_user_versions_settings_refuse_keys(parts, monkeypatch):
     from test_web import Scripted, client_for
-    monkeypatch.setattr(edition, "private", lambda: False)
+    monkeypatch.setattr(edition, "own_keys", lambda: False)
     client, headers = client_for(parts, {"scripted": Scripted([])})
     r = client.post("/api/settings", headers=headers, json={"anthropic_api_key": "sk-ant-mine-1234",
                                                             "local_models": "qwen3:32b"})
@@ -228,3 +241,46 @@ def test_kelvins_own_connections_through_a_test_hub(tmp_path, monkeypatch):
         time.sleep(0.05)
     assert used == [("anthropic", "claude-opus-5-5"), ("openai", "gpt-6-sol"), ("gemini", "gemini-3.1-pro")]
     assert owner.spent(1) > 0
+
+
+def test_a_hub_with_nothing_yet_is_asked_again_in_a_minute(monkeypatch):
+    empty = dict(OFFERED, services=[])
+    fetch, asked = told(empty)
+    hub = HubModels("https://hub.test", "khub_new", fetch)
+    hub.refresh()
+    soon = time.time() + hubmodels.AGAIN + 1
+    monkeypatch.setattr(hubmodels.time, "time", lambda: soon)
+    hub.fetch = told(OFFERED)[0]
+    hub.refresh()                                                             # the owner has set a key meanwhile
+    assert len(asked) == 1 and hub.offers("anthropic")
+
+
+def test_a_model_list_refused_says_the_hubs_own_words(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+    from labharness.web.providers import openai_provider
+
+    def refuse(req, timeout=20):
+        raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(json.dumps(
+            {"type": "error", "error": {"message": "The Kelvin hub's terms changed. Agree to them at "
+                                                  "https://hub.test/consent first."}}).encode()))
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        openai_provider._fetch_json("https://hub.test/llm/opencode/v1/models", "khub_t")
+    said = describe("OpenCode · Kelvin hub", "hub-opencode", caught.value)
+    assert said == ("OpenCode · Kelvin hub: The Kelvin hub's terms changed. Agree to them at https://hub.test/consent "
+                    "first.")
+
+
+def test_new_hub_terms_are_said_beside_the_hubs_models(tmp_path):
+    waiting = dict(OFFERED, needs_consent=True, consent_url="https://hub.test/consent")
+    providers = hub_providers(("https://hub.test", "khub_terms"))
+    for p in providers.values():
+        p.hub.fetch = told(waiting)[0]
+    providers["hub-opencode"].models = lambda: asyncio.sleep(0, [])
+    agent, _ = kelvin(tmp_path, providers)
+    listed = asyncio.run(agent.models())
+    claude = next(g for g in listed["groups"] if g["provider"] == "hub-anthropic")
+    assert claude["models"] and "agree to the hub's new terms first" in claude["error"]   # still listed
+    assert listed["hub"]["needs_consent"] and listed["hub"]["consent_url"] == "https://hub.test/consent"

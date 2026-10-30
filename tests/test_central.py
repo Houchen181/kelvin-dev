@@ -292,3 +292,23 @@ def test_removing_the_first_account_never_hands_its_data_from_before_to_someone_
     assert ben["name"] == "Ben" and "data" not in ben                               # his own folder, not hers
     client.delete("/api/session")
     assert client.post("/api/accounts/remove", json={"name": "Ben"}).status_code == 200   # no password: none asked
+
+
+def test_the_hubs_models_come_with_the_sign_in(tmp_path, hub):
+    """Signing in replaces this computer's token on the hub: the hub's models use the new one at once, not the one
+    from before (which the hub no longer takes) or none (a first sign-in)."""
+    pytest.importorskip("cryptography")
+    pytest.importorskip("anthropic")
+    from labharness.hub import llm
+    from labharness.hub.catalog import Catalog
+    h, line = hub
+    h.register(ADA["email"], "Ada", ADA["password"], True)
+    llm.Gateway(h, Catalog(h.home)).set_key("anthropic", "sk-ant-owner-1234")
+    lab, settings = computer(tmp_path / "one")
+    lab.post("/api/session/hub", json={"url": HUB})
+    for _ in range(2):   # a first sign-in, then one with a token from before
+        assert lab.post("/api/session", json=ADA).status_code == 200
+        groups = {g["provider"]: g for g in lab.get("/api/bootstrap").json()["models"]["groups"]}
+        assert [m["key"] for m in groups["hub-anthropic"]["models"]][:1] == ["hub-anthropic:claude-opus-5-5"]
+        assert "error" not in groups["hub-anthropic"]
+        lab.delete("/api/session")

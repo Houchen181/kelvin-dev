@@ -70,7 +70,8 @@ class HubModels:
                 answer = self.fetch(self.url, self.token)
                 if not isinstance(answer, dict):
                     raise ValueError("not a list of services")
-                _SEEN[self.key] = (time.time() + EVERY, answer)
+                # while it offers nothing (no keys set yet), asked again in a minute, so keys show soon after
+                _SEEN[self.key] = (time.time() + (EVERY if answer.get("services") else AGAIN), answer)
             except Exception as e:   # offline, signed out, an older hub: what it said before stays a while
                 log.info("the Kelvin hub's models: %s", e)
                 _SEEN[self.key] = (time.time() + AGAIN, before)

@@ -76,15 +76,15 @@ COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument c
 
 def make_providers(settings: Settings, signin: Optional[SignIn] = None) -> Dict[str, Provider]:
     """The model connections: the Kelvin hub's for a person signed in with their Kelvin account (hubmodels.py), a
-    model server on this computer, the ChatGPT plan; and in the private build (edition.py) the person's own keys and
-    other model services too."""
+    model server on this computer, the ChatGPT plan; and in Kelvin from source (edition.own_keys) the person's own
+    keys and other model services too."""
     from .. import edition
     from .hubmodels import hub_providers
     from .providers.anthropic_provider import AnthropicProvider
     from .providers.gemini_provider import GeminiProvider
     from .providers.openai_provider import OpenAIProvider
 
-    own = edition.private()
+    own = edition.own_keys()
     providers: Dict[str, Provider] = {
         "anthropic": AnthropicProvider(settings.get("anthropic_api_key")),
         "openai": OpenAIProvider("openai", "GPT", settings.get("openai_api_key")),
@@ -773,6 +773,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if online and answer and answer.get("access_token"):
             settings.put_secret("account_token", answer["access_token"])   # encrypted with their password
             relay_wake()   # sign_in's wake can reach the relay before the token is kept: look again with it
+            if providers is None:   # and the hub's models (hubmodels.py) come with this token, not the one before:
+                agent.providers = make_providers(settings, signin)   # signing in replaced that one on the hub
         from .settings import unreadable
         return {"signed_in": True, "offline": not online,
                 "keys_sealed": before is None and unreadable(accounts.dir(account), settings.cipher) > 0,
@@ -1712,7 +1714,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """GET: the services set up, and the ones Kelvin knows. POST {preset, name, base_url, api_key, models}: add."""
         from .services import presets_view
         if request.method == "POST":
-            if not edition.private():
+            if not edition.own_keys():
                 return error(400, "This version of Kelvin uses models through your Kelvin account, not services of "
                                   "your own.")
             try:
@@ -2937,7 +2939,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             was_on = collection_on() is not None
             try:
                 values = await request.json()
-                if isinstance(values, dict) and not edition.private():   # the user version takes no API keys
+                if isinstance(values, dict) and not edition.own_keys():   # the app takes no API keys
                     values = {k: v for k, v in values.items() if k not in OWN_KEYS}
                 settings.update(values)
             except ValueError as e:
