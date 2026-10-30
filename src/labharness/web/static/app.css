@@ -689,7 +689,7 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
   background: var(--raised); color: var(--text); font-size: 13.5px; }
 .pair-box { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 12px;
   padding: 12px; background: var(--panel); margin: 6px 0; }
-.pair-box .qr svg { display: block; width: 180px; height: 180px; border-radius: 6px; }
+.pair-box .qr svg { display: block; width: min(264px, 100%); height: auto; aspect-ratio: 1; border-radius: 6px; }
 .pair-text { flex: 1; min-width: 180px; font-size: 14px; }
 .pair-text p { margin: 2px 0; }
 .pair-url { font-family: ui-monospace, Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; }

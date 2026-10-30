@@ -73,7 +73,12 @@ struct AccountView: View {
             .navigationTitle("Kelvin account")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        password = ""   // a password left typed in makes iOS offer to save it
+                        dismiss()
+                    }
+                }
             }
             .onAppear {
                 if hub.isEmpty { hub = app.lastHub.absoluteString.replacingOccurrences(of: "https://", with: "") }
@@ -108,6 +113,8 @@ struct AccountView: View {
 struct AccountSection: View {
     @EnvironmentObject var app: AppModel
     @State var confirming = false
+    @State var looking = false
+    @State var looked = false
     @State var deleting = false
     @State var password = ""
     @State var failure: String?
@@ -117,7 +124,15 @@ struct AccountSection: View {
             Section {
                 LabeledContent("Signed in", value: a.email)
                 LabeledContent("Kelvin hub", value: a.hub.host ?? a.hub.absoluteString)
-                Button("Look for my Kelvins") { attempt($failure) { try await app.lookForKelvins() } }
+                Button(looking ? "Looking…" : "Look for my Kelvins") {
+                    looking = true
+                    attempt($failure) {
+                        defer { looking = false }
+                        try await app.lookForKelvins()
+                        looked = true
+                    }
+                }
+                .disabled(looking)
                 Button("Sign out", role: .destructive) { confirming = true }
                 Button("Delete Kelvin account…", role: .destructive) {
                     password = ""
@@ -126,7 +141,8 @@ struct AccountSection: View {
             } header: {
                 Text("Kelvin account")
             } footer: {
-                Text("Your Kelvins appear here once you sign in to them with this account.")
+                Text(looked && app.kelvins.isEmpty ? "No Kelvin is signed in with this account yet."
+                                                   : "Your Kelvins appear here once you sign in to them with this account.")
             }
             .confirmationDialog("Sign out of \(a.email)?", isPresented: $confirming, titleVisibility: .visible) {
                 Button("Sign out", role: .destructive) { Task { await app.signOut() } }

@@ -28,6 +28,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
     private var stopped: Int?
     private var hands: JSON?            // the hands-on-the-sample lock
     private var team: [JSON] = DemoTransport.firstTeam()
+    private var chats: [JSON] = []      // chats begun here, the newest last, kept while the app runs
 
     // ------------------------------------------------------------------ the lab
 
@@ -37,6 +38,9 @@ final class DemoTransport: Transport, @unchecked Sendable {
     }
 
     private func running() -> Bool { stopped == nil && done() < DemoTransport.total }
+
+    /// The IV sweep's status, the same on every screen.
+    private func status() -> String { stopped != nil ? "stopped" : running() ? "running" : "completed" }
 
     private static func row(_ i: Int) -> JSON {
         let v = -0.5 + Double(i) * 0.025
@@ -126,7 +130,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
         live["done"] = n
         live["total"] = DemoTransport.total
         live["eta_s"] = running() ? Double(DemoTransport.total - n) * 2 : 0.0
-        live["status"] = stopped != nil ? "stopped" : running() ? "running" : "completed"
+        live["status"] = status()
         s["live"] = live
         return s
     }
@@ -146,7 +150,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
         live["plan"] = "iv-sweep-D3"
         live["total"] = DemoTransport.total
         live["done"] = n
-        live["status"] = running() ? "running" : "completed"
+        live["status"] = status()
         live["axes"] = [DemoTransport.column("smu.voltage", "V", "sweep")]
         live["measures"] = [DemoTransport.column("smu.current", "A"), DemoTransport.column("lockin.x", "V")]
         live["rows"] = (min(since, n)..<n).map(DemoTransport.row)
@@ -165,7 +169,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
             }
             return r
         }
-        let list: [JSON] = [run(DemoTransport.runID, "iv-sweep-D3", running() ? "running" : "completed", nil),
+        let list: [JSON] = [run(DemoTransport.runID, "iv-sweep-D3", status(), nil),
                             run(DemoTransport.fieldRunID, "field-sweep-D3", "completed", 121),
                             run(DemoTransport.cooldownRunID, "cooldown", "completed", 60)]
         return ["runs": list]
@@ -197,6 +201,16 @@ final class DemoTransport: Transport, @unchecked Sendable {
             meta["points"] = 121
             meta["planned_points"] = 121
             meta["duration_s"] = 3480.0
+        } else if id.hasSuffix("cooldown") {
+            d["plan"] = "cooldown"
+            d["axes"] = [DemoTransport.column("t", "s")]
+            d["scalars"] = [DemoTransport.column("cryostat.temperature", "K")]
+            d["rows"] = (0..<60).map(DemoTransport.cooldown)
+            d["plan_text"] = "plan: cooldown\nmonitor: [cryostat.temperature]\nevery: 6 min\nuntil: cryostat.temperature < 1.6 K\n"
+            meta["status"] = "completed"
+            meta["points"] = 60
+            meta["planned_points"] = 60
+            meta["duration_s"] = 21240.0
         } else {
             let n = done()
             d["plan"] = "iv-sweep-D3"
@@ -204,12 +218,28 @@ final class DemoTransport: Transport, @unchecked Sendable {
             d["scalars"] = [DemoTransport.column("smu.current", "A"), DemoTransport.column("lockin.x", "V")]
             d["rows"] = (0..<n).map(DemoTransport.row)
             d["plan_text"] = "plan: iv-sweep-D3\naxes:\n  - sweep: smu.voltage\n    from: -0.5 V\n    to: 0.5 V\n    points: 41\nmeasure: [smu.current, lockin.x]\n"
-            meta["status"] = running() ? "running" : "completed"
+            meta["status"] = status()
             meta["points"] = n
             meta["planned_points"] = DemoTransport.total
         }
         d["meta"] = meta
         return d
+    }
+
+    /// A chat begun here keeps what was said, as Kelvin keeps a conversation, so it is all there when opened again.
+    private func remember(_ id: String, _ text: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let i = chats.firstIndex(where: { $0["id"] as? String == id }) else { return }
+        var said: JSON = ["type": "text"]
+        said["text"] = "This is the demo lab, so nothing real happens. The lock-in reads **3.21 µV**. Pair with Kelvin "
+            + "on your lab computer to talk to your own instruments."
+        var messages = chats[i]["messages"] as? [JSON] ?? []
+        messages.append(DemoTransport.message("user", ["text": text]))
+        messages.append(DemoTransport.message("assistant", ["blocks": [said]]))
+        chats[i]["messages"] = messages
+        if chats[i]["title"] as? String == "New chat" { chats[i]["title"] = String(text.prefix(40)) }
+        chats[i]["updated"] = Date().timeIntervalSince1970
     }
 
     private static func message(_ role: String, _ fields: JSON) -> JSON {
@@ -298,6 +328,9 @@ final class DemoTransport: Transport, @unchecked Sendable {
     /// lockin.y of the field sweep: a Hall voltage with some of the resistance picked up, which antisymmetrizing removes.
     static func hall(_ b: Double) -> Double { 4.0e-7 * b + 1.6e-8 * b * b + 3e-9 * sin(23 * b) }
 
+    /// The cooldown: the cryostat from room temperature to 1.5 K, a point every 6 minutes.
+    static func cooldown(_ i: Int) -> JSON { ["t": Double(i) * 360, "cryostat.temperature": 1.5 + 298.5 * exp(-Double(i) / 9)] }
+
     /// A demo run's columns and points: the field sweep, else the IV sweep.
     private func table(_ run: String) -> (axes: [String], readings: [String], units: [String: String],
                                           rows: [[String: Double]]) {
@@ -311,6 +344,10 @@ final class DemoTransport: Transport, @unchecked Sendable {
             }
             return (["magnet.field"], ["lockin.x", "lockin.y"],
                     ["magnet.field": "T", "lockin.x": "V", "lockin.y": "V", "t": "s"], rows)
+        }
+        if run.hasSuffix("cooldown") {
+            let rows = (0..<60).map { DemoTransport.cooldown($0).compactMapValues { $0 as? Double } }
+            return ([], ["cryostat.temperature"], ["cryostat.temperature": "K", "t": "s"], rows)
         }
         let rows = (0..<done()).map { DemoTransport.row($0).compactMapValues { $0 as? Double } }
         return (["smu.voltage"], ["smu.current", "lockin.x"],
@@ -327,7 +364,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
             }
         }
         var c: JSON = ["run": run, "status": "completed"]
-        c["plan"] = run.hasSuffix("field-sweep-D3") ? "field-sweep-D3" : "iv-sweep-D3"
+        c["plan"] = run.hasSuffix("field-sweep-D3") ? "field-sweep-D3" : run.hasSuffix("cooldown") ? "cooldown" : "iv-sweep-D3"
         c["points"] = t.rows.count
         c["axes"] = listed(t.axes)
         c["readings"] = listed(t.readings)
@@ -600,11 +637,16 @@ final class DemoTransport: Transport, @unchecked Sendable {
         case ("GET", "/api/chats/demo-chat"):
             return (200, chat())
         case ("POST", "/api/chats"):
-            var c: JSON = ["id": "demo-new", "title": "New chat", "model": "demo:kelvin"]
+            let asked = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? JSON
+            var c: JSON = ["id": "demo-\(chats.count + 1)", "title": "New chat", "model": "demo:kelvin"]
+            c["updated"] = Date().timeIntervalSince1970
             c["messages"] = [JSON]()
+            if asked?["incognito"] as? Bool != true { chats.append(c) }   // an incognito chat keeps nothing
             return (200, c)
         case ("GET", _) where path.hasPrefix("/api/chats/"):
-            var c: JSON = ["id": String(path.dropFirst("/api/chats/".count)), "title": "New chat"]
+            let id = String(path.dropFirst("/api/chats/".count))
+            if let c = chats.first(where: { $0["id"] as? String == id }) { return (200, c) }
+            var c: JSON = ["id": id, "title": "New chat"]
             c["messages"] = [JSON]()
             return (200, c)
         case ("GET", "/api/team"):
@@ -660,7 +702,9 @@ final class DemoTransport: Transport, @unchecked Sendable {
             var c: JSON = ["id": "demo-chat", "title": "IV of device D3", "model": "demo:kelvin"]
             c["updated"] = Date().timeIntervalSince1970 - 900
             status = 200
-            body = [c]
+            lock.lock()
+            body = chats.reversed().map { chat in chat.filter { $0.key != "messages" } } + [c]   // the newest first
+            lock.unlock()
         } else {
             let a = answer(request)
             status = a.0
@@ -672,6 +716,8 @@ final class DemoTransport: Transport, @unchecked Sendable {
 
     /// A chat answer, a few words at a time.
     func lines(for request: URLRequest) async throws -> (HTTPURLResponse, AsyncThrowingStream<String, Error>) {
+        let asked = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? JSON
+        remember(request.url?.deletingLastPathComponent().lastPathComponent ?? "", asked?["text"] as? String ?? "")
         func event(_ type: String, _ fields: JSON = [:]) -> String {
             var e = fields
             e["type"] = type

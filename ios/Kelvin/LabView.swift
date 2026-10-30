@@ -361,7 +361,7 @@ struct SeriesChart: View {
     let series: Series
 
     var body: some View {
-        let s = series.scaled()   // 4 µV, not 4.0E-6 V
+        let s = series.thinned().scaled()   // 4 µV, not 4.0E-6 V; a long run thinned for the phone
         Chart(Array(s.points.enumerated()), id: \.offset) { item in
             LineMark(x: .value(s.x.label, item.element.x), y: .value(s.y.label, item.element.y))
                 .interpolationMethod(.linear)

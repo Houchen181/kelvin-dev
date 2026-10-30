@@ -438,11 +438,12 @@ public struct RunSummary: Decodable, Equatable, Identifiable, Sendable {
     public var points: Int?
     public var plannedPoints: Int?
     public var reason: String?
+    public var startedAt: Double?       // Kelvin 0.3.34 and later: when it began, wherever the phone is
 
     public var id: String { runID }
 
     enum CodingKeys: String, CodingKey {
-        case runID = "run_id", plan, status, points, plannedPoints = "planned_points", reason
+        case runID = "run_id", plan, status, points, plannedPoints = "planned_points", reason, startedAt = "started_at"
     }
 
     public init(from decoder: Decoder) throws {
@@ -453,10 +454,13 @@ public struct RunSummary: Decodable, Equatable, Identifiable, Sendable {
         points = c.maybe(.points)
         plannedPoints = c.maybe(.plannedPoints)
         reason = c.maybe(.reason)
+        startedAt = c.maybe(.startedAt)
     }
 
-    /// Run ids start with the time they began: 20261022-143005-plan.
+    /// When it began. Before Kelvin said, from the run id, which starts with the time on the lab computer's clock
+    /// (20261022-143005-plan): right when the phone is in the same time zone.
     public var started: Date? {
+        if let startedAt { return Date(timeIntervalSince1970: startedAt) }
         let stamp = runID.split(separator: "-").prefix(2).joined(separator: "-")
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")

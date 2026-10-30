@@ -120,6 +120,8 @@ struct LabTabs: View {
 struct WelcomeView: View {
     @EnvironmentObject var app: AppModel
     @State var failure: String?
+    @State var looking = false
+    @State var noneYet = false   // looked: the account has no Kelvin yet
 
     var body: some View {
         VStack(spacing: 18) {
@@ -136,15 +138,27 @@ struct WelcomeView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 Button {
-                    attempt($failure) { try await app.lookForKelvins() }
+                    look()
                 } label: {
-                    Label("Look for my Kelvins", systemImage: "arrow.clockwise")
+                    Label(looking ? "Looking…" : "Look for my Kelvins", systemImage: "arrow.clockwise")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(looking)
+                if noneYet {
+                    Text("No Kelvin is signed in with \(a.email) yet.").font(.footnote).foregroundStyle(.secondary)
+                }
+                Button {
+                    app.pairing = true
+                } label: {
+                    Label("Pair with a code", systemImage: "qrcode.viewfinder")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
                 Button("Sign out", role: .destructive) { Task { await app.signOut() } }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(.borderless)
             } else {
                 Text("Watch your lab, answer Kelvin's requests and stop a run from your phone. Sign in with your "
                      + "Kelvin account to reach your lab computer from anywhere, or pair with it directly.")
@@ -178,6 +192,16 @@ struct WelcomeView: View {
         }
         .padding(24)
         .failure($failure)
+    }
+
+    private func look() {
+        looking = true
+        noneYet = false
+        attempt($failure) {
+            defer { looking = false }
+            try await app.lookForKelvins()
+            noneYet = app.list.computers.isEmpty
+        }
     }
 }
 

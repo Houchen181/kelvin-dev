@@ -108,8 +108,9 @@ final class ClientTests: XCTestCase {
         try await c.answer(ApprovalRequest(id: "r-7", title: "Raise the field", items: []), approve: false)
         try await c.acknowledge(alarm("a1"))
         try await c.stopRun()
-        try await c.stopChat()
+        try await c.stopChat("c-1")
         XCTAssertEqual(t.body(0)?["approve"], .bool(false))
+        XCTAssertEqual(t.body(3), .object(["chat_id": .string("c-1")]))   // that chat, not the whole lab
         XCTAssertEqual(t.asked.map { $0.url!.path }, ["/api/approvals/r-7", "/api/alarms/a1/ack", "/api/runs/stop", "/api/stop"])
     }
 

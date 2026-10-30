@@ -139,6 +139,12 @@ public struct Transcript: Equatable, Sendable {
         answering = true
     }
 
+    /// The person's message didn't reach Kelvin: it comes off again (the app puts it back in the box).
+    public mutating func unsay() {
+        if lines.last?.kind == .user { lines.removeLast() }
+        answering = false
+    }
+
     public mutating func apply(_ event: ChatEvent) {
         switch event {
         case .started(let model, let title):

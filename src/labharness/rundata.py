@@ -626,6 +626,14 @@ def upgrade(folder: Path, columns: Optional[Dict[str, Any]] = None) -> Optional[
     return folder / RUN_FILE
 
 
+def started_at(run_id: str) -> Optional[float]:
+    """When a run started, from its name, as seconds since 1970 (the name is in this computer's time zone)."""
+    try:
+        return datetime.strptime(run_id[:15], "%Y%m%d-%H%M%S").timestamp()
+    except ValueError:
+        return None
+
+
 def _started(run_id: str) -> Optional[str]:
     """When a run started, from its name (YYYYMMDD-HHMMSS-plan)."""
     try:

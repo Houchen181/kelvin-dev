@@ -8,6 +8,7 @@ final class Script: Transport, @unchecked Sendable {
     var replies: [String: (Int, String)] = [:]
     var unreachable: Set<String> = []
     private(set) var asked: [String] = []
+    private(set) var bearers: [String] = []    // each request's Authorization, when it had one
     private let lock = NSLock()
 
     func on(_ key: String, _ status: Int, _ body: String) { replies[key] = (status, body) }
@@ -18,6 +19,7 @@ final class Script: Transport, @unchecked Sendable {
         let key = "\(request.httpMethod ?? "GET") \(url.path)"
         lock.lock()
         asked.append("\(url.host ?? "") \(key)")
+        if let bearer = request.value(forHTTPHeaderField: "Authorization") { bearers.append(bearer) }
         lock.unlock()
         if unreachable.contains(url.host ?? "") { throw URLError(.timedOut) }
         let (status, body) = replies[key] ?? (404, "{\"error\": \"not found\"}")
@@ -382,6 +384,38 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(model.answered?.y, "y1")                               // the newest is what is drawn
         XCTAssertEqual(model.result?.y.key, "y1")
         XCTAssertFalse(model.working)
+    }
+
+    func testAMessageThatCouldNotBeSentGoesBackInTheBox() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script)
+        script.unreachable = ["192.168.1.50", "100.101.7.9"]
+        let chat = ChatModel(session: app.session(for: c), chat: nil)
+        chat.draft = "Ramp the field to 1 T"
+        await chat.send()?.value
+        XCTAssertEqual(chat.draft, "Ramp the field to 1 T")                  // back in the box, to send again
+        XCTAssertTrue(chat.transcript.lines.isEmpty)
+        XCTAssertTrue(chat.problem?.hasSuffix("Not sent.") ?? false)
+    }
+
+    func testSigningInAgainReachesTheKelvinWithTheNewToken() async throws {
+        let script = Script()
+        let hub = URL(string: "https://kelvin.example.org")!
+        script.on("POST /api/signin", "{\"access_token\": \"khub_old\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        script.on("GET /api/relay/kelvins", "{\"kelvins\": [{\"id\": \"pc-1\", \"name\": \"LAB-PC\", \"online\": true}]}")
+        script.on("GET /api/relay/kelvins/pc-1/api/me", "{\"role\": \"control\", \"name\": \"iPhone\", \"lab\": \"Cryostat lab\"}")
+        script.on("GET /api/relay/kelvins/pc-1/api/state", 401, "{\"error\": \"Sign in to your Kelvin account again.\"}")
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        try await app.signIn(hub: hub, email: "ada@example.org", password: "pw")
+        let session = app.session(for: try XCTUnwrap(app.current))
+        await session.refresh()
+        XCTAssertEqual(session.problem?.kind, .unpaired)
+        script.on("POST /api/signin", "{\"access_token\": \"khub_new\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        script.on("GET /api/relay/kelvins/pc-1/api/state", "{\"lab\": \"Cryostat lab\"}")
+        try await app.signIn(hub: hub, email: "ada@example.org", password: "pw")   // Sign in again
+        await session.refresh()
+        XCTAssertNil(session.problem)
+        XCTAssertEqual(script.bearers.last, "Bearer khub_new")
     }
 
     func testTheKeychain() throws {

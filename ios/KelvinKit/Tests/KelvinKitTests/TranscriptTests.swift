@@ -2,6 +2,14 @@ import XCTest
 @testable import KelvinKit
 
 final class TranscriptTests: XCTestCase {
+    func testAMessageThatNeverReachedKelvinComesOffAgain() {
+        var t = Transcript(title: "New chat", model: nil, incognito: false)
+        t.say("Ramp the field to 1 T")
+        t.unsay()
+        XCTAssertTrue(t.lines.isEmpty)
+        XCTAssertFalse(t.answering)
+    }
+
     func testAConversationAsKelvinKeepsIt() throws {
         let chat = try decode(ChatDetail.self, """
         {"id": "c1", "title": "IV of D3", "model": "anthropic:claude-opus-5-5", "messages": [

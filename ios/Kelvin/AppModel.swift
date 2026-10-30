@@ -60,6 +60,7 @@ final class AppModel: ObservableObject {
         let (token, signedIn) = try await HubClient(hub: hub, transport: transport)
             .signIn(email: email.trimmingCharacters(in: .whitespaces), password: password, phone: phone)
         tokens.save(token, for: Account.tokenID)
+        for s in sessions.values { s.reconnect() }   // the account's computers: with this token from now on
         account = signedIn
         defaults.set(signedIn.encoded(), forKey: accountKey)
         defaults.set(hub.absoluteString, forKey: "kelvin.hub")
@@ -275,6 +276,13 @@ final class LabSession: ObservableObject {
         loop = nil
     }
 
+    /// Find the computer again at the next look: where it answers, and with the token there is then (the account
+    /// signed in again, say).
+    func reconnect() {
+        client = nil
+        connected = nil
+    }
+
     func refresh() async {
         do {
             let c = try await ready()
@@ -288,10 +296,7 @@ final class LabSession: ObservableObject {
             Notifier.shared.look(at: s, on: computer)
             await follow(s.live, with: c)
         } catch let e as KelvinError {
-            if e.kind == .unreachable {
-                client = nil
-                connected = nil
-            }
+            if e.kind == .unreachable || e.kind == .unpaired { reconnect() }   // a token refused may be replaced
             problem = e
         } catch {
             problem = KelvinError(.server, error.localizedDescription)
@@ -317,7 +322,8 @@ final class LabSession: ObservableObject {
         guard let token = tokens.token(for: computer.id) else {
             throw KelvinError(.unpaired, "This phone is not paired with \(computer.lab) any more. Pair it again.")
         }
-        let (c, me) = try await reach(computer.addresses, token: token, transport: transport) { try await $0.me() }
+        let (found, me) = try await reach(computer.addresses, token: token, transport: transport) { try await $0.me() }
+        let c = KelvinClient(base: found.base, token: token, transport: transport)   // the usual wait, not the probe's
         client = c
         connected = c.base
         computer.update(with: me, used: c.base)
@@ -328,9 +334,10 @@ final class LabSession: ObservableObject {
     private func readyThroughAccount(_ relay: URL) async throws -> KelvinClient {
         if let direct = tokens.token(for: computer.id), !computer.addresses.isEmpty {
             do {   // on the lab network or Tailscale: faster, and unshared work opens too
-                let (c, me) = try await reach(computer.addresses, token: direct, transport: transport, timeout: 2.5) {
+                let (found, me) = try await reach(computer.addresses, token: direct, transport: transport, timeout: 2.5) {
                     try await $0.me()
                 }
+                let c = KelvinClient(base: found.base, token: direct, transport: transport)   // the usual wait now
                 client = c
                 connected = c.base
                 computer.update(with: me, used: c.base)
@@ -384,7 +391,7 @@ final class LabSession: ObservableObject {
         await refresh()
     }
 
-    func stopChat() async throws { try await ready().stopChat() }
+    func stopChat(_ id: String) async throws { try await ready().stopChat(id) }
 
     /// Lock while hands are on the sample, or unlock. Returns what Kelvin did, in words.
     func hands(on: Bool) async throws -> [String] {
@@ -493,6 +500,7 @@ final class ChatModel: ObservableObject {
     }
 
     private func answer(_ text: String) async {
+        var reached = false   // Kelvin has the message
         do {
             if id == nil || model == nil {
                 let models = try await session.models()
@@ -504,13 +512,21 @@ final class ChatModel: ObservableObject {
             if id == nil {
                 id = try await session.newChat(model: model ?? "", incognito: transcript.incognito).id
             }
-            for try await event in try await session.turn(chat: id ?? "", text: text, model: model ?? "") {
+            let events = try await session.turn(chat: id ?? "", text: text, model: model ?? "")
+            reached = true
+            for try await event in events {
                 transcript.apply(event)
             }
             transcript.finish()
         } catch let e as KelvinError where e.kind == .unreachable {
             transcript.finish()
-            problem = "Lost the connection. Kelvin goes on with the answer on its computer; pull down to load it."
+            if reached {
+                problem = "Lost the connection. Kelvin goes on with the answer on its computer; pull down to load it."
+            } else {   // it never got there: back in the box, to send again
+                transcript.unsay()
+                if draft.isEmpty { draft = text }
+                problem = e.message + " Not sent."
+            }
         } catch {
             transcript.apply(.error(error.localizedDescription))
             transcript.finish()
@@ -518,8 +534,9 @@ final class ChatModel: ObservableObject {
     }
 
     func stop() async {
+        guard let id else { return }   // not on Kelvin yet: nothing there to stop
         do {
-            try await session.stopChat()
+            try await session.stopChat(id)
         } catch {
             problem = error.localizedDescription
         }

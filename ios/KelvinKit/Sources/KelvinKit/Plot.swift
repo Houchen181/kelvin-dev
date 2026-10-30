@@ -21,6 +21,11 @@ public struct Series: Equatable, Sendable {
         sy.unit = uy
         return Series(x: sx, y: sy, points: points.map { Point(x: $0.x * fx, y: $0.y * fy) })
     }
+
+    /// At most about `most` points, each stretch's lowest and highest so a narrow peak stays: a long run draws smoothly.
+    public func thinned(to most: Int = 800) -> Series {
+        Series(x: x, y: y, points: Drawn.thin(points, to: most))
+    }
 }
 
 /// SI prefixes for plot axes.

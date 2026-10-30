@@ -153,9 +153,10 @@ public struct KelvinClient: Sendable {
         let _: JSONValue = try await call("DELETE", "/api/phone/direct")
     }
 
-    /// Stop the conversation Kelvin is answering, and decline what it asked.
-    public func stopChat() async throws {
-        let _: JSONValue = try await call("POST", "/api/stop", body: .object([:]))
+    /// Stop the answer in chat `id`, and decline what it asked. That chat's lab work stops with it; the rest of the
+    /// lab carries on (a run another chat started, the queue).
+    public func stopChat(_ id: String) async throws {
+        let _: JSONValue = try await call("POST", "/api/stop", body: .object(["chat_id": .string(id)]))
     }
 
     /// Unpair this phone on the Kelvin computer.

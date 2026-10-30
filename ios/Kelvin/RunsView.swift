@@ -66,6 +66,7 @@ struct RunDetailView: View {
     @State var fetching: String?
     @State var analyzing = false
     @State var preset: AnalysisSpec?
+    @State var loadFailed: String?     // why the run didn't come, in place of the spinner
 
     var body: some View {
         List {
@@ -113,6 +114,11 @@ struct RunDetailView: View {
                             Text(plan).font(.caption.monospaced()).textSelection(.enabled)
                         }
                     }
+                }
+            } else if let why = loadFailed {
+                Section {
+                    Text(why).foregroundStyle(.secondary)
+                    Button("Try again") { Task { await load() } }
                 }
             } else {
                 Section { ProgressView() }
@@ -165,10 +171,11 @@ struct RunDetailView: View {
 
     @MainActor
     func load() async {
+        loadFailed = nil
         do {
             detail = try await session.run(summary.runID)
         } catch {
-            failure = error.localizedDescription
+            if detail == nil { loadFailed = error.localizedDescription } else { failure = error.localizedDescription }
         }
         if launched, let spec = Launch.analysis() {
             preset = spec

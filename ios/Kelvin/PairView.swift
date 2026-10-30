@@ -33,6 +33,14 @@ struct PairView: View {
                     Section {
                         ScannerView { found($0) }
                             .frame(height: 320)
+                            .overlay {
+                                if working {   // on the camera, where the person is looking
+                                    Label("Pairing…", systemImage: "qrcode")
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+                                        .background(.regularMaterial, in: Capsule())
+                                }
+                            }
                             .listRowInsets(EdgeInsets())
                     } footer: {
                         Text("Point the camera at the QR code. Away from the lab, pair with the code made for the "
@@ -51,12 +59,17 @@ struct PairView: View {
                         Text("The address and code Kelvin shows under Pair a phone. The code works once, for 10 minutes.")
                     }
                     Section {
-                        Button("Pair") { Task { await pair(typed: address, code: code) } }
-                            .disabled(working || address.isEmpty || !Pairing.isCode(Pairing.digits(code)))
+                        Button {
+                            Keyboard.dismiss()   // what pairing says shows below, where the number pad was
+                            Task { await pair(typed: address, code: code) }
+                        } label: {
+                            HStack(spacing: 10) {
+                                Text("Pair")
+                                if working { ProgressView() }
+                            }
+                        }
+                        .disabled(working || address.isEmpty || !Pairing.isCode(Pairing.digits(code)))
                     }
-                }
-                if working {
-                    Section { HStack(spacing: 10) { ProgressView(); Text("Pairing…") } }
                 }
                 if let failure {
                     Section {
@@ -85,6 +98,7 @@ struct PairView: View {
             failure = "That QR code is not a Kelvin pairing code."
             return
         }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()   // got it: the phone can come away
         guard let code = link.code else {
             address = link.base.absoluteString
             mode = .type
@@ -159,6 +173,7 @@ final class ScannerController: UIViewController {
     private let relay = QRRelay()
     private var preview: AVCaptureVideoPreviewLayer?
     private let message = UILabel()
+    private let queue = DispatchQueue(label: "kelvin.camera")   // starts and stops, one at a time
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -188,11 +203,13 @@ final class ScannerController: UIViewController {
     static let denied = "Kelvin may not use the camera. Allow it in Settings → Kelvin, or type the address and code."
 
     private func configure() {
-        guard let device = AVCaptureDevice.default(for: .video),
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+                ?? AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) else {
             say("There is no camera here. Type the address and code instead.")
             return
         }
+        ScannerController.closeUp(device)
         session.addInput(input)
         let output = AVCaptureMetadataOutput()
         guard session.canAddOutput(output) else { return }
@@ -205,19 +222,57 @@ final class ScannerController: UIViewController {
         layer.frame = view.layer.bounds
         view.layer.insertSublayer(layer, at: 0)
         preview = layer
+        run(true)
+    }
+
+    /// Start or stop the camera, off the main queue (it takes a moment).
+    private func run(_ on: Bool) {
         let camera = session
-        DispatchQueue.global(qos: .userInitiated).async { camera.startRunning() }
+        queue.async {
+            guard !camera.inputs.isEmpty, camera.isRunning != on else { return }
+            if on { camera.startRunning() } else { camera.stopRunning() }
+        }
+    }
+
+    /// Focus near, and keep focusing. The main camera of recent iPhones can't focus closer than about 20 cm, yet
+    /// people bring the phone close to a small code: zoomed in so that from there the view is about 12 cm across, a
+    /// code on a screen fills much of it before the phone is too close to focus.
+    static func closeUp(_ device: AVCaptureDevice) {
+        guard (try? device.lockForConfiguration()) != nil else { return }
+        defer { device.unlockForConfiguration() }
+        if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+        if device.isAutoFocusRangeRestrictionSupported { device.autoFocusRangeRestriction = .near }
+        let closest = Double(device.minimumFocusDistance)   // mm; -1 when unknown
+        let half = Double(device.activeFormat.videoFieldOfView) / 2 * .pi / 180
+        guard closest > 0, half > 0 else { return }
+        let across = 60 / tan(half)   // mm away where the view is 12 cm across, not zoomed
+        let zoom = min(closest / across, Double(device.activeFormat.videoMaxZoomFactor), 4)
+        if zoom > 1 { device.videoZoomFactor = CGFloat(zoom) }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        run(true)   // again after a swipe away that was let go
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         preview?.frame = view.layer.bounds
+        guard let connection = preview?.connection, let turned = view.window?.windowScene?.interfaceOrientation else {
+            return
+        }
+        if #available(iOS 17, *) {   // the picture upright, however the phone is held
+            let angle: CGFloat = turned == .landscapeLeft ? 180 : turned == .landscapeRight ? 0
+                : turned == .portraitUpsideDown ? 270 : 90
+            if connection.isVideoRotationAngleSupported(angle) { connection.videoRotationAngle = angle }
+        } else if connection.isVideoOrientationSupported {
+            connection.videoOrientation = AVCaptureVideoOrientation(rawValue: turned.rawValue) ?? .portrait
+        }
     }
 
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        let camera = session
-        DispatchQueue.global(qos: .userInitiated).async { if camera.isRunning { camera.stopRunning() } }
+    override func viewDidDisappear(_ animated: Bool) {   // not on will-disappear: a swipe away let go keeps it
+        super.viewDidDisappear(animated)
+        run(false)
     }
 
     private func say(_ text: String) {

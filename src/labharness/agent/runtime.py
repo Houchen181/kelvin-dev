@@ -1425,6 +1425,9 @@ class LabRuntime:
         live = self.live_view(10 ** 9)
         for d in dirs:
             entry: Dict[str, Any] = {"run_id": d.name, "plan": d.name.split("-", 2)[-1], "status": "unfinished"}
+            began = rundata.started_at(d.name)
+            if began is not None:
+                entry["started_at"] = began   # the name says this computer's clock; a phone may be elsewhere
             if live and live["run_id"] == d.name and live["status"] == "running":
                 entry.update(status="running", points=live["done"], planned_points=live["total"])
             else:

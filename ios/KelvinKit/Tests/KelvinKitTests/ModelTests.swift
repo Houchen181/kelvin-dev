@@ -93,6 +93,26 @@ final class ModelTests: XCTestCase {
         list.sync(Array(listed.prefix(2)), hub: hub)                                    // LAPTOP signed out
         XCTAssertEqual(list.computers.compactMap(\.kelvin), ["a"])
         XCTAssertEqual(list.selected, list.computers.first?.id)
+        list.sync(listed, hub: hub, removed: ["a"])                                     // LAB-PC removed here:
+        XCTAssertFalse(list.computers.contains { $0.host == "LAB-PC" })                 // not its older one either
+    }
+
+    func testAComputerPairedAndOnTheAccountIsOneRow() {
+        let hub = URL(string: "https://kelvin.example.org")!
+        var list = ComputerList()
+        list.add(Computer(lab: "Cryostat lab", host: "LAB-PC", phoneName: "P", role: "control",
+                          addresses: [URL(string: "http://10.0.0.5:8771")!]))
+        list.sync([HubKelvin(id: "a", name: "lab-pc", online: true), HubKelvin(id: "b", name: "LAPTOP", online: true)],
+                  hub: hub)
+        XCTAssertEqual(list.computers.map(\.host), ["LAB-PC", "LAPTOP"])
+        XCTAssertFalse(list.computers[0].viaAccount)                                     // the pairing stays
+    }
+
+    func testALongRunIsThinnedForThePhone() {
+        let points = (0..<20_000).map { Point(x: Double($0), y: $0 == 12_345 ? 5 : 0) }   // one narrow peak
+        let s = Series(x: Column(key: "x", unit: ""), y: Column(key: "y", unit: ""), points: points).thinned()
+        XCTAssertLessThanOrEqual(s.points.count, 800)
+        XCTAssertEqual(s.points.map(\.y).max(), 5)
     }
 
     func testPairingTheSameComputerAgainReplacesItWhereverItIsNow() {

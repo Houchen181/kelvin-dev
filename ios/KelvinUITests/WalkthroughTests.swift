@@ -130,11 +130,8 @@ final class WalkthroughTests: XCTestCase {
         XCTAssertTrue(must(app.buttons["Sign in"], "find Sign in").isHittable, "Sign in is under the keyboard")
         app.navigationBars.buttons["Cancel"].tap()
         gone(app.navigationBars["Kelvin account"], "leave the account sheet")
-        let notNow = app.buttons["Not Now"]   // iOS offers to save the password typed, though nothing was signed in to
-        if notNow.waitForExistence(timeout: 8) {
-            notNow.tap()
-            gone(notNow, "say no to saving the password")
-        }
+        // the password typed goes on Cancel, so iOS doesn't offer to save it (nothing was signed in to)
+        XCTAssertFalse(app.buttons["Not Now"].waitForExistence(timeout: 6), "iOS offers to save the password")
 
         tapWhenFree(app.buttons["Try a demo lab"], "try the demo lab")
         must(app.navigationBars["Demo lab"], "open the demo lab")

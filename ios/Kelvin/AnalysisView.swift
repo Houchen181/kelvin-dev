@@ -326,11 +326,13 @@ struct AnalysisView: View {
                     ForEach(c.axes, id: \.key) { Text($0.key).tag($0.key) }
                 }
             }
-            TextField("Only where \(c.axes.first?.key ?? "t") > 0",
+            TextField("Only where, e.g. \(c.axes.first?.key ?? "t") > 0",
                       text: Binding(get: { model.spec.condition }, set: { model.setCondition($0) }))
                 .font(.callout.monospaced())
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+        } else if model.problem != nil {   // the run's columns didn't come, and x and y are chosen from them
+            Button("Try again") { Task { await model.start() } }
         }
     }
 
