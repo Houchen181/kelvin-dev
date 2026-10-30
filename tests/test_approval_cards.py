@@ -55,10 +55,11 @@ def test_the_duration_counts_ramps_settles_and_waits(lab, make_engine):
     plan = load_plan(COOL_AND_SWEEP.replace("tc.setpoint: 4, ", ""))
     engine.validate(plan)
     f = Forecast(engine).plan(plan)
-    # smu.V ramps 0 → 2 V and back at 0.5 V/s (8 s), 5 settles of 1 s; the output and compliance switch at once
-    assert abs(f.seconds - 13.0) < 0.01, f.seconds
+    # smu.V ramps 0 → 2 V and back at 0.5 V/s (8 s), 5 settles of 1 s; the output and compliance switch at once; and
+    # each point's readings: smu.I integrates for 1 NPLC (1/60 s on its twin)
+    assert abs(f.seconds - (13.0 + 5 / 60)) < 0.01, f.seconds
     f = Forecast(engine).plan(load_plan("plan: t\ntime: {every: 2, points: 31}\nmeasure: [smu.I]\nrepeat: 2\n"))
-    assert abs(f.seconds - 2 * 30 * 2) < 0.01        # a time series waits between its points, in every repeat
+    assert abs(f.seconds - (2 * 30 * 2 + 62 / 60)) < 0.01   # a time series waits between its points, in every repeat
 
 
 def test_a_card_says_when_an_output_the_plan_drives_stays_off(lab, make_engine):

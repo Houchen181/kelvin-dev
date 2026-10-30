@@ -9,7 +9,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from . import frames, pulses, techniques
 from ._version import __version__
@@ -20,6 +20,7 @@ from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
 from .instrument import InstrumentOff, SensorError, Stopped
 from .monitor import Approach, rate_per_s
 from .plans import MAX_POINTS, Axis, Plan, PlanError, Stabilize, Step, load_plan
+from .timing import Took, away as away_from_safe, settings_of, steps as timing_steps
 
 # An instrument that passed its health check is checked again only after this long (or after a run on it fails):
 # checked before it is used, as at the bench, not before every scan of a series or a queue.
@@ -545,8 +546,9 @@ class RunEngine:
                 report = RunReport("declined", plan.name, "declined: plan %s not run%s" % (plan.name, why), dry_run=sim)
                 self.gate.log.write("run_declined", by=self.gate.operator, plan=plan.name)
                 return report
-        report = self._execute(plan, grants, sim.duration_s if sim is not None and sim.ok else None, meta, folder,
-                               since)
+        # the time left counts from the dry run's duration, else the card's estimate (timing.py), not points alone
+        expected = sim.duration_s if sim is not None and sim.ok else forecast.seconds or None
+        report = self._execute(plan, grants, expected, meta, folder, since)
         report.dry_run = sim
         if report.status != "done":   # something went wrong on them: check them again before the next run
             for name in plan.requires:
@@ -621,9 +623,14 @@ class RunEngine:
     def _execute(self, plan: Plan, grants: Dict[str, Any], expected_s: Optional[float] = None,
                  meta: Optional[Dict[str, Any]] = None, folder: Any = None,
                  since: Optional[Tuple[int, int]] = None) -> RunReport:
-        """expected_s: the dry run's duration (lab time), for an honest time-left estimate that counts ramps."""
+        """expected_s: the dry run's duration (lab time), else the card's estimate, for an honest time-left estimate
+        that counts ramps. A real run measures how long its readings, steps and points take (timing.py), for the
+        estimates after it; a dry run's twins take what this lab's runs measured (lab.pace), so it counts what the card
+        counts."""
         gate, lab, clock = self.gate, self.lab, self.lab.clock
         gen, stops = since if since is not None else (gate.stop_generation, lab.stops.count)
+        timing, pace = getattr(lab, "timing", None), getattr(lab, "pace", None)
+        took = Took()
         rec = self.store.create(plan.name, plan.source, gate.operator, folder)
         rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
         rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
@@ -647,9 +654,37 @@ class RunEngine:
                     return   # a twin has nothing to start
                 r = gate.act(instr, param, in_plan=True)
             else:
+                inst = lab.instrument(instr)
+                before, began = inst._last.get(param), clock.now()
                 r = gate._set(instr, param, value, True, "plan:" + plan.name, gen=gen)   # a stop ends its waits too
+                if r.ok:
+                    stepped(inst, param, before, r.value, clock.now() - began)
             if not r.ok:
                 raise _Abort(r.message)
+
+        def stepped(inst: Any, param: str, before: Any, after: Any, seconds: float) -> None:
+            """A drive or setting it stepped: what each step took beyond its dwell; a rehearsal takes as long."""
+            spec = inst.spec(param)
+            n, dwell = timing_steps(inst, spec, before, after)
+            if not n:
+                return
+            key, away = "%s.%s" % (inst.name, param), away_from_safe(spec, before, after)
+            took.step(key, (seconds - dwell) / n, away)
+            if pace is not None:
+                clock.sleep(n * pace.step_s(key, away))
+
+        def read(key: str, get: Callable[[], Any]) -> Any:
+            """One reading, timed; a rehearsal takes as long as this lab's runs measured it (with these settings)."""
+            began = clock.now()
+            value = get()
+            spent = clock.now() - began
+            took.read(key, spent)
+            if pace is not None:
+                inst = lab.instrument(key.split(".", 1)[0])
+                s = pace.read_s(key, inst._last.get)
+                if s is not None and s > spent:
+                    clock.sleep(s - spent)
+            return value
 
         def aim(instr: str, param: str, value: Any) -> None:
             """A ramp's set point, set without waiting for its reading: the ramp measures while it gets there."""
@@ -661,9 +696,11 @@ class RunEngine:
 
         def time_left(done: int) -> float:
             wall, lab_t = time.time() - wall0, clock.now() - t0
-            if expected_s and lab_t > 0:
-                return max(0.0, expected_s - lab_t) * wall / lab_t
-            return wall / done * max(0, plan.points - done) if done else 0.0
+            by_points = wall / done * max(0, plan.points - done) if done else 0.0
+            if expected_s and lab_t > 0:   # a run past its estimate goes by its points still to take
+                left = max(0.0, expected_s - lab_t) * wall / lab_t
+                return left if left > 0 or done >= plan.points else by_points
+            return by_points
 
         # what the sweep changes again: its axes, and the levels a swept switch parks and puts back
         swept = {a.key for a in plan.axes if a.kind in ("instrument", "ramp")}
@@ -683,11 +720,12 @@ class RunEngine:
         def readings(row: Dict[str, Any]) -> None:
             """One point's reading: a ramp's own reading, the cards' actions, then what the plan measures."""
             if followed:
-                row[followed] = lab.read(*followed.split(".", 1))
+                row[followed] = read(followed, lambda: lab.read(*followed.split(".", 1)))
             for instr, action in plan.trigger:   # the cards' actions: arm, trigger, fire
                 if lab.instrument(instr).simulated:
-                    continue   # a twin has no trigger to fire
-                done = gate.act(instr, action, in_plan=True)
+                    read("%s.%s" % (instr, action), lambda: None)   # a twin has no trigger to fire: it takes as long
+                    continue
+                done = read("%s.%s" % (instr, action), lambda: gate.act(instr, action, in_plan=True))
                 if not done.ok:
                     raise _Abort("%s.%s: %s" % (instr, action, done.message))
             for step in plan.techniques:   # the cards' techniques: their buffers, as traces
@@ -701,7 +739,7 @@ class RunEngine:
                 key = "%s.%s" % (instr, param)
                 if key == followed:
                     continue   # read already, as the ramp's column
-                row[key] = lab.read(instr, param)
+                row[key] = read(key, lambda: lab.read(instr, param))
                 mspec = lab.instrument(instr).spec(param)
                 if mspec.axis:  # record the trace's x-axis as it was when measured
                     row[key + ".axis"] = [lab.read(instr, mspec.axis[0]), lab.read(instr, mspec.axis[1])]
@@ -754,6 +792,7 @@ class RunEngine:
             row: Dict[str, Any] = {"i": n, "t": 0.0}
             row.update(at)
             lost = measured(row)
+            began = clock.now()
             if plan.retry is not None:
                 row["gap_s"] = lost   # the time lost to a fault just before this point (0: none)
             if logs_waits:
@@ -763,6 +802,9 @@ class RunEngine:
             state["last"] = row
             self._emit(event="point", run_id=rec.run_id, done=n, total=max(plan.points, n), row=row,
                        eta_s=time_left(n))
+            took.point(clock.now() - began)   # recording it, beyond its readings
+            if pace is not None:
+                clock.sleep(pace.point_s())
             if gate.stop_generation != gen:
                 raise _Abort("stop requested")
             return row
@@ -936,6 +978,13 @@ class RunEngine:
                 rec.set_analysis(analysis)
             except Exception as e:  # analysis is a convenience; the data are already safe on disk
                 warnings.append("automatic analysis failed: %s" % e)
+        if took.reads or took.steps:   # what its readings, steps and points took: the estimates after it count them
+            meta["timing"] = took.summary()
+            if timing is not None and n:
+                try:
+                    timing.learn(rec.run_id, took, self._ran_with(plan, start, {k.split(".")[0] for k in took.reads}))
+                except Exception:   # an estimate is a convenience; the run is kept whatever happens here
+                    pass
         rec.finish(**meta)
         gate.log.write("run_end", by=gate.operator, run=rec.run_id, status=status, reason=reason, points=n,
                        duration_s=round(duration, 3))
@@ -950,6 +999,28 @@ class RunEngine:
                 msg += "; then " + "; ".join(cleanup)
         return RunReport(status, plan.name, msg, rec.run_id, n, duration, rec.rows,
                          str(rec.path) if rec.path else None, analysis=analysis, warnings=warnings)
+
+    def _ran_with(self, plan: Plan, start: Dict[str, Any], names: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        """These instruments' settings while the plan ran (as at its start, with its setup), kept with its readings'
+        times: a reading measured at other settings (another integration time) isn't taken for one now. A setting it
+        swept had no one value."""
+        out: Dict[str, Dict[str, Any]] = {}
+        for name in names:
+            inst = self.lab.instruments.get(name)
+            if inst is None:
+                continue
+            values = dict(start.get(name)) if isinstance(start.get(name), dict) else {}
+            for step in plan.setup:
+                if step.instr == name and step.param in inst.card.params:
+                    try:
+                        values[step.param] = inst.spec(step.param).coerce(step.value)
+                    except ValueError:
+                        values.pop(step.param, None)
+            for axis in plan.axes:
+                if getattr(axis, "instr", None) == name and axis.kind in ("instrument", "ramp"):
+                    values[axis.param] = "swept"
+            out[name] = settings_of(inst, values)
+        return out
 
     def _long_wait(self, plan: Plan, step: Step, waited: float, warnings: List[str]) -> None:
         """A set point in setup that the instrument ramps to by itself held a time series until its reading got

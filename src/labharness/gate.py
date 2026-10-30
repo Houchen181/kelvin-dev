@@ -973,12 +973,17 @@ class SafetyGate:
 
     def _describe_move(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any) -> str:
         """A change on its card: from and to, how fast (the gate's ramp, or the rate the instrument moves at, read
-        from it) and for how long, and for an output going on, what it applies and how the instrument is set."""
+        from it) and for how long, and for an output going on, what it applies and how the instrument is set. A ramp's
+        time counts what its steps take in this lab beyond their dwell (timing.py: a card said ~2 s for 19 s)."""
         from .forecast import applies, mode_words, rate_words, read_now
+        from .timing import away, steps
         bits = ["%s.%s %s → %s" % (inst.name, spec.name, spec.show(current), spec.show(target))]
         eta = self._eta(inst, spec, current, target)
         if spec.ramp == "gate":
-            bits.append("ramp %s %s/s (~%s)" % (num(inst.rate(spec.name)), spec.unit, _dur(eta)))
+            timing = getattr(self.lab, "timing", None)
+            extra = steps(inst, spec, current, target)[0] * timing.step_s(
+                "%s.%s" % (inst.name, spec.name), away(spec, current, target)) if timing is not None else 0.0
+            bits.append("ramp %s %s/s (~%s)" % (num(inst.rate(spec.name)), spec.unit, _dur((eta or 0.0) + extra)))
         elif spec.ramp == "instrument" and spec.numeric:
             rate, words = rate_words(self, inst, spec)
             seconds = abs(target - current) / rate if rate and current is not None else None

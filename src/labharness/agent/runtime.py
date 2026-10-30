@@ -41,6 +41,7 @@ from ..scanqueue import Item, ScanQueue, load_named, load_step, parse_item, save
 from ..reports import Collector, pick_runs, write_pdf, write_pptx
 from ..reports import kinds as report_kinds
 from ..reports.document import write_document_pdf, write_document_pptx
+from ..timing import Timing
 from ..yamlio import load_yaml
 
 if TYPE_CHECKING:
@@ -324,6 +325,11 @@ class LabRuntime:
         self.user: Optional[str] = None             # the person signed in to the portal (accounts.py), if any
         self.shared_log: Optional[Path] = None      # the lab's instrument log, everyone's events; set by the app
         self.operating: Optional[str] = None        # Claude Code bridge: the task Claude is doing on the screen now
+        # how long readings and steps take in this lab, as its runs measured them, for every estimate (timing.py):
+        # kept with the lab's memory in Kelvin's own folder (the data folder in a script or a test)
+        self.timing = Timing(lambda: (getattr(self, "lab_memory_dir", None) or self.data_dir) / "timing.json",
+                             lambda: self.lab.config.name)
+        lab.timing = self.timing
         self.gate = SafetyGate(lab, approver, self._new_log(lab.clock), envelope, operator="agent")
         self.engine = RunEngine(self.gate, self._store())
         self.engine.progress = self._on_progress
@@ -5612,6 +5618,7 @@ class LabRuntime:
                 except Exception:
                     pass
             self.lab = lab
+            lab.timing = self.timing   # its own times, under its name
             self._follow_lab_folder(lab, info, by)
             self.gate = SafetyGate(lab, self.approver, self._new_log(lab.clock), envelope, operator="agent")
             self.engine = RunEngine(self.gate, self._store())
