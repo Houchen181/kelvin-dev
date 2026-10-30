@@ -8,6 +8,14 @@ check that each real instrument still answers): which instrument, on which bus, 
 doesn't answer on GPIB (address 7): cable or power?"). It clears when the instrument answers again. Replies that
 arrive garbled are one comms fault, latched: raised once, cleared only after its replies have been clean for a while.
 
+The gate tells the monitor what it met while changing something (gate.alarm): a guard's trip, and a wait for a set
+point that gave up. Those alarms are latched: they stay on until a person says Got it.
+
+Every alarm is kept with its history: when it went up, how often (a repeat that nobody has looked at yet folds into it,
+with a count, instead of a new alarm and a new notice), when and why it cleared, and who said Got it, where and when.
+A watch's alarm clears only once its reading is back past its threshold by more than its noise (hysteresis): a
+reading sitting at its threshold raised ten alarms in 90 s, each a notice and a push.
+
 Durations are in lab time (the lab clock), so tests on a simulated clock behave like the real lab.
 """
 from __future__ import annotations
@@ -30,6 +38,8 @@ GARBLE_CLEAR_S = 300.0       # lab seconds without a garbled reply before a comm
 INTERLOCK_EVERY = 5.0        # lab seconds between checks of the interlocks whose drive is away from safe
 STALL_S = 300.0              # lab seconds a set point's reading may go without getting closer before the alarm
 SETPOINT_EVERY = 15.0        # lab seconds between the set-point watchdog's looks
+FOLD_S = 600.0               # lab seconds: the same alarm again within this of its clearing, unseen, folds into it
+CLEAR_BAND = 0.01            # a watch's alarm clears once back past its threshold by this share of it (or 3x its noise)
 _ids = itertools.count(1)
 
 
@@ -94,6 +104,30 @@ def _since(t: float) -> str:
     return _dur(time.time() - t)
 
 
+def _at(t: Optional[float]) -> str:
+    return time.strftime("%H:%M", time.localtime(t)) if t else "?"
+
+
+def switch_words(inst: Any, spec: Any) -> str:
+    """The switch a set point reaches the sample through, when it may be why the reading doesn't get there: "tc.
+    heater_range is off, so nothing drives T_sample there", or "tc.heater_range is only low: a higher range may be
+    needed" (a range below its highest). "" otherwise, or when it can't be read. A heater left off was reported as
+    "the instrument may be stuck"."""
+    switch = inst.card.params.get(spec.applies_when) if spec.applies_when else None
+    if switch is None:
+        return ""
+    try:
+        now = inst.read(switch.name)
+        key = "%s.%s" % (inst.name, switch.name)
+        if switch.distance(now) == 0:
+            return "%s is %s, so nothing drives %s there" % (key, switch.show(now), spec.readback or "it")
+        if switch.type == "enum" and switch.distance(now) < max(switch.distance(v) for v in switch.values or {}):
+            return "%s is only %s: a higher range may be needed" % (key, switch.show(now))
+    except Exception:
+        pass
+    return ""
+
+
 @dataclass
 class Watch:
     key: str                                   # instr.param to read
@@ -106,11 +140,13 @@ class Watch:
     source: str = "person"                     # lab | person | agent
     note: str = ""
     id: str = field(default_factory=lambda: "w%d" % next(_ids))
+    device: str = ""                           # the sample it was made for: it ends when that sample is taken out
     # state
     value: Any = None
     since: Optional[float] = None              # lab time the condition became true
     last_read: Optional[float] = None
     alarm: Optional[str] = None                # the active alarm's id
+    recent: List[float] = field(default_factory=list)   # its latest readings: their noise sets the band
 
     def rule(self, unit: str = "") -> str:
         u = " " + unit if unit else ""
@@ -121,26 +157,87 @@ class Watch:
             parts.append("below %g%s" % (self.below, u))
         return "%s %s%s" % (self.key, " or ".join(parts), " for %gs" % self.for_s if self.for_s else "")
 
+    def band(self) -> float:
+        """How far back past its threshold the reading must come before the alarm clears: 3x the reading's noise (from
+        the lower median of the changes between its latest values, so the jump that set off the alarm doesn't count as
+        noise), between CLEAR_BAND and ten times that of the threshold (of the range, for a threshold at 0); never
+        more than a quarter of the range between above and below."""
+        r = self.recent
+        steps = sorted(abs(b - a) for a, b in zip(r, r[1:]))
+        # the median |change| of Gaussian noise is 0.954 σ; too few readings tell nothing
+        noise = steps[(len(steps) - 1) // 2] / 0.954 if len(steps) >= 3 else 0.0
+        both = self.above is not None and self.below is not None
+        scale = max(abs(x) for x in (self.above, self.below) if x is not None)
+        if not scale and both:
+            scale = self.above - self.below
+        band = max(3 * noise, CLEAR_BAND * scale)
+        if scale:
+            band = min(band, 10 * CLEAR_BAND * scale)
+        return min(band, (self.above - self.below) / 4) if both else band
+
     def view(self, unit: str = "") -> Dict[str, Any]:
         return {"id": self.id, "key": self.key, "above": self.above, "below": self.below, "for_s": self.for_s,
                 "every": self.every, "source": self.source, "note": self.note, "rule": self.rule(unit),
-                "then": ["%s.%s %s" % t for t in self.then], "value": self.value, "alarm": bool(self.alarm)}
+                "then": ["%s.%s %s" % t for t in self.then], "value": self.value, "alarm": bool(self.alarm),
+                "device": self.device}
 
 
 @dataclass
 class Alarm:
     id: str
-    kind: str          # reading | silent | error
+    kind: str          # reading | silent | error | interlock | stall | comms | reset | trip
     key: str
     text: str
     raised: float      # wall time
     actions: List[str] = field(default_factory=list)
     cleared: Optional[float] = None
     acknowledged: bool = False
+    # its history: how often it went up (a repeat nobody had seen folds into it), the latest time, why it cleared, and
+    # who said Got it (their name and where: "Ada (phone, Pixel 7)") and when. A latched alarm (a guard's trip, a wait
+    # that gave up) stays on until a person says Got it.
+    count: int = 1
+    last: Optional[float] = None
+    cleared_text: str = ""
+    acknowledged_by: str = ""
+    acknowledged_at: Optional[float] = None
+    latched: bool = False
+    source: str = field(default="", repr=False)   # what raised it (a watch, an interlock, a drive): repeats fold by it
+
+    @property
+    def latest(self) -> float:
+        """When it last went up (wall time)."""
+        return self.last or self.raised
 
     def view(self) -> Dict[str, Any]:
         return {"id": self.id, "kind": self.kind, "key": self.key, "text": self.text, "actions": self.actions,
-                "raised": self.raised, "cleared": self.cleared, "acknowledged": self.acknowledged}
+                "raised": self.raised, "cleared": self.cleared, "acknowledged": self.acknowledged,
+                "count": self.count, "last": self.latest, "cleared_text": self.cleared_text,
+                "acknowledged_by": self.acknowledged_by, "acknowledged_at": self.acknowledged_at,
+                "latched": self.latched}
+
+    @classmethod
+    def restore(cls, v: Dict[str, Any]) -> "Alarm":
+        """One kept in alarms.json (view()), back as an Alarm. KeyError, TypeError or ValueError for one that isn't."""
+        def when(k: str) -> Optional[float]:
+            return float(v[k]) if v.get(k) is not None else None
+        return cls(str(v["id"]), str(v["kind"]), str(v["key"]), str(v["text"]), float(v["raised"]),
+                   [str(x) for x in v.get("actions") or []], when("cleared"), bool(v.get("acknowledged")),
+                   max(1, int(v.get("count") or 1)), when("last"), str(v.get("cleared_text") or ""),
+                   str(v.get("acknowledged_by") or ""), when("acknowledged_at"), bool(v.get("latched")))
+
+    def line(self) -> str:
+        """Its history in one line: "02:13 tc.T_sample = 5.001 K is above 5 K (3 times, last 02:20); cleared 02:31
+        (back in range); Got it: Ada (phone, Pixel 7) 07:30"."""
+        bits = ["%s %s%s" % (_at(self.raised), self.text, " (%d times, last %s)" % (self.count, _at(self.last))
+                              if self.count > 1 else "")]
+        if self.cleared:
+            bits.append("cleared %s%s" % (_at(self.cleared), " (%s)" % self.cleared_text if self.cleared_text else ""))
+        else:
+            bits.append("still on" + (" until a person says Got it" if self.latched else ""))
+        if self.acknowledged:
+            bits.append("Got it: %s%s" % (self.acknowledged_by or "a person",
+                                          " %s" % _at(self.acknowledged_at) if self.acknowledged_at else ""))
+        return "; ".join(bits)
 
 
 class Monitor:
@@ -176,6 +273,13 @@ class Monitor:
         self._moves: Dict[str, Approach] = {}
         self._stalled: Dict[str, Alarm] = {}
         self._last_setpoint_check = -1e18
+        self._cleared_lab: Dict[str, float] = {}   # lab time each alarm cleared: a repeat soon after folds into it
+        # an alarm changed without a notice to people (a repeat folded into it, a Got it): the runtime keeps the history
+        self.on_change: Callable[[], None] = lambda: None
+        try:   # the gate's trips and the waits it gave up on are alarms too (from_gate)
+            gate.alarm = self.from_gate
+        except AttributeError:
+            pass
 
     # ------------------------------------------------------------------ watches
 
@@ -189,14 +293,28 @@ class Monitor:
             self.watches[watch.id] = watch
         return watch
 
-    def remove(self, watch_id: str, source: Optional[str] = None) -> Watch:
+    def remove(self, watch_id: str, source: Optional[str] = None, why: str = "") -> Watch:
+        """Stop a watch; its alarm, if on, clears with it (it once stayed on, and came back after a restart). Watches
+        from the lab config change only there (PermissionError when a source is given)."""
         with self._lock:
             w = self.watches.get(watch_id)
             if w is None:
                 raise KeyError("no watch %r" % watch_id)
             if source is not None and w.source == "lab":
                 raise PermissionError("%s comes from the lab config; change it there" % watch_id)
-            return self.watches.pop(watch_id)
+            self.watches.pop(watch_id)
+        if w.alarm:
+            self._clear(w.alarm, "%s is no longer watched (%s)" % (w.key, why or "the watch was removed"))
+            w.alarm = None
+        return w
+
+    def end_for(self, device: str, why: str) -> List[Watch]:
+        """The watches made for a sample, ended when it is taken out (a sample's watch outlived it, and alarmed on the
+        next one): removed, their alarms cleared. Returns them."""
+        ended = [w for w in list(self.watches.values()) if device and w.device == device and w.source != "lab"]
+        for w in ended:
+            self.remove(w.id, why=why)
+        return ended
 
     def list(self) -> List[Dict[str, Any]]:
         out = []
@@ -215,12 +333,32 @@ class Monitor:
     def active(self) -> List[Alarm]:
         return [a for a in self.alarms if a.cleared is None]
 
-    def acknowledge(self, alarm_id: str) -> bool:
-        for a in self.alarms:
-            if a.id == alarm_id:
-                a.acknowledged = True
-                return True
-        return False
+    def unseen(self) -> List[Alarm]:
+        """The alarms that cleared before anyone said Got it (overnight, say): shown until someone does."""
+        return [a for a in self.alarms if a.cleared is not None and not a.acknowledged]
+
+    def lines(self) -> List[str]:
+        """The alarms a person should hear of, for lab_status and the watches tool: those on, then those that went up
+        and cleared while nobody looked."""
+        out = ["ALARM: %s%s%s" % (a.text, " (%s)" % "; ".join(a.actions) if a.actions else "",
+                                  " (%d times)" % a.count if a.count > 1 else "") for a in self.active()]
+        out += ["ALARM (cleared, nobody has said Got it yet): %s" % a.line() for a in self.unseen()]
+        return out
+
+    def acknowledge(self, alarm_id: str, by: str = "") -> Optional[Alarm]:
+        """A person's Got it, kept with the alarm: who (their name and where), and when. A latched alarm (a guard's
+        trip, a wait that gave up) ends here; one whose condition still holds stays on, seen. None: no such alarm."""
+        with self._lock:
+            a = next((x for x in self.alarms if x.id == alarm_id), None)
+            if a is None:
+                return None
+            if not a.acknowledged:
+                a.acknowledged, a.acknowledged_by, a.acknowledged_at = True, by, time.time()
+                if a.latched and a.cleared is None:
+                    a.cleared, a.cleared_text = a.acknowledged_at, "Got it from %s" % (by or "a person")
+                    self._cleared_lab[a.id] = self.lab.clock.now()
+        self.on_change()
+        return a
 
     # ------------------------------------------------------------------ the loop
 
@@ -275,16 +413,21 @@ class Monitor:
             w.value = value
             if not isinstance(value, (int, float)) or isinstance(value, bool):
                 continue  # not readable just now (e.g. its switch is off) or not a number
+            if math.isfinite(value):
+                w.recent = (w.recent + [float(value)])[-20:]
+            if w.alarm:   # it clears only once back past its threshold by more than its noise (hysteresis)
+                band = w.band()
+                if (w.above is None or value <= w.above - band) and (w.below is None or value >= w.below + band):
+                    self._clear(w.alarm, "%s is back in range (%s)" % (w.key, self._show(w.key, value)))
+                    w.alarm, w.since = None, None
+                continue
             out = (w.above is not None and value > w.above) or (w.below is not None and value < w.below)
             if not out:
                 w.since = None
-                if w.alarm:
-                    self._clear(w.alarm, "%s is back in range (%s)" % (w.key, self._show(w.key, value)))
-                    w.alarm = None
                 continue
             if w.since is None:
                 w.since = now
-            if w.alarm is None and now - w.since >= w.for_s:
+            if now - w.since >= w.for_s:
                 self._raise_reading(w, value)
         self._check_setpoints(now)
         self._check_interlocks(now)
@@ -300,12 +443,33 @@ class Monitor:
         except KeyError:
             return str(value)
 
-    def _new(self, kind: str, key: str, text: str) -> Alarm:
-        a = Alarm("a%d" % next(_ids), kind, key, text, time.time())
+    def _new(self, kind: str, key: str, text: str, source: str = "", latched: bool = False) -> Alarm:
+        """A new alarm, or the same one again: one that went up for the same reason (the same watch, interlock or
+        drive), that nobody has said Got it to, and that is still on or cleared less than FOLD_S ago, takes the repeat
+        instead (its count goes up, and _tell tells nobody again). Its count says which: 1 for a new one."""
+        now = self.lab.clock.now()
         with self._lock:
+            for a in self.alarms:
+                if (a.kind, a.key, a.source) == (kind, key, source) and not a.acknowledged and (
+                        a.cleared is None or now - self._cleared_lab.get(a.id, -1e18) < FOLD_S):
+                    a.count += 1
+                    a.last, a.text, a.cleared, a.cleared_text = time.time(), text, None, ""
+                    a.latched = a.latched or latched
+                    return a
+            a = Alarm("a%d" % next(_ids), kind, key, text, time.time(), latched=latched, source=source)
             self.alarms.insert(0, a)
             del self.alarms[50:]
         return a
+
+    def _tell(self, a: Alarm, detail: str, **record: Any) -> None:
+        """An alarm that went up, into the lab's record, and to people unless it is a repeat folded into one nobody
+        has said Got it to yet: they were told of it, and it shows with its count."""
+        if a.count > 1:
+            self.gate.log.write("alarm_again", by="monitor", alarm=a.id, count=a.count, text=a.text, **record)
+            self.on_change()
+            return
+        self.gate.log.write("alarm", by="monitor", alarm=a.id, text=a.text, actions=a.actions or None, **record)
+        self.notify("alarm", "Alarm: " + a.text, detail)
 
     def _raise_reading(self, w: Watch, value: Any) -> None:
         which = "above %g" % w.above if w.above is not None and value > w.above else "below %g" % w.below
@@ -316,20 +480,21 @@ class Monitor:
 
     def _raise(self, w: Watch, text: str) -> None:
         """The watch's alarm and its actions: for a reading out of range, or one that can't be had (a sensor fault),
-        which acts the same, since the value could be anything."""
-        a = self._new("reading", w.key, text)
+        which acts the same, since the value could be anything. Its actions run every time it goes up."""
+        a = self._new("reading", w.key, text, source=w.id)
         w.alarm = a.id
+        actions = []
         if w.stop_run:
             self.gate.request_abort()
-            a.actions.append("stopped the running plan")
+            actions.append("stopped the running plan")
         for instr, param, safe in w.then:   # only ever toward safe: lab-config watches name safe values
             try:   # its switch goes off too (gate.cut): V = 0 does nothing on a source in current mode
-                a.actions += [r.message if r.ok else "could not set %s.%s: %s" % (instr, param, r.message)
-                              for r in self.gate.cut(instr, param, "monitor")]
+                actions += [r.message if r.ok else "could not set %s.%s: %s" % (instr, param, r.message)
+                            for r in self.gate.cut(instr, param, "monitor")]
             except Exception as e:
-                a.actions.append("could not set %s.%s: %s" % (instr, param, e))
-        self.gate.log.write("alarm", by="monitor", watch=w.id, text=text, actions=a.actions or None)
-        self.notify("alarm", "Alarm: " + text, "; ".join(a.actions) or (w.note or "Kelvin is watching it."))
+                actions.append("could not set %s.%s: %s" % (instr, param, e))
+        a.actions = actions if a.count == 1 or actions else a.actions
+        self._tell(a, "; ".join(a.actions) or (w.note or "Kelvin is watching it."), watch=w.id)
 
     def _check_interlocks(self, now: float) -> None:
         """The interlocks are enforced, not only checked when their drive moves: every INTERLOCK_EVERY lab seconds,
@@ -357,12 +522,11 @@ class Monitor:
             if i in self._broken:
                 continue
             text = "Interlock: %s is at %s, which needs %s%s" % (lock.drive, spec.show(at), lock.require.text, broken)
-            a = self._broken[i] = self._new("interlock", lock.drive, text)
+            a = self._broken[i] = self._new("interlock", lock.drive, text, source="interlock %d" % i)
             self.gate.request_abort()
-            a.actions.append("stopped the running plan")
-            a.actions += [r.message for r in self.gate.abort_to_safe([lock.drive], "monitor")]
-            self.gate.log.write("alarm", by="monitor", interlock=lock.drive, text=text, actions=a.actions or None)
-            self.notify("alarm", "Alarm: " + text, "; ".join(a.actions))
+            a.actions = ["stopped the running plan"] + [r.message for r in self.gate.abort_to_safe([lock.drive],
+                                                                                                "monitor")]
+            self._tell(a, "; ".join(a.actions), interlock=lock.drive)
 
     def _check_setpoints(self, now: float) -> None:
         """The set-point watchdog. A set point an instrument ramps to by itself (a cryostat's temperature, a magnet's
@@ -419,14 +583,44 @@ class Monitor:
             self._clear(self._stalled.pop(key).id, "%s is getting closer to %s again (%s)" % (
                 reading, spec.show(target), self._show(reading, value)))
         elif key not in self._stalled and stuck >= self.stall_s:
-            text = "%s has not got closer to %s for %s: it reads %s (set point %s)" % (
+            switch = switch_words(inst, spec)   # a range too low for the set point, not a stuck instrument
+            text = "%s has not got closer to %s for %s: it reads %s (set point %s%s)" % (
                 reading, spec.show(target), _minutes(stuck),
-                self._show(reading, value) if _number(value) else repr(value), key)
-            self._stalled[key] = self._new("stall", key, text)
-            self.gate.log.write("alarm", by="monitor", setpoint=key, text=text)
-            self.notify("alarm", "Alarm: " + text, "The instrument may be stuck: check its rate, and its helium, heater "
-                        "or compressor. A wait for it ends after %s without progress, and so does a run that ramps "
-                        "it." % _minutes(WAIT_STALL_S))
+                self._show(reading, value) if _number(value) else repr(value), key, "; " + switch if switch else "")
+            a = self._stalled[key] = self._new("stall", key, text, source="setpoint")
+            self._tell(a, "%sA wait for it ends after %s without progress, and so does a run that ramps it." % (
+                "" if switch else "The instrument may be stuck: check its rate, and its helium, heater or compressor. ",
+                _minutes(WAIT_STALL_S)), setpoint=key)
+
+    def from_gate(self, kind: str, key: str, text: str, actions: Optional[List[str]] = None,
+                  target: Any = None) -> Optional[Alarm]:
+        """What the gate met while it changed something, as an alarm that stays on until a person says Got it: a
+        guard's trip (a gate's leakage past its limit, the night's most important event, went into the record and
+        nowhere else), and a wait for a set point that gave up ("stall": its reading stopped getting closer, or its
+        time was up; the alarm the system prompt promised never went up). The watchdog's alarm for that set point and
+        target, if it is on already, becomes this one. Never raises: the gate goes on whatever happens here."""
+        try:
+            with self._lock:
+                told = self._stalled.get(key) if kind == "stall" else None
+                move = self._moves.get(key)
+                if told is not None and told.cleared is None and move is not None and _number(target) \
+                        and move.target == float(target):   # it now says how the wait ended, and stays on
+                    del self._stalled[key]
+                    told.text, told.latched, told.last = text, True, time.time()
+                    told.actions = list(actions or told.actions)
+                    a = told
+                else:
+                    told = None
+                    a = self._new(kind, key, text, source="gate", latched=True)
+                    a.actions = list(actions or [])
+            if told is not None:   # people heard of it when it went up; the record has the rest
+                self.gate.log.write("alarm_again", by="monitor", alarm=a.id, count=a.count, text=a.text, target=key)
+                self.on_change()
+            else:
+                self._tell(a, "; ".join(a.actions) or "It stays on until a person says Got it.", target=key)
+            return a
+        except Exception:
+            return None
 
     @staticmethod
     def _applied(inst: Any, spec: Any) -> bool:
@@ -441,11 +635,17 @@ class Monitor:
             return False
 
     def _clear(self, alarm_id: str, text: str) -> None:
-        for a in self.alarms:
-            if a.id == alarm_id and a.cleared is None:
-                a.cleared = time.time()
-                self.gate.log.write("alarm_cleared", by="monitor", text=text)
-                self.notify("alarm_cleared", "Cleared: " + text, "")
+        """An alarm whose condition ended. People hear of it the first time; a repeat folded into it clears quietly
+        (the record has it). A latched alarm ends only at a person's Got it."""
+        for a in list(self.alarms):
+            if a.id == alarm_id and a.cleared is None and not a.latched:
+                a.cleared, a.cleared_text = time.time(), text
+                self._cleared_lab[a.id] = self.lab.clock.now()
+                self.gate.log.write("alarm_cleared", by="monitor", alarm=a.id, text=text)
+                if a.count > 1:
+                    self.on_change()
+                else:
+                    self.notify("alarm_cleared", "Cleared: " + text, "")
 
     def _failed(self, instr: str, e: Exception) -> None:
         """A watch's reading failed. One its instrument didn't answer is that instrument's health, which
@@ -456,11 +656,10 @@ class Monitor:
         self._fails[instr] = self._fails.get(instr, 0) + 1
         if self._fails[instr] >= FAILS_BEFORE_ALARM and instr not in self._unreadable:
             text = "%s can't be read (%s)" % (instr, str(e).splitlines()[0][:160] if str(e) else type(e).__name__)
-            a = self._new("silent", instr, text)
+            a = self._new("silent", instr, text, source="unreadable")
             self._unreadable[instr] = a
-            self.gate.log.write("alarm", by="monitor", text=text)
-            self.notify("alarm", "Alarm: " + text, "It answers, but not with a reading its card can read: check the "
-                                                   "card (Lab → Cards…) and the instrument's settings.")
+            self._tell(a, "It answers, but not with a reading its card can read: check the card (Lab → Cards…) and "
+                          "the instrument's settings.")
 
     def _answered(self, instr: str) -> None:
         self._fails[instr] = 0
@@ -487,7 +686,7 @@ class Monitor:
             if h.losses <= losses.get(name, 0):
                 continue
             with self._lock:
-                a = self._silent.get(name) or next((x for x in self.alarms if x.key == name and x.raised >= t0
+                a = self._silent.get(name) or next((x for x in self.alarms if x.key == name and x.latest >= t0
                                                     and x.kind in ("silent", "reset")), None) \
                     or self._raise_lost(name, h.lost_text)
             out.append(a)
@@ -497,9 +696,7 @@ class Monitor:
     def _raise_lost(self, name: str, text: str) -> Alarm:
         a = self._new("silent", name, text)
         self._silent[name] = a
-        self.gate.log.write("alarm", by="monitor", instrument=name, text=text)
-        self.notify("alarm", "Alarm: " + text, "Runs that use it stop, and plans refuse to start, until it answers "
-                                               "again.")
+        self._tell(a, "Runs that use it stop, and plans refuse to start, until it answers again.", instrument=name)
         return a
 
     def _check_health(self, now: Optional[float] = None) -> None:
@@ -530,10 +727,8 @@ class Monitor:
                 self._garbled_lab[name] = now
                 if name not in self._comms:
                     a = self._comms[name] = self._new("comms", name, h.garbled_text)
-                    self.gate.log.write("alarm", by="monitor", instrument=name, text=a.text)
-                    self.notify("alarm", "Alarm: " + a.text, "Raised once: it stays until %s's replies have been clean "
-                                                             "for %s. Runs that read it stop at a reply Kelvin can't read."
-                                % (name, _dur(GARBLE_CLEAR_S)))
+                    self._tell(a, "Raised once: it stays until %s's replies have been clean for %s. Runs that read it "
+                                  "stop at a reply Kelvin can't read." % (name, _dur(GARBLE_CLEAR_S)), instrument=name)
             elif name in self._comms and now - self._garbled_lab.get(name, now) >= GARBLE_CLEAR_S \
                     and (h.answered_at or 0) > (h.garbled_at or 0):
                 a = self._comms.pop(name)
@@ -605,7 +800,7 @@ class Monitor:
                 if name in self._reset:
                     return
                 recent = self._silent.get(name) or next((a for a in self.alarms if a.kind == "silent" and a.key == name
-                                                         and time.time() - a.raised < 600), None)
+                                                         and time.time() - a.latest < 600), None)
                 text = "%s.%s is %s, though the running plan switched it %s: %s restarted (a power cut puts it back to " \
                        "its power-on settings) or someone switched it off" % (name, param, spec.show(now),
                                                                            spec.show(value), name)
@@ -618,9 +813,11 @@ class Monitor:
             self.gate.request_abort()
             a.actions.append("stopped the running plan, which would have gone on measuring with %s.%s %s"
                              % (name, param, spec.show(now)))
-            self.gate.log.write("alarm", by="monitor", instrument=name, text=a.text, actions=a.actions)
             if recent is None:
-                self.notify("alarm", "Alarm: " + text, "; ".join(a.actions))
+                self._tell(a, "; ".join(a.actions), instrument=name)
+            else:   # the same fault as its alarm for not answering: said there, not again
+                self.gate.log.write("alarm", by="monitor", alarm=a.id, instrument=name, text=a.text, actions=a.actions)
+                self.on_change()
             return
 
     def _check_errors(self, now: float) -> None:
@@ -642,8 +839,7 @@ class Monitor:
             if err and name not in self._errors:
                 text = "%s reports an error: %s%s" % (name, err, " (and %d more)" % (len(set(errs)) - 1)
                                                       if len(set(errs)) > 1 else "")
-                self._errors[name] = self._new("error", name, text)
-                self.gate.log.write("alarm", by="monitor", text=text)
-                self.notify("alarm", "Alarm: " + text, "")
+                a = self._errors[name] = self._new("error", name, text)
+                self._tell(a, "", instrument=name)
             elif not err and name in self._errors:
                 self._clear(self._errors.pop(name).id, "%s reports no more errors" % name)

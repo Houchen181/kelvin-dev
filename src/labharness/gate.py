@@ -25,7 +25,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from . import pulses
 from .cards import ParamSpec, num
@@ -234,6 +234,9 @@ class SafetyGate:
         # the drive levels the running plan or queue item set: switching their enable on parks them at safe (_move),
         # then puts them back (_reapply), so a run measures at what was approved, not at safe. None: no plan running
         self._asked: Optional[Dict[str, Any]] = None
+        # alarm(kind, key, text, actions): what the gate meets while it changes something goes up as an alarm (a
+        # guard's trip, a wait for a set point that gave up). The monitor sets it (Monitor.from_gate); None on a twin
+        self.alarm: Optional[Callable[..., Any]] = None
         self._undo: List[Tuple[str, str, Any]] = []
         self._stop_gen = 0
         self._prefixes: Dict[int, Template] = {}
@@ -1151,8 +1154,12 @@ class SafetyGate:
         held where the reading is; toward safe it goes on there by itself, and only the waiting ends. arrived: its
         status already says the move is over, so the reading only settles: a stage that stopped short isn't waited for
         until the move's whole timeout. A reading that stops getting closer for WAIT_STALL_S ends the wait too (a PPMS
-        that stalled on its way held a run, its current source on, for hours): monitor.Approach tells."""
-        from .monitor import Approach, rate_per_s
+        that stalled on its way held a run, its current source on, for hours): monitor.Approach tells. A wait that
+        gives up goes up as an alarm (it stays until a person says Got it), and says the switch the set point goes
+        through when that may be why (a heater range too low). A move away from safe whose switch is off (a heater
+        range at off) isn't waited for at all: nothing brings the reading there (it was waited on for ten minutes,
+        then called stuck)."""
+        from .monitor import Approach, rate_per_s, switch_words
         clock = self.lab.clock
         key = "%s.%s" % (inst.name, spec.name)
         eta = self._eta(inst, spec, current, target)
@@ -1160,6 +1167,14 @@ class SafetyGate:
         poll = max(0.1, min(5.0, (eta or 10.0) / 50))
         t0 = clock.now()
         way = None if arrived else Approach(target, spec.tol, t0, rate_per_s(inst, spec), WAIT_STALL_S)
+        off = self._switched_off(inst, spec) if watch and not arrived else None
+        if off:
+            val = inst.read(spec.readback)
+            if abs(val - target) > spec.tol:
+                return self._gave_up(inst, spec, val, target, watch, "%s: %s is %s, so nothing brings %s (%s) to %s, "
+                                     "and Kelvin didn't wait for it" % (key, off[0], off[1], spec.readback,
+                                                                       spec.show(val), spec.show(target)),
+                                     " (switch %s on first, or set both in one plan's setup)" % off[0], alarm=False)
         while True:
             val = inst.read(spec.readback)
             if abs(val - target) <= spec.tol:
@@ -1176,27 +1191,58 @@ class SafetyGate:
                 return Result(False, "stopped", key, value=val, message="%s: stopped waiting at %s (stop requested); "
                               "it goes on to %s by itself" % (key, spec.show(val), spec.show(target)))
             if way is not None and way.update(val, clock.now()) >= WAIT_STALL_S:
-                return Result(False, "timeout", key, value=val, message=(
-                    "%s: %s has not got closer to %s for %s (it reads %s): the instrument may be stuck, so Kelvin "
-                    "stopped waiting%s" % (key, spec.readback, spec.show(target), _dur(clock.now() - way.since),
-                                           spec.show(val), self._held_at(inst, spec, val, watch))))
+                switch = switch_words(inst, spec)
+                return self._gave_up(inst, spec, val, target, watch, "%s: %s has not got closer to %s for %s (it reads "
+                                     "%s)%s, so Kelvin stopped waiting" % (
+                                         key, spec.readback, spec.show(target), _dur(clock.now() - way.since),
+                                         spec.show(val) + ("; %s" % switch if switch else ""),
+                                         "" if switch else ": the instrument may be stuck"))
             if clock.now() - t0 > timeout:
                 if arrived:
                     return Result(False, "error", key, value=val, message=(
                         "%s: its status says the move is over, but %s is %s, not %s: it stopped short or refused the "
                         "move" % (key, spec.readback, spec.show(val), spec.show(target))))
-                return Result(False, "timeout", key, value=val, message="%s: %s is %s after %s (target %s)%s" % (
-                    key, spec.readback, spec.show(val), _dur(timeout), spec.show(target),
-                    self._held_at(inst, spec, val, watch)))
+                return self._gave_up(inst, spec, val, target, watch, "%s: %s is %s after %s (target %s)" % (
+                    key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
             self._pause(poll, gen)   # a stop wakes it at once
 
-    def _held_at(self, inst: Instrument, spec: ParamSpec, val: Any, away: bool) -> str:
-        """A wait that gives up on a move away from safe (no progress, or its time is up) leaves it where it got to,
-        as a stop does: its guards are watched only while Kelvin waits, so it must not go on by itself unwatched."""
-        if not away:
-            return ""
-        inst.write(spec.name, val)
-        return "; held at %s" % spec.show(val)
+    def _switched_off(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[str, str]]:
+        """("tc.heater_range", "off") when the switch a set point reaches the sample through (its applies_when) is at
+        safe: nothing drives its reading there. None otherwise, or when it can't be read."""
+        switch = inst.card.params.get(spec.applies_when) if spec.applies_when else None
+        try:
+            now = inst.read(switch.name) if switch is not None else None
+        except Exception:
+            return None
+        if now is None or switch.distance(now) > 0:
+            return None
+        return "%s.%s" % (inst.name, switch.name), switch.show(now)
+
+    def _gave_up(self, inst: Instrument, spec: ParamSpec, val: Any, target: Any, away: bool, text: str,
+                 after: str = "", alarm: bool = True) -> Result:
+        """A wait for a set point that ends before its reading got there. A move away from safe is set back to where
+        its reading got to, as a stop leaves it (its guards are watched only while Kelvin waits, so it must not go on
+        by itself unwatched), and the result says so: the set point a person approved was once put back silently.
+        alarm: it goes up as one (gate.alarm), before the set point changes, so the watchdog's alarm for it becomes
+        this one."""
+        key = "%s.%s" % (inst.name, spec.name)
+        if away:
+            text += "; %s set back to %s, where %s is, not %s" % (key, spec.show(val), spec.readback, spec.show(target))
+        text += after
+        if alarm:
+            self._raise_alarm("stall", key, text, target=target)
+        if away:
+            inst.write(spec.name, val)
+        return Result(False, "timeout", key, value=val, message=text)
+
+    def _raise_alarm(self, kind: str, key: str, text: str, actions: Optional[List[str]] = None, **more: Any) -> None:
+        """An alarm for the monitor (gate.alarm), if it is listening. Never in the gate's way."""
+        if self.alarm is None:
+            return
+        try:
+            self.alarm(kind, key, text, actions, **more)
+        except Exception:
+            pass
 
     def _arrive(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any, gen: int) -> Optional[Result]:
         """Follow a move the instrument makes by itself (a stage, a piezo) until its card's status says it is there:
@@ -1261,6 +1307,9 @@ class SafetyGate:
         msg = "%s tripped at %s: %s; %s" % (key, spec.show(at), detail, end)
         self.log.write("trip", by=self._who(), target=key, at=at, guard=g.key,
                        reading=val if not isinstance(val, Exception) else str(val), message=msg)
+        # an alarm that stays until a person says Got it: a gate's leakage trip in the night went into the record and
+        # nowhere else, and the morning's account said no alarm was raised
+        self._raise_alarm("trip", key, msg)
         return Result(False, "tripped", key, value=at, message=msg)
 
     def _switch_of(self, inst: Instrument, spec: ParamSpec) -> Optional[ParamSpec]:

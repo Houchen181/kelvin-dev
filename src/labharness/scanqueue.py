@@ -308,9 +308,12 @@ class ScanQueue:
             lines.append("Stopped with no data: " + "; ".join(empty))
         if waiting:
             lines.append("Not run: " + ", ".join("#%d %s" % (n, i.name) for n, i in waiting))
-        raised = sorted((a for a in alarms if getattr(a, "raised", 0) >= started), key=lambda a: a.raised)
+        # a guard's trip is one of them (monitor.Monitor.from_gate); so is an alarm that went up before and again now
+        raised = sorted((a for a in alarms if (getattr(a, "last", None) or getattr(a, "raised", 0)) >= started),
+                        key=lambda a: a.raised)
         lines.append("Alarms while it ran: " + "; ".join(
-            "%s %s (%s)" % (_at(a.raised), a.text, "cleared %s" % _at(a.cleared) if a.cleared else "still on")
+            "%s %s%s (%s)" % (_at(a.raised), a.text, " (%d times)" % a.count if getattr(a, "count", 1) > 1 else "",
+                              "cleared %s" % _at(a.cleared) if a.cleared else "still on")
             for a in raised) if raised else "No alarm was raised while it ran.")
         with self.lock:
             self.last = {"started": started, "ended": end, "lines": lines}
