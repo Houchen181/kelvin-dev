@@ -77,13 +77,27 @@ targets:
       base:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: io.github.houchen181.kelvin.tests
+  KelvinUITests:                    # the app driven as a person would: taps, typing, the keyboard
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: KelvinUITests
+    dependencies:
+      - target: Kelvin
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.houchen181.kelvin.uitests
+        TEST_TARGET_NAME: Kelvin
 schemes:
   Kelvin:
     build:
       targets:
         Kelvin: all
         KelvinTests: [test]
+        KelvinUITests: [test]
     test:
       targets:
         - KelvinTests
+        - KelvinUITests
       gatherCoverageData: false

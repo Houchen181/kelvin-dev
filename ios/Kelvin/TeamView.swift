@@ -87,6 +87,7 @@ struct TeamView: View {
     @State var naming = false
     @State var name = ""
     @State var sendAfterNaming = false
+    @FocusState private var typing: Bool
 
     init(session: LabSession, active: Bool) {
         _session = ObservedObject(wrappedValue: session)
@@ -155,6 +156,8 @@ struct TeamView: View {
                 }
                 .padding()
             }
+            .scrollDismissesKeyboard(.immediately)   // a swipe on the messages puts the keyboard away (the tabs are under it)
+            .onTapGesture { typing = false }         // and so does a tap on them
             .onChange(of: model.thread.last) { _ in
                 withAnimation { proxy.scrollTo("end", anchor: .bottom) }
             }
@@ -183,6 +186,8 @@ struct TeamView: View {
                     TextField("Message the team", text: $model.draft, axis: .vertical)
                         .lineLimit(1...6)
                         .textFieldStyle(.roundedBorder)
+                        .focused($typing)
+                        .accessibilityIdentifier("team-message")
                     Button { send() } label: {
                         Image(systemName: "arrow.up.circle.fill").font(.title)
                     }

@@ -69,6 +69,7 @@ struct ChatListView: View {
 struct ChatView: View {
     @StateObject var model: ChatModel
     @StateObject var voice = Dictation()
+    @FocusState private var typing: Bool
 
     init(session: LabSession, chat: ChatSummary?, incognito: Bool) {
         _model = StateObject(wrappedValue: ChatModel(session: session, chat: chat, incognito: incognito))
@@ -99,6 +100,8 @@ struct ChatView: View {
                 }
                 .padding()
             }
+            .scrollDismissesKeyboard(.immediately)   // a swipe on the conversation puts the keyboard away (the tabs are under it)
+            .onTapGesture { typing = false }         // and so does a tap on it
             .onChange(of: model.transcript.lines.count) { _ in
                 withAnimation { proxy.scrollTo("end", anchor: .bottom) }
             }
@@ -106,7 +109,7 @@ struct ChatView: View {
                 proxy.scrollTo("end", anchor: .bottom)
             }
         }
-        .safeAreaInset(edge: .bottom) { Composer(model: model, voice: voice) }
+        .safeAreaInset(edge: .bottom) { Composer(model: model, voice: voice, typing: $typing) }
         .onDisappear { voice.cancel() }
         .navigationTitle(model.transcript.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -118,6 +121,7 @@ struct ChatView: View {
 struct Composer: View {
     @ObservedObject var model: ChatModel
     @ObservedObject var voice: Dictation
+    var typing: FocusState<Bool>.Binding
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -148,6 +152,8 @@ struct Composer: View {
             TextField(voice.listening ? "Listening…" : "Message Kelvin", text: $model.draft, axis: .vertical)
                 .lineLimit(1...6)
                 .textFieldStyle(.roundedBorder)
+                .focused(typing)
+                .accessibilityIdentifier("chat-message")
             if model.transcript.answering {
                 Button {
                     Task { await model.stop() }

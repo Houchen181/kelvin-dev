@@ -48,6 +48,8 @@ jobs:
           runtimes = sorted((k for k in devices if "iOS" in k), reverse=True)
           print(next(d["udid"] for k in runtimes for d in devices[k] if d["name"].startswith("iPhone")))')
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      - name: The on-screen keyboard, as on a phone, for the UI tests
+        run: defaults write com.apple.iphonesimulator ConnectHardwareKeyboard -bool false
       - name: Build and test
         # Signed to run locally (no team needed on the simulator), so the app may use the Keychain.
         run: |

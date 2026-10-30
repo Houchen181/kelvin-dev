@@ -236,6 +236,7 @@ struct AnalysisView: View {
             Section("Steps") { steps }
             Section("Fit") { fitControls }
         }
+        .scrollDismissesKeyboard(.immediately)   // scrolling puts the keyboard away; every field's return key does too
         .navigationTitle("Analysis")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -315,7 +316,7 @@ struct AnalysisView: View {
                 LabeledContent("Point") {
                     TextField("the last", text: Binding(get: { model.spec.row.map { String($0) } ?? "" },
                                                         set: { model.setRow($0) }))
-                        .keyboardType(.numberPad)
+                        .keyboardType(.numbersAndPunctuation)   // a number pad has no return key to put it away
                         .multilineTextAlignment(.trailing)
                 }
             }
