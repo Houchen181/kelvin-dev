@@ -56,6 +56,8 @@ public enum Role: String, Sendable {
     public var canChat: Bool { self == .control }
     public var canApprove: Bool { self == .control }
     public var canUnlock: Bool { self == .control }   // any phone can lock while hands are on the sample
+    public var canWriteTeam: Bool { self == .control }   // any phone reads the team chat
+    public var canAnalyze: Bool { self == .control }
 
     public var summary: String {
         self == .watch ? "Can watch, stop runs and decline requests" : "Can also chat and approve"
@@ -208,9 +210,10 @@ public struct LabState: Decodable, Equatable, Sendable {
     public var observeOnly: Bool
     public var mounted: Mounted?
     public var handsOn: HandsOn?
+    public var team: Int?                  // the team chat's newest message (Kelvin 0.3.32 and later)
 
     enum CodingKeys: String, CodingKey {
-        case lab, simulated, busy, pending, alarms, notices, status, live, active, mounted
+        case lab, simulated, busy, pending, alarms, notices, status, live, active, mounted, team
         case approvalMode = "approval_mode", observeOnly = "observe_only", handsOn = "hands_on"
     }
 
@@ -229,6 +232,7 @@ public struct LabState: Decodable, Equatable, Sendable {
         observeOnly = c.value(.observeOnly, or: false)
         mounted = c.maybe(.mounted)
         handsOn = c.maybe(.handsOn)
+        team = c.maybe(.team)
     }
 
     /// Instruments by name (JSON objects carry no order a decoder keeps).

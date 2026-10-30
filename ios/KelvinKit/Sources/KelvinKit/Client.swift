@@ -109,8 +109,9 @@ public struct KelvinClient: Sendable {
         return answer.live
     }
 
-    public func runs() async throws -> [RunSummary] {
-        let answer: RunsAnswer = try await call("GET", "/api/runs")
+    /// The latest runs, newest first (Kelvin lists 20 unless asked for more).
+    public func runs(limit: Int? = nil) async throws -> [RunSummary] {
+        let answer: RunsAnswer = try await call("GET", "/api/runs", query: limit.map { ["limit": String($0)] } ?? [:])
         return answer.runs
     }
 
@@ -206,11 +207,91 @@ public struct KelvinClient: Sendable {
         }
     }
 
+    // ------------------------------------------------------------------ the team chat and Analysis (Kelvin 0.3.32)
+
+    /// The team chat: its latest messages (after 0), or those after the newest this phone has, oldest first.
+    public func team(after: Int = 0) async throws -> TeamPage {
+        try await call("GET", "/api/team", query: after > 0 ? ["after": String(after)] : [:])
+    }
+
+    /// Older messages, scrolling back from the first this phone has.
+    public func team(before: Int) async throws -> TeamPage {
+        try await call("GET", "/api/team", query: ["before": String(before)])
+    }
+
+    /// Write in the team chat, under the name this person chose.
+    public func postTeam(name: String, text: String) async throws -> TeamMessage {
+        let answer: TeamPosted = try await call("POST", "/api/team",
+                                                body: .object(["name": .string(name), "text": .string(text)]))
+        return answer.message
+    }
+
+    /// What a run offers the Analysis screen: its axes, readings and traces with their units, its kept fits.
+    public func analysisColumns(run: String) async throws -> AnalysisColumns {
+        try await call("GET", "/api/analysis/columns", query: ["run": run])
+    }
+
+    /// The spec worked out: each curve after its steps, and its fit (fits may take Kelvin up to 45 s).
+    public func analyze(_ spec: AnalysisSpec) async throws -> AnalysisResult {
+        try await call("POST", "/api/analysis", body: .object(["spec": spec.json]), timeout: 90)
+    }
+
+    /// Keep curve `curve`'s fit with its run. A fit of that name kept already is replaced only when asked to.
+    public func keepFit(_ spec: AnalysisSpec, curve: Int, replace: Bool = false) async throws -> KeepAnswer {
+        let body = JSONValue.object(["spec": spec.json, "curve": .number(Double(curve)), "replace": .bool(replace)])
+        let (data, response) = try await exchange(request("POST", "/api/analysis/keep", body: body, timeout: 90))
+        let json = try? JSONDecoder().decode(JSONValue.self, from: data)
+        if response.statusCode == 409, let name = json?["exists"]?.string { return .exists(name) }
+        guard (200..<300).contains(response.statusCode) else {
+            throw KelvinError.from(status: response.statusCode, body: data, paired: token != nil, account: bearer)
+        }
+        return .kept(json?["said"]?.string ?? "kept")
+    }
+
+    /// The curves as CSV, every point: the file's name, as Kelvin names it, and the file.
+    public func analysisCSV(_ spec: AnalysisSpec) async throws -> (name: String, data: Data) {
+        let (data, response) = try await exchange(request("POST", "/api/analysis/csv",
+                                                          body: .object(["spec": spec.json]), timeout: 90))
+        guard (200..<300).contains(response.statusCode) else {
+            throw KelvinError.from(status: response.statusCode, body: data, paired: token != nil, account: bearer)
+        }
+        let name = KelvinClient.fileName(contentDisposition: KelvinClient.header(response, "Content-Disposition"))
+        return (name ?? (spec.runs.first ?? "analysis") + "-analysis.csv", data)
+    }
+
+    /// The file name a Content-Disposition gives: filename*=UTF-8''… (any name), else filename="…" (plain ASCII).
+    /// Only its last part, so it can't lead out of the folder it is saved in.
+    public static func fileName(contentDisposition: String?) -> String? {
+        guard let value = contentDisposition else { return nil }
+        var plain: String?
+        var full: String?
+        for part in value.split(separator: ";") {
+            let p = part.trimmingCharacters(in: .whitespaces)
+            let lower = p.lowercased()
+            if lower.hasPrefix("filename*="), let q = p.range(of: "''") {
+                full = String(p[q.upperBound...]).removingPercentEncoding
+            } else if lower.hasPrefix("filename=") {
+                plain = String(p.dropFirst("filename=".count)).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            }
+        }
+        guard let name = (full ?? plain)?.components(separatedBy: CharacterSet(charactersIn: "/\\")).last,
+              !name.isEmpty, name != ".", name != ".." else { return nil }
+        return name
+    }
+
+    /// A header of an answer, its name in any case.
+    static func header(_ response: HTTPURLResponse, _ name: String) -> String? {
+        for (key, value) in response.allHeaderFields {
+            if let key = key as? String, key.lowercased() == name.lowercased() { return value as? String }
+        }
+        return nil
+    }
+
     // ------------------------------------------------------------------ plumbing
 
     func call<T: Decodable>(_ method: String, _ path: String, query: [String: String] = [:],
-                            body: JSONValue? = nil) async throws -> T {
-        let data = try await send(request(method, path, query: query, body: body))
+                            body: JSONValue? = nil, timeout: TimeInterval? = nil) async throws -> T {
+        let data = try await send(request(method, path, query: query, body: body, timeout: timeout))
         do {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
@@ -220,17 +301,20 @@ public struct KelvinClient: Sendable {
     }
 
     func send(_ request: URLRequest) async throws -> Data {
-        let data: Data
-        let response: HTTPURLResponse
-        do {
-            (data, response) = try await transport.data(for: request)
-        } catch {
-            throw KelvinError.unreachable(base, error)
-        }
+        let (data, response) = try await exchange(request)
         guard (200..<300).contains(response.statusCode) else {
             throw KelvinError.from(status: response.statusCode, body: data, paired: token != nil, account: bearer)
         }
         return data
+    }
+
+    /// The answer, whatever its status; only "can't reach Kelvin" throws.
+    func exchange(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        do {
+            return try await transport.data(for: request)
+        } catch {
+            throw KelvinError.unreachable(base, error)
+        }
     }
 
     func request(_ method: String, _ path: String, query: [String: String] = [:], body: JSONValue? = nil,

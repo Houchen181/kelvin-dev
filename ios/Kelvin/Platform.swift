@@ -5,7 +5,8 @@ import UIKit
 import UserNotifications
 
 /// Requests over URLSession. Two sessions: quick calls give up after 20 s of silence, so the next address gets its
-/// turn; a chat answer may be silent for a long time while Kelvin waits for someone's approval.
+/// turn; a chat answer may be silent for a long time while Kelvin waits for someone's approval, and a request that
+/// says it may take longer (a file, an analysis with fits) waits as long as it says.
 struct URLSessionTransport: Transport {
     static let shared = URLSessionTransport()
 
@@ -26,7 +27,7 @@ struct URLSessionTransport: Transport {
     }
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, response) = try await quick.data(for: request)
+        let (data, response) = try await (request.timeoutInterval > 20 ? streaming : quick).data(for: request)
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         return (data, http)
     }

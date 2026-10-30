@@ -9,6 +9,7 @@ final class Scripted: Transport, @unchecked Sendable {
     struct Reply {
         var status: Int = 200
         var body: String
+        var headers: [String: String] = [:]
     }
 
     var replies: [String: Reply] = [:]        // "METHOD /path" -> reply
@@ -16,8 +17,8 @@ final class Scripted: Transport, @unchecked Sendable {
     private(set) var asked: [URLRequest] = []
     private let lock = NSLock()
 
-    func on(_ key: String, _ status: Int, _ body: String) {
-        replies[key] = Reply(status: status, body: body)
+    func on(_ key: String, _ status: Int, _ body: String, headers: [String: String] = [:]) {
+        replies[key] = Reply(status: status, body: body, headers: headers)
     }
 
     func on(_ key: String, _ body: String) { on(key, 200, body) }
@@ -30,7 +31,7 @@ final class Scripted: Transport, @unchecked Sendable {
         if unreachable.contains(url.host ?? "") { throw URLError(.timedOut) }
         let key = "\(request.httpMethod ?? "GET") \(url.path)"
         let r = replies[key] ?? Reply(status: 404, body: "{\"error\": \"not found\"}")
-        let response = HTTPURLResponse(url: url, statusCode: r.status, httpVersion: "HTTP/1.1", headerFields: [:])!
+        let response = HTTPURLResponse(url: url, statusCode: r.status, httpVersion: "HTTP/1.1", headerFields: r.headers)!
         return (Data(r.body.utf8), response)
     }
 
