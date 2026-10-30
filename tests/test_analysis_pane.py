@@ -285,3 +285,22 @@ def test_the_panes_hints_dont_look_like_values_and_a_disabled_button_looks_disab
     assert ".an-body input::placeholder" in css and "font-style: italic" in css.split(".an-body input::placeholder")[1]
     dark = re.search(r"@media \(prefers-color-scheme: dark\) \{[^{}]*\{ opacity: \.35; \}", css)
     assert dark and ".btn:disabled" in dark.group(0)
+
+
+# ------------------------------------------------------------------ 9. a chat made elsewhere reaches the sidebar
+
+def test_a_chat_made_elsewhere_changes_the_states_stamp_and_the_sidebar_reloads(rt, tmp_path):
+    store = ChatStore(tmp_path / "chats")
+    client, h = portal(rt, tmp_path, store)
+    before = client.get("/api/state", headers=h).json()["chats"]
+    assert client.get("/api/state", headers=h).json()["chats"] == before   # nothing changed: the same
+    made = store.create("scripted:m1")   # a phone's, another window's, Kelvin continuing a chat by itself
+    after = client.get("/api/state", headers=h).json()["chats"]
+    assert after != before and made["id"] in [c["id"] for c in client.get("/api/chats", headers=h).json()]
+    chat = store.load(made["id"])
+    chat["title"] = "Cool to 5 K while measuring"
+    store.save(chat)
+    assert client.get("/api/state", headers=h).json()["chats"] != after
+    assert [c["title"] for c in store.list() if c["id"] == made["id"]] == ["Cool to 5 K while measuring"]
+    poll = _js("pollState")
+    assert "s.chats !== S.chatsStamp" in poll and "refreshChats()" in poll.split("s.chats !== S.chatsStamp")[1][:80]

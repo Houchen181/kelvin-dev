@@ -3021,6 +3021,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         data["pending"] = [shown(p, settings.card_language) for p in data.get("pending") or []]
         data["lab_memory"] = runtime.lab_memory_stamp()   # the Lab panel reloads the lab's memory when it changes
         data["team"] = team.last   # the team chat's newest message: the portal marks what you haven't read
+        data["chats"] = await asyncio.to_thread(store.stamp)   # the sidebar reloads when a chat is made elsewhere
         return JSONResponse(data)
 
     async def scripts_folder(request: Request) -> Response:

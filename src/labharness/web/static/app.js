@@ -3836,6 +3836,7 @@
     renderAlerts(s.alarms, s.incident);
     renderWatches(s.watches || [], s.status);
     if (s.lab_memory && s.lab_memory !== LABMEM.stamp) { LABMEM.stamp = s.lab_memory; loadLabMemory(); }
+    if (s.chats && s.chats !== S.chatsStamp) { S.chatsStamp = s.chats; refreshChats(); }   // a chat made or changed elsewhere (a phone, another window)
     teamState(s.team);
     notifySystem(s.notices);
     $("lab-name").textContent = s.lab;
