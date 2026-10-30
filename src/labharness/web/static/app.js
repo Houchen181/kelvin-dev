@@ -6143,7 +6143,7 @@
     ANA.spec = { runs, x: spec.x || "", y: spec.y || "", where: spec.where || "", group: spec.group || "", row: spec.row,
       steps: Array.isArray(spec.steps) ? spec.steps.map((s) => Object.assign({}, s)) : [],
       fit: spec.fit ? Object.assign({}, spec.fit) : null };
-    ANA.auto = auto || { x: !spec.x, y: !spec.y, group: false };   // what Kelvin left out follows the run, as the server's does
+    ANA.auto = auto || { x: !spec.x, y: !spec.y, group: spec.group === undefined || spec.group === null };   // what Kelvin left out follows the run, as the server's does
     if (!ANA.open) {
       ANA.open = true;   // shown without starting the pane's own default
       $("anpane").hidden = false;
@@ -6164,14 +6164,14 @@
       showAnalysis(result);
     } else computeAnalysis(true);
   }
-  // a run's columns: the suggestions under x and y, the models. Until the person picks them, x and y follow the run (its
-  // innermost swept axis and first reading) and a map is drawn a curve per value of its outer axis
+  // a run's columns: the suggestions under x, y, where and per, the models. Until the person picks them, x and y follow
+  // the run (its innermost swept axis and first reading), and the server draws a map a curve per value of its outer axis
   async function anColumns(runId) {
     let cols;
     try { cols = await api("/api/analysis/columns?run=" + encodeURIComponent(runId)); }
     catch (e) { anMessage(e.message, true); return; }
     ANA.models = cols.models.filter((m) => m !== "resonator");
-    const all = cols.axes.concat(cols.readings, cols.traces);
+    const all = cols.axes.concat(cols.readings, cols.others || [], cols.traces);
     ANA.traces = new Map(cols.traces.map((c) => [c.key, c.x_unit === "Hz" ? "frequency" : "x"]));
     $("an-where").placeholder = (cols.axes.length ? cols.axes[0].key : "t") + " > 0";
     $("an-cols").replaceChildren(...all.map((c) => h("option", { value: c.key, label: c.unit || "" })));
@@ -6184,7 +6184,7 @@
       s.y = cols.readings.length ? cols.readings[0].key : cols.traces.length ? cols.traces[0].key : "";
       auto.y = true;
     }
-    if (auto.group) s.group = cols.axes.length > 1 ? cols.axes[0].key : "";
+    if (auto.group) s.group = "";   // the server's, shown once it answers
   }
   function renderAnalysisForm() {
     const s = ANA.spec;
@@ -6195,11 +6195,11 @@
     traceAxis();
     $("an-y").value = s.y || "";
     $("an-where").value = s.where || "";
+    $("an-group").value = s.group || "";
     const chips = s.runs.slice(1).map((id) => {
       const r = ANA.runs.find((x) => x.run_id === id);
       return anChip(r ? anRunLabel(r) : id, () => { s.runs = s.runs.filter((x) => x !== id); renderAnalysisForm(); computeAnalysis(true); });
     });
-    if (s.group) chips.push(anChip("per " + s.group, () => { s.group = ""; ANA.auto.group = false; renderAnalysisForm(); computeAnalysis(true); }));
     if (s.row !== undefined && s.row !== null && s.row !== "") chips.push(anChip("row " + s.row, () => { s.row = null; renderAnalysisForm(); computeAnalysis(true); }));
     $("an-chips").replaceChildren(...chips);
     $("an-chips").hidden = !chips.length;
@@ -6259,7 +6259,7 @@
   function anSpec() {
     const s = ANA.spec;
     const out = { runs: s.runs, x: s.x, y: s.y, where: s.where, steps: s.steps };
-    if (s.group) out.group = s.group;
+    if (!ANA.auto.group) out.group = s.group || "";   // "": one curve; left out, the server draws a map per its outer axis
     if (s.row !== undefined && s.row !== null && s.row !== "") out.row = s.row;
     if (s.fit && s.fit.model) out.fit = s.fit;
     return out;
@@ -6297,6 +6297,7 @@
   }
   function showAnalysis(r) {
     ANA.result = r;
+    if (ANA.auto.group) { ANA.spec.group = r.group || ""; $("an-group").value = ANA.spec.group; }   // a map's own
     const curves = r.curves.slice(0, SERIES), a = r.axes || {};
     const notes = (r.notes || []).slice();
     if (r.curves.length > SERIES) notes.push(r.curves.length + " curves: the first " + SERIES + " are drawn");
@@ -6367,6 +6368,8 @@
     if (!s.runs.length) return;
     const parts = [s.runs.join(", "), "y = " + s.y, "x = " + s.x];
     if (s.where) parts.push("where " + s.where);
+    if (s.group) parts.push("a curve per " + s.group);
+    if (s.row !== undefined && s.row !== null && s.row !== "") parts.push("row " + s.row);
     if (s.steps.length) parts.push("steps: " + s.steps.map((st) => st.op + Object.entries(st).filter(([k]) => k !== "op")
       .map(([k, v]) => " " + k + "=" + v).join("")).join(", "));
     if (s.fit && s.fit.model) parts.push("fit: " + s.fit.model);
@@ -6417,7 +6420,7 @@
       renderAnalysisForm();
       computeAnalysis(true);
     });
-    for (const [id, key] of [["an-x", "x"], ["an-y", "y"], ["an-where", "where"]]) {
+    for (const [id, key] of [["an-x", "x"], ["an-y", "y"], ["an-where", "where"], ["an-group", "group"]]) {
       $(id).addEventListener("input", () => {
         ANA.spec[key] = $(id).value.trim();
         if (key !== "where") ANA.auto[key] = false;   // the person's choice now, kept when the run changes

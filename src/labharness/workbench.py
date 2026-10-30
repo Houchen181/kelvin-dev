@@ -10,7 +10,8 @@ A spec, as the panel sends it and the analyze tool writes it:
     x, y     a column or an expression of the run's columns; y a trace column takes one point's trace (row: which
              point, default the last that has one) against the trace's own x
     where    a condition on the points (smu.V > 0)
-    group    a column: one curve per value of it (a map's outer axis)
+    group    a column (or several, comma-separated): one curve per value of it. Left out, a map is a curve per value
+             of its outer axes (those x isn't); "" is one curve
     steps    in order, each {op, ...}:
         crop {lo, hi}              keep x in [lo, hi]
         bin {width}                the mean in each x bin of this width
@@ -31,6 +32,7 @@ Units follow the columns through expressions and steps (units.py); where one can
 note says so."""
 from __future__ import annotations
 
+import ast
 import asyncio
 import concurrent.futures
 import csv
@@ -41,10 +43,11 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import datatools, fitting, rundata, units
+from . import datatools, expr, fitting, rundata, units
 
 MAX_RUNS = 8
 MAX_CURVES = 24       # curves drawn at once (runs times groups)
+MAX_TABLE = 1000      # curves in one CSV: every one of them, never fewer
 MAX_STEPS = 16
 MAX_BINS = 100000
 SHOWN = 4000          # points of a curve sent to the panel; every point is used for steps and fits
@@ -288,11 +291,76 @@ def _values(src: datatools.Source, text: str) -> Tuple[Any, Optional[str]]:
     return v, units.of(text, _unit_of(src))
 
 
-def _curves(rt: Any, spec: Dict[str, Any], notes: List[str]) -> List[Dict[str, Any]]:
-    """Each run's curves before the steps: {run, label, x, y, x and y units (None: not known) and names}."""
-    runs = run_ids(spec)
+def _names(text: str) -> List[str]:
+    """The names an expression uses."""
+    try:
+        tree = ast.parse(str(text or "").strip(), mode="eval")
+    except SyntaxError:
+        return []
     out = []
-    for run in runs:
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            try:
+                out.append(expr._dotted(node))
+            except expr.ExprError:
+                pass
+    return out
+
+
+def default_group(src: datatools.Source, x: str) -> str:
+    """What a run is drawn per when the spec leaves group out: a map a curve per value of its outer axes (the swept
+    axes x doesn't use; all but the innermost when it uses none), anything else one curve ("")."""
+    used = set(_names(x)) & set(src.axes)
+    return ", ".join([a for a in src.axes if a not in used] if used else src.axes[:-1])
+
+
+def _split(group: str) -> List[str]:
+    """A group's columns: several are comma-separated (a comma inside brackets is an expression's)."""
+    parts, depth, part = [], 0, ""
+    for ch in group:
+        depth += 1 if ch in "([" else -1 if ch in ")]" else 0
+        if ch == "," and depth == 0:
+            parts.append(part)
+            part = ""
+        else:
+            part += ch
+    return [p.strip() for p in parts + [part] if p.strip()]
+
+
+def _groups(src: datatools.Source, group: str, mask: Any, most: int) -> Tuple[List[Tuple[str, Any]], int]:
+    """One curve per value of the group's column (per set of values, for several), in the order they were measured:
+    (its label, its points' indices) for the first `most`, and how many there are."""
+    from .cards import si
+    np = _np()
+    cols = [(k,) + _values(src, k) for k in _split(group)]
+    ok = mask.copy()
+    for _, v, _ in cols:
+        ok &= np.isfinite(v)
+    at = np.flatnonzero(ok)
+    if not at.size:
+        return [], 0
+    values = np.column_stack([v[at] for _, v, _ in cols]) + 0.0   # -0.0 is 0
+    _, first, inverse = np.unique(values, axis=0, return_index=True, return_inverse=True)
+    inverse = inverse.reshape(-1)
+    counts = np.bincount(inverse, minlength=first.size)
+    ends = np.cumsum(counts)
+    members = np.argsort(inverse, kind="stable")   # each group's points together, in the order measured
+    out = []
+    for g in np.argsort(first, kind="stable")[:most]:
+        idx = at[members[ends[g] - counts[g]:ends[g]]]
+        out.append((", ".join("%s = %s" % (k, si(float(v[idx[0]]), unit or "")) for k, v, unit in cols), idx))
+    return out, int(first.size)
+
+
+def _curves(rt: Any, spec: Dict[str, Any], notes: List[str], most: int = MAX_CURVES
+            ) -> Tuple[List[Dict[str, Any]], int]:
+    """Each run's curves before the steps, the first `most` of them: {run, label, group (what sets the curve apart:
+    magnet.B = 1 T, row 3), by (the group asked for, or the run's own), row (a trace's point), x, y, x and y units
+    (None: not known) and names}; and how many there are."""
+    np = _np()
+    out: List[Dict[str, Any]] = []
+    total = 0
+    for run in run_ids(spec):
         try:
             src = datatools.Source(rt, run)
         except datatools.ToolError as e:
@@ -304,8 +372,13 @@ def _curves(rt: Any, spec: Dict[str, Any], notes: List[str]) -> List[Dict[str, A
                 xv, yv, xu, yu, r = src.trace(y_text, None if row in (None, "") else int(row))
             except (datatools.ToolError, ValueError) as e:
                 raise AnalysisError(str(e))
-            out.append({"run": src.run_id, "label": "%s · row %d" % (src.run_id, r), "x": xv, "y": yv,
-                        "xu": xu, "yu": yu, "xn": "frequency" if xu == "Hz" else "x", "yn": y_text})
+            if str(spec.get("group") or "").strip():
+                notes.append("%s is one point's trace: row picks the point, group doesn't apply" % y_text)
+            total += 1
+            if len(out) < most:
+                out.append({"run": src.run_id, "label": "%s · row %d" % (src.run_id, r), "group": "row %d" % r,
+                            "by": "", "row": r, "x": xv, "y": yv, "xu": xu, "yu": yu,
+                            "xn": "frequency" if xu == "Hz" else "x", "yn": y_text})
             continue
         xn = str(spec.get("x") or "").strip() or (src.axes[-1] if src.axes else "t")
         yn = y_text or (src.scalars[0] if src.scalars else "")
@@ -315,17 +388,20 @@ def _curves(rt: Any, spec: Dict[str, Any], notes: List[str]) -> List[Dict[str, A
         yv, yu = _values(src, yn)
         try:
             mask = src.mask(str(spec.get("where") or "").strip())
-            group = str(spec.get("group") or "").strip()
-            parts = datatools._grouped(src, group, mask) if group else [("", mask)]
         except datatools.ToolError as e:
             raise AnalysisError(str(e))
-        for label, m in parts:
-            out.append({"run": src.run_id, "label": src.run_id + (" · " + label if label else ""), "x": xv[m],
-                        "y": yv[m], "xu": xu, "yu": yu, "xn": xn, "yn": yn})
-    if len(out) > MAX_CURVES:
-        notes.append("%d curves; the first %d are drawn" % (len(out), MAX_CURVES))
-        out = out[:MAX_CURVES]
-    return out
+        group = default_group(src, xn) if spec.get("group") is None else str(spec["group"]).strip()
+        if group:
+            parts, count = _groups(src, group, mask, max(0, most - len(out)))
+        else:
+            parts, count = [("", np.flatnonzero(mask))][:max(0, most - len(out))], 1
+        total += count
+        for label, idx in parts:
+            out.append({"run": src.run_id, "label": src.run_id + (" · " + label if label else ""), "group": label,
+                        "by": group, "x": xv[idx], "y": yv[idx], "xu": xu, "yu": yu, "xn": xn, "yn": yn})
+    if total > len(out):
+        notes.append("%d curves; the first %d are drawn" % (total, len(out)))
+    return out, total
 
 
 def _worked(np: Any, c: Dict[str, Any], steps: Sequence[Any]
@@ -432,7 +508,8 @@ def _no_unit(axis: str, name: str) -> str:
 
 
 def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
-    """The spec worked out: each curve after the steps (and its fit), with the axes' names and units."""
+    """The spec worked out: each curve after the steps (and its fit), with the axes' names and units, and the group
+    the curves are drawn per."""
     np = _np()
     steps = _steps(spec)
     f = spec.get("fit") or {}
@@ -442,7 +519,8 @@ def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
     axes: Dict[str, str] = {}
     unknown: List[str] = []
     deadline = time.monotonic() + FITS_S
-    for c in _curves(rt, spec, notes):
+    found, _ = _curves(rt, spec, notes)
+    for c in found:
         x, y, xu, yu, xn, yn = _worked(np, c, steps)
         axes = {"x": xn, "x_unit": xu or "", "y": yn, "y_unit": yu or ""}
         for axis, u, n in (("x", xu, xn), ("y", yu, yn)):
@@ -453,15 +531,18 @@ def compute(rt: Any, spec: Dict[str, Any]) -> Dict[str, Any]:
         if fit_on:
             out["fit"] = _fit(np, x, y, xu, yu, "%s vs %s" % (yn, xn), f, deadline)
         curves.append(out)
-    return _safe({"curves": curves, "axes": axes, "notes": notes + unknown})
+    return _safe({"curves": curves, "axes": axes, "notes": notes + unknown,
+                  "group": next((c["by"] for c in found if c["by"]), "")})
 
 
 def table(rt: Any, spec: Dict[str, Any]) -> Tuple[str, str]:
-    """The worked-out curves as CSV, every point, for the panel's download: (a file name, the text). Two columns a
-    curve, its x and its y, named with their units."""
+    """The worked-out curves as CSV, every point of every curve, for the panel's download: (a file name, the text).
+    Two columns a curve, its x and its y, named with their units."""
     np = _np()
     steps = _steps(spec)
-    found = _curves(rt, spec, [])
+    found, total = _curves(rt, spec, [], MAX_TABLE)
+    if total > len(found):   # never a file that leaves curves out without saying so
+        raise AnalysisError("%d curves: a CSV takes %d at most; take fewer with where or group" % (total, MAX_TABLE))
     head: List[str] = []
     cols: List[List[float]] = []
     for c in found:
@@ -479,7 +560,8 @@ def table(rt: Any, spec: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def columns(rt: Any, run_id: str) -> Dict[str, Any]:
-    """What a run offers the panel: its swept axes, its readings and traces, each with its unit; its kept fits."""
+    """What a run offers the panel: its swept axes, its readings and traces, each with its unit; its other columns of
+    numbers (i: each point's number, t: its time, a repeated sweep's repeat); its kept fits."""
     try:
         src = datatools.Source(rt, run_id)
     except datatools.ToolError as e:
@@ -489,12 +571,15 @@ def columns(rt: Any, run_id: str) -> Dict[str, Any]:
         meta = rundata.meta(src.folder)
     except (KeyError, OSError, ValueError):
         pass
+    listed = set(src.axes) | set(src.scalars) | set(src.traces)
     return _safe({"run": src.run_id, "plan": meta.get("plan") or src.run_id.split("-", 2)[-1],
                   "status": meta.get("status"), "points": src.table.n,
                   "axes": [{"key": k, "unit": src.units.get(k, "")} for k in src.axes],
                   "readings": [{"key": k, "unit": src.units.get(k, "")} for k in src.scalars],
                   "traces": [{"key": k, "unit": src.units.get(k, ""), "x_unit": src.x_units.get(k, "")}
                              for k in src.traces],
+                  "others": [{"key": k, "unit": src.units.get(k, "")} for k in src.table.order
+                             if k in src.table.numbers and k not in listed],
                   "kept": [k.get("name") for k in fitting.stored(src.folder)],
                   "models": [name for name, make in fitting.MODELS.items()
                              if name != "resonator" and not getattr(make(), "needs", ())]})
@@ -506,7 +591,7 @@ def keep(rt: Any, spec: Dict[str, Any], curve: int = 0, name: str = "", by: str 
     says who kept it, and the run's scan report shows it. Its name says its curve (a map's "magnet.B = 1 T"), and a fit
     already kept under that name is replaced only when asked (KeptAlready otherwise)."""
     np = _np()
-    found = _curves(rt, spec, [])
+    found, _ = _curves(rt, spec, [])
     try:
         c = found[int(curve)]
     except (IndexError, TypeError, ValueError):
@@ -522,7 +607,7 @@ def keep(rt: Any, spec: Dict[str, Any], curve: int = 0, name: str = "", by: str 
     if rundata.being_recorded(folder):
         raise AnalysisError("the run is still being measured; keep the fit once it has finished")
     lo, hi = f.get("lo"), f.get("hi")
-    group = c["label"][len(c["run"]):].lstrip(" ·") if c["label"].startswith(c["run"]) else ""
+    group = c["group"]
     tail = " @ " + fitting.fit_name(group)[-40:] if group else ""   # its value at the end: never the part cut
     head = fitting.fit_name("%s %s" % (yn, result["model"] if result["model"] != "expression" else "model"))
     name = fitting.fit_name(name) or (head[:80 - len(tail)] + tail) or result["model"]   # as run.h5 will name it
@@ -531,7 +616,7 @@ def keep(rt: Any, spec: Dict[str, Any], curve: int = 0, name: str = "", by: str 
     try:
         kept = fitting.store(folder, name, result, {
             "model": str(f.get("model")).strip(), "x": spec.get("x"), "y": spec.get("y"), "where": spec.get("where"),
-            "group": spec.get("group"), "curve": c["label"], "steps": spec.get("steps") or None,
+            "group": c["by"], "curve": c["label"], "steps": spec.get("steps") or None,
             "x_range": [lo, hi] if lo not in (None, "") or hi not in (None, "") else None,
             "from": "the Analysis panel"}, by=by, account=account)
     except (fitting.FitError, OSError) as e:
@@ -543,8 +628,9 @@ def keep(rt: Any, spec: Dict[str, Any], curve: int = 0, name: str = "", by: str 
 def describe(result: Dict[str, Any]) -> str:
     """The worked-out spec in words, for the model (the analyze tool): each curve's points and fit."""
     a = result.get("axes") or {}
-    lines = ["%s vs %s%s" % (a.get("y", "y") + (" [%s]" % a["y_unit"] if a.get("y_unit") else ""),
-                             a.get("x", "x"), " [%s]" % a["x_unit"] if a.get("x_unit") else "")]
+    lines = ["%s vs %s%s%s" % (a.get("y", "y") + (" [%s]" % a["y_unit"] if a.get("y_unit") else ""),
+                               a.get("x", "x"), " [%s]" % a["x_unit"] if a.get("x_unit") else "",
+                               ", a curve per %s" % result["group"] if result.get("group") else "")]
     for c in result.get("curves") or []:
         lines.append("- %s: %d points" % (c["label"], c["n"]))
         f = c.get("fit")

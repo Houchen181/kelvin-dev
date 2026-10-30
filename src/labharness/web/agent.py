@@ -454,7 +454,9 @@ ANALYZE = {
         "x": {"type": "string", "description": "A column or an expression of columns, e.g. magnet.B"},
         "y": {"type": "string", "description": "A column, an expression (lockin.X / 1e-8) or a trace column"},
         "where": {"type": "string", "description": "A condition on the points, e.g. smu.V > 0"},
-        "group": {"type": "string", "description": "A column: one curve per value of it (a map's outer axis)"},
+        "group": {"type": "string", "description": "A column (or several, comma-separated): one curve per value of "
+                                                   "it. Left out, a map is drawn per value of its outer axis; '' is "
+                                                   "one curve"},
         "row": {"type": "integer", "description": "For a trace column: the point whose trace (default the last)"},
         "steps": {"type": "array", "description": "In order: crop {lo, hi}, bin {width}, smooth {points}, deriv, "
                                                   "integrate, background {order, lo, hi} (subtracted), normalize "

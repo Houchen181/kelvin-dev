@@ -1198,7 +1198,8 @@ body.resizing .plot-svg { pointer-events: none; }
 .an-body .an-step input { width: 84px; padding: 4px 6px; }
 .an-body .an-step select { padding: 4px 6px; }
 .an-add-step { align-self: flex-start; color: var(--text-2); }
-.an-body > .an-field { flex: none; }
+.an-where { flex: 2 1 180px; }
+.an-per { flex: 1 1 120px; }
 .an-body .an-field input:disabled { color: var(--muted); }
 .an-body .an-step input.an-text { width: 64px; font-family: ui-monospace, Consolas, monospace; }
 .an-plot { min-height: 60px; }

@@ -93,6 +93,25 @@ def test_a_symmetrized_curve_keeps_one_point_per_x_so_a_fit_s_errors_are_not_shr
     assert a_sym["error"] > 0.8 * a_raw["error"]   # counting x and -x both made it 0.6 times as large
 
 
+# ------------------------------------------------------------------ 2. the CSV has every curve
+
+def test_the_csv_has_every_curve_not_only_the_ones_drawn(rt, tmp_path, monkeypatch):
+    rt.run(MAP)
+    run = last(rt)
+    spec = {"runs": [run], "x": "magnet.B", "y": "lockin.X"}   # a curve per gate voltage: 31 of them
+    drawn = compute(rt, spec)
+    assert len(drawn["curves"]) == 24 and "31 curves; the first 24 are drawn" in drawn["notes"]
+    _, text = table(rt, spec)
+    head = text.splitlines()[0].split(",")
+    assert len(head) == 62 and head[-1].endswith("smu.V = 3 V)")
+    client, h = portal(rt, tmp_path)
+    r = client.post("/api/analysis/csv", json={"spec": spec}, headers=h)
+    assert r.status_code == 200 and len(r.text.splitlines()[0].split(",")) == 62
+    monkeypatch.setattr("labharness.workbench.MAX_TABLE", 10)   # more than a CSV takes: said, never cut short
+    with pytest.raises(AnalysisError, match="31 curves"):
+        table(rt, spec)
+
+
 # ------------------------------------------------------------------ 3. units
 
 def test_units_follow_expressions_scales_and_derivatives(rt):
@@ -134,3 +153,70 @@ def test_the_unit_algebra():
     assert units.model_units("a*exp(-x/tau) + c", ["a", "tau", "c"], "s", "µV") == {"a": "µV", "tau": "s", "c": "µV"}
     assert units.model_units("R0*(1 + a*x**2)", ["R0", "a"], "T", "Ω") == {"R0": "Ω", "a": "1/T²"}
     assert units.model_units("a*x + b", ["a", "b"], "V", None) == {}   # y's unit unknown: nothing guessed
+
+
+# ------------------------------------------------------------------ 5. i, t and repeat
+
+def test_i_t_and_repeat_are_columns_to_choose(rt):
+    rt.run(REPEATED)
+    run = last(rt)
+    others = {c["key"]: c["unit"] for c in columns(rt, run)["others"]}
+    assert others == {"i": "", "t": "s", "repeat": ""}
+    out = compute(rt, {"runs": [run], "x": "smu.V", "y": "lockin.X", "group": "repeat"})
+    assert [c["label"].split(" · ")[1] for c in out["curves"]] == ["repeat = 1", "repeat = 2", "repeat = 3"]
+    assert compute(rt, {"runs": [run], "x": "smu.V", "y": "lockin.X", "where": "i < 11"})["curves"][0]["n"] == 11
+    assert "cols.others" in _js("anColumns")   # suggested under x, y and per
+
+
+# ------------------------------------------------------------------ 6. a map grouped by the server
+
+def _turn(tmp_path, rt, turns):
+    provider = Scripted(turns)
+    store = ChatStore(tmp_path / "chats")
+    agent = ChatAgent(rt, store, build_server(rt), {"scripted": provider})
+    chat = store.create("scripted:m1")
+    events = []
+
+    async def emit(e):
+        events.append(e)
+
+    async def go():
+        await agent.start()
+        try:
+            agent.claim(chat["id"], "scripted:m1")
+            await agent.run_turn(chat["id"], "fit the map", "scripted:m1", provider, emit)
+        finally:
+            await agent.close()
+    asyncio.run(go())
+    return events
+
+
+def test_a_map_is_a_curve_per_outer_value_for_the_api_kelvins_tool_and_keep(rt, tmp_path):
+    rt.run(MAP)
+    run = last(rt)
+    out = compute(rt, {"runs": [run], "y": "lockin.X", "fit": {"model": "lorentzian"}})
+    assert [c["label"].split(" · ")[1] for c in out["curves"]] == ["magnet.B = 0 T", "magnet.B = 500 mT",
+                                                                    "magnet.B = 1 T"]
+    assert out["group"] == "magnet.B" and all(c["n"] == 31 for c in out["curves"])
+    assert len(compute(rt, {"runs": [run], "group": ""})["curves"]) == 1   # "" asks for one curve
+    across = compute(rt, {"runs": [run], "x": "magnet.B"})   # x the outer axis: a curve per gate voltage
+    assert across["group"] == "smu.V" and across["curves"][0]["n"] == 3
+    both = compute(rt, {"runs": [run], "group": "magnet.B, smu.V"})
+    assert both["curves"][1]["label"].endswith("magnet.B = 0 T, smu.V = 100 mV") and both["curves"][1]["n"] == 1
+    client, h = portal(rt, tmp_path)
+    r = client.post("/api/analysis", json={"spec": {"runs": [run], "y": "lockin.X"}}, headers=h)
+    assert r.status_code == 200 and len(r.json()["curves"]) == 3 and r.json()["group"] == "magnet.B"
+    events = _turn(tmp_path, rt, [
+        [{"type": "tool_call", "id": "a1", "name": "analyze",
+          "input": {"runs": [run], "y": "lockin.X", "fit": {"model": "lorentzian"}}}],
+        [{"type": "text", "text": "A peak at each field."}]])
+    (shown,) = [e for e in events if e["type"] == "analysis"]
+    assert len(shown["result"]["curves"]) == 3 and "group" not in shown["spec"]
+    (end,) = [e for e in events if e["type"] == "tool_end"]
+    assert "a curve per magnet.B" in end["content"] and end["content"].count("lorentzian fit") == 3
+    said = keep(rt, {"runs": [run], "y": "lockin.X", "fit": {"model": "lorentzian"}}, curve=1)
+    assert "/fits/lockin.X lorentzian @ magnet.B = 500 mT" in said
+    (kept,) = fitting.stored(rt._run_dir(run))
+    assert kept["spec"]["group"] == "magnet.B"
+    spec = _js("anSpec")
+    assert 'if (!ANA.auto.group) out.group = s.group || "";' in spec   # the pane leaves it to the server
