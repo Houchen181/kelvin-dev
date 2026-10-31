@@ -267,18 +267,24 @@ class RelayLink:
 
     async def _out_trimmed(self, out_head: Any, out_bytes: Any, method: str, path: str, head: Dict[str, Any],
                            data: bytes) -> None:
-        """An answer that may list unshared work, without it."""
+        """An answer that may list unshared work, without it. Trimmed in a thread of its own, never on the portal's
+        loop: telling whose each run is may read the runs' records (the first time after an update). An answer that
+        can't be trimmed doesn't go."""
         headers = head.get("headers") or []
+        status, trim = head.get("status") or 500, self.trim
         is_json = any(k.lower() == "content-type" and "json" in v for k, v in headers)
-        if is_json and head.get("status") == 200 and data:
+        if trim is not None and is_json and status == 200 and data:
+            def trimmed() -> Tuple[bytes, int]:
+                payload, hidden = trim(method, path, json.loads(data))
+                return json.dumps(payload).encode("utf-8"), hidden
             try:
-                payload = json.loads(data)
-                payload, hidden = self.trim(method, path, payload)
-                data = json.dumps(payload).encode("utf-8")
+                data, hidden = await asyncio.to_thread(trimmed)
                 if hidden:
                     headers = headers + [["x-kelvin-hidden", str(hidden)]]
-            except ValueError:
-                pass
-        await out_head(head.get("status") or 500, headers)
+            except Exception as e:
+                log.warning("phones through the hub: %s %s could not be checked for unshared work: %s", method, path, e)
+                status, headers = 500, [["content-type", "application/json"]]
+                data = json.dumps({"error": "Kelvin had a problem answering that."}).encode("utf-8")
+        await out_head(status, headers)
         if data:
             await out_bytes(data)

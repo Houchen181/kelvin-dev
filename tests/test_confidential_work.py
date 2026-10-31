@@ -568,3 +568,32 @@ def test_the_data_folder_and_unshared_runs_are_out_of_reach_wherever_they_are(tm
     assert out["c7"].startswith("not imported") and "unshared work" in out["c7"]
     inside = p.turn(p.secret, [("list_folder", {}), ("read_file", {"path": str(inner.relative_to(runs[0].parent))})])
     assert runs[0].name in inside["c0"] and not inside["c1"].startswith("not read")   # its own
+
+
+def test_the_hub_trims_answers_off_the_portals_loop_and_sends_none_it_could_not_trim():
+    import threading
+    from labharness.web.relay import RelayLink
+    seen, sent = {}, []
+
+    def trim(method, path, payload):   # reading whose each run is may take a while
+        seen["trim"] = threading.get_ident()
+        if payload.get("broken"):
+            raise RuntimeError("the catalog is locked")
+        return dict(payload, runs=[]), 1
+
+    async def out_head(status, headers):
+        sent.append((status, headers))
+
+    async def out_bytes(data):
+        sent.append(data)
+
+    async def answer(body):
+        seen["loop"] = threading.get_ident()
+        link = RelayLink(app=None, target=lambda: None, hello=dict, trim=trim)
+        await link._out_trimmed(out_head, out_bytes, "GET", "/api/runs",
+                                {"status": 200, "headers": [["content-type", "application/json"]]}, body)
+    asyncio.run(answer(b'{"runs": ["20261030-120000-acme_gate"]}'))
+    assert seen["trim"] != seen["loop"] and json.loads(sent[1]) == {"runs": []}
+    sent.clear()
+    asyncio.run(answer(b'{"runs": ["20261030-120000-acme_gate"], "broken": true}'))
+    assert sent[0][0] == 500 and b"acme" not in sent[1]
