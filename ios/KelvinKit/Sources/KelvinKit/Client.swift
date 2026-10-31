@@ -13,10 +13,10 @@ public protocol Transport: Sendable {
 /// What went wrong, in words for the screen, and what kind of thing it was.
 public struct KelvinError: LocalizedError, Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
-        case unpaired      // the token is gone: pair again
+        case unpaired      // the token is gone: sign in again
         case signedOut     // still paired, but its person isn't signed in on the Kelvin computer
         case forbidden     // this phone's role can't do that
-        case locked        // too many wrong pairing codes
+        case locked        // too many tries
         case conflict      // already answered, already running...
         case server
         case unreachable
@@ -46,14 +46,14 @@ public struct KelvinError: LocalizedError, Equatable, Sendable {
         case 503 where json?["offline"]?.bool == true:
             return KelvinError(.unreachable, said ?? "That Kelvin is offline.")
         case 401:
-            return KelvinError(.unpaired, paired ? "This phone is no longer paired with Kelvin. Pair it again."
+            return KelvinError(.unpaired, paired ? "Kelvin there no longer knows this phone."
                                                  : (said ?? "Kelvin did not accept this phone."))
         case 403:
             return KelvinError(.forbidden, said ?? "This phone cannot do that. Use the Kelvin computer.")
         case 409, 423:
             return KelvinError(.conflict, said ?? "Kelvin is busy with that already.")
         case 429:
-            return KelvinError(.locked, said ?? "Too many wrong codes. Wait a few minutes and make a new code.")
+            return KelvinError(.locked, said ?? "Too many tries. Wait a few minutes.")
         default:
             return KelvinError(.server, said ?? "Kelvin answered HTTP \(status).")
         }
@@ -94,11 +94,6 @@ public struct KelvinClient: Sendable {
     }
 
     // ------------------------------------------------------------------ the calls
-
-    /// Offer a pairing code; Kelvin answers with this phone's own token.
-    public func pair(code: String) async throws -> PairResult {
-        try await call("POST", "/api/pair", body: .object(["code": .string(Pairing.digits(code))]))
-    }
 
     public func me() async throws -> Me { try await call("GET", "/api/me") }
 

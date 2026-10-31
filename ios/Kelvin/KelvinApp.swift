@@ -32,15 +32,6 @@ struct RootView: View {
                 WelcomeView()
             }
         }
-        .sheet(isPresented: $app.pairing, onDismiss: {
-            if app.signInNext {
-                app.signInNext = false
-                app.signingIn = true
-            }
-        }) {
-            PairView()
-                .environmentObject(app)
-        }
         .sheet(isPresented: $app.signingIn) {
             AccountView()
                 .environmentObject(app)
@@ -154,19 +145,11 @@ struct WelcomeView: View {
                 if noneYet {
                     Text("No Kelvin is signed in with \(a.email) yet.").font(.footnote).foregroundStyle(.secondary)
                 }
-                Button {
-                    app.pairing = true
-                } label: {
-                    Label("Pair with a code", systemImage: "qrcode.viewfinder")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
                 Button("Sign out", role: .destructive) { Task { await app.signOut() } }
                     .buttonStyle(.borderless)
             } else {
                 Text("Watch your lab, answer Kelvin's requests and stop a run from your phone. Sign in with your "
-                     + "Kelvin account to reach your lab computer from anywhere, or pair with it directly.")
+                     + "Kelvin account to reach your lab computer from anywhere.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 Button {
@@ -177,23 +160,10 @@ struct WelcomeView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                Button {
-                    app.pairing = true
-                } label: {
-                    Label("Pair with a code", systemImage: "qrcode.viewfinder")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
             }
             Button("Try a demo lab") { app.startDemo() }
                 .buttonStyle(.borderless)
             Spacer()
-            Text("Pairing works without an account: on the Kelvin computer, open Settings → Phone, switch on Phone "
-                 + "access, and press Pair a phone.")
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
         }
         .padding(24)
         .failure($failure)

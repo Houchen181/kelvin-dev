@@ -1,8 +1,8 @@
 import KelvinKit
 import SwiftUI
 
-/// The Kelvin computers this phone works with, paired or through the Kelvin account: switch between them, pair
-/// another, unpair, sign in or out.
+/// The Kelvin computers this phone works with, through the Kelvin account (or paired by an app before 0.1.8): switch
+/// between them, remove one, sign in or out.
 struct ComputersView: View {
     @ObservedObject var session: LabSession
     @EnvironmentObject var app: AppModel
@@ -26,16 +26,11 @@ struct ComputersView: View {
                         }
                     }
                     .swipeActions {
-                        Button(c.viaAccount ? "Remove" : "Unpair", role: .destructive) { removing = c }
+                        Button("Remove", role: .destructive) { removing = c }
                     }
                 }
-                Button {
-                    app.pairing = true
-                } label: {
-                    Label("Pair with a Kelvin computer", systemImage: "qrcode.viewfinder")
-                }
             } footer: {
-                Text("Swipe left to unpair or remove one.")
+                Text("Swipe left to remove one.")
             }
 
             let c = session.computer
@@ -77,18 +72,18 @@ struct ComputersView: View {
                             isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }),
                             titleVisibility: .visible) {
             if let c = removing {
-                Button(c.viaAccount ? "Remove" : "Unpair", role: .destructive) { Task { await app.remove(c) } }
+                Button("Remove", role: .destructive) { Task { await app.remove(c) } }
             }
         } message: {
             Text(removing?.viaAccount == true
                  ? "It shows again after you sign in to your Kelvin account again."
-                 : "This phone stops working with that computer, and Kelvin there forgets it. Pairing again needs a new code.")
+                 : "This phone stops working with it, and Kelvin there forgets this phone.")
         }
     }
 
     var removeTitle: String {
         guard let c = removing else { return "" }
-        return c.viaAccount ? "Remove \(c.lab) from this phone?" : "Unpair \(c.lab)?"
+        return "Remove \(c.lab) from this phone?"
     }
 
     func subtitle(_ c: Computer) -> String {

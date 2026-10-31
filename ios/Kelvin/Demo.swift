@@ -233,8 +233,8 @@ final class DemoTransport: Transport, @unchecked Sendable {
         defer { lock.unlock() }
         guard let i = chats.firstIndex(where: { $0["id"] as? String == id }) else { return }
         var said: JSON = ["type": "text"]
-        said["text"] = "This is the demo lab, so nothing real happens. The lock-in reads **3.21 µV**. Pair with Kelvin "
-            + "on your lab computer to talk to your own instruments."
+        said["text"] = "This is the demo lab, so nothing real happens. The lock-in reads **3.21 µV**. Sign in with "
+            + "your Kelvin account to talk to your own instruments."
         var messages = chats[i]["messages"] as? [JSON] ?? []
         messages.append(DemoTransport.message("user", ["text": text]))
         messages.append(DemoTransport.message("assistant", ["blocks": [said]]))
@@ -735,7 +735,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
             event("tool_start", start),
             event("tool_end", end),
             event("text", ["delta": "The lock-in reads **3.21 µV**. "]),
-            event("text", ["delta": "Pair with Kelvin on your lab computer to talk to your own instruments."]),
+            event("text", ["delta": "Sign in with your Kelvin account to talk to your own instruments."]),
             event("turn_end", ["reason": "end"]),
         ]
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!

@@ -11,23 +11,22 @@ How people use it is in [portal.md](portal.md#phone-and-remote-access). This pag
 | Path | What |
 |---|---|
 | `ios/project.yml` | The Xcode project, as an [XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. `Kelvin.xcodeproj` and `Support/Info.plist` are generated from it and not committed. |
-| `ios/KelvinKit/` | A Swift package with no UI and only Foundation: pairing links, the phone API client, the models, the chat stream and transcript, plot data, the team chat thread (`Team.swift`), Analysis specs and results and fitted values with their errors (`Analysis.swift`). Its tests run on Linux too. |
-| `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (paired computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Dictation.swift` (voice input), `Demo.swift` (the demo lab), `TeamView.swift` and `AnalysisView.swift` (with their models) and the other screens. |
-| `ios/KelvinTests/` | App tests: pairing, the Keychain, falling back to the Tailscale address, a chat, a message that couldn't be sent, signing in to the account again, notifications, the team chat and its unread count, Analysis on the demo lab. `ios/KelvinUITests/`: the keyboard, and a walkthrough of every screen on the demo lab. |
+| `ios/KelvinKit/` | A Swift package with no UI and only Foundation: the phone API client, the models, the chat stream and transcript, plot data, the team chat thread (`Team.swift`), Analysis specs and results and fitted values with their errors (`Analysis.swift`). Its tests run on Linux too. |
+| `ios/Kelvin/` | The SwiftUI app: `AppModel.swift` (the computers, one `LabSession` per computer, `ChatModel`), `Platform.swift` (URLSession, Keychain, notifications), `Dictation.swift` (voice input), `Demo.swift` (the demo lab), `TeamView.swift` and `AnalysisView.swift` (with their models) and the other screens. |
+| `ios/KelvinTests/` | App tests: the Keychain, falling back to the Tailscale address, a chat, a message that couldn't be sent, signing in to the account again, notifications, the team chat and its unread count, Analysis on the demo lab. `ios/KelvinUITests/`: the keyboard, and a walkthrough of every screen on the demo lab. |
 | `.github/workflows/ios.yml` | CI: KelvinKit's tests on Linux; when they pass, the app's build and tests on the iOS Simulator (macOS runner). |
 | `.github/workflows/ios-testflight.yml` | On a tag `ios-v*`: builds with the newest Xcode, signs with an App Store Connect API key and uploads to TestFlight. |
 
-The app needs iOS 16. It uses only Apple's frameworks (SwiftUI, Charts, AVFoundation for the QR scanner, Speech for voice input, QuickLook for reports).
+The app needs iOS 16. It uses only Apple's frameworks (SwiftUI, Charts, Speech for voice input, QuickLook for reports).
 
 Voice input uses on-device recognition only (`requiresOnDeviceRecognition`). Where the iPhone can't recognize the language on the phone itself, the mic button says so, and the app doesn't fall back to Apple's servers. Voice only fills the message box; it never sends or approves anything.
 
 ## The API it uses
 
-The phone listener (`src/labharness/web/remote.py`) and the routes a paired device may call:
+The phone listener (`src/labharness/web/remote.py`) and the routes a phone may call with its own token (given through the hub by `POST /api/phone/direct`; a computer paired by an app before 0.1.8 keeps its pairing's):
 
-- `POST /api/pair {code}` → `{token, name, role}`. Every later request carries `X-Kelvin-Token`.
+- Every request carries the token in `X-Kelvin-Token`.
 - `GET /api/me` → role, phone name, lab, and for the app: `computer`, `version`, `api` (1), `addresses` (where the phone listener is: the lab network and Tailscale) and `routes` (each address with its kind: `tailscale`, `network` or `public`). The app keeps them, tries the address that worked last first, and calls a connection encrypted only when Kelvin says the address is Tailscale's: some Wi-Fi networks (Xfinity's) hand out addresses in Tailscale's range 100.64.0.0/10 too.
-- The pairing QR code holds `http://<address>:<port>/pair#<code>&also=<host:port>,…`: the first address, then the others that fit. The app tries each in turn; only a computer that answers sees the code.
 - Watch and control: `GET /api/state`, `/api/live?since=n`, `/api/runs`, `/api/runs/{id}`, `/api/runs/{id}/files/{name}`; `POST /api/approvals/{id}` (control only for approving), `/api/alarms/{id}/ack`, `/api/runs/stop`, `/api/stop {chat_id}` (a chat's Stop: that chat and its lab work, nothing else), `/api/me/forget`, `/api/hands {on}` (the hands-on-the-sample lock: any phone can lock, control only can unlock). `/api/state` carries `mounted` (the sample, with `protection_lines`) and `hands_on` (who locked it and since when) from Kelvin 0.3.17; older Kelvins leave them out. Each of its `alarms` also carries its history: `count`, `last`, `cleared_text`, `acknowledged_by`, `acknowledged_at` and `latched` (a guard's trip or a wait that gave up, on until Got it); `alarms` lists every alarm nobody has said Got it to, cleared or not, besides the latest 20. `POST /api/runs/stop {}` with no run in progress while the queue runs stops the queue. `/api/runs` gives each run's `started_at` (seconds since 1970) from Kelvin 0.3.34, so a phone in another time zone shows the right time; before, the app reads the lab computer's clock time from the run id.
 - Control: `GET /api/bootstrap` (models), `/api/chats`, `/api/chats/{id}`; `POST /api/chats {model, incognito}`, `/api/chats/{id}/turn {text, model}` (the answer streams back as one JSON event per line).
 - The team chat (Kelvin 0.3.32 and later): `GET /api/team?after=<id>` (or `?before=<id>`, scrolling back) → `{messages, last}`, each message `{id, at, name, account, via, text}`, oldest first, 200 at most; any phone reads it. `POST /api/team {name, text}` (control) → `{message, last}`. `/api/state` carries `team`, the newest message's id: the tab's badge counts from the last one the phone showed (kept per computer in UserDefaults), and what was there at its first look is not news. The name a person writes under is the phone's own (`kelvin.teamName`).
@@ -37,7 +36,7 @@ Through the Kelvin account (Kelvin 0.3.19 and later; see [hub.md](hub.md#phones-
 
 - `POST <hub>/api/signin {email, password, installation: {id: "ios-<uuid>", name, platform: "ios", version}}` → the phone's token on the hub (in the Keychain, under `Account.tokenID`); `GET <hub>/api/relay/kelvins` → the account's Kelvins; `POST <hub>/api/signout` ends it.
 - The phone routes above, through `<hub>/api/relay/kelvins/<id>/api/...`, with `Authorization: Bearer <token>` (`KelvinClient(bearer: true)`, whose `base` is that path). A 503 with `offline: true` means that Kelvin isn't online.
-- A paired computer the account reaches too is one row, the pairing: away from the lab it goes through the hub with the account's token (app 0.1.8). Pairing itself needs the phone on the computer's network or Tailscale; when it can't reach the computer, the app offers the Kelvin account.
+- From app 0.1.8 there is no pairing: the phone reaches Kelvin only through the Kelvin account. A computer paired by an older app stays until removed; when the account reaches it too, it is one row that goes through the hub with the account's token away from the lab.
 - `POST /api/phone/direct` (through the hub only) → `{available, token, addresses, routes}`: the phone's own token for reaching that Kelvin directly, tried first (2.5 s) before the hub. `DELETE` forgets it.
 
 When a route the app depends on changes, raise `API` in remote.py and handle both in the app.
@@ -52,7 +51,7 @@ brew install xcodegen
 cd ios && xcodegen generate && open Kelvin.xcodeproj
 ```
 
-Choose the **Kelvin** scheme and a simulator, then Run. The simulator has no camera, so pair by typing the address and code (run Kelvin on the same Mac, switch on phone access, and pair with the address it shows).
+Choose the **Kelvin** scheme and a simulator, then Run. Sign in there with an account on a hub of your own (**Use a test hub** on the sign-in screen; see [hub.md](hub.md)), or try the demo lab.
 
 To run it on your own iPhone, set your team under Signing & Capabilities (or `DEVELOPMENT_TEAM` in `project.yml`), plug the phone in and Run. A free Apple account works for your own phone for 7 days at a time.
 
@@ -105,7 +104,7 @@ People install the app through TestFlight: you send a link, they install Apple's
 
 - The token is in the Keychain (this device only, after first unlock); the list of computers in UserDefaults holds nothing secret.
 - App Transport Security: from iOS 17 the app needs `NSAllowsLocalNetworking` to reach a lab IP address, and exceptions for Tailscale's `100.64.0.0/10` and `*.ts.net`. Any other plain-http address is refused by iOS.
-- Unpairing in the app also unpairs the phone on the Kelvin computer when it answers.
+- Removing a computer in the app also makes Kelvin there forget the phone's token, when it answers.
 - **Delete Kelvin account…** (Computers → Kelvin account) deletes the account on the hub with its password (`POST /api/account/delete`), then signs the phone out, as App Review asks of an app that offers making an account. Each Kelvin computer keeps the person's chats and measurements until the account is removed there too.
 
 ## Next: push notifications

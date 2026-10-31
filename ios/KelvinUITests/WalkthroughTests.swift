@@ -108,34 +108,11 @@ final class WalkthroughTests: XCTestCase {
         element.tap()
     }
 
-    func testPairingThatCantReachTheComputerOffersTheKelvinAccount() {
-        launch([])
-        must(app.buttons["Pair with a code"], "see the welcome screen").tap()
-        must(app.buttons["Type it"], "choose to type the code").tap()
-        must(app.textFields["Address, e.g. 192.168.1.20"], "find the address field").tap()
-        app.typeText("127.0.0.1:9")                                       // nothing answers there
-        must(app.textFields["6-digit code"], "find the code field").tap()
-        app.typeText("123456")
-        must(app.buttons["Pair"], "find Pair").tap()
-        reach(must(app.buttons["pair-sign-in"], "be offered the Kelvin account", timeout: 30), "see it").tap()
-        gone(app.navigationBars["Pair with Kelvin"], "leave pairing")
-        must(app.navigationBars["Kelvin account"], "open the account sheet")
-    }
-
     func testTheWelcomeScreensSheetsCanBeFilledInAndLeft() {
         launch([])
-        must(app.buttons["Pair with a code"], "see the welcome screen").tap()
-        must(app.navigationBars["Pair with Kelvin"], "open pairing")
-        must(app.buttons["Type it"], "choose to type the code").tap()   // it opens on the camera
-        must(app.textFields["Address, e.g. 192.168.1.20"], "find the address field").tap()
-        app.typeText("192.168.1.20")
-        must(app.textFields["6-digit code"], "find the code field").tap()
-        app.typeText("123456")
-        XCTAssertTrue(must(app.buttons["Pair"], "find Pair").isHittable, "Pair is under the keyboard")
-        app.navigationBars.buttons["Cancel"].tap()
-        gone(app.navigationBars["Pair with Kelvin"], "leave pairing")
-
-        must(app.buttons["Sign in with your Kelvin account"], "see the welcome screen again").tap()
+        let signIn = must(app.buttons["Sign in with your Kelvin account"], "see the welcome screen")
+        XCTAssertFalse(app.buttons["Pair with a code"].exists, "pairing is gone: the Kelvin account only")
+        signIn.tap()
         must(app.navigationBars["Kelvin account"], "open the account sheet")
         must(app.textFields["Email"], "find the email field").tap()
         app.typeText("ada@example.org")
@@ -210,13 +187,13 @@ final class WalkthroughTests: XCTestCase {
         must(app.buttons["QLOverlayDoneButtonAccessibilityIdentifier"], "close the CSV").tap()
         must(app.navigationBars["Analysis"], "come back from the CSV")
 
-        // the computers: the demo lab unpaired, the welcome screen again
+        // the computers: the demo lab removed, the welcome screen again
         app.tabBars.buttons["Computers"].tap()
         let row = must(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Demo lab'")).firstMatch,
                        "find the demo lab's row")
         row.swipeLeft()
-        must(app.buttons["Unpair"], "find Unpair").tap()
-        confirm("Unpair", "unpair the demo lab")
+        must(app.buttons["Remove"], "find Remove").tap()
+        confirm("Remove", "remove the demo lab")
         must(app.buttons["Try a demo lab"], "get back to the welcome screen")
         XCTAssertTrue(csvShown, "the CSV preview never showed the file")
     }

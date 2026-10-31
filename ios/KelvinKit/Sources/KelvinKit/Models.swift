@@ -13,13 +13,6 @@ extension KeyedDecodingContainer {
     }
 }
 
-/// POST /api/pair
-public struct PairResult: Decodable, Equatable, Sendable {
-    public var token: String
-    public var name: String
-    public var role: String
-}
-
 /// GET /api/me: who this phone is to Kelvin, and (Kelvin 0.3.15 and later) the computer's name and addresses.
 public struct Me: Decodable, Equatable, Sendable {
     public var role: String

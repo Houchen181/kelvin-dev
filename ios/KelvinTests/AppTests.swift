@@ -51,7 +51,6 @@ final class Slow: Transport, @unchecked Sendable {
 
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         switch request.url?.path ?? "" {
-        case "/api/pair": return reply(request, "{\"token\": \"t\", \"name\": \"P\", \"role\": \"control\"}")
         case "/api/me": return reply(request, "{\"role\": \"control\", \"version\": \"0.3.32\"}")
         case "/api/runs": return reply(request, "{\"runs\": []}")
         case "/api/analysis/columns":
@@ -96,49 +95,21 @@ final class AppTests: XCTestCase {
      "addresses": ["http://192.168.1.50:8771", "http://100.101.7.9:8771"]}
     """
 
+    /// A computer this phone reaches directly with a token of its own: paired by an app before 0.1.8, kept until
+    /// removed.
+    func direct(_ transport: Transport) throws -> (AppModel, Computer) {
+        var list = ComputerList.decode(nil)
+        _ = list.add(Computer(lab: "Cryostat lab", host: "LAB-PC", phoneName: "Ana's phone", role: "control",
+                              addresses: [lan, tail]))
+        let c = try XCTUnwrap(list.computers.first)
+        defaults.set(list.encoded(), forKey: "kelvin.computers")
+        tokens.save("secret-token", for: c.id)
+        return (AppModel(transport: transport, defaults: defaults, tokens: tokens), c)
+    }
+
     func paired(_ script: Script) async throws -> (AppModel, Computer) {
-        script.on("POST /api/pair", "{\"token\": \"secret-token\", \"name\": \"Ana's phone\", \"role\": \"control\"}")
         script.on("GET /api/me", me)
-        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
-        return (app, try await app.pair(at: lan, code: "123456"))
-    }
-
-    func testPairingKeepsTheTokenOutOfThePlainSettings() async throws {
-        let (app, c) = try await paired(Script())
-        XCTAssertEqual(tokens.token(for: c.id), "secret-token")
-        XCTAssertEqual(c.lab, "Cryostat lab")
-        XCTAssertEqual(c.addresses, [lan, tail])
-        XCTAssertEqual(app.current?.id, c.id)
-        let kept = String(decoding: defaults.data(forKey: "kelvin.computers") ?? Data(), as: UTF8.self)
-        XCTAssertTrue(kept.contains("LAB-PC"))
-        XCTAssertFalse(kept.contains("secret-token"))                          // never in the plain settings
-        XCTAssertEqual(AppModel(transport: Script(), defaults: defaults, tokens: tokens).current?.id, c.id)   // kept
-    }
-
-    func testPairingTriesEveryAddressInTheCode() async throws {
-        let script = Script()
-        script.on("POST /api/pair", "{\"token\": \"secret-token\", \"name\": \"Ana's phone\", \"role\": \"control\"}")
-        script.on("GET /api/me", me)
-        script.unreachable = ["192.168.1.50"]                                 // not on the lab's Wi-Fi
-        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
-        let link = try XCTUnwrap(Pairing.parse("http://192.168.1.50:8771/pair#123456&also=100.101.7.9:8771"))
-        let c = try await app.pair(at: link.addresses, code: try XCTUnwrap(link.code))
-        XCTAssertEqual(c.addresses.first, tail)
-        XCTAssertEqual(tokens.token(for: c.id), "secret-token")
-        XCTAssertEqual(script.asked.filter { $0.hasSuffix("POST /api/pair") }.count, 2)   // reached Kelvin only once
-    }
-
-    func testAWrongCodeSaysSo() async {
-        let script = Script()
-        script.on("POST /api/pair", 403, "{\"error\": \"That code is wrong or has expired.\"}")
-        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
-        do {
-            try await app.pair(at: lan, code: "000000")
-            XCTFail("paired with a wrong code")
-        } catch {
-            XCTAssertEqual(error.localizedDescription, "That code is wrong or has expired.")
-        }
-        XCTAssertNil(app.current)
+        return try direct(script)
     }
 
     func testAwayFromTheLabItGoesThroughTailscale() async throws {
@@ -210,6 +181,8 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(session.route, .hub)
         XCTAssertEqual(session.state?.lab, "Cryostat lab")
         XCTAssertEqual(tokens.token(for: c.id), "direct-token")               // its own token, for the lab network
+        let listed = String(decoding: defaults.data(forKey: "kelvin.computers") ?? Data(), as: UTF8.self)
+        XCTAssertTrue(listed.contains("LAB-PC") && !listed.contains("direct-token"))   // never in the plain settings
         XCTAssertEqual(app.current?.addresses, [lan])
 
         script.unreachable = []                                              // back in the lab: directly, no hub
@@ -368,8 +341,7 @@ final class AppTests: XCTestCase {
 
     func testOneAnalysisAtATimeAndTheNewestWins() async throws {
         let slow = Slow()
-        let app = AppModel(transport: slow, defaults: defaults, tokens: tokens)
-        let c = try await app.pair(at: lan, code: "123456")
+        let (app, c) = try direct(slow)
         let model = AnalysisModel(session: app.session(for: c), run: "r1")
         await model.start()
         XCTAssertEqual(model.answered?.y, "y1")

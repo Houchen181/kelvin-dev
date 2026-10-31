@@ -54,15 +54,6 @@ final class Scripted: Transport, @unchecked Sendable {
 final class ClientTests: XCTestCase {
     let base = URL(string: "http://192.168.1.50:8771")!
 
-    func testPairingSendsTheCodeAndNoToken() async throws {
-        let t = Scripted()
-        t.on("POST /api/pair", "{\"token\": \"tok\", \"name\": \"Ana's phone\", \"role\": \"control\"}")
-        let r = try await KelvinClient(base: base, token: nil, transport: t).pair(code: "123 456")
-        XCTAssertEqual(r, PairResult(token: "tok", name: "Ana's phone", role: "control"))
-        XCTAssertEqual(t.body(0)?["code"], .string("123456"))
-        XCTAssertNil(t.asked[0].value(forHTTPHeaderField: "X-Kelvin-Token"))
-    }
-
     func testEveryCallCarriesTheToken() async throws {
         let t = Scripted()
         t.on("GET /api/me", "{\"role\": \"watch\", \"name\": \"Lab tablet\", \"lab\": \"Cryostat lab\"}")
@@ -75,27 +66,16 @@ final class ClientTests: XCTestCase {
 
     func testKelvinsRefusalsInWords() async {
         let t = Scripted()
-        t.on("POST /api/pair", 403, "{\"error\": \"That code is wrong or has expired.\"}")
         t.on("GET /api/state", 401, "{\"error\": \"Nobody is signed in to Kelvin on its computer now.\", \"signin\": true}")
         t.on("GET /api/chats", 403, "{\"error\": \"A watch device cannot do that. Use the Kelvin computer.\"}")
         t.on("GET /api/runs", 401, "{\"error\": \"This device is not paired with Kelvin, or was removed.\"}")
-        let fresh = KelvinClient(base: base, token: nil, transport: t)
         let paired = KelvinClient(base: base, token: "tok", transport: t)
-        await assertFails(.forbidden, "That code is wrong or has expired.") { _ = try await fresh.pair(code: "000000") }
         await assertFails(.signedOut, "Nobody is signed in to Kelvin on its computer now.") { _ = try await paired.state() }
         await assertFails(.forbidden, "A watch device cannot do that. Use the Kelvin computer.") { _ = try await paired.chats() }
-        await assertFails(.unpaired, "This phone is no longer paired with Kelvin. Pair it again.") { _ = try await paired.runs() }
+        await assertFails(.unpaired, "Kelvin there no longer knows this phone.") { _ = try await paired.runs() }
         t.unreachable = ["192.168.1.50"]
         await assertFails(.unreachable, "Can't reach Kelvin at 192.168.1.50: it did not answer in time.") {
             _ = try await paired.state()
-        }
-    }
-
-    func testAPairingLockIsNotAWrongCode() async {
-        let t = Scripted()
-        t.on("POST /api/pair", 429, "{\"error\": \"Too many wrong codes. Pairing is locked for a few minutes.\"}")
-        await assertFails(.locked, "Too many wrong codes. Pairing is locked for a few minutes.") {
-            _ = try await KelvinClient(base: self.base, token: nil, transport: t).pair(code: "111111")
         }
     }
 

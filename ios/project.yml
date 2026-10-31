@@ -51,7 +51,6 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        NSCameraUsageDescription: Kelvin scans the pairing code that the Kelvin computer shows.
         NSLocalNetworkUsageDescription: Kelvin connects to the Kelvin computer in your lab over the local network.
         NSMicrophoneUsageDescription: Kelvin listens only while the microphone button is on, to turn what you say into a message.
         NSSpeechRecognitionUsageDescription: What you say is turned into text on this iPhone; the audio is not sent anywhere.

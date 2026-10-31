@@ -99,14 +99,25 @@ struct ProblemRow: View {
                     .font(.footnote).foregroundStyle(.secondary)
             case .unreachable:
                 Text("Kelvin tries every address it knows for this computer, the one that worked last first. Away from "
-                     + "the lab, switch on Tailscale.")
+                     + "the lab, your Kelvin account reaches it when Kelvin there is signed in with it.")
                     .font(.footnote).foregroundStyle(.secondary)
+                if app.account == nil {
+                    Button("Sign in with your Kelvin account") { app.signingIn = true }
+                        .buttonStyle(.bordered)
+                }
             case .unpaired where session.computer.viaAccount:
                 Button("Sign in again") { app.signingIn = true }
                     .buttonStyle(.bordered)
-            case .unpaired:
-                Button("Pair again") { app.pairing = true }
+            case .unpaired:   // a computer paired by an app before 0.1.8 that forgot this phone
+                if app.account == nil {
+                    Button("Sign in with your Kelvin account") { app.signingIn = true }
+                        .buttonStyle(.bordered)
+                } else {
+                    Button("Remove from this phone", role: .destructive) {
+                        Task { await app.remove(session.computer) }
+                    }
                     .buttonStyle(.bordered)
+                }
             default:
                 EmptyView()
             }

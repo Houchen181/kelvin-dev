@@ -1,13 +1,12 @@
 import Foundation
 import KelvinKit
 
-/// The computers this phone works with (paired, or through the Kelvin account) and which one the app shows.
+/// The computers this phone works with (through the Kelvin account, or paired by an app before 0.1.8) and which one
+/// the app shows.
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var list: ComputerList
-    @Published var pairing = false
     @Published var signingIn = false
-    var signInNext = false      // pairing gave way to the Kelvin account: its sheet opens once pairing's has gone
     @Published private(set) var account: Account?
     @Published private(set) var kelvins: [HubKelvin] = []     // the account's, as the hub last listed them
     /// The name this phone writes under in team chats: each person their own, also on an account people share.
@@ -147,35 +146,6 @@ final class AppModel: ObservableObject {
     func select(_ id: UUID) {
         list.selected = id
         save()
-    }
-
-    /// Offer the pairing code, keep the token, and learn the computer's name and other addresses.
-    @discardableResult
-    func pair(at base: URL, code: String) async throws -> Computer {
-        try await pair(at: [base], code: code)
-    }
-
-    /// Pair at the first of `addresses` that answers (a pairing code holds every address Kelvin has).
-    @discardableResult
-    func pair(at addresses: [URL], code: String) async throws -> Computer {
-        let (client, result) = try await reach(addresses, token: nil, transport: transport, timeout: 8) {
-            try await $0.pair(code: code)
-        }
-        let base = client.base
-        var c = Computer(lab: base.host ?? "Kelvin", phoneName: result.name, role: result.role,
-                         addresses: [base] + addresses.filter { $0 != base })
-        tokens.save(result.token, for: c.id)
-        if let me = try? await KelvinClient(base: base, token: result.token, transport: transport).me() {
-            c.update(with: me, used: base)
-        }
-        if let old = list.add(c) {
-            tokens.delete(old)
-            sessions[old]?.pause()
-            sessions[old] = nil
-        }
-        save()
-        Notifier.shared.ask()
-        return c
     }
 
     /// A direct token a Kelvin gave this phone through the hub.
@@ -322,7 +292,7 @@ final class LabSession: ObservableObject {
         if let client { return client }
         if let relay = computer.relayBase { return try await readyThroughAccount(relay) }
         guard let token = tokens.token(for: computer.id) else {
-            throw KelvinError(.unpaired, "This phone is not paired with \(computer.lab) any more. Pair it again.")
+            throw KelvinError(.unpaired, "Kelvin on \(computer.lab) no longer knows this phone.")
         }
         let reached: (KelvinClient, Me)
         do {

@@ -106,9 +106,10 @@ public struct ComputerList: Codable, Equatable, Sendable {
         computers.first { $0.id == selected } ?? computers.first
     }
 
-    /// A new pairing. Pairing the same computer again replaces the old pairing, whose token is then useless: the same
-    /// computer by its name, wherever it is now (a laptop has another address on another network), or, when Kelvin
-    /// didn't say its name, by an address in common. Returns the id it replaced, if any, so its token can be deleted.
+    /// A computer added on this phone: the demo lab, or (before app 0.1.8) a pairing. The same computer again replaces
+    /// the old one, whose token is then useless: the same computer by its name, wherever it is now (a laptop has
+    /// another address on another network), or, when Kelvin didn't say its name, by an address in common. Returns the
+    /// id it replaced, if any, so its token can be deleted.
     @discardableResult
     public mutating func add(_ c: Computer) -> UUID? {
         let old = computers.firstIndex { o in

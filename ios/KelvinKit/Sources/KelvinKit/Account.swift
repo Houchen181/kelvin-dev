@@ -5,7 +5,7 @@ import FoundationNetworking
 
 // A Kelvin account on the Kelvin hub (hub/relay.py, Kelvin 0.3.19 and later): the same email and password as on the
 // lab's Kelvin computers. Signed in, the phone reaches every Kelvin where that account is signed in, through the hub,
-// with no pairing; directly too, on the lab network or through Tailscale, once a Kelvin gives it a token for that.
+// and directly too, on the lab network or through Tailscale, once a Kelvin gives it a token for that.
 
 /// The account this phone is signed in to. Nothing secret: the hub's token for this phone is in the Keychain.
 public struct Account: Codable, Equatable, Sendable {

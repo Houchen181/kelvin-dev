@@ -2,7 +2,7 @@ import KelvinKit
 import SwiftUI
 
 /// Sign in with the Kelvin account: the same email and password as on the lab's Kelvin computers. The phone then
-/// reaches each of them through the Kelvin hub, with no pairing.
+/// reaches each of them: directly on the lab network, through the Kelvin hub elsewhere.
 struct AccountView: View {
     @EnvironmentObject var app: AppModel
     @Environment(\.dismiss) var dismiss
@@ -170,7 +170,7 @@ struct AccountSection: View {
                     Label("Sign in with your Kelvin account", systemImage: "person.crop.circle")
                 }
             } footer: {
-                Text("No pairing: your phone reaches every Kelvin where you are signed in with that account.")
+                Text("Your phone reaches every Kelvin where you are signed in with that account, from any network.")
             }
         }
     }
