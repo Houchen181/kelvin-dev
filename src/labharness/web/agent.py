@@ -1017,8 +1017,8 @@ class ChatAgent:
                             "what is mounted (Lab panel)" % now.get("device_name")), True
                 ref = str(args.get("device") or "").strip()
                 if not ref:
-                    self.runtime.unmount(by="agent")
-                    return "nothing is mounted now; scans are filed under the project only", False
+                    ended = self.runtime.unmount(by="agent") or []   # the watches made for the sample that was
+                    return "\n".join(["nothing is mounted now; scans are filed under the project only"] + ended), False
                 d = self.store.find_device(pid, ref)
                 m = self.runtime.mount(pid, d, by="agent")
                 lines = ["mounted %s (%s); every scan from now on is filed under it" % (m["device_name"],
@@ -1026,7 +1026,7 @@ class ChatAgent:
                 prot = protection_summary(d.get("protection") or {}, self.runtime.lab)
                 if prot:
                     lines.append("its protection holds (a person set it): " + "; ".join(prot))
-                lines += m.get("caps") or []
+                lines += (m.get("caps") or []) + (m.get("watches") or [])
                 return "\n".join(lines), False
             devices = self.store.devices(pid)
             m = self.runtime.mounted

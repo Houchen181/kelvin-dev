@@ -1531,6 +1531,8 @@
     showProtection(m);
     const key = m ? JSON.stringify([m.project || null, m.device]) : "";
     $("mount-summary").textContent = m ? m.device_name + " · " + m.project_name : "nothing mounted";
+    $("watch-sample-row").hidden = !m;   // a new watch is the sample's (it ends when the sample is taken out) unless unticked
+    if (m) $("watch-sample-name").textContent = "Only while " + m.device_name + " is mounted";
     if (key === MOUNT.key) return;
     const sel = $("mount-select");
     if ([...sel.options].some((o) => o.value === key)) sel.value = key;
@@ -1544,8 +1546,11 @@
   async function mountChosen() {
     const v = $("mount-select").value;
     const [project, device] = v ? JSON.parse(v) : [null, null];
-    try { const r = await api("/api/mount", { body: device ? { project, device } : {} }); MOUNT.key = "x"; showMounted(r.mounted); }
-    catch (e) { toast(e.message); }
+    try {
+      const r = await api("/api/mount", { body: device ? { project, device } : {} });
+      MOUNT.key = "x"; showMounted(r.mounted);
+      if ((r.watches || []).length) toast(r.watches.join(" "));   // the watches made for the sample taken out ended
+    } catch (e) { toast(e.message); }
   }
   async function newDevice() {
     const chat = S.chats.find((c) => c.id === S.chatId);
@@ -3930,17 +3935,33 @@
       ...i.lines.map((l) => h("span", {}, l))),
       on ? act("Bring the outputs to safe", "safe", true) : null, act("Dismiss", "dismiss", false));
   }
+  const hhmm = (t) => (t ? new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "");
+  function alarmWhen(a) {   // "02:13" or "3 times, last 02:20", and when it cleared
+    return (a.count > 1 ? a.count + " times, last " + hhmm(a.last) : hhmm(a.raised))
+      + (a.cleared ? " · cleared " + hhmm(a.cleared) + (a.cleared_text ? ": " + a.cleared_text : "") : "");
+  }
   function renderAlerts(alarms, incident) {
-    const live = (alarms || []).filter((a) => !a.cleared && !a.acknowledged);
+    // every alarm until a person says Got it: one that cleared while nobody looked (overnight) stays, marked cleared
+    const open = (alarms || []).filter((a) => !a.acknowledged);
     const box = $("alerts");
-    box.hidden = !live.length && !incident;
-    box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...live.map((a) => {
+    box.hidden = !open.length && !incident;
+    box.replaceChildren(...(incident ? [incidentCard(incident)] : []), ...open.map((a) => {
       const ok = h("button", { class: "btn small", type: "button" }, "Got it");
       ok.addEventListener("click", async () => { try { await api("/api/alarms/" + a.id + "/ack", { body: {} }); } catch (e) { /* gone */ } pollState(); });
-      return h("div", { class: "alert" }, icon("warn"), h("div", { class: "alert-body" }, h("b", {}, a.text),
-        a.actions.length ? h("span", {}, "Kelvin " + a.actions.join("; ")) : null), ok);
+      return h("div", { class: "alert" + (a.cleared ? " cleared" : "") }, icon("warn"), h("div", { class: "alert-body" }, h("b", {}, a.text),
+        a.actions.length ? h("span", {}, "Kelvin " + a.actions.join("; ")) : null, h("span", { class: "alert-when" }, alarmWhen(a))), ok);
     }));
-    document.title = (live.length || incident ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
+    document.title = (open.length || incident ? "(!) " : "") + document.title.replace(/^\(!\) /, "");
+    renderAlarmHistory(alarms || []);
+  }
+  function renderAlarmHistory(alarms) {   // the Lab panel: each alarm with when it went up, cleared, and who said Got it
+    $("alarm-history").hidden = !alarms.length;
+    const sig = JSON.stringify(alarms.map((a) => [a.id, a.count, a.cleared, a.acknowledged]));
+    if (sig === S.alarmsShown) return;   // redrawn only when it changes
+    S.alarmsShown = sig;
+    $("alarm-history-list").replaceChildren(...alarms.map((a) => h("li", {}, h("b", {}, a.text),
+      h("span", {}, alarmWhen(a) + " · " + (a.acknowledged ? "Got it: " + (a.acknowledged_by || "a person")
+        + (a.acknowledged_at ? " " + hhmm(a.acknowledged_at) : "") : "nobody has said Got it yet")))));
   }
   function notifySystem(notices) {
     if (!notices || !notices.length) return;
@@ -3984,7 +4005,8 @@
   }
   async function addWatch(e) {
     e.preventDefault();
-    const body = { key: $("watch-key").value, above: $("watch-above").value, below: $("watch-below").value, for_s: $("watch-for").value };
+    const body = { key: $("watch-key").value, above: $("watch-above").value, below: $("watch-below").value, for_s: $("watch-for").value,
+      lab_wide: !$("watch-sample").checked };
     try {
       await api("/api/watches", { body });
       $("watch-form").reset(); $("watch-form").hidden = true;

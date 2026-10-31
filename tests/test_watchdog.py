@@ -101,13 +101,17 @@ def test_a_heater_range_too_low_for_its_set_point_alarms(lab, tmp_path):
     run_for(lab, monitor, 9 * 60, step=15)
     alarm = monitor.alarms[0]
     assert alarm.kind == "stall" and "tc.T_sample has not got closer to 40 K" in alarm.text
+    assert "tc.heater_range is only low: a higher range may be needed" in alarm.text   # the likely cause, not "stuck"
     t0 = lab.clock.now()
     r = gate.set("tc", "setpoint", 30)                     # a wait for it now ends instead of taking 30 min
     assert not r.ok and "T_sample has not got closer to 30 K for 10.0 min" in r.message
+    assert "tc.heater_range is only low: a higher range may be needed" in r.message and "stuck" not in r.message
     assert lab.clock.now() - t0 < 11 * 60
-    assert len([a for a in monitor.alarms if a.cleared is None]) == 1
+    gave_up = monitor.alarms[0]                            # the wait that gave up is an alarm of its own, kept
+    assert gave_up.kind == "stall" and gave_up.latched and "30 K" in gave_up.text and gave_up.cleared is None
     run_for(lab, monitor, 30)
     assert alarm.cleared and "new set point" in notices[-1][1]   # 30 K is another set point: followed afresh
+    assert gave_up.cleared is None                               # until a person says Got it
 
 
 def test_a_set_point_whose_switch_is_off_is_not_a_stall(lab, tmp_path):
@@ -134,10 +138,11 @@ def test_a_stalled_move_away_from_safe_is_held_where_it_got_to(lab, tmp_path, mo
     assert gate.set("magnet", "rate", 0.05).ok            # 20 min to 1 T: a stall ends the wait before its time does
     r = gate.set("magnet", "B", 1)
     assert not r.ok and "B_actual has not got closer to 1 T for 10.0 min" in r.message
-    assert "held at 300 mT" in r.message and lab.read("magnet", "B") == pytest.approx(0.3, abs=0.01)
+    assert "magnet.B set back to 300 mT, where B_actual is, not 1 T" in r.message
+    assert lab.read("magnet", "B") == pytest.approx(0.3, abs=0.01)
     assert gate.set("magnet", "B", 0).ok and gate.set("magnet", "rate", 0.2).ok   # 5 min to 1 T: its time is up first
     r = gate.set("magnet", "B", 1)
-    assert not r.ok and "B_actual is 300 mT after 8.5 min (target 1 T); held at 300 mT" in r.message
+    assert not r.ok and "B_actual is 300 mT after 8.5 min (target 1 T); magnet.B set back to 300 mT" in r.message
     assert lab.read("magnet", "B") == pytest.approx(0.3, abs=0.01)
 
 

@@ -175,7 +175,7 @@ def test_kelvin_watch_tools(runtime):
     assert "[agent, ok]" in listed and "[lab, ok]" in listed
     assert refused.startswith("not removed") and "lab config" in refused
     assert unknown.startswith("not watched")
-    mine = added.rsplit("id ", 1)[1].rstrip(")")
+    mine = added.split("(id ", 1)[1].split(")")[0]
     assert call(runtime, ("unwatch", {"watch_id": mine}))[0] == "no longer watching (%s)" % mine
 
 

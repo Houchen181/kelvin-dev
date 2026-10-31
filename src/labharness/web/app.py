@@ -408,7 +408,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                                        heartbeat=settings.get("heartbeat"), heartbeat_s=settings.heartbeat_s)
         except ValueError:
             runtime.notifier.configure(None, settings.notify_kinds)
-        runtime.notifier.phones = lambda: bool(settings.devices)   # a paired phone sees requests and alarms
+        runtime.notifier.phones = lambda: len(settings.devices)   # a paired phone sees requests and alarms
         if hasattr(runtime.approver, "escalate_s"):   # a request nobody answered here waits this long for the phone
             runtime.approver.escalate_s = settings.approval_wait_s
         from ..notify import email_from   # where the lab owner hears of safety changes, whoever is signed in
@@ -1602,8 +1602,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def mount_view(request: Request) -> Response:
         """GET: the mounted sample and every project's devices to choose from. POST {project, device} mounts one
-        (a person's choice); POST {} records that nothing is mounted."""
+        (a person's choice); POST {} records that nothing is mounted. watches: the watches made for the sample taken
+        out, which ended with it, in words."""
         caps: List[str] = []
+        ended: List[str] = []
         if request.method == "POST":
             body = await request.json()
             pid = body.get("project") or None
@@ -1613,16 +1615,16 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                     return refused
             try:
                 if body.get("device"):
-                    caps = (await asyncio.to_thread(runtime.mount, pid, store.find_device(pid, body["device"]),
-                                                    "human")).get("caps") or []
+                    m = await asyncio.to_thread(runtime.mount, pid, store.find_device(pid, body["device"]), "human")
+                    caps, ended = m.get("caps") or [], m.get("watches") or []
                 else:
-                    await asyncio.to_thread(runtime.unmount, "human")
+                    ended = await asyncio.to_thread(runtime.unmount, "human") or []
             except KeyError as e:
                 return error(404, e.args[0])
         choices = [{"project": None, "name": "General", "devices": store.devices(None)}] + \
             [{"project": p["id"], "name": p["name"], "devices": p.get("devices") or []} for p in store.projects()]
         return JSONResponse({"mounted": runtime.mounted_view(), "choices": choices, "caps": caps,
-                             "hands_on": runtime.hands})
+                             "hands_on": runtime.hands, "watches": ended})
 
     async def reports_tree(request: Request) -> Response:
         return JSONResponse(dict(runtime.reports_tree(), folder=str(runtime.reports_dir)))
@@ -2298,7 +2300,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     # ------------------------------------------------------------------ watches, alarms, notifications
 
     async def watches_view(request: Request) -> Response:
-        """GET: watches and recent alarms. POST {key, above, below, for_s, note}: a person adds a watch."""
+        """GET: watches and recent alarms. POST {key, above, below, for_s, note, lab_wide}: a person adds a watch (the
+        mounted sample's, ending when it is taken out, unless lab_wide)."""
         if request.method == "POST":
             body = await request.json()
 
@@ -2307,13 +2310,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 return None if v in (None, "") else float(v)
             try:
                 view = runtime.add_watch(str(body.get("key") or ""), num("above"), num("below"), num("for_s") or 0.0,
-                                         str(body.get("note") or ""), source="person")
+                                         str(body.get("note") or ""), source="person",
+                                         lab_wide=bool(body.get("lab_wide")))
             except KeyError as e:
                 return error(404, e.args[0] if e.args else "no such reading")
             except (TypeError, ValueError) as e:
                 return error(400, str(e))
             return JSONResponse(view)
-        return JSONResponse({"watches": runtime.monitor.list(), "alarms": [a.view() for a in runtime.monitor.alarms[:20]]})
+        return JSONResponse({"watches": runtime.monitor.list(), "alarms": runtime.alarms_view()})
 
     async def watch_view(request: Request) -> Response:
         try:
@@ -2325,7 +2329,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"ok": True})
 
     async def alarm_ack(request: Request) -> Response:
-        ok = runtime.monitor.acknowledge(request.path_params["alarm_id"])
+        """A person's Got it, from the portal or a phone: kept with the alarm and in the record, with who and where."""
+        ok = runtime.acknowledge_alarm(request.path_params["alarm_id"], person(request), *channel(request))
         return JSONResponse({"ok": ok}, status_code=200 if ok else 404)
 
     def lab_memory_now(said: str = "") -> Dict[str, Any]:
@@ -3251,14 +3256,22 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return Viewer()
 
     async def stop_run(request: Request) -> Response:
+        """Stop the run in progress. {queue: true}: the queue too, nothing else starts after this scan. With no run in
+        progress while the queue runs (between its scans: a step's wait or settle), the queue's stop: a phone's Stop
+        there did nothing, and the queue went on to the next scan."""
         try:
             body = await request.json()
         except ValueError:
             body = {}
-        if isinstance(body, dict) and body.get("queue"):   # the queue too: nothing else starts after this scan
+        if isinstance(body, dict) and body.get("queue"):
             runtime.stop(person(request))
             return JSONResponse({"ok": True})
-        return JSONResponse({"ok": runtime.stop_run(person(request))})
+        if runtime.stop_run(person(request)):
+            return JSONResponse({"ok": True})
+        if runtime.queue.state in ("running", "pausing"):   # between its scans
+            runtime.stop(person(request))
+            return JSONResponse({"ok": True})
+        return JSONResponse({"ok": False})
 
     async def queue(request: Request) -> Response:
         """GET: the scan queue. POST {op, ...}: a person's change to it. start asks for the queue's approval as usual

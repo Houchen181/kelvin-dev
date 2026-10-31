@@ -63,6 +63,10 @@ class Lab:
         self.clock = clock
         self.stops = Stops()   # a person's stop, which every long wait (and instrument wait) watches
         self.world = world
+        # how long readings and changes take in this lab, as its runs measured them (timing.Timing; the runtime sets
+        # it). A twin has none of its own: it is paced at the real lab's (pace), so dry runs and cards agree
+        self.timing: Any = None
+        self.pace: Any = None
         self._factory = backend_factory
         self._parked: Dict[str, Any] = {}   # connections set aside unclosed when switched off (closing would send)
         off = set(switched_off(config.name)) if switched_off else set()
@@ -310,6 +314,7 @@ class Lab:
         world = World(clock, seed)
         off = set(self.switched_off) | set(self.unavailable)
         twin = Lab(self.config, self.registry, sim_backend_factory(world), clock, world, lambda _: off)
+        twin.pace = self.timing or self.pace   # readings and steps take what they take in this lab (timing.py)
         for name, inst in self.instruments.items():
             if name in off:
                 continue

@@ -65,7 +65,8 @@ You are connected to a physics lab through Kelvin.
   its reading gets there: in set_value, in a plan's setup: and at each value of a stepped sweep, and nothing is
   measured on the way (a 300 K to 2 K cool-down holds the run half an hour or more). To measure while it ramps
   (R(T) on a cool-down, a field sweep), sweep it with ramp: (validate_plan shows the form); to stop a loop on a
-  reading, until: or while:. A wait whose reading stops getting closer ends after 10 min, and an alarm says so.
+  reading, until: or while:. A wait whose reading stops getting closer ends after 10 min, and an alarm says so; a
+  set point whose switch is off (a heater range at off) isn't waited for, and the result says which switch.
 - Units are the ones describe_instrument shows. Call describe_instrument before using an instrument for the first time.
 - The lab's memory keeps what people and Kelvin learned about this lab, for every chat and agent: how it is wired,
   where references come from, what excites the sample, lessons (what to do first, what to avoid), each note with who
@@ -84,8 +85,10 @@ You are connected to a physics lab through Kelvin.
 - What only a person does in Kelvin (approving, changing limits, reviewing an instrument Kelvin added or a draft
   card, protecting a device, switching an instrument on) happens in Kelvin's portal. Tell them exactly where: look
   it up with kelvin_help, never guess a menu or a button.
-- Before a long or unattended run, offer to watch the readings that matter (watch); alarms reach the user even when
-  they are away. lab_status lists active alarms; mention any you see.
+- Before a long or unattended run, offer to watch the readings that matter (watch). Alarms show in Kelvin's portal;
+  they reach the person away from the computer only through what is set up (a paired phone, email, a webhook):
+  watch and queue_start say what is, so promise no more. lab_status lists alarms that are on, and those that went up
+  while nobody looked; mention any you see.
 - To plan an experiment, first look at what is known: search_papers, read the most relevant one or two, then
   propose parameters with reasons and cite them as [Author Year](url). Never invent a reference or a number.
   For a standard measurement (R(T), Hall, gate sweeps, I-V, ODMR, FMR...), experiment_guide has the procedure,
@@ -361,14 +364,17 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def watch(reading: str, above: Optional[float] = None, below: Optional[float] = None, for_seconds: float = 0,
-              note: str = "") -> str:
+              note: str = "", lab_wide: bool = False) -> str:
         """Watch a reading (e.g. tc.T_A) and alert the user when it goes above/below a value for `for_seconds`.
-        Only reads and notifies; watches written in the lab config may also act. Returns the watch id."""
+        Only reads and notifies; watches written in the lab config may also act. Made while a sample is mounted, it is
+        that sample's and ends when the sample is taken out; lab_wide: true keeps it (a cryostat's helium). Returns the
+        watch id, and where alarms reach people."""
         try:
-            v = rt.add_watch(reading, above, below, for_seconds, note, source="agent")
+            v = rt.add_watch(reading, above, below, for_seconds, note, source="agent", lab_wide=bool(lab_wide))
         except (KeyError, ValueError) as e:
             return "not watched: %s" % (e.args[0] if e.args else e)
-        return "watching %s (id %s)" % (v["rule"], v["id"])
+        return "watching %s (id %s%s); %s" % (v["rule"], v["id"], ", ends when %s is taken out" % v["device"]
+                                              if v.get("device") else "", rt.alarms_reach())
 
     @server.tool(annotations=READ, structured_output=False)
     def watches() -> str:

@@ -101,7 +101,10 @@ def test_watches_and_the_alarm_history_outlast_a_restart(tmp_path):
     before.monitor.tick()
     assert [a.text for a in before.monitor.active()] == ["smu.V = 1 V is above 0.5 V"]
     before.remove_watch(w["id"])                                  # removed: not back after the restart
+    assert before.monitor.active() == []                          # nor its alarm, which once came back as "on"
+    assert "no longer watched" in before.monitor.alarms[0].cleared_text
     before.add_watch("smu.V", above=0.5, source="agent")
+    before.monitor.tick()                                         # the new watch alarms of its own
     saved = json.loads((data / "watches.json").read_text(encoding="utf-8"))
     assert len(saved["labs"][lab.config.name]) == 2
 

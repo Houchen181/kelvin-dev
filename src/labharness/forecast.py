@@ -9,6 +9,11 @@ before saying yes. Its duration counts ramps, settling and waits; what it can't 
 tell, a stabilize that may wait longer, readings that take their own time, a reading taken again after a fault) the
 card says, and so does what may end the run sooner (until: and while:), which makes its time the most it takes.
 
+Its time counts what this lab takes (timing.py), the same as a dry run does: each point's readings, as this lab's
+runs measured them at the settings the run uses (else as the instrument's twin takes them: a counter's integration, a
+VNA's sweep), and what recording a point takes; each step of a ramp beyond its dwell (the guard readings, the checks),
+and a set that isn't ramped. Cards said "81 points, ~8 s" for 3.6 min, and ~29 s for a queue its dry run took ~6.8 min.
+
 A ramp: sweep (plans.py) is walked as the engine runs it: each leg sets its rate (when it gives one) and its target
 without waiting, then measures every `every` seconds until the reading gets there, and hold: seconds more. A leg takes
 |Δ|/rate + hold, at the leg's rate, else the rate as the run has set it by then, else as the instrument reads now; it
@@ -21,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .gate import _dur, _same
+from .timing import away as away_from_safe, modeled_read_s, steps as timing_steps
 
 # what a plan step that names one of the card's actions says: run it, once (a waveform started, a stage homed)
 RUN_WORDS = {"run", "start", "do", "go", "yes", "on", "true", "1"}
@@ -186,6 +192,8 @@ class Forecast:
         self._on_stop: Dict[str, List[Any]] = {}   # the settings plans' on_abort make after a stop (a queue covers them)
         self._rates: Dict[str, List[Tuple[str, str]]] = {}   # each instrument-ramped key's rates: (shown, from where)
         self._name = "the plan"                 # the plan being walked
+        # how long readings and steps take in this lab (timing.py): a twin's lab is paced at the real lab's
+        self.timing = getattr(self.lab, "timing", None) or getattr(self.lab, "pace", None)
 
     # ------------------------------------------------------------------ the walk
 
@@ -215,12 +223,14 @@ class Forecast:
 
     def travel(self, inst: Any, spec: Any, a: Any, b: Any) -> Tuple[float, bool]:
         """Seconds to move a drive or setting from a to b as the gate does (ramped at the lab's rate, or followed while
-        the instrument moves it at its own), and whether Kelvin could count them. 0 for a switch or a choice."""
+        the instrument moves it at its own), and whether Kelvin could count them, with what each step takes in this
+        lab beyond its dwell (a power ramp took 9 times its |change|/rate, a guard read at each step). 0 for a switch
+        or a choice."""
         if not spec.numeric or b is None or (a is not None and _same(spec, a, b)):
             return 0.0, True
         if spec.ramp == "gate":
-            rate = inst.rate(spec.name)
-            return (abs(b - a) / rate if rate and a is not None else 0.0), True
+            n, dwell = timing_steps(inst, spec, a, b)
+            return dwell + n * self._step_s(inst, spec, a, b), True
         if spec.ramp == "instrument":
             rate, shown, source = self._rate_parts(inst, spec)
             if rate and a is not None:
@@ -229,7 +239,35 @@ class Forecast:
                     moves.append((shown, source))
                 return abs(b - a) / rate, True
             return 0.0, False
-        return 0.0, True
+        return timing_steps(inst, spec, a, b)[0] * self._step_s(inst, spec, a, b), True
+
+    def _step_s(self, inst: Any, spec: Any, a: Any, b: Any) -> float:
+        """What a step from a toward b takes in this lab beyond its dwell (away from safe, its guard readings too)."""
+        if self.timing is None:
+            return 0.0
+        return self.timing.step_s("%s.%s" % (inst.name, spec.name), away_from_safe(spec, a, b))
+
+    def read_s(self, key: str) -> Optional[float]:
+        """Seconds one reading of key (instr.param, or a card's action at each point) takes: as this lab's runs took it
+        at the settings the run has by then, else as its instrument's twin takes it with them; None when neither
+        tells."""
+        instr, _, name = key.partition(".")
+        inst = self.lab.instruments.get(instr)
+        if inst is None:
+            return None
+
+        def setting(param: str) -> Any:
+            k = "%s.%s" % (instr, param)
+            return self.now[k] if k in self.set_by else inst._last.get(param)
+        if self.timing is not None:
+            seconds = self.timing.read_s(key, setting)
+            if seconds is not None:
+                return seconds
+        if name not in inst.card.params:
+            return None
+        state = dict(getattr(inst.backend, "state", None) or inst._last)
+        state.update({k.split(".", 1)[1]: self.now[k] for k in self.set_by if k.split(".", 1)[0] == instr})
+        return modeled_read_s(inst, name, state)
 
     def _note(self, key: str) -> None:
         if key not in self.order:
@@ -335,16 +373,33 @@ class Forecast:
             self.retries.append("readings taken again after a fault (%sretry: up to %d time%s, %s apart)" % (
                 "" if self.who == "the plan" else self._name + "'s ", retry.times, "" if retry.times == 1 else "s",
                 _dur(retry.wait)))
+        self._readings(plan)
         for step in plan.after:
             self._step(step.instr, step.param, step.value, "after")
         self._after_a_stop(plan)
-        for instr, param in plan.measure:
-            try:
-                spec = self.lab.resolve("%s.%s" % (instr, param))[1]
-            except KeyError:
+
+    def _readings(self, plan: Any) -> None:
+        """Each point's readings and its recording, times its points, into the time: each reading as long as read_s
+        says. A ramp: sweep measures while it ramps, in the ramp's time. A reading that takes its own time (a trace,
+        a frame, an acquisition) that neither this lab's runs nor a twin times is said instead: not in the time."""
+        keys = ["%s.%s" % m for m in plan.measure] + ["%s.%s" % t for t in getattr(plan, "trigger", None) or []]
+        followed = self.engine.followed(plan.ramp) if plan.ramp is not None else None
+        if followed and followed not in keys:
+            keys.insert(0, followed)
+        each = 0.0
+        for key in keys:
+            seconds = self.read_s(key)
+            if seconds is not None:
+                each += seconds
                 continue
+            try:
+                spec = self.lab.resolve(key)[1]
+            except KeyError:
+                continue   # a card's action: no time of its own known
             if spec.type in ("trace", "image") or spec.acquires or spec.get_before:
-                self.slow_reads.append("%s.%s" % (instr, param))
+                self.slow_reads.append(key)
+        if plan.ramp is None:
+            self.seconds += plan.points * (each + (self.timing.point_s() if self.timing is not None else 0.0))
 
     def _after_a_stop(self, plan: Any) -> None:
         """The settings a plan's on_abort makes after a stop (its drives are a queue's whole path already): kept apart
