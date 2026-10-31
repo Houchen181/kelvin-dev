@@ -6,9 +6,11 @@ text (scripts, notes, data); a file it replaces is kept first, in .kelvin-old be
 
 Kelvin's own folders are never reached this way, wherever the person put the chat's folder (off_limits): Kelvin's
 folder holds the lab config, the settings, the accounts, the cards and everyone's chats, which a model that could
-rewrite them would use to change its own limits and approvals; and the lab's records in the data folder are Kelvin's
-alone to write. Nor are files that hold sign-ins, keys or tokens, wherever they are (secret): SSH and cloud keys,
-.env files, other programs' sign-ins."""
+rewrite them would use to change its own limits and approvals; and the data folder holds everyone's runs and the lab's
+records, which Kelvin's run tools read for a chat (leaving out work it may not see) and whose records Kelvin alone
+writes. Nor are a run of unshared work the chat may not see, wherever it is kept (a chat's folder keeps its runs), and
+files that hold sign-ins, keys or tokens, wherever they are (secret): SSH and cloud keys, .env files, other programs'
+sign-ins."""
 from __future__ import annotations
 
 import io
@@ -18,7 +20,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Tuple
 
 MAX_CHARS = 12000              # of text in one read; start= reads on
 MAX_PDF_PAGES = 20             # pages a model sees whole at once: each costs about as much as a picture
@@ -90,19 +92,47 @@ def secret(path: Path) -> bool:
             or any(w in name for w in SECRET_WORDS))
 
 
-def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: bool = False) -> Optional[str]:
+def run_of(path: Path) -> Optional[Path]:
+    """The folder of the Kelvin run that path is, or is in (None: none): a run's folder is named by its id and holds
+    its record."""
+    from . import rundata
+    from .eventlog import RUN_NAME
+    path = Path(path)
+    for p in [path] + list(path.parents):
+        try:
+            if RUN_NAME.match(p.name) and rundata.is_run(p):
+                return p
+        except OSError:
+            continue
+    return None
+
+
+def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: bool = False,
+               unseen: Optional[Callable[[Path], bool]] = None) -> Optional[str]:
     """Why Kelvin's AI may not reach target through a chat's folder (None: it may). own: Kelvin's own folders (its
     folder, with the lab config, settings, accounts, cards and everyone's chats; the signed-in person's chats), never
     read or written this way; nor is a file that may hold sign-ins, keys or tokens (secret). data: the data folder,
-    whose records (RECORDS) only Kelvin itself writes; a run's record and run.h5 are Kelvin's wherever the run is."""
+    with everyone's runs and the lab's records: never read this way (Kelvin's run tools read runs, leaving out work
+    the chat may not see), and its records (RECORDS) only Kelvin itself writes; a run's record and run.h5 are
+    Kelvin's wherever the run is. unseen: whether a Kelvin run (its folder) is unshared work the chat may not see,
+    which it never reaches wherever it is kept."""
+    verb = "saves" if saving else "reads"
     folder = mine(target, own)
     if folder is not None:
         return ("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, the "
                 "instrument cards and everyone's chats: Kelvin's AI never %s there. Choose a folder for this "
-                "chat outside it" % (target, folder, "saves" if saving else "reads"))
+                "chat outside it" % (target, folder, verb))
     if secret(target):
         return ("%s may hold sign-ins, keys or tokens (a password file, an SSH or cloud key, a .env file, another "
-                "program's sign-in): Kelvin's AI never %s such files" % (target, "saves" if saving else "reads"))
+                "program's sign-in): Kelvin's AI never %s such files" % (target, verb))
+    if data is not None and not saving and _within(target, data):
+        return ("%s is in Kelvin's data folder (%s), which holds everyone's runs and the lab's records: Kelvin's AI "
+                "never reads there through a chat's folder (describe_run and get_run_data read runs). Choose a folder "
+                "for this chat outside it" % (target, Path(data)))
+    run = run_of(target) if unseen is not None else None
+    if run is not None and unseen(run):
+        return ("that is in a Kelvin run of unshared work (another chat's, or a project's this chat is not in): "
+                "Kelvin's AI never %s there" % verb)
     name = target.name.lower()
     if saving and name in RECORDS and (name in ("run.h5", "record.bin") or data is None or _within(target, data)):
         return ("%s is one of the lab's records (the event log, the mounted sample's protection, the queue, the "
@@ -110,28 +140,30 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
     return None
 
 
-def inside(folder: Any, path: Any = "", saving: bool = False, own: Iterable[Any] = (), data: Any = None) -> Path:
+def inside(folder: Any, path: Any = "", saving: bool = False, own: Iterable[Any] = (), data: Any = None,
+           unseen: Optional[Callable[[Path], bool]] = None) -> Path:
     """path (relative to the chat's folder, or in full) as a path in that folder; FolderError if it leads out, or to
-    Kelvin's own folders or records (off_limits)."""
+    Kelvin's own folders, the data folder, a run the chat may not see or a file of sign-ins (off_limits)."""
     base = Path(folder).resolve()
     given = Path(str(path or "").strip() or ".")
     target = (given if given.is_absolute() else base / given).resolve()
     if target != base and base not in target.parents:
         raise FolderError("%s is outside this chat's folder (%s): Kelvin %s only what is in it"
                           % (path, base, "saves" if saving else "reads"))
-    why = off_limits(target, own, data, saving)
+    why = off_limits(target, own, data, saving, unseen)
     if why:
         raise FolderError(why)
     return target
 
 
-def save(folder: Any, path: Any, text: str, own: Iterable[Any] = (), data: Any = None) -> Tuple[Path, Optional[Path]]:
+def save(folder: Any, path: Any, text: str, own: Iterable[Any] = (), data: Any = None,
+         unseen: Optional[Callable[[Path], bool]] = None) -> Tuple[Path, Optional[Path]]:
     """A text file saved in the chat's folder, its subfolders made as needed: the file, and where the version it
     replaced was kept (None for a new file, or one already so). FolderError: outside the folder, in Kelvin's own
     folders or records (own, data: off_limits), a kind Kelvin doesn't save, too long, or the computer refused."""
     if not str(path or "").strip():
         raise FolderError("say which file: its name, or its path in this chat's folder")
-    target = inside(folder, path, saving=True, own=own, data=data)
+    target = inside(folder, path, saving=True, own=own, data=data, unseen=unseen)
     if target == Path(folder).resolve() or target.is_dir():
         raise FolderError("%s is a folder: give the file's name" % path)
     if target.suffix.lower() in NOT_SAVED or target.name.lower() in STARTUP or KEPT in target.parts:
@@ -167,12 +199,14 @@ def _size(n: int) -> str:
     return "%d B" % n if n < 1024 else "%.0f KB" % (n / 1024) if n < 1024 ** 2 else "%.1f MB" % (n / 1024 ** 2)
 
 
-def listing(folder: Any, path: Any = "", own: Iterable[Any] = ()) -> str:
+def listing(folder: Any, path: Any = "", own: Iterable[Any] = (), data: Any = None,
+            unseen: Optional[Callable[[Path], bool]] = None) -> str:
     """The subfolders (Kelvin's runs marked) and files of the chat's folder, or of a folder in it: newest files
-    first, with sizes and dates. Never in Kelvin's own folders (own: off_limits)."""
+    first, with sizes and dates. Never in Kelvin's own folders or the data folder, nor a run the chat may not see
+    (own, data, unseen: off_limits), which it lists without its name."""
     from . import rundata
     from .eventlog import RUN_NAME
-    where = inside(folder, path, own=own)
+    where = inside(folder, path, own=own, data=data, unseen=unseen)
     if not where.is_dir():
         raise FolderError("there is no folder %s in this chat's folder" % (path or "."))
     try:
@@ -181,17 +215,23 @@ def listing(folder: Any, path: Any = "", own: Iterable[Any] = ()) -> str:
         files = sorted(((e, e.stat()) for e in entries if e.is_file()), key=lambda f: f[1].st_mtime, reverse=True)
     except OSError as e:
         raise FolderError("Kelvin could not list %s: %s" % (where, e.strerror or e))
+    runs = [d for d in dirs if RUN_NAME.match(d.name) and rundata.is_run(d)]
+    apart = [d for d in runs if unseen is not None and unseen(d)]   # unshared work's runs: not named
+    dirs = [d for d in dirs if d not in apart]
     lines = ["%s: %d folder%s, %d file%s" % (where, len(dirs), "" if len(dirs) == 1 else "s", len(files),
                                              "" if len(files) == 1 else "s")]
     for d in dirs[:MAX_LISTED]:
-        run = RUN_NAME.match(d.name) and rundata.is_run(d)
-        lines.append("%s/%s" % (d.name, "  (a Kelvin run: describe_run and get_run_data read it)" if run else ""))
+        lines.append("%s/%s" % (d.name, "  (a Kelvin run: describe_run and get_run_data read it)" if d in runs
+                                else ""))
     for f, st in files[:max(0, MAX_LISTED - len(dirs))]:
         lines.append("%s  %s  %s" % (f.name, _size(st.st_size), time.strftime("%Y-%m-%d %H:%M",
                                                                              time.localtime(st.st_mtime))))
     hidden = len(dirs) + len(files) - (len(lines) - 1)
     if hidden > 0:
         lines.append("… and %d more" % hidden)
+    if apart:
+        lines.append("(and %d run%s of unshared work this chat may not see)" % (len(apart), "" if len(apart) == 1
+                                                                                else "s"))
     return "\n".join(lines)
 
 
@@ -225,10 +265,12 @@ def _ranges(indices: List[int]) -> str:
 
 
 def read(folder: Any, path: Any, pages: Any = "", start: int = 0, figures: bool = False,
-         own: Iterable[Any] = (), most: int = MAX_PDF_PAGES) -> Tuple[str, Media]:
+         own: Iterable[Any] = (), most: int = MAX_PDF_PAGES, data: Any = None,
+         unseen: Optional[Callable[[Path], bool]] = None) -> Tuple[str, Media]:
     """A file in the chat's folder: (what to tell the model, the pictures or PDF pages to show it). Never one in
-    Kelvin's own folders (own: off_limits). most: a PDF's pages shown at once (figures)."""
-    target = inside(folder, path, own=own)
+    Kelvin's own folders or the data folder, nor in a run the chat may not see (own, data, unseen: off_limits).
+    most: a PDF's pages shown at once (figures)."""
+    target = inside(folder, path, own=own, data=data, unseen=unseen)
     if not target.is_file():
         raise FolderError("there is no file %s in this chat's folder (list_folder shows what is there)" % path)
     shown = target.relative_to(Path(folder).resolve()).as_posix()

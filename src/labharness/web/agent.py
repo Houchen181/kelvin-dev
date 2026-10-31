@@ -2050,7 +2050,7 @@ class ChatAgent:
         path = str(args.get("path") or "")
         if call["name"] == "list_folder":
             try:
-                text = await asyncio.to_thread(folderfiles.listing, folder, path, self._kelvins())
+                text = await asyncio.to_thread(folderfiles.listing, folder, path, self._kelvins(), **self._apart())
             except (ValueError, OSError) as e:   # FolderError is a ValueError
                 return "not read: %s" % (e.strerror if isinstance(e, OSError) and e.strerror else e), True
             return OUTSIDE % ("the names in this chat's folder", text), False
@@ -2062,6 +2062,13 @@ class ChatAgent:
         (folderfiles.off_limits): Kelvin's folder (the lab config, settings, accounts, cards, everyone's chats) and
         the chats of the person signed in."""
         return [f for f in (getattr(self.runtime, "home", None), getattr(self.store, "root", None)) if f]
+
+    def _apart(self) -> Dict[str, Any]:
+        """What else a chat's folder tools never reach (folderfiles.off_limits): the data folder (everyone's runs and
+        the lab's records), and a run of unshared work this chat may not see, wherever it is kept. Asked in the
+        chat's tool call (its viewer)."""
+        rt = self.runtime
+        return {"data": rt.data_dir, "unseen": lambda d: not rt.may_see(rt._run_marks(Path(d)))}
 
     async def _read_in(self, folder: Any, call: Dict[str, Any], provider: Provider, own: Iterable[Any] = (),
                        model: str = "", chat: Optional[Dict[str, Any]] = None) -> Tuple[str, bool]:
@@ -2077,7 +2084,7 @@ class ChatAgent:
         try:
             start = int(args.get("start") or 0)
             text, media = await asyncio.to_thread(folderfiles.read, folder, path, pages, start, whole or drawn, own,
-                                                  MAX_DRAWN if drawn else MAX_PDF_PAGES)
+                                                  MAX_DRAWN if drawn else MAX_PDF_PAGES, **self._apart())
             pdf = [data for mime, data in media if mime == folderfiles.PDF] if drawn else []
             if pdf:
                 try:
@@ -2086,7 +2093,8 @@ class ChatAgent:
                         raise ValueError("the hub drew no pages")
                     text = text.replace(", shown whole", ", shown as pictures")
                 except Exception as e:   # the hub can't draw them now: their text, as for any model
-                    text, media = await asyncio.to_thread(folderfiles.read, folder, path, pages, start, False, own)
+                    text, media = await asyncio.to_thread(folderfiles.read, folder, path, pages, start, False, own,
+                                                          **self._apart())
                     text += "\n(the pages couldn't be drawn as pictures (%s), so these are their text)" % _why(e)
             elif asked and not whole and not drawn:
                 text += "\n(this model can't see a PDF's pages, so these are their text)"
@@ -2115,8 +2123,8 @@ class ChatAgent:
         if not isinstance(text, str):
             return "not saved: give the file's whole text as content", True
         rt = self.runtime
-        try:   # never Kelvin's own folders (the lab config, settings, accounts, cards, chats) or the lab's records
-            target = folderfiles.inside(folder, path, saving=True, own=self._kelvins(), data=rt.data_dir)
+        try:   # never Kelvin's own folders (the lab config, settings, accounts, cards, chats) or those of _apart
+            target = folderfiles.inside(folder, path, saving=True, own=self._kelvins(), **self._apart())
         except folderfiles.FolderError as e:
             return "not saved: %s" % e, True
         loads = sorted({n for n, d in library.code_folders({n: ic.address for n, ic in rt.lab.config.instruments.items()},
@@ -2143,7 +2151,7 @@ class ChatAgent:
                 return "declined: nothing was saved%s" % (" (%s)" % request.note if request.note else ""), True
         try:
             target, kept = await asyncio.to_thread(folderfiles.save, folder, path, text, self._kelvins(),
-                                                   rt.data_dir)
+                                                   **self._apart())
         except folderfiles.FolderError as e:
             return "not saved: %s" % e, True
         rt.gate.log.write("file_saved", by="agent", chat=chat["id"], path=str(target), chars=len(text),

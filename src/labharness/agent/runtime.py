@@ -1935,6 +1935,9 @@ class LabRuntime:
             return "name the files to import: their full paths (';' between several)"
         if len(files) > 20:
             return "at most 20 files at once"
+        refused = next((why for why in map(self._unreadable, files) if why), None)
+        if refused:
+            return "not imported: %s" % refused
         try:
             table = imports.merge([imports.read(p) for p in files])
         except imports.DataError as e:
@@ -3885,9 +3888,31 @@ class LabRuntime:
             return "not read: %s" % e
 
     def _kelvins(self) -> List[Path]:
-        """Kelvin's own folder (~/Kelvin: the lab config, the settings, the accounts, the cards, everyone's chats),
-        which the tools that read a folder a person or the model names never reach."""
-        return [self.home] if self.home is not None else []
+        """Kelvin's own folders, which the tools that read a folder a person or the model names never reach: its
+        folder (~/Kelvin: the lab config, the settings, the accounts, the cards, everyone's chats) and the data
+        folder (everyone's runs and the lab's records), wherever it is."""
+        return [f for f in (self.home, self.data_dir) if f is not None]
+
+    def _unreadable(self, path: Any) -> Optional[str]:
+        """Why Kelvin's AI may not read this file a chat or an agent named (None: it may): it is in Kelvin's own
+        folders, may hold sign-ins, or is in a run of unshared work the viewer of this thread may not see, wherever
+        that run is kept."""
+        from .. import folderfiles
+        try:
+            target = Path(str(path)).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        folder = folderfiles.mine(target, self._kelvins())
+        if folder is not None:
+            return ("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, the "
+                    "instrument cards, and everyone's chats and runs: Kelvin's AI never reads there (describe_run and "
+                    "get_run_data read runs)" % (path, folder))
+        if folderfiles.secret(target):
+            return "%s may hold sign-ins, keys or tokens: Kelvin's AI never reads such files" % path
+        run = folderfiles.run_of(target)
+        if run is not None and not self.may_see(self._run_marks(run)):
+            return "that is in a Kelvin run of unshared work this chat may not see"
+        return None
 
     def script_cards(self) -> Any:
         """Every card Kelvin can use here, to match the lab's scripts against: Kelvin's own and the lab's. Kept

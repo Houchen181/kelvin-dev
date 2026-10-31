@@ -534,3 +534,37 @@ def test_whose_a_run_is_fails_closed(rt, tmp_path, monkeypatch):
     with rt.viewing(Viewer()):
         assert run in rt._hidden_runs() and not rt.may_see(rt._run_marks(rt.runs / run))
     assert rt.may_see(rt._run_marks(rt.runs / run))   # the person at the computer
+
+
+def test_the_data_folder_and_unshared_runs_are_out_of_reach_wherever_they_are(tmp_path):
+    rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover([True] * 50), tmp_path / "LabData")
+    rt.home = tmp_path / "Kelvin"   # the data folder is elsewhere (Settings -> Data folder)
+    rt.home.mkdir()
+    p = Portal(tmp_path, rt)
+    (tmp_path / "Shared" / "nda-runs").mkdir(parents=True)
+    for chat_id, folder in ((p.secret, tmp_path / "Shared" / "nda-runs"), (p.other, tmp_path)):
+        chat = p.store.load(chat_id)
+        chat["folder"] = str(folder)
+        p.store.save(chat)
+    p.turn(p.secret, [("run_plan", {"plan": NDA}), ("run_plan", {"plan": NDA.replace("acme_gate", "acme_data")})])
+    p.turn(p.secret, [("export_run", {"run_id": "last"})])
+    runs = sorted(d for d in (tmp_path / "Shared" / "nda-runs").iterdir() if d.is_dir())
+    assert runs and all("acme" in d.name for d in runs)
+    exported = next(runs[-1].rglob("*.csv"))
+    inner = next(f for f in runs[0].rglob("*") if f.is_file() and f.suffix != ".h5")
+    out = p.turn(p.other, [("read_examples", {"path": str(tmp_path / "LabData")}),
+                           ("survey_scripts", {"path": str(tmp_path / "LabData")}),
+                           ("read_examples", {"path": str(tmp_path / "Shared")}),
+                           ("list_folder", {"path": "Shared/nda-runs"}),
+                           ("read_file", {"path": str(inner.relative_to(tmp_path))}),
+                           ("list_folder", {"path": "LabData"}),
+                           ("read_file", {"path": "LabData/events.jsonl"}),
+                           ("import_data", {"paths": str(exported)})])
+    for call, text in out.items():
+        assert "acme" not in text.lower(), (call, text)
+    assert "Kelvin's own folder" in out["c0"] and "Kelvin's own folder" in out["c1"]
+    assert "2 runs of unshared work" in out["c3"]
+    assert "unshared work" in out["c4"] and "Kelvin's data folder" in out["c5"] and "data folder" in out["c6"]
+    assert out["c7"].startswith("not imported") and "unshared work" in out["c7"]
+    inside = p.turn(p.secret, [("list_folder", {}), ("read_file", {"path": str(inner.relative_to(runs[0].parent))})])
+    assert runs[0].name in inside["c0"] and not inside["c1"].startswith("not read")   # its own

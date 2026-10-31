@@ -1190,14 +1190,15 @@ class _Collector:
 
 
 def _files(root: Path, own: Iterable[Any] = ()) -> Tuple[List[Path], List[str]]:
-    from .folderfiles import mine
+    from .folderfiles import mine, run_of
     if root.is_file():
         return ([root] if root.suffix.lower() in SUFFIXES else []), []
     found, skipped = [], []
     for p in sorted(root.rglob("*")):
         if any(part.lower() in SKIP_DIRS or part.startswith(".") for part in p.relative_to(root).parts[:-1]):
             continue
-        if p.is_file() and p.suffix.lower() in SUFFIXES and mine(p.resolve(), own) is None:
+        if p.is_file() and p.suffix.lower() in SUFFIXES and mine(p.resolve(), own) is None \
+                and run_of(p.resolve()) is None:   # nor Kelvin's runs (a run keeps the plan it ran as a script)
             if len(found) >= MAX_FILES:
                 skipped.append("more than %d scripts: the rest" % MAX_FILES)
                 break
@@ -1216,7 +1217,12 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = ()) -> Survey:
     kelvins = mine(root.resolve(), own)
     if kelvins is not None:
         raise ValueError("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, "
-                         "the instrument cards and everyone's chats: Kelvin's AI never reads there" % (root, kelvins))
+                         "the instrument cards, and everyone's chats and runs: Kelvin's AI never reads there"
+                         % (root, kelvins))
+    from .folderfiles import run_of
+    if run_of(root.resolve()) is not None:
+        raise ValueError("%s is in a Kelvin run, not the lab's scripts: describe_run and get_run_data read runs"
+                         % root)
     files, skipped = _files(root, own)
     out = Survey(folder=str(root))
     out.skipped += skipped
