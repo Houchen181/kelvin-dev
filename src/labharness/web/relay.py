@@ -1,10 +1,10 @@
 """Phones through the Kelvin hub (hub/relay.py): while someone is signed in here with their Kelvin account, this Kelvin
-keeps one connection open to the hub, and a phone signed in to the same account reaches it through the hub. No
-pairing, and no phone access on this computer's network needed: the connection goes out from the lab.
+keeps one connection open to the hub, and a phone signed in to the same account reaches it through the hub. No phone
+access on this computer's network needed: the connection goes out from the lab.
 
-The hub's requests are answered by the portal itself, as for a paired phone of that person with role "control"
-(remote.py): the same routes, the same refusals. One more rule: the hub sees what passes through it (there is no
-end-to-end encryption yet), so the person's unshared work (unpublished, confidential or model-limited projects,
+The hub's requests are answered by the portal itself, as for a phone of that person with its own token and role
+"control" (remote.py): the same routes, the same refusals. One more rule: the hub sees what passes through it (there
+is no end-to-end encryption yet), so the person's unshared work (unpublished, confidential or model-limited projects,
 incognito chats, and their runs) doesn't go this way; app.py's `private` and `trim` keep it out. On the lab network or
 through Tailscale the phone reaches this computer directly, with a token it gets through the hub
 (POST /api/phone/direct), and sees everything as before."""
@@ -61,7 +61,7 @@ class RelayLink:
                  private: Optional[Callable[[str, str, bytes, str], Optional[str]]] = None,
                  trim: Optional[Callable[[str, str, Any], Tuple[Any, int]]] = None,
                  connect: Callable[[str, str], Any] = _connect):
-        self.app = app            # the portal inside its guard: what answers a paired phone's requests
+        self.app = app            # the portal inside its guard: what answers a phone's requests
         self.target = target
         self.hello = hello        # {"name", "version", "direct"} for the hub
         self.private = private    # (method, path, body, query) -> why this request reaches unshared work, or None

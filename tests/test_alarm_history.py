@@ -386,7 +386,7 @@ def test_kelvin_says_where_alarms_reach_people_and_promises_no_more(tmp_path):
     rt.notifier.phones = lambda: 2
     reach = rt.alarms_reach()
     assert reach == ("alarms show in the portal on this computer and reach people away from it through the Kelvin app "
-                     "on 2 paired phones (while it is open), the webhook (ntfy.sh)")
+                     "on 2 phones (while it is open), the webhook (ntfy.sh)")
     assert "secret" not in reach
     rt.notifier.configure("https://ntfy.sh/kelvin-secret-topic", ["run"])          # alarms not ticked for it
     rt.notifier.phones = lambda: 0
@@ -454,12 +454,8 @@ def test_a_stop_between_two_items_never_lets_the_next_one_start(tmp_path):
     assert not ok and message == "stopped before it started" and item.status == "stopped"
 
 
-def test_the_phone_page_shows_the_queue_with_a_stop_and_every_alarm_until_got_it():
+def test_the_portal_shows_every_alarm_until_got_it():
     pytest.importorskip("starlette")
     from labharness.web.app import STATIC
-    js = (STATIC / "mobile.js").read_text(encoding="utf-8")
-    assert 'filter((a) => !a.acknowledged)' in js and "!a.cleared && !a.acknowledged" not in js
-    queue = js[js.index("const queued"):js.index('"No run in progress"')]
-    assert 'api("/api/stop", {})' in queue
     portal_js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "!a.cleared && !a.acknowledged" not in portal_js and "acknowledged_by" in portal_js

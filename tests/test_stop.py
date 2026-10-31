@@ -229,8 +229,6 @@ def test_no_dialog_stands_between_a_person_and_stop():
     hands = js[js.index("async function handsOn()"):js.index("function openUnlock()")]
     assert "confirm(" not in run_stop and "confirm(" not in hands
     assert "if (TYPED_STOP.test(text)) return hardStop();" in js
-    phone = (STATIC / "mobile.js").read_text(encoding="utf-8")
-    assert 'confirm("Stop' not in phone and 'confirm("Hands on' not in phone
 
 
 def test_a_stop_during_a_queue_step_ends_it_there_and_pauses_the_queue(tmp_path):

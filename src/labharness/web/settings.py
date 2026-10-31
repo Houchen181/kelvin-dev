@@ -578,7 +578,7 @@ class Settings:
         self._user["services"] = services
         self._save()
 
-    # ------------------------------------------------------------------ paired phones (see remote.py): each person's
+    # ------------------------------------------------------------------ phones (see remote.py): each person's
 
     @property
     def devices(self) -> List[Dict[str, Any]]:
@@ -612,7 +612,7 @@ class Settings:
     def remove_device(self, device_id: str) -> None:
         kept = [d for d in self.devices if d["id"] != device_id]
         if len(kept) == len(self.devices):
-            raise KeyError("no paired device %r" % device_id)
+            raise KeyError("no such phone %r" % device_id)
         self._user["devices"] = kept
         self._save()
 

@@ -546,7 +546,6 @@
     hubLink(a, "account-hub-text", "account-hub-edit");
     const relay = a.relay;
     $("relay-field").hidden = !(a.user.central && relay);
-    $("phone-away-account").hidden = !(a.user.central && relay && relay.on);   // Settings -> Phone: the way from anywhere
     if (relay) {
       $("relay-on").checked = relay.on;
       $("relay-status").textContent = !relay.on ? "off" : ({ online: "on: your phone can reach this Kelvin",
@@ -3508,10 +3507,10 @@
   }
 
   // ------------------------------------------------------------------ phones
-  const PHONE = { view: null, pairTimer: 0 };
+  const PHONE = { view: null };
   async function loadPhone() {
     try { renderPhone(await api("/api/phone")); }
-    catch (e) { $("phone-status").textContent = e.message; $("pair-start").disabled = true; }
+    catch (e) { $("phone-status").textContent = e.message; }
   }
   function renderPhone(v) {
     PHONE.view = v;
@@ -3519,8 +3518,7 @@
     const where = v.addresses.map((a) => a.url + (a.kind === "tailscale" ? " (Tailscale)" : a.kind === "network" ? " (this network)" : ""));
     $("phone-status").textContent = v.error ? v.error
       : v.listening ? "Phones can reach Kelvin at " + (where.join(", ") || "this computer's address, port " + v.port) + "."
-      : v.on ? "Starting…" : "Off: only this computer can use Kelvin.";
-    $("pair-start").disabled = !v.listening;
+      : v.on ? "Starting…" : "Off: phones can't connect directly.";
     $("firewall-row").hidden = !v.firewall;
     $("firewall-status").textContent = v.firewall === "allowed" ? "Windows Firewall lets phones reach Kelvin."
       : "Windows Firewall may stop phones from reaching Kelvin.";
@@ -3529,7 +3527,7 @@
       h("span", { class: "memory-kind" }, d.role),
       h("div", { class: "memory-body" }, h("span", {}, d.name),
         h("span", { class: "memory-meta" }, d.last_seen ? "last seen " + new Date(d.last_seen * 1000).toLocaleString() : "not used yet")),
-      rowButton("trash", "Unpair " + d.name, async () => {
+      rowButton("trash", "Remove " + d.name, async () => {
         try { await api("/api/devices/" + d.id, { method: "DELETE" }); } catch (e) { toast(e.message); }
         loadPhone();
       }))));
@@ -3546,28 +3544,6 @@
     catch (e) { $("firewall-status").textContent = e.message; }
     $("firewall-allow").disabled = false;
   }
-  async function startPairing() {
-    clearInterval(PHONE.pairTimer);
-    let r;
-    try { r = await api("/api/devices", { body: { name: $("pair-name").value.trim(), role: $("pair-role").value } }); }
-    catch (e) { $("phone-status").textContent = e.message; return; }
-    const state = h("p", { class: "pair-wait" }, "Waiting for the phone… the code works for 10 minutes, once.");
-    $("pair-box").replaceChildren(
-      r.qr ? h("div", { class: "qr", html: r.qr }) : null,
-      h("div", { class: "pair-text" },
-        h("p", {}, "On " + r.name + ", scan the code, or open"),
-        ...r.urls.map((u) => h("p", { class: "pair-url" }, u.split("#")[0])),
-        h("p", {}, "and type"), h("p", { class: "pair-code" }, r.code.slice(0, 3) + " " + r.code.slice(3)), state));
-    $("pair-box").hidden = false;
-    PHONE.pairTimer = setInterval(async () => {
-      if (!$("settings-dialog").open) { clearInterval(PHONE.pairTimer); return; }
-      let p;
-      try { p = await api("/api/devices/pairing/" + r.code); } catch (e) { clearInterval(PHONE.pairTimer); state.textContent = "The code expired. Make a new one."; return; }
-      if (p.device) { clearInterval(PHONE.pairTimer); state.textContent = "Paired. " + r.name + " can use Kelvin now."; loadPhone(); }
-      else if (!p.expires_in) { clearInterval(PHONE.pairTimer); state.textContent = "The code expired. Make a new one."; }
-    }, 2000);
-  }
-
   // ------------------------------------------------------------------ second opinions
   const VERDICTS = { go: ["ok", "Go"], caution: ["warn", "Caution"], stop: ["bad", "Stop"],
     agree: ["ok", "Agrees"], partly: ["warn", "Partly agrees"], disagree: ["bad", "Disagrees"] };
@@ -5687,7 +5663,6 @@
     $("data-choose").hidden = !hasPicker();
     const reportKinds = (S.settings && S.settings.report_kinds) || ["scan", "device", "project"];
     for (const c of document.querySelectorAll("#report-kinds input")) c.checked = reportKinds.includes(c.value);
-    $("pair-box").hidden = true;
     loadPhone();
     loadServices();
     loadDataFolder();
@@ -6717,7 +6692,6 @@
       if (path) { $("data-path").value = path; dataPathChanged(); }
     });
     $("data-open").addEventListener("click", () => api("/api/data-folder", { body: { open: true } }).catch((e) => showDataFolder(e.message, true)));
-    $("pair-start").addEventListener("click", startPairing);
     $("firewall-allow").addEventListener("click", allowFirewall);
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".compare-wrap")) { $("compare-menu").hidden = true; $("compare-btn").setAttribute("aria-expanded", "false"); }

@@ -438,7 +438,7 @@
           <div id="relay-field" class="field" hidden>
             <div class="field-row"><span class="field-label">Your phone, through the Kelvin hub</span><span id="relay-status" class="hint"></span></div>
             <label class="check wrap"><input id="relay-on" type="checkbox"> Let my phone reach this Kelvin through the hub while I'm signed in here</label>
-            <span class="hint">Sign in to the iPhone app with this account; no pairing needed. Unshared work never goes through the hub.</span>
+            <span class="hint">Sign in to the iPhone app with this account. Unshared work never goes through the hub.</span>
           </div>
           <div id="hub-field" class="field">
             <div class="field-row"><span class="field-label">Your hub account</span><span id="hub-status" class="hint"></span></div>
@@ -699,7 +699,7 @@
               <option value="240">After 5 minutes, ask your phone and wait 4 hours more</option>
               <option value="720">After 5 minutes, ask your phone and wait 12 hours more</option>
             </select>
-            <span id="approval-wait-hint" class="hint">Without a paired phone, or the email or webhook above (alarms ticked), a request is declined after 5 minutes. Nothing moves while it waits.</span>
+            <span id="approval-wait-hint" class="hint">Without a phone in Settings → Phone, or the email or webhook above (alarms ticked), a request is declined after 5 minutes. Nothing moves while it waits.</span>
           </div>
           <div class="field">
             <label for="idle-off">Switch off outputs left idle</label>
@@ -722,18 +722,8 @@
             <span id="phone-status" class="hint phone-status"></span>
             <div id="firewall-row" class="field-row" hidden><span id="firewall-status" class="hint"></span>
               <button id="firewall-allow" class="btn small" type="button">Let phones through</button></div>
-            <div class="pair-row">
-              <input id="pair-name" type="text" maxlength="40" placeholder="Phone name" aria-label="Phone name">
-              <select id="pair-role" aria-label="What the phone may do">
-                <option value="watch">Watch: see, stop, decline</option>
-                <option value="control">Control: also chat and approve</option>
-              </select>
-              <button id="pair-start" class="btn small" type="button">Pair a phone</button>
-            </div>
-            <div id="pair-box" class="pair-box" hidden></div>
             <ul id="device-list" class="memory-notes"></ul>
-            <span class="hint"><b>Away from the lab:</b> <span id="phone-away-account" hidden>sign in to the iPhone app with your Kelvin account, no pairing needed; or </span>use <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> on both (encrypted; plain Wi-Fi is not).</span>
-            <span class="hint"><b>Phone can't connect?</b> Same Wi-Fi, and the firewall must let it in.</span>
+            <span class="hint">With Phone access on, the Kelvin iPhone app signed in with your Kelvin account connects directly on the lab network (faster, and unshared work opens only this way), and through the Kelvin hub elsewhere.</span>
           </div>
         </section>
         <section class="set-page" data-page="display" hidden>

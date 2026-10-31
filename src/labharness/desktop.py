@@ -90,9 +90,7 @@ def _self_test(port: int, key: str) -> int:
     req = urllib.request.Request(base + "/api/bootstrap", headers={"X-Kelvin-Token": key})
     with urllib.request.urlopen(req, timeout=10) as r:
         boot = json.load(r)
-    with urllib.request.urlopen(base + "/m", timeout=10) as r:   # the phone page and its script are packaged too
-        page_ok = page_ok and b"Pair this phone" in r.read()
-    with urllib.request.urlopen(base + "/static/mobile.js", timeout=10) as r:
+    with urllib.request.urlopen(base + "/static/app.js", timeout=10) as r:   # the portal's script is packaged too
         page_ok = page_ok and r.status == 200
     from . import autosetup, carddraft, drivers, profiles  # noqa: F401  (loaded on demand; make sure the build has them)
     page_ok = page_ok and "card: 1" in carddraft.example()

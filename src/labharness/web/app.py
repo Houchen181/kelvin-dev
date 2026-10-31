@@ -15,7 +15,6 @@ import re
 import socket
 import subprocess
 import sys
-import time
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -51,10 +50,9 @@ from .agent import Busy, ChatAgent, runs_in, typed_stop
 from . import labops, review, rules as rulebook
 from .chatgpt import SignIn, SignInError
 from .hubsync import NETWORK as HUB_UNREACHABLE, SYNC_EVERY as HUB_EVERY, HubClientError, HubLink
-from .qr import QR
 from .relay import RelayLink
-from .remote import (API as PHONE_API, ROLES, Remote, addresses, allow_through_firewall, allowed, firewall_state,
-                     pairing_link, remote_host_ok)
+from .remote import (API as PHONE_API, Remote, addresses, allow_through_firewall, allowed, firewall_state,
+                     remote_host_ok)
 from .providers.base import Provider, sees_images
 from .settings import ENV as OWN_KEYS, Settings, default_model
 from .store import ChatStore
@@ -140,7 +138,8 @@ def _page(title: str, text: str) -> str:
 
 class Guard:
     """On 127.0.0.1, only this machine's browser holding the access key may use the API. On the network listener
-    (phone access, see remote.py) only paired devices may, each within its role; the access key never works there."""
+    (phone access, see remote.py) only phones with their own token may, each within its role; the access key never
+    works there."""
 
     def __init__(self, app: Any, token: str, hosts: Iterable[str], remote: Optional[Remote] = None,
                  signed_in: Optional[Callable[[], bool]] = None,
@@ -172,15 +171,16 @@ class Guard:
                     problem = (403, "sign in from the Kelvin computer")
                 elif path.startswith("/api/") and self.signed_in is not None and not self.signed_in():
                     problem = (401, "Nobody is signed in to Kelvin on its computer now.", {"signin": True})
-                elif path.startswith("/api/") and not (path == "/api/pair" and method == "POST"):
+                elif path.startswith("/api/"):
                     token = headers.get("x-kelvin-token", "")
                     device = self.remote.device_for(token)
                     owner = self.paired_with(token) if device is None and self.paired_with else None
-                    if owner:   # a person's phone works while they are signed in; it stays paired meanwhile
+                    if owner:   # a person's phone works while they are signed in; its token stays meanwhile
                         problem = (401, "This phone is %s's; it works while %s is signed in on the Kelvin computer."
                                    % (owner, owner), {"signin": True})
                     elif device is None:
-                        problem = (401, "This device is not paired with Kelvin, or was removed. Pair it again.")
+                        problem = (401, "Kelvin doesn't know this phone, or it was removed. Sign in to the Kelvin app "
+                                        "with your Kelvin account.")
                     elif not allowed(device["role"], method, path):
                         problem = (403, "A %s device cannot do that. Use the Kelvin computer." % device["role"])
                 scope["kelvin"] = {"role": device["role"] if device else None, "device": device}
@@ -211,7 +211,7 @@ def role_of(request: Request) -> str:
 
 
 def person(request: Request) -> str:
-    """Who a person's request is from, as the lab's record names them: the Kelvin computer or a paired phone."""
+    """Who a person's request is from, as the lab's record names them: the Kelvin computer or a phone."""
     device = (request.scope.get("kelvin") or {}).get("device")
     return "human (phone %s)" % device.get("name") if device else "human (portal)"
 
@@ -408,7 +408,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                                        heartbeat=settings.get("heartbeat"), heartbeat_s=settings.heartbeat_s)
         except ValueError:
             runtime.notifier.configure(None, settings.notify_kinds)
-        runtime.notifier.phones = lambda: len(settings.devices)   # a paired phone sees requests and alarms
+        runtime.notifier.phones = lambda: len(settings.devices)   # a phone in Settings → Phone sees requests and alarms
         if hasattr(runtime.approver, "escalate_s"):   # a request nobody answered here waits this long for the phone
             runtime.approver.escalate_s = settings.approval_wait_s
         from ..notify import email_from   # where the lab owner hears of safety changes, whoever is signed in
@@ -498,12 +498,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         page = page.replace("/static/app.js", "/static/app.js?v=" + version).replace("/static/app.css", "/static/app.css?v=" + version)
         return Response(page, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
-    async def mobile(request: Request) -> Response:
-        return FileResponse(STATIC / "mobile.html", headers={"Cache-Control": "no-store"})
-
     async def static(request: Request) -> Response:
         name = request.path_params["name"]
-        if name not in ("app.js", "app.css", "kelvin.svg", "mobile.js"):
+        if name not in ("app.js", "app.css", "kelvin.svg"):
             return error(404, "not found")
         return FileResponse(STATIC / name, headers={"Cache-Control": "no-cache"})
 
@@ -2087,7 +2084,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         on, port = settings.phone
         live = remote.port
         return {"on": on, "port": port, "listening": live is not None, "error": remote.error,
-                "addresses": addresses(live or port), "devices": settings.device_views(), "roles": list(ROLES),
+                "addresses": addresses(live or port), "devices": settings.device_views(),
                 "firewall": firewall_state() if live is not None else None}
 
     async def start_phone() -> None:
@@ -2104,7 +2101,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                      or "port %d" % remote.port)
 
     async def phone(request: Request) -> Response:
-        """GET: phone access and paired devices. POST {on, port}: switch phone access (this computer only)."""
+        """GET: phone access and the phones that reach Kelvin directly. POST {on, port}: switch phone access (this
+        computer only)."""
         if request.method == "POST":
             body = await request.json()
             try:
@@ -2143,24 +2141,6 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(409, said)
         return JSONResponse(await asyncio.to_thread(phone_view))
 
-    async def devices(request: Request) -> Response:
-        """POST {name, role}: a one-time pairing code (and QR code) for a new phone."""
-        body = await request.json()
-        if remote.port is None:
-            return error(400, "Switch on phone access first.")
-        try:
-            p = remote.start_pairing(str(body.get("name") or ""), str(body.get("role") or "watch"))
-        except ValueError as e:
-            return error(400, str(e))
-        bases = [a["url"] for a in addresses(remote.port)]
-        urls = [u + "/pair#" + p.code for u in bases]
-        return JSONResponse({"code": p.code, "name": p.name, "role": p.role, "expires_in": int(p.expires - time.time()),
-                             "urls": urls, "qr": QR(pairing_link(bases, p.code)).svg(5) if bases else None})
-
-    async def pairing(request: Request) -> Response:
-        state = remote.pairing_state(request.path_params["code"])
-        return JSONResponse(state) if state else error(404, "no such pairing code")
-
     async def device(request: Request) -> Response:
         try:
             settings.remove_device(request.path_params["device_id"])
@@ -2168,23 +2148,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(404, e.args[0])
         return JSONResponse({"ok": True})
 
-    async def pair(request: Request) -> Response:
-        """A phone offers its pairing code (no token yet) and gets its own token."""
-        if (request.scope.get("kelvin") or {}).get("role") == "owner":
-            return error(404, "pair from the phone, through the address Kelvin shows")
-        body = await request.json()
-        try:
-            dev, token = remote.claim(str(body.get("code") or ""))
-        except PermissionError as e:
-            locked = "locked" in str(e)
-            return error(429 if locked else 403, str(e))
-        return JSONResponse({"token": token, "name": dev["name"], "role": dev["role"]})
-
     async def forget_me(request: Request) -> Response:
-        """A paired phone unpairs itself."""
+        """A phone forgets this computer: Kelvin forgets the phone's token too."""
         d = (request.scope.get("kelvin") or {}).get("device")
         if not d:
-            return error(404, "this is not a paired device")
+            return error(404, "this is not a phone")
         settings.remove_device(d["id"])
         return JSONResponse({"ok": True})
 
@@ -3345,11 +3313,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     routes = [
         Route("/", index),
-        Route("/m", mobile),
-        Route("/pair", mobile),
         Route("/api/me", me),
         Route("/api/me/forget", forget_me, methods=["POST"]),
-        Route("/api/pair", pair, methods=["POST"]),
         Route("/api/phone", phone, methods=["GET", "POST"]),
         Route("/api/phone/firewall", phone_firewall, methods=["POST"]),
         Route("/api/phone/direct", phone_direct, methods=["POST", "DELETE"]),
@@ -3372,8 +3337,6 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/cards/delete", card_delete, methods=["POST"]),
         Route("/api/cards/draft", card_draft, methods=["POST"]),
         Route("/api/cards/try", card_try, methods=["POST"]),
-        Route("/api/devices", devices, methods=["POST"]),
-        Route("/api/devices/pairing/{code}", pairing),
         Route("/api/devices/{device_id}", device, methods=["DELETE"]),
         Route("/api/bootstrap", bootstrap),
         Route("/api/session", session_view, methods=["GET", "POST", "DELETE"]),
@@ -3493,7 +3456,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     else:   # one person, as before accounts
         hub.use(home)
     def paired_with(token: str) -> Optional[str]:
-        """Whose paired phone this is, among everyone with an account (phones are paired per person)."""
+        """Whose phone this token is, among everyone with an account (each person's phones are their own)."""
         from .remote import token_hash
         h = token_hash(token) if token else ""
         for a in accounts.list() if accounts is not None and h else []:

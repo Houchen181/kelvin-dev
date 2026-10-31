@@ -68,9 +68,10 @@ def checklist(runtime: Any, settings: Any, home: Any) -> List[Dict[str, Any]]:
          "owner's PIN.", "pin")
 
     phones = settings.devices
-    item("phone", "A phone paired", bool(phones),
-         "%d paired: approvals and alarms reach you away from the computer." % len(phones) if phones else
-         "None yet: pair one in Settings → Phone, so a request or an alarm in the night reaches you.", "phone")
+    item("phone", "A phone connected", bool(phones),
+         "%d connected: approvals and alarms reach you away from the computer." % len(phones) if phones else
+         "None yet: with Phone access on (Settings → Phone), sign in to the Kelvin iPhone app with your Kelvin "
+         "account, so a request or an alarm in the night reaches you.", "phone")
 
     data = Path(runtime.data_dir)
     old = Path(home) / "virtual-lab"   # an older Kelvin's virtual lab's folder, which the first account took over

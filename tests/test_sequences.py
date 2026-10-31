@@ -405,6 +405,6 @@ def test_every_approval_surface_draws_the_figures(tmp_path):
     assert shown[0]["figures"] == request.figures
     t.join()
     src = Path(__file__).resolve().parents[1] / "src" / "labharness"
-    for page in ("web/static/app.js", "web/static/mobile.js", "agent/ui.html"):
+    for page in ("web/static/app.js", "agent/ui.html"):
         text = (src / page).read_text(encoding="utf-8")
         assert "data:image/svg+xml;charset=utf-8," in text and "figures" in text, page   # as an image: nothing runs

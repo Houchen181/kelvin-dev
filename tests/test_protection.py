@@ -209,15 +209,11 @@ def test_a_watch_phone_can_lock_but_not_unlock(parts):
     from test_web import Scripted
     runtime, settings, store = parts
     guard = create_app(runtime, settings, store, hosts=["testserver"], providers={"scripted": Scripted([])})
-    owner = {"X-Kelvin-Token": settings.access_key}
-    with TestClient(guard) as local:
-        local.post("/api/phone", json={"on": True}, headers=owner)
-        guard.remote.port = 8771
+    with TestClient(guard):
+        guard.remote.port = 8771   # as if phone access were on
         phone = TestClient(guard, base_url="http://192.168.1.50:8771")
-        tokens = {}
-        for role in ("watch", "control"):
-            code = local.post("/api/devices", json={"name": role, "role": role}, headers=owner).json()["code"]
-            tokens[role] = {"X-Kelvin-Token": phone.post("/api/pair", json={"code": code}).json()["token"]}
+        tokens = {role: {"X-Kelvin-Token": guard.remote.issue(role, role, "ios-" + role)[1]}   # each phone's own
+                  for role in ("watch", "control")}
         assert phone.post("/api/hands", json={"on": True}, headers=tokens["watch"]).json()["hands_on"]["by"] == \
             "human (phone watch)"
         assert phone.post("/api/hands", json={"on": False}, headers=tokens["watch"]).status_code == 403

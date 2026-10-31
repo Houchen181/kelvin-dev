@@ -1,14 +1,14 @@
-"""Phones and other computers: pairing, what each paired device may do, and the listener on the network.
+"""Phones: what each phone may do, and the listener on the network.
 
 The portal itself only listens on 127.0.0.1, where the access key works. Phone access opens a second listener on the
-network (off until the user switches it on). There, only paired devices' own tokens work, never the access key:
-- a device is paired with a one-time 6-digit code shown on this computer (the code expires in 10 minutes, and
-  repeated wrong codes lock pairing for a while);
+network (off until the user switches it on). There, only phones' own tokens work, never the access key:
+- a phone signed in to its person's Kelvin account gets its token through the Kelvin hub (Remote.issue, for
+  POST /api/phone/direct in app.py); phones paired by code with an earlier Kelvin keep theirs;
 - "watch" devices see the lab, runs, alarms and the team chat, can stop a run, decline (never approve) a request and
   lock the lab while hands are on the sample (never unlock it);
 - "control" devices can also chat with Kelvin, approve requests and unlock, write in the team chat, and use the
   Analysis pane (keeping a fit with its run);
-- settings, the lab config, instruments, approval mode and pairing are for this computer only.
+- settings, the lab config, instruments and approval mode are for this computer only.
 Traffic on a plain Wi-Fi network is not encrypted, so away from a trusted network use a VPN such as Tailscale."""
 from __future__ import annotations
 
@@ -23,20 +23,15 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 PHONE_PORT = 8771
 ROLES = ("watch", "control")
-CODE_TTL = 600
-MAX_FAILURES = 5          # wrong codes within FAILURE_WINDOW lock pairing
-FAILURE_WINDOW = 600
 API = 1                   # what the Kelvin phone app can count on; raise it when a route it uses changes
 TAILNET = ipaddress.ip_network("100.64.0.0/10")   # Tailscale's addresses, and also carrier-grade NAT (e.g. Xfinity Wi-Fi)
-QR_BYTES = 100            # what Kelvin's QR codes hold (qr.py: version 6, level M)
 FIREWALL_RULE = "Kelvin phone access"
 
-# What a paired device may do. Anything not listed is for this computer only.
+# What a phone may do, by its role. Anything not listed is for this computer only.
 _WATCH = [("GET", r"/api/(state|live|me|runs|runs/[^/]+|runs/[^/]+/files/[^/]+|team)"),
           ("POST", r"/api/(stop|runs/stop|alarms/[^/]+/ack|approvals/[^/]+|me/forget|hands)")]
 _CONTROL = _WATCH + [
@@ -96,16 +91,6 @@ def addresses(port: int) -> List[Dict[str, str]]:
     return sorted(out, key=lambda a: ("tailscale", "network", "public").index(a["kind"]))
 
 
-def pairing_link(urls: List[str], code: str) -> str:
-    """What a pairing QR code holds: the first address with /pair#<code>, and the others after it (as many as fit), so
-    the Kelvin app can try each: http://100.101.7.9:8771/pair#123456&also=192.168.1.20:8771,10.0.0.5:8771"""
-    link = urls[0] + "/pair#" + code
-    others = [u.split("://", 1)[-1] for u in urls[1:]]
-    while others and len(link + "&also=" + ",".join(others)) > QR_BYTES:
-        others.pop()
-    return link + ("&also=" + ",".join(others) if others else "")
-
-
 def firewall_state() -> Optional[str]:
     """On Windows: "allowed" when Kelvin's firewall rule for phones is there, "missing" when it isn't; else None."""
     if sys.platform != "win32":
@@ -155,15 +140,6 @@ def remote_host_ok(host: str) -> bool:
         return name.endswith((".ts.net", ".local")) or name.lower() == socket.gethostname().lower()
 
 
-@dataclass
-class Pairing:
-    code: str
-    name: str
-    role: str
-    expires: float
-    device: Optional[str] = None    # set when a phone used it
-
-
 def _quiet_server(config: Any) -> Any:
     """A uvicorn server that leaves signal handling to the main server (both run on the same event loop)."""
     import uvicorn
@@ -180,8 +156,6 @@ class Remote:
 
     def __init__(self, settings: Any):
         self.settings = settings
-        self.pairings: Dict[str, Pairing] = {}
-        self.failures: List[float] = []
         self.port: Optional[int] = None      # where the network listener is, while it runs
         self.error: Optional[str] = None
         self._server: Any = None
@@ -203,49 +177,14 @@ class Remote:
                 return d
         return None
 
-    def start_pairing(self, name: str, role: str) -> Pairing:
-        name = " ".join(str(name or "").split())[:40] or "Phone"
-        if role not in ROLES:
-            raise ValueError("role must be watch or control")
-        now = time.time()
-        self.pairings = {c: p for c, p in self.pairings.items() if p.expires > now and not p.device}
-        code = "%06d" % secrets.randbelow(10 ** 6)
-        while code in self.pairings:
-            code = "%06d" % secrets.randbelow(10 ** 6)
-        p = Pairing(code, name, role, now + CODE_TTL)
-        self.pairings[code] = p
-        return p
-
-    def claim(self, code: str) -> Tuple[Dict[str, Any], str]:
-        """A phone offers a code; returns (device, its token). PermissionError when wrong or locked."""
-        now = time.time()
-        self.failures = [t for t in self.failures if now - t < FAILURE_WINDOW]
-        if len(self.failures) >= MAX_FAILURES:
-            raise PermissionError("Too many wrong codes. Pairing is locked for a few minutes; make a new code then.")
-        p = self.pairings.get(str(code or "").strip())
-        if p is None or p.expires < now or p.device:
-            self.failures.append(now)
-            raise PermissionError("That code is wrong or has expired. Make a new one on the Kelvin computer.")
-        token = secrets.token_urlsafe(32)
-        device = self.settings.add_device(p.name, p.role, token_hash(token))
-        p.device = device["id"]
-        return device, token
-
     def issue(self, name: str, role: str, phone: str) -> Tuple[Dict[str, Any], str]:
-        """A token for a phone signed in to its person's Kelvin account, asked for through the hub: the hub vouches
-        for it, so no code. Replaces that phone's token from before."""
+        """A token for a phone signed in to its person's Kelvin account, asked for through the hub, which vouches for
+        it. Replaces that phone's token from before."""
         if role not in ROLES:
             raise ValueError("role must be watch or control")
         name = " ".join(str(name or "").split())[:40] or "Phone"
         token = secrets.token_urlsafe(32)
         return self.settings.add_device(name, role, token_hash(token), phone=phone), token
-
-    def pairing_state(self, code: str) -> Optional[Dict[str, Any]]:
-        p = self.pairings.get(code)
-        if p is None:
-            return None
-        return {"code": p.code, "name": p.name, "role": p.role, "expires_in": max(0, int(p.expires - time.time())),
-                "device": p.device}
 
     # ------------------------------------------------------------------ the network listener
 

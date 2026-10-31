@@ -132,8 +132,8 @@ class Notifier:
         self.email: Optional[Email] = None
         self.kinds = set(DEFAULT_KINDS)
         self.last_error: Optional[str] = None
-        # how many phones are paired (the Kelvin app sees requests and alarms): set by the app; one counts as someone
-        # to reach
+        # how many phones are in Settings -> Phone (the Kelvin app sees requests and alarms): set by the app; one
+        # counts as someone to reach
         self.phones: Callable[[], int] = lambda: 0
         # the heartbeat: pinged every heartbeat_s while alive() (Kelvin is watching the lab), never otherwise
         self.heartbeat: Optional[str] = None
@@ -171,20 +171,20 @@ class Notifier:
 
     def reaches_away(self, kind: str = "alarm") -> bool:
         """Can a notice of this kind reach someone away from the computer: a webhook or email that takes it, or a
-        paired phone (the Kelvin app shows requests and alarms)?"""
+        phone (the Kelvin app shows requests and alarms)?"""
         return bool(self.away(kind))
 
     def away(self, kind: str = "alarm") -> List[str]:
         """What takes a notice of this kind to people away from this computer, in words (empty: nothing does): the
-        Kelvin app on paired phones (while it is open), email, the webhook by its host. Kelvin once told a person alarms
+        Kelvin app on phones (while it is open), email, the webhook by its host. Kelvin once told a person alarms
         would reach them away from the lab with none of these set up. Never the webhook's address or the email
         addresses themselves: these words go to the model."""
         try:
             phones = int(self.phones() or 0)
         except Exception:
             phones = 0
-        out = ["the Kelvin app on %s (while it is open)" % ("a paired phone" if phones == 1 else
-                                                           "%d paired phones" % phones)] if phones else []
+        which = "a phone" if phones == 1 else "%d phones" % phones
+        out = ["the Kelvin app on %s (while it is open)" % which] if phones else []
         if kind in self.kinds and self.email is not None:
             out.append("email")
         if kind in self.kinds and self.webhook:

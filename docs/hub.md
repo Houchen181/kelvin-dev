@@ -73,11 +73,11 @@ Kelvin, for its part:
 
 ## Phones through the hub
 
-A phone signed in to a person's Kelvin account reaches every Kelvin where that account is signed in, through the hub, with no pairing (`hub/relay.py`, and Kelvin's side `web/relay.py`).
+A phone signed in to a person's Kelvin account reaches every Kelvin where that account is signed in, through the hub (`hub/relay.py`, and Kelvin's side `web/relay.py`).
 
 - **The Kelvin's side:** while someone is signed in to a Kelvin with their Kelvin account, that Kelvin keeps one WebSocket open to the hub (`/api/relay/kelvin`, with that sign-in's token). It goes out from the lab, so firewalls and Wi-Fi that keeps devices apart (many university, housing and hotel networks) don't stop it. Signing out there, or another person signing in, closes it. The person can switch it off in Settings → **Account**.
 - **The phone's side:** the phone signs in with `POST /api/signin` and `"platform": "ios"`, lists the account's Kelvins with `GET /api/relay/kelvins`, and calls Kelvin's phone routes on one through `/api/relay/kelvins/<id>/api/...`. Answers stream back as they come, a chat turn included.
-- **Who answers:** the Kelvin, as it would a paired phone of that person with control (`remote.py`): the same routes and refusals. Settings, the lab config, instruments and pairing stay on the computer.
+- **Who answers:** the Kelvin, as it would that person's phone reaching it directly, with control (`remote.py`): the same routes and refusals. Settings, the lab config and instruments stay on the computer.
 - **Unshared work stays off the hub.** The hub keeps nothing that passes through, but it sees it in passing: there is no end-to-end encryption yet. So Kelvin leaves the person's unshared work out of what the hub carries (unpublished, confidential and model-limited projects, incognito chats, and their runs): lists come without it (with an `X-Kelvin-Hidden` count), and asking for it is refused. The phone sees it when it reaches the Kelvin directly.
 - **The lab's state, without unshared work's names.** What keeps the lab safe still goes through the hub: that a run is on and how far it is, **Stop**, alarms and the instruments' values, and that a request waits. Unshared work's names and data don't: the live view of its run (while it runs and after it ended) comes without its plan, run id and points; its approval cards and notices say only that they are unshared work's (**Decline** works from the phone; approve one where you can see it, on the lab network or through Tailscale); its queue items without their names and notes; its watches without their notes; the mounted sample without its name; what Kelvin is doing for it (a recipe, a chat's request) without its name; the runs and queue items a restart cut short, counted but not named; and the lab record's lines and the chats it continued without it. An answer Kelvin can't check for unshared work doesn't go. Each card, notice, queue item, watch and record line keeps whose work it is for this.
 - **Directly when possible:** through the hub, the phone asks for a token of its own (`POST /api/phone/direct`), when the Kelvin's phone access is on. It then tries the Kelvin's addresses first (lab network, Tailscale) and goes through the hub only when none answers. `DELETE /api/phone/direct` forgets that token; the app does it when the person signs out.
@@ -153,7 +153,7 @@ Settings → **Account** → Kelvin hub (`web/hubsync.py`, routes in `web/app.py
   - **Installation id:** one per person on this computer, so two people on one PC each keep their own connection. It's the computer's id (`hub_installation` in `~/Kelvin/settings.json`, made once), a colon, and the first 12 hex digits of the SHA-256 of the person's folder. The folder is resolved first (`Path.resolve()`, then `normcase`, lower case on Windows), so another spelling of it, such as an 8.3 short name, gives the same id.
   - **Earlier ids (`previous`):** Kelvin remembers the ids each person connected with (`hub_installations` in their `settings.json`, the latest 5). On connect it sends them, plus the id that Kelvin's first hub branch made from the folder as spelled and the bare computer id, at most 5 in all. At the token trade the hub moves what was shared under those to the new id and ends their tokens, so it keeps one copy of everything.
   - **Name:** Kelvin also sends the person's name (`person`), which the hub shows.
-  - **Callback:** works only on Kelvin's own computer, never from a paired phone. It answers at once, even while a sync of the old connection is still uploading.
+  - **Callback:** works only on Kelvin's own computer, never from a phone. It answers at once, even while a sync of the old connection is still uploading.
   - **Token:** the hub's address and the token go in the person's `settings.json` (`hub_url`, `hub_token`). The token is encrypted with their password like the API keys, and never reaches the browser or the logs.
 - **Status:** who the person is on the hub, which lab this Kelvin shares into, and the last sync of this connection (from `GET /api/me`). If the hub says the connection ended (disconnected on the account page, or after a password reset), Kelvin forgets the token and says so.
 - **Disconnect:** Kelvin forgets the token at once, then ends the connection on the hub (`DELETE /api/token`, confirmed only by a 204). A sync in progress stops before its next request. What was shared stays on the hub, and the account page deletes it.
@@ -305,7 +305,7 @@ Every call but `health`, `token`, `signin`, `register` and `reset` needs `Author
 
 - **New projects:** a new project's name and chats go up within two minutes, before it can be marked unpublished. Marking it later deletes them from the hub.
 - **Backups:** they keep deleted work for up to 30 days.
-- **Phones:** a paired phone with control can set a project back to Shared.
+- **Phones:** a phone reaching Kelvin directly can set a project back to Shared.
 - **Through the hub:** the hub can read what it passes between a phone and a Kelvin; unshared work never goes that way, but the rest does, in passing.
 - **Registration:** it says when an email already has an account.
 - **Quoting:** Kelvin's tools never read an unshared run into another chat ([data.md](data.md#your-data)), but a person can still paste it there. The chat then carries it to the hub.

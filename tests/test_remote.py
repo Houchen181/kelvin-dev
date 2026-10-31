@@ -1,4 +1,5 @@
-"""Phones: QR codes, pairing, what a paired device may do, and the network listener."""
+"""Phones: what a phone may do with its own token, and the network listener. Phones connect through the Kelvin account
+only: no pairing code, QR code or phone page."""
 import json
 import socket
 import urllib.error
@@ -12,65 +13,9 @@ pytest.importorskip("mcp")
 from starlette.testclient import TestClient  # noqa: E402
 
 from labharness.web.app import create_app  # noqa: E402
-from labharness.web.qr import QR, format_bits, rs_divisor, rs_remainder  # noqa: E402
 from labharness.web import remote  # noqa: E402
-from labharness.web.remote import MAX_FAILURES, allowed, pairing_link, remote_host_ok  # noqa: E402
+from labharness.web.remote import allowed, remote_host_ok  # noqa: E402
 from test_web import Scripted, parts  # noqa: E402,F401
-
-
-# ------------------------------------------------------------------ QR codes
-
-def read_qr(q):
-    """Read a code back: format bits, unmask, zigzag, de-interleave, byte mode. (Version 1-6, level M.)"""
-    from labharness.web.qr import _ECC_M, _capacity
-    n, m = q.size, q.modules
-    fmt = 0
-    cells = [(8, i) for i in range(6)] + [(8, 7), (8, 8), (7, 8)] + [(14 - i, 8) for i in range(9, 15)]
-    for i, (x, y) in enumerate(cells):
-        fmt |= int(m[y][x]) << i
-    mask = next(k for k in range(8) if format_bits(k) == fmt)
-    raw = []
-    right = n - 1
-    while right >= 1:
-        if right == 6:
-            right = 5
-        for vert in range(n):
-            for j in range(2):
-                x = right - j
-                y = n - 1 - vert if ((right + 1) & 2) == 0 else vert
-                if not q.function[y][x]:
-                    raw.append(int(m[y][x]) ^ int(QR.mask_bit(mask, x, y)))
-        right -= 2
-    words = [int("".join(map(str, raw[i:i + 8])), 2) for i in range(0, len(raw) - 7, 8)]
-    ec, blocks = _ECC_M[q.version]
-    cap = _capacity(q.version)
-    per = cap // blocks
-    data = [words[i * blocks + b] for b in range(blocks) for i in range(per)]
-    for b in range(blocks):   # every block's error correction checks out
-        block = data[b * per:(b + 1) * per]
-        assert rs_remainder(block, rs_divisor(ec)) == [words[cap + i * blocks + b] for i in range(ec)]
-    stream = "".join(format(w, "08b") for w in data)
-    assert stream[:4] == "0100"
-    length = int(stream[4:12], 2)
-    return bytes(int(stream[12 + 8 * i:20 + 8 * i], 2) for i in range(length)).decode("utf-8"), mask
-
-
-def test_qr_codes():
-    assert rs_remainder([32, 91, 11, 120, 209, 114, 220, 77, 67, 64, 236, 17, 236, 17, 236, 17], rs_divisor(10)) == \
-        [196, 35, 39, 119, 235, 215, 231, 226, 93, 23]                       # ISO 18004 / Thonky's 1-M example
-    assert format(format_bits(0), "015b") == "101010000010010"                # level M, mask 0
-    assert [format_bits(k, 1) for k in (0, 7)] == [0b111011111000100, 0b110100101110110]   # level L
-    for text in ("http://192.168.1.23:8771/pair#482915", "x", "http://lab-pc.tail1234.ts.net:8771/pair#000001",
-                 "é" * 40, "a" * 106):                                       # 106 bytes: version 6-M is full
-        q = QR(text)
-        assert read_qr(q)[0] == text and q.size == 17 + 4 * q.version
-        for cx, cy in ((3, 3), (q.size - 4, 3), (3, q.size - 4)):            # the three finder patterns
-            assert q.modules[cy][cx] and not q.modules[cy - 2][cx] and q.modules[cy - 3][cx]
-    assert QR("http://192.168.1.23:8771/pair#482915").version == 3 and QR("a" * 106).version == 6
-    with pytest.raises(ValueError):
-        QR("a" * 107)
-    svg = QR("hi").svg()
-    assert svg.startswith("<svg") and 'role="img"' in svg
 
 
 # ------------------------------------------------------------------ roles
@@ -83,7 +28,7 @@ def test_what_each_role_may_do():
                          ("POST", "/api/watches")):
         assert allowed("control", method, path) and not allowed("watch", method, path)
     for method, path in (("POST", "/api/settings"), ("POST", "/api/lab"), ("POST", "/api/mode"),
-                         ("POST", "/api/instruments/scan"), ("POST", "/api/devices"), ("POST", "/api/phone"),
+                         ("POST", "/api/instruments/scan"), ("POST", "/api/phone"),
                          ("GET", "/api/phone"), ("POST", "/api/quit"), ("POST", "/api/reports/x.pdf/open"),
                          ("POST", "/api/notify/test"), ("DELETE", "/api/devices/d1"), ("GET", "/api/settingsX")):
         assert not allowed("control", method, path) and not allowed("watch", method, path), path
@@ -92,7 +37,7 @@ def test_what_each_role_may_do():
     assert not remote_host_ok("evil.example.com:8771") and not remote_host_ok("")
 
 
-# ------------------------------------------------------------------ pairing through the API
+# ------------------------------------------------------------------ phones' tokens through the API
 
 @pytest.fixture
 def app(parts):
@@ -101,26 +46,20 @@ def app(parts):
     return guard, settings
 
 
-def test_pairing_and_roles(app):
+def test_a_phones_token_and_its_role(app):
     guard, settings = app
     owner = {"X-Kelvin-Token": settings.access_key}
     with TestClient(guard) as local:
-        assert local.post("/api/devices", json={"name": "Ana's phone"}, headers=owner).status_code == 400   # phone access off
         guard.remote.port = 8771                       # as if the network listener were running
         phone = TestClient(guard, base_url="http://192.168.1.50:8771")
-        assert phone.get("/m").status_code == 200 and b"Pair this phone" in phone.get("/pair").content
         assert phone.get("/api/state", headers=owner).status_code == 401      # the access key never works there
-        assert phone.get("/m", headers={"Host": "evil.example.com:8771"}).status_code == 403
+        assert phone.get("/", headers={"Host": "evil.example.com:8771"}).status_code == 403
         assert phone.get("/api/state", headers={"Origin": "http://evil.example.com"}).status_code == 403
 
-        r = local.post("/api/devices", json={"name": "  Ana's   phone ", "role": "control"}, headers=owner).json()
-        assert r["name"] == "Ana's phone" and len(r["code"]) == 6 and r["expires_in"] > 500
-        assert phone.post("/api/pair", json={"code": "000000" if r["code"] != "000000" else "111111"}).status_code == 403
-        paired = phone.post("/api/pair", json={"code": r["code"]}).json()
-        assert paired["role"] == "control" and len(paired["token"]) > 30
-        assert phone.post("/api/pair", json={"code": r["code"]}).status_code == 403   # once only
-        assert local.get("/api/devices/pairing/" + r["code"], headers=owner).json()["device"]
-        ctl = {"X-Kelvin-Token": paired["token"]}
+        # a phone signed in to the Kelvin account gets its own token through the hub (POST /api/phone/direct)
+        device, token = guard.remote.issue("  Ana's   phone ", "control", "ios-ana")
+        assert device["name"] == "Ana's phone" and len(token) > 30
+        ctl = {"X-Kelvin-Token": token}
         me = phone.get("/api/me", headers=ctl).json()
         assert {k: me[k] for k in ("role", "name", "lab", "api")} == \
             {"role": "control", "name": "Ana's phone", "lab": "Virtual Lab", "api": 1}
@@ -128,7 +67,7 @@ def test_pairing_and_roles(app):
         assert all(u.startswith("http://") and u.endswith(":8771") for u in me["addresses"])
         assert [r["url"] for r in me["routes"]] == me["addresses"]
         assert {r["kind"] for r in me["routes"]} <= {"tailscale", "network", "public"}
-        assert "computer" not in local.get("/api/me", headers=owner).json()   # only a paired app needs it
+        assert "computer" not in local.get("/api/me", headers=owner).json()   # only the phone app needs it
         assert phone.post("/api/phone/firewall", json={}, headers=ctl).status_code == 403   # this computer only
         assert phone.get("/api/state", headers=ctl).status_code == 200
         assert phone.get("/api/chats", headers=ctl).status_code == 200
@@ -136,8 +75,8 @@ def test_pairing_and_roles(app):
         assert denied.status_code == 403 and "Use the Kelvin computer" in denied.json()["error"]
         assert phone.get("/api/phone", headers=ctl).status_code == 403
 
-        w = local.post("/api/devices", json={"name": "Lab tablet", "role": "watch"}, headers=owner).json()
-        watch = {"X-Kelvin-Token": phone.post("/api/pair", json={"code": w["code"]}).json()["token"]}
+        _, tablet = guard.remote.issue("Lab tablet", "watch", "ios-tablet")   # watch only, as a phone paired before
+        watch = {"X-Kelvin-Token": tablet}
         assert phone.get("/api/chats", headers=watch).status_code == 403
         assert phone.post("/api/approvals/r1", json={"approve": True}, headers=watch).status_code == 403
         assert phone.post("/api/approvals/r1", json={"approve": False}, headers=watch).status_code == 409   # no such request
@@ -147,28 +86,30 @@ def test_pairing_and_roles(app):
 
         view = local.get("/api/phone", headers=owner).json()
         assert [(d["name"], d["role"]) for d in view["devices"]] == [("Ana's phone", "control"), ("Lab tablet", "watch")]
-        assert "hash" not in json.dumps(view) and paired["token"] not in json.dumps(settings._user)   # only a hash is kept
-        tablet = view["devices"][1]["id"]
-        assert local.delete("/api/devices/" + tablet, headers=owner).json() == {"ok": True}
+        assert "hash" not in json.dumps(view) and token not in json.dumps(settings._user)   # only a hash is kept
+        assert local.delete("/api/devices/" + view["devices"][1]["id"], headers=owner).json() == {"ok": True}
         assert phone.get("/api/state", headers=watch).status_code == 401
         assert phone.post("/api/me/forget", json={}, headers=ctl).json() == {"ok": True}
         assert phone.get("/api/state", headers=ctl).status_code == 401
         assert local.get("/api/phone", headers=owner).json()["devices"] == []
-        assert local.post("/api/pair", json={"code": "123456"}, headers=owner).status_code == 404   # phones only
 
 
-def test_wrong_codes_lock_pairing(app):
+def test_pairing_is_gone(app):
+    """Phones connect through the Kelvin account only: no pairing code, no QR code, no phone page in a browser."""
     guard, settings = app
     owner = {"X-Kelvin-Token": settings.access_key}
     with TestClient(guard) as local:
         guard.remote.port = 8771
-        phone = TestClient(guard, base_url="http://10.0.0.7:8771")
-        code = local.post("/api/devices", json={"name": "x"}, headers=owner).json()["code"]
-        wrong = "%06d" % ((int(code) + 1) % 10 ** 6)
-        for _ in range(MAX_FAILURES):
-            assert phone.post("/api/pair", json={"code": wrong}).status_code == 403
-        locked = phone.post("/api/pair", json={"code": code})
-        assert locked.status_code == 429 and "locked" in locked.json()["error"]
+        phone = TestClient(guard, base_url="http://192.168.1.50:8771")
+        for path in ("/m", "/pair", "/static/mobile.js"):
+            assert local.get(path).status_code == 404 and phone.get(path).status_code == 404, path
+        assert local.post("/api/devices", json={"name": "Ana's phone"}, headers=owner).status_code == 404
+        assert local.get("/api/devices/pairing/123456", headers=owner).status_code == 404
+        assert local.post("/api/pair", json={"code": "123456"}, headers=owner).status_code == 404
+        assert phone.post("/api/pair", json={"code": "123456"}).status_code == 401   # no token, no way in
+        page = local.get("/").text
+        assert "Pair a phone" not in page and "pair-box" not in page and 'id="phone-on"' in page
+        assert "/api/devices/pairing" not in local.get("/static/app.js").text
 
 
 def test_the_network_listener_starts_and_stops(app):
@@ -179,9 +120,8 @@ def test_the_network_listener_starts_and_stops(app):
         port = s.getsockname()[1]
     base = "http://127.0.0.1:%d" % port
 
-    def get(path, token=None, data=None):
-        req = urllib.request.Request(base + path, data=json.dumps(data).encode() if data is not None else None,
-                                     headers=dict({"Content-Type": "application/json"}, **({"X-Kelvin-Token": token} if token else {})))
+    def get(path, token=None):
+        req = urllib.request.Request(base + path, headers={"X-Kelvin-Token": token} if token else {})
         try:
             with urllib.request.urlopen(req, timeout=10) as r:
                 return r.status, r.read()
@@ -193,18 +133,16 @@ def test_the_network_listener_starts_and_stops(app):
         view = local.post("/api/phone", json={"on": True, "port": port}, headers=owner).json()
         assert view["on"] and view["listening"] and view["port"] == port and view["error"] is None
         assert settings.phone == (True, port)
-        assert get("/m")[0] == 200
+        assert get("/")[0] == 200
         assert get("/api/state")[0] == 401
         assert get("/api/state", settings.access_key)[0] == 401
-        code = local.post("/api/devices", json={"name": "phone"}, headers=owner).json()["code"]
-        status, body = get("/api/pair", data={"code": code})
-        token = json.loads(body)["token"]
+        _, token = guard.remote.issue("phone", "control", "ios-phone")
         status, body = get("/api/state", token)
         assert status == 200 and json.loads(body)["lab"] == "Virtual Lab"
         view = local.post("/api/phone", json={"on": False}, headers=owner).json()
         assert not view["listening"] and guard.remote.port is None
         with pytest.raises(urllib.error.URLError):
-            urllib.request.urlopen(base + "/m", timeout=3)
+            urllib.request.urlopen(base + "/", timeout=3)
         assert local.post("/api/phone", json={"on": True, "port": 80}, headers=owner).status_code == 400
 
 
@@ -232,16 +170,6 @@ def test_a_carrier_network_is_not_tailscale(monkeypatch):
     assert [(a["ip"], a["kind"]) for a in found] == [
         ("100.101.7.9", "tailscale"), ("100.103.144.14", "network"), ("192.168.1.20", "network")]
     assert found[0]["url"] == "http://100.101.7.9:8771"
-
-
-def test_the_pairing_code_carries_every_address():
-    link = pairing_link(["http://100.101.7.9:8771", "http://192.168.1.20:8771"], "042137")
-    assert link == "http://100.101.7.9:8771/pair#042137&also=192.168.1.20:8771"
-    assert read_qr(QR(link))[0] == link
-    many = ["http://100.101.%d.200:8771" % i for i in range(10)]
-    full = pairing_link(many, "042137")
-    assert len(full) <= remote.QR_BYTES and full.startswith(many[0] + "/pair#042137&also=") and QR(full)
-    assert pairing_link(["http://192.168.1.20:8771"], "042137") == "http://192.168.1.20:8771/pair#042137"
 
 
 def test_letting_phones_through_the_firewall(app, monkeypatch):

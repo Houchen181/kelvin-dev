@@ -5818,8 +5818,8 @@ class LabRuntime:
         if away:
             return "alarms show in the portal on this computer and reach people away from it through " + ", ".join(away)
         return ("alarms show only in the portal on this computer: nothing is set up to reach anyone away from it "
-                "(Settings → Notifications for email or a webhook such as ntfy; Settings → Phone access to pair a "
-                "phone)")
+                "(Settings → Notifications for email or a webhook such as ntfy; Settings → Phone for the Kelvin "
+                "iPhone app)")
 
     # ------------------------------------------------------------------ watches and alarms outlast a restart
 
@@ -5828,7 +5828,7 @@ class LabRuntime:
 
     def _escalate(self, request: Dict[str, Any]) -> bool:
         """A request nobody answered at the computer (WebApprover.escalate): it goes to people away from it as an
-        alarm (the Kelvin app on a paired phone, email, a webhook) and waits for their answer, instead of being
+        alarm (the Kelvin app on a phone, email, a webhook) and waits for their answer, instead of being
         declined after a few minutes and ending the night's queue. False when Kelvin can reach nobody away from the
         computer: then it is declined, as before."""
         if not self.notifier.reaches_away("alarm"):

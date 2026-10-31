@@ -85,7 +85,7 @@ The Python package is still called `labharness` (`import labharness`); the produ
 | `src/labharness/gate.py` | The safety gate |
 | `src/labharness/plans.py`, `engine.py` | Plan format; validate → preflight (reused for 10 min for measuring plans) → approve → run → log; a dry run only when asked or in auto mode |
 | `src/labharness/reports/` | Reports: gathering runs and the log (`collect.py`), shared plot layout (`chart.py`), the PDF and PowerPoint writers |
-| `src/labharness/web/remote.py`, `qr.py`, `static/mobile.*` | Phone access: pairing, device roles, the network listener, QR codes, the phone page |
+| `src/labharness/web/remote.py`, `relay.py` | Phone access: each phone's token and role, the network listener, the firewall rule; phones through the Kelvin hub |
 | `src/labharness/monitor.py`, `notify.py` | Watches and alarms on a background thread, including instruments that stop answering (from each instrument's `health`) and garbled replies (one latched comms fault); in-app notices, the optional webhook and email, and the heartbeat |
 | `src/labharness/adapters.py`, `discovery.py` | VISA/serial connections for real instruments; the read-only scan that matches instruments to cards |
 | `src/labharness/collection.py` | The instrument collection from the public repository (`Houchen181/Kelvin`, where published builds update from; never the private source): the pinned, checked copy in `~/Kelvin/collection`, its cards, the instruments it knows without a card, and its experiments mapped to a lab's instruments |

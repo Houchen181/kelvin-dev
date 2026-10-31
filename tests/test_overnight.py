@@ -366,7 +366,7 @@ def test_the_runtime_asks_people_away_only_when_it_can_reach_them(tmp_path):
     assert rt.approver.escalate == rt._escalate
     request = {"title": "Run the queue: 3 scans", "items": ["smu.V: now 0 V, plan uses 0 … 1 V"], "until": 0}
     assert rt._escalate(request) is False                            # nobody to reach: declined as before
-    rt.notifier.phones = lambda: True                                # a paired phone
+    rt.notifier.phones = lambda: True                                # a phone in Settings → Phone
     assert rt._escalate(request) is True
     notice = rt.notifier.notices[-1]
     assert notice["kind"] == "alarm" and notice["title"] == "Waiting for your answer: Run the queue: 3 scans"

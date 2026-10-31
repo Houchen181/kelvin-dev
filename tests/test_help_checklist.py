@@ -1,5 +1,5 @@
 """Help in the portal, from Kelvin's own documentation, and a first-run checklist: lab set up, instruments checked,
-limits set, owner PIN, phone paired, data folder (F3 #20: no in-app help at all)."""
+limits set, owner PIN, a phone connected, data folder (F3 #20: no in-app help at all)."""
 import pytest
 
 pytest.importorskip("starlette")
