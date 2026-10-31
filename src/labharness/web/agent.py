@@ -2072,7 +2072,8 @@ class ChatAgent:
 
     def _kept(self) -> List[Any]:
         """What Kelvin runs as a person chose it, which a chat's write_file never saves (folderfiles.off_limits): the
-        lab's scripts folder, and the scripts a person imported into their library."""
+        lab's scripts folder, and the scripts a person imported into their library, each with its whole folder (a
+        Python environment, wherever it is, folderfiles refuses itself)."""
         rt = self.runtime
         kept: List[Any] = []
         try:

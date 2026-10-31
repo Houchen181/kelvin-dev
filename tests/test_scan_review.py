@@ -132,9 +132,10 @@ def test_the_ai_never_forges_the_library_nor_rewrites_a_script_a_person_chose(tm
         with pytest.raises(folderfiles.FolderError, match="only a person changes it"):
             folderfiles.save(target.parent, target.name, "print('AI code')\n", kept=kept, **ai_saves(rt))
     assert "AI code" not in mine.read_text() and "AI code" not in (scripts / "sweep.py").read_text()
-    with pytest.raises(folderfiles.FolderError, match="Python code beside probe.py"):   # what it would import
-        folderfiles.save(elsewhere, "other.py", "print(1)\n", kept=kept, **ai_saves(rt))
-    folderfiles.save(elsewhere, "notes.txt", "a note\n", kept=kept, **ai_saves(rt))    # beside it, not code: fine
+    for name in ("other.py", "notes.txt"):   # beside it: what it would import, or read (its whole folder is theirs)
+        with pytest.raises(folderfiles.FolderError, match="in the folder of probe.py, a script the person imported"):
+            folderfiles.save(elsewhere, name, "print(1)\n", kept=kept, **ai_saves(rt))
+    folderfiles.save(tmp_path, "notes.txt", "a note\n", kept=kept, **ai_saves(rt))     # outside that folder: fine
 
 
 def test_in_a_chat_write_file_refuses_the_scripts_folder(tmp_path, scripts):

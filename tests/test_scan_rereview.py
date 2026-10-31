@@ -5,10 +5,8 @@ for its restore, and `..` in a path is fine."""
 import ctypes
 import json
 import os
-import sys
 
 import pytest
-import yaml
 
 pytest.importorskip("mcp")
 
@@ -40,11 +38,11 @@ def test_the_code_beside_an_imported_script_is_the_persons(tmp_path, scripts):
     kw = dict(ai_saves(rt), kept=kept_by_person(rt))
     for path in ("proj/measure.py", "proj/helpers.py", "proj/numpy.py", "proj/helpers.PYW", "proj/fast.pyd",
                  "proj/__pycache__/helpers.cpython-313.pyc", "proj/data/__init__.py", "proj/newpkg/notes.txt",
-                 "proj/data/../helpers.py"):
+                 "proj/data/../helpers.py",
+                 "proj/data/results.csv"):   # since re-review 2, its whole folder: what it reads there too
         with pytest.raises(folderfiles.FolderError, match="only a person changes|Only a person changes"):
             folderfiles.save(chat, path, "open('ai_was_here', 'w')\n", **kw)
     assert (chat / "proj" / "helpers.py").read_text() == "VALUE = 1\n" and not (chat / "proj" / "newpkg").exists()
-    folderfiles.save(chat, "proj/data/results.csv", "x,y\n1,2\n", **kw)        # data beside it: the chat's own
     folderfiles.save(chat, "notes/helpers.py", "VALUE = 2\n", **kw)              # code elsewhere in the chat: fine
 
     # a person (or another program) changes what it imports: its next card says so, by name

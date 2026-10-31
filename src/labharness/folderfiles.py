@@ -36,7 +36,6 @@ NOT_SAVED = {".exe", ".com", ".scr", ".pif", ".msi", ".msp", ".dll", ".sys", ".c
              ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".url", ".reg", ".inf", ".pth"}
 STARTUP = {"sitecustomize.py", "usercustomize.py"}
 LOADED = {".py", ".pyw"}   # what a maker's Python library could import from its folder
-CODE = {".py", ".pyw", ".pyc", ".pyd"}   # what Python imports from a script's folder (source, compiled, extension)
 KEPT = ".kelvin-old"   # beside a file Kelvin replaced: each version before, by date
 # the lab's records in the data folder, and in each run's folder, which only Kelvin itself writes: the event log, the
 # mounted sample and its protection, the queue, the chats' folders of runs, the catalog, the person's library of scans
@@ -141,9 +140,10 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
     the chat may not see), and its records (RECORDS) and runs only Kelvin itself writes; a run's own files
     (RUN_RECORDS) are Kelvin's in any folder named as a run is. unseen: whether a Kelvin run (its folder) is unshared
     work the chat may not see, which it never reaches wherever it is kept. kept: what Kelvin runs as a person chose
-    it, never saved this way: the lab's scripts folders, whole, and the scripts a person imported (their library),
-    with the code beside them (Python files and new folders, anywhere under an imported script's folder: its folder
-    is first on sys.path, so a helpers.py or a numpy.py there would run with it)."""
+    it, never saved this way: the lab's scripts folders, and the folder of each script a person imported (their
+    library), each whole (what a script imports and reads there, its code, settings and data, is the person's); nor
+    is anything inside a Python environment, wherever it is (a venv, a conda environment, a Python installation,
+    installed packages: environment), whose code runs with the lab's scripts."""
     verb = "saves" if saving else "reads"
     folder = mine(target, own)
     if folder is not None:
@@ -175,19 +175,38 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
         for k in kept:
             if not k:
                 continue
-            if _within(target, k):
-                return ("%s is %s: Kelvin runs it as a person chose it, so only a person changes it. Give the code "
-                        "in the answer; the person saves it if they want it" % (target, (
-                            "in the lab's scripts folder (%s)" % k) if Path(str(k)).is_dir() else
-                        "a script the person imported into their library"))
-            beside = Path(str(k)).parent   # an imported script's folder: what Python imports there runs with it
-            if not Path(str(k)).is_dir() and _within(target, beside) and (
-                    target.suffix.lower() in CODE or not target.parent.exists()):
-                return ("%s is %s beside %s, a script the person imported: its folder comes first when Python imports, "
-                        "so what is saved there runs with it. Only a person changes the code there. Give the code in "
-                        "the answer; the person saves it if they want it" % (
-                            target, "Python code" if target.suffix.lower() in CODE else "a new folder (a package)",
-                            Path(str(k)).name))
+            path = Path(str(k))
+            whole = path if path.is_dir() else path.parent   # an imported script: its whole folder, as it runs there
+            if _within(target, whole):
+                return ("%s is %s, so only a person changes it: Kelvin runs what is there as a person chose it. Give "
+                        "it in the answer; the person saves it if they want it" % (target, (
+                            "in the lab's scripts folder (%s)" % k) if path.is_dir() else
+                        "in the folder of %s, a script the person imported (what it imports and reads there is "
+                        "theirs)" % path.name))
+        env = environment(target)
+        if env:
+            return ("%s is in %s: what Python loads from there runs with the lab's scripts, so only a person changes "
+                    "it. Give it in the answer; the person saves it if they want it" % (target, env))
+    return None
+
+
+def environment(path: Path) -> Optional[str]:
+    """The Python environment a path is in, in words, or None: a path through site-packages or dist-packages (the
+    packages installed in any Python), or under a folder holding pyvenv.cfg (a venv: the one beside a script, or one
+    set in Settings) or conda-meta (a conda environment), or a Python installation itself (python.exe, or its own
+    library: Lib/os.py, lib/python3.x/os.py), which a script may run with (this computer's Python)."""
+    path = Path(path)
+    if {p.lower() for p in path.parts} & {"site-packages", "dist-packages"}:
+        return "a Python environment's installed packages"
+    for folder in path.parents:
+        try:
+            if (folder / "pyvenv.cfg").is_file() or (folder / "conda-meta").is_dir():
+                return "a Python environment (%s)" % folder
+            if (folder / "python.exe").is_file() or (folder / "Lib" / "os.py").is_file() or any(
+                    (folder / "lib").glob("python3*/os.py")):
+                return "a Python installation (%s)" % folder
+        except OSError:
+            continue
     return None
 
 

@@ -501,6 +501,8 @@ class LabRuntime:
         self._report_timer: Optional[threading.Timer] = None
         self._report_lock = threading.Lock()
         self._queue_thread: Optional[threading.Thread] = None
+        # the ids of the items the running start of the queue is for, when it had a pause point (_queue_loop's only)
+        self._queue_only: Optional[List[str]] = None
         self.interrupted: List[str] = []   # the runs a crash or power cut ended, found when Kelvin started (tidy_runs)
         # the latest dry runs that went wrong, by the plan's text (a queue's: its items'), as (when, what they said):
         # the real run's card says so (a queue was approved minutes after its rehearsal said two items would fail)
@@ -2645,7 +2647,13 @@ class LabRuntime:
         return out
 
     def queue_edit(self, ref: Any, text: str, by: str = "agent") -> str:
+        """A waiting or finished item's new text, checked first. A step restoring the settings another item ran with
+        is never edited (ScanQueue.edit): for the agent's tool and the Queue pane alike, whatever the new text."""
         try:
+            found = self.queue.find(ref)
+            if found.restores:
+                return "not changed: %s restores the settings another item ran with, so it isn't edited: remove it " \
+                       "and its item, then use Run again" % found.name
             problems = self._queue_problems(text)
             if problems:
                 return "not changed: " + "; ".join(problems[:5])
@@ -2868,9 +2876,11 @@ class LabRuntime:
         """Check every waiting item, ask a person once for every drive range, then run the queue in the background.
         Returns at once after the approval; queue_show follows it. dry_run: only a rehearsal of the whole queue in
         order on the simulated lab (how long it takes, what would fail); the queue does not start. The queue pauses
-        after an item marked then_pause, so its approval covers the items up to that one. It runs exactly the items
+        after an item marked then_pause, so its approval covers the items up to that one, and that start runs those
+        items alone (_queue_loop's only): never one waiting after them, or added since. It runs exactly the items
         approved, as they were when it looked (copies: the card is built from these, and an edit while it waits is
-        another text): an item added or changed since is asked about before it runs, if it drives anything."""
+        another text): an item changed since, or added since to a start of the whole queue, is asked about before it
+        runs, if it drives anything."""
         with self.queue.lock:
             if self.queue.state in ("running", "pausing"):
                 return "the queue is already running\n" + self._queue_text()
@@ -2912,9 +2922,11 @@ class LabRuntime:
                 self.gate.queue_actions = got["actions"]   # its scans do these, not asking again
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()
+                # a start with a pause point (Run and Run again make one) is for these items alone, by id
+                self._queue_only = [i.id for i in items] if items[-1].then_pause else None
                 self._queue_thread = threading.Thread(
-                    target=self._queue_loop, args=(got["grants"], by, {i.id: i.text for i in items}), daemon=True,
-                    name="kelvin-queue")
+                    target=self._queue_loop, args=(got["grants"], by, {i.id: i.text for i in items}, self._queue_only),
+                    daemon=True, name="kelvin-queue")
                 self._queue_thread.start()
             self.gate.log.write("queue_start", by=by, items=len(items),
                                 expected_s=round(got["duration"]) if got["duration"] else None)
@@ -2990,23 +3002,35 @@ class LabRuntime:
         self.gate.log.write("queue_pause", by=by)
         return "the queue pauses after the item that is running"
 
-    def _queue_loop(self, grants: Dict[str, Allowed], by: str, approved: Optional[Dict[str, str]] = None) -> None:
+    def _queue_loop(self, grants: Dict[str, Allowed], by: str, approved: Optional[Dict[str, str]] = None,
+                    only: Optional[List[str]] = None) -> None:
         """The queue, item after item, in the background. approved: the items its approval covers ({id: text}, as
-        they were when it was asked): an item added or changed since is asked about first (_queue_ask_again: only it,
-        with what was approved kept, and no card at all when it drives nothing); None: whatever waits (the tests' own
-        loop). An item that runs after a step restoring the settings it ran with starts only once that step finished;
-        if the step was taken out, moved after it or didn't finish, it is skipped, saying why."""
+        they were when it was asked): an item changed since is asked about first (_queue_ask_again: only it, with
+        what was approved kept, and no card at all when it drives nothing); None: whatever waits (the tests' own
+        loop). only: the ids of the items a start with a pause point is for (the last marked then_pause, as Run and
+        Run again leave them): it runs these alone, each once, in the queue's order, and pauses once they are done,
+        whether the marked one ran, was skipped, taken out or moved; an item waiting outside them, or added since,
+        waits for the next start. None: a start of the whole queue, which runs an item added since as well, asked
+        about as a changed one is. An item that runs after a step restoring the settings it ran with starts only
+        once that step finished; if the step was taken out, moved after it or didn't finish, it is skipped, saying
+        why."""
         q = self.queue
         started = time.time()
+        left = None if only is None else set(only)   # the items of this start not run yet
         while True:
             fresh: List[Item] = []
             with q.lock:
-                item = q.next_waiting() if q.state == "running" else None
+                item = next((i for i in q.items if i.status == "waiting" and (left is None or i.id in left)),
+                            None) if q.state == "running" else None
                 if item is None:
-                    finished = q.state == "running"
-                    q.state = "idle" if finished else "paused"
-                    if finished:
-                        q.reason = "finished"
+                    if q.state == "running" and only is not None and q.next_waiting() is not None:
+                        # the items it was started for are done; nobody started the rest, so they wait
+                        q.state, q.reason = "paused", "paused after %s, as asked" % self._started_for(only, ran=True)
+                    elif q.state == "running":
+                        q.state, q.reason = "idle", "finished"
+                    else:
+                        q.state = "paused"
+                    self._queue_only = None
                     q.save()
                     break
                 held = self._restore_pending(item)
@@ -3014,11 +3038,15 @@ class LabRuntime:
                     q.mark(item, "skipped", held)
                     continue
                 if approved is not None and approved.get(item.id) != item.text:
-                    fresh = [dataclasses.replace(i) for i in self._queue_window(q.waiting())
+                    waiting = self._queue_window(q.waiting()) if left is None else \
+                        [i for i in q.waiting() if i.id in left]
+                    fresh = [dataclasses.replace(i) for i in waiting
                              if approved.get(i.id) != i.text]   # as they are now: asked about, then compared
                 else:
                     if approved is not None:   # once: put back in line later, it is asked about again
                         del approved[item.id]
+                    if left is not None:   # and in a start with a pause point, it doesn't run again
+                        left.discard(item.id)
                     q.mark(item, "running")
                     position = q.items.index(item) + 1
                     # a stop from here on ends it: one between two items once let the next one start (Stop sets the
@@ -3090,6 +3118,14 @@ class LabRuntime:
                 q.reason = "%s (added or changed after the queue was approved)" % got["said"].splitlines()[0]
                 q.save()
         return None
+
+    def _started_for(self, only: List[str], ran: bool = False) -> str:
+        """What a start with a pause point pauses after, in words: the item marked then_pause it started with, while it
+        waits or runs (ran: once it ran), or else "the items it was started for" (it was taken out or skipped)."""
+        mark = next((i for i in self.queue.items if i.id == only[-1]), None)
+        if mark is not None and mark.status in (("done", "failed", "stopped") if ran else ("waiting", "running")):
+            return mark.name
+        return "the items it was started for"
 
     def _restore_pending(self, item: Item) -> Optional[str]:
         """Why an item set to start after a step restoring the settings it ran with can't start now (None: that step
@@ -3344,12 +3380,13 @@ class LabRuntime:
                       library: Optional[str] = None) -> Dict[str, Any]:
         """Items a person runs now, from the Runs panel, filed as whose work this thread does (a run again's: the
         run's own): checked together first, then at the front of the line, the last marked then_pause, and the queue
-        started (its approval, as ever: this returns once it is answered); the queue pauses after them if more items
-        wait. While the queue runs they go next in line, and it goes on as it was; while it is pausing they wait
-        there, marked as well. at_end: at the end of the queue, not started. restores: the first is a step setting
-        back what the second ran with (if it doesn't finish, the second is skipped). library: the entry the last
-        one's runs are noted under. {queue, message}; ValueError: nothing was added, and why (a start that didn't
-        happen takes them out again)."""
+        started (its approval, as ever: this returns once it is answered); that start runs them alone, and the queue
+        pauses after them if more items wait. While the queue runs they go next in line, and it goes on as it was;
+        while it is pausing, or running a start with a pause point (another Run's, which runs only what it was
+        started for), they wait next in line after what it still runs, marked as well, for its next start. at_end: at
+        the end of the queue, not started. restores: the first is a step setting back what the second ran with (if it
+        doesn't finish, the second is skipped). library: the entry the last one's runs are noted under. {queue,
+        message}; ValueError: nothing was added, and why (a start that didn't happen takes them out again)."""
         for text in texts:
             try:
                 problems = self._queue_problems(text)
@@ -3361,23 +3398,28 @@ class LabRuntime:
         with q.lock:
             running = q.state in ("running", "pausing")
             pausing = q.state == "pausing"
+            only = self._queue_only if q.state == "running" else None   # a start with a pause point: not run by it
             first = None if at_end else next((n for n, i in enumerate(q.items, 1) if i.status == "waiting"), None)
+            if first is not None and only is not None:   # after the items that start still runs: in the order they run
+                first = max((n + 1 for n, i in enumerate(q.items, 1) if i.status == "waiting" and i.id in only),
+                            default=first)
             last = len(texts) - 1
             added = [self._queue_put(text, None if first is None else first + k, "", by,
-                                     then_pause=not at_end and (not running or pausing) and k == last,
-                                     library=library if k == last else None)
+                                     then_pause=not at_end and (not running or pausing or only is not None)
+                                     and k == last, library=library if k == last else None)
                      for k, text in enumerate(texts)]
             if restores and len(added) > 1:   # the step and the item it restores for, each knowing the other
                 added[0].restores, added[1].restored_by = added[1].id, added[0].id
                 q.save()
+            after = "the item running now" if only is None else self._started_for(only)
         names = " and ".join(i.name for i in added)
         if at_end:
             said = "added %s at the end of the queue" % names
         elif running:
             them = "them" if len(added) > 1 else "it"
             said = "added %s next in line: %s" % (names, (
-                "the queue pauses after the item running now, as asked; start it again to run %s, and it pauses after "
-                "%s" % (them, them)) if pausing else (
+                "the queue pauses after %s, as asked; start it again to run %s, and it pauses after %s" % (
+                    after, them, them)) if pausing or only is not None else (
                 "after the item running now, the queue asks you about %s, as %s came after its approval"
                 % (them, "they" if len(added) > 1 else "it")))
         else:

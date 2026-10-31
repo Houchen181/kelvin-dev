@@ -286,11 +286,16 @@ class ScanQueue:
         return item
 
     def edit(self, ref: Any, text: str) -> Item:
+        """An item's new text. A step restoring the settings another item ran with (restores) isn't edited: what it
+        sets back is that run's, so the item would no longer run as it ran."""
         kind, name = parse_item(text)
         with self.lock:
             item = self.find(ref)
             if item.status == "running":
                 raise ValueError("%s is running; it can be edited after it finishes" % item.name)
+            if item.restores:
+                raise ValueError("%s restores the settings another item ran with, so it isn't edited: remove it and "
+                                 "its item, then use Run again" % item.name)
             item.kind, item.name, item.text = kind, name, text.strip() + "\n"
             item.status, item.run_id, item.message, item.started, item.finished = "waiting", None, "", None, None
             self.save()
