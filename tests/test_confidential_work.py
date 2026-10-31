@@ -597,3 +597,28 @@ def test_the_hub_trims_answers_off_the_portals_loop_and_sends_none_it_could_not_
     sent.clear()
     asyncio.run(answer(b'{"runs": ["20261030-120000-acme_gate"], "broken": true}'))
     assert sent[0][0] == 500 and b"acme" not in sent[1]
+
+
+def test_a_queued_item_of_unpublished_work_keeps_that_mark(rt, tmp_path, monkeypatch):
+    import time
+    from test_team_and_analysis import _relay
+    p = Portal(tmp_path, rt)
+    draft = p.store.create_project("Thesis draft")
+    p.store.set_sharing(draft["id"], "unpublished")
+    chat = p.store.create("scripted:m1", draft["id"])["id"]
+    p.turn(chat, [("queue_add", {"item": OPEN})])
+    item = rt.queue.items[0]
+    assert item.unpublished and item.whose()["unpublished"]
+    p.store.set_sharing(draft["id"], "")   # published later: what was queued before stays unpublished work
+    assert rt.unshared_work(item.whose())
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"thesis_gate" not in raw
+    assert rt.queue_start("human").startswith("queue started")
+    deadline = time.time() + 60
+    while rt.queue.state in ("running", "pausing") and time.time() < deadline:
+        time.sleep(0.1)
+    run, meta = newest(rt, "thesis_gate")
+    assert meta.get("unpublished")
+    status, raw = ask("GET", "/api/runs")
+    assert status == 200 and run.encode() not in raw

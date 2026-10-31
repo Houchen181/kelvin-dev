@@ -599,8 +599,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     def unshared_meta(meta: Any) -> bool:
         if not isinstance(meta, dict):
             return False
-        return bool(meta.get("incognito") or meta.get("unshared") or meta.get("confidential") or meta.get("rules")) \
-            or unshared_project(meta.get("project"))
+        return bool(meta.get("incognito") or meta.get("unshared") or meta.get("confidential") or meta.get("rules")
+                    or meta.get("unpublished")) or unshared_project(meta.get("project"))
 
     def unshared_run(run_id: str) -> bool:
         live = runtime.live_view(10 ** 9) or {}
@@ -608,8 +608,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return unshared_meta(runtime.running_meta)
         try:
             meta = rundata.meta(runtime.runs / run_id)
-        except (KeyError, OSError, ValueError):
-            return False
+        except Exception:   # whose it is can't be read: kept apart
+            return True
         return unshared_meta(meta)
 
     NOT_THROUGH_HUB = ("That is unshared work (unpublished, confidential or limited to some models, or incognito), "

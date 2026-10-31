@@ -2467,7 +2467,7 @@ class LabRuntime:
         item = self.queue.add(text, position, note, by, project=whose.get("project"),
                               incognito=bool(whose.get("incognito")), unshared=bool(whose.get("unshared")),
                               folder=whose.get("folder"), chat=whose.get("chat"), rules=whose.get("rules"),
-                              confidential=bool(whose.get("confidential")))
+                              confidential=bool(whose.get("confidential")), unpublished=bool(whose.get("unpublished")))
         pos = self.queue.items.index(item) + 1
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name, position=pos)
         return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self._queue_text())

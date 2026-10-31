@@ -100,6 +100,7 @@ class Item:
     chat: Optional[str] = None      # the chat that queued it, and the model rules and marks it was under: its
     rules: Optional[Dict[str, Any]] = None   # runs keep them, as a chat's own runs do
     confidential: bool = False
+    unpublished: bool = False
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
@@ -107,7 +108,8 @@ class Item:
     def whose(self) -> Dict[str, Any]:
         """Whose work it is, as its runs are filed (LabRuntime.attribution)."""
         return {"project": self.project, "chat": self.chat, "incognito": self.incognito, "unshared": self.unshared,
-                "rules": self.rules, "confidential": self.confidential, "folder": self.folder}
+                "rules": self.rules, "confidential": self.confidential, "unpublished": self.unpublished,
+                "folder": self.folder}
 
 
 def parse_item(text: str) -> Tuple[str, str]:
@@ -198,11 +200,11 @@ class ScanQueue:
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "",
             project: Optional[str] = None, incognito: bool = False, unshared: bool = False,
             folder: Optional[str] = None, chat: Optional[str] = None, rules: Optional[Dict[str, Any]] = None,
-            confidential: bool = False) -> Item:
+            confidential: bool = False, unpublished: bool = False) -> Item:
         kind, name = parse_item(text)
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time(),
                     project=project, incognito=incognito, unshared=unshared, folder=folder, chat=chat, rules=rules,
-                    confidential=confidential)
+                    confidential=confidential, unpublished=unpublished)
         with self.lock:
             if position is None or position > len(self.items):
                 self.items.append(item)
