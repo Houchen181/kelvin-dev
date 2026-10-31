@@ -165,6 +165,8 @@ class ChatGPTProvider(Provider):
         if incomplete:
             result.stop_reason, result.note = "max_tokens", "The answer was cut short."
             result.blocks = [b for b in blocks if b["type"] != "tool_call"]
+            # nor sent again: a call that never ran has no output to follow it, which the route refuses
+            result.raw = [i for i in raw if i["type"] != "function_call"]
         elif result.tool_calls:
             result.stop_reason = "tool_calls"
         return result

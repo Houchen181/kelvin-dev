@@ -28,6 +28,13 @@ def sanitize(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if b.get("type") != "fallback" and (i > last or b.get("type") == "text")]
 
 
+def without_calls(raw: List[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    """A cut or declined turn as it is sent again: without its tool calls, which never ran (no result follows them,
+    and Claude refuses a tool_use without its tool_result). None when no text is left (the blocks are sent then)."""
+    kept = [b for b in raw if b.get("type") != "tool_use"]
+    return kept if any(b.get("type") == "text" for b in kept) else None
+
+
 def _image(image: Dict[str, str]) -> Dict[str, Any]:
     return {"type": "image", "source": {"type": "base64", "media_type": image["mime"], "data": image["data"]}}
 
@@ -162,10 +169,12 @@ class AnthropicProvider(Provider):
         if stop == "refusal":
             result.stop_reason = "refusal"
             result.blocks = [b for b in blocks if b["type"] != "tool_call"]
+            result.raw = without_calls(raw)
             result.note = "The model declined this request."
-        elif stop == "max_tokens":
+        elif stop in ("max_tokens", "model_context_window_exceeded"):
             result.stop_reason = "max_tokens"
             result.blocks = [b for b in blocks if b["type"] != "tool_call"]  # a truncated tool input must not run
+            result.raw = without_calls(raw)
             result.note = "The answer hit the length limit."
         elif stop == "pause_turn":
             result.stop_reason = "pause"

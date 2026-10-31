@@ -148,4 +148,13 @@ class GeminiProvider(Provider):
             result.blocks = [b for b in blocks if b["type"] != "tool_call"]
         elif result.tool_calls:
             result.stop_reason = "tool_calls"
+        if result.stop_reason != "tool_calls":   # a call that never runs is never sent again: no response follows it
+            raw["parts"] = [p for p in raw.get("parts") or [] if "function_call" not in p]
+        if not any(not p.get("thought") for p in raw.get("parts") or []):   # Gemini refuses a turn of no parts
+            result.raw = None
+        if not result.note and not text and not result.tool_calls:   # nothing to show the person: said instead
+            result.note = "The model gave no answer%s. Say “continue” to try again." % (
+                " (the tool call it wrote was malformed)" if finish == "MALFORMED_FUNCTION_CALL" else
+                " (Gemini: %s)" % finish.lower().replace("_", " ")
+                if finish not in (None, "STOP", "FINISH_REASON_UNSPECIFIED") else "")
         return result

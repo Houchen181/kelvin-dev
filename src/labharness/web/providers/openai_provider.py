@@ -271,6 +271,7 @@ class OpenAIProvider(Provider):
             result.blocks = [b for b in blocks if b["type"] != "tool_call"]
         elif finish == "content_filter":
             result.stop_reason, result.note = "refusal", "The model declined this request."
+            result.blocks = [b for b in blocks if b["type"] != "tool_call"]   # never run, so never sent again
         elif result.tool_calls:
             result.stop_reason = "tool_calls"
         if left_out:
