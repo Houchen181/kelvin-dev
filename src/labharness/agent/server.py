@@ -793,8 +793,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)   # accept writes the run's fits (never an instrument)
     def analyze_run(run_id: str, column: Optional[str] = None, model: Optional[str] = None,
                     accept: bool = False) -> str:
-        """Re-analyse a recorded run. column: one measured instr.param; model: linear, lorentzian,
-        gaussian or exponential to force that fit (default: chosen automatically). accept: once the person agrees
+        """Re-analyse a recorded run. column: one measured instr.param; model: linear, quadratic, lorentzian,
+        gaussian, double_lorentzian, exponential or oscillation to force that fit (default: chosen automatically,
+        one model for every row of the run). accept: once the person agrees
         this is the right fit, make it the run's result (in run.h5), in place of the automatic one; its reports
         show it as the run's fit from then on (fit_run's kept fits are shown beside it)."""
         return rt.analyze(run_id, column, model, accept=accept)
@@ -811,13 +812,15 @@ def build_server(rt: LabRuntime) -> MCPServer:
         "expression or one number), which weights the fit; start: starting values; fix: values held; bounds: "
         "{name: [low, high]}. phase: the phase column or trace for resonator (y: its magnitude, dB or linear). "
         "x_values and y_values: numbers you give instead of a run's (Hc2 against T from several runs). A resonance "
-        "recorded in dB is fitted on linear power. name: what to keep it as; keep: false only looks."
+        "recorded in dB is fitted on linear power. A fit that finds nothing a flat line doesn't says 'not "
+        "significant'; one that failed (no convergence, parameters the data can't fix) says FAILED and is kept only "
+        "with keep: true, marked failed. name: what to keep it as; keep: false only looks."
         % ", ".join(fitting.MODELS)))
     def fit_run(model: str, run_id: str = "last", x: str = "", y: str = "", where: str = "",
                 sigma: Optional[Union[float, str]] = None, start: Optional[Dict[str, float]] = None,
                 fix: Optional[Dict[str, float]] = None, bounds: Optional[Dict[str, List[Optional[float]]]] = None,
                 x_range: Optional[List[Optional[float]]] = None, row: Optional[int] = None, phase: str = "",
-                name: str = "", keep: bool = True, x_values: Optional[List[float]] = None,
+                name: str = "", keep: Optional[bool] = None, x_values: Optional[List[float]] = None,
                 y_values: Optional[List[float]] = None, x_unit: str = "", y_unit: str = "") -> List[Any]:
         try:
             png, text = datatools.fit_run(rt, run_id, model, x, y, where, sigma, start, fix, bounds, x_range, row,

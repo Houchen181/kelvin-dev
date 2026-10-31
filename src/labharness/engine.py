@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from . import frames, pulses, techniques
 from ._version import __version__
 from .analysis import analyze_run
+from .chain import derived_readings
 from .eventlog import EventLog, RunStore
 from .forecast import Forecast, action_of, runs
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur
@@ -113,6 +114,33 @@ class RunEngine:
                         out[key] = spec.show(v)
                 except Exception:
                     continue
+        return out
+
+    def measured_with(self, plan: Plan, measuring: Dict[str, Any]) -> Dict[str, Any]:
+        """What the automatic analysis needs to know about how a run measured, kept with the run so a re-analysis
+        knows it too: the protocol a pulse generator played (protocol: rabi, ramsey...; not a sequence written out,
+        whose meaning Kelvin doesn't know), and the readings that guarded its drives (guards: a gate's leakage
+        current, which leads the assessment only when nothing else was measured). measuring: the settings it
+        measured with (its start, with the plan's setup applied)."""
+        out: Dict[str, Any] = {}
+        for name, inst in self.lab.instruments.items():
+            values = measuring.get(name) if isinstance(measuring.get(name), dict) else {}
+            if inst.card.kind != "pulse-generator" or "protocol" not in inst.card.params:
+                continue
+            playing = values.get("running") in (True, 1, "1", "on", "ON", "true") or \
+                any(a.instr == name and a.param == "running" for a in plan.axes)
+            written = str(values.get("sequence") or pulses.NONE).strip().lower() not in (pulses.NONE, "")
+            if playing and not written and isinstance(values.get("protocol"), str):
+                out["protocol"] = values["protocol"].strip().lower()
+        guards = set()
+        for key in self.drive_values(plan):
+            try:
+                inst, spec = self.lab.resolve(key)
+            except KeyError:
+                continue
+            guards.update(g.key for g in inst.guards(spec.name))
+        if guards:
+            out["guards"] = sorted(guards)
         return out
 
     def units(self, snapshot: Dict[str, Any]) -> Dict[str, str]:
@@ -890,8 +918,12 @@ class RunEngine:
                 for step in plan.setup:
                     if isinstance(measuring.get(step.instr), dict):
                         measuring[step.instr][step.param] = step.value
+                try:
+                    known = self.measured_with(plan, measuring)
+                except Exception:   # what the analysis would like to know never stops a run
+                    known = {}
                 rec.note(held=self.held(plan, measuring),
-                         setup={"%s.%s" % (s.instr, s.param): s.value for s in plan.setup})
+                         setup={"%s.%s" % (s.instr, s.param): s.value for s in plan.setup}, **known)
                 loop(0, {})
                 late = self.readback_problems(plan.setup, swept)
                 if late:   # something reset a level during the sweep: the assessment must not say all was well
@@ -929,8 +961,10 @@ class RunEngine:
         analysis = None
         points = [r for r in rec.rows if not r.get("stabilizing")]   # not the ones logged while it waited
         if self.analyze and points:
-            try:
-                analysis = analyze_run(points, cols["axes"], cols["measures"], meta)
+            try:   # with how it measured (protocol, guards) and the device's measurement chain (readings in ohms)
+                known = {k: rec.meta[k] for k in ("protocol", "guards") if k in rec.meta}
+                derive = derived_readings(rec.meta.get("chain"), rec.meta.get("setup"), start, cols["measures"])
+                analysis = analyze_run(points, cols["axes"], cols["measures"], dict(meta, **known), derive=derive)
                 rec.set_analysis(analysis)
             except Exception as e:  # analysis is a convenience; the data are already safe on disk
                 warnings.append("automatic analysis failed: %s" % e)

@@ -1330,17 +1330,19 @@ class LabRuntime:
         """Re-analyse a recorded run, optionally one column and/or with a chosen fit model. accept: keep these fits
         as the run's (in run.h5), and its scan report shows them."""
         from ..analysis import MODELS, analyze_run
-        if model and model not in MODELS and model != "linear":
-            return "unknown model %r (choose: linear, %s)" % (model, ", ".join(MODELS))
+        from ..chain import derived_readings
+        if model and model not in MODELS and model not in ("linear", "quadratic"):
+            return "unknown model %r (choose: linear, quadratic, %s)" % (model, ", ".join(MODELS))
         try:
             rec = rundata.load(self._run_dir(run_id))
-            rows, meta = rec.rows, rec.meta
+            rows, meta = [r for r in rec.rows if not r.get("stabilizing")], rec.meta   # as the run analysed them
             cols = self._columns(rec)
         except (KeyError, OSError, ValueError, PlanError) as e:
             return "cannot analyse %s: %s" % (run_id, e)
         if column and column not in [m["key"] for m in cols["measures"]]:
             return "unknown column %r (have: %s)" % (column, ", ".join(m["key"] for m in cols["measures"]))
-        a = analyze_run(rows, cols["axes"], cols["measures"], meta, force=model, only=column)
+        derive = derived_readings(meta.get("chain"), meta.get("setup"), rec.snapshots.get("start"), cols["measures"])
+        a = analyze_run(rows, cols["axes"], cols["measures"], meta, force=model, only=column, derive=derive)
         lines = ["%s: %d rows" % (run_id, len(rows))] + self._analysis_lines(a)
         if accept:
             lines.append(self._accept_fit(run_id, rec.analysis or {}, a, model, by))
