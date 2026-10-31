@@ -45,6 +45,10 @@ public struct Computer: Codable, Equatable, Identifiable, Sendable {
 
     public func route(_ url: URL) -> Route { Route(url, kinds: kinds) }
 
+    /// The addresses to try the direct token from the account at: on the lab network or Tailscale only, not one
+    /// Kelvin calls public (Route.direct).
+    public var directAddresses: [URL] { addresses.filter { route($0).direct } }
+
     /// The hub's way to a paired computer the account reaches too.
     public var accountRelay: URL? {
         guard let accountHub, let accountKelvin else { return nil }

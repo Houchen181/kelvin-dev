@@ -88,6 +88,8 @@ public struct LiveData: Equatable, Sendable {
     public var since: Int { rows.count }
 
     /// Add what /api/live?since=`since` answered. True when that was the middle of a new run: fetch again from 0.
+    /// An answer from another row than the next one is left out: two looks at once (the one every few seconds and a
+    /// pull to refresh, say) asked from the same row, and the first one's rows are here already.
     @discardableResult
     public mutating func take(_ live: LiveRun?, since: Int) -> Bool {
         guard let live else { return false }
@@ -97,6 +99,8 @@ public struct LiveData: Equatable, Sendable {
             axes = live.axes
             measures = live.measures
             if since != 0 { return true }
+        } else if since != rows.count {
+            return false
         }
         rows += live.rows
         if let t = live.trace { trace = t }

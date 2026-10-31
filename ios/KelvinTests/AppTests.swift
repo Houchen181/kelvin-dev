@@ -448,4 +448,149 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(n.look(at: try state(["r1", "r2"]), on: c), ["Kelvin asks: Ask r2"])
         XCTAssertEqual(n.look(at: try state(["r2"]), on: c), [])
     }
+
+    func testNoSoundForWhatCameWhileAwayAndAnAlarmBackOnIsNews() throws {
+        let c = Computer(lab: "Cryostat lab", phoneName: "P", role: "control", addresses: [lan])
+        func state(_ asks: [String], alarm: String = "") throws -> LabState {
+            let pending = asks.map { "{\"id\": \"\($0)\", \"title\": \"Ask \($0)\", \"items\": []}" }.joined(separator: ",")
+            let json = "{\"lab\": \"L\", \"pending\": [\(pending)], \"alarms\": [\(alarm)]}"
+            return try JSONDecoder().decode(LabState.self, from: Data(json.utf8))
+        }
+        func alarm(cleared: Bool, count: Int) -> String {
+            "{\"id\": \"a1\", \"text\": \"He level low\", \"raised\": 1, \"acknowledged\": false, \"count\": \(count)"
+                + (cleared ? ", \"cleared\": 2}" : "}")
+        }
+        let n = Notifier()
+        XCTAssertEqual(n.look(at: try state(["r1"]), on: c), [])
+        n.returned(to: c)                                                       // back from the background
+        XCTAssertEqual(n.look(at: try state(["r1", "r2"], alarm: alarm(cleared: true, count: 1)), on: c), [])   // on screen
+        XCTAssertEqual(n.look(at: try state(["r1", "r2", "r3"]), on: c), ["Kelvin asks: Ask r3"])
+        XCTAssertEqual(n.look(at: try state([], alarm: alarm(cleared: false, count: 2)), on: c), ["Alarm again in L"])
+        XCTAssertEqual(n.look(at: try state([], alarm: alarm(cleared: true, count: 2)), on: c), [])
+        XCTAssertEqual(n.look(at: try state([], alarm: alarm(cleared: false, count: 3)), on: c), [])   // once, as Kelvin
+    }
+
+    // ------------------------------------------------------------------ the chat, Stop, files, the account
+
+    func summary(_ id: String) throws -> ChatSummary {
+        try JSONDecoder().decode(ChatSummary.self, from: Data("{\"id\": \"\(id)\", \"title\": \"Field ramp\", \"model\": \"m\"}".utf8))
+    }
+
+    func testAMessageKelvinRefusedGoesBackInTheBox() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script)
+        script.on("POST /api/chats/c1/turn", 409, "{\"error\": \"This conversation is still answering.\"}")
+        let chat = ChatModel(session: app.session(for: c), chat: try summary("c1"))
+        chat.draft = "And at 2 T?"
+        await chat.send()?.value
+        XCTAssertEqual(chat.draft, "And at 2 T?")                              // back in the box, to send again
+        XCTAssertTrue(chat.transcript.lines.isEmpty)
+        XCTAssertEqual(chat.problem, "This conversation is still answering. Not sent.")
+    }
+
+    func testAChatOpenedWhileKelvinAnswersItShowsWorkingWithStop() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script)
+        let session = app.session(for: c)
+        let chat = ChatModel(session: session, chat: try summary("c1"))
+        XCTAssertFalse(chat.working)
+        script.on("GET /api/state", "{\"lab\": \"Cryostat lab\", \"active\": {\"chat_id\": \"c2\", \"model\": \"m\"},"
+                  + " \"answering\": [{\"chat_id\": \"c1\", \"model\": \"m\"}, {\"chat_id\": \"c2\", \"model\": \"m\"}]}")
+        await session.refresh()
+        XCTAssertTrue(chat.working)                                           // Stop, not a Send Kelvin would refuse
+        script.on("POST /api/stop", "{\"ok\": true, \"message\": \"\"}")
+        await chat.stop()
+        XCTAssertEqual(script.asked.last, "192.168.1.50 POST /api/stop")
+        script.on("GET /api/state", "{\"lab\": \"Cryostat lab\", \"answering\": []}")
+        await session.refresh()
+        XCTAssertFalse(chat.working)
+    }
+
+    func testAnAnswerCutShortIsNotShownAsDoneAndLoadsAgain() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script)
+        script.on("POST /api/chats/c1/turn", "{\"type\": \"turn_start\"}\n"   // the hub ended it here, as if it were over
+                  + "{\"type\": \"tool_start\", \"id\": \"t1\", \"name\": \"run_plan\", \"input\": {\"plan\": \"plan: ramp\"}}\n")
+        script.on("GET /api/chats/c1", "{\"id\": \"c1\", \"title\": \"Field ramp\", \"messages\": [{\"role\": \"user\","
+                  + " \"text\": \"Ramp B to 1 T\"}, {\"role\": \"assistant\", \"blocks\": [{\"type\": \"tool_call\", \"id\": \"t1\","
+                  + " \"name\": \"run_plan\", \"input\": {\"plan\": \"plan: ramp\"}}]}]}")
+        let chat = ChatModel(session: app.session(for: c), chat: try summary("c1"))
+        chat.draft = "Ramp B to 1 T"
+        await chat.send()?.value
+        XCTAssertTrue(script.asked.contains("192.168.1.50 GET /api/chats/c1"))   // loaded again, as Kelvin has it
+        XCTAssertEqual(chat.transcript.lines.map(\.kind), [.user, .step])
+        XCTAssertTrue(chat.transcript.lines[1].unknown)                        // not a green tick
+        XCTAssertTrue(chat.problem?.hasPrefix("Lost the connection.") ?? false)
+        XCTAssertEqual(chat.draft, "")                                         // Kelvin has it: not one to send again
+    }
+
+    func testStopPressedBeforeTheMessageReachesKelvinStopsItOnceItDoes() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script)
+        script.on("POST /api/chats/c1/turn", "{\"type\": \"turn_start\"}\n{\"type\": \"turn_end\", \"reason\": \"stopped\"}")
+        script.on("POST /api/stop", "{\"ok\": true, \"message\": \"\"}")
+        let chat = ChatModel(session: app.session(for: c), chat: try summary("c1"))
+        chat.draft = "Ramp B to 1 T"
+        let sending = chat.send()
+        await chat.stop()                                                     // at once: Kelvin doesn't have it yet
+        XCTAssertFalse(script.asked.contains("192.168.1.50 POST /api/stop"))  // there would be nothing to stop there
+        await sending?.value
+        let turn = try XCTUnwrap(script.asked.firstIndex(of: "192.168.1.50 POST /api/chats/c1/turn"))
+        let stop = try XCTUnwrap(script.asked.firstIndex(of: "192.168.1.50 POST /api/stop"))
+        XCTAssertLessThan(turn, stop)                                         // sent once Kelvin had the message
+        XCTAssertEqual(chat.transcript.lines.last?.text, "Stopped.")
+    }
+
+    func testARunFileIsSavedInsideTheAppsTemporaryFolder() async throws {
+        let script = Script()
+        let (app, c) = try await paired(script)
+        script.on("GET /api/runs/../Library/Preferences/files/../evil.plist", "<plist/>")   // names from a bad answer
+        let url = try await app.session(for: c).runFile("../Library/Preferences", "../evil.plist")
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        XCTAssertEqual(url.lastPathComponent, "evil.plist")
+        XCTAssertEqual(url.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path,
+                       FileManager.default.temporaryDirectory.standardizedFileURL.path)
+    }
+
+    func testTheDirectTokenNeverGoesToAPublicAddress() async throws {
+        let script = Script()
+        script.on("POST /api/signin", "{\"access_token\": \"khub_phone\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        script.on("GET /api/relay/kelvins", "{\"kelvins\": [{\"id\": \"lab-pc-1\", \"name\": \"LAB-PC\", \"online\": true}]}")
+        script.on("GET /api/relay/kelvins/lab-pc-1/api/me", "{\"role\": \"control\", \"lab\": \"Cryostat lab\", \"computer\": \"LAB-PC\"}")
+        script.on("POST /api/relay/kelvins/lab-pc-1/api/phone/direct", "{\"available\": true, \"token\": \"direct-token\","
+                  + " \"addresses\": [\"http://192.168.1.50:8771\", \"http://140.247.10.20:8771\"],"
+                  + " \"routes\": [{\"url\": \"http://192.168.1.50:8771\", \"kind\": \"network\"},"
+                  + " {\"url\": \"http://140.247.10.20:8771\", \"kind\": \"public\"}]}")
+        script.on("GET /api/relay/kelvins/lab-pc-1/api/state", "{\"lab\": \"Cryostat lab\"}")
+        script.on("GET /api/me", me)                                           // what Kelvin would answer anywhere
+        script.on("GET /api/state", "{\"lab\": \"Cryostat lab\"}")
+        script.unreachable = ["192.168.1.50"]                                  // away from the lab
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        try await app.signIn(hub: URL(string: "https://kelvin.example.org")!, email: "ada@example.org", password: "pw")
+        await app.session(for: try XCTUnwrap(app.current)).refresh()          // through the hub: the direct token
+        XCTAssertEqual(tokens.token(for: try XCTUnwrap(app.current).id), "direct-token")
+        let later = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        let session = later.session(for: try XCTUnwrap(later.current))
+        await session.refresh()
+        XCTAssertNil(session.problem)
+        XCTAssertEqual(session.route, .hub)                                    // not plain http across the internet
+        XCTAssertFalse(script.asked.contains { $0.hasPrefix("140.247.10.20") })
+    }
+
+    func testDeletingTheAccountHasEachKelvinForgetThisPhoneFirst() async throws {
+        let script = Script()
+        script.on("POST /api/signin", "{\"access_token\": \"khub_phone\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        script.on("GET /api/relay/kelvins", "{\"kelvins\": [{\"id\": \"lab-pc-1\", \"name\": \"LAB-PC\", \"online\": true}]}")
+        script.on("DELETE /api/relay/kelvins/lab-pc-1/api/phone/direct", "{\"ok\": true}")
+        script.on("POST /api/account/delete", "{\"deleted\": true}")
+        script.on("POST /api/signout", 204, "")
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        try await app.signIn(hub: URL(string: "https://kelvin.example.org")!, email: "ada@example.org", password: "pw")
+        try await app.deleteAccount(password: "correct horse")
+        let forgot = try XCTUnwrap(script.asked.firstIndex(of: "kelvin.example.org DELETE /api/relay/kelvins/lab-pc-1/api/phone/direct"))
+        let deleted = try XCTUnwrap(script.asked.firstIndex(of: "kelvin.example.org POST /api/account/delete"))
+        XCTAssertLessThan(forgot, deleted)                                     // while the hub still took the phone there
+        XCTAssertNil(app.account)
+        XCTAssertNil(app.current)
+    }
 }

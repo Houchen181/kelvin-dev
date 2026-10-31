@@ -34,7 +34,7 @@ struct ChatListView: View {
                             HStack(spacing: 6) {
                                 if c.incognito { Image(systemName: "eye.slash").foregroundStyle(.secondary) }
                                 Text(c.title).lineLimit(1)
-                                if session.state?.active?.chatID == c.id {
+                                if session.state?.answers(c.id) == true {
                                     Spacer()
                                     ProgressView()
                                 }
@@ -68,10 +68,12 @@ struct ChatListView: View {
 
 struct ChatView: View {
     @StateObject var model: ChatModel
+    @ObservedObject var session: LabSession   // its state says whether Kelvin answers this chat without this phone
     @StateObject var voice = Dictation()
     @FocusState private var typing: Bool
 
     init(session: LabSession, chat: ChatSummary?, incognito: Bool) {
+        _session = ObservedObject(wrappedValue: session)
         _model = StateObject(wrappedValue: ChatModel(session: session, chat: chat, incognito: incognito))
     }
 
@@ -88,7 +90,7 @@ struct ChatView: View {
                             LineView(line: line, model: model)
                                 .id(line.id)
                         }
-                        if model.transcript.answering {
+                        if model.working {
                             HStack(spacing: 8) {
                                 ProgressView()
                                 Text("Kelvin is working…").font(.footnote).foregroundStyle(.secondary)
@@ -117,12 +119,15 @@ struct ChatView: View {
                 }
             }
         }
-        .safeAreaInset(edge: .bottom) { Composer(model: model, voice: voice, typing: $typing) }
+        .safeAreaInset(edge: .bottom) { Composer(model: model, voice: voice, typing: $typing, working: model.working) }
         .onDisappear { voice.cancel() }
         .navigationTitle(model.transcript.title)
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
         .refreshable { await model.load() }
+        .onChange(of: model.answeringElsewhere) { now in   // the answer Kelvin went on with is over: show it
+            if !now { Task { await model.load() } }
+        }
     }
 }
 
@@ -130,6 +135,7 @@ struct Composer: View {
     @ObservedObject var model: ChatModel
     @ObservedObject var voice: Dictation
     var typing: FocusState<Bool>.Binding
+    let working: Bool   // an answer is under way: Stop instead of Send
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -153,16 +159,16 @@ struct Composer: View {
                 Image(systemName: voice.listening ? "mic.fill" : "mic")
                     .font(.title2)
                     .foregroundStyle(voice.listening ? Color.red : Color.accentColor)
-                    .frame(width: 32, height: 34)
+                    .frame(minWidth: 32, minHeight: 34)   // larger with larger text, not over the message box
             }
-            .disabled(model.transcript.answering)
+            .disabled(working)
             .accessibilityLabel(voice.listening ? "Stop listening" : "Talk")
             TextField(voice.listening ? "Listening…" : "Message Kelvin", text: $model.draft, axis: .vertical)
                 .lineLimit(1...6)
                 .textFieldStyle(.roundedBorder)
                 .focused(typing)
                 .accessibilityIdentifier("chat-message")
-            if model.transcript.answering {
+            if working {
                 Button {
                     Task { await model.stop() }
                 } label: {
@@ -215,6 +221,10 @@ struct LineView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     if line.working {
                         ProgressView().controlSize(.small)
+                    } else if line.unknown {   // its end wasn't seen here: not shown as done
+                        Image(systemName: "questionmark.circle")
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Not known yet")
                     } else {
                         Image(systemName: line.failed ? "exclamationmark.triangle.fill" : "checkmark.circle")
                             .foregroundStyle(line.failed ? Color.orange : Color.green)

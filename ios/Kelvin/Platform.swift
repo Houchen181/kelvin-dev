@@ -38,7 +38,11 @@ struct URLSessionTransport: Transport {
         let stream = AsyncThrowingStream<String, Error> { continuation in
             let task = Task {
                 do {
-                    for try await line in bytes.lines { continuation.yield(line) }
+                    var breaker = LineBreaker()   // lines end at "\n" only (bytes.lines also ends them at U+2028...)
+                    for try await byte in bytes {
+                        if let line = breaker.take(byte) { continuation.yield(line) }
+                    }
+                    if let line = breaker.end() { continuation.yield(line) }
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)
@@ -107,27 +111,45 @@ struct Keychain: TokenStore {
 }
 
 /// Tells the person about requests and alarms that appear while the app is open (also on another tab or screen).
-/// What was already there when the app first looked is on screen anyway, so it makes no sound.
+/// What is there when the app first looks at a computer, or looks again after it was away from it (in the background,
+/// or showing another computer), is on screen anyway, so it makes no sound.
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = Notifier()
 
     private var seen = Set<String>()
     private var looked = Set<UUID>()
+    private var cleared = Set<String>()   // alarms seen cleared
 
     func ask() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
-    /// Returns the titles it posted.
+    /// The app shows this computer again, back from the background or from another computer: its next look is a
+    /// first look again, so what came meanwhile (alarms that cleared hours ago too) makes no sound.
+    func returned(to computer: Computer) {
+        looked.remove(computer.id)
+    }
+
+    /// Returns the titles it posted. An alarm seen cleared that is on again (Kelvin counts the repeat in the same
+    /// alarm) is news again, once, as Kelvin tells it: one that keeps coming back is only counted.
     @discardableResult
     func look(at state: LabState, on computer: Computer) -> [String] {
         let asks = state.pending.map { ("ask:\(computer.id):\($0.id)", "Kelvin asks: \($0.title)", $0.items.joined(separator: "\n")) }
         let alarms = state.openAlarms.map { ("alarm:\(computer.id):\($0.id)", "Alarm in \(state.lab)", $0.text) }
+        var again: [(String, String, String)] = []
+        for a in state.alarms {
+            let key = "alarm:\(computer.id):\(a.id)"
+            if a.cleared != nil {
+                cleared.insert(key)
+            } else if a.open, cleared.remove(key) != nil {
+                again.append((key + ":again", "Alarm again in \(state.lab)", a.text))
+            }
+        }
         let first = !looked.contains(computer.id)
         looked.insert(computer.id)
         var posted: [String] = []
-        for (key, title, body) in asks + alarms where !seen.contains(key) {
+        for (key, title, body) in asks + alarms + again where !seen.contains(key) {
             seen.insert(key)
             if first { continue }
             let content = UNMutableNotificationContent()

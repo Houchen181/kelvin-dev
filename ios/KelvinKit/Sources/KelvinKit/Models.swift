@@ -207,6 +207,7 @@ public struct LabState: Decodable, Equatable, Sendable {
     public var status: [String: [Reading]]
     public var live: RunProgress?
     public var active: ActiveChat?
+    public var answering: [ActiveChat]     // every chat answering now (Kelvin 0.3.25 and later)
     public var approvalMode: String?
     public var observeOnly: Bool
     public var mounted: Mounted?
@@ -214,7 +215,7 @@ public struct LabState: Decodable, Equatable, Sendable {
     public var team: Int?                  // the team chat's newest message (Kelvin 0.3.32 and later)
 
     enum CodingKeys: String, CodingKey {
-        case lab, simulated, busy, pending, alarms, notices, status, live, active, mounted, team
+        case lab, simulated, busy, pending, alarms, notices, status, live, active, answering, mounted, team
         case approvalMode = "approval_mode", observeOnly = "observe_only", handsOn = "hands_on"
     }
 
@@ -229,6 +230,7 @@ public struct LabState: Decodable, Equatable, Sendable {
         status = c.value(.status, or: [:])
         live = c.maybe(.live)
         active = c.maybe(.active)
+        answering = c.value(.answering, or: [])
         approvalMode = c.maybe(.approvalMode)
         observeOnly = c.value(.observeOnly, or: false)
         mounted = c.maybe(.mounted)
@@ -242,6 +244,11 @@ public struct LabState: Decodable, Equatable, Sendable {
     }
 
     public var openAlarms: [Alarm] { alarms.filter(\.open) }
+
+    /// Kelvin is answering this chat now, asked from any device.
+    public func answers(_ chatID: String) -> Bool {
+        active?.chatID == chatID || answering.contains { $0.chatID == chatID }
+    }
 
     /// What the lab tab's badge counts: requests and alarms waiting for a person.
     public var waiting: Int { pending.count + openAlarms.count }

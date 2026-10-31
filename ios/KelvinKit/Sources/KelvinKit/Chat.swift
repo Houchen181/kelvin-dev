@@ -69,6 +69,7 @@ public struct ChatLine: Identifiable, Equatable, Sendable {
     public var detail: String?           // a step's result
     public var failed = false
     public var working = false           // a step still running, an answer still arriving
+    public var unknown = false           // a step whose end this phone didn't see: neither done nor failed to it
     public var approval: ApprovalRequest?
     public var answer: Answer?
     public var full: String?             // an answer Kelvin condensed: the whole one
@@ -102,6 +103,7 @@ public struct Transcript: Equatable, Sendable {
 
     public init(_ chat: ChatDetail) {
         self.init(title: chat.title, model: chat.model, incognito: chat.incognito)
+        var ended = Set<String>()   // the steps whose result Kelvin kept
         for m in chat.messages {
             switch m["role"]?.string {
             case "user":
@@ -125,11 +127,15 @@ public struct Transcript: Equatable, Sendable {
                 }
             case "tool":
                 for r in m["results"]?.array ?? [] {
+                    ended.insert("step-" + (r["id"]?.string ?? ""))
                     finishStep(r["id"]?.string ?? "", content: r["content"]?.text ?? "", failed: r["is_error"]?.bool ?? false)
                 }
             default:
                 break
             }
+        }
+        for i in lines.indices where lines[i].kind == .step && !ended.contains(lines[i].id) {
+            lines[i].unknown = true   // no result: still running on the computer, or cut off there
         }
     }
 
@@ -216,10 +222,20 @@ public struct Transcript: Equatable, Sendable {
         "A long answer" + (words.map { " (\($0) words)" } ?? "") + (why.isEmpty ? "." : ": \(why).")
     }
 
-    /// The answer is over (or the stream broke): nothing is "working" any more.
+    /// The answer is over: nothing is "working" any more.
     public mutating func finish() {
         answering = false
         for i in lines.indices where lines[i].working { lines[i].working = false }
+    }
+
+    /// The stream broke before the answer ended; Kelvin goes on without this phone. A step still running isn't known
+    /// to be done (it may still run, or fail), so it isn't shown as done.
+    public mutating func lost() {
+        answering = false
+        for i in lines.indices where lines[i].working {
+            lines[i].working = false
+            if lines[i].kind == .step { lines[i].unknown = true }
+        }
     }
 
     /// The person answered a request from this chat.
@@ -234,6 +250,7 @@ public struct Transcript: Equatable, Sendable {
     private mutating func finishStep(_ id: String, content: String, failed: Bool) {
         guard let i = lines.firstIndex(where: { $0.id == "step-" + id }) else { return }
         lines[i].working = false
+        lines[i].unknown = false
         lines[i].failed = failed || Steps.refused(content)
         lines[i].detail = Steps.summary(content)
     }

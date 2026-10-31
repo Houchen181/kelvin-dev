@@ -42,6 +42,11 @@ public enum Route: String, Equatable, Sendable {
     /// Encrypted on the way: Tailscale is, and the Kelvin hub's https both ways (the hub itself sees what passes);
     /// a plain lab network or the internet over http is not.
     public var encrypted: Bool { self == .tailscale || self == .hub }
+
+    /// The phone may go straight to Kelvin there, with a token of its own: on the lab network or Tailscale. Never on
+    /// the internet: Kelvin's phone listener speaks plain http, so the token and the lab's work, unshared work too,
+    /// would cross it unencrypted. From away, the Kelvin hub's https goes instead.
+    public var direct: Bool { self == .lab || self == .tailscale }
 }
 
 private func ipv4(_ host: String) -> (Int, Int, Int, Int)? {
