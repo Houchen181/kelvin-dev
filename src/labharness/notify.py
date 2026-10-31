@@ -132,8 +132,8 @@ class Notifier:
         self.email: Optional[Email] = None
         self.kinds = set(DEFAULT_KINDS)
         self.last_error: Optional[str] = None
-        # how many phones are in Settings -> Phone (the Kelvin app sees requests and alarms): set by the app; one
-        # counts as someone to reach
+        # how many phones see requests and alarms (the Kelvin app: with its own token, or through the Kelvin hub): set
+        # by the app; one counts as someone to reach
         self.phones: Callable[[], int] = lambda: 0
         # the heartbeat: pinged every heartbeat_s while alive() (Kelvin is watching the lab), never otherwise
         self.heartbeat: Optional[str] = None

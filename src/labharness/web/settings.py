@@ -601,13 +601,33 @@ class Settings:
         return device
 
     def remove_phone(self, phone: str) -> bool:
-        """Forget the token a phone got through the hub (it signed out of the Kelvin account)."""
+        """Forget a phone of this person's Kelvin account (it signed out, or removed this computer): the token it got
+        through the hub, and that it reached Kelvin there."""
         kept = [d for d in self.devices if d.get("phone") != phone]
-        if len(kept) == len(self.devices) or not phone:
+        seen = [p for p in self.hub_phones if p["id"] != phone]
+        if not phone or len(kept) == len(self.devices) and len(seen) == len(self.hub_phones):
             return False
         self._user["devices"] = kept
+        self._user["hub_phones"] = seen
         self._save()
         return True
+
+    @property
+    def hub_phones(self) -> List[Dict[str, Any]]:
+        """This person's phones that reached Kelvin through the Kelvin hub, each {id, name, last}: with the Kelvin app
+        open, they see requests and alarms from anywhere."""
+        return [p for p in self._user.get("hub_phones") or [] if isinstance(p, dict) and p.get("id")]
+
+    def saw_hub_phone(self, phone: str, name: str) -> None:
+        """A phone of this person reached Kelvin through the hub. Written at most hourly for each phone: the app asks
+        every few seconds while it is open."""
+        phones, now = self.hub_phones, time.time()
+        old = next((p for p in phones if p["id"] == phone), None)
+        if not phone or old is not None and old.get("name") == name and now - float(old.get("last") or 0) < 3600:
+            return
+        kept = [p for p in phones if p["id"] != phone]
+        self._user["hub_phones"] = (kept + [{"id": phone, "name": name, "last": now}])[-20:]
+        self._save()
 
     def remove_device(self, device_id: str) -> None:
         kept = [d for d in self.devices if d["id"] != device_id]

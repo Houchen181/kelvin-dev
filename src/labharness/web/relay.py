@@ -70,6 +70,8 @@ class RelayLink:
         self.state = "off"        # off | connecting | online | offline | signed out
         self.problem: Optional[str] = None
         self.wake = asyncio.Event()
+        # a phone's request came through the hub ({"id", "name"}): someone who sees requests and alarms from away
+        self.seen: Optional[Callable[[Dict[str, Any]], None]] = None
 
     def view(self) -> Dict[str, Any]:
         return {"state": self.state, "problem": self.problem}
@@ -177,6 +179,11 @@ class RelayLink:
         except ValueError:
             body = b""
         phone = frame.get("phone") if isinstance(frame.get("phone"), dict) else {}
+        if phone.get("id") and self.seen is not None:
+            try:
+                self.seen(phone)
+            except Exception as e:   # never in the way of the answer
+                log.warning("phones through the hub: keeping who reached Kelvin failed: %s", e)
 
         async def reply(status: int, payload: Any) -> None:
             data = json.dumps(payload).encode("utf-8")

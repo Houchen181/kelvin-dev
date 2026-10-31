@@ -75,6 +75,7 @@ def kelvin(home, bot):
                      providers={"scripted": bot}, accounts=Accounts(home))
     client = TestClient(app)
     client.headers["X-Kelvin-Token"] = settings.access_key
+    client.runtime = runtime
     return client, settings, app
 
 
@@ -114,6 +115,9 @@ def test_a_phone_reaches_its_persons_kelvin_through_the_hub(tmp_path, hub, monke
 
         state = httpx.get(base + "/api/state", headers=phone)
         assert state.status_code == 200 and state.json()["lab"] == "Virtual Lab"
+        # someone away from the computer now: a request nobody answers here waits for the phone, not declined
+        assert [p["name"] for p in settings.hub_phones] == ["Ada's iPhone"]
+        assert client.runtime.notifier.phones() == 1 and client.runtime.notifier.reaches_away("alarm")
         assert httpx.get(base + "/api/state").status_code == 401                         # no token, no way through
         assert httpx.post(base + "/api/settings", headers=phone, json={"learn": "off"}).status_code == 403
         assert httpx.post(base + "/api/lab", headers=phone, json={}).status_code == 403  # the lab is the computer's
@@ -149,10 +153,12 @@ def test_a_phone_reaches_its_persons_kelvin_through_the_hub(tmp_path, hub, monke
         mine = httpx.get("http://127.0.0.1:%d/api/state" % port, headers={"X-Kelvin-Token": direct["token"]})
         assert mine.status_code == 200 and mine.json()["lab"] == "Virtual Lab"
         assert [d["name"] for d in settings.devices] == ["Ada's iPhone"]
+        assert client.runtime.notifier.phones() == 1                       # the same phone directly too: once
         again = httpx.post(base + "/api/phone/direct", headers=phone).json()          # asked again: one token
         assert again["token"] != direct["token"] and len(settings.devices) == 1
         assert httpx.request("DELETE", base + "/api/phone/direct", headers=phone).json()["ok"]
-        assert settings.devices == []
+        assert settings.devices == [] and settings.hub_phones == []        # the phone forgot this computer
+        assert client.runtime.notifier.phones() == 0
         client.post("/api/phone", json={"on": False})
 
         # signed out here: the phone finds it offline; signed out on the hub: the phone's token stops working
@@ -198,3 +204,16 @@ def test_only_a_kelvin_opens_the_relay(tmp_path, hub):
         assert result["r"].json() == {"lab": "From the Kelvin"} and "set-cookie" not in result["r"].headers
         bad = httpx.get(url + "/api/relay/kelvins/%s/static/app.js" % computer["id"], headers=phone)
         assert bad.status_code == 404                                            # only the phone API goes through
+
+
+def test_a_phone_through_the_hub_is_kept_hourly_and_forgotten_when_it_signs_out(tmp_path):
+    settings = Settings(tmp_path / "settings.json")
+    settings.saw_hub_phone("ios-1", "Ada's iPhone")
+    first = settings.hub_phones[0]["last"]
+    settings.saw_hub_phone("ios-1", "Ada's iPhone")                    # again within the hour: not written again
+    assert settings.hub_phones == [{"id": "ios-1", "name": "Ada's iPhone", "last": first}]
+    settings.saw_hub_phone("ios-1", "Ada's phone")                     # renamed: kept at once
+    assert [p["name"] for p in settings.hub_phones] == ["Ada's phone"]
+    assert Settings(tmp_path / "settings.json").hub_phones[0]["name"] == "Ada's phone"   # on disk
+    assert settings.remove_phone("ios-1") and settings.hub_phones == []
+    assert not settings.remove_phone("ios-1")

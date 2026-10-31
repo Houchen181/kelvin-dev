@@ -15,6 +15,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -402,13 +403,29 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         runtime.auto_report = settings.get("auto_report") or "both"     # a report after every run and queue
         runtime.report_kinds = set(settings.report_kinds)                # scan, device and project reports
 
+    def phones_away() -> int:
+        """Phones that see this person's requests and alarms (the Kelvin app, while it is open): those with their own
+        token (Settings → Phone) and, while this Kelvin is on the hub, those that reached it through the hub in the
+        last 30 days."""
+        direct = settings.devices
+        try:
+            online = relay_link.state == "online"
+        except NameError:   # asked before the hub link exists
+            online = False
+        if not online:
+            return len(direct)
+        own = {d.get("phone") for d in direct if d.get("phone")}
+        since = time.time() - 30 * 86400
+        return len(direct) + sum(1 for p in settings.hub_phones
+                                 if p["id"] not in own and float(p.get("last") or 0) > since)
+
     def configure_notifications() -> None:
         try:   # the webhook, email and the heartbeat: each off until a person sets it up
             runtime.notifier.configure(settings.get("webhook"), settings.notify_kinds, email=settings.email(),
                                        heartbeat=settings.get("heartbeat"), heartbeat_s=settings.heartbeat_s)
         except ValueError:
             runtime.notifier.configure(None, settings.notify_kinds)
-        runtime.notifier.phones = lambda: len(settings.devices)   # a phone in Settings → Phone sees requests and alarms
+        runtime.notifier.phones = phones_away   # the Kelvin app sees requests and alarms
         if hasattr(runtime.approver, "escalate_s"):   # a request nobody answered here waits this long for the phone
             runtime.approver.escalate_s = settings.approval_wait_s
         from ..notify import email_from   # where the lab owner hears of safety changes, whoever is signed in
@@ -814,6 +831,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return data, hidden
 
     relay_link = RelayLink(lambda *a: relay_app["app"](*a), relay_target, relay_hello, relay_private, relay_trim)
+    relay_link.seen = lambda phone: settings.saw_hub_phone(str(phone["id"])[:80],   # who can answer from away
+                                                           str(phone.get("name") or "Phone")[:80])
 
     def relay_wake() -> None:
         """Someone signed in or out (often in a worker thread): the relay looks again at once."""

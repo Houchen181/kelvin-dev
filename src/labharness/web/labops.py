@@ -67,11 +67,14 @@ def checklist(runtime: Any, settings: Any, home: Any) -> List[Dict[str, Any]]:
          "Not set: anyone at this computer can widen limits or switch on auto mode. Settings → Instruments → Lab "
          "owner's PIN.", "pin")
 
-    phones = settings.devices
+    try:   # with its own token (Settings → Phone), or through the Kelvin hub
+        phones = int(runtime.notifier.phones() or 0)
+    except Exception:
+        phones = len(settings.devices)
     item("phone", "A phone connected", bool(phones),
-         "%d connected: approvals and alarms reach you away from the computer." % len(phones) if phones else
-         "None yet: with Phone access on (Settings → Phone), sign in to the Kelvin iPhone app with your Kelvin "
-         "account, so a request or an alarm in the night reaches you.", "phone")
+         "%d connected: approvals and alarms reach you away from the computer." % phones if phones else
+         "None yet: sign in to the Kelvin iPhone app with your Kelvin account, so a request or an alarm in the night "
+         "reaches you.", "phone")
 
     data = Path(runtime.data_dir)
     old = Path(home) / "virtual-lab"   # an older Kelvin's virtual lab's folder, which the first account took over
