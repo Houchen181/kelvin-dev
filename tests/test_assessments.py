@@ -351,3 +351,32 @@ def test_a_dip_with_a_shoulder_is_not_given_one_lines_q():
     y = 1 - 0.6 / (1 + q ** 2) - 0.25 / (1 + ((q - 3) / 1.5) ** 2) + rng.normal(0, 0.005, f.size)
     s = analyze_curve(f.tolist(), y.tolist(), "vna.frequency", "vna.S21", "Hz", "")
     assert s.get("lines") == 2 or "Q ≈" not in s["summary"], s["summary"]   # one Lorentzian: half the main dip's Q
+
+
+def test_a_swept_excitation_gives_each_point_its_own_current():
+    from labharness.chain import derived_readings
+    chain = {"excitation": {"source": "lockin.amplitude", "form": "rms", "series_resistor": 1e7},
+             "readings": {"lockin.X": {"gain": 1, "name": "R_xx"}}}
+    measures = [{"key": "lockin.X", "unit": "V", "kind": "scalar"}]
+    derive = derived_readings(chain, {}, {"lockin": {"amplitude": 0.004}}, measures)   # 4 mV when the run started
+    rng = np.random.default_rng(1)
+    amps = np.linspace(0.001, 0.1, 41)
+    axes = [{"key": "lockin.amplitude", "unit": "V", "kind": "instrument"}]
+    for heats in (0.0, 2e4):   # 1 kΩ at every current; and a sample that heats, R growing with the current
+        rows = [{"lockin.amplitude": float(a),
+                 "lockin.X": float((1e3 + heats * a) * a / 1e7 * (1 + rng.normal(0, 1e-3)))} for a in amps]
+        a = analyze_run(rows, axes, measures, {"status": "done", "points": 41}, derive=derive)
+        (s,) = a["series"]
+        assert s["chain"] == "R_xx = lockin.X / I, I from each point's own lockin.amplitude"
+        if not heats:
+            assert a["assessment"].startswith("R_xx does not depend on lockin.amplitude: 0.99"), a["assessment"]
+            continue
+        assert s["kind"] == "linear" and s["params"]["slope"][0] == pytest.approx(heats, rel=0.01)
+        assert s["params"]["intercept"][0] == pytest.approx(1e3, rel=0.01)
+        drawn = list(zip(s["fit"]["x"], s["fit"]["y"]))   # over the volts recorded, where it curves
+        assert len(drawn) > 2 and all(y == pytest.approx((1e3 + heats * x) * x / 1e7, rel=0.01) for x, y in drawn)
+    rows = [{"lockin.amplitude": amp, "magnet.B": float(b), "lockin.X": float((1e3 + 50 * b * b) * amp / 1e7)}
+            for amp in (0.002, 0.004, 0.008) for b in np.linspace(-1, 1, 21)]   # one current along each curve
+    a = analyze_run(rows, axes + [{"key": "magnet.B", "unit": "T", "kind": "instrument"}], measures,
+                    {"status": "done", "points": len(rows)}, derive=derive)
+    assert a["assessment"].startswith("R_xx rises as magnet.B² from 1 kΩ") and "does not change" in a["trends"][0]

@@ -1328,6 +1328,28 @@ def map_grid(rows: List[Dict[str, Any]], outer: str, inner: str, key: str) -> Op
 # ---------------------------------------------------------------------------- what the run measured
 
 
+def _recorded(fit: Dict[str, Any], rows: List[Dict[str, Any]], swept: str, x_key: str, start: float
+              ) -> List[Any]:
+    """A fit in ohms, in the reading's own units to draw over it: R over start (the chain's factor), or where the run
+    swept the excitation itself (swept: its key), R times the excitation's setting over start: the curve's one
+    setting, or each x's where the excitation is x. Else nothing is drawn."""
+    if not swept:
+        return [y / start if _number(y) else y for y in fit["y"]]
+    own = {abs(r[swept]) for r in rows if _number(r.get(swept))}
+    if len(own) == 1:
+        return [y * min(own) / start if _number(y) else y for y in fit["y"]]
+    if swept == x_key:
+        xs, ys = fit["x"], fit["y"]
+        if len(xs) == 2 and all(_number(v) for v in xs + ys) and xs[1] != xs[0]:
+            # a straight line in R curves in the reading: drawn at many points, not its two ends
+            grid = _np().linspace(xs[0], xs[1], FIT_POINTS)
+            ys = (ys[0] + (ys[1] - ys[0]) * (grid - xs[0]) / (xs[1] - xs[0])).tolist()
+            xs = fit["x"] = grid.tolist()
+        return [y * abs(x) / start if _number(y) and _number(x) else None for x, y in zip(xs, ys)]
+    fit["x"] = []
+    return []
+
+
 def _first_point(rows: List[Dict[str, Any]], measures: List[Dict[str, str]], axes: List[Dict[str, str]]
                  ) -> Tuple[Set[str], List[str]]:
     """Instruments whose first reading lies far outside all their others along the first sweep (a counter read
@@ -1539,10 +1561,20 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
             continue
         if m.get("kind") == "image":
             continue   # camera frames: look_at shows them
-        factor, name, unit, how = derive.get(m["key"]) or (1.0, m["key"], m["unit"], "")
+        derived = derive.get(m["key"])
+        factor, name, unit, how = derived or (1.0, m["key"], m["unit"], "")
         mine = rows
         if m["key"].split(".")[0] in unsettled:   # its instrument's first point, left out
             mine = [dict(rows[0], **{m["key"]: None})] + rows[1:]
+        swept, start = "", factor   # R = reading * start / the excitation's own setting, where that was swept
+        source, used = getattr(derived, "source", ""), getattr(derived, "value", 0.0)
+        if derived and used and len({r.get(source) for r in rows if _number(r.get(source))}) > 1:
+            # the excitation itself swept (a linearity check): each point over its own current, not the start's
+            swept, start = source, factor * used
+            mine = [dict(r, **{m["key"]: r[m["key"]] * start / abs(r[source])
+                               if _number(r.get(m["key"])) and _number(r.get(source)) and r[source] else None})
+                    for r in mine]
+            factor, how = 1.0, how.split(", I = ")[0] + ", I from each point's own " + source
         values = [r.get(m["key"]) for r in mine]
         numbers = [v for v in values if _number(v)]
         if not numbers:
@@ -1587,7 +1619,7 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
             if how:   # told in ohms; drawn over the reading as recorded
                 s["name"], s["chain"] = name, how
                 if s.get("fit"):
-                    s["fit"]["y"] = [y / factor if _number(y) else y for y in s["fit"]["y"]]
+                    s["fit"]["y"] = _recorded(s["fit"], grows, swept, x_axis["key"], start)
             if outer is not None:
                 s["group"] = "%s = %s" % (outer["key"], si(gval, outer.get("unit", ""))) if _number(gval) else str(gval)
             h = hysteresis([x for x in xs if _number(x)], [y for y in ys if _number(y)], x_axis.get("unit", ""), unit)
