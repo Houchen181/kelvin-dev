@@ -643,3 +643,36 @@ def test_what_kelvin_does_for_confidential_work_goes_unnamed_elsewhere(rt, tmp_p
         assert "acme" not in text.lower() and "#1 (an item of unshared work)" in text, (call, text)
     inside = p.turn(p.secret, [("queue_start", {"dry_run": True})])["c0"]
     assert "#1 acme_gate" in inside
+
+
+@pytest.mark.parametrize("path, held", [
+    ("C:/Users/ann/AppData/Roaming/GitHub CLI/hosts.yml", True),
+    ("C:/Users/ann/AppData/Local/Google/Chrome/User Data/Default/Login Data", True),
+    ("C:/Users/ann/AppData/LocalLow/Acme/settings.json", True),
+    ("C:/Users/ann/AppData/Roaming/Microsoft/Credentials", True),
+    ("/Users/ann/Library/Keychains/login.keychain-db", True),
+    ("/Users/ann/Library/Application Support/gh/hosts.yml", True),
+    ("/home/ann/.local/share/keyrings/login.keyring", True),
+    ("/home/ann/.mozilla/firefox/x.default/logins.json", True),
+    ("C:/Users/ann/AppData/Local/Programs/Acme/examples/sweep.py", False),   # a maker's install
+    ("C:/Users/ann/AppData/Local/Temp/kelvin-attached-1/iv.csv", False),
+    ("/home/ann/.local/lib/python3.12/site-packages/acme/examples/sweep.py", False),
+    ("C:/Users/ann/AppData/Local/Temp/x/AppData/Roaming/GitHub CLI/hosts.yml", True)])
+def test_other_programs_sign_ins_in_appdata_and_their_kin_are_never_read(path, held):
+    from pathlib import Path
+    assert folderfiles.secret(Path(path)) is held
+
+
+def test_a_chats_folder_tools_never_read_another_programs_sign_ins_in_appdata(rt, tmp_path):
+    p = Portal(tmp_path, rt)
+    roaming = tmp_path / "ann" / "AppData" / "Roaming" / "GitHub CLI"
+    roaming.mkdir(parents=True)
+    (roaming / "hosts.yml").write_text("github.com:\n    oauth_token: gho_abc\n", encoding="utf-8")
+    chat = p.store.load(p.other)
+    chat["folder"] = str(tmp_path / "ann")
+    p.store.save(chat)
+    out = p.turn(p.other, [("read_file", {"path": "AppData/Roaming/GitHub CLI/hosts.yml"}),
+                           ("list_folder", {"path": "AppData/Roaming"}),
+                           ("read_examples", {"path": str(roaming)})])
+    for call, text in out.items():
+        assert "gho_abc" not in text and "sign-ins" in text, (call, text)

@@ -46,12 +46,18 @@ RECORDS = {"events.jsonl", "mounted.json", "queue.json", "folders.json", "watche
 # of SSH, GnuPG, the cloud tools and AI tools' sign-ins (Claude Code's, Codex's); such files by name or kind; and
 # files whose name says what they hold
 SECRET_FOLDERS = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config", ".claude", ".codex",
-                  ".password-store"}
+                  ".password-store", ".mozilla"}
 SECRET_FILES = {".env", ".netrc", "_netrc", ".pgpass", ".git-credentials", ".npmrc", ".pypirc", ".htpasswd",
                 "credentials", "auth.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "authorized_keys",
                 "operator-key.txt"}
 SECRET_KINDS = {".pem", ".key", ".p12", ".pfx", ".ppk", ".kdbx", ".jks", ".keystore", ".gpg"}
 SECRET_WORDS = ("credential", "secret", "password", "passwd", "token", "apikey", "api_key", "api-key")
+# where other programs keep each person's sign-ins and settings, by the folders' names in a row: Windows' AppData
+# (GitHub CLI's hosts.yml, browsers' profiles, Windows' own credentials), but for the programs and Python packages
+# installed in it and the temporary files (OPEN_TREES); Linux's ~/.local/share (keyrings); and a Mac's per-user
+# Library, /Users/<name>/Library (Keychains, Application Support)
+SECRET_TREES = (("appdata", "roaming"), ("appdata", "locallow"), ("appdata", "local"), (".local", "share"))
+OPEN_TREES = (("appdata", "local", "programs"), ("appdata", "local", "temp"), ("appdata", "roaming", "python"))
 
 Media = List[Tuple[str, bytes]]   # (mime type, the file's bytes): pictures, or PDF pages
 
@@ -77,13 +83,23 @@ def mine(target: Path, own: Iterable[Any] = ()) -> Optional[Path]:
     return None
 
 
+def _secret_tree(parts: List[str]) -> bool:
+    """Whether a path (its parts, in lower case) is in a folder where other programs keep sign-ins (SECRET_TREES, not
+    OPEN_TREES there), or in a Mac's per-user Library."""
+    for i in range(len(parts)):
+        here = tuple(parts[i:])
+        if any(here[:len(t)] == t for t in SECRET_TREES) and not any(here[:len(t)] == t for t in OPEN_TREES):
+            return True
+    return len(parts) > 3 and parts[1] == "users" and parts[3] == "library"   # /Users/<name>/Library
+
+
 def secret(path: Path) -> bool:
     """Whether a file, or a folder it is in, may hold sign-ins, keys or tokens (SECRET_*): Kelvin's AI never reads or
     writes it, wherever it is. A folder of the person's own counts by those folder names alone ("secret project" is
     theirs to name)."""
     path = Path(path)
     parts = [p.lower() for p in path.parts]
-    if any(p in SECRET_FOLDERS for p in parts):
+    if any(p in SECRET_FOLDERS for p in parts) or _secret_tree(parts):
         return True
     if not parts or path.is_dir():
         return False
