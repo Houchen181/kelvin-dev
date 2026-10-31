@@ -2065,18 +2065,22 @@ class LabRuntime:
         if refused:
             return "not imported: %s" % refused
         try:
-            files = [f for given_path in files for f in self._data_files(given_path)]   # a folder: its data files
+            found = [(f, self._data_files(f)) for f in files]   # a folder: its data files
         except imports.DataError as e:
             return "not imported: %s" % e
+        files = [f for _, inside in found for f in inside]
         if len(files) > 20:
             return "at most 20 files at once"
         refused = next((why for why in (self._unreadable(f, importing=True) for f in files) if why), None)
         if refused:
             return "not imported: %s" % refused
+        # a folder's files by name, should they not go into one run: to import some of them, or one at a time
+        held = "".join("; %s holds %s" % (f, ", ".join(Path(p).name for p in inside))
+                       for f, inside in found if inside != [f])
         try:
             table = imports.merge([imports.read(p) for p in files])
         except imports.DataError as e:
-            return "not imported: %s" % e
+            return "not imported: %s%s" % (e, held)
         except OSError as e:
             return "not imported: %s" % (e.strerror or e)
         return self._do("importing data", lambda: self._imported(table, files, name, self.gate.operator)["text"])

@@ -112,6 +112,12 @@ def test_data_put_in_the_data_folders_runs_and_a_folder_of_it_come_in(tmp_path):
     assert out.startswith("imported spectrum.csv as run "), out
     out = rt.import_data(str(pasted), "PL D2")                      # the folder: its data files side by side
     assert out.startswith("imported silicon.csv, spectrum.csv as run "), out
+    mixed = pasted.parent / "#004-PL_DeviceD3"
+    mixed.mkdir()
+    (mixed / "spectrum.csv").write_text(table, encoding="utf-8")
+    (mixed / "wider.csv").write_text(table.replace("920", "930"), encoding="utf-8")
+    out = rt.import_data(str(mixed))                                 # not one run: its files named, to pick from
+    assert "x values differ" in out and out.endswith("%s holds spectrum.csv, wider.csv" % mixed), out
     kept = rt.data_dir / "runs" / rt.runs_index(1)[0]["run_id"]      # Kelvin's own run, in the same runs folder
     out = rt.import_data(str(pasted.parent))                         # no data files here: the folders to name
     assert "there are no data files" in out and pasted.name in out and kept.name not in out
