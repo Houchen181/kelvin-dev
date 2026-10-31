@@ -486,3 +486,34 @@ def test_the_restart_card_counts_the_confidential_work_it_cut_short_without_nami
     inside = p.turn(p.secret, [("lab_status", {}), ("recent_events", {"n": 60})])
     assert run in inside["c0"] and "the queue was running acme_gate" in inside["c0"]
     assert "cut short %s" % run in inside["c1"]   # the project's own record of it
+
+
+def test_a_persons_answer_to_a_card_of_confidential_work_stays_that_works_own(tmp_path, monkeypatch):
+    import threading
+    from labharness.agent.approval import WebApprover
+    from test_team_and_analysis import _relay
+    rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=30), tmp_path / "data")
+    p = Portal(tmp_path, rt)
+    done = threading.Event()
+
+    def decline_all():   # the person at the computer says No to the NDA chat's run
+        while not done.is_set():
+            entry = rt.approver.wait_for_pending(timeout=0.2)
+            if entry:
+                rt.answer(entry["id"], False, "human")
+    person = threading.Thread(target=decline_all, daemon=True)
+    person.start()
+    said = p.turn(p.secret, [("run_plan", {"plan": NDA})])
+    done.set()
+    person.join(5)
+    assert "declined" in said["c0"]
+    answers = [e for e in rt.gate.log.events() if e["type"] == "answer"]
+    assert answers and answers[-1]["whose"]["confidential"] and "acme_gate" in answers[-1]["request"]
+    other = p.turn(p.other, [("recent_events", {"n": 40}), ("activity", {})])
+    for call, text in other.items():
+        assert "acme" not in text.lower(), (call, text)
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"acme" not in raw.lower()
+    inside = p.turn(p.secret, [("recent_events", {"n": 40})])["c0"]
+    assert "declined" in inside and "acme_gate" in inside   # the project's own record of it

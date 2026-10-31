@@ -599,10 +599,14 @@ class LabRuntime:
             return None
         return {k: mine[k] for k in WHOSE if mine.get(k)}
 
-    def _unshared_request(self, request: Any) -> bool:
+    def _unshared_request(self, request: Any) -> Any:
         """Is this approval card about unshared work: asked by its chat or its queue item, or the queue's card while
-        an item waiting in it is unshared work? Phones through the Kelvin hub then get it without its names."""
-        if self._whose_now() is not None or getattr(request, "unshared", False):
+        an item waiting in it is unshared work? Phones through the Kelvin hub then get it without its names. The
+        work's marks when it is its own (a person's answer is kept with them in the record), else True or False."""
+        whose = self._whose_now()
+        if whose is not None:
+            return whose or {"unshared": True}
+        if getattr(request, "unshared", False):
             return True
         return str(getattr(request, "title", "")).startswith("Run the queue") and any(
             self.unshared_work(i.whose()) for i in list(self.queue.items) if i.status == "waiting")
@@ -1283,6 +1287,7 @@ class LabRuntime:
         A no never does."""
         who: Dict[str, Any] = {"account": self.user, "channel": channel, "device": device}
         title = getattr(self.approver, "title_of", lambda _: None)(request_id)
+        whose = getattr(self.approver, "whose_of", lambda _: None)(request_id)   # unshared work's: its own record
         # a request no longer open asks nothing (no password tried for nothing); one that can't tell, asks
         if approve and (title is not None or not hasattr(self.approver, "title_of")):
             vouched = self.vouched(approver, pin)
@@ -1294,7 +1299,8 @@ class LabRuntime:
             ok = self.approver.answer(request_id, approve)
         if ok:
             self.gate.log.write("answer", by=by, request=title, answer="approved" if approve else "declined",
-                                account=self.user, channel=channel, device=device, vouched=who.get("vouched"))
+                                account=self.user, channel=channel, device=device, vouched=who.get("vouched"),
+                                whose=whose)
         return ok
 
     def stop(self, by: str = "human", note: str = "", report: bool = True) -> int:

@@ -71,12 +71,13 @@ class WebApprover(Approver):
         # the lab's lessons on the instruments a request names, shown on its card (LabRuntime.lab_lessons_for)
         self.lessons: Optional[Callable[[ApprovalRequest], List[str]]] = None
         # whether a request is about unshared work, asked from the requesting thread (LabRuntime._unshared_request):
-        # its card is marked so, and phones through the Kelvin hub get it without its names
-        self.origin: Optional[Callable[[ApprovalRequest], bool]] = None
+        # its card is marked so, and phones through the Kelvin hub get it without its names. That work's marks (a
+        # dict), when it says them: a person's answer is kept with them in the lab's record (whose_of)
+        self.origin: Optional[Callable[[ApprovalRequest], Any]] = None
 
-    def _unshared(self, request: ApprovalRequest) -> bool:
+    def _unshared(self, request: ApprovalRequest) -> Any:
         try:
-            return bool(self.origin(request)) if self.origin else False
+            return self.origin(request) if self.origin else False
         except Exception:   # unsure: the card goes as unshared work's, without its names through the hub
             return True
 
@@ -103,7 +104,8 @@ class WebApprover(Approver):
             lessons = list(self.lessons(request)) if self.lessons else []
         except Exception:   # the lab's memory never holds up an approval
             lessons = []
-        unshared = self._unshared(request)
+        marks = self._unshared(request)
+        unshared = bool(marks)
         with self._cv:
             self._seq += 1
             now = time.time()
@@ -111,7 +113,7 @@ class WebApprover(Approver):
                      "created": now, "expires": now + self.timeout, "answer": None, "by": None,
                      "thread": threading.get_ident(), "where": where, "lessons": lessons,
                      "figures": list(getattr(request, "figures", None) or []),   # a generator's timing, drawn
-                     "unshared": unshared}
+                     "unshared": unshared, "whose": marks if isinstance(marks, dict) else None}
             if why:   # never shown: nobody is left to act on a yes
                 entry.update(answer=False, by=why, decided=now)
                 self._history.appendleft(entry)
@@ -176,7 +178,7 @@ class WebApprover(Approver):
     def inform(self, request: ApprovalRequest, reasons: List[str]) -> None:
         """Auto mode approved this without asking: show it with the reasons, like an answered request."""
         self._annotate(request)
-        unshared = self._unshared(request)
+        unshared = bool(self._unshared(request))
         with self._cv:
             self._seq += 1
             now = time.time()
@@ -208,6 +210,13 @@ class WebApprover(Approver):
         with self._cv:
             entry = self._pending.get(request_id)
             return entry["title"] if entry else None
+
+    def whose_of(self, request_id: str) -> Optional[Dict[str, Any]]:
+        """The marks of the unshared work an open request asks for (None: shared work's, or none said), which a
+        person's answer to it keeps in the lab's record."""
+        with self._cv:
+            entry = self._pending.get(request_id)
+            return entry.get("whose") if entry else None
 
     def decline_all(self, by: str = "stop button") -> int:
         return self.decline_from(None, by)
