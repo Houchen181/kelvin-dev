@@ -754,9 +754,20 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return out, hidden
 
     def hub_watches(watches: List[Any]) -> List[Any]:
-        """Watches for a phone through the Kelvin hub: those unshared work added keep their rule, not their note."""
-        return [dict(w, note="") if isinstance(w, dict) and w.get("id") in runtime.unshared_watches else w
-                for w in watches]
+        """Watches for a phone through the Kelvin hub: those unshared work added keep their rule, not their note, and
+        none names a sample of unshared work it was made for."""
+        mounted = runtime.mounted or {}
+        sample = str(mounted.get("device_name") or "") if unshared_project(mounted.get("project")) else ""
+        out = []
+        for w in watches:
+            if isinstance(w, dict):
+                theirs = w.get("id") in runtime.unshared_watches
+                if theirs:
+                    w = dict(w, note="")
+                if w.get("device") and (theirs or w.get("device") == sample):
+                    w = dict(w, device="a sample of unshared work")
+            out.append(w)
+        return out
 
     def relay_trim(method: str, path: str, data: Any) -> Tuple[Any, int]:
         """An answer through the Kelvin hub without unshared work, and how much was left out."""
