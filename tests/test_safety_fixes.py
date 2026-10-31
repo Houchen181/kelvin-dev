@@ -511,3 +511,26 @@ def test_what_a_stop_leaves_on_says_a_field_still_up(tmp_path):
     said = rt.bring_to_safe("human (portal)")
     assert said[-1] == ("still on: magnet.B 0 T (B_actual 2.5 T; magnet.rate is 0 T/min, so magnet.B can't move: "
                         "set magnet.rate first)")
+
+
+# ------------------------------------------------------------------- review of 0.3.34: held stages, clean-up too
+
+def test_hands_on_the_sample_holds_a_positioner_through_a_stops_clean_up(lab, make_engine, monkeypatch):
+    """Review of 0.3.34: with hands on the sample, a stopped run's clean-up still drove a positioner's drive to safe
+    (a piezo scanner's x, stood in for by the smu); the laser, which is no stage, still goes to safe."""
+    engine, gate, _ = make_engine([True, True])
+    monkeypatch.setattr(lab.instruments["smu"].card, "kind", "positioner")
+    assert gate.set("laser", "emission", True).ok
+
+    def hands_on():
+        lab.hands_on = {"by": "human (portal)", "since": "now"}
+        gate.request_abort("hands on the sample")
+    stop_at_first_point(engine, hands_on)
+    report = engine.run(GATE_SWEEP.format(name="scan", top=2))
+    assert report.status == "aborted" and lab.read("smu", "V") == 0 and lab.read("smu", "output") is True
+    assert "smu.output stays where it is: human (portal) has hands on the sample" in report.message
+    lab.instruments["smu"].backend.state.update(V=0.5)
+    assert [r.message.split(":")[0] for r in gate.to_safe("smu")] == [
+        "smu.V stays where it is", "smu.output stays where it is", "smu.compliance_I stays where it is"]
+    assert gate.cut("smu", "V", "monitor")[0].action == "held" and lab.read("smu", "V") == 0.5
+    assert gate.to_safe("laser") and lab.read("laser", "emission") is False

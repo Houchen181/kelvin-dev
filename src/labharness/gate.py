@@ -1396,6 +1396,10 @@ class SafetyGate:
     def _move(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any,
               away: bool, wait: bool, how: Optional[str], gen: Optional[int] = None) -> Result:
         key = "%s.%s" % (inst.name, spec.name)
+        held = self._held_still(inst, key)
+        if held:   # a stage or positioner with hands on the sample: no path moves it, a clean-up's move to safe neither
+            return Result(True, "held", key, value=current, before=current, message="%s stays where it is: %s" % (
+                key, held.split(": ", 1)[-1]))
         since = self._safe_seq   # a to-safe from here on is never undone by this move's hold (_holding)
         clock = self.lab.clock
         notes: List[str] = []
@@ -1760,7 +1764,8 @@ class SafetyGate:
             self._sending_safe("%s.%s" % (inst.name, spec.name))
             r = self._move(inst, spec, at, spec.safe, away=False, wait=False, how=None)
             results.append(r)
-            words.append("back to %s" % spec.show(spec.safe) if r.ok else "could not return to safe: " + r.message)
+            words.append(r.message if r.action == "held" else "back to %s" % spec.show(spec.safe) if r.ok else
+                         "could not return to safe: " + r.message)   # held: a stage with hands on the sample
         switch = self._switch_of(inst, spec)
         if switch is not None:
             try:
@@ -1768,8 +1773,9 @@ class SafetyGate:
                 if now is None or switch.distance(now) > 0:
                     r = self._move(inst, switch, now, switch.safe, away=False, wait=False, how=None)
                     results.append(r)
-                    words.append("%s %s" % (switch.name, switch.show(switch.safe)) if r.ok else
-                                 "%s could not be switched %s: %s" % (switch.name, switch.show(switch.safe), r.message))
+                    words.append(r.message if r.action == "held" else "%s %s" % (switch.name, switch.show(switch.safe))
+                                 if r.ok else "%s could not be switched %s: %s" % (switch.name,
+                                                                                   switch.show(switch.safe), r.message))
             except Exception as e:
                 words.append("%s could not be switched %s: %s" % (switch.name, switch.show(switch.safe), e))
         return results, "; ".join(words) or "already at %s" % spec.show(spec.safe)
