@@ -2050,7 +2050,10 @@ class LabRuntime:
         """Files Kelvin didn't measure, as a run (imports.py): another program's tables (CSV, TSV, text, Excel),
         makers' files (BioLogic .mpt/.mpr, Gamry .dta, Arbin's exports, LightField .spe), NumPy arrays and TIFF
         images (camera frames); several with the same x values side by side in one run, to compare or subtract.
-        The run goes with this chat's runs, gets the automatic fits, and Kelvin's run tools read it."""
+        A folder stands for its data files. What a person put in the data folder's runs is theirs to import
+        (issue #6: a collaborator pasted data there); Kelvin's own folders and records, runs the chat may not see
+        and files of sign-ins are not (_unreadable). The run goes with this chat's runs, gets the automatic fits,
+        and Kelvin's run tools read it."""
         from .. import imports
         given = paths if isinstance(paths, (list, tuple)) else str(paths or "").split(";")
         files = [str(p).strip().strip('"') for p in given if str(p).strip()]
@@ -2058,7 +2061,16 @@ class LabRuntime:
             return "name the files to import: their full paths (';' between several)"
         if len(files) > 20:
             return "at most 20 files at once"
-        refused = next((why for why in map(self._unreadable, files) if why), None)
+        refused = next((why for why in (self._unreadable(f, importing=True) for f in files) if why), None)
+        if refused:
+            return "not imported: %s" % refused
+        try:
+            files = [f for given_path in files for f in self._data_files(given_path)]   # a folder: its data files
+        except imports.DataError as e:
+            return "not imported: %s" % e
+        if len(files) > 20:
+            return "at most 20 files at once"
+        refused = next((why for why in (self._unreadable(f, importing=True) for f in files) if why), None)
         if refused:
             return "not imported: %s" % refused
         try:
@@ -2068,6 +2080,30 @@ class LabRuntime:
         except OSError as e:
             return "not imported: %s" % (e.strerror or e)
         return self._do("importing data", lambda: self._imported(table, files, name, self.gate.operator)["text"])
+
+    def _data_files(self, path: str) -> List[str]:
+        """What a path given to import_data stands for: a file itself, a folder its data files (by name, at most 20).
+        imports.DataError: a folder with none, naming the folders in it (never a Kelvin run's) to import from."""
+        from .. import folderfiles, imports
+        from ..eventlog import RUN_NAME
+        folder = Path(path).expanduser()
+        if not folder.is_dir():
+            return [path]
+        try:
+            entries = sorted(folder.iterdir(), key=lambda p: p.name.lower())
+            found = [str(p) for p in entries if p.suffix.lower() in imports.DATA_SUFFIXES and p.is_file()
+                     and not p.name.startswith(".")]
+            inner = [p.name for p in entries if not found and p.is_dir() and not p.name.startswith(".")
+                     and not RUN_NAME.match(p.name) and not rundata.is_run(p) and not folderfiles.secret(p)]
+        except OSError as e:
+            raise imports.DataError("Kelvin could not look in %s: %s" % (folder, e.strerror or e))
+        if not found:
+            raise imports.DataError("there are no data files (%s) in the folder %s%s" % (
+                imports.WHAT, path, "; the folders in it: %s" % ", ".join(inner[:20]) if inner else ""))
+        if len(found) > 20:
+            raise imports.DataError("the folder %s holds %d data files, and Kelvin imports at most 20 at once: name "
+                                    "the ones to import" % (path, len(found)))
+        return found
 
     def import_attached(self, path: Any, shown: str, attribution: Dict[str, Any], by: str = "human") -> Dict[str, Any]:
         """A data file a person attached in a chat, as a run filed under that chat (its folder and project): {text:
@@ -4665,26 +4701,54 @@ class LabRuntime:
         folder (everyone's runs and the lab's records), wherever it is."""
         return [f for f in (self.home, self.data_dir) if f is not None]
 
-    def _unreadable(self, path: Any) -> Optional[str]:
+    def _unreadable(self, path: Any, importing: bool = False) -> Optional[str]:
         """Why Kelvin's AI may not read this file a chat or an agent named (None: it may): it is in Kelvin's own
         folders, may hold sign-ins, or is in a run of unshared work the viewer of this thread may not see, wherever
-        that run is kept."""
+        that run is kept. importing (import_data): what a person put in the data folder's runs is theirs (_pasted)."""
         from .. import folderfiles
         try:
             target = Path(str(path)).expanduser().resolve()
         except (OSError, RuntimeError, ValueError):
             return None
         folder = folderfiles.mine(target, self._kelvins())
-        if folder is not None:
+        if folder is not None and not (importing and self._pasted(target)):
             return ("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, the "
                     "instrument cards, and everyone's chats and runs: Kelvin's AI never reads there (describe_run and "
-                    "get_run_data read runs)" % (path, folder))
+                    "get_run_data read runs)%s" % (path, folder, "; another program's data that a person put in the "
+                                                                 "data folder's runs folder, outside Kelvin's runs, "
+                                                                 "are imported from there" if importing else ""))
         if folderfiles.secret(target):
             return "%s may hold sign-ins, keys or tokens: Kelvin's AI never reads such files" % path
         run = folderfiles.run_of(target)
         if run is not None and not self.may_see(self._run_marks(run)):
             return "that is in a Kelvin run of unshared work this chat may not see"
         return None
+
+    def _pasted(self, target: Path) -> bool:
+        """Whether a file or folder (resolved) is one a person put in this person's data folder's runs, where a chat's
+        runs go unless it has a folder of its own: another program's data, to import (issue #6). Never a Kelvin
+        run's folder or anything in it (its record: describe_run and get_run_data read it, leaving out work the chat
+        may not see), one of the lab's records (folderfiles.RECORDS), nor the rest of Kelvin's own folders (the
+        settings, the accounts, everyone's chats, other people's folders), even should one be inside the runs."""
+        from .. import folderfiles
+        from ..eventlog import RUN_NAME
+        try:
+            runs = (self.data_dir / "runs").resolve()
+        except (OSError, RuntimeError):
+            return False
+        if folderfiles.mine(target, [runs]) is None:
+            return False
+        if self.home is not None and folderfiles.mine(target, [self.home]) and not folderfiles.mine(runs, [self.home]):
+            return False   # Kelvin's own folder inside the runs folder: never
+        for p in [target, *target.parents]:
+            if p == runs:
+                break
+            try:
+                if RUN_NAME.match(p.name) or rundata.is_run(p):
+                    return False
+            except OSError:
+                return False
+        return target.name.lower() not in folderfiles.RECORDS
 
     def script_cards(self) -> Any:
         """Every card Kelvin can use here, to match the lab's scripts against: Kelvin's own and the lab's. Kept

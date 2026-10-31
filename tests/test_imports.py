@@ -88,3 +88,46 @@ def test_two_spectra_in_one_run_to_subtract(tmp_path):
     assert rt.import_data([str(silicon), str(other)]).startswith("not imported: other's x values differ")
     assert rt.import_data(str(tmp_path / "nothere.csv")) == "not imported: there is no file %s" % (
         tmp_path / "nothere.csv")
+
+
+def test_data_put_in_the_data_folders_runs_and_a_folder_of_it_come_in(tmp_path):
+    """Issue #6 again: a collaborator pasted another program's data into the data folder's runs (runs/1/<its
+    folder>), and Kelvin refused it as its own folder; naming the folder said "there is no file". What a person put
+    there comes in now, a folder as its data files; Kelvin's runs and records there, the rest of Kelvin's folder
+    (the person's chats, other people's folders) and files of sign-ins stay out of reach."""
+    pytest.importorskip("mcp")
+    from labharness import ScriptedApprover
+    from simlab import build_virtual_lab
+    from labharness.agent.runtime import LabRuntime
+    home = tmp_path / "Kelvin"
+    rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover([]), home / "users" / "Richen1" / "data")
+    rt.home = home
+    table = "Wavelength,Intensity\n" + "".join("%g,%g\n" % (920 + i * 0.01, 100 + i) for i in range(50))
+    pasted = rt.data_dir / "runs" / "1" / "#003-PL_Yb920to921_nodope_DeviceD2_400uw_onsilicon-2026_10_25-16_03_38"
+    pasted.mkdir(parents=True)
+    (pasted / "spectrum.csv").write_text(table, encoding="utf-8")
+    (pasted / "silicon.csv").write_text(table.replace(",1", ",2"), encoding="utf-8")
+    (pasted / "notes.docx").write_bytes(b"PK")                      # not data: left out of the folder's files
+    out = rt.import_data(str(pasted / "spectrum.csv"))
+    assert out.startswith("imported spectrum.csv as run "), out
+    out = rt.import_data(str(pasted), "PL D2")                      # the folder: its data files side by side
+    assert out.startswith("imported silicon.csv, spectrum.csv as run "), out
+    kept = rt.data_dir / "runs" / rt.runs_index(1)[0]["run_id"]      # Kelvin's own run, in the same runs folder
+    out = rt.import_data(str(pasted.parent))                         # no data files here: the folders to name
+    assert "there are no data files" in out and pasted.name in out and kept.name not in out
+    assert kept.name not in rt.import_data(str(rt.data_dir / "runs"))
+    (rt.data_dir / "runs" / "1" / "queue.json").write_text("{}", encoding="utf-8")
+    (rt.data_dir / "reports").mkdir()
+    (rt.data_dir / "reports" / "summary.csv").write_text(table, encoding="utf-8")
+    (pasted / "credentials.csv").write_text(table, encoding="utf-8")
+    for other in (home / "users" / "Ada" / "data" / "runs", home / "users" / "Richen1" / "chats"):
+        other.mkdir(parents=True)
+        (other / "theirs.csv").write_text(table, encoding="utf-8")
+    for path in (kept, kept / "run.h5", rt.data_dir / "events.jsonl", rt.data_dir / "runs" / "1" / "queue.json",
+                 rt.data_dir / "reports" / "summary.csv", home / "users" / "Ada" / "data" / "runs" / "theirs.csv",
+                 home / "users" / "Richen1" / "chats" / "theirs.csv", home / "settings.json"):
+        out = rt.import_data(str(path))
+        assert out.startswith("not imported: ") and "Kelvin's own folder" in out, (path, out)
+    assert "sign-ins" in rt.import_data(str(pasted / "credentials.csv"))
+    assert "sign-ins" in rt.import_data(str(pasted))                 # a folder's files are each checked too
+    assert rt.read_examples(str(pasted)).startswith("not read")      # the other readers keep out of it, as before
