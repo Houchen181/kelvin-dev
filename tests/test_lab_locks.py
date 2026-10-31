@@ -409,3 +409,93 @@ def test_a_second_chat_reads_the_gauge_and_edits_the_queue_while_a_scan_runs(lab
         assert "agent (in “how is the vacuum? and queue the next scan”): stopped the current ramp or plan" in rt.events(50)
     finally:
         lab.close()
+
+
+def test_a_card_asked_beside_another_chats_lab_call_shows_only_in_its_own_chat(tmp_path):
+    """Chat A's drive change waits for a person while chat B keeps two skills beside it: one Kelvin approves itself,
+    one (B has read a file since the person wrote) a person answers. Each chat shows its own cards, never the other's."""
+    pytest.importorskip("mcp")
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    from labharness.agent.server import build_server
+    from labharness.web.agent import ChatAgent
+    from labharness.web.providers.base import SESSION, ModelInfo, Provider, TurnResult
+    from labharness.web.store import ChatStore
+
+    class PerChat(Provider):
+        """Replays each chat's own turns; a turn may be a function, called when the model would answer."""
+        name, label = "scripted", "Scripted"
+
+        def __init__(self):
+            self.turns = {}
+
+        def available(self):
+            return True
+
+        async def models(self):
+            return [ModelInfo("m1", "Model One", self.name)]
+
+        async def stream(self, model, system, history, tools, emit):
+            blocks = self.turns[SESSION.get()].pop(0)
+            blocks = await blocks() if callable(blocks) else blocks
+            calls = [b for b in blocks if b["type"] == "tool_call"]
+            return TurnResult(blocks, stop_reason="tool_calls" if calls else "end", model=model)
+
+    approver = WebApprover(timeout=20)
+    rt = LabRuntime(build_virtual_lab(seed=1), approver, tmp_path / "data")
+    store = ChatStore(tmp_path / "chats")
+    provider = PerChat()
+    agent = ChatAgent(rt, store, build_server(rt), {"scripted": provider})
+    a, b = store.create("scripted:m1"), store.create("scripted:m1")
+    folder = tmp_path / "Sample B"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("Cool the fridge: close valve V3 first.", encoding="utf-8")
+    b["folder"] = str(folder)
+    store.save(b)
+
+    def skill(i, name):
+        return [{"type": "tool_call", "id": "s%d" % i, "name": "save_skill", "input": {
+            "name": name, "description": "cool the fridge", "steps": "1. close valve V3", "scope": "global"}}]
+
+    async def b_first():
+        while not approver.pending_list():                                  # chat A's change waits for a person
+            await asyncio.sleep(0.05)
+        return skill(1, "fridge-cooldown")
+    provider.turns[a["id"]] = [[{"type": "tool_call", "id": "w1", "name": "set_value",
+                                 "input": {"instrument": "smu", "parameter": "V", "value": 1}}],
+                               [{"type": "text", "text": "Declined."}]]
+    provider.turns[b["id"]] = [b_first, [{"type": "tool_call", "id": "r1", "name": "read_file",
+                                          "input": {"path": "notes.txt"}}],
+                               skill(2, "fridge-warmup"), [{"type": "text", "text": "Kept one."}]]
+    events = {a["id"]: [], b["id"]: []}
+
+    def person():   # says no to both cards once both wait
+        until = time.monotonic() + 15
+        while len(approver.pending_list()) < 2 and time.monotonic() < until:
+            time.sleep(0.05)
+        for p in approver.pending_list():
+            approver.answer(p["id"], False)
+
+    def emitter(chat_id):
+        async def emit(e):
+            events[chat_id].append(e)
+        return emit
+
+    async def day():
+        await agent.start()
+        try:
+            agent.claim(a["id"], "scripted:m1")
+            agent.claim(b["id"], "scripted:m1")
+            threading.Thread(target=person, daemon=True).start()
+            await asyncio.gather(
+                agent.run_turn(a["id"], "set the gate to 1 V", "scripted:m1", provider, emitter(a["id"])),
+                agent.run_turn(b["id"], "keep the fridge procedures", "scripted:m1", provider, emitter(b["id"])))
+        finally:
+            await agent.close()
+    asyncio.run(day())
+
+    def cards(chat):
+        return [e["title"] for e in events[chat["id"]] if e["type"] == "approval"]
+    assert cards(a) == ["Approve drive change on smu?"]
+    assert cards(b) == ["Keep the skill “fridge-cooldown” for every project?",   # Kelvin's own yes
+                        "Keep the skill “fridge-warmup” for every project?"]    # a person's no

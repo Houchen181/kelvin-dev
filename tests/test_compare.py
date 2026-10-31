@@ -184,3 +184,59 @@ def test_a_second_opinion_on_an_answer_reaches_the_next_turn_once(parts):
         stream_turn(client, headers, chat["id"], "ok", "main:m1")
         assert main.prompts[-1][-1] == "ok"                              # given once, not with every message
         assert main.prompts[-1][-2].startswith("<second_opinion")       # and replayed unchanged
+
+
+def test_an_incognito_chats_lanes_and_second_opinions_read_no_lab_notes(tmp_path):
+    """An incognito chat uses no memory, the lab's included: in a Compare lane and in a second opinion's lookups, as
+    in its ordinary turns, a tool's answer comes without the lab's notes on the instrument (an ordinary chat's has
+    them)."""
+    import asyncio
+    from simlab import build_virtual_lab
+    from labharness.agent.runtime import LabRuntime
+    from labharness.agent.server import build_server
+    from labharness.gate import ScriptedApprover
+    from labharness.web.agent import ChatAgent
+    from labharness.web.store import ChatStore
+
+    class Rev(Scripted):
+        """A reviewer that keeps the answers its lookups got."""
+        name, label = "rev", "Rev"
+
+        def __init__(self, turns):
+            super().__init__(turns)
+            self.read = []
+
+        async def stream(self, model, system, history, tools, emit):
+            self.read += [r["content"] for m in history if m["role"] == "tool" for r in m["results"]]
+            return await super().stream(model, system, history, tools, emit)
+
+    rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover([]), tmp_path / "data")
+    rt.keep_lab_note("lesson", "The smu gate leaks above 4 V on chip 7: stay below 3 V.", ["smu"])
+    store = ChatStore(tmp_path / "chats")
+    look = tool("describe_instrument", {"instrument": "smu"}, "d1")
+    alpha = bot("alpha", [look, say("Alpha: stay below 3 V."), look, say("Alpha: see its limits.")])
+    beta = bot("beta", [look, say("Beta: stay below 3 V."), look, say("Beta: see its limits.")])
+    rev = Rev([look, say("verdict: agree")])
+    agent = ChatAgent(rt, store, build_server(rt), {"alpha": alpha, "beta": beta, "rev": rev})
+    ordinary, incognito = store.create("alpha:m1"), store.create("alpha:m1", incognito=True)
+
+    async def quiet(e):
+        pass
+
+    async def day():
+        await agent.start()
+        try:
+            for chat in (ordinary, incognito):
+                lanes = agent.claim_compare(chat["id"], ["alpha:m1", "beta:m1"])
+                await agent.run_compare(chat["id"], "what limits does the smu have?", lanes, quiet)
+            await agent.review_answer(incognito["id"], "rev:m1")
+        finally:
+            await agent.close()
+    asyncio.run(day())
+
+    def looked(chat):
+        lanes = store.load(chat["id"])["messages"][0]["compare"]["lanes"]
+        return [r["content"] for lane in lanes for m in lane["messages"] if m["role"] == "tool" for r in m["results"]]
+    assert len(looked(ordinary)) == 2 and all("leaks above 4 V" in c for c in looked(ordinary))
+    assert len(looked(incognito)) == 2 and not any("leaks above 4 V" in c for c in looked(incognito))
+    assert len(rev.read) == 1 and "smu" in rev.read[0] and "leaks above 4 V" not in rev.read[0]
