@@ -1181,8 +1181,12 @@
   function againParts(tab, d) {
     const parts = [];
     const pick = { version: "then" };
+    let cannot = "";   // why it can't run again at all
     if (d.script) {
       const s = d.script;
+      const thenOk = s.as_ran !== false;   // Kelvin kept the text that ran (not for older runs, nor a copy that differs)
+      if (!thenOk) pick.version = "now";
+      if (!s.exists && !thenOk) cannot = s.as_ran_why || "The script is gone, and this run kept no copy Kelvin can run.";
       const tag = !s.exists ? h("span", { class: "tag warn" }, "missing") : s.changed ? h("span", { class: "tag" }, "changed") : null;
       parts.push(h("div", { class: "ra-script" }, h("code", { title: s.path }, s.path), tag));
       const set = paramText(s.params, s.args);
@@ -1191,6 +1195,7 @@
         const seg = h("div", { class: "seg", role: "group", "aria-label": "Which version of the script" });
         for (const [v, label] of [["then", "As it ran then"], ["now", "As it is now"]]) {
           const b = h("button", { type: "button", "aria-pressed": String(v === pick.version), class: v === pick.version ? "on" : "" }, label);
+          if (v === "then" && !thenOk) { b.disabled = true; b.title = s.as_ran_why || "This run kept no copy Kelvin can run."; }
           b.addEventListener("click", () => {
             pick.version = v;
             for (const x of seg.children) { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", String(x === b)); }
@@ -1201,7 +1206,9 @@
       }
     }
     const differ = (d.conditions || []).filter((c) => c.differs && c.settable);
-    if (!d.read_now) parts.push(h("p", { class: "hint" }, "Couldn't read the lab now."));
+    const unread = (d.conditions || []).filter((c) => c.why);
+    if (!d.read_now) parts.push(h("p", { class: "hint", title: unread.slice(0, 12).map((c) => c.key + ": " + c.why).join("\n") },
+      "Couldn't read " + (unread.length ? unread.length + " of the settings" : "the lab") + " now."));
     else if (!differ.length) parts.push(h("p", { class: "hint" }, "Every setting is as it was."));
     if (differ.length) {
       parts.push(h("div", { class: "ra-conds" }, h("table", {},
@@ -1237,6 +1244,7 @@
     const later = h("button", { class: "btn small ghost", type: "button", "data-busy": key }, "Add to the queue");
     run.addEventListener("click", () => go(false, ["start", key]));
     later.addEventListener("click", () => go(true, [key]));
+    if (cannot) { msg.textContent = cannot; parts.push(msg); return parts; }
     parts.push(h("div", { class: "ra-actions" }, run, later), msg);
     return parts;
   }

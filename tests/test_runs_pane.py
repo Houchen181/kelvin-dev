@@ -61,7 +61,7 @@ def test_run_again_follows_the_contract():
     assert '"/api/runs/" + encodeURIComponent(tab.runId) + "/again"' in load
     parts = _js("againParts")
     for text in ('"Run again"', '"Add to the queue"', '"As it ran then"', '"As it is now"', "Restore these ",
-                 "Every setting is as it was.", "Couldn't read the lab now.", "c.differs && c.settable", "c.drive",
+                 "Every setting is as it was.", "Couldn't read ", "c.why", "s.as_ran !== false", "as_ran_why", "c.differs && c.settable", "c.drive",
                  "restore: n > 0 && restore.checked", "body.version = pick.version", "body.queue = true",
                  "queueFromState(r.queue)", "renderQueue()"):
         assert text in parts, text
