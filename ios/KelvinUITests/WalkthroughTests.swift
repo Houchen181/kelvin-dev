@@ -108,6 +108,20 @@ final class WalkthroughTests: XCTestCase {
         element.tap()
     }
 
+    func testPairingThatCantReachTheComputerOffersTheKelvinAccount() {
+        launch([])
+        must(app.buttons["Pair with a code"], "see the welcome screen").tap()
+        must(app.buttons["Type it"], "choose to type the code").tap()
+        must(app.textFields["Address, e.g. 192.168.1.20"], "find the address field").tap()
+        app.typeText("127.0.0.1:9")                                       // nothing answers there
+        must(app.textFields["6-digit code"], "find the code field").tap()
+        app.typeText("123456")
+        must(app.buttons["Pair"], "find Pair").tap()
+        reach(must(app.buttons["pair-sign-in"], "be offered the Kelvin account", timeout: 30), "see it").tap()
+        gone(app.navigationBars["Pair with Kelvin"], "leave pairing")
+        must(app.navigationBars["Kelvin account"], "open the account sheet")
+    }
+
     func testTheWelcomeScreensSheetsCanBeFilledInAndLeft() {
         launch([])
         must(app.buttons["Pair with a code"], "see the welcome screen").tap()

@@ -546,6 +546,7 @@
     hubLink(a, "account-hub-text", "account-hub-edit");
     const relay = a.relay;
     $("relay-field").hidden = !(a.user.central && relay);
+    $("phone-away-account").hidden = !(a.user.central && relay && relay.on);   // Settings -> Phone: the way from anywhere
     if (relay) {
       $("relay-on").checked = relay.on;
       $("relay-status").textContent = !relay.on ? "off" : ({ online: "on: your phone can reach this Kelvin",

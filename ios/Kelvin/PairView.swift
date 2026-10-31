@@ -16,6 +16,7 @@ struct PairView: View {
     @State var failure: String?
     @State var lastScan: String?
     @State var retry: PairingLink?        // a scanned code whose computer didn't answer
+    @State var away = false               // the computer didn't answer: pairing needs its network, the account doesn't
 
     var body: some View {
         NavigationStack {
@@ -43,8 +44,8 @@ struct PairView: View {
                             }
                             .listRowInsets(EdgeInsets())
                     } footer: {
-                        Text("Point the camera at the QR code. Away from the lab, pair with the code made for the "
-                             + "Tailscale address.")
+                        Text(app.account == nil ? "Point the camera at the QR code. Away from the lab, sign in with "
+                             + "your Kelvin account instead: no pairing." : "Point the camera at the QR code.")
                     }
                 } else {
                     Section {
@@ -78,6 +79,20 @@ struct PairView: View {
                             Button("Try again") { Task { await pair(addresses: link.addresses, code: code) } }
                         }
                     }
+                    if away && app.account == nil {
+                        Section {
+                            Button {
+                                app.signInNext = true   // once this sheet has gone: one sheet at a time
+                                dismiss()
+                            } label: {
+                                Label("Sign in with your Kelvin account", systemImage: "person.crop.circle")
+                            }
+                            .accessibilityIdentifier("pair-sign-in")
+                        } footer: {
+                            Text("From any network, with no pairing: your phone reaches every Kelvin where you are "
+                                 + "signed in with that account.")
+                        }
+                    }
                 }
             }
             .navigationTitle("Pair with Kelvin")
@@ -94,6 +109,7 @@ struct PairView: View {
     func found(_ text: String) {
         guard !working, text != lastScan else { return }
         lastScan = text
+        away = false
         guard let link = Pairing.parse(text) else {
             failure = "That QR code is not a Kelvin pairing code."
             return
@@ -111,6 +127,7 @@ struct PairView: View {
     @MainActor
     func pair(typed: String, code: String) async {
         guard let base = Pairing.address(typed) else {
+            away = false
             failure = "That is not an address. Type it as Kelvin shows it, e.g. 192.168.1.20:8771."
             return
         }
@@ -121,23 +138,27 @@ struct PairView: View {
     func pair(addresses: [URL], code: String, link: PairingLink? = nil) async {
         working = true
         failure = nil
+        away = false
         defer { working = false }
         do {
             try await app.pair(at: addresses, code: code)
             dismiss()
         } catch let e as KelvinError where e.kind == .unreachable {
             if let link { retry = link }
-            failure = e.message + " " + PairView.unreachable
+            away = true
+            failure = e.message + " " + PairView.unreachable + (app.account.map {
+                " From any network, with no pairing: sign in to Kelvin on that computer with \($0.email)."
+            } ?? "")
         } catch {
             retry = nil
             failure = error.localizedDescription
         }
     }
 
-    static let unreachable = "Is this phone on the same Wi-Fi as the computer, with phone access on there? On Windows, "
-        + "press Let phones through in Kelvin's Settings → Phone. If iOS asked to find devices on your local network, "
-        + "allow it (Settings → Kelvin → Local Network). Many university, housing and hotel Wi-Fi networks keep devices "
-        + "apart: then install Tailscale on both and pair with the code Kelvin shows."
+    static let unreachable = "Pairing needs this phone on the computer's network, with phone access on there. On "
+        + "Windows, press Let phones through in Kelvin's Settings → Phone. If iOS asked to find devices on your local "
+        + "network, allow it (Settings → Kelvin → Local Network). Many university, housing and hotel Wi-Fi networks "
+        + "keep devices apart: there, use your Kelvin account, or Tailscale on both."
 }
 
 /// The camera, reporting each QR code it sees.

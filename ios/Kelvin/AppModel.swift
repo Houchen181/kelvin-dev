@@ -7,6 +7,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var list: ComputerList
     @Published var pairing = false
     @Published var signingIn = false
+    var signInNext = false      // pairing gave way to the Kelvin account: its sheet opens once pairing's has gone
     @Published private(set) var account: Account?
     @Published private(set) var kelvins: [HubKelvin] = []     // the account's, as the hub last listed them
     /// The name this phone writes under in team chats: each person their own, also on an account people share.

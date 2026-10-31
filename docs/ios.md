@@ -1,6 +1,6 @@
 # Kelvin for iPhone
 
-A native iPhone and iPad app that is a remote for Kelvin on a lab computer: the lab at a glance, Kelvin's requests to approve or decline, the run in progress with a live plot and **Stop**, chats, the lab's team chat, and past runs with their reports and Analysis. It talks to Kelvin directly, on the lab network or through Tailscale; nothing goes through anyone else's server.
+A native iPhone and iPad app that is a remote for Kelvin on a lab computer: the lab at a glance, Kelvin's requests to approve or decline, the run in progress with a live plot and **Stop**, chats, the lab's team chat, and past runs with their reports and Analysis. It talks to Kelvin directly, on the lab network or through Tailscale, or, signed in with a Kelvin account, through the Kelvin hub from any network (the hub passes requests through and keeps none).
 
 How people use it is in [portal.md](portal.md#phone-and-remote-access). This page is for building it.
 
@@ -37,6 +37,7 @@ Through the Kelvin account (Kelvin 0.3.19 and later; see [hub.md](hub.md#phones-
 
 - `POST <hub>/api/signin {email, password, installation: {id: "ios-<uuid>", name, platform: "ios", version}}` → the phone's token on the hub (in the Keychain, under `Account.tokenID`); `GET <hub>/api/relay/kelvins` → the account's Kelvins; `POST <hub>/api/signout` ends it.
 - The phone routes above, through `<hub>/api/relay/kelvins/<id>/api/...`, with `Authorization: Bearer <token>` (`KelvinClient(bearer: true)`, whose `base` is that path). A 503 with `offline: true` means that Kelvin isn't online.
+- A paired computer the account reaches too is one row, the pairing: away from the lab it goes through the hub with the account's token (app 0.1.8). Pairing itself needs the phone on the computer's network or Tailscale; when it can't reach the computer, the app offers the Kelvin account.
 - `POST /api/phone/direct` (through the hub only) → `{available, token, addresses, routes}`: the phone's own token for reaching that Kelvin directly, tried first (2.5 s) before the hub. `DELETE` forgets it.
 
 When a route the app depends on changes, raise `API` in remote.py and handle both in the app.
@@ -107,6 +108,6 @@ People install the app through TestFlight: you send a link, they install Apple's
 - Unpairing in the app also unpairs the phone on the Kelvin computer when it answers.
 - **Delete Kelvin account…** (Computers → Kelvin account) deletes the account on the hub with its password (`POST /api/account/delete`), then signs the phone out, as App Review asks of an app that offers making an account. Each Kelvin computer keeps the person's chats and measurements until the account is removed there too.
 
-## Next: through the hub
+## Next: push notifications
 
-Once the Kelvin hub runs all the time at a public address, the app will connect through it as a relay (so it needs no VPN away from the lab), and the hub can send push notifications through Apple's push service. Until then, alerts while the app is closed come from Kelvin's ntfy webhook (Settings → Notifications).
+Once the Kelvin hub runs on a permanent server, it can send push notifications through Apple's push service. Until then, alerts while the app is closed come from Kelvin's ntfy webhook (Settings → Notifications).

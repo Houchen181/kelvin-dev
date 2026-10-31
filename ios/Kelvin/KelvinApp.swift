@@ -32,7 +32,12 @@ struct RootView: View {
                 WelcomeView()
             }
         }
-        .sheet(isPresented: $app.pairing) {
+        .sheet(isPresented: $app.pairing, onDismiss: {
+            if app.signInNext {
+                app.signInNext = false
+                app.signingIn = true
+            }
+        }) {
             PairView()
                 .environmentObject(app)
         }
