@@ -399,3 +399,16 @@ def test_a_decays_first_point_is_kept_and_said_and_only_an_empty_one_is_left_out
     a = analyze_run(rows, [{"key": "laser.power", "unit": "W", "kind": "instrument"}],
                     [{"key": "counter.rate", "unit": "1/s", "kind": "scalar"}], {"status": "done", "points": 21})
     assert a["series"][0]["kind"] == "linear" and a["issues"] == [], a["issues"]
+
+
+def test_hysteresis_pairs_each_reading_with_its_own_x_when_the_first_is_left_out():
+    rng = np.random.default_rng(5)
+    up = np.linspace(0, 1, 26)
+    volts = np.concatenate([up, up[-2::-1]])
+    for lag in (0.0, 300.0):   # the same line both ways; and the way back 300/s higher
+        rows = [{"smu.V": float(v), "counter.rate": 0.0 if i == 0 else
+                 float(2000 + 3000 * v + (lag if i > 25 else 0) + rng.normal(0, 5))} for i, v in enumerate(volts)]
+        a = analyze_run(rows, [{"key": "smu.V", "unit": "V", "kind": "instrument"}],
+                        [{"key": "counter.rate", "unit": "1/s", "kind": "scalar"}], {"status": "done", "points": 51})
+        assert "the first point reads 0 1/s on counter.rate" in a["issues"][0]
+        assert any("hysteresis" in i for i in a["issues"]) == bool(lag), a["issues"]

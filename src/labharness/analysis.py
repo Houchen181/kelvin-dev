@@ -1645,7 +1645,8 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
                     s["fit"]["y"] = _recorded(s["fit"], grows, swept, x_axis["key"], start)
             if outer is not None:
                 s["group"] = "%s = %s" % (outer["key"], si(gval, outer.get("unit", ""))) if _number(gval) else str(gval)
-            h = hysteresis([x for x in xs if _number(x)], [y for y in ys if _number(y)], x_axis.get("unit", ""), unit)
+            pairs = [(x, y) for x, y in zip(xs, ys) if _number(x) and _number(y)]   # kept together: one gap shifts none
+            h = hysteresis([x for x, _ in pairs], [y for _, y in pairs], x_axis.get("unit", ""), unit)
             if h:
                 s["flags"].append(h)
             return s
