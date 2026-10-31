@@ -1,17 +1,25 @@
 """A queue of scans, run one after another without anyone at the computer, like Special Measure's queue.
 
-An item is a plan (a scan, as the run engine runs it) or a step between scans, which sets values, waits for a
-reading to settle and/or waits a fixed time: the safe counterpart of Special Measure's text items.
+An item is a plan (a scan, as the run engine runs it), a step between scans, which sets values, waits for a
+reading to settle and/or waits a fixed time: the safe counterpart of Special Measure's text items,
 
     step: cool to 2 K
     set: { tc.T_set: 2 }
     stabilize: { read: tc.T, within: 0.02, for: 120, timeout: 7200 }
     wait: 600
 
+or one of the lab's own scripts, run as run_script runs it (scriptrun.py), with its values and arguments:
+
+    script: sweep.py           # in the lab's scripts folder, or one a person imported (the Runs panel)
+    params: { VMAX: 2 }
+    args: [--fast]
+    version: 20261031-101500-sweep.py   # optional: that run's script.py, as it ran then
+
 Items can be added at any position, moved, edited or removed while the queue runs; only the item that is running
-is fixed. A person approves the whole queue once, before it starts: every drive range any item uses. Each scan is
-still dry-run just before it runs, and a scan or step that needs more than was approved asks again. The queue
-pauses when a scan fails, is declined or stopped, or Kelvin closes; it never starts by itself.
+is fixed. A person approves the whole queue once, before it starts: every drive range its scans and steps use. A
+script can't be rehearsed, so it asks its own approval when it starts. A scan or step that needs more than was
+approved asks again. The queue pauses when an item fails, is declined or stopped, after an item marked then_pause,
+or when Kelvin closes; it never starts by itself.
 The queue is kept per lab in queue.json, next to its runs, with an account of its last run for the morning: what was
 done, what stopped part-way and what data it kept, what didn't run, and every alarm raised meanwhile."""
 from __future__ import annotations
@@ -26,11 +34,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .eventlog import RUN_NAME
 from .labconfig import read_yaml
 from .plans import PlanError, Stabilize, _split, _stabilize, load_plan
 
 STATES = ("waiting", "running", "done", "failed", "stopped", "skipped")
 STEP_KEYS = {"step", "set", "stabilize", "wait", "note"}
+SCRIPT_KEYS = {"script", "params", "args", "python", "version", "note"}
+KINDS = {"plan": "scan", "step": "step", "script": "script"}   # each kind of item, in words
 MAX_WAIT = 7 * 24 * 3600.0
 
 
@@ -79,11 +90,61 @@ def load_step(source: Any) -> Step:
 
 
 @dataclass
+class ScriptItem:
+    path: str                     # the script's file name or path, as run_script takes it
+    params: Dict[str, Any] = field(default_factory=dict)
+    args: List[str] = field(default_factory=list)
+    python: str = ""              # the Python to run it in (scriptrun.python_named); "" for the one Kelvin picks
+    version: Optional[str] = None   # a run whose script.py runs, as it ran then; None: the file as it is
+    note: str = ""
+
+    @property
+    def name(self) -> str:
+        base = re.split(r"[\\/]", self.path.strip().strip('"'))[-1] or self.path
+        return base + (" as it ran in %s" % self.version if self.version else "")
+
+
+def load_script_item(source: Any) -> ScriptItem:
+    data = read_yaml(source)[0] if isinstance(source, str) else source
+    if not isinstance(data, dict) or "script" not in data:
+        raise PlanError(["a script item starts with script: <its file name or path>"])
+    errors: List[str] = []
+    unknown = set(data) - SCRIPT_KEYS
+    if unknown:
+        errors.append("unknown keys %s (a script item has: %s)" % (", ".join(sorted(map(str, unknown))),
+                                                                   ", ".join(sorted(SCRIPT_KEYS))))
+    path = data.get("script")
+    if not isinstance(path, str) or not path.strip():
+        errors.append("script: its file name, or its path")
+        path = ""
+    params = data.get("params") or {}
+    if not isinstance(params, dict) or not all(isinstance(k, str) for k in params):
+        errors.append("params: a mapping of setting: value (check_script lists a script's settings)")
+        params = {}
+    args = data.get("args") or []
+    if not isinstance(args, list) or any(isinstance(a, (dict, list)) for a in args):
+        errors.append("args: a list of its command-line arguments")
+        args = []
+    python = data.get("python") or ""
+    if not isinstance(python, str):
+        errors.append("python: the path of the Python to run it in")
+        python = ""
+    version = data.get("version")
+    if version is not None and not (isinstance(version, str) and RUN_NAME.match(version)):
+        errors.append("version: the id of a run of this script, whose script.py runs as it ran then")
+        version = None
+    if errors:
+        raise PlanError(errors)
+    return ScriptItem(path.strip(), dict(params), [str(a) for a in args], python.strip(), version,
+                      str(data.get("note") or ""))
+
+
+@dataclass
 class Item:
     id: str
-    kind: str                     # plan | step
+    kind: str                     # plan | step | script
     name: str
-    text: str                     # the plan or step as written (YAML)
+    text: str                     # the plan, step or script item as written (YAML)
     note: str = ""
     status: str = "waiting"
     by: str = ""
@@ -101,6 +162,7 @@ class Item:
     rules: Optional[Dict[str, Any]] = None   # runs keep them, as a chat's own runs do
     confidential: bool = False
     unpublished: bool = False
+    then_pause: bool = False        # the queue pauses after this item (a person's "run now" from the Runs panel)
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
@@ -122,8 +184,10 @@ def parse_item(text: str) -> Tuple[str, str]:
         return "plan", load_plan(text).name
     if isinstance(data, dict) and "step" in data:
         return "step", load_step(data).name
-    raise PlanError(["a queue item is a plan (plan: <name>, sweep, measure...) or a step (step: <what>, set, "
-                     "stabilize, wait)"])
+    if isinstance(data, dict) and "script" in data:
+        return "script", load_script_item(data).name
+    raise PlanError(["a queue item is a plan (plan: <name>, sweep, measure...), a step (step: <what>, set, "
+                     "stabilize, wait) or one of the lab's scripts (script: <its file>, params, args)"])
 
 
 class ScanQueue:
@@ -200,11 +264,13 @@ class ScanQueue:
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "",
             project: Optional[str] = None, incognito: bool = False, unshared: bool = False,
             folder: Optional[str] = None, chat: Optional[str] = None, rules: Optional[Dict[str, Any]] = None,
-            confidential: bool = False, unpublished: bool = False) -> Item:
+            confidential: bool = False, unpublished: bool = False, then_pause: bool = False) -> Item:
         kind, name = parse_item(text)
+        if kind == "script" and not note.strip():   # a script item's own note: line, kept with its run
+            note = load_script_item(text).note
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time(),
                     project=project, incognito=incognito, unshared=unshared, folder=folder, chat=chat, rules=rules,
-                    confidential=confidential, unpublished=unpublished)
+                    confidential=confidential, unpublished=unpublished, then_pause=bool(then_pause))
         with self.lock:
             if position is None or position > len(self.items):
                 self.items.append(item)
@@ -238,6 +304,14 @@ class ScanQueue:
             item = self.find(ref)
             self.items.remove(item)
             self.items.insert(max(0, min(len(self.items), int(position) - 1)), item)
+            self.save()
+            return item
+
+    def set_then_pause(self, ref: Any, on: bool) -> Item:
+        """Whether the queue pauses after this item."""
+        with self.lock:
+            item = self.find(ref)
+            item.then_pause = bool(on)
             self.save()
             return item
 
@@ -349,12 +423,13 @@ class ScanQueue:
         for n, i in enumerate(self.items, 1):
             if i.id in out:
                 lines.append("%d. [%s] a %s of unshared work (another project's or chat's)" % (
-                    n, i.status, "scan" if i.kind == "plan" else "step"))
+                    n, i.status, KINDS.get(i.kind, i.kind)))
                 continue
-            extra = (" → run %s" % i.run_id if i.run_id else "") + (": %s" % i.message if i.message else "")
+            extra = (" → run %s" % i.run_id if i.run_id else "") + (": %s" % i.message if i.message else "") + (
+                "; the queue pauses after it" if i.then_pause and i.status in ("waiting", "running") else "")
             lines.append("%d. [%s] %s %s%s%s" % (n, i.status, i.kind, i.name, " (%s)" % i.note if i.note else "", extra))
         if not self.items:
-            lines.append("(empty: add plans or steps with queue_add)")
+            lines.append("(empty: add plans, steps or scripts with queue_add)")
         if self.last and v["state"] not in ("running", "pausing"):
             if out & set(self.last.get("items") or []):
                 lines.append("last run: its account names unshared work, which isn't shown here")

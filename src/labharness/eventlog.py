@@ -35,6 +35,11 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
 
 
+def plan_text(plan: Dict[str, Any]) -> str:
+    """A run's plan as its record keeps it (run.h5 /plan): the same plan always gives the same text."""
+    return yaml.safe_dump(plan, sort_keys=False, allow_unicode=True)
+
+
 _SHARED = threading.Lock()
 
 
@@ -125,8 +130,7 @@ class RunRecord:
             return
         if not getattr(self, "_started", False):   # the plan and who/where first, with the meta as it is by then
             self._started = True
-            self._record.write("start", {"plan": yaml.safe_dump(self._plan, sort_keys=False, allow_unicode=True),
-                                         "meta": dict(self.meta)}, sync=True)
+            self._record.write("start", {"plan": plan_text(self._plan), "meta": dict(self.meta)}, sync=True)
         self._record.write(kind, fields, values, sync=sync)
 
     def set_columns(self, columns: Dict[str, Any]) -> None:
@@ -259,11 +263,14 @@ class RunFolders:
 
 class RunStore:
     """Makes each run's folder, named by its id: in root (the data folder's runs/), or in the folder the run is
-    given (its chat's). folders: where runs are kept, so an id is never used twice."""
+    given (its chat's). folders: where runs are kept, so an id is never used twice. noted(record, plan): told of each
+    run as its record is made (the person's library, scanlibrary.py); whatever it does, the run goes on."""
 
-    def __init__(self, root: Any = None, folders: Optional[RunFolders] = None):
+    def __init__(self, root: Any = None, folders: Optional[RunFolders] = None,
+                 noted: Optional[Callable[[RunRecord, Dict[str, Any]], None]] = None):
         self.root = Path(root) if root else None
         self.folders = folders
+        self.noted = noted
 
     def _run_id(self, root: Optional[Path], plan_name: str) -> str:
         """date-time-plan, the plan's part short enough that the run's folder and every file Kelvin keeps in it fit
@@ -282,6 +289,16 @@ class RunStore:
         return run_id
 
     def create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None) -> RunRecord:
+        """Every run's record is made here: plans (and a queue's scans and a recipe's stages) and scripts alike."""
+        rec = self._create(plan_name, plan, operator, folder)
+        if self.noted is not None:
+            try:
+                self.noted(rec, plan)
+            except Exception:   # the library is a help: a run never stops for it
+                pass
+        return rec
+
+    def _create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None) -> RunRecord:
         root = Path(folder) if folder and self.root else self.root
         run_id = self._run_id(root, plan_name)
         if root is None or root == self.root:

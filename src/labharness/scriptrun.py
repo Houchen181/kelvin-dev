@@ -82,32 +82,45 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
-def locate(path: str, folders: Sequence[Any]) -> Path:
-    """The script to run, inside one of the lab's scripts folders (a person named them), never elsewhere. A bare file
-    name may be in a sub-folder, if it is there once."""
+def locate(path: str, folders: Sequence[Any], chosen: Sequence[Any] = (), missing: bool = False) -> Path:
+    """The script to run: inside one of the lab's scripts folders (a person named them), or one of the files a person
+    imported into their library (chosen: each one a person picked, in the Runs panel), never elsewhere. A bare file
+    name may be in a sub-folder, if it is there once, or name an imported file. missing: its path in full may name a
+    file that is gone, in a folder that is still there (an earlier run's copy of it runs there, as it ran then)."""
     roots = [Path(f).expanduser().resolve() for f in folders if f]
-    if not roots:
+    picked: Dict[str, Path] = {}
+    for c in chosen:
+        if c:
+            p = Path(str(c)).expanduser().resolve()
+            picked[os.path.normcase(str(p))] = p
+    if not roots and not picked:
         raise ScriptError("this lab has no scripts folder: a person names it in Set up (Lab → Set up → From your "
-                          "scripts…), and Kelvin runs only the scripts in it")
+                          "scripts…), and Kelvin runs only the scripts in it, or those they import in the Runs panel")
+    where = ", ".join(str(r) for r in roots) or "none named in Set up"
     p = Path(str(path).strip().strip('"')).expanduser()
     tries = [p] if p.is_absolute() else [r / p for r in roots]
     for t in tries:
         t = t.resolve()
-        if t.is_file() and any(_inside(t, r) for r in roots):
+        here = t.is_file() or (missing and p.is_absolute() and not t.exists() and t.parent.is_dir())
+        if here and (any(_inside(t, r) for r in roots) or os.path.normcase(str(t)) in picked):
             return _runnable(t)
     if p.is_absolute():
         if p.exists():
             raise ScriptError("%s is outside the lab's scripts folder (%s): Kelvin runs only the scripts a person put "
-                              "there" % (p, ", ".join(str(r) for r in roots)))
+                              "there, or imported in the Runs panel" % (p, where))
         raise ScriptError("%s does not exist" % p)
     if len(p.parts) == 1:
         hits = [(r, h) for r in roots for h in _named(r, p.name)]
+        seen = {os.path.normcase(str(h.resolve())) for _, h in hits}
+        hits += [(None, c) for k, c in picked.items() if c.name.lower() == p.name.lower() and c.is_file()
+                 and k not in seen]
         if len(hits) == 1:
             return _runnable(hits[0][1].resolve())
         if hits:
-            raise ScriptError("there are several %s in the scripts folder: %s; say which" % (
-                p.name, ", ".join(str(h.relative_to(r)) for r, h in hits)))
-    raise ScriptError("no script %s in the lab's scripts folder (%s)" % (path, ", ".join(str(r) for r in roots)))
+            raise ScriptError("there are several %s in the scripts folder%s: %s; say which" % (
+                p.name, " and the scripts imported" if any(r is None for r, _ in hits) else "",
+                ", ".join(str(h.relative_to(r)) if r is not None else str(h) for r, h in hits)))
+    raise ScriptError("no script %s in the lab's scripts folder (%s)" % (path, where))
 
 
 def _named(root: Path, name: str, most: int = 6) -> List[Path]:
@@ -359,13 +372,40 @@ def _probe(command: List[str], folder: Path, wanted: List[str]) -> Dict[str, Any
     return found
 
 
-def python_for(script: Path, source: str, roots: Sequence[Path], configured: str = "") -> Python:
-    """The Python that runs the script: the one a person set for the lab's scripts; else the first, best first (an
-    environment beside the scripts, this computer's, Kelvin's own), that has every module the script imports."""
+def _configured(configured: str) -> Tuple[List[str], str]:
+    p = Path(configured).expanduser()
+    return [str(p), "-u"], "%s (set for the lab's scripts)" % p
+
+
+def python_named(script: Path, roots: Sequence[Path], configured: str, named: str) -> Optional[Tuple[List[str], str]]:
+    """The Python named (a path, or as a run's record names it: "C:/lab/.venv/Scripts/python.exe (the environment
+    beside the scripts), Python 3.11"), if it is one Kelvin runs the lab's scripts with here: the one set for them,
+    or one it finds (an environment beside the script, this computer's, its own). Never any other program."""
+    named = str(named or "").strip()
+    if not named:
+        return None
+    bare = re.sub(r", Python \d+\.\d+$", "", named)
+    found = ([_configured(configured)] if configured else []) + _candidates(script, roots)
+    for command, text in found:
+        if bare == text or os.path.normcase(bare) == os.path.normcase(command[0]):
+            return command, text
+    return None
+
+
+def python_for(script: Path, source: str, roots: Sequence[Path], configured: str = "", named: str = "") -> Python:
+    """The Python that runs the script: the one named (python_named), when given; else the one a person set for the
+    lab's scripts; else the first, best first (an environment beside the scripts, this computer's, Kelvin's own),
+    that has every module the script imports."""
     wanted = imports(source)
-    if configured:
-        p = Path(configured).expanduser()
-        candidates = [([str(p), "-u"], "%s (set for the lab's scripts)" % p)]
+    if named:
+        pick = python_named(script, roots, configured, named)
+        if pick is None:
+            raise ScriptError("%s is not a Python Kelvin runs the lab's scripts with here (the one set in Settings, an "
+                              "environment beside the script, this computer's, or Kelvin's own): leave python out to "
+                              "use the one Kelvin picks" % named)
+        candidates = [pick]
+    elif configured:
+        candidates = [_configured(configured)]
     else:
         candidates = _candidates(script, roots)
     lacking = []
@@ -582,8 +622,10 @@ class Prepared:
     args: List[str]
     python: Python
     found: Found
-    sha256: str
+    sha256: str               # of the file as this run reads it (a version's: of the file as that run read it)
     declared: Dict[str, List[Any]] = field(default_factory=dict)   # drive ranges the agent gave for this run
+    params: Dict[str, Any] = field(default_factory=dict)           # the values asked for (changes says them)
+    version: Optional[str] = None   # the run whose script.py this runs, as it ran then (None: the file as it is)
 
     @property
     def name(self) -> str:
@@ -634,19 +676,25 @@ def declared_drives(lab: Any, drives: Optional[Dict[str, Any]]) -> Dict[str, Lis
 
 def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[str, Any]] = None,
             args: Optional[Sequence[Any]] = None, drives: Optional[Dict[str, Any]] = None,
-            python: str = "", choose_python: Callable[..., Python] = python_for) -> Prepared:
-    script = locate(path, folders)
-    original = source_of(script)
-    source, changes = with_params(original, dict(params or {}))
+            python: str = "", choose_python: Callable[..., Python] = python_for, chosen: Sequence[Any] = (),
+            source: Optional[str] = None, sha256: Optional[str] = None, version: Optional[str] = None,
+            named: str = "") -> Prepared:
+    """A script read and ready to run. chosen: the scripts a person imported (locate). source: the text to run in
+    place of the file's own (version: the run whose script.py it is, as it ran then; sha256: of the file as that run
+    read it), in the file's own folder and under its own name, which may be gone by now. named: the Python to run it
+    in (python_named)."""
+    script = locate(path, folders, chosen, missing=source is not None)
+    original = source if source is not None else source_of(script)
+    text, changes = with_params(original, dict(params or {}))
     try:
-        compile(source, str(script), "exec")
+        compile(text, str(script), "exec")
     except SyntaxError as e:
         raise ScriptError("%s does not parse as Python 3 (line %s: %s)" % (script.name, e.lineno, e.msg)) from None
     roots = [Path(f).expanduser().resolve() for f in folders if f]
-    py = choose_python(script, source, roots, python)
-    return Prepared(script, original, source, changes, [str(a) for a in (args or [])], py,
-                    read_ahead(lab, script, source), hashlib.sha256(original.encode("utf-8")).hexdigest(),
-                    declared_drives(lab, drives))
+    py = choose_python(script, text, roots, python, named) if named else choose_python(script, text, roots, python)
+    return Prepared(script, original, text, changes, [str(a) for a in (args or [])], py,
+                    read_ahead(lab, script, text), sha256 or hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                    declared_drives(lab, drives), dict(params or {}), version)
 
 
 def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[str, Allowed], List[str]]:
@@ -662,6 +710,8 @@ def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[st
             items[k] = "%s, %s%s%s" % (head, why, sep, rest)
     found = prep.found
     head = "%s runs with %s" % (prep.name, prep.python.text)
+    if prep.version:
+        head += "; as it ran in run %s (its script.py), not the file as it is now" % prep.version
     if prep.changes:
         head += "; with " + "; ".join(prep.changes)
     if prep.args:
@@ -1239,7 +1289,8 @@ class ScriptRun:
     def execute(self) -> ScriptReport:
         gate, lab, prep = self.gate, self.lab, self.prep
         plan = {"plan": prep.name, "script": str(prep.path), "sha256": prep.sha256, "python": prep.python.text,
-                "changes": prep.changes or None, "args": prep.args or None}
+                "changes": prep.changes or None, "params": prep.params or None, "args": prep.args or None,
+                "version": prep.version}
         self.rec = self.store.create(prep.name, {k: v for k, v in plan.items() if v is not None}, gate.operator,
                                      self.folder)
         self.rec_id = self.rec.run_id
@@ -1249,7 +1300,8 @@ class ScriptRun:
         self.rec.meta.update(self.meta)
         self.rec.meta["script"] = str(prep.path)
         (run_dir / "script.py").write_text(prep.source, encoding="utf-8")
-        changed = prep.source != prep.original or prep.path.suffix.lower() != ".py"   # values set, or a notebook
+        # values set, a notebook, or an earlier run's version of the file: the text in script.py runs, not the file
+        changed = prep.source != prep.original or prep.path.suffix.lower() != ".py" or prep.version is not None
         source_file = run_dir / "script.py" if changed else None
         start = lab.snapshot()
         self.rec.snapshot("start", start)

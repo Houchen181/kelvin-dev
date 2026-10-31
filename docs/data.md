@@ -137,6 +137,7 @@ Ask Kelvin to run one of your lab's scripts ("run sweep.py with VMAX at 2") and 
 - **Its folder** keeps `script.py` (the script exactly as it ran, with any value changed for that run), `output.txt` (what it printed), `commands.jsonl` (every command it sent, with the gate's answer), `run.h5` (its readings), the figures it left open (matplotlib) and the run's reports. Kelvin also lists the files the script wrote beside itself.
 - **Values for one run:** the script's settings are its module constants with a plain value (`VMAX = 5   # top of the sweep, V`) and its `main()`'s defaults. `check_script` lists them, and `params` changes them in the copy that runs, never in your file; `args` gives its command-line arguments.
 - **Which Python:** the one set in **Settings → Instruments → Your lab's scripts**, else the first that has everything the script imports: an environment beside your scripts (`.venv`, `venv` or `env`), this computer's Python, then Kelvin's own (which has numpy, pyvisa and pyserial). Python 3.6 or later. A notebook runs its code cells in order, without its `%` and `!` lines. A MATLAB script doesn't run, but can become a recipe.
+- **Scripts from elsewhere, and running one again:** a script you import in the Runs pane may run though it is outside the scripts folder, with the same check and approval. Every script Kelvin runs is kept in your library (`library.json` in the data folder) with the values, arguments and Python of its last run, so it runs again as it ran: from the library, or from its run (its `script.py`, when the file has changed since) ([portal.md](portal.md#in-the-portal)).
 
 ## The queue
 
@@ -149,7 +150,17 @@ stabilize: { read: tc.T, within: 0.02, for: 120, timeout: 7200 }   # wait until 
 wait: 300                                                          # then wait 5 minutes more
 ```
 
-- **Building it.** Add an item at the end or at a position, with a note that is kept with its run. Reorder with ↑ ↓ (or select an item and press `u` / `d`), edit, or remove it (Delete). **Add to the queue** under a finished run's plan queues that scan again. You can change the queue while it runs; only the running item is fixed.
+An item can also be one of your lab's own scripts, as `run_script` runs it ([Your own scripts](#your-own-scripts)):
+
+```yaml
+script: sweep.py                      # in the lab's scripts folder, or one you imported
+params: { VMAX: 2 }                   # values for its settings, for this run
+args: [--fast]
+version: 20261031-101500-sweep.py     # optional: that run's script.py, as it ran then
+```
+
+- **Building it.** Add an item at the end or at a position, with a note that is kept with its run. Reorder with ↑ ↓ (or select an item and press `u` / `d`), edit, or remove it (Delete). **Add to the queue** under a finished run's plan queues that scan again. You can change the queue while it runs; only the running item is fixed. An item can be marked to pause the queue after it (`then_pause`); a scan or script run again from the Runs pane goes to the front, so marked.
+- **A script item** can't be rehearsed on the simulated lab, so the queue's approval doesn't cover it: it asks you itself as it starts, as `run_script` does, and the queue's card says so.
 - **One approval.** **Start** checks every waiting item, then asks you once for every drive range the queue uses. Anything outside what you approved asks again. Asked to (`dry_run`), Kelvin only rehearses the whole queue in order on simulated copies of the lab's instruments, so a step that cools the sample counts for the scans after it, and says how long it takes and what would fail; the queue doesn't start. The rehearsal's instruments take as long as this lab's runs measured (each reading, each ramp step), so it says what the queue's card says ([safety.md](safety.md#the-rules)). The real start's card says when that rehearsal said something would fail.
   - **Over the whole night.** The card covers every value an item sets away from safe, wherever the drive is when the queue starts, and what a plan's `on_abort` sets. An item that switches an output off at its end no longer makes the next one's switching it on a new question at 3 a.m.
   - **Interlocks in queue order.** When an item before it works on an interlock's condition (a cool-down step before a field sweep), that interlock is checked when its drive moves, not at the start, and the card says so. If it still doesn't hold then, the queue pauses there. A queue whose own set points would break an interlock (a warm-up to 15 K before a field sweep, under `T < 10 K`) doesn't start, and says which item ([safety.md](safety.md#the-rules)).

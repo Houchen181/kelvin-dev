@@ -73,7 +73,8 @@ LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api
                           "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/folder",
                           "/api/phone", "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount",
                           "/api/quit", "/api/update", "/api/hub", "/api/skills/", "/api/know/", "/api/collection",
-                          "/api/team", "/api/analysis/keep")
+                          "/api/team", "/api/analysis/keep", "/api/library")
+LOCKED_AGAIN = re.compile(r"^/api/runs/[^/]+/again$")   # a run again starts the queue: locked as the queue is
 COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
 
 
@@ -196,7 +197,7 @@ class Guard:
                       and not self.signed_in()):
                     problem = (401, "Sign in to Kelvin first.", {"signin": True})
                 elif (method != "GET" and self.operating is not None and self.operating()
-                      and path.startswith(LOCKED_WHILE_OPERATING)):
+                      and (path.startswith(LOCKED_WHILE_OPERATING) or LOCKED_AGAIN.match(path))):
                     problem = (423, "Claude is operating this computer, so Kelvin's approvals and settings are locked "
                                     "until it finishes. Press Stop to end it.")
                 scope["kelvin"] = {"role": "owner", "device": None}
@@ -2241,11 +2242,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return FileResponse(path, media_type=media, filename=path.name)
 
     async def run_file(request: Request) -> Response:
-        """A run's report or its data (run.h5), to download."""
+        """A run's report or its data (run.h5), to download; a script run's script.py (as it ran), output.txt and
+        commands.jsonl as plain text to read, on this computer only (phones get none of it)."""
+        name = request.path_params["name"]
+        if name in runtime.RUN_SEEN and role_of(request) != "owner":
+            return error(403, "A script's own files are read on the Kelvin computer.")
         try:
-            path = runtime.run_file(request.path_params["run_id"], request.path_params["name"])
+            path = runtime.run_file(request.path_params["run_id"], name)
         except KeyError as e:
             return error(404, e.args[0])
+        if path.name in runtime.RUN_SEEN:   # text only, never a page or a program: the browser shows it as it is
+            return FileResponse(path, media_type="text/plain; charset=utf-8",
+                                headers={"X-Content-Type-Options": "nosniff",
+                                         "Content-Security-Policy": "default-src 'none'; sandbox"})
         media = {".pdf": "application/pdf", ".h5": "application/x-hdf5",
                  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}[path.suffix]
         return FileResponse(path, media_type=media, filename="%s-%s" % (request.path_params["run_id"], path.name))
@@ -2271,8 +2280,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def run_open(request: Request) -> Response:
         """Open a run's file (or, with no name, its folder) on this computer."""
         run_id, name = request.path_params["run_id"], request.path_params.get("name")
-        try:
-            path = runtime.run_file(run_id, name) if name else runtime._run_dir(run_id)
+        try:   # a script's own files are read in Kelvin, never opened: Windows could run script.py
+            path = runtime.run_file(run_id, name, opening=True) if name else runtime._run_dir(run_id)
         except KeyError as e:
             return error(404, e.args[0])
         try:
@@ -3233,7 +3242,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                              "plan_text": rec.plan_text,
                              "meta": {k: meta.get(k) for k in ("status", "reason", "points", "planned_points",
                                                                 "duration_s", "warnings")},
-                             "files": runtime.run_files(run_id)})
+                             "files": [f for f in runtime.run_files(run_id)   # a script's own: this computer's
+                                       if role_of(request) == "owner" or not f.get("view")]})
 
     async def live(request: Request) -> Response:
         """The running (or last) plan's rows since `since`, for the runs pane."""
@@ -3299,8 +3309,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if op == "add":
             pos = body.get("position")
             msg = await asyncio.to_thread(persons, runtime.queue_add, str(body.get("text") or ""),
-                                          int(pos) if pos else None, str(body.get("note") or ""), by)
+                                          int(pos) if pos else None, str(body.get("note") or ""), by,
+                                          bool(body.get("then_pause")))
             ok = not msg.startswith("not added")
+        elif op == "then_pause":   # {item, value}: the queue pauses after it, or no longer does
+            try:
+                found = runtime.queue.set_then_pause(item, body.get("value", True) is not False)
+                msg, ok = "the queue %s after %s" % ("pauses" if found.then_pause else "goes on", found.name), True
+            except KeyError as e:
+                msg, ok = e.args[0], False
         elif op == "edit":
             msg = await asyncio.to_thread(persons, runtime.queue_edit, item, str(body.get("text") or ""), by)
             ok = not msg.startswith("not changed")
@@ -3329,6 +3346,83 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if not ok:
             return error(400, msg)
         return JSONResponse(dict(runtime.queue_view(), message=msg))
+
+    ON_THIS_COMPUTER = "Your library and running a run again are on the Kelvin computer."
+
+    def as_person(fn: Any, *args: Any) -> Any:
+        """A person's queueing from the Runs panel, on the thread that does it: filed under no chat, never under the
+        one whose call changes the lab meanwhile."""
+        with runtime.attributed({}):
+            return fn(*args)
+
+    async def library(request: Request) -> Response:
+        """The person's library of scans and scripts (scanlibrary.py), for the Runs panel. GET: {scripts, scans}, the
+        latest used first. POST, a person's change on this computer (no phone, no agent tool): {op: import, path}
+        → {entry, check, library}; {op: rename, id, name} and {op: remove, id} → {library}; {op: run, id, params?,
+        args?, queue?} → {queue, message}: at the front of the queue and started, pausing after it (it returns once
+        the queue's approval is answered), or with queue: true at its end."""
+        if role_of(request) != "owner":   # remote.py lists none of it either
+            return error(403, ON_THIS_COMPUTER)
+        if request.method == "GET":
+            try:
+                return JSONResponse(await asyncio.to_thread(runtime.library_view))
+            except OSError as e:
+                return error(500, str(e))
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            return error(400, "send {op, ...}")
+        op, by = str(body.get("op") or ""), person(request)
+        entry_id = str(body.get("id") or "")
+        try:
+            if op == "import":
+                out = await asyncio.to_thread(runtime.library_import, body.get("path"), by)
+            elif op in ("rename", "remove"):
+                await asyncio.to_thread(runtime.library_change, op, entry_id, body.get("name"), by)
+                out = {}
+            elif op == "run":
+                return JSONResponse(await asyncio.to_thread(as_person, runtime.library_run, entry_id,
+                                                            body.get("params"), body.get("args"),
+                                                            bool(body.get("queue")), by))
+            else:
+                return error(400, "unknown library operation %r (import, rename, remove or run)" % op)
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else "nothing like that in the library")
+        except ValueError as e:
+            return error(400, str(e))
+        except OSError as e:
+            return error(500, "Kelvin could not keep the library: %s" % e)
+        out["library"] = await asyncio.to_thread(runtime.library_view)
+        return JSONResponse(out)
+
+    async def run_again(request: Request) -> Response:
+        """A run again, from the Runs panel; on this computer only. GET: {kind, name, text? (a plan's), script? ({path,
+        exists, changed, sha256, params, args, python}), conditions ([{key, then, now, unit, differs, settable,
+        drive}]: its start beside the lab read now), differ, read_now}. POST {restore, version?: then | now, queue?}
+        → {queue, message}: the same plan, or the same script with its values (then: as that run ran it), with the
+        settings restored that differ now if asked; at the front of the queue and started, pausing after it, or with
+        queue: true at its end."""
+        if role_of(request) != "owner":   # remote.py lists none of it either
+            return error(403, ON_THIS_COMPUTER)
+        run_id = request.path_params["run_id"]
+        try:
+            if request.method == "GET":
+                return JSONResponse(await asyncio.to_thread(runtime.run_again_view, run_id))
+            try:
+                body = await request.json()
+            except ValueError:
+                body = {}
+            body = body if isinstance(body, dict) else {}
+            out = await asyncio.to_thread(as_person, runtime.run_again, run_id, bool(body.get("restore")),
+                                          str(body.get("version") or "then"), bool(body.get("queue")),
+                                          person(request))
+        except KeyError as e:
+            return error(404, e.args[0] if e.args else "no such run")
+        except ValueError as e:
+            return error(400, str(e))
+        return JSONResponse(out)
 
     routes = [
         Route("/", index),
@@ -3442,6 +3536,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/runs", runs),
         Route("/api/runs/stop", stop_run, methods=["POST"]),
         Route("/api/queue", queue, methods=["GET", "POST"]),
+        Route("/api/library", library, methods=["GET", "POST"]),
+        Route("/api/runs/{run_id}/again", run_again, methods=["GET", "POST"]),
         Route("/api/runs/{run_id}", run_data),
         Route("/api/runs/{run_id}/open", run_open, methods=["POST"]),
         Route("/api/runs/{run_id}/files/{name}", run_file),
