@@ -181,17 +181,24 @@ class Library:
 
     # ------------------------------------------------------------------ what runs note
 
-    def note_plan(self, text: str, name: str, about: str, run_id: str, when: Optional[float] = None) -> Dict[str, Any]:
-        """A plan that starts a run: its entry, made or brought up to date."""
-        entry_id = plan_id(text)
+    def note_plan(self, text: str, name: str, about: str, run_id: str, when: Optional[float] = None,
+                  marks: Optional[Dict[str, Any]] = None, under: Optional[str] = None) -> Dict[str, Any]:
+        """A plan that starts a run: its entry, made or brought up to date. marks: whose work the run is (its project,
+        chat and folder, and the marks of unshared work), which a run from the library keeps. under: the entry it
+        runs again (a scan run again with its settings restored first, whose text is the scan's own and more): its
+        runs are that entry's while it is there."""
+        entry_id = under if under and under.startswith("plan-") else plan_id(text)
         with _LOCK:
             found = self._read()
+            if entry_id not in found:
+                entry_id = plan_id(text)
             entry = found.get(entry_id) or {
                 "id": entry_id, "kind": "plan", "name": name or "plan", "source": "kelvin",
                 "added": when or time.time(), "used": None, "count": 0, "runs": [],
                 "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text, "summary": about}
             if about and not entry.get("summary"):
                 entry["summary"] = about
+            entry["marks"] = dict(marks or {})
             self._ran(entry, run_id, when)
             found[entry_id] = entry
             self._keep(found)
@@ -200,15 +207,15 @@ class Library:
 
     def note_script(self, path: Any, run_id: str, params: Optional[Dict[str, Any]] = None,
                     args: Optional[List[Any]] = None, python: Optional[str] = None, sha256: Optional[str] = None,
-                    when: Optional[float] = None) -> Dict[str, Any]:
-        """A script that starts a run: its entry, with what that run had (its values, arguments, Python, and the
-        sha256 of the file as it read it)."""
+                    when: Optional[float] = None, marks: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """A script that starts a run: its entry, with what that run had (the values a person changed, its
+        arguments, Python, the sha256 of the file as it read it, and whose work it was: marks, as note_plan)."""
         entry_id = script_id(path)
         with _LOCK:
             found = self._read()
             entry = found.get(entry_id) or self._new_script(path, "kelvin", when)
             entry.update(params=dict(params or {}), args=[str(a) for a in args or []], python=python or None,
-                         sha256=sha256 or None)
+                         sha256=sha256 or None, marks=dict(marks or {}))
             self._ran(entry, run_id, when)
             found[entry_id] = entry
             self._keep(found)

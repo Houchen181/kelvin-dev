@@ -38,13 +38,18 @@ STARTUP = {"sitecustomize.py", "usercustomize.py"}
 LOADED = {".py", ".pyw"}   # what a maker's Python library could import from its folder
 KEPT = ".kelvin-old"   # beside a file Kelvin replaced: each version before, by date
 # the lab's records in the data folder, and in each run's folder, which only Kelvin itself writes: the event log, the
-# mounted sample and its protection, the queue, the chats' folders of runs, the catalog, a run's record and run.h5
+# mounted sample and its protection, the queue, the chats' folders of runs, the catalog, the person's library of scans
+# and scripts (which says which scripts may run), a run's record and run.h5
 RECORDS = {"events.jsonl", "mounted.json", "queue.json", "folders.json", "watches.json", "alarms.jsonl",
            "catalog.sqlite", "catalog.sqlite-wal", "catalog.sqlite-shm", "catalog.sqlite-journal", "record.bin",
-           "run.h5"}
-# a script run's own account of what ran, in its folder wherever the run is kept: the script as it ran (which runs
-# again, as it ran, from the Runs panel), its output and every command it sent. Only Kelvin itself writes them
-RUN_RECORDS = {"script.py", "output.txt", "commands.jsonl"}
+           "run.h5", "library.json"}
+# a run's own files, in any folder named as a run is (eventlog.RUN_NAME), whether Kelvin made it yet or not: its
+# record, run.h5 and the files of runs before them (the plan, the meta, the points, the settings at its start and end),
+# and a script run's account of what ran (the script as it ran, which runs again as it ran from the Runs panel, its
+# output, every command it sent). Only Kelvin itself writes them, so a run is never made up, nor what it ran changed
+RUN_RECORDS = {"script.py", "output.txt", "commands.jsonl", "plan.yaml", "meta.json", "data.jsonl", "record.bin",
+               "run.h5", "analysis.json"}
+_RUN_RECORD = re.compile(r"^snapshot_[^/\\]*\.json$")
 # what holds sign-ins, keys and tokens, which Kelvin's AI never reads or writes, wherever it is (secret): the folders
 # of SSH, GnuPG, the cloud tools and AI tools' sign-ins (Claude Code's, Codex's); such files by name or kind; and
 # files whose name says what they hold
@@ -127,14 +132,15 @@ def run_of(path: Path) -> Optional[Path]:
 
 
 def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: bool = False,
-               unseen: Optional[Callable[[Path], bool]] = None) -> Optional[str]:
+               unseen: Optional[Callable[[Path], bool]] = None, kept: Iterable[Any] = ()) -> Optional[str]:
     """Why Kelvin's AI may not reach target through a chat's folder (None: it may). own: Kelvin's own folders (its
     folder, with the lab config, settings, accounts, cards and everyone's chats; the signed-in person's chats), never
     read or written this way; nor is a file that may hold sign-ins, keys or tokens (secret). data: the data folder,
     with everyone's runs and the lab's records: never read this way (Kelvin's run tools read runs, leaving out work
-    the chat may not see), and its records (RECORDS) only Kelvin itself writes; a run's record and run.h5 are
-    Kelvin's wherever the run is. unseen: whether a Kelvin run (its folder) is unshared work the chat may not see,
-    which it never reaches wherever it is kept."""
+    the chat may not see), and its records (RECORDS) only Kelvin itself writes; a run's own files (RUN_RECORDS) are
+    Kelvin's in any folder named as a run is. unseen: whether a Kelvin run (its folder) is unshared work the chat may
+    not see, which it never reaches wherever it is kept. kept: what Kelvin runs as a person chose it, never saved
+    this way: the lab's scripts folders and the scripts a person imported (their library)."""
     verb = "saves" if saving else "reads"
     folder = mine(target, own)
     if folder is not None:
@@ -155,37 +161,57 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
     name = target.name.lower()
     if saving and name in RECORDS and (name in ("run.h5", "record.bin") or data is None or _within(target, data)):
         return ("%s is one of the lab's records (the event log, the mounted sample's protection, the queue, the "
-                "catalog, a run's data), which only Kelvin itself writes" % target)
-    if saving and name in RUN_RECORDS and run_of(target.parent) == target.parent:
-        return ("%s is part of a Kelvin run's record of what ran (the script as it ran, its output, its commands), "
-                "which only Kelvin itself writes" % target)
+                "catalog, the library of scans and scripts, a run's data), which only Kelvin itself writes" % target)
+    if saving and (name in RUN_RECORDS or _RUN_RECORD.match(name)) and _run_named(target.parent):
+        return ("%s is part of a Kelvin run's record (its data, its plan, or the script as it ran, its output and "
+                "commands), which only Kelvin itself writes" % target)
+    if saving:
+        for k in kept:
+            if k and _within(target, k):
+                return ("%s is %s: Kelvin runs it as a person chose it, so only a person changes it. Give the code "
+                        "in the answer; the person saves it if they want it" % (target, (
+                            "in the lab's scripts folder (%s)" % k) if Path(str(k)).is_dir() else
+                        "a script the person imported into their library"))
     return None
 
 
+def _run_named(folder: Path) -> bool:
+    """Whether a folder is named as Kelvin names a run's (date-time-plan): a run's, or a folder that would pass for
+    one."""
+    from .eventlog import RUN_NAME
+    return bool(RUN_NAME.match(Path(folder).name))
+
+
 def inside(folder: Any, path: Any = "", saving: bool = False, own: Iterable[Any] = (), data: Any = None,
-           unseen: Optional[Callable[[Path], bool]] = None) -> Path:
+           unseen: Optional[Callable[[Path], bool]] = None, kept: Iterable[Any] = ()) -> Path:
     """path (relative to the chat's folder, or in full) as a path in that folder; FolderError if it leads out, or to
-    Kelvin's own folders, the data folder, a run the chat may not see or a file of sign-ins (off_limits)."""
+    Kelvin's own folders, the data folder, a run the chat may not see, a file of sign-ins, or (saving) what Kelvin
+    runs as a person chose it (off_limits)."""
     base = Path(folder).resolve()
     given = Path(str(path or "").strip() or ".")
+    if saving and any(":" in p or p != p.rstrip(". ") for p in given.parts[1 if given.anchor else 0:]):
+        # Windows saves "script.py." or "script.py " as script.py, and "x:y" in a stream of x: never what is checked
+        raise FolderError("%s: a name ending in a dot or a space, or with a colon in it, isn't one Kelvin saves "
+                          "(Windows would save it under another name)" % path)
     target = (given if given.is_absolute() else base / given).resolve()
     if target != base and base not in target.parents:
         raise FolderError("%s is outside this chat's folder (%s): Kelvin %s only what is in it"
                           % (path, base, "saves" if saving else "reads"))
-    why = off_limits(target, own, data, saving, unseen)
+    why = off_limits(target, own, data, saving, unseen, kept)
     if why:
         raise FolderError(why)
     return target
 
 
 def save(folder: Any, path: Any, text: str, own: Iterable[Any] = (), data: Any = None,
-         unseen: Optional[Callable[[Path], bool]] = None) -> Tuple[Path, Optional[Path]]:
+         unseen: Optional[Callable[[Path], bool]] = None, kept: Iterable[Any] = ()) -> Tuple[Path, Optional[Path]]:
     """A text file saved in the chat's folder, its subfolders made as needed: the file, and where the version it
     replaced was kept (None for a new file, or one already so). FolderError: outside the folder, in Kelvin's own
-    folders or records (own, data: off_limits), a kind Kelvin doesn't save, too long, or the computer refused."""
+    folders or records (own, data: off_limits), what Kelvin runs as a person chose it (kept), a kind Kelvin doesn't
+    save, too long, or the computer refused."""
     if not str(path or "").strip():
         raise FolderError("say which file: its name, or its path in this chat's folder")
-    target = inside(folder, path, saving=True, own=own, data=data, unseen=unseen)
+    target = inside(folder, path, saving=True, own=own, data=data, unseen=unseen, kept=kept)
     if target == Path(folder).resolve() or target.is_dir():
         raise FolderError("%s is a folder: give the file's name" % path)
     if target.suffix.lower() in NOT_SAVED or target.name.lower() in STARTUP or KEPT in target.parts:

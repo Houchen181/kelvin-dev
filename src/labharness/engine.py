@@ -747,10 +747,9 @@ class RunEngine:
         gen, stops = since if since is not None else (gate.stop_generation, lab.stops.count)
         timing, pace = getattr(lab, "timing", None), getattr(lab, "pace", None)
         took = Took()
-        rec = self.store.create(plan.name, plan.source, gate.operator, folder)
-        rec.meta["lab"] = lab.config.name   # reports say where a run was taken, even after the lab changes
-        rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
-        rec.meta.update(meta or {})   # e.g. which queue item this run was
+        # reports say where a run was taken, even after the lab changes; meta: whose work it is, its queue item
+        rec = self.store.create(plan.name, plan.source, gate.operator, folder, meta=dict(
+            {"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())}, **(meta or {})))
         start = lab.snapshot()
         rec.snapshot("start", start)
         gate.log.write("run_start", by=gate.operator, run=rec.run_id, plan=plan.name, points=plan.points)

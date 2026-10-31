@@ -1153,21 +1153,39 @@ class LabRuntime:
         return self._library
 
     def _noted(self, rec: Any, plan: Dict[str, Any]) -> None:
-        """A run that starts, in the person's library: a plan by its text as the run keeps it, a script by its file,
-        with the values, arguments and Python of this run. Data imported from other programs are no run of
-        anything. RunStore keeps whatever happens here from stopping the run."""
+        """A run that starts, in the person's library: a plan by its text as the run keeps it (a scan run again with
+        its settings restored, under the entry it ran again: its meta's library), a script by its file, with the
+        values, arguments and Python of this run, and whose work it is (its meta's marks), which a run from the
+        library keeps. Data imported from other programs are no run of anything. RunStore keeps whatever happens here
+        from stopping the run."""
         if plan.get("imported"):
             return
+        marks = self._whose_run(rec.meta, Path(rec.path).parent if rec.path else None)
         if plan.get("script"):
             self.library.note_script(plan["script"], rec.run_id, plan.get("params"), plan.get("args"),
-                                     plan.get("python"), plan.get("sha256"))
+                                     plan.get("python"), plan.get("sha256"), marks=marks)
             return
 
         def unit(key: str) -> str:
             spec = self._spec(key)
             return spec.unit if spec is not None else ""
         from ..scanlibrary import summary
-        self.library.note_plan(plan_text(plan), str(plan.get("plan") or "plan"), summary(plan, unit), rec.run_id)
+        self.library.note_plan(plan_text(plan), str(plan.get("plan") or "plan"), summary(plan, unit), rec.run_id,
+                               marks=marks, under=rec.meta.get("library"))
+
+    def _whose_run(self, meta: Dict[str, Any], folder: Optional[Path]) -> Dict[str, Any]:
+        """Whose work a run is, as a queue item that runs it again files it (Item.whose): the project it was filed
+        under, the chat that started it and the folder its runs go to (a chat's, not the data folder), and the marks of
+        unshared work it kept (incognito, unshared, rules, confidential, unpublished; legacy: from before Kelvin noted
+        them). A run of it again is never shared more than it."""
+        out: Dict[str, Any] = {k: meta[k] for k in ("project", "chat", "rules") if meta.get(k)}
+        out.update({k: True for k in ("incognito", "unshared", "confidential", "unpublished", "legacy") if meta.get(k)})
+        try:
+            if folder is not None and Path(folder).resolve() != (self.data_dir / "runs").resolve():
+                out["folder"] = str(folder)
+        except OSError:
+            pass
+        return out
 
     def data_summary(self) -> Dict[str, Any]:
         runs = self.data_dir / "runs"
@@ -1206,11 +1224,14 @@ class LabRuntime:
                             continue
                         shutil.move(str(item), str(target))
                         moved += 1
-                if (old / "events.jsonl").exists():
-                    if (new / "events.jsonl").exists():
-                        kept.append("events.jsonl")
+                # the record, and the person's library of scans and scripts (the scripts they imported run from it)
+                for name in ("events.jsonl", "library.json"):
+                    if not (old / name).exists():
+                        continue
+                    if (new / name).exists():
+                        kept.append(name)
                     else:
-                        shutil.move(str(old / "events.jsonl"), str(new / "events.jsonl"))
+                        shutil.move(str(old / name), str(new / name))
                         moved += 1
                 for f in RunFolders(old).chat_folders():   # the chats' folders keep their runs; Kelvin still finds them
                     RunFolders(new).remember(f)
@@ -2553,14 +2574,16 @@ class LabRuntime:
         item = self._queue_put(text, position, note, by, then_pause)
         return "added %s %s as #%d\n%s" % (item.kind, item.name, self.queue.items.index(item) + 1, self._queue_text())
 
-    def _queue_put(self, text: str, position: Optional[int], note: str, by: str, then_pause: bool = False) -> Item:
-        """An item checked already, into the queue, filed under whose work this thread does (attribution)."""
+    def _queue_put(self, text: str, position: Optional[int], note: str, by: str, then_pause: bool = False,
+                   library: Optional[str] = None) -> Item:
+        """An item checked already, into the queue, filed under whose work this thread does (attribution: a run
+        again's is the run's own, _whose_run)."""
         whose = self.attribution
         item = self.queue.add(text, position, note, by, project=whose.get("project"),
                               incognito=bool(whose.get("incognito")), unshared=bool(whose.get("unshared")),
                               folder=whose.get("folder"), chat=whose.get("chat"), rules=whose.get("rules"),
                               confidential=bool(whose.get("confidential")), unpublished=bool(whose.get("unpublished")),
-                              then_pause=then_pause)
+                              then_pause=then_pause, legacy=bool(whose.get("legacy")), library=library)
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name,
                             position=self.queue.items.index(item) + 1, then_pause=then_pause or None)
         return item
@@ -2759,29 +2782,38 @@ class LabRuntime:
                 parts.append("%d %s%s" % (n, KINDS[kind], "" if n == 1 else "s"))
         return " and ".join(parts) if len(parts) < 3 else "%s, %s and %s" % tuple(parts)
 
+    @staticmethod
+    def _queue_window(waiting: List[Item]) -> List[Item]:
+        """The waiting items one start of the queue runs: up to the first marked then_pause, where it pauses."""
+        stop = next((k for k, i in enumerate(waiting) if i.then_pause), None)
+        return waiting if stop is None else waiting[:stop + 1]
+
+    def _queue_checked(self, items: List[Item]) -> List[str]:
+        """What stops these items from running, each named as the viewer of this thread may read it (unshared work's
+        unnamed), whichever chat asks."""
+        problems = []
+        for n, item in enumerate(items, 1):
+            try:
+                problems += [self._item_line(n, item, p) for p in self._queue_problems(item.text)]
+            except PlanError as e:
+                problems.append(self._item_line(n, item, e))
+        return problems
+
     def queue_start(self, by: str = "agent", dry_run: bool = False) -> str:
         """Check every waiting item, ask a person once for every drive range, then run the queue in the background.
         Returns at once after the approval; queue_show follows it. dry_run: only a rehearsal of the whole queue in
         order on the simulated lab (how long it takes, what would fail); the queue does not start. The queue pauses
-        after an item marked then_pause, so its approval covers the items up to that one."""
+        after an item marked then_pause, so its approval covers the items up to that one. It runs exactly the items
+        approved: anything else (added, or changed, while the card waited or the queue ran) asks again first."""
         with self.queue.lock:
             if self.queue.state in ("running", "pausing"):
                 return "the queue is already running\n" + self._queue_text()
-        items = self.queue.waiting()
+            items = self._queue_window(self.queue.waiting())
         if not items:
             return "nothing is waiting in the queue"
-        stop = next((k for k, i in enumerate(items) if i.then_pause), None)
-        if stop is not None:
-            items = items[:stop + 1]
 
-        def check() -> List[str]:   # every waiting item's, whichever chat asks: unshared work's unnamed
-            problems = []
-            for n, item in enumerate(items, 1):
-                try:
-                    problems += [self._item_line(n, item, p) for p in self._queue_problems(item.text)]
-                except PlanError as e:
-                    problems.append(self._item_line(n, item, e))
-            return problems
+        def check() -> List[str]:
+            return self._queue_checked(items)
 
         def rehearse() -> str:
             problems = check()
@@ -2802,66 +2834,85 @@ class LabRuntime:
             return self._do("rehearsing the queue", rehearse)
 
         def prepare() -> str:
-            problems = check()
-            if problems:
-                return "the queue did not start:\n" + "\n".join(problems[:8])
-            forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
-            starting = forecast.driving_actions()     # a waveform its scans start: on this card, approved with it
-            running, technique_lines = self._queue_techniques(items)   # a technique its scans run: likewise
-            # over the queue's whole path: every value an item sets away from safe, wherever the drive is now, so
-            # nothing asks again in the night (an item that switches an output off made the next one ask)
-            lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast=forecast,
-                                                              asking=bool(starting or running), whole_path=True,
-                                                              later=self._queue_later(items))
-            refusals += self._queue_interlocks(items)
-            if refusals:
-                return "the queue did not start; these would be refused:\n" + "\n".join(refusals[:8])
-            duration = forecast.seconds or None
-            title = "Run the queue: %s%s" % (self._queue_counts(items), forecast.duration())
-            if lines or starting or running:
-                going_on = ["If an item fails, the queue goes on to the next (on a failure: continue); a stop, a "
-                            "guard trip or an interlock still pauses it"] if self.queue.on_error == "continue" else []
-                scripts = [self._item_line(n, i, "a script: it asks you itself when it starts, as it can't be "
-                                                 "rehearsed") for n, i in enumerate(items, 1) if i.kind == "script"]
-                pause = ["The queue pauses after %s" % self._item_line(len(items), items[-1])] \
-                    if items[-1].then_pause else []
-                request = ApprovalRequest(title, lines + forecast.action_lines(starting) + technique_lines
-                                          + forecast.closing() + going_on + scripts + pause
-                                          + self._dry_run_note("\n".join(item.text for item in items)) + [
-                    "This approval covers every item now waiting%s; anything outside these ranges asks again." % (
-                        " up to there" if pause else "")])
-                covered = False
-                if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
-                    duration, failed = self._rehearse(items)
-                    rehearsal = type("Rehearsal", (), {"ok": not failed})()
-                    covered, why = self.gate.auto_plan(grants, rehearsal)
-                    if starting:   # an action that drives the sample is a person's to start, as with do_action
-                        covered, why = False, why + ["its scans start %s" % ", ".join(starting)]
-                    if running:   # nothing watches inside a technique: a person approves it
-                        covered, why = False, why + ["its scans run %s, which drive the sample on the instrument's "
-                                                     "own clock" % ", ".join(running)]
-                    if covered:
-                        self.gate.auto_approve(request, why)
-                    else:
-                        request.items.append("Auto mode does not cover this: " + "; ".join(
-                            why + ["the dry run: %s" % f for f in failed[:2]]))
-                if not covered and not self.gate.ask(request):
-                    note = " (%s)" % request.note if request.note else ""
-                    self.gate.log.write("queue_declined", by=by)
-                    return "declined: the queue did not start%s" % note
-            self.gate.queue_actions = frozenset(starting) | frozenset(running)   # its scans do these, not asking again
-            with self.queue.lock:
+            with self.queue.lock:   # it may have started meanwhile, from another chat or the Runs panel
+                if self.queue.state in ("running", "pausing"):
+                    return "the queue is already running\n" + self._queue_text()
+            got = self._queue_approve(items, by, "the queue did not start")
+            if not got["ok"]:
+                return got["said"]
+            with self.queue.lock:   # checked again as it starts, under the lock: never two loops at once
+                if self.queue.state in ("running", "pausing"):
+                    return "the queue is already running\n" + self._queue_text()
+                self.gate.queue_actions = got["actions"]   # its scans do these, not asking again
                 self.queue.state, self.queue.reason = "running", ""
                 self.queue.save()
+                self._queue_thread = threading.Thread(
+                    target=self._queue_loop, args=(got["grants"], by, {i.id: i.text for i in items}), daemon=True,
+                    name="kelvin-queue")
+                self._queue_thread.start()
             self.gate.log.write("queue_start", by=by, items=len(items),
-                                expected_s=round(duration) if duration else None)
-            self._queue_thread = threading.Thread(target=self._queue_loop, args=(grants, by), daemon=True,
-                                                  name="kelvin-queue")
-            self._queue_thread.start()
-            return "queue started: %s\n%s\n%s" % (title[len("Run the queue: "):], self._queue_text(),
+                                expected_s=round(got["duration"]) if got["duration"] else None)
+            return "queue started: %s\n%s\n%s" % (got["title"][len("Run the queue: "):], self._queue_text(),
                                                   self.alarms_reach())
         return self._do("starting the queue", prepare, stoppable=True,
                         uses=self._uses("\n".join(item.text for item in items)))   # the rest stay readable
+
+    def _queue_approve(self, items: List[Item], by: str, said: str, again: bool = False) -> Dict[str, Any]:
+        """The queue's one approval for these items (waiting, in order, up to a pause): each checked, the whole path
+        walked, then a person asked once, or auto mode's yes. {ok, grants, actions, title, duration}, or {ok: False,
+        said}: why not, after said ("the queue did not start"). again: these came after the queue was approved (added
+        or changed meanwhile), and its card says so. The caller holds the lab."""
+        problems = self._queue_checked(items)
+        if problems:
+            return {"ok": False, "said": "%s:\n%s" % (said, "\n".join(problems[:8]))}
+        forecast = self._queue_forecast(items)   # the whole queue in order: rates, duration, what it leaves on
+        starting = forecast.driving_actions()     # a waveform its scans start: on this card, approved with it
+        running, technique_lines = self._queue_techniques(items)   # a technique its scans run: likewise
+        # over the queue's whole path: every value an item sets away from safe, wherever the drive is now, so
+        # nothing asks again in the night (an item that switches an output off made the next one ask)
+        lines, grants, refusals = self.gate.plan_approval(self._queue_drives(items), forecast=forecast,
+                                                          asking=bool(starting or running), whole_path=True,
+                                                          later=self._queue_later(items))
+        refusals += self._queue_interlocks(items)
+        if refusals:
+            return {"ok": False, "said": "%s; these would be refused:\n%s" % (said, "\n".join(refusals[:8]))}
+        duration = forecast.seconds or None
+        title = "Run the queue: %s%s" % (self._queue_counts(items), forecast.duration())
+        if lines or starting or running:
+            going_on = ["If an item fails, the queue goes on to the next (on a failure: continue); a stop, a "
+                        "guard trip or an interlock still pauses it"] if self.queue.on_error == "continue" else []
+            scripts = [self._item_line(n, i, "a script: it asks you itself when it starts, as it can't be "
+                                             "rehearsed") for n, i in enumerate(items, 1) if i.kind == "script"]
+            pause = ["The queue pauses after %s" % self._item_line(len(items), items[-1])] \
+                if items[-1].then_pause else []
+            first = ["These were added to the queue, or changed, after it was approved: it waits for your answer "
+                     "before them"] if again else []
+            request = ApprovalRequest(title, first + lines + forecast.action_lines(starting) + technique_lines
+                                      + forecast.closing() + going_on + scripts + pause
+                                      + self._dry_run_note("\n".join(item.text for item in items)) + [
+                "This approval covers every item now waiting%s; anything outside these ranges asks again." % (
+                    " up to there" if pause else "")])
+            covered = False
+            if self.gate.auto:   # as a run is: rehearsed on the simulated lab, and every range low-risk
+                duration, failed = self._rehearse(items)
+                rehearsal = type("Rehearsal", (), {"ok": not failed})()
+                covered, why = self.gate.auto_plan(grants, rehearsal)
+                if starting:   # an action that drives the sample is a person's to start, as with do_action
+                    covered, why = False, why + ["its scans start %s" % ", ".join(starting)]
+                if running:   # nothing watches inside a technique: a person approves it
+                    covered, why = False, why + ["its scans run %s, which drive the sample on the instrument's "
+                                                 "own clock" % ", ".join(running)]
+                if covered:
+                    self.gate.auto_approve(request, why)
+                else:
+                    request.items.append("Auto mode does not cover this: " + "; ".join(
+                        why + ["the dry run: %s" % f for f in failed[:2]]))
+            if not covered and not self.gate.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                self.gate.log.write("queue_declined", by=by)
+                return {"ok": False, "said": "declined: %s%s" % (said, note)}
+        return {"ok": True, "grants": grants, "actions": frozenset(starting) | frozenset(running), "title": title,
+                "duration": duration}
 
     def queue_pause(self, by: str = "agent") -> str:
         """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan."""
@@ -2873,10 +2924,14 @@ class LabRuntime:
         self.gate.log.write("queue_pause", by=by)
         return "the queue pauses after the item that is running"
 
-    def _queue_loop(self, grants: Dict[str, Allowed], by: str) -> None:
+    def _queue_loop(self, grants: Dict[str, Allowed], by: str, approved: Optional[Dict[str, str]] = None) -> None:
+        """The queue, item after item, in the background. approved: the items its approval covers ({id: text}):
+        another item (added before them while the card waited or the queue ran, or one changed since) waits until a
+        person approves again, before anything else runs; None: whatever waits (the tests' own loop)."""
         q = self.queue
         started = time.time()
         while True:
+            fresh: List[Item] = []
             with q.lock:
                 item = q.next_waiting() if q.state == "running" else None
                 if item is None:
@@ -2886,13 +2941,25 @@ class LabRuntime:
                         q.reason = "finished"
                     q.save()
                     break
-                q.mark(item, "running")
-                position = q.items.index(item) + 1
-                # a stop from here on ends it: one between two items once let the next one start (Stop sets the
-                # queue pausing under this lock, then stops)
-                since = self.gate.stop_generation, self.lab.stops.count
+                if approved is not None and approved.get(item.id) != item.text:
+                    fresh = self._queue_window(q.waiting())
+                else:
+                    if approved is not None:   # once: put back in line later, it is asked about again
+                        del approved[item.id]
+                    q.mark(item, "running")
+                    position = q.items.index(item) + 1
+                    # a stop from here on ends it: one between two items once let the next one start (Stop sets the
+                    # queue pausing under this lock, then stops)
+                    since = self.gate.stop_generation, self.lab.stops.count
+            if fresh:   # asked again, before anything it didn't approve runs
+                got = self._queue_ask_again(fresh, by)
+                if got is not None:
+                    grants, approved = got["grants"], {i.id: i.text for i in fresh}
+                continue
             lost, t0, trips = self.monitor.mark(), time.time(), self.gate.trip_count
             ok, message = self._queue_item(item, position, grants, by, since)
+            if not ok and item.restores:   # the settings it was to restore didn't all come back: it doesn't run
+                self._queue_hold_back(item, message)
             tripped = self.gate.trip_count != trips   # a guard tripped (a gate's leakage): not swept again tonight
             if not ok:   # an instrument that stopped answering ended it: its alarm goes up now, with the pause
                 self.monitor.lost_since(lost)   # and the pause says which alarm stopped it ("stop requested" doesn't)
@@ -2921,6 +2988,42 @@ class LabRuntime:
                             lambda item: self.unshared_work(item.whose()))
         self.tell("run", "Queue finished" if q.state == "idle" else "Queue paused", "\n".join(lines)[:1500],
                   bool((q.last or {}).get("unshared")))
+
+    def _queue_ask_again(self, items: List[Item], by: str) -> Optional[Dict[str, Any]]:
+        """Items the queue's approval doesn't cover (added before the approved ones, or changed, after it was given),
+        asked of a person as the queue's start asks them, the lab held as then: the new approval ({grants, ...}), or
+        None, the queue pausing before them and saying why."""
+        q = self.queue
+        with self.lock:
+            self.busy = "the queue: asking about %s added after its approval" % self._queue_counts(items)
+            try:
+                with self.lock.only(self._involved(self._uses("\n".join(i.text for i in items)))):
+                    got = self._queue_approve(items, by, "the queue paused before them", again=True)
+            except Exception as e:   # an item that no longer parses...: said, the queue paused
+                got = {"ok": False, "said": "the queue paused before them: %s" % e}
+            finally:
+                self.busy = None
+        if got["ok"]:
+            with q.lock:
+                self.gate.queue_actions = got["actions"]
+            self.gate.log.write("queue_approved", by=by, items=len(items))
+            return got
+        with q.lock:
+            if q.state == "running":
+                q.state = "pausing"
+                q.reason = "%s (added or changed after the queue was approved)" % got["said"].splitlines()[0]
+                q.save()
+        return None
+
+    def _queue_hold_back(self, step: Item, message: str) -> None:
+        """A step restoring the settings an item ran with didn't finish: that item is skipped, never run in
+        conditions it didn't run in (a person can put it back in line)."""
+        q = self.queue
+        with q.lock:
+            held = next((i for i in q.items if i.id == step.restores and i.status == "waiting"), None)
+            if held is not None:
+                q.mark(held, "skipped", ("not run: %s didn't finish (%s), so it would not have run as it ran"
+                                         % (step.name, message or step.status))[:300])
 
     def _run_points(self, run_id: str) -> Optional[Tuple[int, int]]:
         """(points taken, points planned) of a run, from its record; None when it can't be read."""
@@ -2955,6 +3058,8 @@ class LabRuntime:
                         plan = self._plan(item.text)
                         meta = self._attribute(plan, legacy=item.legacy)
                         apart = meta.pop("_apart", "")   # kept with the item, said where its chat sees the queue
+                        if item.library:   # a scan run again, its settings restored: noted under its own entry
+                            meta["library"] = item.library
                         with self._device_protection(meta), self.lock.only(uses + self._involved(plan.requires)):
                             report = self.engine.run(plan, meta=dict(meta, queue={
                                 "item": item.id, "position": position, "note": item.note}), folder=item.folder,
@@ -3107,11 +3212,15 @@ class LabRuntime:
 
     def library_run(self, entry_id: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[Any]] = None,
                     at_end: bool = False, by: str = "human") -> Dict[str, Any]:
-        """An entry of the library, run again (queue_run_now): a scan as it ran; a script as its file is now, with
-        the values and arguments given, else those of its last run."""
+        """An entry of the library, run again (queue_run_now), as whose work its latest run was (its marks: a
+        confidential project's scan stays that project's): a scan as it ran; a script as its file is now, with the
+        values given, else those its last run changed, its arguments, and the Python its last run had while Kelvin
+        still runs the lab's scripts with it."""
         entry = self.library.get(entry_id)
+        whose = dict(entry.get("marks") or {})
         if entry["kind"] == "plan":
-            return self.queue_run_now([str(entry.get("text") or "")], at_end, by)
+            with self.attributed(whose):
+                return self.queue_run_now([str(entry.get("text") or "")], at_end, by, library=entry_id)
         item: Dict[str, Any] = {"script": str(entry.get("path") or "")}
         params = entry.get("params") if params is None else params
         args = entry.get("args") if args is None else args
@@ -3121,15 +3230,37 @@ class LabRuntime:
             item["params"] = dict(params)
         if args:
             item["args"] = [str(a) for a in args]
-        return self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)], at_end, by)
+        notes: List[str] = []
+        python = self._python_here(item["script"], entry.get("python"), notes)
+        if python:
+            item["python"] = python
+        with self.attributed(whose):
+            return self.queue_run_now([yaml.safe_dump(item, sort_keys=False, allow_unicode=True)], at_end, by, notes)
+
+    def _python_here(self, script: str, python: Any, notes: List[str]) -> Optional[str]:
+        """The Python a run had (as its record names it), if Kelvin still runs the lab's scripts with it here; else
+        None, and a line for notes: the script runs with the Python Kelvin picks."""
+        if not python:
+            return None
+        from .. import scriptrun
+        folder = self.scripts_folder()
+        roots = [Path(folder).expanduser().resolve()] if folder else []
+        if scriptrun.python_named(Path(script), roots, self.scripts_python() or "", str(python)):
+            return str(python)
+        notes.append("It ran with %s, which isn't here now: it runs with the Python Kelvin picks" % python)
+        return None
 
     def queue_run_now(self, texts: List[str], at_end: bool = False, by: str = "human",
-                      notes: Iterable[str] = ()) -> Dict[str, Any]:
-        """Items a person runs now, from the Runs panel: checked together first, then at the front of the line, the
-        last marked then_pause, and the queue started (its approval, as ever: this returns once it is answered); the
-        queue pauses after them if more items wait. While the queue runs they go next in line, and it goes on as it
-        was. at_end: at the end of the queue, not started. {queue, message}; ValueError: nothing was added, and why
-        (a start that didn't happen takes them out again)."""
+                      notes: Iterable[str] = (), restores: bool = False,
+                      library: Optional[str] = None) -> Dict[str, Any]:
+        """Items a person runs now, from the Runs panel, filed as whose work this thread does (a run again's: the
+        run's own): checked together first, then at the front of the line, the last marked then_pause, and the queue
+        started (its approval, as ever: this returns once it is answered); the queue pauses after them if more items
+        wait. While the queue runs they go next in line, and it goes on as it was; while it is pausing they wait
+        there, marked as well. at_end: at the end of the queue, not started. restores: the first is a step setting
+        back what the second ran with (if it doesn't finish, the second is skipped). library: the entry the last
+        one's runs are noted under. {queue, message}; ValueError: nothing was added, and why (a start that didn't
+        happen takes them out again)."""
         for text in texts:
             try:
                 problems = self._queue_problems(text)
@@ -3140,19 +3271,26 @@ class LabRuntime:
         q = self.queue
         with q.lock:
             running = q.state in ("running", "pausing")
-            first = None if at_end else next((n for n, i in enumerate(q.items, 1) if i.status == "waiting"), None)
-            added = [self._queue_put(text, None if first is None else first + k, "", by,
-                                     then_pause=not at_end and not running and k == len(texts) - 1)
-                     for k, text in enumerate(texts)]
             pausing = q.state == "pausing"
+            first = None if at_end else next((n for n, i in enumerate(q.items, 1) if i.status == "waiting"), None)
+            last = len(texts) - 1
+            added = [self._queue_put(text, None if first is None else first + k, "", by,
+                                     then_pause=not at_end and (not running or pausing) and k == last,
+                                     library=library if k == last else None)
+                     for k, text in enumerate(texts)]
+            if restores and len(added) > 1:
+                added[0].restores = added[1].id
+                q.save()
         names = " and ".join(i.name for i in added)
         if at_end:
             said = "added %s at the end of the queue" % names
         elif running:
-            said = "added %s next in line: %s" % (names, "the queue pauses after the item running now, as asked; "
-                                                  "start it again to run %s" % ("them" if len(added) > 1 else "it")
-                                                  if pausing else "the queue runs %s after the item running now"
-                                                  % ("them" if len(added) > 1 else "it"))
+            them = "them" if len(added) > 1 else "it"
+            said = "added %s next in line: %s" % (names, (
+                "the queue pauses after the item running now, as asked; start it again to run %s, and it pauses after "
+                "%s" % (them, them)) if pausing else (
+                "after the item running now, the queue asks you about %s, as %s came after its approval"
+                % (them, "they" if len(added) > 1 else "it")))
         else:
             said = self.queue_start(by)
             if not said.startswith("queue started"):
@@ -3164,23 +3302,24 @@ class LabRuntime:
                 raise ValueError(said)
         return {"queue": self.queue_view(), "message": "\n".join(list(notes) + [said])}
 
-    def lab_now(self, names: Iterable[str]) -> Tuple[Dict[str, Dict[str, Any]], bool]:
+    def lab_now(self, names: Iterable[str]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
         """The settings and readings of these instruments as they are now (lab.snapshot), each read with its own lock
-        beside the work that changes the lab; and whether every one of them in use could be read (one that work uses
-        isn't asked)."""
+        beside the work that changes the lab; and why each one that wasn't read wasn't ({instrument: why}): the work
+        going on uses it, it is switched off or not connected, or it is no longer in the lab."""
         now: Dict[str, Dict[str, Any]] = {}
-        whole = True
+        unread: Dict[str, str] = {}
         for name in names:
             inst = self.lab.instruments.get(name)
             if inst is None or not inst.enabled:
+                unread[name] = "not in the lab now" if inst is None else (self.lab.away(name) or "switched off")
                 continue
             with self._reading(name) as why:
                 if why is None:
                     now.update(self.lab.snapshot([name]))
                     self._keep(name, now.get(name) or {}, "read")
             if why is not None:
-                whole = False
-        return now, whole
+                unread[name] = why
+        return now, unread
 
     def _own(self, rec: Any, plan: Dict[str, Any], kind: str) -> set:
         """What a run set itself, so never a setting to put back before it runs again: a plan's setup and sweeps, or
@@ -3198,13 +3337,14 @@ class LabRuntime:
             return set()
         return {s.key for s in p.setup} | {a.key for a in p.axes if a.kind in ("instrument", "ramp")}
 
-    def _conditions(self, then: Dict[str, Any], now: Dict[str, Dict[str, Any]],
-                    own: Iterable[str] = ()) -> List[Dict[str, Any]]:
+    def _conditions(self, then: Dict[str, Any], now: Dict[str, Dict[str, Any]], own: Iterable[str] = (),
+                    unread: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """A run's start (its snapshot) beside the lab now, one line per setting or reading: {key, then, now, unit,
-        differs, settable, drive, own}. Settable: its card sets it (and its instrument is in the lab); own: the plan
-        sets it itself (_own_keys), so it never differs; a reading that failed then, a trace and an acquisition are
-        left out. now is None where it couldn't be read now."""
-        own = set(own)
+        differs, settable, drive, own}, and why, where now is None: why it couldn't be read now (unread, by
+        instrument: lab_now; or the reading failing). Settable: its card sets it (and its instrument is in the lab);
+        own: the plan sets it itself (_own_keys), so it never differs; a reading that failed then, a trace and an
+        acquisition are left out."""
+        own, unread = set(own), unread or {}
         out = []
         for name, values in then.items():
             if not isinstance(values, dict):
@@ -3216,15 +3356,23 @@ class LabRuntime:
                 spec = inst.card.params.get(param) if inst is not None else None
                 if spec is not None and (spec.acquires or spec.type in ("trace", "image")):
                     continue
-                got = (now.get(name) or {}).get(param)
-                got = got if _restorable(got) else None
+                read = (now.get(name) or {}).get(param)
+                got = read if _restorable(read) else None
                 key = "%s.%s" % (name, param)
-                out.append({"key": key, "then": was, "now": got,
-                            "unit": spec.unit if spec is not None else "",
-                            "differs": key not in own and got is not None and not _same_value(spec, was, got),
-                            "settable": spec is not None and spec.set_cmd is not None,
-                            "drive": spec is not None and spec.is_drive, "own": key in own})
+                line = {"key": key, "then": was, "now": got, "unit": spec.unit if spec is not None else "",
+                        "differs": key not in own and got is not None and not _same_value(spec, was, got),
+                        "settable": spec is not None and spec.set_cmd is not None,
+                        "drive": spec is not None and spec.is_drive, "own": key in own}
+                if got is None:
+                    line["why"] = unread.get(name) or (str(read)[:200] if read is not None else "not read now")
+                out.append(line)
         return out
+
+    @staticmethod
+    def _read_whole(conditions: List[Dict[str, Any]], unread: Dict[str, str]) -> bool:
+        """Whether the lab was read now for every instrument of a run's start and every setting it had: else what
+        isn't known now can't be said to be as it was."""
+        return not unread and all(c["now"] is not None for c in conditions if c["settable"])
 
     def _to_restore(self, conditions: List[Dict[str, Any]], whole: bool) -> Tuple[Dict[str, Any], List[str]]:
         """The settable settings to put back as a run started ({key: value}), those that differ now and that this lab
@@ -3248,8 +3396,8 @@ class LabRuntime:
                 continue
             out[key] = c["then"]
         if not whole:
-            notes.append("Some instruments couldn't be read now (the work going on uses them), so their settings "
-                         "aren't restored")
+            notes.append("Some settings couldn't be read now (an instrument in use, switched off or not answering), "
+                         "so they aren't restored")
         return out, notes
 
     def _ran(self, run_id: str) -> Tuple[Any, Dict[str, Any], str]:
@@ -3285,16 +3433,21 @@ class LabRuntime:
         now, each instrument with its own lock beside the work that changes it."""
         rec, plan, kind = self._ran(run_id)
         then = rec.snapshots.get("start") or {}
-        now, whole = self.lab_now(then)
-        conditions = self._conditions(then, now, self._own(rec, plan, kind))
+        now, unread = self.lab_now(then)
+        conditions = self._conditions(then, now, self._own(rec, plan, kind), unread)
         out: Dict[str, Any] = {"kind": kind, "name": str(plan.get("plan") or run_id.split("-", 2)[-1]),
                                "conditions": conditions,
                                "differ": sum(1 for c in conditions if c["settable"] and c["differs"]),
-                               "read_now": whole}
+                               "read_now": self._read_whole(conditions, unread)}
         if kind == "plan":
             out["text"] = rec.plan_text
         else:
             out["script"] = self._script_ran(plan, rec.meta)
+            try:   # whether its script.py can run as it ran: the text it ran, kept by Kelvin, and unchanged since
+                self._script_as_run(run_id, Path(out["script"]["path"]))
+                out["script"]["as_ran"] = True
+            except (KeyError, ValueError, OSError) as e:
+                out["script"]["as_ran"], out["script"]["as_ran_why"] = False, e.args[0] if e.args else str(e)
         return out
 
     def run_again(self, run_id: str, restore: bool = False, version: str = "then", at_end: bool = False,
@@ -3303,20 +3456,28 @@ class LabRuntime:
         or the same script with the same values and arguments, as that run ran it (version then: its script.py, when
         the file has changed since or is gone) or the file as it is now (version now). restore: also back to the
         settable settings the lab had at its start that differ now: in a plan's setup (the plan's own setup and
-        sweeps win), or a step before a script. {queue, message}; ValueError (KeyError: no such run): why not."""
+        sweeps win), or a step before a script (if it doesn't finish, the script is skipped). Filed as whose work the
+        run was (its project, chat, folder and marks): a run of it again is never shared more than it. A scan's runs
+        are noted under its own entry in the library, restored or not. {queue, message}; ValueError (KeyError: no
+        such run): why not."""
         if version not in ("then", "now"):
             raise ValueError("version is then (as it ran) or now (the file as it is)")
         rec, plan, kind = self._ran(run_id)
+        whose = self._whose_run(rec.meta, self._run_dir(run_id).parent)
         restoring: Dict[str, Any] = {}
         notes: List[str] = []
         if restore:
             then = rec.snapshots.get("start") or {}
-            now, whole = self.lab_now(then)
-            restoring, notes = self._to_restore(self._conditions(then, now, self._own(rec, plan, kind)), whole)
+            now, unread = self.lab_now(then)
+            conditions = self._conditions(then, now, self._own(rec, plan, kind), unread)
+            restoring, notes = self._to_restore(conditions, self._read_whole(conditions, unread))
             if not then:
                 notes.append("Run %s kept no settings from its start, so nothing is restored" % run_id)
         if kind == "plan":
-            return self.queue_run_now([self._restored_plan(plan, restoring, notes)], at_end, by, notes)
+            from ..scanlibrary import plan_id
+            with self.attributed(whose):
+                return self.queue_run_now([self._restored_plan(plan, restoring, notes)], at_end, by, notes,
+                                          library=rec.meta.get("library") or plan_id(rec.plan_text))
         script = self._script_ran(plan, rec.meta)
         if version == "now" and not script["exists"]:
             raise ValueError("%s is no longer there: it can run again only as it ran then" % script["path"])
@@ -3327,20 +3488,15 @@ class LabRuntime:
             item["args"] = script["args"]
         if version == "then" and (script["changed"] or not script["exists"]):
             item["version"] = run_id   # its script.py, as that run ran it, in the file's folder
-        if script["python"]:
-            from .. import scriptrun
-            folder = self.scripts_folder()
-            roots = [Path(folder).expanduser().resolve()] if folder else []
-            if scriptrun.python_named(Path(script["path"]), roots, self.scripts_python() or "", script["python"]):
-                item["python"] = script["python"]
-            else:
-                notes.append("It ran with %s, which isn't here now: it runs with the Python Kelvin picks"
-                             % script["python"])
+        python = self._python_here(script["path"], script["python"], notes)
+        if python:
+            item["python"] = python
         texts = [yaml.safe_dump(item, sort_keys=False, allow_unicode=True)]
         if restoring:
             texts.insert(0, yaml.safe_dump({"step": "the lab as run %s started" % run_id, "set": restoring},
                                            sort_keys=False, allow_unicode=True))
-        return self.queue_run_now(texts, at_end, by, notes)
+        with self.attributed(whose):
+            return self.queue_run_now(texts, at_end, by, notes, restores=bool(restoring))
 
     def _restored_plan(self, plan: Dict[str, Any], restoring: Dict[str, Any], notes: List[str]) -> str:
         """A plan's text with the settings to restore in its setup, before its own: what it sets itself (its setup,
@@ -4515,22 +4671,36 @@ class LabRuntime:
                                  version=version, named=python)
 
     def _script_as_run(self, run_id: str, path: Path) -> Tuple[str, Optional[str]]:
-        """A run's script.py, the script as that run ran it, and the sha256 of the file as it read it then. Only a run
-        of this same script (path): another script's text never runs under its name. KeyError: no such run."""
+        """A run's script.py, the script as that run ran it, and the sha256 of the file as it read it then. Only from
+        a run Kelvin recorded (its record.bin or run.h5, which nothing but Kelvin writes), of this same script (path:
+        another script's text never runs under its name), and only the exact text it ran: its record keeps the text's
+        fingerprint from its start (script_sha256), and a script.py that differs from it never runs. KeyError: no
+        such run; scriptrun.ScriptError: why not, in words."""
         from .. import scanlibrary, scriptrun
         d = self._run_dir(run_id)
+        if not ((d / rundata.RUN_FILE).is_file() or (d / rundata.RECORD).is_file()):
+            raise scriptrun.ScriptError("%s is not a run Kelvin recorded (it has no record.bin or run.h5), so "
+                                        "nothing of it runs" % run_id)
         try:
-            ran = yaml.safe_load(rundata.load(d, with_rows=False).plan_text) or {}
+            rec = rundata.load(d, with_rows=False)
+            ran = yaml.safe_load(rec.plan_text) or {}
         except (KeyError, OSError, ValueError, yaml.YAMLError):
-            ran = {}
+            rec, ran = None, {}
         if not isinstance(ran, dict) or not ran.get("script"):
             raise scriptrun.ScriptError("run %s is not a run of a script" % run_id)
         if scanlibrary.script_key(ran["script"]) != scanlibrary.script_key(path):
             raise scriptrun.ScriptError("run %s ran %s, not %s" % (run_id, ran["script"], path))
+        kept = (rec.meta or {}).get("script_sha256") if rec is not None else None
+        if not kept:
+            raise scriptrun.ScriptError("run %s kept no fingerprint of the text it ran (it ran before Kelvin kept "
+                                        "one), so it can't run again as it ran: run the file as it is now" % run_id)
         try:
             text = (d / "script.py").read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             raise scriptrun.ScriptError("run %s has no script.py to run as it ran (%s)" % (run_id, e)) from None
+        if scriptrun.fingerprint(text) != kept:
+            raise scriptrun.ScriptError("the script.py of run %s is not the text it ran (it was changed since), so "
+                                        "it doesn't run" % run_id)
         return text, ran.get("sha256")
 
     def _script_text(self, spec: ScriptItem) -> Tuple[Path, str]:
@@ -4594,6 +4764,23 @@ class LabRuntime:
     def _run_script(self, prep: Any, mark: Callable[[str], str]) -> str:
         return self._script_run(prep, mark)[0]
 
+    def _changed_since(self, prep: Any) -> Optional[str]:
+        """A line for a script's card when its file has changed since its last run read it (the library keeps the
+        sha256 of what each run read), so the person approves the file as it is now knowingly; None otherwise, or for
+        a run's own copy (its card says it runs as it ran)."""
+        if prep.version:
+            return None
+        from ..scanlibrary import script_id
+        try:
+            entry = self.library.get(script_id(prep.path))
+        except (KeyError, OSError):
+            return None
+        if not entry.get("sha256") or entry["sha256"] == prep.sha256:
+            return None
+        last = (entry.get("runs") or [None])[0]
+        return "%s has changed since its last run%s: what runs is the file as it is now" % (
+            prep.name, " (%s)" % last if last else "")
+
     def _script_run(self, prep: Any, mark: Callable[[str], str], extra: Optional[Dict[str, Any]] = None,
                     told: bool = True) -> Tuple[str, Any]:
         """A prepared script, run after its one approval: (the answer, its ScriptReport; None when it never started:
@@ -4613,6 +4800,9 @@ class LabRuntime:
         bad = [r for r in self.engine.preflight(names, fresh=bool(grants)) if not r.ok] if names else []
         if bad:
             return "script not run: preflight failed: " + "; ".join(str(r) for r in bad), None
+        changed = self._changed_since(prep)
+        if changed:   # said right under what runs: the person approves the file as it is now, not as they knew it
+            request.items.insert(1, changed)
         if gate.auto:
             request.items.append("Auto mode does not cover this run: a script can't be dry-run first")
         if not gate.ask(request):

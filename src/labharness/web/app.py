@@ -63,6 +63,7 @@ log = logging.getLogger("kelvin")   # the desktop app writes this to ~/Kelvin/ke
 STATIC = Path(__file__).parent / "static"
 TRACE_POINTS = 400
 ATTACH_MAX = 40 * 2 ** 20   # a photo (the portal shrinks it first), a PDF or a data file
+TEXT_TAIL = 256 * 1024      # of a script run's own text files, the last part a person reads (X-Kelvin-Cut: the whole)
 # what works while nobody is signed in: signing in, a new account, and stopping whatever runs
 SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/accounts", "/api/accounts/remove",
               "/api/stop", "/api/runs/stop"}
@@ -252,6 +253,27 @@ def unseen_pictures(provider: Provider, model: str, attached: List[Dict[str, Any
     return ("The model can't see pictures through %s: it gets only the name of %s. To have a model look at %s, pick "
             "one that sees pictures (such as Claude, GPT or Gemini with an API key)."
             % (provider.label, ", ".join(names), "it" if len(names) == 1 else "them"))
+
+
+def text_tail(path: Path, most: int) -> Tuple[bytes, int]:
+    """A text file's last `most` bytes at most, from the start of a line (else of a whole character), and its whole
+    size: a long output reads from where it ends, as a person looks at it."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        total = f.tell()
+        start = max(0, total - most)
+        f.seek(start)
+        data = f.read(most)
+    if start:
+        cut = data.find(b"\n", 0, 4096)
+        if cut >= 0:
+            data = data[cut + 1:]
+        else:   # no line end near: from a character's start, never inside one
+            k = 0
+            while k < min(len(data), 4) and (data[k] & 0xC0) == 0x80:
+                k += 1
+            data = data[k:]
+    return data, total
 
 
 def open_path(path: Path) -> None:
@@ -2252,9 +2274,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         except KeyError as e:
             return error(404, e.args[0])
         if path.name in runtime.RUN_SEEN:   # text only, never a page or a program: the browser shows it as it is
-            return FileResponse(path, media_type="text/plain; charset=utf-8",
-                                headers={"X-Content-Type-Options": "nosniff",
-                                         "Content-Security-Policy": "default-src 'none'; sandbox"})
+            headers = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox"}
+            try:
+                data, total = await asyncio.to_thread(text_tail, path, TEXT_TAIL)
+            except OSError as e:
+                return error(500, "Kelvin couldn't read %s: %s" % (path.name, e.strerror or e))
+            if len(data) < total:   # its last part only: a script's output can run to many megabytes
+                headers["X-Kelvin-Cut"] = str(total)
+            return Response(data, media_type="text/plain; charset=utf-8", headers=headers)
         media = {".pdf": "application/pdf", ".h5": "application/x-hdf5",
                  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation"}[path.suffix]
         return FileResponse(path, media_type=media, filename="%s-%s" % (request.path_params["run_id"], path.name))
@@ -3422,6 +3449,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(404, e.args[0] if e.args else "no such run")
         except ValueError as e:
             return error(400, str(e))
+        except OSError as e:   # a run.h5 another program holds, or one that can't be read: said, never a bare 500
+            return error(500, "Kelvin couldn't read run %s: %s" % (run_id, getattr(e, "strerror", None) or e))
         return JSONResponse(out)
 
     routes = [
