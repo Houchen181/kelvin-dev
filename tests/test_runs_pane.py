@@ -3,7 +3,11 @@ place of the old clock menu, Run again in a finished run's view, and the Scans v
 scripts (GET/POST /api/library, /api/runs/{id}/again)."""
 import re
 
-from labharness.web.app import STATIC
+import pytest
+
+pytest.importorskip("starlette")
+
+from labharness.web.app import STATIC  # noqa: E402
 
 PAGE = (STATIC / "index.html").read_text(encoding="utf-8")
 JS = (STATIC / "app.js").read_text(encoding="utf-8")
