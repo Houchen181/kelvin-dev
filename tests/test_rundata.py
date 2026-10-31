@@ -168,7 +168,7 @@ def test_find_runs_takes_times_as_people_say_them(tmp_path):
     started = datetime.fromisoformat(rt.catalog.find()[0]["started"])
     at, before, after = (t.strftime("%Y-%m-%d %H:%M") for t in (started, started - timedelta(minutes=1),
                                                                  started + timedelta(minutes=1)))
-    for t in (at, at.replace(" ", "T")):
+    for t in (at, at.replace(" ", "T"), at[11:]):
         assert run_id in rt.find_runs(until=t)                              # the minute it started, inclusive
     for t in (after, after.replace(" ", "T")):
         assert "no run matches" in rt.find_runs(since=t)

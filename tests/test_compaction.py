@@ -104,7 +104,9 @@ def test_a_stop_while_kelvin_summarises_ends_the_turn_as_stopped(tmp_path):
         try:
             agent.claim(chat["id"], "scripted:m1")
             turn = asyncio.ensure_future(agent.run_turn(chat["id"], "and the field?", "scripted:m1", provider, emit))
-            while not provider.handoffs:
+            for _ in range(500):                                          # until Kelvin summarises
+                if provider.handoffs:
+                    break
                 await asyncio.sleep(0.02)
             assert agent.stop(chat["id"])
             await asyncio.wait_for(turn, 10)

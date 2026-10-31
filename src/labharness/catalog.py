@@ -87,11 +87,10 @@ def _time(text: str, end: bool) -> str:
     d = when(text, datetime.now(), end=end)
     if d is None:
         return ""
-    exact = str(text).strip().upper().replace(" ", "T")
-    if end and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?", exact):   # all of that minute (or second)
-        return exact
     if d.tzinfo is not None:   # another time zone's: in this computer's
         d = d.astimezone().replace(tzinfo=None)
+    elif end and re.fullmatch(r"(\d{4}-\d{2}-\d{2}[T ])?\d{1,2}:\d{2}(:\d{2})?", str(text).strip(), re.I):
+        return d.isoformat(timespec="seconds" if str(text).count(":") == 2 else "minutes")   # all of that minute
     return d.isoformat(timespec="milliseconds")
 
 

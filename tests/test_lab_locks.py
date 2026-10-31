@@ -458,7 +458,8 @@ def test_a_card_asked_beside_another_chats_lab_call_shows_only_in_its_own_chat(t
             "name": name, "description": "cool the fridge", "steps": "1. close valve V3", "scope": "global"}}]
 
     async def b_first():
-        while not approver.pending_list():                                  # chat A's change waits for a person
+        until = time.monotonic() + 15
+        while not approver.pending_list() and time.monotonic() < until:   # chat A's change waits for a person
             await asyncio.sleep(0.05)
         return skill(1, "fridge-cooldown")
     provider.turns[a["id"]] = [[{"type": "tool_call", "id": "w1", "name": "set_value",

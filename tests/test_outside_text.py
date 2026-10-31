@@ -181,8 +181,7 @@ def test_writing_in_another_chat_keeps_this_chat_asking(tmp_path):
     store.save(chat_a)
 
     async def b_first():
-        while not in_lab.is_set():
-            await asyncio.sleep(0.05)
+        await asyncio.to_thread(in_lab.wait, 15)                          # chat A's change works the lab
         assert agent.steer(chat_b["id"], "and note the time")             # the person writes in chat B
         return [{"type": "tool_call", "id": "b1", "name": "calculate", "input": {"expression": "1+1"}}]
 
