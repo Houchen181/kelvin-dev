@@ -389,3 +389,164 @@ def test_tightening_a_limit_takes_no_pin_and_widening_does(tmp_path):
             assert r.status_code == 403 and r.json()["pin"]                       # taking it out widens too
     finally:
         set_resource_manager(None)
+
+
+# ------------------------------------------------------------------- review of 0.3.34: an interlock's to-safe stays
+
+def warm_on_the_third_poll(lab, gate, monitor):
+    """The sample warms past magnet.B's interlock while a wait polls, and the monitor acts before the wait wakes: the
+    monitor's thread winning the race, made deterministic."""
+    pause, polls = gate._pause, []
+
+    def pausing(seconds, gen):
+        polls.append(seconds)
+        if len(polls) == 3:
+            hold_temperature(lab, 10.5)
+            monitor.tick()
+        pause(seconds, gen)
+    gate._pause = pausing
+
+
+def test_a_stopped_wait_never_undoes_an_interlocks_to_safe(lab, make_engine):
+    """Review of 0.3.34: the interlock sent magnet.B to 0, then the run's wait it stopped set it back to where the
+    field was, and the monitor, its alarm up, never acted again: the field stayed up above its interlock."""
+    engine, gate, _ = make_engine([True])
+    monitor = Monitor(lab, gate, lambda *a: None)
+    warm_on_the_third_poll(lab, gate, monitor)
+    report = engine.run("plan: field\nsetup: { magnet.rate: 0.5, magnet.B: 1.0 }\ntime: { every: 30, points: 3 }\n"
+                        "measure: [lockin.X]\n")
+    assert report.status == "aborted" and "it goes on to safe, where it was sent meanwhile" in report.message
+    assert lab.read("magnet", "B") == 0                                          # on its way to safe, not held
+    lab.clock.sleep(30)
+    monitor.tick()
+    assert lab.read("magnet", "B_actual") == 0 and monitor.alarms[0].cleared is not None
+
+
+def test_while_an_interlock_is_broken_its_drive_goes_on_to_safe(lab, make_gate):
+    """Review of 0.3.34: the same race on a chat's direct change, which no run's clean-up follows; and a set point
+    put away from safe again while the alarm is up goes back to safe at the next check."""
+    gate, _ = make_gate([True])
+    lab.config.safe_actions.pop("magnet.B")
+    lab.instruments["magnet"].backend.state.update(rate=0.5)
+    monitor = Monitor(lab, gate, lambda *a: None)
+    warm_on_the_third_poll(lab, gate, monitor)
+    r = gate.set("magnet", "B", 2.0)
+    assert r.action == "stopped" and r.message.endswith("it goes on to safe, where it was sent meanwhile")
+    assert lab.read("magnet", "B") == 0
+    lab.instruments["magnet"].write("B", 0.5)                                    # a hold that came late
+    lab.clock.sleep(10)
+    monitor.tick()
+    alarm = monitor.alarms[0]
+    assert lab.read("magnet", "B") == 0 and alarm.cleared is None
+    assert any(a.startswith("magnet.B 500 mT → 0 T (safe state)") for a in alarm.actions)
+
+
+def test_the_interlock_alarm_clears_on_the_field_not_its_set_point(lab, make_gate):
+    """Review of 0.3.34: the alarm said "the drive is at safe" once magnet.B was set to 0, the field still 1.5 T."""
+    gate, _ = make_gate([])
+    lab.config.safe_actions.pop("magnet.B")
+    lab.instruments["magnet"].backend.state.update(B=1.5, B_actual=1.5, rate=0.2)
+    monitor = Monitor(lab, gate, lambda *a: None)
+    hold_temperature(lab, 12)
+    monitor.tick()
+    alarm = monitor.alarms[0]
+    assert "magnet.B is at 1.5 T, which needs tc.T_sample < 10" in alarm.text and lab.read("magnet", "B") == 0
+    lab.clock.sleep(60)
+    monitor.tick()
+    assert alarm.cleared is None and lab.read("magnet", "B_actual") > 1           # set to 0, but the field is up
+    lab.clock.sleep(420)
+    monitor.tick()
+    assert alarm.cleared is not None and lab.read("magnet", "B_actual") == 0
+
+
+# ------------------------------------------------------------------- review of 0.3.34: a rate that freezes a drive
+
+def test_a_rate_that_freezes_the_field_asks_a_person_and_says_so(lab, make_gate, monkeypatch):
+    """Review of 0.3.34: magnet.rate 0.2 → 0 T/min with the field at 1.5 T counted as "toward safe", so nobody was
+    asked, and a failed interlock's to-safe then couldn't bring the field down. A supply whose card calls its slowest
+    rate safe (a Lake Shore 625's 0.0001 A/s) had the same trap."""
+    gate, approver = make_gate([False, True, True])
+    gate.auto = True
+    magnet = lab.instruments["magnet"].backend.state
+    magnet.update(B=1.5, B_actual=1.5, rate=0.2)
+    r = gate.set("magnet", "rate", 0)
+    assert r.action == "declined" and lab.read("magnet", "rate") == 0.2
+    items = approver.requests[0].items
+    assert "at 0 T/min magnet.B can't move, so a stop, an interlock or Bring to safe couldn't bring it back" in items[0]
+    assert items[-1].startswith("Auto mode does not cover this")                # never Kelvin's own yes
+    r = gate.set("magnet", "rate", 0.001)                                      # 25 h back from 1.5 T: asks too
+    assert r.ok and "magnet.B would take 25.0 h to get back to safe (its card allows 2.0 h for a move)" in r.message
+    magnet.update(B=0.0, B_actual=0.0)                                         # at safe: nothing to freeze
+    assert gate.set("magnet", "rate", 0).ok and len(approver.requests) == 2
+    monkeypatch.setattr(lab.instruments["magnet"].card.params["rate"], "safe", 0.0001)
+    magnet.update(B=1.5, B_actual=1.5, rate=0.2)
+    r = gate.set("magnet", "rate", 0.0001)                                     # its "safe" value: 250 h back
+    assert r.ok and "would take" in r.message and len(approver.requests) == 3
+    magnet.update(rate=0.2)
+    assert gate.set("magnet", "rate", 0.1).ok and len(approver.requests) == 3    # slower, still back in 15 min
+
+
+def test_a_plan_that_zeroes_the_rate_with_the_field_up_asks_even_in_auto_mode(lab, make_engine):
+    engine, gate, approver = make_engine([True])
+    gate.auto = True
+    lab.instruments["magnet"].backend.state.update(B=1.5, B_actual=1.5, rate=0.2)
+    report = engine.run("plan: hold_field\nsetup: { magnet.rate: 0 }\ntime: { every: 10, points: 1 }\n"
+                        "measure: [lockin.X]\n")
+    assert report.status == "done" and lab.read("magnet", "rate") == 0
+    items = approver.requests[0].items
+    assert any(i.startswith("magnet.rate: now ") and "at 0 T/min magnet.B can't move" in i for i in items)
+    assert any(i.startswith("Auto mode does not cover this run: magnet.rate: at 0 T/min") for i in items)
+
+
+def test_what_a_stop_leaves_on_says_a_field_still_up(tmp_path):
+    """Review of 0.3.34: with magnet.B set to 0 and the field still 2.5 T (ramping down, or frozen by a rate of 0),
+    stop_run said nothing was left on, and Bring to safe said nothing either."""
+    rt = runtime(tmp_path)
+    magnet = rt.lab.instruments["magnet"].backend.state
+    magnet.update(B=0.0, B_actual=2.5, rate=0.2)
+    with rt.lock:
+        assert rt.left_on() == ["magnet.B 0 T (B_actual 2.5 T)"]
+    assert "still on: magnet.B 0 T (B_actual 2.5 T)" in rt.stop_work("stop")
+    magnet.update(rate=0.0)
+    said = rt.bring_to_safe("human (portal)")
+    assert said[-1] == ("still on: magnet.B 0 T (B_actual 2.5 T; magnet.rate is 0 T/min, so magnet.B can't move: "
+                        "set magnet.rate first)")
+
+
+# ------------------------------------------------------------------- review of 0.3.34: held stages, clean-up too
+
+def test_hands_on_the_sample_holds_a_positioner_through_a_stops_clean_up(lab, make_engine, monkeypatch):
+    """Review of 0.3.34: with hands on the sample, a stopped run's clean-up still drove a positioner's drive to safe
+    (a piezo scanner's x, stood in for by the smu); the laser, which is no stage, still goes to safe."""
+    engine, gate, _ = make_engine([True, True])
+    monkeypatch.setattr(lab.instruments["smu"].card, "kind", "positioner")
+    assert gate.set("laser", "emission", True).ok
+
+    def hands_on():
+        lab.hands_on = {"by": "human (portal)", "since": "now"}
+        gate.request_abort("hands on the sample")
+    stop_at_first_point(engine, hands_on)
+    report = engine.run(GATE_SWEEP.format(name="scan", top=2))
+    assert report.status == "aborted" and lab.read("smu", "V") == 0 and lab.read("smu", "output") is True
+    assert "smu.output stays where it is: human (portal) has hands on the sample" in report.message
+    lab.instruments["smu"].backend.state.update(V=0.5)
+    assert [r.message.split(":")[0] for r in gate.to_safe("smu")] == [
+        "smu.V stays where it is", "smu.output stays where it is", "smu.compliance_I stays where it is"]
+    assert gate.cut("smu", "V", "monitor")[0].action == "held" and lab.read("smu", "V") == 0.5
+    assert gate.to_safe("laser") and lab.read("laser", "emission") is False
+
+
+# ------------------------------------------------------------------- review of 0.3.34: a setup's switches first
+
+def test_a_setup_switches_a_heater_range_on_before_its_set_point(lab, make_engine):
+    """Review of 0.3.34: setup: {tc.setpoint: 5, tc.heater_range: low} stopped with "switch tc.heater_range on
+    first, or set both in one plan's setup": the heater range, which the set point's applies_when names, came second.
+    A rate still goes before the set point it paces."""
+    from labharness import load_plan
+    engine, _, _ = make_engine([True])
+    plan = load_plan("plan: warm\nsetup: { tc.setpoint: 5, tc.heater_range: low, magnet.B: 0.1, magnet.rate: 0.5 }\n"
+                     "time: { every: 10, points: 2 }\nmeasure: [tc.T_sample]\n")
+    assert [s.key for s in engine.ordered(plan.setup)] == ["tc.heater_range", "tc.setpoint", "magnet.rate", "magnet.B"]
+    report = engine.run("plan: warm\nsetup: { tc.setpoint: 5, tc.heater_range: low }\ntime: { every: 10, points: 2 }\n"
+                        "measure: [tc.T_sample]\n")
+    assert report.status == "done"

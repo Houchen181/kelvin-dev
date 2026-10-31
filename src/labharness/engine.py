@@ -381,9 +381,11 @@ class RunEngine:
 
     def ordered(self, steps: List[Step]) -> List[Step]:
         """Steps in the order they can be applied: a switch that applies other drives to the sample (an output, an
-        RF or laser emission: its card's enables) is switched on before the levels it applies. Switching it on parks
-        those levels at safe first, so a level set before its switch would end up at safe, and the run measure dark.
-        A rate goes before the set point it paces (a field doesn't move at a rate of 0). Otherwise as written."""
+        RF or laser emission: its card's enables; a heater range, which a set point's applies_when names) is switched
+        on before the levels it applies. Switching an output on parks those levels at safe first, so a level set before
+        its switch would end up at safe, and the run measure dark; a set point set while its heater is off is never
+        reached, and a setup that set it first was stopped for it. A rate goes before the set point it paces (a field
+        doesn't move at a rate of 0). Otherwise as written."""
         where: Dict[str, int] = {}
         for i, s in enumerate(steps):
             where.setdefault(s.key, i)
@@ -392,12 +394,14 @@ class RunEngine:
             rank: float = i
             try:
                 inst, spec = self.lab.resolve(s.key)
-                on = bool(spec.enables) and spec.is_drive and spec.distance(spec.coerce(s.value)) > 0
+                applies = list(spec.enables) + ([p.name for p in inst.card.drives if p.applies_when == spec.name]
+                                                if spec.type in ("bool", "enum") else [])   # a switch (gate._switch_of)
+                on = bool(applies) and spec.is_drive and spec.distance(spec.coerce(s.value)) > 0
                 paced = paces(inst.card, spec.name)
             except (KeyError, ValueError):
-                on, paced = False, None
+                on, paced, applies = False, None, []
             if on:
-                levels = [where[k] for k in ("%s.%s" % (s.instr, d) for d in spec.enables) if k in where]
+                levels = [where[k] for k in ("%s.%s" % (s.instr, d) for d in applies) if k in where]
                 if levels and min(levels) < i:
                     rank = min(levels) - 0.5
             elif paced is not None and where.get("%s.%s" % (s.instr, paced.name), i) < i:

@@ -81,6 +81,9 @@ def test_the_monitor_enforces_an_interlock_whose_reading_drifts_out_or_dies(lab,
     assert lab.read("magnet", "B") == 0 and any("magnet.B 500 mT → 0 T" in a for a in alarm.actions)
     lab.clock.sleep(10)
     monitor.tick()
+    assert not alarm.cleared                                      # set to 0, but the field is still coming down
+    lab.clock.sleep(150)
+    monitor.tick()
     assert alarm.cleared                                          # the field is at safe: nothing left to protect
 
     lab.instruments["tc"].backend.state["T_sample"] = 2.0
