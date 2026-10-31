@@ -5644,12 +5644,15 @@ class LabRuntime:
         device = "" if lab_wide else str((self.mounted or {}).get("device_name") or "")
         w = self.monitor.add(Watch(key, above, below, max(0.0, float(for_s)), 10.0, [], False, source, note[:200],
                                    device=device))
-        whose = self._whose_now()
-        if whose:   # added by unshared work: its note is that work's (phones through the Kelvin hub go without it)
+        # added by unshared work, or made for the sample of unshared work: its note and its sample are that work's
+        # (other chats and phones through the Kelvin hub go without them)
+        whose = self._whose_now() or (self._sample_whose() if device else None)
+        if whose:
             self.unshared_watches[w.id] = whose
         self._save_watches()
         view = next(v for v in self.monitor.list() if v["id"] == w.id)
-        self.gate.log.write("watch", by=source, change="added", watch=w.id, rule=view["rule"], device=device or None)
+        self.gate.log.write("watch", by=source, change="added", watch=w.id, rule=view["rule"], device=device or None,
+                            whose=whose)
         return view
 
     def remove_watch(self, watch_id: str, source: str = "person") -> None:
@@ -5658,20 +5661,38 @@ class LabRuntime:
         self._save_watches()
         self.gate.log.write("watch", by=source, change="removed", watch=w.id, rule=w.rule())
 
+    def _sample_whose(self) -> Optional[Dict[str, Any]]:
+        """Whose work the mounted sample is, when it is unshared work (its project's marks); None for shared work."""
+        pid = (self.mounted or {}).get("project")
+        return {"project": pid} if pid and self.unshared_work({"project": pid}) else None
+
+    def shown_sample(self, name: str = "", what: str = "the mounted sample") -> str:
+        """The mounted sample's name as whoever asks in this thread may read it: what (in its place) for a chat
+        outside the unshared work it belongs to."""
+        name = name or str((self.mounted or {}).get("device_name") or "")
+        return name if self.may_see({"project": (self.mounted or {}).get("project")}) else what
+
     def _end_sample_watches(self, by: str) -> List[str]:
         """The watches made for the mounted sample end when it is taken out (one outlived its sample and alarmed on
-        the next one): their alarms clear, and the record and the notices say so. Lines saying what ended."""
+        the next one): their alarms clear, and the record and the notices say so. Lines saying what ended. The
+        sample of unshared work goes unnamed in what everyone reads (the alarms, the notice), and its record is its
+        own."""
         device = str((self.mounted or {}).get("device_name") or "")
-        ended = self.monitor.end_for(device, "%s was taken out" % device) if device else []
+        whose = self._sample_whose()
+        label = "its sample" if whose else device
+        ended = self.monitor.end_for(device, "%s was taken out" % label) if device else []
         if not ended:
             return []
+        for w in ended:
+            self.unshared_watches.pop(w.id, None)
         self._save_watches()
         for w in ended:
-            self.gate.log.write("watch", by=by, change="ended", watch=w.id, rule=w.rule(), device=device)
+            self.gate.log.write("watch", by=by, change="ended", watch=w.id, rule=w.rule(), device=device, whose=whose)
         rules = "; ".join(w.rule(self.lab.resolve(w.key)[1].unit) for w in ended)
-        self.notifier("watch", "Watches ended with %s" % device, rules)
-        return ["%d watch%s made for %s ended with it: %s" % (len(ended), "" if len(ended) == 1 else "es", device,
-                                                                rules)]
+        self.tell("watch", "Watches ended with %s" % ("a sample of unshared work" if whose else device), rules,
+                  bool(whose))
+        return ["%d watch%s made for %s ended with it: %s" % (len(ended), "" if len(ended) == 1 else "es",
+                                                                self.shown_sample(device, "the sample"), rules)]
 
     def acknowledge_alarm(self, alarm_id: str, by: str = "human", channel: str = "portal",
                           device: Optional[str] = None) -> bool:

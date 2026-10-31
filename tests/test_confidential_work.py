@@ -397,3 +397,39 @@ def test_work_outside_every_chat_stays_under_the_mounted_confidential_sample_wit
         time.sleep(0.1)
     shown = p.turn(p.other, [("queue_show", {})])["c0"]
     assert "filed under General without the mounted sample" in shown and SECRET not in shown
+
+
+def test_watches_made_for_a_confidential_sample_never_name_it_outside_its_project(rt, tmp_path, monkeypatch):
+    from test_team_and_analysis import _relay
+    p, _ = mounted(rt, tmp_path)
+    now = float(rt.lab.read("tc", "T_sample"))
+    rt.add_watch("tc.T_sample", above=now - 1.0, note="%s must stay cold" % SECRET)   # a person's, in the Lab panel
+    for _ in range(3):
+        rt.monitor.tick()
+    assert rt.monitor.active()
+    said = p.turn(p.other, [("watch", {"reading": "tc.T_sample", "above": 300})])["c0"]
+    assert "ends when the mounted sample is taken out" in said and SECRET not in said
+
+    async def mcp_watch():   # an agent over MCP: no chat
+        r = await p.agent._tool("watch", {"reading": "tc.T_sample", "above": 301}, None)
+        return r.content[0].text
+    assert SECRET not in p.in_turn(mcp_watch)
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("POST", "/api/watches", {"key": "tc.T_sample", "above": 302})   # a phone through the hub
+    assert status == 200 and SECRET.encode() not in raw and json.loads(raw)["device"]
+    status, raw = ask("GET", "/api/watches")
+    assert status == 200 and SECRET.encode() not in raw
+
+    out = p.turn(p.other, [("mount_device", {"device": ""})])["c0"]   # the ordinary chat takes the sample out
+    assert "ended with it" in out and SECRET not in out
+    notices = [n for n in rt.notifier.notices if n["kind"] == "watch"]
+    assert notices and notices[-1]["unshared"] and SECRET not in json.dumps(notices)
+    assert SECRET not in json.dumps([a.view() for a in rt.monitor.alarms])   # what clears them says no name
+    looked = p.turn(p.other, [("recent_events", {"n": 60}), ("activity", {}), ("watches", {}), ("lab_status", {})])
+    for call, text in looked.items():
+        assert SECRET not in text, (call, text)
+    for path in ("/api/state", "/api/watches"):
+        status, raw = ask("GET", path)
+        assert status == 200 and SECRET.encode() not in raw, path
+    inside = p.turn(p.secret, [("recent_events", {"n": 60})])["c0"]
+    assert "ended" in inside   # the project's own chats keep its record

@@ -28,6 +28,7 @@ AT_ONCE = 16                      # requests answered at once
 RELAY_ONLY = {("POST", "/api/phone/direct"), ("DELETE", "/api/phone/direct")}
 # answers that can list unshared work: read whole and passed through `trim` (a run's files stream as they are)
 TRIMMED = {"/api/chats", "/api/projects", "/api/runs", "/api/state", "/api/live", "/api/bootstrap", "/api/watches"}
+TRIMMED_POSTS = {"/api/watches"}   # and the answers to these posts (a watch the phone added names its sample)
 
 Target = Tuple[str, str, str]     # the hub's address, the person's token there, the person's name here
 
@@ -199,7 +200,8 @@ class RelayLink:
 
     async def _serve(self, send: Callable[[Any], Any], rid: int, method: str, path: str, query: str, body: bytes,
                      phone: Dict[str, Any]) -> None:
-        trimmed = method == "GET" and path in TRIMMED and self.trim is not None
+        trimmed = self.trim is not None and (method == "GET" and path in TRIMMED
+                                             or method == "POST" and path in TRIMMED_POSTS)
         head: Dict[str, Any] = {}
         held: List[bytes] = []
         sent = {"head": False, "end": False, "size": 0}

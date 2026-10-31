@@ -376,8 +376,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
             v = rt.add_watch(reading, above, below, for_seconds, note, source="agent", lab_wide=bool(lab_wide))
         except (KeyError, ValueError) as e:
             return "not watched: %s" % (e.args[0] if e.args else e)
-        return "watching %s (id %s%s); %s" % (v["rule"], v["id"], ", ends when %s is taken out" % v["device"]
-                                              if v.get("device") else "", rt.alarms_reach())
+        return "watching %s (id %s%s); %s" % (v["rule"], v["id"], ", ends when %s is taken out"
+                                              % rt.shown_sample(v["device"]) if v.get("device") else "",
+                                              rt.alarms_reach())
 
     @server.tool(annotations=READ, structured_output=False)
     def watches() -> str:

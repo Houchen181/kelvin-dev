@@ -816,6 +816,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 hidden += n
         elif path == "/api/watches" and isinstance(data, dict) and isinstance(data.get("watches"), list):
             data = dict(data, watches=hub_watches(data["watches"]))
+        elif path == "/api/watches" and method == "POST" and isinstance(data, dict) and data.get("id"):
+            data = hub_watches([data])[0]   # the watch the phone added
         return data, hidden
 
     relay_link = RelayLink(lambda *a: relay_app["app"](*a), relay_target, relay_hello, relay_private, relay_trim)
