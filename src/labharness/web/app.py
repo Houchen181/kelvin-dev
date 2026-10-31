@@ -69,13 +69,9 @@ SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/ac
               "/api/stop", "/api/runs/stop"}
 # sharing work with the Kelvin hub (hubsync.py) is switched off for now: the hub is for accounts only (central.py)
 HUB_SHARING = False
-# Claude Code bridge: locked while Claude works the screen, so its clicks never answer for a person
-LOCKED_WHILE_OPERATING = ("/api/approvals/", "/api/mode", "/api/settings", "/api/lab", "/api/session", "/api/accounts",
-                          "/api/account", "/api/cards", "/api/instruments/", "/api/data-folder", "/api/folder",
-                          "/api/phone", "/api/devices", "/api/watches", "/api/queue", "/api/terminal", "/api/mount",
-                          "/api/quit", "/api/update", "/api/hub", "/api/skills/", "/api/know/", "/api/collection",
-                          "/api/team", "/api/analysis/keep", "/api/library")
-LOCKED_AGAIN = re.compile(r"^/api/runs/[^/]+/again$")   # a run again starts the queue: locked as the queue is
+# Claude Code bridge: while Claude works the screen, this computer's browser only reads and stops, so its clicks never
+# answer for a person (an approval, a rollback, Hands on the sample, a sample's protection, a project's rules, a PIN)
+WHILE_OPERATING = ("/api/stop", "/api/runs/stop")
 COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
 
 
@@ -197,9 +193,9 @@ class Guard:
                 elif (path.startswith("/api/") and path not in SIGNED_OUT and self.signed_in is not None
                       and not self.signed_in()):
                     problem = (401, "Sign in to Kelvin first.", {"signin": True})
-                elif (method != "GET" and self.operating is not None and self.operating()
-                      and (path.startswith(LOCKED_WHILE_OPERATING) or LOCKED_AGAIN.match(path))):
-                    problem = (423, "Claude is operating this computer, so Kelvin's approvals and settings are locked "
+                elif (method not in ("GET", "HEAD") and path not in WHILE_OPERATING and self.operating is not None
+                      and self.operating()):
+                    problem = (423, "Claude is operating this computer, so everything in Kelvin but Stop is locked "
                                     "until it finishes. Press Stop to end it.")
                 scope["kelvin"] = {"role": "owner", "device": None}
             if problem:
