@@ -389,3 +389,53 @@ def test_tightening_a_limit_takes_no_pin_and_widening_does(tmp_path):
             assert r.status_code == 403 and r.json()["pin"]                       # taking it out widens too
     finally:
         set_resource_manager(None)
+
+
+# ------------------------------------------------------------------- review of 0.3.34: an interlock's to-safe stays
+
+def warm_on_the_third_poll(lab, gate, monitor):
+    """The sample warms past magnet.B's interlock while a wait polls, and the monitor acts before the wait wakes: the
+    monitor's thread winning the race, made deterministic."""
+    pause, polls = gate._pause, []
+
+    def pausing(seconds, gen):
+        polls.append(seconds)
+        if len(polls) == 3:
+            hold_temperature(lab, 10.5)
+            monitor.tick()
+        pause(seconds, gen)
+    gate._pause = pausing
+
+
+def test_a_stopped_wait_never_undoes_an_interlocks_to_safe(lab, make_engine):
+    """Review of 0.3.34: the interlock sent magnet.B to 0, then the run's wait it stopped set it back to where the
+    field was, and the monitor, its alarm up, never acted again: the field stayed up above its interlock."""
+    engine, gate, _ = make_engine([True])
+    monitor = Monitor(lab, gate, lambda *a: None)
+    warm_on_the_third_poll(lab, gate, monitor)
+    report = engine.run("plan: field\nsetup: { magnet.rate: 0.5, magnet.B: 1.0 }\ntime: { every: 30, points: 3 }\n"
+                        "measure: [lockin.X]\n")
+    assert report.status == "aborted" and "it goes on to safe, where it was sent meanwhile" in report.message
+    assert lab.read("magnet", "B") == 0                                          # on its way to safe, not held
+    lab.clock.sleep(30)
+    monitor.tick()
+    assert lab.read("magnet", "B_actual") == 0 and monitor.alarms[0].cleared is not None
+
+
+def test_while_an_interlock_is_broken_its_drive_goes_on_to_safe(lab, make_gate):
+    """Review of 0.3.34: the same race on a chat's direct change, which no run's clean-up follows; and a set point
+    put away from safe again while the alarm is up goes back to safe at the next check."""
+    gate, _ = make_gate([True])
+    lab.config.safe_actions.pop("magnet.B")
+    lab.instruments["magnet"].backend.state.update(rate=0.5)
+    monitor = Monitor(lab, gate, lambda *a: None)
+    warm_on_the_third_poll(lab, gate, monitor)
+    r = gate.set("magnet", "B", 2.0)
+    assert r.action == "stopped" and r.message.endswith("it goes on to safe, where it was sent meanwhile")
+    assert lab.read("magnet", "B") == 0
+    lab.instruments["magnet"].write("B", 0.5)                                    # a hold that came late
+    lab.clock.sleep(10)
+    monitor.tick()
+    alarm = monitor.alarms[0]
+    assert lab.read("magnet", "B") == 0 and alarm.cleared is None
+    assert any(a.startswith("magnet.B 500 mT → 0 T (safe state)") for a in alarm.actions)

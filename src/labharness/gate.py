@@ -273,6 +273,12 @@ class SafetyGate:
         # switched another chat's heater back on)
         self._undo: Dict[Any, List[Tuple[str, str, Any, Any, str]]] = {}
         self._undoing = threading.local()   # whose direct change this thread makes (undoable)
+        # the drives a to-safe sent toward safe (a stop's clean-up, an interlock, a trip, Bring to safe), each with the
+        # number of the latest: a stopped or given-up wait never holds such a drive where its reading was (an
+        # interlock's "to safe" was once undone that way, and the magnet stayed at field)
+        self._sent_safe: Dict[str, int] = {}
+        self._safe_seq = 0
+        self._safe_lock = threading.Lock()
         self._stop_gen = 0
         self.stop_reason = ""   # why the latest stop came, when not from a person (an interlock): said with its result
         self.trip_count = 0     # guard trips so far: an item that trips one pauses the queue, whatever on_error says
@@ -1279,6 +1285,7 @@ class SafetyGate:
     def _move(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any,
               away: bool, wait: bool, how: Optional[str], gen: Optional[int] = None) -> Result:
         key = "%s.%s" % (inst.name, spec.name)
+        since = self._safe_seq   # a to-safe from here on is never undone by this move's hold (_holding)
         clock = self.lab.clock
         notes: List[str] = []
         gen = self._stop_gen if gen is None else gen
@@ -1320,7 +1327,7 @@ class SafetyGate:
                 notes.append("moving")
             if spec.ramp == "instrument" and spec.readback:
                 if wait:
-                    stop = self._wait(inst, spec, current, target, watch=away, gen=gen, arrived=moving)
+                    stop = self._wait(inst, spec, current, target, watch=away, gen=gen, arrived=moving, since=since)
                     if stop is not None:
                         return stop
                 else:
@@ -1429,7 +1436,7 @@ class SafetyGate:
         return None
 
     def _wait(self, inst: Instrument, spec: ParamSpec, current: Any, target: float,
-              watch: bool, gen: int, arrived: bool = False) -> Optional[Result]:
+              watch: bool, gen: int, arrived: bool = False, since: Optional[int] = None) -> Optional[Result]:
         """Follow a set point the instrument ramps to by itself until its reading arrives. A stop ends every such
         wait, toward safe too (a PPMS cooling down held a stopped run for ten minutes): away from safe the set point is
         held where the reading is; toward safe it goes on there by itself, and only the waiting ends. arrived: its
@@ -1439,8 +1446,10 @@ class SafetyGate:
         gives up goes up as an alarm (it stays until a person says Got it), and says the switch the set point goes
         through when that may be why (a heater range too low). A move away from safe whose switch is off (a heater
         range at off) isn't waited for at all: nothing brings the reading there (it was waited on for ten minutes,
-        then called stuck)."""
+        then called stuck). since: the to-safe count (_safe_seq) when the move began: a drive a to-safe has sent toward
+        safe since (an interlock that failed) is never held, but goes on there (_holding); None: from now."""
         from .monitor import Approach, rate_per_s, switch_words
+        since = self._safe_seq if since is None else since
         clock = self.lab.clock
         key = "%s.%s" % (inst.name, spec.name)
         eta = self._eta(inst, spec, current, target)
@@ -1455,7 +1464,8 @@ class SafetyGate:
                 return self._gave_up(inst, spec, val, target, watch, "%s: %s is %s, so nothing brings %s (%s) to %s, "
                                      "and Kelvin didn't wait for it" % (key, off[0], off[1], spec.readback,
                                                                        spec.show(val), spec.show(target)),
-                                     " (switch %s on first, or set both in one plan's setup)" % off[0], alarm=False)
+                                     " (switch %s on first, or set both in one plan's setup)" % off[0], alarm=False,
+                                     since=since)
         while True:
             val = inst.read(spec.readback)
             if abs(val - target) <= spec.tol:
@@ -1465,10 +1475,12 @@ class SafetyGate:
                 if trip:
                     return self._tripped(inst, spec, val, trip)
             if self._stop_gen != gen:
-                if watch:
-                    inst.write(spec.name, val)
+                if watch and self._holding(inst, spec, val, since):
                     return Result(False, "stopped", key, value=val,
                                   message="%s stopped at %s (%s)" % (key, spec.show(val), self.stop_words()))
+                if watch:   # a to-safe sent it toward safe meanwhile (an interlock): it goes on there
+                    return Result(False, "stopped", key, value=val, message="%s: stopped at %s (%s); it goes on to "
+                                  "safe, where it was sent meanwhile" % (key, spec.show(val), self.stop_words()))
                 return Result(False, "stopped", key, value=val, message="%s: stopped waiting at %s (%s); "
                               "it goes on to %s by itself" % (key, spec.show(val), self.stop_words(),
                                                               spec.show(target)))
@@ -1478,14 +1490,14 @@ class SafetyGate:
                                      "%s)%s, so Kelvin stopped waiting" % (
                                          key, spec.readback, spec.show(target), _dur(clock.now() - way.since),
                                          spec.show(val) + ("; %s" % switch if switch else ""),
-                                         "" if switch else ": the instrument may be stuck"))
+                                         "" if switch else ": the instrument may be stuck"), since=since)
             if clock.now() - t0 > timeout:
                 if arrived:
                     return Result(False, "error", key, value=val, message=(
                         "%s: its status says the move is over, but %s is %s, not %s: it stopped short or refused the "
                         "move" % (key, spec.readback, spec.show(val), spec.show(target))))
                 return self._gave_up(inst, spec, val, target, watch, "%s: %s is %s after %s (target %s)" % (
-                    key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)))
+                    key, spec.readback, spec.show(val), _dur(timeout), spec.show(target)), since=since)
             self._pause(poll, gen)   # a stop wakes it at once
 
     def _switched_off(self, inst: Instrument, spec: ParamSpec) -> Optional[Tuple[str, str]]:
@@ -1501,21 +1513,43 @@ class SafetyGate:
         return "%s.%s" % (inst.name, switch.name), switch.show(now)
 
     def _gave_up(self, inst: Instrument, spec: ParamSpec, val: Any, target: Any, away: bool, text: str,
-                 after: str = "", alarm: bool = True) -> Result:
+                 after: str = "", alarm: bool = True, since: Optional[int] = None) -> Result:
         """A wait for a set point that ends before its reading got there. A move away from safe is set back to where
         its reading got to, as a stop leaves it (its guards are watched only while Kelvin waits, so it must not go on
         by itself unwatched), and the result says so: the set point a person approved was once put back silently.
-        alarm: it goes up as one (gate.alarm), before the set point changes, so the watchdog's alarm for it becomes
-        this one."""
+        Not one a to-safe has sent toward safe since `since` (_holding): that goes on to safe. alarm: it goes up as
+        one (gate.alarm), before the set point changes, so the watchdog's alarm for it becomes this one."""
         key = "%s.%s" % (inst.name, spec.name)
-        if away:
+        since = self._safe_seq if since is None else since
+        sent = away and self._sent_safe.get(key, 0) > since
+        if away and not sent:
             text += "; %s set back to %s, where %s is, not %s" % (key, spec.show(val), spec.readback, spec.show(target))
+        elif sent:
+            text += "; it goes on to safe, where it was sent meanwhile"
         text += after
         if alarm:
             self._raise_alarm("stall", key, text, target=target)
-        if away:
-            inst.write(spec.name, val)
+        if away and not sent:
+            self._holding(inst, spec, val, since)
         return Result(False, "timeout", key, value=val, message=text)
+
+    def _sending_safe(self, key: str) -> None:
+        """A to-safe (a stop's clean-up, an interlock, a trip, a watch, Bring to safe) is about to send this drive
+        toward safe: from now on no stopped or given-up wait holds it where its reading was (_holding)."""
+        with self._safe_lock:
+            self._safe_seq += 1
+            self._sent_safe[key] = self._safe_seq
+
+    def _holding(self, inst: Instrument, spec: ParamSpec, val: Any, since: int) -> bool:
+        """Set a set point back to where its reading is (a move away from safe that a stop ended, or a wait gave up),
+        unless a to-safe has sent it toward safe since `since`: then it goes on to safe, and False. The check and the
+        write are one step, so a to-safe that comes at the same moment is never undone (an interlock's "to safe" was
+        once overwritten by the stopped wait it woke, and the magnet stayed at field)."""
+        with self._safe_lock:
+            if self._sent_safe.get("%s.%s" % (inst.name, spec.name), 0) > since:
+                return False
+            inst.write(spec.name, val)
+            return True
 
     def _raise_alarm(self, kind: str, key: str, text: str, actions: Optional[List[str]] = None, **more: Any) -> None:
         """An alarm for the monitor (gate.alarm), if it is listening. Never in the gate's way."""
@@ -1611,6 +1645,7 @@ class SafetyGate:
         results: List[Result] = []
         words: List[str] = []
         if at is None or spec.distance(at) > 0:
+            self._sending_safe("%s.%s" % (inst.name, spec.name))
             r = self._move(inst, spec, at, spec.safe, away=False, wait=False, how=None)
             results.append(r)
             words.append("back to %s" % spec.show(spec.safe) if r.ok else "could not return to safe: " + r.message)
@@ -1710,19 +1745,22 @@ class SafetyGate:
         current = self._current(inst, spec)
         if current is not None and spec.distance(current) == 0:
             return None
+        self._sending_safe(key)
         return self._move(inst, spec, current, spec.safe, away=False, wait=wait, how="safe state")
 
     def _hold(self, inst: Instrument, spec: ParamSpec, why: str) -> Optional[Result]:
         """A set point the instrument ramps to by itself stays where its reading is: the ramp stops there. One already
-        sent to safe (an interlock that failed) goes on there: holding it would take it away from safe again."""
+        sent to safe (an interlock that failed) goes on there: holding it would take it away from safe again. The look
+        and the write are one step against a to-safe at the same moment (_holding)."""
         if spec.ramp != "instrument" or not spec.readback:
             return None
         key = "%s.%s" % (inst.name, spec.name)
         actual = inst.read(spec.readback)
-        target = inst.read(spec.name)
-        if abs(target - actual) <= spec.tol or spec.distance(target) == 0:
-            return None
-        inst.write(spec.name, actual)
+        with self._safe_lock:
+            target = inst.read(spec.name)
+            if abs(target - actual) <= spec.tol or spec.distance(target) == 0:
+                return None
+            inst.write(spec.name, actual)
         return Result(True, "held", key, value=actual, message="%s held at %s%s" % (key, spec.show(actual), why))
 
     def _prefix(self, spec: ParamSpec) -> Template:

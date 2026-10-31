@@ -508,11 +508,12 @@ class Monitor:
         sensor, its instrument gone), an alarm goes up, the running plan stops and the drive goes to safe, even where
         the lab config says hold: hold is for a stop, and a held field once stayed at 1 T above its interlock. The
         alarm clears once the drive is at safe, or the condition has held again for INTERLOCK_CLEAR_S (a sample at its
-        interlock's 10 K raised and cleared it six times in 15 s)."""
+        interlock's 10 K raised and cleared it six times in 15 s). While it is up, a drive set away from safe again
+        goes back to safe."""
         if now - self._last_interlock_check < INTERLOCK_EVERY:
             return
         self._last_interlock_check = now
-        from .gate import interlock_problem
+        from .gate import _unreachable, interlock_problem
         for i, lock in enumerate(self.lab.config.interlocks):
             try:
                 inst, spec = self.lab.resolve(lock.drive)
@@ -531,6 +532,11 @@ class Monitor:
                 continue
             self._holding.pop(i, None)
             if i in self._broken:
+                if not _unreachable(spec):   # set away from safe again while it is broken: back to safe it goes
+                    a = self._broken[i]
+                    a.actions += [m for m in (r.message for r in self.gate.abort_to_safe([lock.drive], "monitor",
+                                                                                         hold=False))
+                                  if m not in a.actions]
                 continue
             text = "Interlock: %s is at %s, which needs %s%s" % (lock.drive, spec.show(at), lock.require.text, broken)
             a = self._broken[i] = self._new("interlock", lock.drive, text, source="interlock %d" % i)
