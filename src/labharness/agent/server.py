@@ -26,7 +26,7 @@ from ..collection import Collection
 from ..labconfig import load_envelope
 from ..homelab import open_home_lab
 from .approval import ApprovalServer, WebApprover
-from .runtime import ClientCall, LabRuntime
+from .runtime import ClientCall, LabRuntime, Viewer
 
 INSTRUCTIONS = """\
 You are connected to a physics lab through Kelvin.
@@ -209,7 +209,8 @@ def lab_memory_part(rt: LabRuntime) -> str:
     """The lab's memory as it is when the server starts, for an agent's instructions (each stdio session starts its
     own server); shared_memory has the latest."""
     try:
-        brief = rt.lab_memory_brief(keep="remember_shared")
+        with rt.viewing(Viewer()):   # an agent over MCP sees shared work only
+            brief = rt.lab_memory_brief(keep="remember_shared")
     except Exception:   # the memory never keeps the server from starting
         return ""
     return "\n\n" + brief + "\n(As it was when this server started; shared_memory has the latest.)" if brief else ""

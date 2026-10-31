@@ -212,6 +212,7 @@ notes: 10 MOhm bias resistor on the sine out       # or series_resistor: 10e6 un
 ```
 - **Kept** in the data folder (`chains.json`), per device, or for the setup itself (`setup`), which a device without one of its own uses. Kelvin records it when a person says how the sample is wired (`measurement_chain`), and never assumes peak or rms.
 - **Stamped into every run** of the device (its record in `run.h5`), with the excitation worked out from the run's own setting: 50 nA peak is 35.4 nA rms.
+- **Its own work's.** The chain of a device of confidential (or other unshared) work is read in that project's chats only: other chats' briefs and `shared_memory` leave it out.
 - **Reports plot the named readings as the sample's resistance** (V / gain / I_rms, in ohms), saying how in the caption.
 
 ### Fits, figures, files and Python

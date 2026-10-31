@@ -2093,9 +2093,26 @@ class LabRuntime:
         and written again when Kelvin is next idle, in case an instrument was reset meanwhile."""
         prot = (self.mounted or {}).get("protection") or {}
         self.protection_missing = protection.apply(self.lab, prot, (self.mounted or {}).get("device_name") or "")
+        self._name_protection([{"project": (self.mounted or {}).get("project")}])
         self.lab.hands_on = self.hands
         if recheck:
             self.caps_waiting = bool(prot)
+
+    def _name_protection(self, marks: List[Dict[str, Any]]) -> None:
+        """The instruments name the devices whose protection holds (in limit refusals, descriptions and auto mode's
+        reasons) only to whoever may see the work they belong to (marks): the protection holds for every chat, but the
+        sample of unshared work is its own. Kelvin's own work (a queue item) says what its record may keep."""
+        def shown() -> bool:
+            viewer, mine = _VIEWER.get(), getattr(self._attributed, "value", None)
+            if viewer is None and mine is not None:
+                viewer = Viewer(chat=mine.get("chat"), project=mine.get("project"), allows=lambda _: True, whose=mine)
+            token = _VIEWER.set(viewer)
+            try:
+                return all(self.may_see(m) for m in marks)
+            finally:
+                _VIEWER.reset(token)
+        for inst in self.lab.instruments.values():
+            inst.device_shown = shown
 
     def _write_caps(self, by: str) -> List[str]:
         """Write the mounted device's caps into the instruments. What can't be written yet (a plan holds the
@@ -2151,6 +2168,7 @@ class LabRuntime:
                 except Exception:
                     pass
         protection.apply(self.lab, both, " and ".join(names))
+        self._name_protection([{"project": m.get("project")}, meta])
         try:
             lines, _ = protection.write_caps(self.gate, self.lab, both)
             yield ["held to %s's protection for this run: %s" % (dev.get("name"), "; ".join(
@@ -3161,6 +3179,20 @@ class LabRuntime:
                     return d.get("id"), d.get("name")
         return None, device.strip()
 
+    def _unseen_devices(self) -> Tuple[set, set]:
+        """The ids and names (in lower case) of the devices of the projects whose work the viewer of this thread may
+        not see (none without one)."""
+        ids, names = set(), set()
+        if self.viewer is None:
+            return ids, names
+        cache: Dict[Any, Any] = {}
+        for pid in self.project_ids():
+            if pid and not self.may_see({"project": pid}, cache):
+                for d in self._info(pid, cache).get("devices") or []:
+                    ids.add(str(d.get("id") or ""))
+                    names.add(str(d.get("name") or "").strip().lower())
+        return ids - {""}, names - {""}
+
     def measurement_chain(self, device: str = "", chain: Any = None, by: str = "agent", remove: bool = False) -> str:
         """Read, record or remove a device's measurement chain (chain.py): device by name (default the mounted one;
         "setup" for the setup's own, which a device without one of its own uses). Recorded chains are stamped into
@@ -3239,8 +3271,8 @@ class LabRuntime:
             found = Chains(self.data_dir).get(m.get("device"), m.get("device_name"))
         except Exception:
             return ""
-        if not found:
-            return ""
+        if not found or found["of"] != "setup" and not self.may_see({"project": m.get("project")}):
+            return ""   # the chain of unshared work's sample is read in that work's chats only
         whose = "the setup's" if found["of"] == "setup" else "%s's" % (found.get("device_name") or "the device")
         text = "Measurement chain (%s, recorded by %s, %s): %s" % (whose, found.get("by") or "?",
                                                                   str(found.get("at") or "?")[:10],
@@ -3293,6 +3325,9 @@ class LabRuntime:
                 kept = Chains(self.data_dir).every()
             except Exception:
                 kept = {}
+            ids, names = self._unseen_devices()   # unshared work's samples: their chains are read in its chats
+            kept = {k: v for k, v in kept.items() if k.split(":", 1)[-1] not in ids
+                    and str(v.get("device_name") or "").strip().lower() not in names}
             if kept:
                 out.append("Measurement chains on record (measurement_chain reads or records one):")
                 for entry in kept.values():

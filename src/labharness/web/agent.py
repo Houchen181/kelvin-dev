@@ -813,7 +813,8 @@ class ChatAgent:
         rules = self.chat_rules(chat)
         private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         parts.append(MEMORY_RULES + ("\n" + LEARN_RULES if learn else ""))
-        parts += self._lab_memory("remember, scope lab" if learn and not private else "")   # the lab's, everyone's
+        with self.runtime.viewing(self.viewer_for(chat)):   # the lab's, everyone's; unshared work's sample its own
+            parts += self._lab_memory("remember, scope lab" if learn and not private else "")
         know = self.know.index(project["id"] if project else None)
         parts.append(SKILLS_GUIDE + ("\n" + know if know else ""))
         if rulebook.restrictive(rules):
@@ -1016,7 +1017,7 @@ class ChatAgent:
                 now = self.runtime.mounted or {}
                 if now.get("protection"):   # taking it out would lift its protection: a person's call
                     return ("not changed: %s is mounted with protection a person set, so only a person changes "
-                            "what is mounted (Lab panel)" % now.get("device_name")), True
+                            "what is mounted (Lab panel)" % self.runtime.shown_sample(what="a sample")), True
                 ref = str(args.get("device") or "").strip()
                 if not ref:
                     ended = self.runtime.unmount(by="agent") or []   # the watches made for the sample that was
@@ -1039,7 +1040,9 @@ class ChatAgent:
                                            ", retired" if d.get("retired") else "",
                                            "; protected: " + "; ".join(prot) if prot else ""))
             lines = lines or ["no devices yet"]
-            lines.append("mounted now: %s" % ("%s (%s)" % (m["device_name"], m["project_name"]) if m else "nothing"))
+            seen = m and self.runtime.may_see({"project": m.get("project")})   # unshared work's sample is its own
+            lines.append("mounted now: %s" % ("%s (%s)" % (m["device_name"], m["project_name"]) if seen else
+                                              "a sample of another project's unshared work" if m else "nothing"))
             return "\n".join(lines), False
         except (KeyError, ValueError) as e:
             return str(e.args[0] if e.args else e), True

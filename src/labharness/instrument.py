@@ -123,13 +123,24 @@ class Instrument:
         self.stops = stops or Stops()   # the lab's: a person's stop ends a long wait on this instrument
         self._last: Dict[str, Any] = {}   # what Kelvin set, for parameters with no read-back
         # the mounted device's protection (protection.py): it only ever narrows the lab's limits and rates
-        self.device_name: Optional[str] = None
+        self._device_name: Optional[str] = None
+        self.device_shown: Callable[[], bool] = lambda: True   # may whoever asks now see its name (the runtime says)
         self.device_limits: Dict[str, Tuple[float, float]] = {}
         self.device_rates: Dict[str, float] = {}
         self.device_guards: Dict[str, List[Guard]] = {}
         self.health = Health()   # how it has been answering: the monitor's instrument-loss alarms read it
         self._read_ok: set = set()   # readings whose replies parsed: one that later can't is a garbled reply
         self._error_form = False     # its error query has answered as SCPI's do (-113,"Undefined header")
+
+    @property
+    def device_name(self) -> Optional[str]:
+        """The device whose protection holds here, by name; None for whoever may not see it (the sample of unshared
+        work, asked from another chat: then refusals and descriptions say "device" only)."""
+        return self._device_name if self._device_name and self.device_shown() else None
+
+    @device_name.setter
+    def device_name(self, name: Optional[str]) -> None:
+        self._device_name = name
 
     def _io(self, fn: Callable[..., Any], *args: Any, alive: bool = True) -> Any:
         """One exchange with the instrument, kept in its health. No answer, or no connection, is raised in plain words

@@ -433,3 +433,30 @@ def test_watches_made_for_a_confidential_sample_never_name_it_outside_its_projec
         assert status == 200 and SECRET.encode() not in raw, path
     inside = p.turn(p.secret, [("recent_events", {"n": 60})])["c0"]
     assert "ended" in inside   # the project's own chats keep its record
+
+
+def test_the_protection_of_a_confidential_sample_holds_for_every_chat_without_its_name(rt, tmp_path):
+    p, device = mounted(rt, tmp_path, {"limits": {"smu.V": [-0.5, 0.5]}})
+    rt.measurement_chain(chain={"excitation": {"source": "lockin.amplitude", "form": "rms"}}, by="Ann")   # its own
+    out = p.turn(p.other, [("set_value", {"instrument": "smu", "parameter": "V", "value": 0.8}),
+                           ("describe_instrument", {"instrument": "smu"}),
+                           ("validate_plan", {"plan": OPEN}),
+                           ("lab_status", {}),
+                           ("devices", {}),
+                           ("mount_device", {"device": ""}),
+                           ("shared_memory", {})])
+    assert "outside device limits [-0.5, 0.5]" in out["c0"]   # it still holds
+    assert "a sample of another project's unshared work" in out["c4"] and "protection a person set" in out["c5"]
+    for call, text in out.items():
+        assert SECRET not in text, (call, text)
+    assert SECRET not in p.agent.context(p.store.load(p.other))["system"]
+    rt.attribution = {}   # an agent over MCP
+
+    async def mcp():
+        r = await p.agent._tool("set_value", {"instrument": "smu", "parameter": "V", "value": 0.8}, None)
+        return r.content[0].text
+    assert "outside device limits" in p.in_turn(mcp) and SECRET not in p.in_turn(mcp)
+    inside = p.turn(p.secret, [("set_value", {"instrument": "smu", "parameter": "V", "value": 0.8}),
+                               ("devices", {})])
+    assert "outside device %s limits" % SECRET in inside["c0"] and "mounted now: %s" % SECRET in inside["c1"]
+    assert SECRET in p.agent.context(p.store.load(p.secret))["system"]   # its chain, in its own chats' brief
