@@ -622,3 +622,24 @@ def test_a_queued_item_of_unpublished_work_keeps_that_mark(rt, tmp_path, monkeyp
     assert meta.get("unpublished")
     status, raw = ask("GET", "/api/runs")
     assert status == 200 and run.encode() not in raw
+
+
+def test_what_kelvin_does_for_confidential_work_goes_unnamed_elsewhere(rt, tmp_path, monkeypatch):
+    from test_team_and_analysis import _relay
+    p, device = mounted(rt, tmp_path)
+    p.turn(p.secret, [("queue_add", {"item": NDA})])
+    rt.protect(dict(device, protection={"limits": {"smu.V": [-0.5, 0.5]}}))   # the item no longer fits
+    with rt.viewing(p.agent.viewer_for(p.store.load(p.secret))):   # its chat's call has the lab
+        rt.busy = "running recipe acme_prep"
+    with rt.viewing(p.agent.viewer_for(p.store.load(p.other))):
+        assert rt.held_by() == "a task of unshared work"
+    assert rt.held_by() == "running recipe acme_prep"   # the person at the computer
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"acme" not in raw.lower() and json.loads(raw)["busy"] == "a task of unshared work"
+    rt.busy = None
+    out = p.turn(p.other, [("queue_start", {"dry_run": True}), ("queue_start", {})])
+    for call, text in out.items():
+        assert "acme" not in text.lower() and "#1 (an item of unshared work)" in text, (call, text)
+    inside = p.turn(p.secret, [("queue_start", {"dry_run": True})])["c0"]
+    assert "#1 acme_gate" in inside

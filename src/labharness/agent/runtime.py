@@ -387,7 +387,8 @@ class LabRuntime:
         self._viewers_lock = threading.Lock()
         self._holder: Optional["ClientCall"] = None   # the client's call that has the lab now, if one has
         self._script_cards: Optional[Tuple[Any, Any]] = None   # (the lab's cards folder as it was, the registry)
-        self.busy: Optional[str] = None
+        self._busy: Optional[str] = None
+        self._busy_whose: Optional[Dict[str, Any]] = None   # the marks of the unshared work busy names (_whose_now)
         self._status: Dict[str, Dict[str, Any]] = {}
         self._status_at = 0.0
         self.live: Optional[Dict[str, Any]] = None   # the run in progress (or the last one), for live displays
@@ -815,6 +816,27 @@ class LabRuntime:
             return got[0], None
         return None, why
 
+    @property
+    def busy(self) -> Optional[str]:
+        """What Kelvin is doing now, in words ("running recipe ..."); None when idle. Who reads it: busy_shown."""
+        return self._busy
+
+    @busy.setter
+    def busy(self, text: Optional[str]) -> None:
+        try:   # set by the thread doing that work: whose work it is goes with it
+            whose = self._whose_now() if text else None
+        except Exception:
+            whose = {"unshared": True}
+        self._busy, self._busy_whose = text, whose
+
+    def busy_shown(self, text: Optional[str] = None) -> Optional[str]:
+        """What Kelvin is doing now (busy), as the viewer of this thread may read it: what it does for unshared work
+        that viewer may not see goes unnamed. text: busy as read a moment ago (unnamed too if it has changed since)."""
+        now = self._busy
+        text = now if text is None else text
+        whose = self._busy_whose if text == now else {"unshared": True}
+        return text if not text or self.may_see(whose) else "a task of unshared work"
+
     def held_by(self) -> str:
         """What has the lab now, in words: the running plan and how far it is, an approval card waiting for a person,
         the queue, or what Kelvin is doing."""
@@ -834,8 +856,8 @@ class LabRuntime:
         if self.queue.state in ("running", "pausing"):
             running = next((i for i in self.queue.items if i.status == "running"), None)
             hide = restricted and running is not None and not self.may_see(running.whose())
-            return "the queue (%s)" % ("an item of unshared work" if hide else self.busy or "between its items")
-        return self.busy or "an earlier request"
+            return "the queue (%s)" % ("an item of unshared work" if hide else self.busy_shown() or "between its items")
+        return self.busy_shown() or "an earlier request"
 
     def busy_for(self, seconds: float) -> bool:
         """Whether the lab stays held for longer than this: by a run expected to go on longer, the queue, or an
@@ -2142,7 +2164,7 @@ class LabRuntime:
             return []
         if not self.lock.acquire(blocking=False):
             self.caps_waiting = True
-            return ["the instruments' own caps are written when Kelvin is idle (now %s)" % (self.busy or "busy")]
+            return ["the instruments' own caps are written when Kelvin is idle (now %s)" % (self.busy_shown() or "busy")]
         try:
             with self.gate.acting_as(by):
                 lines, done = protection.write_caps(self.gate, self.lab, prot)
@@ -2604,13 +2626,21 @@ class LabRuntime:
             used.update(keys)
         return later
 
+    def _item_line(self, n: int, item: Item, text: Any = None, cache: Optional[Dict[Any, Any]] = None) -> str:
+        """A queue item by its place and name ("#2 gate_sweep"), with what is said of it (text), as the viewer of this
+        thread may read it: an item of unshared work it may not see goes unnamed."""
+        if self.may_see(item.whose(), cache):
+            return "#%d %s" % (n, item.name) + (": %s" % text if text is not None else "")
+        unnamed = "#%d (an item of unshared work)" % n
+        return unnamed + (": %s" % str(text).replace(item.name, "it") if text is not None else "")
+
     def _queue_interlocks(self, items: List[Item]) -> List[str]:
         """Where the queue would break an interlock, item after item, each from where the one before leaves the lab
         (engine.interlock_problems): a warm-up step before a field sweep once got a card with no word of it."""
         state: Dict[str, Any] = {}
         out: List[str] = []
         for n, item in enumerate(items, 1):
-            who = "#%d %s" % (n, item.name)
+            who = self._item_line(n, item)
             if item.kind == "plan":
                 out += self.engine.interlock_problems(self._plan(item.text), state, who)
             else:
@@ -2630,13 +2660,13 @@ class LabRuntime:
             if item.kind == "plan":
                 r = engine.run(self._plan(item.text), dry_run=False)
                 if r.status != "done":
-                    problems.append("#%d %s: %s" % (n, item.name, r.message))
+                    problems.append(self._item_line(n, item, r.message))
                 continue
             step = load_step(item.text)
             for instr, param, value in step.sets:
                 r = gate._set(instr, param, value, True, "dry-run")
                 if not r.ok:
-                    problems.append("#%d %s: %s" % (n, item.name, r.message))
+                    problems.append(self._item_line(n, item, r.message))
             if step.stabilize:
                 engine._stabilize(step.stabilize, gate.stop_generation, warnings)
             twin.clock.sleep(step.wait)
@@ -2653,13 +2683,13 @@ class LabRuntime:
         if not items:
             return "nothing is waiting in the queue"
 
-        def check() -> List[str]:
+        def check() -> List[str]:   # every waiting item's, whichever chat asks: unshared work's unnamed
             problems = []
             for n, item in enumerate(items, 1):
                 try:
-                    problems += ["#%d %s: %s" % (n, item.name, p) for p in self._queue_problems(item.text)]
+                    problems += [self._item_line(n, item, p) for p in self._queue_problems(item.text)]
                 except PlanError as e:
-                    problems.append("#%d %s: %s" % (n, item.name, e))
+                    problems.append(self._item_line(n, item, e))
             return problems
 
         def rehearse() -> str:

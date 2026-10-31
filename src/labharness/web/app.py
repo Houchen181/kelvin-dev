@@ -724,6 +724,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         running = next((i for i in runtime.queue.items if i.status == "running"), None)
         if work or (running is not None and runtime.unshared_work(running.whose())):
             out["busy"] = "running a scan of unshared work" if data.get("busy") else data.get("busy")
+        elif data.get("busy"):   # what Kelvin does for unshared work (a recipe, a chat's call): unnamed
+            with runtime.viewing(Viewer()):
+                out["busy"] = runtime.busy_shown(data["busy"])
         if work or any(isinstance(p, dict) and p.get("unshared") for p in data.get("pending") or []):
             out["instruments"] = [dict(i, in_use="it is in use (unshared work)") if isinstance(i, dict)
                                   and i.get("in_use") else i for i in data.get("instruments") or []]
