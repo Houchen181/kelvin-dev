@@ -352,3 +352,327 @@ def test_a_confidential_project_and_its_chats_show_a_lock_and_one_switch_sets_it
     client.patch("/api/chats/" + chat["id"], headers=h, json={"project": None})   # out of it, it keeps the marks
     (mine,) = [c for c in client.get("/api/chats", headers=h).json() if c["id"] == chat["id"]]
     assert mine.get("confidential") is True and mine["rules"]["providers"] == ["local"]
+
+
+# ------------------------------------------------------------------ the review of 0.3.34
+
+SECRET = "Acme-HfO2-D1"
+
+
+def mounted(rt, tmp_path, protection=None):
+    """A portal whose Acme NDA sample is mounted (with this protection)."""
+    p = Portal(tmp_path, rt)
+    device = p.store.add_device(p.nda, SECRET)
+    rt.mount(p.nda, device)
+    if protection:
+        rt.protect(dict(device, protection=protection))
+    return p, device
+
+
+def test_work_outside_every_chat_stays_under_the_mounted_confidential_sample_with_its_marks(rt, tmp_path):
+    import time
+    from labharness.web.hubsync import run_items
+    p, _ = mounted(rt, tmp_path)
+    with rt.attributed({}):   # a person queues it from the Queue pane: filed under no chat
+        assert rt.queue_add(NDA, None, "W17 first pass", "human").startswith("added")
+    assert rt.queue_start("human").startswith("queue started")
+    deadline = time.time() + 60
+    while rt.queue.state in ("running", "pausing") and time.time() < deadline:
+        time.sleep(0.1)
+    run, meta = newest(rt, "acme_gate")
+    assert (meta["project"], meta["device_name"], meta.get("confidential")) == (p.nda, SECRET, True)
+    assert meta["rules"]["providers"] == ["scripted"]
+    assert run not in [item["id"] for item, _ in run_items(rt.runs, {p.nda}, None)[0]]
+    looked = p.turn(p.other, [("list_runs", {}), ("describe_run", {"run_id": run})])
+    assert run not in looked["c0"] and "unshared work" in looked["c1"]
+    rt.attribution = {}   # an agent over MCP: no chat either
+    rt.run(NDA.replace("acme_gate", "acme_mcp"))
+    _, meta = newest(rt, "acme_mcp")
+    assert (meta["project"], meta["device_name"], meta.get("confidential")) == (p.nda, SECRET, True)
+    # a chat's queued item filed apart says so where that chat reads the queue
+    p.turn(p.other, [("queue_add", {"item": OPEN})])
+    assert rt.queue_start("human").startswith("queue started")
+    deadline = time.time() + 60
+    while rt.queue.state in ("running", "pausing") and time.time() < deadline:
+        time.sleep(0.1)
+    shown = p.turn(p.other, [("queue_show", {})])["c0"]
+    assert "filed under General without the mounted sample" in shown and SECRET not in shown
+
+
+def test_watches_made_for_a_confidential_sample_never_name_it_outside_its_project(rt, tmp_path, monkeypatch):
+    from test_team_and_analysis import _relay
+    p, _ = mounted(rt, tmp_path)
+    now = float(rt.lab.read("tc", "T_sample"))
+    rt.add_watch("tc.T_sample", above=now - 1.0, note="%s must stay cold" % SECRET)   # a person's, in the Lab panel
+    for _ in range(3):
+        rt.monitor.tick()
+    assert rt.monitor.active()
+    said = p.turn(p.other, [("watch", {"reading": "tc.T_sample", "above": 300})])["c0"]
+    assert "ends when the mounted sample is taken out" in said and SECRET not in said
+
+    async def mcp_watch():   # an agent over MCP: no chat
+        r = await p.agent._tool("watch", {"reading": "tc.T_sample", "above": 301}, None)
+        return r.content[0].text
+    assert SECRET not in p.in_turn(mcp_watch)
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("POST", "/api/watches", {"key": "tc.T_sample", "above": 302})   # a phone through the hub
+    assert status == 200 and SECRET.encode() not in raw and json.loads(raw)["device"]
+    status, raw = ask("GET", "/api/watches")
+    assert status == 200 and SECRET.encode() not in raw
+
+    out = p.turn(p.other, [("mount_device", {"device": ""})])["c0"]   # the ordinary chat takes the sample out
+    assert "ended with it" in out and SECRET not in out
+    notices = [n for n in rt.notifier.notices if n["kind"] == "watch"]
+    assert notices and notices[-1]["unshared"] and SECRET not in json.dumps(notices)
+    assert SECRET not in json.dumps([a.view() for a in rt.monitor.alarms])   # what clears them says no name
+    looked = p.turn(p.other, [("recent_events", {"n": 60}), ("activity", {}), ("watches", {}), ("lab_status", {})])
+    for call, text in looked.items():
+        assert SECRET not in text, (call, text)
+    for path in ("/api/state", "/api/watches"):
+        status, raw = ask("GET", path)
+        assert status == 200 and SECRET.encode() not in raw, path
+    inside = p.turn(p.secret, [("recent_events", {"n": 60})])["c0"]
+    assert "ended" in inside   # the project's own chats keep its record
+
+
+def test_the_protection_of_a_confidential_sample_holds_for_every_chat_without_its_name(rt, tmp_path):
+    p, device = mounted(rt, tmp_path, {"limits": {"smu.V": [-0.5, 0.5]}})
+    rt.measurement_chain(chain={"excitation": {"source": "lockin.amplitude", "form": "rms"}}, by="Ann")   # its own
+    out = p.turn(p.other, [("set_value", {"instrument": "smu", "parameter": "V", "value": 0.8}),
+                           ("describe_instrument", {"instrument": "smu"}),
+                           ("validate_plan", {"plan": OPEN}),
+                           ("lab_status", {}),
+                           ("devices", {}),
+                           ("mount_device", {"device": ""}),
+                           ("shared_memory", {})])
+    assert "outside device limits [-0.5, 0.5]" in out["c0"]   # it still holds
+    assert "a sample of another project's unshared work" in out["c4"] and "protection a person set" in out["c5"]
+    for call, text in out.items():
+        assert SECRET not in text, (call, text)
+    assert SECRET not in p.agent.context(p.store.load(p.other))["system"]
+    rt.attribution = {}   # an agent over MCP
+
+    async def mcp():
+        r = await p.agent._tool("set_value", {"instrument": "smu", "parameter": "V", "value": 0.8}, None)
+        return r.content[0].text
+    assert "outside device limits" in p.in_turn(mcp) and SECRET not in p.in_turn(mcp)
+    inside = p.turn(p.secret, [("set_value", {"instrument": "smu", "parameter": "V", "value": 0.8}),
+                               ("devices", {})])
+    assert "outside device %s limits" % SECRET in inside["c0"] and "mounted now: %s" % SECRET in inside["c1"]
+    assert SECRET in p.agent.context(p.store.load(p.secret))["system"]   # its chain, in its own chats' brief
+
+
+def test_the_restart_card_counts_the_confidential_work_it_cut_short_without_naming_it(rt, tmp_path, monkeypatch):
+    from test_team_and_analysis import _relay
+    p = Portal(tmp_path, rt)
+    p.turn(p.secret, [("run_plan", {"plan": NDA}), ("queue_add", {"item": NDA, "note": "W17"})])
+    p.turn(p.other, [("run_plan", {"plan": OPEN})])
+    run, _ = newest(rt, "acme_gate")
+    shared, _ = newest(rt, "thesis_gate")
+    rt.interrupted, rt.queue.cut_short = [run, shared], [rt.queue.items[0]]   # as after a crash
+    rt._incident_due = True
+    rt._incident_check()
+    assert rt.incident and "acme_gate" in json.dumps(rt.ui_state()["incident"])   # the person at the computer
+    notices = [n for n in rt.notifier.notices if "restarted" in n["title"]]
+    assert notices and "acme" not in json.dumps(notices) and "1 run of unshared work" in notices[-1]["text"]
+    assert shared in notices[-1]["text"] and "1 item of unshared work" in notices[-1]["text"]
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"acme" not in raw.lower() and shared.encode() in raw
+    other = p.turn(p.other, [("lab_status", {}), ("recent_events", {"n": 60})])
+    for call, text in other.items():
+        assert "acme" not in text.lower(), (call, text)
+    assert "AFTER KELVIN RESTARTED" in other["c0"] and "1 run of unshared work" in other["c0"]
+    inside = p.turn(p.secret, [("lab_status", {}), ("recent_events", {"n": 60})])
+    assert run in inside["c0"] and "the queue was running acme_gate" in inside["c0"]
+    assert "cut short %s" % run in inside["c1"]   # the project's own record of it
+
+
+def test_a_persons_answer_to_a_card_of_confidential_work_stays_that_works_own(tmp_path, monkeypatch):
+    import threading
+    from labharness.agent.approval import WebApprover
+    from test_team_and_analysis import _relay
+    rt = LabRuntime(build_virtual_lab(seed=1), WebApprover(timeout=30), tmp_path / "data")
+    p = Portal(tmp_path, rt)
+    done = threading.Event()
+
+    def decline_all():   # the person at the computer says No to the NDA chat's run
+        while not done.is_set():
+            entry = rt.approver.wait_for_pending(timeout=0.2)
+            if entry:
+                rt.answer(entry["id"], False, "human")
+    person = threading.Thread(target=decline_all, daemon=True)
+    person.start()
+    said = p.turn(p.secret, [("run_plan", {"plan": NDA})])
+    done.set()
+    person.join(5)
+    assert "declined" in said["c0"]
+    answers = [e for e in rt.gate.log.events() if e["type"] == "answer"]
+    assert answers and answers[-1]["whose"]["confidential"] and "acme_gate" in answers[-1]["request"]
+    other = p.turn(p.other, [("recent_events", {"n": 40}), ("activity", {})])
+    for call, text in other.items():
+        assert "acme" not in text.lower(), (call, text)
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"acme" not in raw.lower()
+    inside = p.turn(p.secret, [("recent_events", {"n": 40})])["c0"]
+    assert "declined" in inside and "acme_gate" in inside   # the project's own record of it
+
+
+def test_whose_a_run_is_fails_closed(rt, tmp_path, monkeypatch):
+    from labharness import rundata
+    p = Portal(tmp_path, rt)
+    p.turn(p.secret, [("run_plan", {"plan": NDA})])
+    run, _ = newest(rt, "acme_gate")
+
+    def locked():
+        raise OSError("the catalog is locked")
+    monkeypatch.setattr(rt, "_fresh_catalog", locked)   # each run's own record says whose it is
+    with rt.viewing(Viewer()):
+        assert run in rt._hidden_runs()
+    monkeypatch.setattr(rundata, "meta", lambda d: {}["damaged"])   # nor can that be read: kept apart
+    with rt.viewing(Viewer()):
+        assert run in rt._hidden_runs() and not rt.may_see(rt._run_marks(rt.runs / run))
+    assert rt.may_see(rt._run_marks(rt.runs / run))   # the person at the computer
+
+
+def test_the_data_folder_and_unshared_runs_are_out_of_reach_wherever_they_are(tmp_path):
+    rt = LabRuntime(build_virtual_lab(seed=1), ScriptedApprover([True] * 50), tmp_path / "LabData")
+    rt.home = tmp_path / "Kelvin"   # the data folder is elsewhere (Settings -> Data folder)
+    rt.home.mkdir()
+    p = Portal(tmp_path, rt)
+    (tmp_path / "Shared" / "nda-runs").mkdir(parents=True)
+    for chat_id, folder in ((p.secret, tmp_path / "Shared" / "nda-runs"), (p.other, tmp_path)):
+        chat = p.store.load(chat_id)
+        chat["folder"] = str(folder)
+        p.store.save(chat)
+    p.turn(p.secret, [("run_plan", {"plan": NDA}), ("run_plan", {"plan": NDA.replace("acme_gate", "acme_data")})])
+    p.turn(p.secret, [("export_run", {"run_id": "last"})])
+    runs = sorted(d for d in (tmp_path / "Shared" / "nda-runs").iterdir() if d.is_dir())
+    assert runs and all("acme" in d.name for d in runs)
+    exported = next(runs[-1].rglob("*.csv"))
+    inner = next(f for f in runs[0].rglob("*") if f.is_file() and f.suffix != ".h5")
+    out = p.turn(p.other, [("read_examples", {"path": str(tmp_path / "LabData")}),
+                           ("survey_scripts", {"path": str(tmp_path / "LabData")}),
+                           ("read_examples", {"path": str(tmp_path / "Shared")}),
+                           ("list_folder", {"path": "Shared/nda-runs"}),
+                           ("read_file", {"path": str(inner.relative_to(tmp_path))}),
+                           ("list_folder", {"path": "LabData"}),
+                           ("read_file", {"path": "LabData/events.jsonl"}),
+                           ("import_data", {"paths": str(exported)})])
+    for call, text in out.items():
+        assert "acme" not in text.lower(), (call, text)
+    assert "Kelvin's own folder" in out["c0"] and "Kelvin's own folder" in out["c1"]
+    assert "2 runs of unshared work" in out["c3"]
+    assert "unshared work" in out["c4"] and "Kelvin's data folder" in out["c5"] and "data folder" in out["c6"]
+    assert out["c7"].startswith("not imported") and "unshared work" in out["c7"]
+    inside = p.turn(p.secret, [("list_folder", {}), ("read_file", {"path": str(inner.relative_to(runs[0].parent))})])
+    assert runs[0].name in inside["c0"] and not inside["c1"].startswith("not read")   # its own
+
+
+def test_the_hub_trims_answers_off_the_portals_loop_and_sends_none_it_could_not_trim():
+    import threading
+    from labharness.web.relay import RelayLink
+    seen, sent = {}, []
+
+    def trim(method, path, payload):   # reading whose each run is may take a while
+        seen["trim"] = threading.get_ident()
+        if payload.get("broken"):
+            raise RuntimeError("the catalog is locked")
+        return dict(payload, runs=[]), 1
+
+    async def out_head(status, headers):
+        sent.append((status, headers))
+
+    async def out_bytes(data):
+        sent.append(data)
+
+    async def answer(body):
+        seen["loop"] = threading.get_ident()
+        link = RelayLink(app=None, target=lambda: None, hello=dict, trim=trim)
+        await link._out_trimmed(out_head, out_bytes, "GET", "/api/runs",
+                                {"status": 200, "headers": [["content-type", "application/json"]]}, body)
+    asyncio.run(answer(b'{"runs": ["20261030-120000-acme_gate"]}'))
+    assert seen["trim"] != seen["loop"] and json.loads(sent[1]) == {"runs": []}
+    sent.clear()
+    asyncio.run(answer(b'{"runs": ["20261030-120000-acme_gate"], "broken": true}'))
+    assert sent[0][0] == 500 and b"acme" not in sent[1]
+
+
+def test_a_queued_item_of_unpublished_work_keeps_that_mark(rt, tmp_path, monkeypatch):
+    import time
+    from test_team_and_analysis import _relay
+    p = Portal(tmp_path, rt)
+    draft = p.store.create_project("Thesis draft")
+    p.store.set_sharing(draft["id"], "unpublished")
+    chat = p.store.create("scripted:m1", draft["id"])["id"]
+    p.turn(chat, [("queue_add", {"item": OPEN})])
+    item = rt.queue.items[0]
+    assert item.unpublished and item.whose()["unpublished"]
+    p.store.set_sharing(draft["id"], "")   # published later: what was queued before stays unpublished work
+    assert rt.unshared_work(item.whose())
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"thesis_gate" not in raw
+    assert rt.queue_start("human").startswith("queue started")
+    deadline = time.time() + 60
+    while rt.queue.state in ("running", "pausing") and time.time() < deadline:
+        time.sleep(0.1)
+    run, meta = newest(rt, "thesis_gate")
+    assert meta.get("unpublished")
+    status, raw = ask("GET", "/api/runs")
+    assert status == 200 and run.encode() not in raw
+
+
+def test_what_kelvin_does_for_confidential_work_goes_unnamed_elsewhere(rt, tmp_path, monkeypatch):
+    from test_team_and_analysis import _relay
+    p, device = mounted(rt, tmp_path)
+    p.turn(p.secret, [("queue_add", {"item": NDA})])
+    rt.protect(dict(device, protection={"limits": {"smu.V": [-0.5, 0.5]}}))   # the item no longer fits
+    with rt.viewing(p.agent.viewer_for(p.store.load(p.secret))):   # its chat's call has the lab
+        rt.busy = "running recipe acme_prep"
+    with rt.viewing(p.agent.viewer_for(p.store.load(p.other))):
+        assert rt.held_by() == "a task of unshared work"
+    assert rt.held_by() == "running recipe acme_prep"   # the person at the computer
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"acme" not in raw.lower() and json.loads(raw)["busy"] == "a task of unshared work"
+    rt.busy = None
+    out = p.turn(p.other, [("queue_start", {"dry_run": True}), ("queue_start", {})])
+    for call, text in out.items():
+        assert "acme" not in text.lower() and "#1 (an item of unshared work)" in text, (call, text)
+    inside = p.turn(p.secret, [("queue_start", {"dry_run": True})])["c0"]
+    assert "#1 acme_gate" in inside
+
+
+@pytest.mark.parametrize("path, held", [
+    ("C:/Users/ann/AppData/Roaming/GitHub CLI/hosts.yml", True),
+    ("C:/Users/ann/AppData/Local/Google/Chrome/User Data/Default/Login Data", True),
+    ("C:/Users/ann/AppData/LocalLow/Acme/settings.json", True),
+    ("C:/Users/ann/AppData/Roaming/Microsoft/Credentials", True),
+    ("/Users/ann/Library/Keychains/login.keychain-db", True),
+    ("/Users/ann/Library/Application Support/gh/hosts.yml", True),
+    ("/home/ann/.local/share/keyrings/login.keyring", True),
+    ("/home/ann/.mozilla/firefox/x.default/logins.json", True),
+    ("C:/Users/ann/AppData/Local/Programs/Acme/examples/sweep.py", False),   # a maker's install
+    ("C:/Users/ann/AppData/Local/Temp/kelvin-attached-1/iv.csv", False),
+    ("/home/ann/.local/lib/python3.12/site-packages/acme/examples/sweep.py", False),
+    ("C:/Users/ann/AppData/Local/Temp/x/AppData/Roaming/GitHub CLI/hosts.yml", True)])
+def test_other_programs_sign_ins_in_appdata_and_their_kin_are_never_read(path, held):
+    from pathlib import Path
+    assert folderfiles.secret(Path(path)) is held
+
+
+def test_a_chats_folder_tools_never_read_another_programs_sign_ins_in_appdata(rt, tmp_path):
+    p = Portal(tmp_path, rt)
+    roaming = tmp_path / "ann" / "AppData" / "Roaming" / "GitHub CLI"
+    roaming.mkdir(parents=True)
+    (roaming / "hosts.yml").write_text("github.com:\n    oauth_token: gho_abc\n", encoding="utf-8")
+    chat = p.store.load(p.other)
+    chat["folder"] = str(tmp_path / "ann")
+    p.store.save(chat)
+    out = p.turn(p.other, [("read_file", {"path": "AppData/Roaming/GitHub CLI/hosts.yml"}),
+                           ("list_folder", {"path": "AppData/Roaming"}),
+                           ("read_examples", {"path": str(roaming)})])
+    for call, text in out.items():
+        assert "gho_abc" not in text and "sign-ins" in text, (call, text)

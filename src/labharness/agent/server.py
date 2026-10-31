@@ -26,7 +26,7 @@ from ..collection import Collection
 from ..labconfig import load_envelope
 from ..homelab import open_home_lab
 from .approval import ApprovalServer, WebApprover
-from .runtime import ClientCall, LabRuntime
+from .runtime import ClientCall, LabRuntime, Viewer
 
 INSTRUCTIONS = """\
 You are connected to a physics lab through Kelvin.
@@ -209,7 +209,8 @@ def lab_memory_part(rt: LabRuntime) -> str:
     """The lab's memory as it is when the server starts, for an agent's instructions (each stdio session starts its
     own server); shared_memory has the latest."""
     try:
-        brief = rt.lab_memory_brief(keep="remember_shared")
+        with rt.viewing(Viewer()):   # an agent over MCP sees shared work only
+            brief = rt.lab_memory_brief(keep="remember_shared")
     except Exception:   # the memory never keeps the server from starting
         return ""
     return "\n\n" + brief + "\n(As it was when this server started; shared_memory has the latest.)" if brief else ""
@@ -376,8 +377,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
             v = rt.add_watch(reading, above, below, for_seconds, note, source="agent", lab_wide=bool(lab_wide))
         except (KeyError, ValueError) as e:
             return "not watched: %s" % (e.args[0] if e.args else e)
-        return "watching %s (id %s%s); %s" % (v["rule"], v["id"], ", ends when %s is taken out" % v["device"]
-                                              if v.get("device") else "", rt.alarms_reach())
+        return "watching %s (id %s%s); %s" % (v["rule"], v["id"], ", ends when %s is taken out"
+                                              % rt.shown_sample(v["device"]) if v.get("device") else "",
+                                              rt.alarms_reach())
 
     @server.tool(annotations=READ, structured_output=False)
     def watches() -> str:

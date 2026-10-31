@@ -813,7 +813,8 @@ class ChatAgent:
         rules = self.chat_rules(chat)
         private = unshared(project) or unshared(dict(chat, rules=rules))   # no notes for every conversation from it
         parts.append(MEMORY_RULES + ("\n" + LEARN_RULES if learn else ""))
-        parts += self._lab_memory("remember, scope lab" if learn and not private else "")   # the lab's, everyone's
+        with self.runtime.viewing(self.viewer_for(chat)):   # the lab's, everyone's; unshared work's sample its own
+            parts += self._lab_memory("remember, scope lab" if learn and not private else "")
         know = self.know.index(project["id"] if project else None)
         parts.append(SKILLS_GUIDE + ("\n" + know if know else ""))
         if rulebook.restrictive(rules):
@@ -978,20 +979,22 @@ class ChatAgent:
     # ------------------------------------------------------------------ devices and the reports' view of projects
 
     def project_info(self, project_id: Optional[str]) -> Dict[str, Any]:
-        """What reports need about a project; None is the General workspace (work outside every project)."""
+        """What reports need about a project, and its marks; None is the General workspace (work outside every
+        project). A project that is gone counts as unshared work: Kelvin can't tell whether it was shared."""
         project = None
         if project_id:
             try:
                 project = self.store.project(project_id)
             except KeyError:
                 return {"id": project_id, "name": project_id, "devices": [], "notes": [], "references": [],
-                        "summary": "", "private": False, "unshared": False}
+                        "summary": "", "private": False, "unshared": True}
         return {"id": project_id, "name": project["name"] if project else "General",
                 "devices": self.store.devices(project_id), "notes": self.report_notes(project),
                 "references": self.report_references(project), "summary": self.store.summary_of(project_id),
                 "private": bool(project and rulebook.restrictive(project.get("rules"))),
                 "unshared": unshared(project), "rules": (project or {}).get("rules"),
-                "confidential": bool((project or {}).get("confidential"))}
+                "confidential": bool((project or {}).get("confidential")),
+                "unpublished": bool((project or {}).get("unpublished"))}
 
     def project_chat_runs(self, project_id: Optional[str]) -> List[str]:
         chats = []
@@ -1014,7 +1017,7 @@ class ChatAgent:
                 now = self.runtime.mounted or {}
                 if now.get("protection"):   # taking it out would lift its protection: a person's call
                     return ("not changed: %s is mounted with protection a person set, so only a person changes "
-                            "what is mounted (Lab panel)" % now.get("device_name")), True
+                            "what is mounted (Lab panel)" % self.runtime.shown_sample(what="a sample")), True
                 ref = str(args.get("device") or "").strip()
                 if not ref:
                     ended = self.runtime.unmount(by="agent") or []   # the watches made for the sample that was
@@ -1037,7 +1040,9 @@ class ChatAgent:
                                            ", retired" if d.get("retired") else "",
                                            "; protected: " + "; ".join(prot) if prot else ""))
             lines = lines or ["no devices yet"]
-            lines.append("mounted now: %s" % ("%s (%s)" % (m["device_name"], m["project_name"]) if m else "nothing"))
+            seen = m and self.runtime.may_see({"project": m.get("project")})   # unshared work's sample is its own
+            lines.append("mounted now: %s" % ("%s (%s)" % (m["device_name"], m["project_name"]) if seen else
+                                              "a sample of another project's unshared work" if m else "nothing"))
             return "\n".join(lines), False
         except (KeyError, ValueError) as e:
             return str(e.args[0] if e.args else e), True
@@ -2045,7 +2050,7 @@ class ChatAgent:
         path = str(args.get("path") or "")
         if call["name"] == "list_folder":
             try:
-                text = await asyncio.to_thread(folderfiles.listing, folder, path, self._kelvins())
+                text = await asyncio.to_thread(folderfiles.listing, folder, path, self._kelvins(), **self._apart())
             except (ValueError, OSError) as e:   # FolderError is a ValueError
                 return "not read: %s" % (e.strerror if isinstance(e, OSError) and e.strerror else e), True
             return OUTSIDE % ("the names in this chat's folder", text), False
@@ -2057,6 +2062,13 @@ class ChatAgent:
         (folderfiles.off_limits): Kelvin's folder (the lab config, settings, accounts, cards, everyone's chats) and
         the chats of the person signed in."""
         return [f for f in (getattr(self.runtime, "home", None), getattr(self.store, "root", None)) if f]
+
+    def _apart(self) -> Dict[str, Any]:
+        """What else a chat's folder tools never reach (folderfiles.off_limits): the data folder (everyone's runs and
+        the lab's records), and a run of unshared work this chat may not see, wherever it is kept. Asked in the
+        chat's tool call (its viewer)."""
+        rt = self.runtime
+        return {"data": rt.data_dir, "unseen": lambda d: not rt.may_see(rt._run_marks(Path(d)))}
 
     async def _read_in(self, folder: Any, call: Dict[str, Any], provider: Provider, own: Iterable[Any] = (),
                        model: str = "", chat: Optional[Dict[str, Any]] = None) -> Tuple[str, bool]:
@@ -2072,7 +2084,7 @@ class ChatAgent:
         try:
             start = int(args.get("start") or 0)
             text, media = await asyncio.to_thread(folderfiles.read, folder, path, pages, start, whole or drawn, own,
-                                                  MAX_DRAWN if drawn else MAX_PDF_PAGES)
+                                                  MAX_DRAWN if drawn else MAX_PDF_PAGES, **self._apart())
             pdf = [data for mime, data in media if mime == folderfiles.PDF] if drawn else []
             if pdf:
                 try:
@@ -2081,7 +2093,8 @@ class ChatAgent:
                         raise ValueError("the hub drew no pages")
                     text = text.replace(", shown whole", ", shown as pictures")
                 except Exception as e:   # the hub can't draw them now: their text, as for any model
-                    text, media = await asyncio.to_thread(folderfiles.read, folder, path, pages, start, False, own)
+                    text, media = await asyncio.to_thread(folderfiles.read, folder, path, pages, start, False, own,
+                                                          **self._apart())
                     text += "\n(the pages couldn't be drawn as pictures (%s), so these are their text)" % _why(e)
             elif asked and not whole and not drawn:
                 text += "\n(this model can't see a PDF's pages, so these are their text)"
@@ -2110,8 +2123,8 @@ class ChatAgent:
         if not isinstance(text, str):
             return "not saved: give the file's whole text as content", True
         rt = self.runtime
-        try:   # never Kelvin's own folders (the lab config, settings, accounts, cards, chats) or the lab's records
-            target = folderfiles.inside(folder, path, saving=True, own=self._kelvins(), data=rt.data_dir)
+        try:   # never Kelvin's own folders (the lab config, settings, accounts, cards, chats) or those of _apart
+            target = folderfiles.inside(folder, path, saving=True, own=self._kelvins(), **self._apart())
         except folderfiles.FolderError as e:
             return "not saved: %s" % e, True
         loads = sorted({n for n, d in library.code_folders({n: ic.address for n, ic in rt.lab.config.instruments.items()},
@@ -2138,7 +2151,7 @@ class ChatAgent:
                 return "declined: nothing was saved%s" % (" (%s)" % request.note if request.note else ""), True
         try:
             target, kept = await asyncio.to_thread(folderfiles.save, folder, path, text, self._kelvins(),
-                                                   rt.data_dir)
+                                                   **self._apart())
         except folderfiles.FolderError as e:
             return "not saved: %s" % e, True
         rt.gate.log.write("file_saved", by="agent", chat=chat["id"], path=str(target), chars=len(text),

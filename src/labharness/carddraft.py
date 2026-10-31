@@ -390,15 +390,17 @@ def read_sources(path: str, limit: int = MAX_MANUAL, own: Iterable[Any] = ()) ->
     a card is drafted from when the maker gives code rather than a command reference. Never Kelvin's own folders
     (own: its folder, with the lab config, the settings, the accounts, the cards and everyone's chats), nor a file
     that may hold sign-ins, keys or tokens (folderfiles.secret): a folder that holds them is read without them."""
-    from .folderfiles import mine, secret
+    from .folderfiles import mine, run_of, secret
     root = Path(path).expanduser()
     if not root.exists():
         raise ValueError("no file or folder %s" % path)
     kelvins = mine(root.resolve(), own)
     if kelvins is not None:
         raise ValueError("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, "
-                         "the instrument cards and everyone's chats: Kelvin's AI never reads there. Name the maker's "
-                         "files where the maker put them" % (root, kelvins))
+                         "the instrument cards, and everyone's chats and runs: Kelvin's AI never reads there. Name the "
+                         "maker's files where the maker put them" % (root, kelvins))
+    if run_of(root.resolve()) is not None:
+        raise ValueError("%s is in a Kelvin run, not a maker's files: describe_run and get_run_data read runs" % root)
     if secret(root.resolve()):
         raise ValueError("%s may hold sign-ins, keys or tokens (a password file, an SSH or cloud key, a .env file, "
                          "another program's sign-in): Kelvin's AI never reads such files" % root)
@@ -413,7 +415,7 @@ def read_sources(path: str, limit: int = MAX_MANUAL, own: Iterable[Any] = ()) ->
                 continue
             if p.is_file() and p.suffix.lower() in SOURCE_TYPES and p.stat().st_size < (
                     MAX_PDF_BYTES if p.suffix.lower() == ".pdf" else 2_000_000) and not secret(p) \
-                    and mine(p.resolve(), own) is None:
+                    and mine(p.resolve(), own) is None and run_of(p.resolve()) is None:   # nor Kelvin's runs
                 files.append(p)
     if not files:
         raise ValueError("no scripts, headers, text files or PDFs in %s" % path)

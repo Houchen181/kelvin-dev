@@ -599,8 +599,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     def unshared_meta(meta: Any) -> bool:
         if not isinstance(meta, dict):
             return False
-        return bool(meta.get("incognito") or meta.get("unshared") or meta.get("confidential") or meta.get("rules")) \
-            or unshared_project(meta.get("project"))
+        return bool(meta.get("incognito") or meta.get("unshared") or meta.get("confidential") or meta.get("rules")
+                    or meta.get("unpublished")) or unshared_project(meta.get("project"))
 
     def unshared_run(run_id: str) -> bool:
         live = runtime.live_view(10 ** 9) or {}
@@ -608,8 +608,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return unshared_meta(runtime.running_meta)
         try:
             meta = rundata.meta(runtime.runs / run_id)
-        except (KeyError, OSError, ValueError):
-            return False
+        except Exception:   # whose it is can't be read: kept apart
+            return True
         return unshared_meta(meta)
 
     NOT_THROUGH_HUB = ("That is unshared work (unpublished, confidential or limited to some models, or incognito), "
@@ -724,6 +724,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         running = next((i for i in runtime.queue.items if i.status == "running"), None)
         if work or (running is not None and runtime.unshared_work(running.whose())):
             out["busy"] = "running a scan of unshared work" if data.get("busy") else data.get("busy")
+        elif data.get("busy"):   # what Kelvin does for unshared work (a recipe, a chat's call): unnamed
+            with runtime.viewing(Viewer()):
+                out["busy"] = runtime.busy_shown(data["busy"])
         if work or any(isinstance(p, dict) and p.get("unshared") for p in data.get("pending") or []):
             out["instruments"] = [dict(i, in_use="it is in use (unshared work)") if isinstance(i, dict)
                                   and i.get("in_use") else i for i in data.get("instruments") or []]
@@ -733,18 +736,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 lines = [event_line(e) for e in reversed(runtime.seen_events(tail_events(runtime.events_path, 25)))]
             hidden += max(0, len(data["events"]) - len(lines))
             out["events"] = lines
-        incident = data.get("incident")
-        if isinstance(incident, dict) and incident.get("runs"):   # runs a restart cut short: unshared work's unnamed
+        if isinstance(data.get("incident"), dict):   # what a restart cut short: unshared work unnamed
             with runtime.viewing(Viewer()):
-                cut = set(runtime._hidden_runs()) & set(incident["runs"])
-
-            def unnamed(text: Any) -> Any:
-                for run_id in cut:
-                    text = str(text).replace(run_id, "a run of unshared work")
-                return text
-            if cut:
-                out["incident"] = dict(incident, runs=[unnamed(r) for r in incident["runs"]],
-                                       lines=[unnamed(line) for line in incident.get("lines") or []])
+                out["incident"] = runtime.incident_view()
+            hidden += sum(1 for k in ("runs", "queue") for a, b in zip(data["incident"].get(k) or [],
+                                                                      (out["incident"] or {}).get(k) or []) if a != b)
         if isinstance(data.get("wakes"), list):
             out["wakes"] = [dict(w, text="", note="") if isinstance(w, dict) and unshared_chat(str(w.get("chat_id")))
                             else w for w in data["wakes"]]
@@ -816,6 +812,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 hidden += n
         elif path == "/api/watches" and isinstance(data, dict) and isinstance(data.get("watches"), list):
             data = dict(data, watches=hub_watches(data["watches"]))
+        elif path == "/api/watches" and method == "POST" and isinstance(data, dict) and data.get("id"):
+            data = hub_watches([data])[0]   # the watch the phone added
         return data, hidden
 
     relay_link = RelayLink(lambda *a: relay_app["app"](*a), relay_target, relay_hello, relay_private, relay_trim)
