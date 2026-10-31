@@ -784,7 +784,9 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .lane .pane-menu.review-menu { left: auto; right: 0; }
 .report-files { display: grid; gap: 6px; margin: 6px 0; }
 .report-files.rv-files { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 4px; }
-.rv-file-text { flex: 1 1 100%; margin: 2px 0 0; max-height: 320px; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace;
+.rv-file-view { flex: 1 1 100%; min-width: 0; display: grid; gap: 4px; margin-top: 2px; }
+.rv-file-cut { margin: 0; }
+.rv-file-text { margin: 0; max-height: 320px; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace;
   background: var(--code); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .report-file { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px;
   background: var(--panel); padding: 8px 12px; font-size: 14px; }
@@ -985,7 +987,7 @@ body.resizing .plot-svg { pointer-events: none; }
 .ra-body p { margin: 0; }
 .ra-body p:empty { display: none; }
 .said, #scans-msg { white-space: pre-line; overflow-wrap: anywhere; }
-.ra-body > .rv-plan, .ra-body > .ra-conds { justify-self: stretch; }
+.ra-body > .ra-conds { justify-self: stretch; }
 .ra-script { display: flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; }
 .ra-script code { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ra-params { font: 12.5px/1.5 ui-monospace, Consolas, monospace; color: var(--text-2); overflow-wrap: anywhere; }

@@ -1140,6 +1140,7 @@
       if (!v.table.hidden) v.table.replaceChildren(runTable(runViewData(tab)));
       v.tableBtn.textContent = v.table.hidden ? "Show table" : "Hide table";
     });
+    v.plan = h("details", { class: "rv-plan", hidden: true }, h("summary", {}, "Plan"), h("pre", {}));   // as it ran
     v.again = h("details", { class: "rv-again", hidden: true }, h("summary", {}, "Run again"), h("div", { class: "ra-body" }));
     v.again.addEventListener("toggle", () => { if (v.again.open) loadAgain(tab); });   // the lab read now, each time
     v.files = h("div", { class: "report-files rv-files", hidden: true });
@@ -1148,12 +1149,26 @@
     back.addEventListener("click", showRunList);
     tab.body.replaceChildren(back,
       h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name" }, tab.plan), h("div", { class: "spacer" }), v.stop),
-      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.files, v.again, v.charts, v.foot, v.table);
+      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.files, v.plan, v.again, v.charts, v.foot, v.table);
     tab.view = v;
   }
 
-  // Run again: what ran (the plan, or the script and its settings), the start settings that differ from the lab now,
-  // and whether to set those back first (GET/POST /api/runs/{id}/again)
+  // A request that starts the queue answers once the person has answered its approval. Meanwhile no other Run starts
+  // (what is approved is what runs) and no button sends its request twice, however often the lists are redrawn: a
+  // button names what it waits for in data-busy ("start", its entry's or its run's key).
+  const BUSY = new Set();
+  function syncBusy() {
+    for (const b of document.querySelectorAll("[data-busy]")) b.disabled = b.dataset.busy.split(" ").some((k) => BUSY.has(k));
+  }
+  async function busyWhile(keys, fn) {
+    if (keys.some((k) => BUSY.has(k))) return null;   // a second click while one is on its way does nothing
+    keys.forEach((k) => BUSY.add(k));
+    syncBusy();
+    try { return await fn(); } finally { keys.forEach((k) => BUSY.delete(k)); syncBusy(); }
+  }
+
+  // Run again: what ran (the script and its settings; a scan's plan is the run's Plan), the start settings that differ
+  // from the lab now, and whether to set those back first (GET/POST /api/runs/{id}/again)
   async function loadAgain(tab) {
     const box = tab.view.again.querySelector(".ra-body");
     if (!box.firstChild) box.append(h("p", { class: "hint" }, "Reading the lab…"));
@@ -1161,13 +1176,12 @@
     try { d = await api("/api/runs/" + encodeURIComponent(tab.runId) + "/again"); }
     catch (e) { box.replaceChildren(h("p", { class: "hint bad" }, e.message)); return; }
     box.replaceChildren(...againParts(tab, d));
+    syncBusy();
   }
   function againParts(tab, d) {
     const parts = [];
     const pick = { version: "then" };
-    if (d.text != null) {
-      parts.push(h("details", { class: "rv-plan" }, h("summary", {}, "Plan"), h("pre", {}, d.text)));
-    } else if (d.script) {
+    if (d.script) {
       const s = d.script;
       const tag = !s.exists ? h("span", { class: "tag warn" }, "missing") : s.changed ? h("span", { class: "tag" }, "changed") : null;
       parts.push(h("div", { class: "ra-script" }, h("code", { title: s.path }, s.path), tag));
@@ -1203,12 +1217,11 @@
     restore.checked = n > 0;
     if (n) parts.push(h("label", { class: "check" }, restore, n === 1 ? "Restore this setting first" : "Restore these " + n + " settings first"));
     const msg = h("p", { class: "hint said", role: "status" });
-    const go = async (queue, btn) => {
+    const go = (queue, keys) => busyWhile(keys, async () => {
       const body = { restore: n > 0 && restore.checked };
       if (d.script && d.script.exists && d.script.changed) body.version = pick.version;
       if (d.script && !d.script.exists) body.version = "then";
       if (queue) body.queue = true;
-      btn.disabled = true;
       msg.classList.remove("bad");
       msg.textContent = queue ? "" : "Starting…";   // the queue's approval is asked first
       try {
@@ -1218,12 +1231,12 @@
         msg.textContent = r.message || "";
         if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
       } catch (e) { msg.classList.add("bad"); msg.textContent = e.message; }
-      finally { btn.disabled = false; }
-    };
-    const run = h("button", { class: "btn small primary", type: "button" }, "Run again");
-    const later = h("button", { class: "btn small ghost", type: "button" }, "Add to the queue");
-    run.addEventListener("click", () => go(false, run));
-    later.addEventListener("click", () => go(true, later));
+    });
+    const key = "again:" + encodeURIComponent(tab.runId);
+    const run = h("button", { class: "btn small primary", type: "button", "data-busy": "start " + key }, "Run again");
+    const later = h("button", { class: "btn small ghost", type: "button", "data-busy": key }, "Add to the queue");
+    run.addEventListener("click", () => go(false, ["start", key]));
+    later.addEventListener("click", () => go(true, [key]));
     parts.push(h("div", { class: "ra-actions" }, run, later), msg);
     return parts;
   }
@@ -1274,6 +1287,8 @@
       clearTimeout(tab.timer); tab.timer = 0;
       v.analysis.replaceChildren(...(tab.final.analysis ? [analysisBlock(tab.final.analysis)] : []));
       v.charts.replaceChildren(runCharts(tab.final));
+      v.plan.hidden = !tab.final.plan_text;
+      v.plan.querySelector("pre").textContent = tab.final.plan_text || "";
       v.again.hidden = false;
       runFiles(tab, v.files);
       if (!v.table.hidden) v.table.replaceChildren(runTable(tab.final));
@@ -1498,15 +1513,21 @@
     const openIt = async (path, what) => {
       try { await api(path, { body: {} }); toast("Opening " + what + "…"); } catch (e) { toast(e.message); }
     };
-    const text = h("pre", { class: "rv-file-text", hidden: true });
-    const readIt = async (name) => {
-      if (!text.hidden && text.dataset.name === name) { text.hidden = true; return; }
+    const text = h("pre", { class: "rv-file-text" });
+    const cut = h("p", { class: "hint rv-file-cut", hidden: true });
+    const shown = h("div", { class: "rv-file-view", hidden: true }, cut, text);
+    const readIt = async (name) => {   // a long one comes as its last 256 KB (X-Kelvin-Cut: its whole size)
+      if (!shown.hidden && shown.dataset.name === name) { shown.hidden = true; return; }
       try {
         const res = await fetch(base + "/files/" + encodeURIComponent(name), { headers: { "X-Kelvin-Token": token } });
         if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).error) || "HTTP " + res.status);
-        text.textContent = await res.text();
-        text.dataset.name = name;
-        text.hidden = false;
+        const got = await res.arrayBuffer();
+        const whole = Number(res.headers.get("X-Kelvin-Cut")) || 0;
+        text.textContent = new TextDecoder().decode(got);
+        cut.textContent = whole ? "The last " + bytesText(got.byteLength) + " of " + bytesText(whole) + "." : "";
+        cut.hidden = !whole;
+        shown.dataset.name = name;
+        shown.hidden = false;
       } catch (e) { toast(e.message); }
     };
     const buttons = files.map((f) => {
@@ -1518,9 +1539,11 @@
     });
     const folder = h("button", { class: "link soft", type: "button" }, "Open folder");
     folder.addEventListener("click", () => openIt(base + "/open", "the run's folder"));
-    box.replaceChildren(...buttons, folder, runDownloads(tab.runId), text);
+    box.replaceChildren(...buttons, folder, runDownloads(tab.runId), shown);
     box.hidden = false;
   }
+  const bytesText = (n) => (n < 1024 ? n + " B" : n < 1048576 ? Math.round(n / 1024) + " KB"
+    : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(1) + " GB");
 
   // the run's data written by Kelvin's code (/api/runs/{id}/export): CSV, Excel or NumPy, never copied by hand
   function runDownloads(runId) {
@@ -4530,7 +4553,7 @@
 
   // ------------------------------------------------------------------ scans and scripts, kept to run again
   // Each scan Kelvin runs and each script a person imports (GET/POST /api/library): Run puts it first in the queue,
-  // which pauses after it; Queue puts it last. A script runs with the settings last used, or those shown.
+  // which pauses after it; Queue puts it last. A script runs with the settings last used and those changed in Show.
   const SCANS = { data: null, shown: new Set(), params: new Map(), renaming: null, fresh: null, empty: "" };
 
   async function loadScans() {   // a fresh visit: the last import's check and message go
@@ -4571,9 +4594,10 @@
   }
   function scanEntry(e) {
     const script = e.kind === "script";
-    const act = (label, title, fn) => {
-      const b = h("button", { type: "button", title }, label);
-      b.addEventListener("click", () => fn(b));
+    const key = "lib:" + encodeURIComponent(e.id);
+    const act = (label, title, keys, queue) => {
+      const b = h("button", { type: "button", title, "data-busy": keys.join(" "), disabled: keys.some((k) => BUSY.has(k)) }, label);
+      b.addEventListener("click", () => runScan(e, queue, keys));
       return b;
     };
     const more = h("button", { type: "button", "aria-label": "More: " + e.name, "aria-haspopup": "menu" }, icon("dots"));
@@ -4584,8 +4608,8 @@
     const what = script ? e.path : e.summary || "";
     const li = h("li", { class: "q-item lib" + (SCANS.fresh === e.id ? " fresh" : ""), "data-id": e.id },
       h("span", { class: "lib-name" }, SCANS.renaming === e.id ? renameField(e) : h("span", { class: "q-name" }, e.name), tag),
-      h("span", { class: "q-acts" }, act("Run", "First in the queue, which pauses after it", (b) => runScan(e, false, b)),
-        act("Queue", "Last in the queue", (b) => runScan(e, true, b)), more),
+      h("span", { class: "q-acts" }, act("Run", "First in the queue, which pauses after it", ["start", key], false),
+        act("Queue", "Last in the queue", [key], true), more),
       h("span", { class: "q-sub", title: what }, what), h("span", { class: "lib-used" }, used));
     if (SCANS.shown.has(e.id)) li.append(scanDetail(e));
     return li;
@@ -4628,7 +4652,7 @@
     return input;
   }
   // a script's settings, as fields (settable: {name: value in the file}, notes: {name: its comment}): the values last
-  // used, else the file's; with the file unreadable, those last used. Run sends them once shown.
+  // used, else the file's; with the file unreadable, those last used
   function scriptFields(e) {
     const params = e.params || {}, notes = e.notes || {};
     const unread = e.exists === false || !!e.problem;
@@ -4642,19 +4666,37 @@
     if (typeof base === "number") return raw.trim() !== "" && isFinite(Number(raw)) ? Number(raw) : raw;
     try { return JSON.parse(raw); } catch (err) { return raw; }
   }
+  // what Run sends: nothing while the person has changed no field in Show (Kelvin runs it with the values last used);
+  // else the values a person set, now or for its last run, never a field nobody touched, and none the file has as it
+  // is now: those follow the file
+  function scanParams(e) {
+    const edited = SCANS.params.get(e.id) || {};
+    const fields = new Map(scriptFields(e).map((f) => [f.name, f]));
+    const changed = Object.keys(edited).filter((name) => fields.has(name));
+    if (!changed.length) return null;
+    const file = e.exists === false || e.problem ? {} : e.settable || {};
+    const out = {};
+    for (const [name, f] of fields) {
+      const v = changed.includes(name) ? paramValue(f.value, edited[name]) : (e.params || {})[name];
+      if (v !== undefined && !(name in file && JSON.stringify(v) === JSON.stringify(file[name]))) out[name] = v;
+    }
+    return out;
+  }
   function scanDetail(e) {
     if (e.kind !== "script") return h("pre", { class: "lib-detail lib-plan" }, e.text || "");
     const fields = scriptFields(e);
-    if (!SCANS.params.has(e.id)) SCANS.params.set(e.id, Object.fromEntries(fields.map((f) => [f.name, paramRaw(f.value)])));
-    const raw = SCANS.params.get(e.id);
+    if (!SCANS.params.has(e.id)) SCANS.params.set(e.id, {});
+    const edited = SCANS.params.get(e.id);   // only the fields the person changed, as typed
     const rows = fields.map((f) => {
+      const was = paramRaw(f.value);
+      const keep = (v) => { if (v === was) delete edited[f.name]; else edited[f.name] = v; };
       const input = typeof f.value === "boolean" ? h("input", { type: "checkbox" })
-        : h("input", { value: raw[f.name] === undefined ? paramRaw(f.value) : raw[f.name], spellcheck: "false", autocomplete: "off",
+        : h("input", { value: f.name in edited ? edited[f.name] : was, spellcheck: "false", autocomplete: "off",
                        inputmode: typeof f.value === "number" ? "decimal" : null });
       if (input.type === "checkbox") {
-        input.checked = raw[f.name] === undefined ? f.value : !!raw[f.name];
-        input.addEventListener("change", () => { raw[f.name] = input.checked; });
-      } else input.addEventListener("input", () => { raw[f.name] = input.value; });
+        input.checked = f.name in edited ? !!edited[f.name] : f.value;
+        input.addEventListener("change", () => keep(input.checked));
+      } else input.addEventListener("input", () => keep(input.value));
       return h("label", { class: "lib-param", title: f.note || null }, h("span", {}, f.name), input);
     });
     const args = e.args && e.args.length ? h("span", { class: "lib-args" }, "args: " + e.args.join(" ")) : null;
@@ -4662,20 +4704,20 @@
     return h("div", { class: "lib-detail lib-params" }, problem,
       ...(rows.length ? rows : problem ? [] : [h("span", { class: "hint" }, "No settings to change.")]), args);
   }
-  async function runScan(e, queue, btn) {
-    const body = { op: "run", id: e.id };
-    const raw = e.kind === "script" && SCANS.params.get(e.id);
-    if (raw) body.params = Object.fromEntries(scriptFields(e).map((f) => [f.name, paramValue(f.value, raw[f.name])]));
-    if (queue) body.queue = true;
-    scansSay(queue ? "" : "Starting…");   // the queue's approval is asked first
-    btn.disabled = true;
-    const r = await scansOp(body);
-    btn.disabled = false;
-    if (!r) return;
-    queueFromState(r.queue);
-    renderQueue();
-    scansSay(r.message || "");
-    if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
+  function runScan(e, queue, keys) {
+    return busyWhile(keys, async () => {
+      const body = { op: "run", id: e.id };
+      const params = e.kind === "script" ? scanParams(e) : null;
+      if (params) body.params = params;
+      if (queue) body.queue = true;
+      scansSay(queue ? "" : "Starting…");   // the queue's approval is asked first
+      const r = await scansOp(body);
+      if (!r) return;
+      queueFromState(r.queue);
+      renderQueue();
+      scansSay(r.message || "");
+      if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
+    });
   }
   // Import a script…: the computer's own file picker in the Kelvin app; in a browser, its path typed
   function hasFilePicker() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_file); }
