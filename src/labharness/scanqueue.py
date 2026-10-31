@@ -163,6 +163,9 @@ class Item:
     confidential: bool = False
     unpublished: bool = False
     then_pause: bool = False        # the queue pauses after this item (a person's "run now" from the Runs panel)
+    restores: Optional[str] = None  # a step that sets back the settings item <id> ran with: if it doesn't finish,
+    #                                 that item is skipped, never run in conditions it didn't run in
+    library: Optional[str] = None   # the library's entry its runs are noted under (a scan run again, restored)
 
     def view(self) -> Dict[str, Any]:
         return asdict(self)
@@ -264,13 +267,15 @@ class ScanQueue:
     def add(self, text: str, position: Optional[int] = None, note: str = "", by: str = "",
             project: Optional[str] = None, incognito: bool = False, unshared: bool = False,
             folder: Optional[str] = None, chat: Optional[str] = None, rules: Optional[Dict[str, Any]] = None,
-            confidential: bool = False, unpublished: bool = False, then_pause: bool = False) -> Item:
+            confidential: bool = False, unpublished: bool = False, then_pause: bool = False, legacy: bool = False,
+            library: Optional[str] = None) -> Item:
         kind, name = parse_item(text)
         if kind == "script" and not note.strip():   # a script item's own note: line, kept with its run
             note = load_script_item(text).note
         item = Item(uuid.uuid4().hex[:8], kind, name, text.strip() + "\n", note=note.strip(), by=by, added=time.time(),
                     project=project, incognito=incognito, unshared=unshared, folder=folder, chat=chat, rules=rules,
-                    confidential=confidential, unpublished=unpublished, then_pause=bool(then_pause))
+                    confidential=confidential, unpublished=unpublished, then_pause=bool(then_pause),
+                    legacy=bool(legacy), library=library)
         with self.lock:
             if position is None or position > len(self.items):
                 self.items.append(item)
@@ -373,6 +378,8 @@ class ScanQueue:
         with self.lock:
             ran = [(n, i) for n, i in enumerate(self.items, 1) if i.started and i.started >= started]
             waiting = [(n, i) for n, i in enumerate(self.items, 1) if i.status == "waiting"]
+            skipped = [(n, i) for n, i in enumerate(self.items, 1) if i.status == "skipped" and not i.started
+                       and (i.finished or 0) >= started]   # held back meanwhile (a restore before it didn't finish)
             state, reason = self.state, self.reason
         lines = ["The queue ran %s to %s (%s) and %s" % (_at(started), _at(end), _span(end - started),
                                                         "finished" if state == "idle" else "paused: %s" % reason)]
@@ -393,6 +400,8 @@ class ScanQueue:
             lines.append("Stopped part-way, its data kept: " + "; ".join(partial))
         if empty:
             lines.append("Stopped with no data: " + "; ".join(empty))
+        if skipped:
+            lines.append("Skipped: " + "; ".join("#%d %s: %s" % (n, i.name, i.message) for n, i in skipped))
         if waiting:
             lines.append("Not run: " + ", ".join("#%d %s" % (n, i.name) for n, i in waiting))
         # a guard's trip is one of them (monitor.Monitor.from_gate); so is an alarm that went up before and again now
@@ -402,7 +411,7 @@ class ScanQueue:
             "%s %s%s (%s)" % (_at(a.raised), a.text, " (%d times)" % a.count if getattr(a, "count", 1) > 1 else "",
                               "cleared %s" % _at(a.cleared) if a.cleared else "still on")
             for a in raised) if raised else "No alarm was raised while it ran.")
-        named = [i for _, i in ran + waiting]
+        named = [i for _, i in ran + skipped + waiting]
         with self.lock:
             self.last = {"started": started, "ended": end, "lines": lines, "items": [i.id for i in named]}
             if any(unshared(i) for i in named):

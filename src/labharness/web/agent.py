@@ -2070,6 +2070,19 @@ class ChatAgent:
         rt = self.runtime
         return {"data": rt.data_dir, "unseen": lambda d: not rt.may_see(rt._run_marks(Path(d)))}
 
+    def _kept(self) -> List[Any]:
+        """What Kelvin runs as a person chose it, which a chat's write_file never saves (folderfiles.off_limits): the
+        lab's scripts folder, and the scripts a person imported into their library."""
+        rt = self.runtime
+        kept: List[Any] = []
+        try:
+            folder = rt.scripts_folder()
+            kept += [folder] if folder else []
+            kept += list(rt.library.chosen())   # none while the library can't be read: none of them runs then either
+        except Exception:
+            pass
+        return kept
+
     async def _read_in(self, folder: Any, call: Dict[str, Any], provider: Provider, own: Iterable[Any] = (),
                        model: str = "", chat: Optional[Dict[str, Any]] = None) -> Tuple[str, bool]:
         """A file in this folder, read (folderfiles.py): pictures go to the person and to a model that sees them, PDF
@@ -2123,8 +2136,10 @@ class ChatAgent:
         if not isinstance(text, str):
             return "not saved: give the file's whole text as content", True
         rt = self.runtime
+        kept_by_person = await asyncio.to_thread(self._kept)   # the lab's scripts, as a person chose them
         try:   # never Kelvin's own folders (the lab config, settings, accounts, cards, chats) or those of _apart
-            target = folderfiles.inside(folder, path, saving=True, own=self._kelvins(), **self._apart())
+            target = folderfiles.inside(folder, path, saving=True, own=self._kelvins(), kept=kept_by_person,
+                                        **self._apart())
         except folderfiles.FolderError as e:
             return "not saved: %s" % e, True
         loads = sorted({n for n, d in library.code_folders({n: ic.address for n, ic in rt.lab.config.instruments.items()},
@@ -2151,7 +2166,7 @@ class ChatAgent:
                 return "declined: nothing was saved%s" % (" (%s)" % request.note if request.note else ""), True
         try:
             target, kept = await asyncio.to_thread(folderfiles.save, folder, path, text, self._kelvins(),
-                                                   **self._apart())
+                                                   kept=kept_by_person, **self._apart())
         except folderfiles.FolderError as e:
             return "not saved: %s" % e, True
         rt.gate.log.write("file_saved", by="agent", chat=chat["id"], path=str(target), chars=len(text),

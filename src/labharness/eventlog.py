@@ -234,8 +234,8 @@ class RunFolders:
             return None
         for root in self.roots():
             d = root / run_id
-            try:
-                if d.is_dir() and (root == self.home or rundata.is_run(d)):
+            try:   # in a chat's folder only Kelvin's runs, as iterdir lists them: named as a run, with its record
+                if d.is_dir() and (root == self.home or (RUN_NAME.match(run_id) and rundata.is_run(d))):
                     return d
             except OSError:
                 continue
@@ -288,9 +288,12 @@ class RunStore:
             run_id = "%s-%d" % (base, n)
         return run_id
 
-    def create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None) -> RunRecord:
-        """Every run's record is made here: plans (and a queue's scans and a recipe's stages) and scripts alike."""
+    def create(self, plan_name: str, plan: Dict[str, Any], operator: str, folder: Any = None,
+               meta: Optional[Dict[str, Any]] = None) -> RunRecord:
+        """Every run's record is made here: plans (and a queue's scans and a recipe's stages) and scripts alike.
+        meta: what the run's record says from its start (where it ran, whose work it is), as noted sees it."""
         rec = self._create(plan_name, plan, operator, folder)
+        rec.meta.update(meta or {})
         if self.noted is not None:
             try:
                 self.noted(rec, plan)

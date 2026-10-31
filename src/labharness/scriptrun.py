@@ -144,6 +144,12 @@ def _runnable(path: Path) -> Path:
     return path
 
 
+def fingerprint(text: str) -> str:
+    """The sha256 of a script's text however its lines end (script.py is written with this computer's line ends): a
+    run keeps it of the text it ran, and that text runs again only while it still matches."""
+    return hashlib.sha256(text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")).hexdigest()
+
+
 def source_of(path: Path) -> str:
     """The script's text as Python (a notebook's code cells in order, its % and ! lines left out). A .py file is
     read as Python reads it: in the encoding its coding line names (# -*- coding: gbk -*-), else UTF-8."""
@@ -262,6 +268,26 @@ def _coerce(param: Param, value: Any) -> Any:
     if isinstance(old, (list, tuple)) and not isinstance(value, (list, tuple)):
         raise ScriptError("%s is a list (now %r), not %r" % (param.name, old, value))
     return type(old)(value) if isinstance(old, tuple) else value
+
+
+def changed_params(source: str, values: Dict[str, Any]) -> Dict[str, Any]:
+    """The values that change the script: those equal to its own (VMAX = 1 for a file that has 1) go, so a run keeps,
+    and runs again with, only what a person changed, and an edit of the file counts from then on. A value it can't
+    take stays, for with_params to say why."""
+    try:
+        found = {p.name: p for p in parameters(source)}
+    except ScriptError:
+        return dict(values)
+    out: Dict[str, Any] = {}
+    for name, value in values.items():
+        p = found.get(name)
+        try:
+            same = p is not None and _coerce(p, value) == p.value and type(_coerce(p, value)) is type(p.value)
+        except ScriptError:
+            same = False
+        if not same:
+            out[name] = value
+    return out
 
 
 def with_params(source: str, values: Dict[str, Any]) -> Tuple[str, List[str]]:
@@ -682,10 +708,12 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
     """A script read and ready to run. chosen: the scripts a person imported (locate). source: the text to run in
     place of the file's own (version: the run whose script.py it is, as it ran then; sha256: of the file as that run
     read it), in the file's own folder and under its own name, which may be gone by now. named: the Python to run it
-    in (python_named)."""
+    in (python_named). params: only those that change the file's own values count (changed_params); a version's
+    text has its run's values in it already."""
     script = locate(path, folders, chosen, missing=source is not None)
     original = source if source is not None else source_of(script)
-    text, changes = with_params(original, dict(params or {}))
+    params = dict(params or {}) if source is not None else changed_params(original, dict(params or {}))
+    text, changes = with_params(original, params)
     try:
         compile(text, str(script), "exec")
     except SyntaxError as e:
@@ -694,7 +722,7 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
     py = choose_python(script, text, roots, python, named) if named else choose_python(script, text, roots, python)
     return Prepared(script, original, text, changes, [str(a) for a in (args or [])], py,
                     read_ahead(lab, script, text), sha256 or hashlib.sha256(original.encode("utf-8")).hexdigest(),
-                    declared_drives(lab, drives), dict(params or {}), version)
+                    declared_drives(lab, drives), params, version)
 
 
 def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[str, Allowed], List[str]]:
@@ -1291,14 +1319,15 @@ class ScriptRun:
         plan = {"plan": prep.name, "script": str(prep.path), "sha256": prep.sha256, "python": prep.python.text,
                 "changes": prep.changes or None, "params": prep.params or None, "args": prep.args or None,
                 "version": prep.version}
+        # script_sha256: the text that runs (script.py), kept in the record from its start, so a run again "as it
+        # ran" runs exactly that text, or nothing
+        meta = dict({"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())},
+                    **self.meta)
+        meta.update(script=str(prep.path), script_sha256=fingerprint(prep.source))
         self.rec = self.store.create(prep.name, {k: v for k, v in plan.items() if v is not None}, gate.operator,
-                                     self.folder)
+                                     self.folder, meta=meta)
         self.rec_id = self.rec.run_id
         run_dir = Path(self.rec.path) if self.rec.path else Path(tempfile.mkdtemp(prefix="kelvin-script-"))
-        self.rec.meta["lab"] = lab.config.name
-        self.rec.meta["simulated"] = all(i.simulated for i in lab.instruments.values())
-        self.rec.meta.update(self.meta)
-        self.rec.meta["script"] = str(prep.path)
         (run_dir / "script.py").write_text(prep.source, encoding="utf-8")
         # values set, a notebook, or an earlier run's version of the file: the text in script.py runs, not the file
         changed = prep.source != prep.original or prep.path.suffix.lower() != ".py" or prep.version is not None
