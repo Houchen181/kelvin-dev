@@ -216,10 +216,27 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(app.list.computers.compactMap(\.kelvin), ["pc-1"])
         try await app.lookForKelvins()
         XCTAssertEqual(app.list.computers.compactMap(\.kelvin), ["pc-1"])        // removed on this phone: stays away
+        try await app.lookForKelvins(all: true)                                  // Look for my Kelvins: all of them
+        XCTAssertEqual(app.list.computers.compactMap(\.kelvin).sorted(), ["laptop", "pc-1"])
+        await app.remove(try XCTUnwrap(app.list.computers.first { $0.kelvin == "pc-1" }))
+        try await app.lookForKelvins()
+        XCTAssertFalse(app.list.computers.contains { $0.host == "LAB-PC" })     // nor its older copy, pc-old
         script.on("POST /api/signout", 204, "")
         await app.signOut()
         try await app.signIn(hub: URL(string: "https://kelvin.example.org")!, email: "ada@example.org", password: "pw")
         XCTAssertEqual(app.list.computers.compactMap(\.kelvin).sorted(), ["laptop", "pc-1"])   // signed in again
+    }
+
+    func testAnOlderCopySwipedAwayBeforeDoesNotHideTheComputer() async throws {
+        let script = Script()
+        script.on("POST /api/signin", "{\"access_token\": \"khub_phone\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        script.on("GET /api/relay/kelvins", "{\"kelvins\": [{\"id\": \"pc-1\", \"name\": \"LAB-PC\", \"online\": true},"
+                  + " {\"id\": \"pc-old\", \"name\": \"LAB-PC\", \"online\": false, \"last_seen\": 1}]}")
+        let app = AppModel(transport: script, defaults: defaults, tokens: tokens)
+        try await app.signIn(hub: URL(string: "https://kelvin.example.org")!, email: "ada@example.org", password: "pw")
+        defaults.set(["pc-old"], forKey: "kelvin.removedKelvins")              // swiped away in app 0.1.7 or before
+        try await app.lookForKelvins()
+        XCTAssertEqual(app.list.computers.compactMap(\.kelvin), ["pc-1"])        // the computer itself stays
     }
 
     func testUnpairingDoesNotWaitForTheComputer() async throws {

@@ -170,14 +170,17 @@ public struct ComputerList: Codable, Equatable, Sendable {
 
     /// The account's Kelvins as the hub lists them, one row per computer: the hub keeps every Kelvin that ever signed
     /// in with the account until it signs out, so a computer can have had several (a new data folder, a reinstall).
-    /// Of a computer's, those online now are shown, else its latest; none of a computer removed on this phone (nor its
-    /// older ones), nor of one this phone is paired with (its row is the pairing), nor those the hub no longer lists.
-    /// Returns the ids that left the list, so their tokens go too.
+    /// Of a computer's, those online now are shown, else its latest; not those removed on this phone (`removed`, by
+    /// id: as app 0.1.8 and before kept them, one Kelvin each, maybe an older copy of a computer still in use), none of
+    /// a computer removed on this phone (`removedNames`, from app 0.1.9: its older Kelvins too), nor of one this phone
+    /// is paired with (its row is the pairing), nor those the hub no longer lists. Returns the ids that left the list,
+    /// so their tokens go too.
     @discardableResult
-    public mutating func sync(_ listed: [HubKelvin], hub: URL, removed: Set<String> = []) -> [UUID] {
-        let removedNames = Set(listed.filter { removed.contains($0.id) }.map { $0.name.lowercased() })
+    public mutating func sync(_ listed: [HubKelvin], hub: URL, removed: Set<String> = [],
+                              removedNames: Set<String> = []) -> [UUID] {
         let paired = Set(computers.filter { !$0.viaAccount }.compactMap { $0.host?.lowercased() })
-        let kept = listed.filter { !removedNames.contains($0.name.lowercased()) && !paired.contains($0.name.lowercased()) }
+        let kept = listed.filter { !removed.contains($0.id) && !removedNames.contains($0.name.lowercased())
+                                   && !paired.contains($0.name.lowercased()) }
         let shown = kept.filter { k in
             let same = kept.filter { $0.name == k.name }
             if same.contains(where: \.online) { return k.online }

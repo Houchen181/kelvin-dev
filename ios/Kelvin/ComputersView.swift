@@ -76,7 +76,7 @@ struct ComputersView: View {
             }
         } message: {
             Text(removing?.viaAccount == true
-                 ? "It shows again after you sign in to your Kelvin account again."
+                 ? "Look for my Kelvins brings it back."
                  : "This phone stops working with it, and Kelvin there forgets this phone.")
         }
     }

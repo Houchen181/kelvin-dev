@@ -39,6 +39,17 @@ final class AppModel: ObservableObject {
     /// to the account again.
     private var removedKelvins: Set<String> { Set(defaults.stringArray(forKey: "kelvin.removedKelvins") ?? []) }
 
+    /// The computers removed on this phone, by name (app 0.1.9 on): none of their Kelvins is listed again, older copies
+    /// included, until Look for my Kelvins or signing in again brings them back. The ids removed before hide only that
+    /// one Kelvin: some were older copies of a computer still in use.
+    private var removedNames: Set<String> { Set(defaults.stringArray(forKey: "kelvin.removedNames") ?? []) }
+
+    /// Every computer removed on this phone, listed again.
+    private func forgetRemoved() {
+        defaults.removeObject(forKey: "kelvin.removedKelvins")
+        defaults.removeObject(forKey: "kelvin.removedNames")
+    }
+
     /// The newest team chat message shown on this phone, per computer (nil: it never looked).
     func teamRead(_ c: Computer) -> Int? { defaults.object(forKey: "kelvin.teamRead." + c.id.uuidString) as? Int }
 
@@ -69,8 +80,9 @@ final class AppModel: ObservableObject {
     }
 
     /// Ask the hub which Kelvins the account is signed in to: one row per computer, without those removed here or
-    /// those the hub no longer lists (ComputerList.sync).
-    func lookForKelvins() async throws {
+    /// those the hub no longer lists (ComputerList.sync). all: a person asked (Look for my Kelvins), so the computers
+    /// removed on this phone come back too.
+    func lookForKelvins(all: Bool = false) async throws {
         guard let account, let token = accountToken else { return }
         do {
             kelvins = try await HubClient(hub: account.hub, token: token, transport: transport).kelvins()
@@ -78,7 +90,10 @@ final class AppModel: ObservableObject {
             kelvins = []
             throw e
         }
-        for id in list.sync(kelvins, hub: account.hub, removed: removedKelvins) { forgetHere(id) }
+        if all { forgetRemoved() }
+        for id in list.sync(kelvins, hub: account.hub, removed: removedKelvins, removedNames: removedNames) {
+            forgetHere(id)
+        }
         save()
     }
 
@@ -102,7 +117,7 @@ final class AppModel: ObservableObject {
         self.account = nil
         kelvins = []
         defaults.removeObject(forKey: accountKey)
-        defaults.removeObject(forKey: "kelvin.removedKelvins")   // signed in again, the phone lists them all again
+        forgetRemoved()   // signed in again, the phone lists them all again
         save()
     }
 
@@ -165,6 +180,9 @@ final class AppModel: ObservableObject {
         let token = tokens.token(for: c.id), hubToken = accountToken, here = transport(for: c)
         if c.viaAccount, let kelvin = c.kelvin {
             defaults.set(Array(removedKelvins.union([kelvin])), forKey: "kelvin.removedKelvins")
+            if let name = c.host?.lowercased() {   // the computer: its older Kelvins stay away too
+                defaults.set(Array(removedNames.union([name])), forKey: "kelvin.removedNames")
+            }
         }
         forgetHere(c.id)
         list.remove(c.id)

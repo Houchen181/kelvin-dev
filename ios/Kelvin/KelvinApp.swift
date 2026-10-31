@@ -174,7 +174,7 @@ struct WelcomeView: View {
         noneYet = false
         attempt($failure) {
             defer { looking = false }
-            try await app.lookForKelvins()
+            try await app.lookForKelvins(all: true)
             noneYet = app.list.computers.isEmpty
         }
     }

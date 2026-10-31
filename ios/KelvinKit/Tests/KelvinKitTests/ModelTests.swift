@@ -103,8 +103,10 @@ final class ModelTests: XCTestCase {
         list.sync(Array(listed.prefix(2)), hub: hub)                                    // LAPTOP signed out
         XCTAssertEqual(list.computers.compactMap(\.kelvin), ["a"])
         XCTAssertEqual(list.selected, list.computers.first?.id)
-        list.sync(listed, hub: hub, removed: ["a"])                                     // LAB-PC removed here:
+        list.sync(listed, hub: hub, removed: ["a"], removedNames: ["lab-pc"])           // LAB-PC removed here:
         XCTAssertFalse(list.computers.contains { $0.host == "LAB-PC" })                 // not its older one either
+        list.sync(listed, hub: hub, removed: ["b"])           // only an older copy, swiped away in app 0.1.7 or before
+        XCTAssertTrue(list.computers.contains { $0.kelvin == "a" })                     // LAB-PC itself is back
     }
 
     func testAComputerPairedAndOnTheAccountIsOneRow() {

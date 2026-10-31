@@ -128,7 +128,7 @@ struct AccountSection: View {
                     looking = true
                     attempt($failure) {
                         defer { looking = false }
-                        try await app.lookForKelvins()
+                        try await app.lookForKelvins(all: true)   // those removed on this phone too
                         looked = true
                     }
                 }
