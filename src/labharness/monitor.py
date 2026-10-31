@@ -41,6 +41,7 @@ STALL_S = 300.0              # lab seconds a set point's reading may go without 
 SETPOINT_EVERY = 15.0        # lab seconds between the set-point watchdog's looks
 FOLD_S = 600.0               # lab seconds: the same alarm again within this of its clearing, unseen, folds into it
 CLEAR_BAND = 0.01            # a watch's alarm clears once back past its threshold by this share of it (or 3x its noise)
+KEEP_SEEN = 50               # alarms people said Got it to that are over: the newest this many are kept (no other goes)
 _ids = itertools.count(1)
 
 
@@ -276,6 +277,7 @@ class Monitor:
         self._stalled: Dict[str, Alarm] = {}
         self._last_setpoint_check = -1e18
         self._cleared_lab: Dict[str, float] = {}   # lab time each alarm cleared: a repeat soon after folds into it
+        self._back: set = set()   # repeats that came back after people were told their alarm cleared: told again
         # an alarm changed without a notice to people (a repeat folded into it, a Got it): the runtime keeps the history
         self.on_change: Callable[[], None] = lambda: None
         try:   # the gate's trips and the waits it gave up on are alarms too (from_gate)
@@ -353,16 +355,18 @@ class Monitor:
 
     def acknowledge(self, alarm_id: str, by: str = "") -> Optional[Alarm]:
         """A person's Got it, kept with the alarm: who (their name and where), and when. A latched alarm (a guard's
-        trip, a wait that gave up) ends here; one whose condition still holds stays on, seen. None: no such alarm."""
+        trip, a wait that gave up) ends here, also one that latched after a Got it (else nothing could end it); one
+        whose condition still holds stays on, seen. None: no such alarm."""
         with self._lock:
             a = next((x for x in self.alarms if x.id == alarm_id), None)
             if a is None:
                 return None
+            now = time.time()
             if not a.acknowledged:
-                a.acknowledged, a.acknowledged_by, a.acknowledged_at = True, by, time.time()
-                if a.latched and a.cleared is None:
-                    a.cleared, a.cleared_text = a.acknowledged_at, "Got it from %s" % (by or "a person")
-                    self._cleared_lab[a.id] = self.lab.clock.now()
+                a.acknowledged, a.acknowledged_by, a.acknowledged_at = True, by, now
+            if a.latched and a.cleared is None:
+                a.cleared, a.cleared_text = now, "Got it from %s" % (by or "a person")
+                self._cleared_lab[a.id] = self.lab.clock.now()
         self.on_change()
         return a
 
@@ -452,27 +456,51 @@ class Monitor:
     def _new(self, kind: str, key: str, text: str, source: str = "", latched: bool = False) -> Alarm:
         """A new alarm, or the same one again: one that went up for the same reason (the same watch, interlock or
         drive), that nobody has said Got it to, and that is still on or cleared less than FOLD_S ago, takes the repeat
-        instead (its count goes up, and _tell tells nobody again). Its count says which: 1 for a new one."""
+        instead (its count goes up). Its count says which: 1 for a new one. A repeat that comes back after people
+        were told it cleared is news (_tell tells it); one while it flaps unannounced is only counted."""
         now = self.lab.clock.now()
         with self._lock:
             for a in self.alarms:
                 if (a.kind, a.key, a.source) == (kind, key, source) and not a.acknowledged and (
                         a.cleared is None or now - self._cleared_lab.get(a.id, -1e18) < FOLD_S):
+                    if a.cleared is not None and a.count == 1:   # its clear was told (_clear tells a first one)
+                        self._back.add(a.id)
                     a.count += 1
                     a.last, a.text, a.cleared, a.cleared_text = time.time(), text, None, ""
                     a.latched = a.latched or latched
                     return a
             a = Alarm("a%d" % next(_ids), kind, key, text, time.time(), latched=latched, source=source)
             self.alarms.insert(0, a)
-            del self.alarms[50:]
+            self.trim()
         return a
+
+    def trim(self) -> None:
+        """The history kept: every alarm nobody has said Got it to, and every one still on, whatever their number (a
+        night's trip once vanished behind 50 newer alarms, from the portal, the phones and lab_status); of the others,
+        the newest KEEP_SEEN."""
+        with self._lock:
+            room = KEEP_SEEN
+            kept = []
+            for a in self.alarms:   # newest first
+                if not a.acknowledged or a.cleared is None:
+                    kept.append(a)
+                elif room > 0:
+                    kept.append(a)
+                    room -= 1
+            self.alarms[:] = kept
 
     def _tell(self, a: Alarm, detail: str, **record: Any) -> None:
         """An alarm that went up, into the lab's record, and to people unless it is a repeat folded into one nobody
-        has said Got it to yet: they were told of it, and it shows with its count."""
+        has said Got it to yet: they were told of it, and it shows with its count. A repeat that came back after
+        people were told it cleared is told again, with its count: a phone's last word was "Cleared" while it was
+        on again (a second interlock break within minutes reached nobody away from the lab)."""
         if a.count > 1:
             self.gate.log.write("alarm_again", by="monitor", alarm=a.id, count=a.count, text=a.text, **record)
-            self.on_change()
+            if a.id in self._back:
+                self._back.discard(a.id)
+                self.notify("alarm", "Alarm again (%d times): %s" % (a.count, a.text), detail)
+            else:
+                self.on_change()
             return
         self.gate.log.write("alarm", by="monitor", alarm=a.id, text=a.text, actions=a.actions or None, **record)
         self.notify("alarm", "Alarm: " + a.text, detail)
@@ -609,18 +637,26 @@ class Monitor:
         guard's trip (a gate's leakage past its limit, the night's most important event, went into the record and
         nowhere else), and a wait for a set point that gave up ("stall": its reading stopped getting closer, or its
         time was up; the alarm the system prompt promised never went up). The watchdog's alarm for that set point and
-        target, if it is on already, becomes this one. Never raises: the gate goes on whatever happens here."""
+        target, if it is on already and nobody has said Got it to it, becomes this one. One a person has seen ends
+        here instead, and the wait's end is an alarm of its own, told: it is news, and a Got it said before the alarm
+        latched once left nothing that could end it. Never raises: the gate goes on whatever happens here."""
         try:
             with self._lock:
                 told = self._stalled.get(key) if kind == "stall" else None
                 move = self._moves.get(key)
-                if told is not None and told.cleared is None and move is not None and _number(target) \
-                        and move.target == float(target):   # it now says how the wait ended, and stays on
+                same = told is not None and told.cleared is None and move is not None and _number(target) \
+                    and move.target == float(target)
+                if same and not told.acknowledged:   # it now says how the wait ended, and stays on
                     del self._stalled[key]
                     told.text, told.latched, told.last = text, True, time.time()
                     told.actions = list(actions or told.actions)
                     a = told
                 else:
+                    if same:   # seen: it ends with the wait, quietly (the person knows it), and the new one says why
+                        del self._stalled[key]
+                        told.cleared, told.cleared_text = time.time(), "the wait for it gave up (the next alarm)"
+                        self._cleared_lab[told.id] = self.lab.clock.now()
+                        self.gate.log.write("alarm_cleared", by="monitor", alarm=told.id, text=told.cleared_text)
                     told = None
                     a = self._new(kind, key, text, source="gate", latched=True)
                     a.actions = list(actions or [])
