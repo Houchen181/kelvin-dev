@@ -4498,7 +4498,7 @@
     const idle = i.status !== "running";
     if (n > 1) act("↑", "Move up (u)", () => queueOp({ op: "move", item: i.id, position: n - 1 }, true));
     if (n < count) act("↓", "Move down (d)", () => queueOp({ op: "move", item: i.id, position: n + 1 }, true));
-    if (idle) act("Edit", "Edit this item", () => queueEditing(Object.assign({ n }, i)));
+    if (idle && !i.restores) act("Edit", "Edit this item", () => queueEditing(Object.assign({ n }, i)));   // a restore step stays as Run again made it
     if (idle && i.status !== "waiting") act("Again", "Put it back in line", () => queueOp({ op: "again", item: i.id }, true));
     if (i.run_id) act("Open", "Open its run", () => openRun(i.run_id, i.name));
     if (idle) act("✕", "Remove (Delete)", () => queueOp({ op: "remove", item: i.id }, true));
