@@ -732,6 +732,47 @@ def test_incognito_is_offered_in_every_chat():
     assert "if (S.chatId) newChat();" in js[js.index("function toggleIncognito"):]   # from a saved chat: a new one
 
 
+def portal_function(name):
+    """One function of the portal's app.js, by its name."""
+    from labharness.web.app import STATIC
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    start = js.index("function %s(" % name)
+    return js[start:js.index("\n  }\n", start)]
+
+
+def test_a_message_is_sent_once_however_often_enter_is_pressed():
+    """Bug hunt: two Enters in a new chat made two chats and sent the message twice, as the input emptied only once
+    the chat was made. It empties at once now, and S.sending holds off another Enter until the message is on its way."""
+    send, start, compare = (portal_function(n) for n in ("sendMessage", "startSend", "sendCompare"))
+    assert send.index("if (S.sending) return;") < send.index("await")       # before anything waits
+    assert start.index('$("input").value = ""') < start.index("S.sending = true") < start.index("await")
+    assert "S.sending = false" in start[start.index("finally"):]            # and always lets go
+    assert 'api("/api/chats"' not in send + compare and "startSend(" in send and "startSend(" in compare
+    assert "S.sending" in portal_function("updateSend")                     # Send is greyed meanwhile
+
+
+def test_an_approval_card_closes_only_when_the_request_did():
+    """Bug hunt: a card said "Already closed" whatever failed (a 423 while Claude operates, no connection) though the
+    request was still open, hid the server's words, and came back in the Lab panel at the next poll."""
+    card = portal_function("makeApproval")
+    answer = card[card.index("async function answer(approve)"):card.index("yes.addEventListener")]
+    assert 'if (e.status === 409) { card.close("Already closed", false); return; }' in answer
+    rest = answer[answer.index("e.status === 409"):]
+    assert "yes.disabled = no.disabled = false" in rest and "card.choice = undefined" in rest and "toast(" in rest
+    assert "err.status = res.status" in portal_function("api")
+    assert "if (e.status !== 409) TERM.asked.delete(p.id)" in portal_function("termAnswer")   # the terminal's too
+
+
+def test_the_lab_button_shows_when_its_panel_is_open():
+    """Bug hunt: the Lab button never showed it was pressed, unlike the other panels' buttons."""
+    import re
+    from labharness.web.app import STATIC
+    assert re.search(r'<button id="toggle-lab"[^>]*aria-pressed="false"', (STATIC / "index.html").read_text("utf-8"))
+    lab = portal_function("toggleLab")
+    assert '$("toggle-lab").setAttribute("aria-pressed", String(S.labOpen))' in lab
+    assert '$("toggle-lab").classList.toggle("on", S.labOpen)' in lab
+
+
 def test_incognito_uses_and_keeps_no_memory(parts):
     _, settings, store = parts
     from labharness.web.agent import INCOGNITO, SYSTEM

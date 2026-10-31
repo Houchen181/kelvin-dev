@@ -103,6 +103,7 @@
       }
       const err = new Error(msg);
       err.data = data;
+      err.status = res.status;
       throw err;
     }
     return res.json();
@@ -1112,12 +1113,14 @@
     } finally { RUNS.polling = false; }
   }
   async function loadFinal(tab) {
+    const ended = tab.status === "finishing";   // it just ended (not an earlier run's tab opened)
     let data;
     try { data = await getRun(tab.runId); } catch (e) { setTabStatus(tab, "missing"); renderRunView(tab); return; }
     tab.final = data;
     tab.plan = data.plan || tab.plan;
     setTabStatus(tab, (data.meta && data.meta.status) || "unfinished");
     renderRunView(tab);
+    if (ended) refreshAnalysisRuns();   // the Analysis pane's list has it now
   }
 
   function buildRunView(tab) {
@@ -2173,13 +2176,12 @@
         await api("/api/approvals/" + encodeURIComponent(ev.id), { body: { approve } });
         card.close(approve ? "Approved" : "Declined", approve);
       } catch (e) {
-        if (e.data && e.data.approver) {   // not confirmed by an operator: the request is still open
-          yes.disabled = no.disabled = false;
-          card.choice = undefined;
-          toast(e.message);
-          return;
-        }
-        card.close("Already closed", false);
+        if (e.status === 409) { card.close("Already closed", false); return; }   // answered or closed meanwhile
+        // the request is still open (not confirmed by an operator, locked while Claude operates, no connection):
+        // the card stays, saying why, to answer again
+        yes.disabled = no.disabled = false;
+        card.choice = undefined;
+        toast(e.status ? e.message : "Your answer didn't reach Kelvin (" + e.message + "). Try again.");
       }
     }
     yes.addEventListener("click", () => answer(true));
@@ -3018,6 +3020,7 @@
     renderChats();
     refreshComposer();
     closeSidebar();
+    refreshAnalysisRuns();   // the runs this chat's model may see
   }
   function showChat(chat) {   // a chat still answering in this window: what it said before, then its answer as it goes
     const live = S.live.get(chat.id);
@@ -3044,6 +3047,7 @@
     applyIncognito();
     if (ask) askFolder(); else loadNewFolder();
     loadStartChecklist();
+    refreshAnalysisRuns();   // the runs a new chat's model may see
     $("input").focus();
   }
 
@@ -3122,7 +3126,7 @@
     const stop = S.streaming && !typed;
     send.classList.toggle("stop", stop);
     send.setAttribute("aria-label", stop ? "Stop" : "Send");
-    send.disabled = !S.streaming && ((!typed && !ATT.items.length) || !$("model").value);
+    send.disabled = !!S.sending || (!S.streaming && ((!typed && !ATT.items.length) || !$("model").value));
   }
   // ------------------------------------------------------------------ /name: start a skill or a recipe
   const SLASH = { items: null, shown: [], at: 0, for: null };
@@ -3267,29 +3271,47 @@
     catch (e) { toast(e.message); }
     pollState();
   }
+  // a message on its way: the input empties at once, and S.sending holds off another Enter until its chat is made
+  // and its files are up (two Enters in a new chat made two chats, and sent the message twice). The attachments sent,
+  // or null: not sent (a toast says why), and what was typed is back in the input
+  async function startSend(model) {
+    const typed = $("input").value;
+    $("input").value = ""; autosize();
+    S.sending = true;
+    updateSend();
+    let attachments = null;
+    try {
+      if (!S.chatId) {
+        const rules = currentRules();
+        try {
+          const made = await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } });
+          S.chatId = made.id;
+          showFolder(made.folder, made.own_folder);
+        } catch (e) { toast(e.message); return null; }
+        S.chatRules = rules;
+        applyIncognito();
+      }
+      attachments = await takeAttachments();
+      return attachments;
+    } finally {
+      S.sending = false;
+      if (attachments === null && !$("input").value) { $("input").value = typed; autosize(); }
+      updateSend();
+    }
+  }
   async function sendMessage(text) {
     text = text.trim();
     if (TYPED_STOP.test(text)) return hardStop();
     if (S.streaming) return steerMessage(text);   // attachments wait for the next message
+    if (S.sending) return;   // the message before is still on its way
     if (!text && ATT.items.length) text = ATT.items.length > 1 ? "Look at the attached files." : "Look at the attached file.";
     if (!text) return;
     const model = $("model").value;
     if (!model) { openSettings(); return; }
     const extra = S.compare.filter((k) => k !== model);
     if (extra.length) return sendCompare(text, [model, ...extra]);
-    if (!S.chatId) {
-      const rules = currentRules();
-      try {
-        const made = await api("/api/chats", { body: { model, project: SIDE.newProject, incognito: S.incognito } });
-        S.chatId = made.id;
-        showFolder(made.folder, made.own_folder);
-      } catch (e) { toast(e.message); return; }
-      S.chatRules = rules;
-      applyIncognito();
-    }
-    const attachments = await takeAttachments();
+    const attachments = await startSend(model);
     if (attachments === null) return;
-    $("input").value = ""; autosize();
     $("input").placeholder = askHint();
     showEmpty(false);
     thread.append(userBubble(text, attachments));
@@ -3407,19 +3429,8 @@
     } catch (e) { toast(e.message); }
   }
   async function sendCompare(text, models) {
-    if (!S.chatId) {
-      const rules = currentRules();
-      try {
-        const made = await api("/api/chats", { body: { model: models[0], project: SIDE.newProject, incognito: S.incognito } });
-        S.chatId = made.id;
-        showFolder(made.folder, made.own_folder);
-      } catch (e) { toast(e.message); return; }
-      S.chatRules = rules;
-      applyIncognito();
-    }
-    const attachments = await takeAttachments();
+    const attachments = await startSend(models[0]);
     if (attachments === null) return;
-    $("input").value = ""; autosize();
     $("input").placeholder = askHint();
     showEmpty(false);
     for (const el of document.querySelectorAll(".msg-actions")) el.remove();
@@ -5408,6 +5419,8 @@
   function toggleLab(open) {
     S.labOpen = open === undefined ? !S.labOpen : open;
     $("labpanel").hidden = !S.labOpen;
+    $("toggle-lab").setAttribute("aria-pressed", String(S.labOpen));
+    $("toggle-lab").classList.toggle("on", S.labOpen);
     fitLayout();
     if (S.labOpen) pollState();
   }
@@ -5779,7 +5792,7 @@
       termLine(approve ? "approved" : "declined", approve ? "ok" : "warn");
     } catch (e) {
       termLine(e.message, "err");
-      if (e.data && e.data.approver) TERM.asked.delete(p.id);   // still open: the Lab panel shows it again
+      if (e.status !== 409) TERM.asked.delete(p.id);   // still open (only a 409 says it closed): asked again
     }
   }
   function termState(s) {   // each poll: ask here for what the terminal is waiting on; notice answers given elsewhere
@@ -6550,6 +6563,16 @@
     // the runs this chat's model may see: what the pane hands to Kelvin goes into this chat
     try { ANA.runs = (await api("/api/runs?limit=100&chat=" + encodeURIComponent(S.chatId || ""))).runs; } catch (e) { ANA.runs = []; }
     $("an-run").replaceChildren(...ANA.runs.map((r) => h("option", { value: r.run_id }, anRunLabel(r))));
+  }
+  // the run picker and the compare menu as they are now, while the pane is open: a run ended, or another chat (whose
+  // model may see other runs) opened. Only the list changes: what the person is writing in the form stays
+  async function refreshAnalysisRuns() {
+    if (!ANA.open) return;
+    if (!ANA.spec.runs.length) return startAnalysis();   // it said "No runs yet.": the latest now
+    await loadAnalysisRuns();
+    const first = ANA.spec.runs[0];
+    if (!ANA.runs.some((r) => r.run_id === first)) $("an-run").append(h("option", { value: first }, first));
+    $("an-run").value = first;
   }
   // the pane opened by a person: the run the Runs pane shows, else the latest
   async function startAnalysis() {
