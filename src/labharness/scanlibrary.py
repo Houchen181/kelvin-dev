@@ -207,15 +207,18 @@ class Library:
 
     def note_script(self, path: Any, run_id: str, params: Optional[Dict[str, Any]] = None,
                     args: Optional[List[Any]] = None, python: Optional[str] = None, sha256: Optional[str] = None,
-                    when: Optional[float] = None, marks: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                    when: Optional[float] = None, marks: Optional[Dict[str, Any]] = None,
+                    beside: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         """A script that starts a run: its entry, with what that run had (the values a person changed, its
-        arguments, Python, the sha256 of the file as it read it, and whose work it was: marks, as note_plan)."""
+        arguments, Python, the sha256 of the file as it read it, the Python files beside it, hashed, and whose work it
+        was: marks, as note_plan)."""
         entry_id = script_id(path)
         with _LOCK:
             found = self._read()
             entry = found.get(entry_id) or self._new_script(path, "kelvin", when)
             entry.update(params=dict(params or {}), args=[str(a) for a in args or []], python=python or None,
-                         sha256=sha256 or None, marks=dict(marks or {}))
+                         sha256=sha256 or None, marks=dict(marks or {}),
+                         beside=dict(beside) if isinstance(beside, dict) else None)
             self._ran(entry, run_id, when)
             found[entry_id] = entry
             self._keep(found)

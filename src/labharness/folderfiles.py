@@ -36,6 +36,7 @@ NOT_SAVED = {".exe", ".com", ".scr", ".pif", ".msi", ".msp", ".dll", ".sys", ".c
              ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".hta", ".lnk", ".url", ".reg", ".inf", ".pth"}
 STARTUP = {"sitecustomize.py", "usercustomize.py"}
 LOADED = {".py", ".pyw"}   # what a maker's Python library could import from its folder
+CODE = {".py", ".pyw", ".pyc", ".pyd"}   # what Python imports from a script's folder (source, compiled, extension)
 KEPT = ".kelvin-old"   # beside a file Kelvin replaced: each version before, by date
 # the lab's records in the data folder, and in each run's folder, which only Kelvin itself writes: the event log, the
 # mounted sample and its protection, the queue, the chats' folders of runs, the catalog, the person's library of scans
@@ -137,10 +138,12 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
     folder, with the lab config, settings, accounts, cards and everyone's chats; the signed-in person's chats), never
     read or written this way; nor is a file that may hold sign-ins, keys or tokens (secret). data: the data folder,
     with everyone's runs and the lab's records: never read this way (Kelvin's run tools read runs, leaving out work
-    the chat may not see), and its records (RECORDS) only Kelvin itself writes; a run's own files (RUN_RECORDS) are
-    Kelvin's in any folder named as a run is. unseen: whether a Kelvin run (its folder) is unshared work the chat may
-    not see, which it never reaches wherever it is kept. kept: what Kelvin runs as a person chose it, never saved
-    this way: the lab's scripts folders and the scripts a person imported (their library)."""
+    the chat may not see), and its records (RECORDS) and runs only Kelvin itself writes; a run's own files
+    (RUN_RECORDS) are Kelvin's in any folder named as a run is. unseen: whether a Kelvin run (its folder) is unshared
+    work the chat may not see, which it never reaches wherever it is kept. kept: what Kelvin runs as a person chose
+    it, never saved this way: the lab's scripts folders, whole, and the scripts a person imported (their library),
+    with the code beside them (Python files and new folders, anywhere under an imported script's folder: its folder
+    is first on sys.path, so a helpers.py or a numpy.py there would run with it)."""
     verb = "saves" if saving else "reads"
     folder = mine(target, own)
     if folder is not None:
@@ -165,13 +168,26 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
     if saving and (name in RUN_RECORDS or _RUN_RECORD.match(name)) and _run_named(target.parent):
         return ("%s is part of a Kelvin run's record (its data, its plan, or the script as it ran, its output and "
                 "commands), which only Kelvin itself writes" % target)
+    if saving and data is not None and _within(target, Path(str(data)) / "runs"):
+        return ("%s is in the data folder's runs, which only Kelvin itself writes (every run there is one it "
+                "recorded)" % target)
     if saving:
         for k in kept:
-            if k and _within(target, k):
+            if not k:
+                continue
+            if _within(target, k):
                 return ("%s is %s: Kelvin runs it as a person chose it, so only a person changes it. Give the code "
                         "in the answer; the person saves it if they want it" % (target, (
                             "in the lab's scripts folder (%s)" % k) if Path(str(k)).is_dir() else
                         "a script the person imported into their library"))
+            beside = Path(str(k)).parent   # an imported script's folder: what Python imports there runs with it
+            if not Path(str(k)).is_dir() and _within(target, beside) and (
+                    target.suffix.lower() in CODE or not target.parent.exists()):
+                return ("%s is %s beside %s, a script the person imported: its folder comes first when Python imports, "
+                        "so what is saved there runs with it. Only a person changes the code there. Give the code in "
+                        "the answer; the person saves it if they want it" % (
+                            target, "Python code" if target.suffix.lower() in CODE else "a new folder (a package)",
+                            Path(str(k)).name))
     return None
 
 
@@ -189,7 +205,8 @@ def inside(folder: Any, path: Any = "", saving: bool = False, own: Iterable[Any]
     runs as a person chose it (off_limits)."""
     base = Path(folder).resolve()
     given = Path(str(path or "").strip() or ".")
-    if saving and any(":" in p or p != p.rstrip(". ") for p in given.parts[1 if given.anchor else 0:]):
+    if saving and any(p not in (".", "..") and (":" in p or p != p.rstrip(". "))
+                      for p in given.parts[1 if given.anchor else 0:]):
         # Windows saves "script.py." or "script.py " as script.py, and "x:y" in a stream of x: never what is checked
         raise FolderError("%s: a name ending in a dot or a space, or with a colon in it, isn't one Kelvin saves "
                           "(Windows would save it under another name)" % path)

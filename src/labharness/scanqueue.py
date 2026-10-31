@@ -165,6 +165,7 @@ class Item:
     then_pause: bool = False        # the queue pauses after this item (a person's "run now" from the Runs panel)
     restores: Optional[str] = None  # a step that sets back the settings item <id> ran with: if it doesn't finish,
     #                                 that item is skipped, never run in conditions it didn't run in
+    restored_by: Optional[str] = None   # and that item: it starts only once step <id> has finished (else skipped)
     library: Optional[str] = None   # the library's entry its runs are noted under (a scan run again, restored)
 
     def view(self) -> Dict[str, Any]:

@@ -195,8 +195,9 @@ def run_name(plan_name: str, most: int = NAME_MAX) -> str:
 class RunFolders:
     """Where a person's runs are: the data folder's runs/, and each folder a chat saved runs in (the data folder's
     folders.json lists them). It reads like runs/ alone did: folders / run_id is that run's folder wherever it is,
-    and iterdir() gives every run's folder (in a chat's folder only Kelvin's runs: the person keeps other files
-    there too). A folder that can't be read now (a drive that is away) is skipped until it is back."""
+    and iterdir() gives every run's folder: only folders named as Kelvin names runs (RUN_NAME), and in a chat's
+    folder only those with a run's record (the person keeps other files there too). A folder that can't be read now
+    (a drive that is away) is skipped until it is back."""
 
     INDEX = "folders.json"
 
@@ -230,12 +231,12 @@ class RunFolders:
 
     def find(self, run_id: str) -> Optional[Path]:
         """The run's folder, or None (an id is a name, never a path)."""
-        if not run_id or run_id in (".", "..") or "/" in run_id or "\\" in run_id or ":" in run_id:
-            return None
+        if not run_id or not RUN_NAME.match(run_id) or "/" in run_id or "\\" in run_id or ":" in run_id:
+            return None   # only Kelvin's runs, as iterdir lists them: named as a run (in a chat's folder, recorded)
         for root in self.roots():
             d = root / run_id
-            try:   # in a chat's folder only Kelvin's runs, as iterdir lists them: named as a run, with its record
-                if d.is_dir() and (root == self.home or (RUN_NAME.match(run_id) and rundata.is_run(d))):
+            try:
+                if d.is_dir() and (root == self.home or rundata.is_run(d)):
                     return d
             except OSError:
                 continue
@@ -252,7 +253,7 @@ class RunFolders:
             except OSError:
                 continue
             for d in found:
-                if d.name in seen or (root != self.home and not (RUN_NAME.match(d.name) and rundata.is_run(d))):
+                if d.name in seen or not RUN_NAME.match(d.name) or (root != self.home and not rundata.is_run(d)):
                     continue
                 seen.add(d.name)
                 yield d

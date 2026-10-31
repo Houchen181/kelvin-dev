@@ -132,7 +132,9 @@ def test_the_ai_never_forges_the_library_nor_rewrites_a_script_a_person_chose(tm
         with pytest.raises(folderfiles.FolderError, match="only a person changes it"):
             folderfiles.save(target.parent, target.name, "print('AI code')\n", kept=kept, **ai_saves(rt))
     assert "AI code" not in mine.read_text() and "AI code" not in (scripts / "sweep.py").read_text()
-    folderfiles.save(elsewhere, "other.py", "print(1)\n", kept=kept, **ai_saves(rt))   # beside it: the chat's own
+    with pytest.raises(folderfiles.FolderError, match="Python code beside probe.py"):   # what it would import
+        folderfiles.save(elsewhere, "other.py", "print(1)\n", kept=kept, **ai_saves(rt))
+    folderfiles.save(elsewhere, "notes.txt", "a note\n", kept=kept, **ai_saves(rt))    # beside it, not code: fine
 
 
 def test_in_a_chat_write_file_refuses_the_scripts_folder(tmp_path, scripts):
@@ -216,7 +218,7 @@ def test_a_run_again_keeps_whose_work_it_was(tmp_path):
 
 def test_the_queue_runs_only_what_a_person_approved(tmp_path):
     rt = virtual(tmp_path, [])
-    sneak = "step: sneak in\nset: {smu.V: 1}"
+    sneak = "step: sneak in\nset: {smu.V: 3}"                           # beyond the 0 … 2 V the scan was approved for
     rt.gate.approver = During([True, False], lambda: rt.queue_add(sneak, position=1, by="agent"))
     rt.queue_add(SWEEP)
     assert rt.queue_start().startswith("queue started")               # its card waited while the step came first
@@ -224,6 +226,7 @@ def test_the_queue_runs_only_what_a_person_approved(tmp_path):
     first, again = rt.gate.approver.requests
     assert "sneak" not in "\n".join(first.items)                       # approved: the scan alone
     assert again.items[0].startswith("These were added to the queue, or changed, after it was approved")
+    assert "3 V" in "\n".join(again.items) and "gate_sweep" not in again.title + "\n".join(again.items)
     assert [i.status for i in rt.queue.items] == ["waiting", "waiting"]   # asked again, declined: nothing ran
     assert rt.queue.state == "paused" and "after the queue was approved" in rt.queue.reason
 
@@ -231,6 +234,14 @@ def test_the_queue_runs_only_what_a_person_approved(tmp_path):
     assert rt.queue_start().startswith("queue started")
     finish(rt)
     assert [i.status for i in rt.queue.items] == ["done", "done"]
+
+    inside = "step: inside what was approved\nset: {smu.V: 1}"        # a drive already approved: no card for it
+    rt.queue.items.clear()
+    rt.gate.approver = During([True], lambda: rt.queue_add(inside, position=1, by="agent"))
+    rt.queue_add(SWEEP)
+    rt.queue_start()
+    finish(rt)
+    assert len(rt.gate.approver.requests) == 1 and [i.status for i in rt.queue.items] == ["done", "done"]
 
 
 def test_a_start_that_lost_the_race_never_starts_a_second_loop(tmp_path, monkeypatch):

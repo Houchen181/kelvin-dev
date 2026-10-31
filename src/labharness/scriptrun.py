@@ -144,6 +144,31 @@ def _runnable(path: Path) -> Path:
     return path
 
 
+def beside(script: Path, most: int = 200) -> Dict[str, str]:
+    """The Python files beside a script, which it may import (its folder comes first on sys.path): each of its
+    folder's own .py, .pyw, .pyc and .pyd files, with a short sha256 of its bytes (its size and time, over 4 MB), so
+    a card can say which of them changed since the script's last run."""
+    out: Dict[str, str] = {}
+    try:
+        found = sorted(os.scandir(script.parent), key=lambda e: e.name.lower())
+    except OSError:
+        return out
+    for e in found:
+        if len(out) >= most:
+            break
+        if e.name.lower() == script.name.lower() or Path(e.name).suffix.lower() not in (".py", ".pyw", ".pyc", ".pyd"):
+            continue
+        try:
+            if not e.is_file():
+                continue
+            size = e.stat().st_size
+            out[e.name] = ("%d bytes, %d" % (size, e.stat().st_mtime_ns) if size > 4 * 2 ** 20 else
+                           hashlib.sha256(Path(e.path).read_bytes()).hexdigest()[:16])
+        except OSError:
+            continue
+    return out
+
+
 def fingerprint(text: str) -> str:
     """The sha256 of a script's text however its lines end (script.py is written with this computer's line ends): a
     run keeps it of the text it ran, and that text runs again only while it still matches."""
@@ -652,6 +677,7 @@ class Prepared:
     declared: Dict[str, List[Any]] = field(default_factory=dict)   # drive ranges the agent gave for this run
     params: Dict[str, Any] = field(default_factory=dict)           # the values asked for (changes says them)
     version: Optional[str] = None   # the run whose script.py this runs, as it ran then (None: the file as it is)
+    near: Dict[str, str] = field(default_factory=dict)   # the Python files beside it as it starts, hashed (beside)
 
     @property
     def name(self) -> str:
@@ -722,7 +748,7 @@ def prepare(lab: Any, path: str, folders: Sequence[Any], params: Optional[Dict[s
     py = choose_python(script, text, roots, python, named) if named else choose_python(script, text, roots, python)
     return Prepared(script, original, text, changes, [str(a) for a in (args or [])], py,
                     read_ahead(lab, script, text), sha256 or hashlib.sha256(original.encode("utf-8")).hexdigest(),
-                    declared_drives(lab, drives), params, version)
+                    declared_drives(lab, drives), params, version, beside(script))
 
 
 def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[str, Allowed], List[str]]:
@@ -1320,10 +1346,10 @@ class ScriptRun:
                 "changes": prep.changes or None, "params": prep.params or None, "args": prep.args or None,
                 "version": prep.version}
         # script_sha256: the text that runs (script.py), kept in the record from its start, so a run again "as it
-        # ran" runs exactly that text, or nothing
+        # ran" runs exactly that text, or nothing; beside: the Python files beside it then, for the next card
         meta = dict({"lab": lab.config.name, "simulated": all(i.simulated for i in lab.instruments.values())},
                     **self.meta)
-        meta.update(script=str(prep.path), script_sha256=fingerprint(prep.source))
+        meta.update(script=str(prep.path), script_sha256=fingerprint(prep.source), beside=prep.near)
         self.rec = self.store.create(prep.name, {k: v for k, v in plan.items() if v is not None}, gate.operator,
                                      self.folder, meta=meta)
         self.rec_id = self.rec.run_id
