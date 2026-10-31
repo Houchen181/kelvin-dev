@@ -248,9 +248,10 @@ def test_dots_in_a_path_and_other_spellings_of_what_is_kept(tmp_path):
     kw = dict(own=[], data=tmp_path / "data", kept=[str(scripts_dir), str(imported)])
     assert folderfiles.save(chat, "notes/../x.py", "print(3)\n", **kw)[0] == (chat / "x.py").resolve()
     assert folderfiles.save(chat, "./y.txt", "y\n", **kw)[0] == (chat / "y.txt").resolve()
-    refused = ["measurementscripts/NEW.PY", "PROJ/LONG_IMPORTED_SCRIPT.PY", "proj/sibling.py",
-               "20261031-101500-LONGSWEEPNAME.PY/SCRIPT.PY", "proj/../MeasurementScripts/x.py",
-               "\\\\?\\" + str(scripts_dir / "x.py"), "notes/x.py."]
+    refused = ["proj/sibling.py", "proj/../MeasurementScripts/x.py", "notes/x.py."]
+    if os.name == "nt":   # other spellings of the same files on Windows (case, the \\?\ prefix); elsewhere other files
+        refused += ["measurementscripts/NEW.PY", "PROJ/LONG_IMPORTED_SCRIPT.PY",
+                    "20261031-101500-LONGSWEEPNAME.PY/SCRIPT.PY", "\\\\?\\" + str(scripts_dir / "x.py")]
     for p in (scripts_dir, run, imported):   # Windows' 8.3 names, where the volume keeps them
         short = _short(p)
         if short:

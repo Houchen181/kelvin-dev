@@ -80,7 +80,14 @@ def _within(path: Path, folder: Any) -> bool:
         folder = Path(folder).expanduser().resolve()
     except (OSError, RuntimeError, ValueError):
         return False
-    return path == folder or folder in path.parents
+    if path == folder or folder in path.parents:
+        return True
+    if os.name == "nt":   # Windows paths compare without case already
+        return False
+    try:   # another spelling of the same folder, on a file system that ignores case (macOS's usually does)
+        return folder.is_dir() and any(p.exists() and os.path.samefile(p, folder) for p in [path, *path.parents])
+    except OSError:
+        return False
 
 
 def mine(target: Path, own: Iterable[Any] = ()) -> Optional[Path]:
