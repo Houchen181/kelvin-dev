@@ -412,3 +412,15 @@ def test_hysteresis_pairs_each_reading_with_its_own_x_when_the_first_is_left_out
                         [{"key": "counter.rate", "unit": "1/s", "kind": "scalar"}], {"status": "done", "points": 51})
         assert "the first point reads 0 1/s on counter.rate" in a["issues"][0]
         assert any("hysteresis" in i for i in a["issues"]) == bool(lag), a["issues"]
+
+
+def test_a_kinked_line_has_no_both_sides_and_no_share_of_a_level_at_or_below_zero():
+    rng = np.random.default_rng(3)
+    b = np.linspace(-2, 2, 81)
+    kink = analyze_curve(b.tolist(), (np.where(b > 0, 2 * b, 0.5 * b) + rng.normal(0, 0.01, b.size)).tolist(), "x", "y")
+    assert kink["kind"] == "quadratic" and kink["summary"].startswith("y rises with x from -0.9"), kink["summary"]
+    assert "both sides" not in kink["summary"] and "%" not in kink["summary"]   # was +595 % of a minimum of -0.84
+    low = analyze_curve(b.tolist(), (-0.84 + 0.4 * (b - 0.3) ** 2 + rng.normal(0, 0.01, b.size)).tolist(), "x", "y")
+    assert "both sides of a minimum" in low["summary"] and "%" not in low["summary"], low["summary"]
+    zero = analyze_curve(b.tolist(), (b ** 2 + rng.normal(0, 0.01, b.size)).tolist(), "magnet.B", "V", "T", "V")
+    assert zero["summary"].startswith("V rises as magnet.B² from ") and "%" not in zero["summary"], zero["summary"]

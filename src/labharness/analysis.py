@@ -837,7 +837,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
             res("resistance (slope)", v[1], e[1], "Ω")
             out["summary"] += "; R = %s" % _fmt_pm(v[1], e[1], "Ω")
     elif chosen["model"] == "quadratic":
-        _bend(out, res, chosen, xs_s, x_name, y_name, x_unit, y_unit, sigma)
+        _bend(out, res, chosen, xs_s, ys_s, x_name, y_name, x_unit, y_unit, sigma)
     elif chosen["model"] == "step":
         _step_said(out, res, chosen, step, x_name, y_name, x_unit, y_unit)
     elif chosen["model"] in PEAKS and chosen["values"][3] > reach:   # its width would come from the shape assumed
@@ -1056,10 +1056,12 @@ def _two_lines(out: Dict[str, Any], res: Callable[..., None], f: Dict[str, Any],
                      width + " 2": [w2, ew2, x_unit]}
 
 
-def _bend(out: Dict[str, Any], res: Callable[..., None], q: Dict[str, Any], xs: Any, x_name: str, y_name: str,
-          x_unit: str, y_unit: str, noise: float) -> None:
+def _bend(out: Dict[str, Any], res: Callable[..., None], q: Dict[str, Any], xs: Any, ys: Any, x_name: str,
+          y_name: str, x_unit: str, y_unit: str, noise: float) -> None:
     """A parabola: where it turns and from what level, and how much it changes across the sweep (for a
-    magnetoresistance: rises as B², +125 % at 2.5 T)."""
+    magnetoresistance: rises as B², +125 % at 2.5 T). "Both sides" only of a turn well inside the sweep (a kinked
+    line has its "minimum" near an end: then it rises or falls between the levels measured at the ends), and a share
+    only of a level well above zero."""
     (xv, yv, k), (exv, eyv, ek) = q["values"], q["errors"]
     lo, hi = float(xs[0]), float(xs[-1])
     far = lo if abs(lo - xv) > abs(hi - xv) else hi
@@ -1067,11 +1069,13 @@ def _bend(out: Dict[str, Any], res: Callable[..., None], q: Dict[str, Any], xs: 
     out["kind"] = "quadratic"
     turn = "minimum" if k > 0 else "maximum"
     grows = "rises" if k > 0 else "falls"
-    relative = abs(yv) > 5 * max(noise, 1e-300) and not _db(y_unit)   # a share of a level in dB means nothing
-    change = "%+.0f%% at %s = %s" % (100 * (at_far - yv) / abs(yv), x_name, si(far, x_unit)) if relative else \
+    # a share of a level in dB means nothing, nor of one near or below zero (+595 % of -0.84)
+    relative = yv > 5 * max(noise, 1e-300) and yv > 0.02 * abs(at_far - yv) and not _db(y_unit)
+    change = "%+.0f%% at %s = %s" % (100 * (at_far - yv) / yv, x_name, si(far, x_unit)) if relative else \
         "%s at %s = %s" % (si(at_far, y_unit), x_name, si(far, x_unit))
-    if lo < xv < hi:
-        if abs(xv) < max(3 * exv, 0.01 * (hi - lo)):   # turning at 0: even in x (a magnetoresistance in B)
+    at_zero = lo <= 0 <= hi and abs(xv) < max(3 * exv, 0.01 * (hi - lo))   # even in x (a magnetoresistance in B)
+    if at_zero or lo + 0.15 * (hi - lo) < xv < hi - 0.15 * (hi - lo):
+        if at_zero:
             out["summary"] = "%s %s as %s² from %s at %s = 0: %s (quadratic fit, R² %.4f)" % (
                 y_name, grows, x_name, si(yv, y_unit), x_name, change, q["r2"])
         else:
@@ -1080,17 +1084,17 @@ def _bend(out: Dict[str, Any], res: Callable[..., None], q: Dict[str, Any], xs: 
                                            change, q["r2"])
         res(turn, yv, eyv, y_unit)
         res("at " + x_name, xv, exv, x_unit)
-    else:
-        rising = (k > 0) == (lo > xv)   # past a minimum, or before a maximum
+    else:   # its turn outside the sweep or near an end: a curving rise or fall
+        relative = False
+        y_lo, y_hi = float(ys[0]), float(ys[-1])
         out["summary"] = "%s %s with %s from %s to %s, curving (quadratic fit, R² %.4f)" % (
-            y_name, "rises" if rising else "falls", x_name, si(yv + k * (lo - xv) ** 2, y_unit),
-            si(yv + k * (hi - xv) ** 2, y_unit), q["r2"])
+            y_name, "rises" if y_hi > y_lo else "falls", x_name, si(y_lo, y_unit), si(y_hi, y_unit), q["r2"])
     curvature = "%s/%s²" % (y_unit or "1", x_unit or "1")
     res("curvature", k, ek, "")
     out["results"][-1]["value"] += " " + curvature
     out["results"][-1]["unit"] = curvature
     if relative:
-        res("change at %s = %s" % (x_name, si(far, x_unit)), 100 * (at_far - yv) / abs(yv), None, "%")
+        res("change at %s = %s" % (x_name, si(far, x_unit)), 100 * (at_far - yv) / yv, None, "%")
     out["params"] = {"curvature": [k, ek, curvature], "vertex": [xv, exv, x_unit], turn: [yv, eyv, y_unit]}
 
 
