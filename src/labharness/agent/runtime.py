@@ -5718,7 +5718,8 @@ class LabRuntime:
 
     def _save_alarms(self) -> None:
         try:
-            _write_json(self.data_dir / self.ALARMS, {"alarms": [a.view() for a in list(self.monitor.alarms)[:50]]})
+            # as the monitor keeps them: every one nobody has said Got it to, and the newest of the others
+            _write_json(self.data_dir / self.ALARMS, {"alarms": [a.view() for a in list(self.monitor.alarms)]})
         except OSError:
             pass
 
@@ -5743,7 +5744,8 @@ class LabRuntime:
                 a.cleared_text, a.acknowledged_by = "Kelvin stopped", a.acknowledged_by or "the restart's card"
                 a.text += " (on when Kelvin stopped)"
             kept.append(a)
-        self.monitor.alarms[:] = kept[:50]
+        self.monitor.alarms[:] = kept
+        self.monitor.trim()
         return was_on
 
     def alarms_view(self) -> List[Dict[str, Any]]:

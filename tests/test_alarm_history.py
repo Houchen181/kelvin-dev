@@ -139,6 +139,27 @@ def test_the_portal_keeps_every_unseen_alarm_beyond_the_latest_ones(tmp_path):
     assert w["id"] in [v["id"] for v in rt.monitor.list()]
 
 
+def test_no_alarm_nobody_said_got_it_to_is_dropped_however_many_come_after(tmp_path):
+    """Review of 0.3.34: the history kept the latest 50 alarms, so a night's trip nobody had said Got it to vanished
+    from the portal, the phones and lab_status behind 50 newer ones (a flaky instrument every 15 min makes 50 in 12 h).
+    Only the history of alarms people have seen, and that are over, is cut, to the newest 50."""
+    rt = runtime(tmp_path)
+    trip = rt.monitor.from_gate("trip", "smu.V", "smu.V tripped at 12.05 V: |smu.I| = 2 nA > 1 nA; back to 0 V")
+    for n in range(60):   # a flaky instrument's error, cleared and back every 15 min over a weekend
+        a = rt.monitor._new("error", "dmm", "dmm reports an error %d" % n)
+        rt.monitor._clear(a.id, "no more errors")
+        rt.lab.clock.sleep(900)
+    assert len(rt.monitor.alarms) == 61 and trip in rt.monitor.alarms
+    assert trip.id in [v["id"] for v in rt.alarms_view()] and "ALARM: smu.V tripped at 12.05 V" in rt.lab_status()
+    for a in rt.monitor.alarms[:60]:   # people saw the errors: their history is cut to the newest 50
+        rt.monitor.acknowledge(a.id, "Ada (portal)")
+    rt.monitor.trim()
+    assert len(rt.monitor.alarms) == 51 and rt.monitor.alarms[-1] is trip         # the trip nobody saw stays
+    assert rt.monitor.alarms[0].text == "dmm reports an error 59"
+    kept = json.loads((rt.data_dir / "alarms.json").read_text(encoding="utf-8"))["alarms"]
+    assert trip.id in [v["id"] for v in kept]                                       # and so after a restart
+
+
 def test_lab_status_names_the_latest_unseen_alarms_and_counts_the_rest(tmp_path):
     rt = runtime(tmp_path)
     for n in range(8):
@@ -170,6 +191,9 @@ def test_a_noisy_reading_at_its_threshold_raises_one_alarm_not_ten(lab, tmp_path
 
 
 def test_an_alarm_that_comes_back_before_anyone_looked_folds_into_one_with_a_count(lab, tmp_path):
+    """Repeats fold into one alarm with a count. One that comes back after people were told it cleared is told again
+    (review of 0.3.34: a phone's last word was "Cleared" while the alarm was on again); while it flaps after that, it
+    is only counted."""
     gate, monitor, notices = watching(lab, tmp_path)
     monitor.add(Watch("tc.T_sample", above=20, every=1))
     for _ in range(3):   # out, back well inside for a while, out again, within minutes
@@ -180,7 +204,7 @@ def test_an_alarm_that_comes_back_before_anyone_looked_folds_into_one_with_a_cou
             monitor.tick()
     [alarm] = monitor.alarms
     assert alarm.count == 3 and alarm.last >= alarm.raised and alarm.cleared
-    assert [n[0] for n in notices] == ["alarm", "alarm_cleared"]                    # told once, not three times
+    assert [n[1].split(":")[0] for n in notices] == ["Alarm", "Cleared", "Alarm again (2 times)"]   # not one a flap
     assert [e["type"] for e in gate.log.events()].count("alarm_again") == 2        # the record has every one
     monitor.acknowledge(alarm.id, "Ada (portal)")
     reads(lab, 25.0, 30)
@@ -191,6 +215,23 @@ def test_an_alarm_that_comes_back_before_anyone_looked_folds_into_one_with_a_cou
     reads(lab, 25.0, FOLD_S + 60)                                                  # much later: a new alarm again
     monitor.tick()
     assert len(monitor.alarms) == 3 and notices[-1][0] == "alarm"
+
+
+def test_a_second_break_after_people_heard_it_cleared_reaches_them(lab, tmp_path):
+    """Review of 0.3.34: an interlock that broke again within 10 minutes of its "Cleared" folded into the first alarm
+    and told nobody, so nobody away from the lab heard of the second break."""
+    gate, monitor, notices = watching(lab, tmp_path)
+    text = "Interlock: magnet.B is at 1 T, which needs tc.T_sample < 10 (now 12 K)"
+    a = monitor._new("interlock", "magnet.B", text, source="interlock 0")
+    monitor._tell(a, "stopped the running plan")
+    lab.clock.sleep(120)
+    monitor._clear(a.id, "interlock magnet.B: the drive is at safe")
+    lab.clock.sleep(120)                                                          # broken again, 2 min later
+    again = monitor._new("interlock", "magnet.B", text, source="interlock 0")
+    monitor._tell(again, "stopped the running plan")
+    assert again is a and a.count == 2 and a.cleared is None
+    assert [n[1] for n in notices] == ["Alarm: " + text, "Cleared: interlock magnet.B: the drive is at safe",
+                                       "Alarm again (2 times): " + text]
 
 
 # ------------------------------------------------------------------------------------ a sample's watches end with it
@@ -291,6 +332,38 @@ def test_the_watchdogs_alarm_becomes_the_wait_that_gave_up(lab, tmp_path):
     lab.clock.sleep(60)
     monitor.tick()
     assert alarm.cleared is None and len(monitor.alarms) == 1
+
+
+def test_a_stall_seen_before_the_wait_gave_up_is_news_and_got_it_ends_it(lab, tmp_path):
+    """Review of 0.3.34: a person said Got it to the watchdog's stall at 5 min; at 10 min the wait gave up and latched
+    that same alarm, a Got it then did nothing, and "ALARM: ..." stayed in lab_status until Kelvin restarted. The
+    wait's end is news of its own now, told, and a Got it ends it."""
+    gate, monitor, notices = watching(lab, tmp_path, answers=[True, True])
+    assert gate.set("tc", "heater_range", "low").ok
+    done = {}
+    real_sleep = lab.clock.sleep
+
+    def sleep(seconds):   # the monitor looks every 15 s while the wait goes on, and the phone says Got it at once
+        real_sleep(seconds)
+        if lab.clock.now() - done.setdefault("look", lab.clock.now()) >= 15:
+            done["look"] = lab.clock.now()
+            monitor.tick()
+            for a in monitor.active():
+                if not a.acknowledged:
+                    monitor.acknowledge(a.id, "Ada (phone)")
+    lab.clock.sleep = sleep
+    r = gate.set("tc", "setpoint", 25)
+    lab.clock.sleep = real_sleep
+    gave_up, seen = monitor.alarms
+    assert seen.acknowledged and seen.cleared and "the wait for it gave up" in seen.cleared_text
+    assert gave_up.latched and not gave_up.acknowledged and gave_up.text == r.message
+    assert [n[1] for n in notices][-1] == "Alarm: " + r.message                    # told: it is news
+    monitor.acknowledge(gave_up.id, "Ada (portal)")
+    assert gave_up.cleared and monitor.lines() == []
+    late = monitor._new("trip", "smu.V", "smu.V tripped at 12 V", source="gate")   # a latched one seen before it
+    late.acknowledged, late.latched = True, True                                   # latched (any other way): Got
+    monitor.acknowledge(late.id, "Ada (portal)")                                   # it still ends it
+    assert late.cleared and "Got it from Ada (portal)" in late.cleared_text
 
 
 # ------------------------------------------------------------------------------- where alarms reach people, honestly
