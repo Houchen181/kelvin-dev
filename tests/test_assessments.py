@@ -4,7 +4,10 @@ different model on each row (a Q "drop" of 14 % that wasn't there), a centred re
 first point of 0 counts, Ramsey told to widen its sweep; a parabola called a dip 117 T wide and a gate map's
 magnetoresistance a 2-D Gaussian spot; fits of noise given as numbers and failed fits kept unmarked; smooth() pulling
 a sweep's ends down; a Hall density from a zero R_H, a lock-in's volts where the measurement chain gives ohms, and a
-leakage current leading a gate sweep's headline."""
+leakage current leading a gate sweep's headline. And from the review of 0.3.34: a Q for a line as wide as the sweep,
+superconducting transitions called peaks or two dips, a swept excitation's every point divided by its first current,
+a decay's first point left out, hysteresis from readings paired with the wrong x, "both sides" of a kinked line's
+end, and a Hall density beside "not significant"."""
 import math
 import random
 
@@ -237,7 +240,7 @@ def test_a_hall_density_only_from_an_r_h_that_stands_out_in_ohms():
     noise = np.random.default_rng(2).normal(0, 0.5, b.size)
     r = fitting.fit(hall, b, 5 + noise, x_unit="T", y_unit="Ω")
     assert not any(d["name"].startswith("carrier") for d in r["derived"])
-    assert any("within 3σ of 0" in w for w in r["warnings"])
+    assert any("is not significant" in w for w in r["warnings"])
     r = fitting.fit(hall, b, 1e-5 * b + noise * 1e-8, x_unit="T", y_unit="V")
     assert not r["derived"] and any("not ohms" in w for w in r["warnings"])
     ohms = fitting.fit(hall, b, 5 - b / (fitting.QE * 2e16) + noise, x_unit="T", y_unit="Ω")
@@ -297,3 +300,142 @@ def test_a_gate_sweeps_headline_is_the_sample_not_its_leakage():
     assert head.startswith("lockin.X has a peak at smu.V = "), head   # the sample's reading leads: inside the sweep
     assert float(head.split(" = ", 1)[1].split()[0]) == pytest.approx(1.50, abs=0.01)   # whatever the noise's draw
     assert "edge of the sweep; the feature may extend" not in r.analysis["assessment"]
+
+# ------------------------------------------------------------------ the review of 0.3.34 (2026-10-31)
+
+
+def test_a_line_as_wide_as_the_sweep_gets_no_width_or_q_and_a_narrower_one_its_own():
+    rng = np.random.default_rng(12)
+    f = np.linspace(4.999e9, 5.001e9, 201)                                       # a 2 MHz window
+    for fwhm in (1.4e6, 2e6, 3e6):
+        y = 1 - 0.5 / (1 + ((f - 5.0001e9) / (fwhm / 2)) ** 2) + rng.normal(0, 0.002, f.size)
+        s = analyze_curve(f.tolist(), y.tolist(), "vna.frequency", "vna.S21", "Hz", "")
+        assert s["kind"] == "dip" and s["params"]["center"][0] == pytest.approx(5.0001e9, abs=5e3), s["summary"]
+        if fwhm < 2e6:   # its own Q, not a Gaussian's 1.4 times too high
+            assert s["params"]["Q"][0] == pytest.approx(5.0001e9 / fwhm, rel=0.02), s["summary"]
+        else:
+            assert "wider than the sweep: its FWHM and Q need a wider one" in s["summary"], s["summary"]
+            assert "Q ≈" not in s["summary"] and set(s["params"]) == {"center"}
+            assert any("wider than the 2 MHz sweep: widen the range" in flag for flag in s["flags"])
+
+
+@pytest.mark.parametrize("tc, width", [(4, 0.05), (5.5, 0.2), (7, 0.5), (10, 1.0)])
+def test_a_superconducting_transition_is_a_step_not_a_peak_or_two_dips(tc, width):
+    rng = np.random.default_rng(11)
+    t = np.linspace(2, 12, 101)
+    s = analyze_curve(t.tolist(), (50 * (1 + np.tanh((t - tc) / width)) + rng.normal(0, 0.1, t.size)).tolist(),
+                      "temp.T", "R", "K", "Ω")
+    assert s["kind"] == "step" and s["summary"].startswith("R steps up from "), s["summary"]
+    center, error, _ = s["params"]["center"]
+    assert abs(center - tc) < 4 * error and s["params"]["change"][0] == pytest.approx(100, rel=0.01)
+    assert s["params"]["rise"][0] == pytest.approx(2 * math.atanh(0.8) * width, rel=0.05)   # 10 % to 90 %
+
+
+def test_a_switch_sharper_than_the_points_is_placed_between_two_of_them_and_steps_are_never_a_peak():
+    rng = np.random.default_rng(3)
+    b = np.linspace(-2, 2, 81)
+    s = analyze_curve(b.tolist(), (np.where(b > 0.3, 1.0, 0.0) + rng.normal(0, 0.01, b.size)).tolist(),
+                      "magnet.B", "V", "T", "V")
+    assert s["kind"] == "step" and "sharper than the 50 mT step between points" in s["summary"], s["summary"]
+    center, error, _ = s["params"]["center"]
+    assert error == pytest.approx(0.025) and abs(center - 0.275) <= error   # between 250 and 300 mT
+    assert "rise" not in s["params"] and "use a step ≤ 12.5 mT" in s["flags"][0]
+    two = np.where(b > 0.5, 1.0, 0.0) + np.where(b > -0.5, 1.0, 0.0) + rng.normal(0, 0.01, b.size)
+    stairs = 25812.8 / np.clip(np.floor(np.abs(b) * 3 + 1), 1, None) + rng.normal(0, 5, b.size)   # quantum Hall
+    for y in (two, stairs):
+        s = analyze_curve(b.tolist(), y.tolist(), "magnet.B", "R_xy", "T", "Ω")
+        assert s["kind"] not in ("peak", "dip"), s["summary"]
+
+
+def test_a_dip_with_a_shoulder_is_not_given_one_lines_q():
+    rng = np.random.default_rng(9)
+    f = np.linspace(4.99e9, 5.01e9, 401)
+    q = 2 * (f - 5e9) / 1e6
+    y = 1 - 0.6 / (1 + q ** 2) - 0.25 / (1 + ((q - 3) / 1.5) ** 2) + rng.normal(0, 0.005, f.size)
+    s = analyze_curve(f.tolist(), y.tolist(), "vna.frequency", "vna.S21", "Hz", "")
+    assert s.get("lines") == 2 or "Q ≈" not in s["summary"], s["summary"]   # one Lorentzian: half the main dip's Q
+
+
+def test_a_swept_excitation_gives_each_point_its_own_current():
+    from labharness.chain import derived_readings
+    chain = {"excitation": {"source": "lockin.amplitude", "form": "rms", "series_resistor": 1e7},
+             "readings": {"lockin.X": {"gain": 1, "name": "R_xx"}}}
+    measures = [{"key": "lockin.X", "unit": "V", "kind": "scalar"}]
+    derive = derived_readings(chain, {}, {"lockin": {"amplitude": 0.004}}, measures)   # 4 mV when the run started
+    rng = np.random.default_rng(1)
+    amps = np.linspace(0.001, 0.1, 41)
+    axes = [{"key": "lockin.amplitude", "unit": "V", "kind": "instrument"}]
+    for heats in (0.0, 2e4):   # 1 kΩ at every current; and a sample that heats, R growing with the current
+        rows = [{"lockin.amplitude": float(a),
+                 "lockin.X": float((1e3 + heats * a) * a / 1e7 * (1 + rng.normal(0, 1e-3)))} for a in amps]
+        a = analyze_run(rows, axes, measures, {"status": "done", "points": 41}, derive=derive)
+        (s,) = a["series"]
+        assert s["chain"] == "R_xx = lockin.X / I, I from each point's own lockin.amplitude"
+        if not heats:
+            assert a["assessment"].startswith("R_xx does not depend on lockin.amplitude: 0.99"), a["assessment"]
+            continue
+        assert s["kind"] == "linear" and s["params"]["slope"][0] == pytest.approx(heats, rel=0.01)
+        assert s["params"]["intercept"][0] == pytest.approx(1e3, rel=0.01)
+        drawn = list(zip(s["fit"]["x"], s["fit"]["y"]))   # over the volts recorded, where it curves
+        assert len(drawn) > 2 and all(y == pytest.approx((1e3 + heats * x) * x / 1e7, rel=0.01) for x, y in drawn)
+    rows = [{"lockin.amplitude": amp, "magnet.B": float(b), "lockin.X": float((1e3 + 50 * b * b) * amp / 1e7)}
+            for amp in (0.002, 0.004, 0.008) for b in np.linspace(-1, 1, 21)]   # one current along each curve
+    a = analyze_run(rows, axes + [{"key": "magnet.B", "unit": "T", "kind": "instrument"}], measures,
+                    {"status": "done", "points": len(rows)}, derive=derive)
+    assert a["assessment"].startswith("R_xx rises as magnet.B² from 1 kΩ") and "does not change" in a["trends"][0]
+
+
+def test_a_decays_first_point_is_kept_and_said_and_only_an_empty_one_is_left_out():
+    rng = np.random.default_rng(2)
+    t = np.arange(21) * 1e-9   # photoluminescence: a 100 ps part over by the second point, then 10 ns
+    rows = [{"delay.t": float(x), "spc.counts": float(9000 * math.exp(-x / 1e-10) + 1000 * math.exp(-x / 1e-8) +
+                                                      rng.normal(0, 5))} for x in t]
+    a = analyze_run(rows, [{"key": "delay.t", "unit": "s", "kind": "instrument"}],
+                    [{"key": "spc.counts", "unit": "counts", "kind": "scalar"}], {"status": "done", "points": 21})
+    (s,) = a["series"]
+    assert a["assessment"].startswith("spc.counts drops from 1e+04 counts at delay.t = 0 s to 902.6 counts within one "
+                                      "step (1 ns), then relaxes exponentially"), a["assessment"]
+    assert s["params"]["τ"][0] == pytest.approx(1e-8, rel=0.05) and "left out" not in a["assessment"]
+    assert any("faster than the 1 ns step" in i for i in a["issues"])
+    p = np.linspace(0, 1e-3, 21)   # a light's power from 0 W: no counts there, as the line says
+    rows = [{"laser.power": float(x), "counter.rate": float(0.0 if x == 0 else 5e6 * x + rng.normal(0, 30))} for x in p]
+    a = analyze_run(rows, [{"key": "laser.power", "unit": "W", "kind": "instrument"}],
+                    [{"key": "counter.rate", "unit": "1/s", "kind": "scalar"}], {"status": "done", "points": 21})
+    assert a["series"][0]["kind"] == "linear" and a["issues"] == [], a["issues"]
+
+
+def test_hysteresis_pairs_each_reading_with_its_own_x_when_the_first_is_left_out():
+    rng = np.random.default_rng(5)
+    up = np.linspace(0, 1, 26)
+    volts = np.concatenate([up, up[-2::-1]])
+    for lag in (0.0, 300.0):   # the same line both ways; and the way back 300/s higher
+        rows = [{"smu.V": float(v), "counter.rate": 0.0 if i == 0 else
+                 float(2000 + 3000 * v + (lag if i > 25 else 0) + rng.normal(0, 5))} for i, v in enumerate(volts)]
+        a = analyze_run(rows, [{"key": "smu.V", "unit": "V", "kind": "instrument"}],
+                        [{"key": "counter.rate", "unit": "1/s", "kind": "scalar"}], {"status": "done", "points": 51})
+        assert "the first point reads 0 1/s on counter.rate" in a["issues"][0]
+        assert any("hysteresis" in i for i in a["issues"]) == bool(lag), a["issues"]
+
+
+def test_a_kinked_line_has_no_both_sides_and_no_share_of_a_level_at_or_below_zero():
+    rng = np.random.default_rng(3)
+    b = np.linspace(-2, 2, 81)
+    kink = analyze_curve(b.tolist(), (np.where(b > 0, 2 * b, 0.5 * b) + rng.normal(0, 0.01, b.size)).tolist(), "x", "y")
+    assert kink["kind"] == "quadratic" and kink["summary"].startswith("y rises with x from -0.9"), kink["summary"]
+    assert "both sides" not in kink["summary"] and "%" not in kink["summary"]   # was +595 % of a minimum of -0.84
+    low = analyze_curve(b.tolist(), (-0.84 + 0.4 * (b - 0.3) ** 2 + rng.normal(0, 0.01, b.size)).tolist(), "x", "y")
+    assert "both sides of a minimum" in low["summary"] and "%" not in low["summary"], low["summary"]
+    zero = analyze_curve(b.tolist(), (b ** 2 + rng.normal(0, 0.01, b.size)).tolist(), "magnet.B", "V", "T", "V")
+    assert zero["summary"].startswith("V rises as magnet.B² from ") and "%" not in zero["summary"], zero["summary"]
+
+
+def test_a_hall_density_never_stands_beside_not_significant():
+    hall = fitting.MODELS["hall"]()
+    b = np.linspace(-1, 1, 41)
+    noise = np.random.default_rng(2).normal(0, 0.5, b.size)
+    rh = next(p for p in fitting.fit(hall, b, 5 + noise, x_unit="T", y_unit="Ω")["params"] if p["name"] == "R_H")
+    for z in (3.2, 4.5):   # past 3σ but short of p ≤ 1e-3 (41 points); and past both
+        r = fitting.fit(hall, b, 5 + noise + (z * rh["error"] - rh["value"]) * b, x_unit="T", y_unit="Ω")
+        density = any(d["name"].startswith("carrier") for d in r["derived"])
+        assert density == (z > 4) == (r["p_flat"] <= fitting.SIGNIFICANT), (z, r["p_flat"])
+        assert any("not significant" in w for w in r["warnings"]) != density, r["warnings"]

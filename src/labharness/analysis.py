@@ -42,6 +42,7 @@ SELECT_POINTS = 2000      # a longer curve is decimated to about this many point
 TIME_LIMIT = 10.0         # seconds for a whole run's analysis (it runs while the lab is held)
 MAP_MIN = 8               # values on each of two axes that make a sweep a map
 TRACE_ROWS = 12           # a run's traces looked at: spread over its rows, the first and the last among them
+RISE = 2 * math.atanh(0.8)   # a tanh step's rise from 10 % to 90 % of its change, in its widths
 DB_UNITS = ("dB", "dBm", "dBc", "dBV", "dBW")
 PEAKS = ("lorentzian", "gaussian")
 LINES = PEAKS + ("double_lorentzian",)
@@ -151,6 +152,13 @@ def _double(u: Any, p: Sequence[float]) -> Any:
     return b + a1 / (1 + ((u - c1) / (abs(w1) / 2 + 1e-12)) ** 2) + a2 / (1 + ((u - c2) / (abs(w2) / 2 + 1e-12)) ** 2)
 
 
+def _step(u: Any, p: Sequence[float]) -> Any:
+    """A step (a superconducting transition, a switch): the level before, the change, the midpoint and the width (a
+    tanh's: 10 % to 90 % of the change over 2.2 of it)."""
+    b, a, c, w = p
+    return b + a * 0.5 * (1 + _np().tanh((u - c) / (abs(w) + 1e-12)))
+
+
 def _exponential(u: Any, p: Sequence[float]) -> Any:
     b, a, tau = p
     np = _np()
@@ -171,6 +179,7 @@ MODELS: Dict[str, Tuple[Callable[[Any, Sequence[float]], Any], Tuple[str, ...]]]
     "gaussian": (_gaussian, ("background", "amplitude", "center", "FWHM")),
     "double_lorentzian": (_double, ("background", "amplitude 1", "center 1", "FWHM 1", "amplitude 2", "center 2",
                                     "FWHM 2")),
+    "step": (_step, ("level before", "change", "midpoint", "width")),
     "exponential": (_exponential, ("final value", "amplitude", "time constant")),
     "oscillation": (_oscillation, ("offset", "amplitude", "frequency", "phase", "decay time")),
 }
@@ -233,7 +242,10 @@ def fit(model: str, xs: Sequence[float], ys: Sequence[float], p0: Optional[Seque
         extra = {"r2_db": 1 - shown / (float(((y - y.mean()) ** 2).sum()) or 1e-300), "rms_db": math.sqrt(shown / n),
                  "physical": bool(level.min() > 0)}
     # back to data units
-    if model in PEAKS:
+    if model == "step":   # the level after it, b + a: its error with the two's correlation (they share points)
+        extra["after_error"] = math.sqrt(max(0.0, float(sol.cov[0][0] + sol.cov[1][1] + 2 * sol.cov[0][1]) * chi
+                                             / dof)) * ys_
+    if model in PEAKS or model == "step":
         b, a, c, w = p
         vals = [yc + b * ys_, a * ys_, xc + c * xs_, abs(w) * xs_]
         errv = [errs[0] * ys_, errs[1] * ys_, errs[2] * xs_, errs[3] * xs_]
@@ -276,6 +288,18 @@ def _peak_guess(us: Any, vs: Any) -> List[float]:
     return [base, amp, float(us[k]), width]
 
 
+def _step_starts(us: Any, vs: Any) -> List[List[float]]:
+    """Where to start a step (normalised): the levels of its two ends, the change halfway between them where the
+    curve (lightly smoothed) crosses it, and a sharp, a middling and a broad width."""
+    np = _np()
+    from .expr import moving_average
+    edge = max(2, us.size // 7)
+    lo, hi = float(np.median(vs[:edge])), float(np.median(vs[-edge:]))
+    smooth = moving_average(np, vs, max(1, us.size // 20))
+    k = int(np.nanargmin(np.abs(smooth - (lo + hi) / 2)))
+    return [[lo, hi - lo, float(us[k]), w] for w in (0.02, 0.1, 0.4)]
+
+
 def _guess(model: str, us: Any, vs: Any) -> List[float]:
     np = _np()
     n = us.size
@@ -295,6 +319,8 @@ def _guess(model: str, us: Any, vs: Any) -> List[float]:
     if model == "exponential":
         tail = float(np.median(vs[-edge:]))
         return [tail, float(vs[0]) - tail, 0.6]
+    if model == "step":
+        return _step_starts(us, vs)[0]
     b, a, c, w = _peak_guess(us, vs)
     if model == "double_lorentzian":   # the second line where the first leaves most behind
         rest = vs - _lorentzian(us, [0.0, a, c, w])
@@ -368,7 +394,7 @@ def _refit(model: str, chosen: Dict[str, Any], x: Any, y: Any, deadline: Optiona
     db = bool(chosen.get("on_power"))
     nxc, nxs, nyc, nys = _scale(x, 10 ** (y / 10) if db else y)
     vals = chosen["values"]
-    if model in PEAKS:
+    if model in PEAKS or model == "step":
         p0 = [(vals[0] - nyc) / nys, vals[1] / nys, (vals[2] - nxc) / nxs, vals[3] / nxs]
     elif model == "double_lorentzian":
         p0 = [(vals[0] - nyc) / nys, vals[1] / nys, (vals[2] - nxc) / nxs, vals[3] / nxs, vals[4] / nys,
@@ -441,10 +467,11 @@ def _clean(xs: Sequence[Any], ys: Sequence[Any]) -> Tuple[Any, Any, int]:
 def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name: str,
                   x_unit: str = "", y_unit: str = "", force: Optional[str] = None,
                   deadline: Optional[float] = None, protocol: Optional[str] = None,
-                  models: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+                  models: Optional[Sequence[str]] = None, tail: bool = False) -> Dict[str, Any]:
     """Classify one y(x) curve and quantify it. Returns kind, summary, results, fit, flags. force: fit this model
     whatever the curve shows; models: the only shapes to look for (one model for every row of a run); protocol: the
-    pulse protocol the run played, which says what its sweep shows (EXPECT)."""
+    pulse protocol the run played, which says what its sweep shows (EXPECT); tail: the curve after its first point
+    (a decay's slow part, below)."""
     np = _np()
     out: Dict[str, Any] = {"x": x_name, "y": y_name, "kind": "none", "summary": "", "results": [], "flags": [], "fit": None}
     xs_s, ys_s, total = _clean(xs, ys)
@@ -534,7 +561,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
     elif level or expect == "lines":
         order = ["lorentzian", "gaussian", "double_lorentzian"]
     else:
-        order = ["lorentzian", "gaussian", "exponential", "oscillation", "double_lorentzian"]
+        order = ["lorentzian", "gaussian", "step", "exponential", "oscillation", "double_lorentzian"]
     candidates: Dict[str, Dict[str, Any]] = {"linear": lin} if lin else {}
     if quad:
         candidates["quadratic"] = quad
@@ -550,6 +577,9 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
             if n < 12 or single is None or (single["r2"] >= 0.9 and told(single)):
                 continue
             starts = _double_starts(np, single, xd, yd)
+        elif model == "step":   # a sharp, a middling and a broad start: a sharp one has no slope to follow
+            xc, xs_, yc, ys_ = _scale(xd, yd)
+            starts = _step_starts((xd - xc) / xs_, (yd - yc) / ys_)
         else:
             starts = [None]
         best = None
@@ -582,13 +612,21 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
         "dB" would be linear values)."""
         return not f.get("on_power") or bool(f.get("physical") and f["values"][0] > 0)
 
+    def near(f: Dict[str, Any]) -> bool:
+        """Most of the curve told, and little more than noise left (twice it at most, on the values as recorded):
+        a line shape a little off at moderate signal (a resonance in dB, fitted in power)."""
+        return f["r2"] >= 0.9 and f.get("rms_db", f["rms"]) <= 2 * sigma
+
     def peak_ok(f: Optional[Dict[str, Any]]) -> bool:
-        """One line, inside the sweep and narrower than it (wider, it is the curve's bend, not a peak)."""
+        """One line inside the sweep that tells the curve: nearly all of it (a line shape a little off at high
+        signal), or with its residuals near the noise. Half a line beside a step, or one across a staircase, leaves
+        far more than noise. Its width is weighed after the shape that tells the curve best is chosen (lines(), and
+        wide below)."""
         if not f or not physical(f):
             return False
         b, a, c, w = f["values"]
-        good = f["r2"] >= 0.9 or (told(f) and r2_shown(f) >= 0.75 and abs(a) > 5 * f["errors"][1])
-        return good and 0 < w <= reach and inside(c) and stands_out(a, f["errors"][1], w)
+        good = f["r2"] >= 0.98 or near(f) or (told(f) and r2_shown(f) >= 0.75 and abs(a) > 5 * f["errors"][1])
+        return good and w > 0 and inside(c) and stands_out(a, f["errors"][1], w)
 
     def double_ok(f: Optional[Dict[str, Any]]) -> bool:
         """Two lines of one kind (two dips or two peaks), each standing out inside the sweep, with a valley between
@@ -602,7 +640,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
                    for a, ea, c, w in ((a1, e[1], c1, w1), (a2, e[4], c2, w2)))
         single = candidates.get("lorentzian")
         better = single is None or _p_more(single, f, len(yd)) * trials(min(w1, w2)) < 1e-3
-        good = f["r2"] >= 0.9 or told(f)
+        good = f["r2"] >= 0.99 or near(f) or told(f)
         return each and (a1 > 0) == (a2 > 0) and _valley(f) >= 0.1 and better and good
 
     def osc_ok(f: Optional[Dict[str, Any]]) -> bool:
@@ -626,15 +664,29 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
         good = f["r2"] >= 0.98 or adequate(f, sigma, len(yd)) or (expect == "decay" and f["r2"] >= 0.9)
         return known and good and (not lin or f["r2"] > lin["r2"] + 0.01)
 
+    def step_ok(f: Optional[Dict[str, Any]]) -> bool:
+        """A step: its change stands out, its rise (10 % to 90 %) lies inside the sweep with points on both levels and
+        takes at most half of it (a broader one is a curve), and the fit leaves only noise behind."""
+        if not f:
+            return False
+        b, a, c, w = f["values"]
+        rise = RISE * w
+        k = int(np.argmin(np.abs(xs_s - c)))
+        return abs(a) > 5 * f["errors"][1] and abs(a) > 5 * sigma and 3 <= k <= n - 4 and rise <= reach / 2 and \
+            xs_s[0] + rise / 2 <= c <= xs_s[-1] - rise / 2 and (told(f) or f["r2"] >= 0.995)
+
     def quad_ok(q: Optional[Dict[str, Any]]) -> bool:
         """A bend a straight line misses: the parabola leaves only noise behind, and its curvature stands out."""
         return bool(q) and abs(q["values"][2]) > 5 * q["errors"][2] and (q["r2"] >= 0.99 or adequate(q)) and \
             not (lin and adequate(lin))
 
     def lines() -> Optional[Dict[str, Any]]:
-        single = max((candidates[m] for m in PEAKS if peak_ok(candidates.get(m))), key=lambda f: f["r2"], default=None)
+        """The line shape that tells the curve best (a Gaussian fits a broad Lorentzian narrower, never instead of
+        it), or two lines."""
+        best = max((candidates[m] for m in PEAKS if m in candidates and physical(candidates[m])),
+                   key=lambda f: f["r2"], default=None)
         double = candidates.get("double_lorentzian")
-        return double if double_ok(double) else single
+        return double if double_ok(double) else best if peak_ok(best) else None
 
     def possible() -> str:
         """The strongest line short of standing out (4σ and more): worth a longer look, though not a finding."""
@@ -673,7 +725,10 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
     if chosen is None and not force:
         line = lines()
         shown = r2_shown(line) if line else 0.0
-        if line is not None and (told(line) or not osc_ok(osc) or osc["r2"] <= shown + 0.03):
+        stepped = candidates.get("step")
+        if step_ok(stepped) and (line is None or r2_shown(stepped) >= shown):
+            chosen = stepped   # a step, not half a line beside it (or two)
+        elif line is not None and (told(line) or not osc_ok(osc) or osc["r2"] <= shown + 0.03):
             chosen = line   # one extremum fitted well is a peak, not a cycle of a cosine
         elif osc_ok(osc) and osc["r2"] > max(shown, expo["r2"] if expo else 0.0) + 0.03:
             chosen = osc
@@ -700,7 +755,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
                                si(step, x_unit)))
 
     if chosen is None and force is None and lin and abs(lin["values"][1]) < 3 * lin["errors"][1] \
-            and max(f["r2"] for m, f in candidates.items() if m != "double_lorentzian") < 0.75:
+            and max(f["r2"] for m, f in candidates.items() if m not in ("double_lorentzian", "step")) < 0.75:
         # slow fluctuations (correlated noise) around a constant: no model explains them well
         constant(float(ys_s.std(ddof=1)), possible())
         mid, spread = float(np.median(ys_s)), _mad_sigma(ys_s)
@@ -710,6 +765,27 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
                                 % (si(float(ys_s[k]), y_unit), x_name, si(float(xs_s[k]), x_unit),
                                    abs(float(ys_s[k]) - mid) / spread))
         return out
+
+    if chosen is None and force is None and models is None and not tail and n >= 8:
+        # a decay whose fast part is over by the second point (photoluminescence at time zero): that first point
+        # is kept and said, and the slow part told from the rest
+        rest = ys_s[1:]
+        spread, noise = float(np.ptp(rest)), noise_estimate(rest)
+        if abs(ys_s[0] - (2 * rest[0] - rest[1])) > 10 * max(noise, 0.02 * spread, 1e-300) and \
+                abs(ys_s[0] - float(np.median(rest))) > 3 * max(spread, noise, 1e-300):
+            slow = analyze_curve(xs_s[1:], rest, x_name, y_name, x_unit, y_unit, None, deadline, protocol, None, True)
+            if slow["kind"] == "relaxation":
+                falls = bool(ys_s[0] > rest[0])
+                slow["summary"] = "%s %s from %s at %s = %s to %s within one step (%s), then %s" % (
+                    y_name, "drops" if falls else "rises", si(float(ys_s[0]), y_unit), x_name,
+                    si(float(xs_s[0]), x_unit), si(float(rest[0]), y_unit), si(step, x_unit),
+                    slow["summary"][len(y_name) + 1:])
+                slow["results"].insert(0, {"name": "first point", "value": si(float(ys_s[0]), y_unit),
+                                           **_numeric(float(ys_s[0]), None, y_unit)})
+                slow["flags"].append("part of the %s is faster than the %s step: a finer step near %s = %s "
+                                     "would show it" % ("decay" if falls else "rise", si(step, x_unit), x_name,
+                                                        si(float(xs_s[0]), x_unit)))
+                return slow
 
     if chosen is None:
         diffs = np.diff(ys_s)
@@ -761,7 +837,11 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
             res("resistance (slope)", v[1], e[1], "Ω")
             out["summary"] += "; R = %s" % _fmt_pm(v[1], e[1], "Ω")
     elif chosen["model"] == "quadratic":
-        _bend(out, res, chosen, xs_s, x_name, y_name, x_unit, y_unit, sigma)
+        _bend(out, res, chosen, xs_s, ys_s, x_name, y_name, x_unit, y_unit, sigma)
+    elif chosen["model"] == "step":
+        _step_said(out, res, chosen, step, x_name, y_name, x_unit, y_unit)
+    elif chosen["model"] in PEAKS and chosen["values"][3] > reach:   # its width would come from the shape assumed
+        _wide_line(out, res, chosen, ys_s, x_name, y_name, x_unit, y_unit, reach)
     elif chosen["model"] in PEAKS:
         b, a, c, w = v
         eb, ea, ec, ew = e
@@ -850,6 +930,52 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
     return out
 
 
+def _step_said(out: Dict[str, Any], res: Callable[..., None], f: Dict[str, Any], spacing: float, x_name: str,
+               y_name: str, x_unit: str, y_unit: str) -> None:
+    """A step (a superconducting transition, a switch): from what level to what, where (its midpoint) and over how
+    much of x it rises (10 % to 90 %); one sharper than the points can follow is placed within a step of x."""
+    b, a, c, w = f["values"]
+    eb, ea, ec, ew = f["errors"]
+    rise, erise = RISE * w, RISE * ew
+    sharp = bool(spacing) and rise < spacing
+    if sharp:   # between two points: no fit says better where (its own error is then of any size)
+        ec = spacing / 2
+    out["kind"] = "step"
+    over = "sharper than the %s step between points" % si(spacing, x_unit) if sharp else \
+        "10–90%% over %s" % _fmt_pm(rise, erise, x_unit)
+    out["summary"] = "%s steps %s from %s to %s at %s = %s (%s; tanh fit, R² %.3f)" % (
+        y_name, "up" if a > 0 else "down", si(b, y_unit), si(b + a, y_unit), x_name, _fmt_pm(c, ec, x_unit), over,
+        f["r2"])
+    res("midpoint", c, ec, x_unit)
+    res("from", b, eb, y_unit)
+    res("to", b + a, f.get("after_error", math.hypot(eb, ea)), y_unit)
+    out["params"] = {"center": [c, ec, x_unit], "change": [a, ea, y_unit]}
+    if not sharp:
+        res("rise (10–90%)", rise, erise, x_unit)
+        out["params"]["rise"] = [rise, erise, x_unit]
+    if spacing and rise < 2 * spacing:
+        out["flags"].append("the step is under-resolved (its rise is under 2 steps); use a step ≤ %s between %s and %s"
+                            % (si(spacing / 4, x_unit), _at(c - 3 * spacing, x_unit, spacing / 4),
+                               _at(c + 3 * spacing, x_unit, spacing / 4)))
+
+
+def _wide_line(out: Dict[str, Any], res: Callable[..., None], f: Dict[str, Any], ys: Any, x_name: str, y_name: str,
+               x_unit: str, y_unit: str, reach: float) -> None:
+    """A line wider than the sweep: where it is, but no width or Q. Those would come from the shape assumed, not from
+    the points (a Gaussian fits a Lorentzian as wide as the sweep 0.7 times as wide, and a Q 1.4 times too high)."""
+    b, a, c, w = f["values"]
+    out["kind"] = "peak" if a > 0 else "dip"
+    out["summary"] = "%s has a %s at %s = %s, wider than the sweep: its FWHM%s a wider one (%s fit%s, R² %.3f)" \
+        % (y_name, out["kind"], x_name, _fmt_pm(c, f["errors"][2], x_unit),
+           " and Q need" if x_unit == "Hz" else " needs", f["model"], " on 10^(dB/10)" if f.get("on_power") else "",
+           f["r2"])
+    res("center", c, f["errors"][2], x_unit)
+    res("maximum" if a > 0 else "minimum", float(ys.max() if a > 0 else ys.min()), None, y_unit)
+    out["params"] = {"center": [c, f["errors"][2], x_unit]}
+    out["flags"].append("the %s is wider than the %s sweep: widen the range to measure its width%s" % (
+        out["kind"], si(reach, x_unit), " and Q" if x_unit == "Hz" else ""))
+
+
 def _valley(f: Dict[str, Any]) -> float:
     """How deep two lines dip between their centers, as a share of the lower one: about 0 where they merge into one
     (a flat-topped line fitted as two)."""
@@ -930,10 +1056,12 @@ def _two_lines(out: Dict[str, Any], res: Callable[..., None], f: Dict[str, Any],
                      width + " 2": [w2, ew2, x_unit]}
 
 
-def _bend(out: Dict[str, Any], res: Callable[..., None], q: Dict[str, Any], xs: Any, x_name: str, y_name: str,
-          x_unit: str, y_unit: str, noise: float) -> None:
+def _bend(out: Dict[str, Any], res: Callable[..., None], q: Dict[str, Any], xs: Any, ys: Any, x_name: str,
+          y_name: str, x_unit: str, y_unit: str, noise: float) -> None:
     """A parabola: where it turns and from what level, and how much it changes across the sweep (for a
-    magnetoresistance: rises as B², +125 % at 2.5 T)."""
+    magnetoresistance: rises as B², +125 % at 2.5 T). "Both sides" only of a turn well inside the sweep (a kinked
+    line has its "minimum" near an end: then it rises or falls between the levels measured at the ends), and a share
+    only of a level well above zero."""
     (xv, yv, k), (exv, eyv, ek) = q["values"], q["errors"]
     lo, hi = float(xs[0]), float(xs[-1])
     far = lo if abs(lo - xv) > abs(hi - xv) else hi
@@ -941,11 +1069,13 @@ def _bend(out: Dict[str, Any], res: Callable[..., None], q: Dict[str, Any], xs: 
     out["kind"] = "quadratic"
     turn = "minimum" if k > 0 else "maximum"
     grows = "rises" if k > 0 else "falls"
-    relative = abs(yv) > 5 * max(noise, 1e-300) and not _db(y_unit)   # a share of a level in dB means nothing
-    change = "%+.0f%% at %s = %s" % (100 * (at_far - yv) / abs(yv), x_name, si(far, x_unit)) if relative else \
+    # a share of a level in dB means nothing, nor of one near or below zero (+595 % of -0.84)
+    relative = yv > 5 * max(noise, 1e-300) and yv > 0.02 * abs(at_far - yv) and not _db(y_unit)
+    change = "%+.0f%% at %s = %s" % (100 * (at_far - yv) / yv, x_name, si(far, x_unit)) if relative else \
         "%s at %s = %s" % (si(at_far, y_unit), x_name, si(far, x_unit))
-    if lo < xv < hi:
-        if abs(xv) < max(3 * exv, 0.01 * (hi - lo)):   # turning at 0: even in x (a magnetoresistance in B)
+    at_zero = lo <= 0 <= hi and abs(xv) < max(3 * exv, 0.01 * (hi - lo))   # even in x (a magnetoresistance in B)
+    if at_zero or lo + 0.15 * (hi - lo) < xv < hi - 0.15 * (hi - lo):
+        if at_zero:
             out["summary"] = "%s %s as %s² from %s at %s = 0: %s (quadratic fit, R² %.4f)" % (
                 y_name, grows, x_name, si(yv, y_unit), x_name, change, q["r2"])
         else:
@@ -954,17 +1084,17 @@ def _bend(out: Dict[str, Any], res: Callable[..., None], q: Dict[str, Any], xs: 
                                            change, q["r2"])
         res(turn, yv, eyv, y_unit)
         res("at " + x_name, xv, exv, x_unit)
-    else:
-        rising = (k > 0) == (lo > xv)   # past a minimum, or before a maximum
+    else:   # its turn outside the sweep or near an end: a curving rise or fall
+        relative = False
+        y_lo, y_hi = float(ys[0]), float(ys[-1])
         out["summary"] = "%s %s with %s from %s to %s, curving (quadratic fit, R² %.4f)" % (
-            y_name, "rises" if rising else "falls", x_name, si(yv + k * (lo - xv) ** 2, y_unit),
-            si(yv + k * (hi - xv) ** 2, y_unit), q["r2"])
+            y_name, "rises" if y_hi > y_lo else "falls", x_name, si(y_lo, y_unit), si(y_hi, y_unit), q["r2"])
     curvature = "%s/%s²" % (y_unit or "1", x_unit or "1")
     res("curvature", k, ek, "")
     out["results"][-1]["value"] += " " + curvature
     out["results"][-1]["unit"] = curvature
     if relative:
-        res("change at %s = %s" % (x_name, si(far, x_unit)), 100 * (at_far - yv) / abs(yv), None, "%")
+        res("change at %s = %s" % (x_name, si(far, x_unit)), 100 * (at_far - yv) / yv, None, "%")
     out["params"] = {"curvature": [k, ek, curvature], "vertex": [xv, exv, x_unit], turn: [yv, eyv, y_unit]}
 
 
@@ -1224,11 +1354,33 @@ def map_grid(rows: List[Dict[str, Any]], outer: str, inner: str, key: str) -> Op
 # ---------------------------------------------------------------------------- what the run measured
 
 
+def _recorded(fit: Dict[str, Any], rows: List[Dict[str, Any]], swept: str, x_key: str, start: float
+              ) -> List[Any]:
+    """A fit in ohms, in the reading's own units to draw over it: R over start (the chain's factor), or where the run
+    swept the excitation itself (swept: its key), R times the excitation's setting over start: the curve's one
+    setting, or each x's where the excitation is x. Else nothing is drawn."""
+    if not swept:
+        return [y / start if _number(y) else y for y in fit["y"]]
+    own = {abs(r[swept]) for r in rows if _number(r.get(swept))}
+    if len(own) == 1:
+        return [y * min(own) / start if _number(y) else y for y in fit["y"]]
+    if swept == x_key:
+        xs, ys = fit["x"], fit["y"]
+        if len(xs) == 2 and all(_number(v) for v in xs + ys) and xs[1] != xs[0]:
+            # a straight line in R curves in the reading: drawn at many points, not its two ends
+            grid = _np().linspace(xs[0], xs[1], FIT_POINTS)
+            ys = (ys[0] + (ys[1] - ys[0]) * (grid - xs[0]) / (xs[1] - xs[0])).tolist()
+            xs = fit["x"] = grid.tolist()
+        return [y * abs(x) / start if _number(y) and _number(x) else None for x, y in zip(xs, ys)]
+    fit["x"] = []
+    return []
+
+
 def _first_point(rows: List[Dict[str, Any]], measures: List[Dict[str, str]], axes: List[Dict[str, str]]
                  ) -> Tuple[Set[str], List[str]]:
-    """Instruments whose first reading lies far outside all their others along the first sweep (a counter read
-    before its first acquisition was in: 0 counts at every pulse-generator run's first point): those instruments,
-    and what to say. Their first point is left out of the analysis."""
+    """Instruments whose first reading along the first sweep is an empty one, 0 where the rest are not (a counter
+    read before its first acquisition was in: 0 counts at every pulse-generator run's first point): those
+    instruments, and what to say. Their first point is left out of the analysis."""
     np = _np()
     if len(rows) < 7:
         return set(), []
@@ -1244,9 +1396,10 @@ def _first_point(rows: List[Dict[str, Any]], measures: List[Dict[str, str]], axe
             continue
         spread, noise = float(np.ptp(rest)), noise_estimate(rest.tolist())
         trend = 2 * rest[0] - rest[1]   # where the next points say the first should be
-        empty = v0 == 0 and float(np.abs(rest).min()) > 10 * max(noise, 1e-300)   # nothing read yet: 0, the rest not
-        if empty or (abs(v0 - trend) > 10 * max(noise, 0.02 * spread, 1e-300) and
-                     abs(v0 - float(np.median(rest))) > 3 * max(spread, noise, 1e-300)):
+        # nothing read yet: 0 where the rest are far from it and the next points don't lead there (a sweep of a
+        # light's power from 0 W reads 0 there too). A large first point is kept: a decay's fast part starts there
+        if v0 == 0 and float(np.abs(rest).min()) > 10 * max(noise, 1e-300) and \
+                abs(v0 - trend) > 10 * max(noise, 0.02 * spread, 1e-300):
             found.setdefault(m["key"].split(".")[0], []).append(
                 "%s on %s (the rest %s to %s)" % (si(v0, m.get("unit", "")), m["key"], si(float(rest.min()),
                                                                                         m.get("unit", "")),
@@ -1435,10 +1588,20 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
             continue
         if m.get("kind") == "image":
             continue   # camera frames: look_at shows them
-        factor, name, unit, how = derive.get(m["key"]) or (1.0, m["key"], m["unit"], "")
+        derived = derive.get(m["key"])
+        factor, name, unit, how = derived or (1.0, m["key"], m["unit"], "")
         mine = rows
         if m["key"].split(".")[0] in unsettled:   # its instrument's first point, left out
             mine = [dict(rows[0], **{m["key"]: None})] + rows[1:]
+        swept, start = "", factor   # R = reading * start / the excitation's own setting, where that was swept
+        source, used = getattr(derived, "source", ""), getattr(derived, "value", 0.0)
+        if derived and used and len({r.get(source) for r in rows if _number(r.get(source))}) > 1:
+            # the excitation itself swept (a linearity check): each point over its own current, not the start's
+            swept, start = source, factor * used
+            mine = [dict(r, **{m["key"]: r[m["key"]] * start / abs(r[source])
+                               if _number(r.get(m["key"])) and _number(r.get(source)) and r[source] else None})
+                    for r in mine]
+            factor, how = 1.0, how.split(", I = ")[0] + ", I from each point's own " + source
         values = [r.get(m["key"]) for r in mine]
         numbers = [v for v in values if _number(v)]
         if not numbers:
@@ -1483,10 +1646,11 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
             if how:   # told in ohms; drawn over the reading as recorded
                 s["name"], s["chain"] = name, how
                 if s.get("fit"):
-                    s["fit"]["y"] = [y / factor if _number(y) else y for y in s["fit"]["y"]]
+                    s["fit"]["y"] = _recorded(s["fit"], grows, swept, x_axis["key"], start)
             if outer is not None:
                 s["group"] = "%s = %s" % (outer["key"], si(gval, outer.get("unit", ""))) if _number(gval) else str(gval)
-            h = hysteresis([x for x in xs if _number(x)], [y for y in ys if _number(y)], x_axis.get("unit", ""), unit)
+            pairs = [(x, y) for x, y in zip(xs, ys) if _number(x) and _number(y)]   # kept together: one gap shifts none
+            h = hysteresis([x for x, _ in pairs], [y for _, y in pairs], x_axis.get("unit", ""), unit)
             if h:
                 s["flags"].append(h)
             return s
@@ -1502,7 +1666,7 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
     # the most telling curve leads: a resonance, a spot or an oscillation, then a relaxation, then a line, then the
     # rest; a read-back only when there is nothing else. A ratio leads over its parts, and a guard reading (the
     # leakage a ramp watches) over nothing a person measured for its own sake
-    rank = {"peak": 3, "dip": 3, "oscillation": 3, "spot": 3, "spots": 3, "dark spot": 3, "relaxation": 2,
+    rank = {"peak": 3, "dip": 3, "oscillation": 3, "step": 3, "spot": 3, "spots": 3, "dark spot": 3, "relaxation": 2,
             "quadratic": 2, "linear": 1, "structured map": 1, "tracking": -1, "none": -2}
 
     def lead(ks: Tuple[int, Dict[str, Any]]) -> Tuple[Any, ...]:
@@ -1583,7 +1747,8 @@ def _next_step(primary: Optional[Dict[str, Any]], issues: List[str], trends: Seq
             return "Refine the sweep: " + flag.split("; ", 1)[-1] + "."
         if "under-resolved" in flag:
             return "Refine the map: use a finer step around the spot."
-        if "edge of the sweep" in flag or "extend beyond" in flag or "edge of the map" in flag:
+        if "edge of the sweep" in flag or "extend beyond" in flag or "edge of the map" in flag or \
+                "wider than the" in flag:
             return "Widen the sweep range to capture the whole feature."
         if "clipped" in flag:
             return "Change the range or sensitivity so the signal is not clipped, then repeat."
@@ -1611,7 +1776,7 @@ def _next_step(primary: Optional[Dict[str, Any]], issues: List[str], trends: Seq
             return "Nothing changes with %s over this range: widen it, or try another parameter." % outer
         if trend:
             return "Add more %s values (and a finer step where it changes fastest) to map the dependence." % outer
-        if kind in ("peak", "dip", "linear", "relaxation", "quadratic", "oscillation"):
+        if kind in ("peak", "dip", "linear", "relaxation", "quadratic", "oscillation", "step"):
             return "Compare the curves at each %s value (plot_runs with group: outer): no one fit follows them all." \
                 % outer
     if kind == "steady":
@@ -1630,6 +1795,9 @@ def _next_step(primary: Optional[Dict[str, Any]], issues: List[str], trends: Seq
         return "The %s is well resolved; next, track how it moves with a second parameter (field, temperature)." % kind
     if kind == "linear":
         return "The response is linear; extend the range to look for where it stops being linear."
+    if kind == "step":
+        return "The step is resolved; next, see how its midpoint moves with a second parameter (field, current, " \
+               "temperature)."
     if kind == "quadratic":
         return "The response is quadratic in %s; next, see how its curvature changes with a second parameter." \
             % primary["x"]

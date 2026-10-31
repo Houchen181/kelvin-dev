@@ -17,7 +17,8 @@ where a person wanted R. Nothing in a run said which.
 
 A device's chain is kept in the data folder (chains.json), set by a person or by Kelvin when a person says how it
 is wired, and stamped into every run of that device (its meta, in run.h5), so the run says it whatever changes
-later. The excitation's value comes from the run itself: the plan's setup, else the setting at its start."""
+later. The excitation's value comes from the run itself: the plan's setup, else the setting at its start; a run
+that sweeps the excitation itself (a linearity check) is worked out from each point's own (Derived.source)."""
 from __future__ import annotations
 
 import json
@@ -144,19 +145,34 @@ def derived(chain: Dict[str, Any], key: str, unit: str, current: Optional[Tuple[
     return factor, name, "Ω", "%s = %s%s / I, I = %s" % (name, key, gain, how)
 
 
+class Derived(tuple):
+    """A reading as the sample's resistance: (factor, name, unit, how), as derived() gives it, with the excitation's
+    setting it divides by (source) and the value that setting had (value). A run that sweeps that setting has a
+    current of its own at each point: R there is the reading times factor * value / its own setting."""
+
+    def __new__(cls, items: Tuple[float, str, str, str], source: str, value: float) -> "Derived":
+        self = super().__new__(cls, items)
+        self.source, self.value = source, value
+        return self
+
+
 def derived_readings(chain: Any, setup: Any, start: Any, measures: Any) -> Dict[str, Tuple[float, str, str, str]]:
-    """The readings a run's measurement chain turns into the sample's resistance: {key: (factor, name, unit, how)},
-    from the chain stamped into the run, the excitation it measured with (its plan's setup, else the setting at its
-    start) and its measured columns. Empty when the run carries no chain, or its excitation isn't known."""
+    """The readings a run's measurement chain turns into the sample's resistance: {key: Derived (factor, name, unit,
+    how)}, from the chain stamped into the run, the excitation it measured with (its plan's setup, else the setting at
+    its start) and its measured columns. Empty when the run carries no chain, or its excitation isn't known."""
     if not isinstance(chain, dict):
         return {}
     plan = {"setup": setup if isinstance(setup, dict) else {}}
-    current = excitation_current(chain, lambda k: setting_in_run(k, plan, start if isinstance(start, dict) else {}))
+
+    def value_of(key: str) -> Any:
+        return setting_in_run(key, plan, start if isinstance(start, dict) else {})
+    current = excitation_current(chain, value_of)
+    source = ((chain.get("excitation") or {}).get("source")) or ""
     out = {}
     for m in measures or []:
         d = derived(chain, m["key"], m.get("unit") or "", current)
         if d:
-            out[m["key"]] = d
+            out[m["key"]] = Derived(d, source, abs(float(value_of(source))))
     return out
 
 
