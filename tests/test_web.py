@@ -485,7 +485,96 @@ def test_projects_organize_conversations(parts):
         assert "project" not in store.load(a["id"])              # chat files never carry the project
 
 
-REMEMBER_QUIRK = [{"type": "text", "text": "Noting it."},
+def race(seconds, *jobs):
+    """Each job over and over in its own thread for a while: the errors each raised, and how often each ran."""
+    stop, errors, runs = time.time() + seconds, [], [0] * len(jobs)
+
+    def loop(k):
+        while time.time() < stop:
+            try:
+                jobs[k]()
+                runs[k] += 1
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+    threads = [threading.Thread(target=loop, args=(k,)) for k in range(len(jobs))]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    return errors, runs
+
+
+def test_a_confidential_chat_stays_filed_while_the_index_is_rewritten(tmp_path):
+    """Bug hunt (Windows): the index was read without the lock while a request replaced it; a read that met the
+    replace took the index for empty, so a confidential, local-only chat counted as unfiled for that turn (web
+    tools offered, notes for every conversation allowed), and the replace itself failed (500)."""
+    store = ChatStore(tmp_path / "chats")
+    p = store.create_project("Secret")
+    store.set_sharing(p["id"], "confidential")
+    store.set_rules(p["id"], {"providers": ["local"], "literature": False})
+    chat = store.create("local:x", project=p["id"])
+    n = iter(range(10 ** 9))
+    seen = []
+
+    def read():
+        memory = store.memory_of(chat["id"])
+        seen.append(bool(memory and memory["confidential"] and store.projects()))
+    errors, runs = race(1.5, lambda: store.set_instructions(p["id"], "text %d" % next(n)), read, read)
+    assert errors == [] and all(seen) and runs[0] > 10 and runs[1] > 10
+
+
+def test_a_chat_saved_while_the_sidebar_reads_it_never_fails(tmp_path):
+    """Bug hunt (Windows): a turn's save failed while another request read the chat's file (2211 saves in 6 s)."""
+    store = ChatStore(tmp_path / "chats")
+    chat = store.create("local:x")
+
+    def save():
+        chat["messages"].append({"role": "user", "text": "x" * 200})
+        store.save(chat)
+    errors, runs = race(1.5, save, lambda: store.load(chat["id"]), store.list)
+    assert errors == [] and min(runs) > 10
+    assert len(store.load(chat["id"])["messages"]) == runs[0]
+
+
+def test_an_index_kelvin_cant_read_is_never_taken_for_none(tmp_path, monkeypatch):
+    """An index that is there but can't be read stops what needs it, rather than open a confidential chat to every
+    model, forget the marks a chat keeps from a project it left, or be written over with no projects in it."""
+    from pathlib import Path
+    from labharness.web import store as stored
+    store = ChatStore(tmp_path / "chats")
+    p = store.create_project("Secret")
+    store.set_sharing(p["id"], "confidential")
+    chat = store.create("local:x", project=p["id"])
+    left = store.create("local:x", project=p["id"])
+    store.assign(left["id"], None)                     # it keeps the confidential mark
+    index = tmp_path / "chats" / "_projects.json"
+    real, busy = Path.read_text, {"n": 0}
+
+    def read_text(path, *args, **kwargs):              # in use for a moment: a replace, a virus scanner
+        if path == index and busy["n"]:
+            busy["n"] -= 1
+            raise PermissionError(13, "Permission denied")
+        return real(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    busy["n"] = 3
+    store._kept_cache = None
+    assert store.load(left["id"]).get("confidential") and store.memory_of(chat["id"])["confidential"]
+    monkeypatch.setattr(stored, "IN_USE_TRIES", 3)
+    busy["n"] = 10 ** 6                                # in use for good: an error, never no projects
+    store._kept_cache = None
+    with pytest.raises(OSError, match="_projects.json"):
+        store.memory_of(chat["id"])
+    with pytest.raises(OSError):
+        store.load(left["id"])
+    busy["n"] = 0
+    damaged = '{"projects": [{"id": "%s", "name": "Secret", "confidential": true' % p["id"]
+    index.write_text(damaged, encoding="utf-8")       # cut short
+    for unreadable in (lambda: store.memory_of(chat["id"]), lambda: store.load(left["id"]), store.list,
+                       lambda: store.create_project("Other")):
+        with pytest.raises(OSError, match="move it away"):
+            unreadable()
+    assert index.read_text(encoding="utf-8") == damaged   # never written over
+
+
+REMEMBER_QUIRK =[{"type": "text", "text": "Noting it."},
                   {"type": "tool_call", "id": "n1", "name": "remember",
                    "input": {"scope": "project", "kind": "quirk", "text": "Gate on D3 leaks above 6 V."}}]
 REMEMBER_PREF = [{"type": "text", "text": "Noting it."},
