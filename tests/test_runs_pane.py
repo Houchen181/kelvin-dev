@@ -80,3 +80,40 @@ def test_scans_follow_the_contract():
 
 def test_a_queued_script_says_so():
     assert 'script: "script"' in JS and "Q_KIND[i.kind]" in _js("queueItem") and "i.then_pause" in _js("queueItem")
+
+
+def test_a_finished_runs_plan_shows_without_reading_the_lab():
+    """The run's Plan (its plan_text) stays in its view beside Run again: for data imported from another program, and
+    when GET /again fails. Run again doesn't show it twice."""
+    view, render = _js("buildRunView"), _js("renderRunView")
+    assert '"Plan"' in view and view.index("v.plan,") < view.index("v.again,")
+    assert "v.plan.hidden = !tab.final.plan_text" in render and 'querySelector("pre").textContent = tab.final.plan_text' in render
+    assert "rv-plan" not in _js("againParts") and "d.text" not in _js("againParts")
+
+
+def test_run_sends_only_the_values_a_person_set():
+    """Show's fields reach Run only when the person changed one: then the values a person set (now, or for the last
+    run), never an untouched field, and none the file has now (it follows the file)."""
+    run = _js("runScan")
+    assert "scanParams(e)" in run and "scriptFields(e).map" not in run
+    params = _js("scanParams")
+    assert "if (!changed.length) return null;" in params and "e.settable" in params and "e.params" in params
+    detail = _js("scanDetail")
+    assert "SCANS.params.set(e.id, {})" in detail and "delete edited[f.name]" in detail   # put back: no change
+
+
+def test_a_start_waits_for_its_answer_and_is_sent_once():
+    """While a Run or Run again waits for the queue's approval its button stays disabled, however often Scans is
+    redrawn, and no other Run starts; a second click does nothing."""
+    busy = _js("busyWhile")
+    assert "return null" in busy and "BUSY.add" in busy and "BUSY.delete" in busy and "syncBusy()" in busy
+    assert "busyWhile(keys" in _js("runScan") and "busyWhile(keys" in _js("againParts")
+    entry = _js("scanEntry")
+    assert '["start", key]' in entry and '"data-busy": keys.join(" ")' in entry and "BUSY.has(k)" in entry
+    assert '"data-busy": "start " + key' in _js("againParts") and "syncBusy();" in _js("loadAgain")
+
+
+def test_a_long_run_file_says_it_shows_its_end():
+    """Script, Output and Commands come as at most their last 256 KB; X-Kelvin-Cut gives the whole size."""
+    files = _js("runFiles")
+    assert 'res.headers.get("X-Kelvin-Cut")' in files and '"The last "' in files and "cut.hidden = !whole" in files
