@@ -451,6 +451,7 @@ def build_server(rt: LabRuntime) -> MCPServer:
         return outside(rt, "the lab's scripts", rt.check_script(script, params or {}))
 
     @server.tool(annotations=ACT, structured_output=False)
+    @cancellable
     def run_script(script: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[str]] = None,
                    drives: Optional[Dict[str, Any]] = None) -> str:
         """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:

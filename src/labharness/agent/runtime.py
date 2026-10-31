@@ -4893,7 +4893,7 @@ class LabRuntime:
             prep = self._prepare_script(path, params, args, drives)
         except scriptrun.ScriptError as e:
             return "script not run: %s" % e
-        return self._do("running script %s" % prep.name, lambda: self._run_script(prep, mark))
+        return self._do("running script %s" % prep.name, lambda: self._run_script(prep, mark), stoppable=True)
 
     def _run_script(self, prep: Any, mark: Callable[[str], str]) -> str:
         return self._script_run(prep, mark)[0]
