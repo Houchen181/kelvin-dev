@@ -157,6 +157,27 @@ def test_the_catalog_finds_runs_and_answers_read_only_sql(tmp_path, monkeypatch)
         assert want in text, want
 
 
+def test_find_runs_takes_times_as_people_say_them(tmp_path):
+    """since and until as activity takes them (today, yesterday, 2h, a date and time with a space or a T), compared
+    as times; until takes in the whole minute given; what isn't a time is said, never taken for one."""
+    from datetime import datetime, timedelta
+    rt = runtime(tmp_path)
+    rt.run(SWEEP)
+    run_id = rt.runs_index(1)[0]["run_id"]
+    assert run_id in rt.find_runs()
+    started = datetime.fromisoformat(rt.catalog.find()[0]["started"])
+    at, before, after = (t.strftime("%Y-%m-%d %H:%M") for t in (started, started - timedelta(minutes=1),
+                                                                 started + timedelta(minutes=1)))
+    for t in (at, at.replace(" ", "T")):
+        assert run_id in rt.find_runs(until=t)                              # the minute it started, inclusive
+    for t in (after, after.replace(" ", "T")):
+        assert "no run matches" in rt.find_runs(since=t)
+    assert run_id in rt.find_runs(since=before) and "no run matches" in rt.find_runs(until=before)
+    assert run_id in rt.find_runs(since="today") and run_id in rt.find_runs(since="2h", until="today")
+    assert "no run matches" in rt.find_runs(until="yesterday")
+    assert rt.find_runs(since="last week").startswith("not searched: a time is 2026-10-28")
+
+
 def test_compute_and_where_work_on_a_runs_columns_and_nothing_else(tmp_path):
     rt = runtime(tmp_path)
     rt.run(SWEEP)

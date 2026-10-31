@@ -925,8 +925,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Search every run in the data folder, newest first. Each comes with what it swept and measured (units,
         ranges), the conditions held and its assessment. Filters are optional and combine: text (anywhere in the
         run's card), device, project, plan (names, in part), status (done, aborted, interrupted), since and until
-        (2026-10-24, or 2026-10-24T15:00; inclusive), quantity (temperature, magnetic_field, voltage, current,
-        frequency, power... or a column such as smu.V). For questions these can't answer, query_runs."""
+        (2026-10-24, 2026-10-24T15:00, 15:00, today, yesterday, or a while ago such as 2h; this computer's clock;
+        inclusive), quantity (temperature, magnetic_field, voltage, current, frequency, power... or a column such as
+        smu.V). For questions these can't answer, query_runs."""
         return rt.find_runs(text, device, project, plan, status, since, until, quantity, limit)
 
     @server.tool(annotations=READ, structured_output=False, description=(

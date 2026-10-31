@@ -10,9 +10,11 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -75,6 +77,22 @@ def _num(v: Any) -> Optional[float]:
     if isinstance(v, (int, float)) and math.isfinite(float(v)):
         return float(v)
     return None
+
+
+def _time(text: str, end: bool) -> str:
+    """A time as a person or the model gives it (2026-10-24, 2026-10-24 15:00, 15:00, today, yesterday, 2h:
+    provenance.when) as the catalog keeps a run's start (2026-10-24T15:00:00.000, this computer's clock). end (until):
+    to the end of the day, or of the minute, given. ValueError: not a time."""
+    from .provenance import when
+    d = when(text, datetime.now(), end=end)
+    if d is None:
+        return ""
+    exact = str(text).strip().upper().replace(" ", "T")
+    if end and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?", exact):   # all of that minute (or second)
+        return exact
+    if d.tzinfo is not None:   # another time zone's: in this computer's
+        d = d.astimezone().replace(tzinfo=None)
+    return d.isoformat(timespec="milliseconds")
 
 
 class QueryError(ValueError):
@@ -215,9 +233,11 @@ class Catalog:
     def find(self, text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
              since: str = "", until: str = "", quantity: str = "", limit: int = 20,
              skip: Iterable[str] = ()) -> List[Dict[str, Any]]:
-        """Runs matching every filter given, newest first. since/until: dates or times (2026-10-24, inclusive);
-        quantity: a swept or measured quantity (temperature) or column (smu.V, or smu for any of its columns).
-        skip: runs left out (unshared work the asker may not see)."""
+        """Runs matching every filter given, newest first. since/until: dates or times (2026-10-24, 2026-10-24 15:00,
+        today, 2h: _time; inclusive; ValueError when one isn't a time); quantity: a swept or measured quantity
+        (temperature) or column (smu.V, or smu for any of its columns). skip: runs left out (unshared work the
+        asker may not see)."""
+        since, until = _time(since, False) if since else "", _time(until, True) if until else ""
         where: List[str] = []
         args: List[Any] = []
         skip = sorted(skip)
