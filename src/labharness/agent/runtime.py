@@ -6103,7 +6103,7 @@ class LabRuntime:
             for run_id in runs:
                 try:
                     meta = rundata.meta(self.runs / run_id)
-                except (KeyError, OSError, ValueError):
+                except Exception:
                     meta = {"unshared": True}   # whose it was can't be read: kept apart
                 unattended = unattended or bool(meta.get("queue"))
                 if self._unshared_marks(meta):
