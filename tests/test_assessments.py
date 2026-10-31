@@ -356,6 +356,20 @@ def test_a_dip_with_a_shoulder_is_not_given_one_lines_q():
     assert s.get("lines") == 2 or "Q ≈" not in s["summary"], s["summary"]   # one Lorentzian: half the main dip's Q
 
 
+def test_a_reports_chart_of_a_swept_excitation_gives_each_point_its_own_current():
+    from labharness.chain import derived_readings
+    from labharness.reports.collect import Collector
+    chain = {"excitation": {"source": "lockin.amplitude", "form": "rms", "series_resistor": 1e7},
+             "readings": {"lockin.X": {"gain": 1, "name": "R_xx"}}}
+    measures = [{"key": "lockin.X", "unit": "V", "kind": "scalar"}]
+    derive = derived_readings(chain, {}, {"lockin": {"amplitude": 0.004}}, measures)   # 4 mV when the run started
+    rows = [{"lockin.amplitude": a, "lockin.X": 1e3 * a / 1e7} for a in (0.001, 0.01, 0.1)]   # 1 kΩ throughout
+    cols = {"axes": [{"key": "lockin.amplitude", "unit": "V", "kind": "instrument"}], "measures": measures}
+    collector = Collector(None, None, lambda run: cols, lambda: [], str)
+    (chart,) = collector._charts(rows, cols, {}, {}, derive)
+    assert chart.series[0].ys == pytest.approx([1e3, 1e3, 1e3], rel=1e-3)   # not 1e3 × amplitude / 4 mV
+
+
 def test_a_swept_excitation_gives_each_point_its_own_current():
     from labharness.chain import derived_readings
     chain = {"excitation": {"source": "lockin.amplitude", "form": "rms", "series_resistor": 1e7},

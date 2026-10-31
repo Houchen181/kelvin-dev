@@ -251,9 +251,16 @@ class Collector:
                 series: List[Series] = []
                 model = ""
                 factor, title, y_unit, how = derive.get(m["key"]) or (1.0, m["key"], m.get("unit", ""), "")
+                source = getattr(derive.get(m["key"]), "source", "")   # the excitation's setting, when derived
+                at_start = getattr(derive.get(m["key"]), "value", None)
 
-                def scaled(ys: List[Any]) -> List[Any]:
-                    return [y * factor if _numbers(y) else y for y in ys] if factor != 1.0 else ys
+                def scaled(ys: List[Any], own: List[Any]) -> List[Any]:
+                    """In ohms: by the run's current, or, where the run sweeps the excitation, by each point's own
+                    (own: the setting at each point, None where it isn't swept)."""
+                    if factor == 1.0:
+                        return ys
+                    return [y * factor * (at_start / o if source and _numbers(at_start) and _numbers(o) and o else 1)
+                            if _numbers(y) else y for y, o in zip(ys, own)]
                 for k, (gval, grows) in enumerate(list(groups.items())[:MAX_GROUPS]):
                     if outer:   # the same label the analysis gives this group
                         name = "%s = %s" % (outer["key"], si(gval, outer.get("unit", "")) if _numbers(gval) else gval)
@@ -261,12 +268,16 @@ class Collector:
                         name = title
                     color = PALETTE[k % len(PALETTE)] if outer else ""
                     series.append(Series(name, [r.get(xa["key"]) for r in grows],
-                                         scaled([r.get(m["key"]) for r in grows]), color=color))
+                                         scaled([r.get(m["key"]) for r in grows], [r.get(source) for r in grows]),
+                                         color=color))
                     fit = next((f for f in fits if f["y"] == m["key"]
                                 and (f.get("group") == name if outer else not f.get("group"))), None)
                     if fit:
                         model = _fit_words(fit)
-                        series.append(Series("fit", fit["fit"]["x"], scaled(fit["fit"]["y"]), fit=True, color=color))
+                        xs = fit["fit"]["x"]
+                        own = (xs if source == xa["key"] else
+                               [gval] * len(xs) if outer and source == outer["key"] else [None] * len(xs))
+                        series.append(Series("fit", xs, scaled(fit["fit"]["y"], own), fit=True, color=color))
                 caption = ("Dashed: %s fit%s to %s." % (model, "s" if outer and len(groups) > 1 else "", m["key"])
                            if model else "")
                 if how:   # a derived quantity says how it was worked out
