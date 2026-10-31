@@ -981,13 +981,13 @@ body.resizing .plot-svg { pointer-events: none; }
 .rv-back { justify-self: start; margin: -8px 0 -6px -6px; }
 /* Run again, in a finished run's view */
 .rv-again > summary { cursor: pointer; font-size: 13.5px; font-weight: 550; color: var(--text-2); width: max-content; }
-.ra-body { display: grid; gap: 8px; justify-items: start; margin: 8px 0 2px 5px; padding-left: 12px; border-left: 2px solid var(--line); }
+.ra-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; justify-items: start; margin: 8px 0 2px 5px; padding-left: 12px; border-left: 2px solid var(--line); }
 .ra-body p { margin: 0; }
 .ra-body p:empty { display: none; }
 .said, #scans-msg { white-space: pre-line; overflow-wrap: anywhere; }
 .ra-body > .rv-plan, .ra-body > .ra-conds { justify-self: stretch; }
-.ra-script { display: flex; align-items: center; gap: 8px; max-width: 100%; }
-.ra-script code { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ra-script { display: flex; align-items: center; gap: 8px; max-width: 100%; min-width: 0; }
+.ra-script code { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ra-params { font: 12.5px/1.5 ui-monospace, Consolas, monospace; color: var(--text-2); overflow-wrap: anywhere; }
 .ra-conds { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
 .ra-conds table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
