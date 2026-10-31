@@ -2324,10 +2324,12 @@ class LabRuntime:
         go to General. Unshared work stays apart: the run of an incognito chat, of a chat that keeps unshared work's
         marks or of a chat in an unshared (unpublished, confidential or model-limited) project never goes under
         another project's sample, nor does any chat's run go under the sample of another project's unshared work
-        (_apart says why, for the chat). A run keeps the chat that started it, the rules and marks it ran under, and
-        who made it: runs of unshared work, and anyone else's, are never shared on the Kelvin hub, and only chats
-        inside that work see them (may_see). project, incognito, unshared: in place of the attribution's.
-        legacy: queued before Kelvin noted these; held like older runs."""
+        (_apart says why, for the chat). Work outside every chat (a person's from the Queue pane, an agent's over
+        MCP) goes under the mounted sample, as it always has, and keeps that project's marks when it is unshared
+        work. A run keeps the chat that started it, the rules and marks it ran under, and who made it: runs of
+        unshared work, and anyone else's, are never shared on the Kelvin hub, and only chats inside that work see them
+        (may_see). project, incognito, unshared: in place of the attribution's. legacy: queued before Kelvin noted
+        these; held like older runs."""
         whose = dict(self.attribution)
         for key, value in (("project", project), ("incognito", incognito), ("unshared", unshared)):
             if value is not None:
@@ -2336,8 +2338,9 @@ class LabRuntime:
         incognito = bool(whose.get("incognito"))
         chat_pid = None if incognito else whose.get("project")
         pid = m.get("project") if m else chat_pid
+        in_chat = bool(whose.get("chat") or incognito or whose.get("unshared") or chat_pid)
         apart = ""
-        if m and (pid or None) != (chat_pid or None):   # the sample in the setup is another project's
+        if m and in_chat and (pid or None) != (chat_pid or None):   # the sample in the setup is another project's
             if incognito:
                 apart = "an incognito chat's runs go under no project or sample"
             elif whose.get("unshared") or self.project_info(chat_pid).get("unshared"):
@@ -2350,6 +2353,10 @@ class LabRuntime:
         out = {"project": pid, "project_name": info.get("name") or "General",
                "device": m.get("device") if m else None,
                "device_name": m.get("device_name") if m else None, "user": self.user}
+        if not in_chat and m and info.get("unshared"):   # outside every chat, on unshared work's sample: its marks
+            whose.update({k: info[k] for k in ("confidential", "unpublished") if info.get(k)})
+            if info.get("private") and info.get("rules"):
+                whose["rules"] = info["rules"]
         if whose.get("chat"):
             out["chat"] = whose["chat"]
         if incognito:
@@ -2780,7 +2787,7 @@ class LabRuntime:
                     if item.kind == "plan":
                         plan = self._plan(item.text)
                         meta = self._attribute(plan, legacy=item.legacy)
-                        meta.pop("_apart", None)
+                        apart = meta.pop("_apart", "")   # kept with the item, said where its chat sees the queue
                         with self._device_protection(meta), self.lock.only(uses + self._involved(plan.requires)):
                             report = self.engine.run(plan, meta=dict(meta, queue={
                                 "item": item.id, "position": position, "note": item.note}), folder=item.folder,
@@ -2788,7 +2795,9 @@ class LabRuntime:
                         status = {"done": "done", "aborted": "stopped"}.get(report.status, "failed")
                         if report.status == "aborted" and "stop" not in (report.message or "").lower():
                             status = "failed"
-                        q.mark(item, status, report.message if status != "done" else "", report.run_id)
+                        q.mark(item, status, report.message if status != "done" else "filed under %s without the "
+                               "mounted sample: %s" % (meta.get("project_name") or "General", apart) if apart else "",
+                               report.run_id)
                         with self.lock.only([]):   # its report uses no instrument
                             self._auto_report(report.run_id)
                         return status == "done", report.message

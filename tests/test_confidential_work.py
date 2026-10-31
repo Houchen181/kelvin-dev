@@ -352,3 +352,48 @@ def test_a_confidential_project_and_its_chats_show_a_lock_and_one_switch_sets_it
     client.patch("/api/chats/" + chat["id"], headers=h, json={"project": None})   # out of it, it keeps the marks
     (mine,) = [c for c in client.get("/api/chats", headers=h).json() if c["id"] == chat["id"]]
     assert mine.get("confidential") is True and mine["rules"]["providers"] == ["local"]
+
+
+# ------------------------------------------------------------------ the review of 0.3.34
+
+SECRET = "Acme-HfO2-D1"
+
+
+def mounted(rt, tmp_path, protection=None):
+    """A portal whose Acme NDA sample is mounted (with this protection)."""
+    p = Portal(tmp_path, rt)
+    device = p.store.add_device(p.nda, SECRET)
+    rt.mount(p.nda, device)
+    if protection:
+        rt.protect(dict(device, protection=protection))
+    return p, device
+
+
+def test_work_outside_every_chat_stays_under_the_mounted_confidential_sample_with_its_marks(rt, tmp_path):
+    import time
+    from labharness.web.hubsync import run_items
+    p, _ = mounted(rt, tmp_path)
+    with rt.attributed({}):   # a person queues it from the Queue pane: filed under no chat
+        assert rt.queue_add(NDA, None, "W17 first pass", "human").startswith("added")
+    assert rt.queue_start("human").startswith("queue started")
+    deadline = time.time() + 60
+    while rt.queue.state in ("running", "pausing") and time.time() < deadline:
+        time.sleep(0.1)
+    run, meta = newest(rt, "acme_gate")
+    assert (meta["project"], meta["device_name"], meta.get("confidential")) == (p.nda, SECRET, True)
+    assert meta["rules"]["providers"] == ["scripted"]
+    assert run not in [item["id"] for item, _ in run_items(rt.runs, {p.nda}, None)[0]]
+    looked = p.turn(p.other, [("list_runs", {}), ("describe_run", {"run_id": run})])
+    assert run not in looked["c0"] and "unshared work" in looked["c1"]
+    rt.attribution = {}   # an agent over MCP: no chat either
+    rt.run(NDA.replace("acme_gate", "acme_mcp"))
+    _, meta = newest(rt, "acme_mcp")
+    assert (meta["project"], meta["device_name"], meta.get("confidential")) == (p.nda, SECRET, True)
+    # a chat's queued item filed apart says so where that chat reads the queue
+    p.turn(p.other, [("queue_add", {"item": OPEN})])
+    assert rt.queue_start("human").startswith("queue started")
+    deadline = time.time() + 60
+    while rt.queue.state in ("running", "pausing") and time.time() < deadline:
+        time.sleep(0.1)
+    shown = p.turn(p.other, [("queue_show", {})])["c0"]
+    assert "filed under General without the mounted sample" in shown and SECRET not in shown

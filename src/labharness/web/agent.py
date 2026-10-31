@@ -978,20 +978,22 @@ class ChatAgent:
     # ------------------------------------------------------------------ devices and the reports' view of projects
 
     def project_info(self, project_id: Optional[str]) -> Dict[str, Any]:
-        """What reports need about a project; None is the General workspace (work outside every project)."""
+        """What reports need about a project, and its marks; None is the General workspace (work outside every
+        project). A project that is gone counts as unshared work: Kelvin can't tell whether it was shared."""
         project = None
         if project_id:
             try:
                 project = self.store.project(project_id)
             except KeyError:
                 return {"id": project_id, "name": project_id, "devices": [], "notes": [], "references": [],
-                        "summary": "", "private": False, "unshared": False}
+                        "summary": "", "private": False, "unshared": True}
         return {"id": project_id, "name": project["name"] if project else "General",
                 "devices": self.store.devices(project_id), "notes": self.report_notes(project),
                 "references": self.report_references(project), "summary": self.store.summary_of(project_id),
                 "private": bool(project and rulebook.restrictive(project.get("rules"))),
                 "unshared": unshared(project), "rules": (project or {}).get("rules"),
-                "confidential": bool((project or {}).get("confidential"))}
+                "confidential": bool((project or {}).get("confidential")),
+                "unpublished": bool((project or {}).get("unpublished"))}
 
     def project_chat_runs(self, project_id: Optional[str]) -> List[str]:
         chats = []
