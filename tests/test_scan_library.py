@@ -485,6 +485,13 @@ def test_the_library_routes(tmp_path, scripts):
     queued = client.post("/api/library", json={"op": "run", "id": entry_id, "params": {}, "queue": True})
     assert queued.status_code == 200 and "at the end of the queue" in queued.json()["message"]
     assert yaml.safe_load(queued.json()["queue"]["items"][-1]["text"]) == {"script": str(probe.resolve())}
+    item_id = queued.json()["queue"]["items"][-1]["id"]
+    marked = client.post("/api/queue", json={"op": "then_pause", "item": item_id, "value": True}).json()
+    assert marked["items"][-1]["then_pause"] is True and "pauses after probe.py" in marked["message"]
+    assert client.post("/api/queue", json={"op": "then_pause", "item": item_id, "value": 0}).json()["items"][-1][
+        "then_pause"] is False
+    added = client.post("/api/queue", json={"op": "add", "text": "step: settle\nwait: 5", "then_pause": True}).json()
+    assert added["items"][-1]["then_pause"] is True
     assert client.post("/api/library", json={"op": "run", "id": "plan-nope"}).status_code == 404
     assert client.post("/api/library", json={"op": "remove", "id": entry_id}).json()["library"]["scripts"] == []
     assert client.post("/api/library", json={"op": "fly"}).status_code == 400

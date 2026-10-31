@@ -3314,7 +3314,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             ok = not msg.startswith("not added")
         elif op == "then_pause":   # {item, value}: the queue pauses after it, or no longer does
             try:
-                found = runtime.queue.set_then_pause(item, body.get("value", True) is not False)
+                found = runtime.queue.set_then_pause(item, bool(body.get("value", True)))
                 msg, ok = "the queue %s after %s" % ("pauses" if found.then_pause else "goes on", found.name), True
             except KeyError as e:
                 msg, ok = e.args[0], False
