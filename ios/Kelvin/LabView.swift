@@ -121,15 +121,19 @@ struct AlarmRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(alarm.text, systemImage: "bell.badge.fill")
+            Label(alarm.text + ((alarm.count ?? 1) > 1 ? " (×\(alarm.count ?? 1))" : ""), systemImage: "bell.badge.fill")
                 .font(.headline)
-                .foregroundStyle(.red)
+                .foregroundStyle(alarm.cleared == nil ? Color.red : Color.orange)
             if !alarm.actions.isEmpty {
                 Text("Kelvin " + alarm.actions.joined(separator: "; "))
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if let raised = alarm.raised {
                 Text("Since \(Format.time(raised))").font(.caption).foregroundStyle(.secondary)
+            }
+            if let cleared = alarm.cleared {
+                Text("Cleared \(Format.time(cleared))" + (alarm.clearedText.isEmpty ? "" : ": " + alarm.clearedText))
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Button("Got it") { attempt($failure) { try await session.acknowledge(alarm) } }
                 .buttonStyle(.bordered)

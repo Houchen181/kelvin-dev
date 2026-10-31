@@ -98,8 +98,12 @@ public struct Alarm: Decodable, Equatable, Identifiable, Sendable {
     public var raised: Double?
     public var cleared: Double?
     public var acknowledged: Bool
+    public var count: Int?              // Kelvin 0.3.34 and later: how often it went off before Got it
+    public var clearedText: String      // why it cleared
 
-    enum CodingKeys: String, CodingKey { case id, kind, key, text, actions, raised, cleared, acknowledged }
+    enum CodingKeys: String, CodingKey {
+        case id, kind, key, text, actions, raised, cleared, acknowledged, count, clearedText = "cleared_text"
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -111,9 +115,13 @@ public struct Alarm: Decodable, Equatable, Identifiable, Sendable {
         raised = c.maybe(.raised)
         cleared = c.maybe(.cleared)
         acknowledged = c.value(.acknowledged, or: false)
+        count = c.maybe(.count)
+        clearedText = c.value(.clearedText, or: "")
     }
 
-    public var open: Bool { cleared == nil && !acknowledged }
+    /// Waiting for a person. A newer Kelvin keeps an alarm until someone says Got it, also once it has cleared (one
+    /// that cleared overnight is still news in the morning); an older one let it go when it cleared.
+    public var open: Bool { !acknowledged && (cleared == nil || count != nil) }
 }
 
 public struct Notice: Decodable, Equatable, Identifiable, Sendable {

@@ -62,6 +62,16 @@ final class ModelTests: XCTestCase {
         XCTAssertFalse(Role.watch.canUnlock)
     }
 
+    func testANewerKelvinsAlarmWaitsForGotItAlsoOnceCleared() throws {
+        let a = try decode(Alarm.self, """
+        {"id": "a2", "text": "T above 4 K", "raised": 1, "cleared": 2, "acknowledged": false, "count": 3,
+         "cleared_text": "back below 3.9 K"}
+        """)
+        XCTAssertTrue(a.open)
+        XCTAssertEqual(a.count, 3)
+        XCTAssertEqual(a.clearedText, "back below 3.9 K")
+    }
+
     func testTheAccountsKelvins() throws {
         let hub = URL(string: "https://kelvin.example.org")!
         var list = ComputerList()
