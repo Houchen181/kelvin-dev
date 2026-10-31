@@ -168,7 +168,7 @@ Only a person sets or changes a device's protection. Kelvin reads it (the lab st
 **No switching glitches, no clipped sweeps.** A source's range, or its autorange switch, changes only while its level is at safe. The gate refuses it otherwise, whether it comes from a plan, the agent or a raw command. While the range is fixed (autorange off), a level beyond it is refused up front, saying which range it needs, and a plan that would pass it is refused before it starts, unless its setup sets that range first. Outputs already switch cleanly: a drive is parked at safe before its output switches on, and ramped to safe before it switches off.
 
 **A run measures at what you approved.** Parking a level at safe must not leave a run measuring in the dark:
-- A plan switches its outputs on (laser emission, RF, a source's output) before the levels they apply, whatever order it writes them in.
+- A plan switches its outputs on (laser emission, RF, a source's output) before the levels they apply, and a heater range on before its set point (the set point's `applies_when`), whatever order it writes them in. A rate goes before the set point it paces.
 - When an output goes on later in a plan or a queue item, the level that plan or item set is ramped back up once the output is on, through every check again.
 - After its setup, a run reads every drive it set back from the instrument. If one shows something else (parked, clipped, refused), the run stops before its first point and says which drive. A level lost during the sweep becomes a warning in the run's assessment, which then never says "no problems found".
 - Your own `set` outside a plan still parks the level and says so ("V set to 0 V first").

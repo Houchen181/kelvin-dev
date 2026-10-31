@@ -534,3 +534,19 @@ def test_hands_on_the_sample_holds_a_positioner_through_a_stops_clean_up(lab, ma
         "smu.V stays where it is", "smu.output stays where it is", "smu.compliance_I stays where it is"]
     assert gate.cut("smu", "V", "monitor")[0].action == "held" and lab.read("smu", "V") == 0.5
     assert gate.to_safe("laser") and lab.read("laser", "emission") is False
+
+
+# ------------------------------------------------------------------- review of 0.3.34: a setup's switches first
+
+def test_a_setup_switches_a_heater_range_on_before_its_set_point(lab, make_engine):
+    """Review of 0.3.34: setup: {tc.setpoint: 5, tc.heater_range: low} stopped with "switch tc.heater_range on
+    first, or set both in one plan's setup": the heater range, which the set point's applies_when names, came second.
+    A rate still goes before the set point it paces."""
+    from labharness import load_plan
+    engine, _, _ = make_engine([True])
+    plan = load_plan("plan: warm\nsetup: { tc.setpoint: 5, tc.heater_range: low, magnet.B: 0.1, magnet.rate: 0.5 }\n"
+                     "time: { every: 10, points: 2 }\nmeasure: [tc.T_sample]\n")
+    assert [s.key for s in engine.ordered(plan.setup)] == ["tc.heater_range", "tc.setpoint", "magnet.rate", "magnet.B"]
+    report = engine.run("plan: warm\nsetup: { tc.setpoint: 5, tc.heater_range: low }\ntime: { every: 10, points: 2 }\n"
+                        "measure: [tc.T_sample]\n")
+    assert report.status == "done"
