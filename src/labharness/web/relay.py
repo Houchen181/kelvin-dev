@@ -27,7 +27,7 @@ TRIMMED_MAX = 8 * 1024 * 1024     # bytes of an answer read whole to leave unsha
 AT_ONCE = 16                      # requests answered at once
 RELAY_ONLY = {("POST", "/api/phone/direct"), ("DELETE", "/api/phone/direct")}
 # answers that can list unshared work: read whole and passed through `trim` (a run's files stream as they are)
-TRIMMED = {"/api/chats", "/api/projects", "/api/runs", "/api/state", "/api/live", "/api/bootstrap"}
+TRIMMED = {"/api/chats", "/api/projects", "/api/runs", "/api/state", "/api/live", "/api/bootstrap", "/api/watches"}
 
 Target = Tuple[str, str, str]     # the hub's address, the person's token there, the person's name here
 

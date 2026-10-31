@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime
 import io
 import re
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -118,8 +119,10 @@ def run_markdown(part: Any, figures: Sequence[Tuple[str, str, str]], meta: Dict[
 
 
 def markdown(report: Any, figures: Dict[str, List[Tuple[str, str, str]]], metas: Dict[str, Dict[str, Any]],
-             calibration: Dict[str, List[str]], day_log: Sequence[str] = (), exported_by: str = "") -> str:
-    """The record as one Markdown page: a run's, or several runs' (a day's) with that day's lab record."""
+             calibration: Dict[str, List[str]], day_log: Sequence[str] = (), exported_by: str = "",
+             left: int = 0) -> str:
+    """The record as one Markdown page: a run's, or several runs' (a day's) with that day's lab record. left: the
+    runs of unshared work (another project's or chat's) it leaves out."""
     many = len(report.runs) > 1 or bool(day_log)
     lines = ["# %s" % report.title, ""]
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -128,6 +131,10 @@ def markdown(report: Any, figures: Dict[str, List[Tuple[str, str, str]]], metas:
                                                              " by %s" % exported_by if exported_by else ""))
     if report.simulated:
         lines += ["", "> Simulated instruments: these runs measured no real sample."]
+    if left:
+        lines += ["", "> %d run%s of unshared work (another project's or chat's) %s left out of this record, with "
+                  "%s part of the lab record." % (left, "" if left == 1 else "s", "is" if left == 1 else "are",
+                                                  "its" if left == 1 else "their")]
     if many:
         lines += ["", "## Runs", ""]
         lines += _table(["When", "Run", "Plan", "Status", "Points"],
@@ -189,11 +196,14 @@ def export(rt: Any, runs: Optional[List[str]] = None, day: str = "", last: int =
             day = datetime.date.fromisoformat(str(day).strip()).isoformat()
         except ValueError:
             raise ValueError("day must be YYYY-MM-DD, today or yesterday")
-    ids = rt.pick_runs(runs, day, last) if (runs or day or last) else rt.pick_runs(last=1)
+    # only the runs, and the lab record, that whoever asks may see: unshared work of another project or chat is left
+    # out (LabRuntime.viewing), and the record says how many runs
+    ids, left = rt.picked(runs, day, last) if (runs or day or last) else rt.picked(last=1)
     if not ids and not day:
-        raise KeyError("no runs yet")
+        raise KeyError("no runs yet" if not left else "no runs here: %d of unshared work (another project's or chat's) "
+                       "aren't shown here" % left)
     ids = ids[-MAX_RUNS:]
-    events = rt.gate.log.events()
+    events = rt.seen_events(rt.gate.log.events())
     if ids:   # as the reports gather runs (reports.collect): the runtime's collector finds every run's folder
         report = rt._collector().report(ids, "", "", (), rt.lab.config.name, False)
     else:   # a day with no runs: its lab record alone
@@ -225,6 +235,7 @@ def export(rt: Any, runs: Optional[List[str]] = None, day: str = "", last: int =
     name = _safe_name(name)
     folder = (target or rt.data_dir / FOLDER) / name
     folder.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(folder / "figures", ignore_errors=True)   # this record's figures only, never an earlier one's
     figures = {part.run_id: _figures(part, folder) for part in report.runs}
     home = getattr(rt, "home", None)
     calibration = {}
@@ -232,14 +243,14 @@ def export(rt: Any, runs: Optional[List[str]] = None, day: str = "", last: int =
         used = [n for n, _ in part.conditions]   # the instruments its start snapshot read
         calibration[part.run_id] = _calibration_lines(home, used, metas.get(part.run_id, {}).get("started", ""))
     log = _day_log(events, day, event_line) if day else []
-    text = markdown(report, figures, metas, calibration, log, exported_by=getattr(rt, "user", None) or by)
+    text = markdown(report, figures, metas, calibration, log, exported_by=getattr(rt, "user", None) or by, left=left)
     path = folder / (name + ".md")
     tmp = path.with_suffix(".md.tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
     rt.gate.log.write("eln_export", by=by, name=name, runs=len(ids), day=day or None)
     return {"path": str(path), "folder": str(folder), "name": name, "runs": len(ids),
-            "figures": sum(len(f) for f in figures.values())}
+            "figures": sum(len(f) for f in figures.values()), "left": left}
 
 
 def zipped(folder: Any) -> bytes:
@@ -255,7 +266,9 @@ def zipped(folder: Any) -> bytes:
 
 def answer(result: Dict[str, Any]) -> str:
     """The export_eln tool's answer."""
-    return ("ELN record: %s (%d run%s, %d figure%s in figures/ beside it). Paste the Markdown into the notebook, or "
+    left = result.get("left") or 0
+    return ("ELN record: %s (%d run%s, %d figure%s in figures/ beside it%s). Paste the Markdown into the notebook, or "
             "upload the folder; the portal's Runs pane downloads it as a .zip." % (
                 result["path"], result["runs"], "" if result["runs"] == 1 else "s", result["figures"],
-                "" if result["figures"] == 1 else "s"))
+                "" if result["figures"] == 1 else "s", "; %d run%s of unshared work (another project's or chat's) "
+                "left out" % (left, "" if left == 1 else "s") if left else ""))

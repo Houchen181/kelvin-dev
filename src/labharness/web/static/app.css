@@ -216,6 +216,8 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .proj-row { color: var(--text); font-weight: 550; padding-left: 4px; }
 .proj-row > svg { width: 16px; height: 16px; color: var(--accent); }
 .proj-row .count { color: var(--muted); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.lock-mark { flex: none; display: inline-flex; color: var(--warn); }
+.lock-mark svg { width: 12px; height: 12px; }
 .proj-row:hover .count { display: none; }
 .chev-s { display: grid; place-items: center; color: var(--muted); transition: transform .15s; }
 .chev-s svg { width: 13px; height: 13px; }

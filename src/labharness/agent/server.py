@@ -184,6 +184,7 @@ You are connected to a physics lab through Kelvin.
 
 READ = ToolAnnotations(readOnlyHint=True)
 OUTSIDE = '<outside_text from="%s">\n%s\n</outside_text>'
+VIEWER_META = "kelvin.viewer"   # a portal chat's tool call names its viewer here (LabRuntime.register_viewer)
 
 
 def outside(rt: LabRuntime, source: str, text: str, web: bool = False) -> str:
@@ -210,8 +211,26 @@ def lab_memory_part(rt: LabRuntime) -> str:
     return "\n\n" + brief + "\n(As it was when this server started; shared_memory has the latest.)" if brief else ""
 
 
+def _viewer_token(context: Any) -> str:
+    """The viewer token a call's meta names ("": none)."""
+    try:
+        meta = context.request_context.meta or {}
+    except (AttributeError, ValueError):   # no request (a call from inside this process)
+        return ""
+    return str(meta.get(VIEWER_META) or "") if isinstance(meta, dict) else ""
+
+
 def build_server(rt: LabRuntime) -> MCPServer:
     server = MCPServer("kelvin", instructions=INSTRUCTIONS + lab_memory_part(rt), version=__version__)
+    plain_call = server.call_tool
+
+    async def call_tool(name: str, arguments: Dict[str, Any], context: Any = None) -> Any:
+        """Every tool reads the lab's runs and records as its caller may (LabRuntime.viewing): a portal chat's call
+        names its viewer by a token only this process knows; any other client is an agent over MCP, no chat, which
+        sees shared work only. The worker thread a tool runs in takes the viewer with its context."""
+        with rt.viewing(rt.viewer_of(_viewer_token(context))):
+            return await plain_call(name, arguments, context)
+    server.call_tool = call_tool   # type: ignore[method-assign]
 
     def cancellable(fn: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
         """A tool that changes something or asks a person, which the client may cancel (notifications/cancelled) or

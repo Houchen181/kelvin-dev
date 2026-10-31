@@ -9,7 +9,7 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import yaml
 
@@ -42,13 +42,17 @@ class EventLog:
     """One JSON object per line; never rewritten. path=None keeps it in memory.
 
     shared: the lab's instrument log (~/Kelvin/instrument-log.jsonl), where every event of everyone who uses these
-    instruments is also written, with user: the signed-in person (None: nobody, such as setting up on start)."""
+    instruments is also written, with user: the signed-in person (None: nobody, such as setting up on start).
+    whose: the marks of unshared work the writing thread does (LabRuntime._whose_now), kept with each event it writes,
+    so that other chats and phones through the Kelvin hub never see it."""
 
-    def __init__(self, path: Any = None, clock: Any = None, shared: Any = None, user: Optional[str] = None):
+    def __init__(self, path: Any = None, clock: Any = None, shared: Any = None, user: Optional[str] = None,
+                 whose: Optional[Callable[[], Optional[Dict[str, Any]]]] = None):
         self.path = Path(path) if path else None
         self.clock = clock
         self.shared = Path(shared) if shared else None
         self.user = user
+        self.whose = whose
         self._memory: List[Dict[str, Any]] = []
         self._seq = 0
         self._lock = threading.Lock()  # agent, plans and people write from different threads; keep every line
@@ -59,6 +63,10 @@ class EventLog:
                     self._seq = sum(1 for _ in f)
 
     def write(self, type_: str, **fields: Any) -> Dict[str, Any]:
+        try:
+            whose = self.whose() if self.whose is not None else None
+        except Exception:   # the record never loses an event to its marks
+            whose = None
         with self._lock:
             self._seq += 1
             event: Dict[str, Any] = {"seq": self._seq, "wall": _now(), "type": type_}
@@ -67,6 +75,8 @@ class EventLog:
             for k, v in fields.items():
                 if v is not None:
                     event[k] = _jsonable(v)
+            if whose and "whose" not in event:
+                event["whose"] = _jsonable(whose)
             if self.path:
                 with open(self.path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(event, ensure_ascii=False) + "\n")

@@ -7,7 +7,8 @@ text (scripts, notes, data); a file it replaces is kept first, in .kelvin-old be
 Kelvin's own folders are never reached this way, wherever the person put the chat's folder (off_limits): Kelvin's
 folder holds the lab config, the settings, the accounts, the cards and everyone's chats, which a model that could
 rewrite them would use to change its own limits and approvals; and the lab's records in the data folder are Kelvin's
-alone to write."""
+alone to write. Nor are files that hold sign-ins, keys or tokens, wherever they are (secret): SSH and cloud keys,
+.env files, other programs' sign-ins."""
 from __future__ import annotations
 
 import io
@@ -39,6 +40,16 @@ KEPT = ".kelvin-old"   # beside a file Kelvin replaced: each version before, by 
 RECORDS = {"events.jsonl", "mounted.json", "queue.json", "folders.json", "watches.json", "alarms.jsonl",
            "catalog.sqlite", "catalog.sqlite-wal", "catalog.sqlite-shm", "catalog.sqlite-journal", "record.bin",
            "run.h5"}
+# what holds sign-ins, keys and tokens, which Kelvin's AI never reads or writes, wherever it is (secret): the folders
+# of SSH, GnuPG, the cloud tools and AI tools' sign-ins (Claude Code's, Codex's); such files by name or kind; and
+# files whose name says what they hold
+SECRET_FOLDERS = {".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config", ".claude", ".codex",
+                  ".password-store"}
+SECRET_FILES = {".env", ".netrc", "_netrc", ".pgpass", ".git-credentials", ".npmrc", ".pypirc", ".htpasswd",
+                "credentials", "auth.json", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "authorized_keys",
+                "operator-key.txt"}
+SECRET_KINDS = {".pem", ".key", ".p12", ".pfx", ".ppk", ".kdbx", ".jks", ".keystore", ".gpg"}
+SECRET_WORDS = ("credential", "secret", "password", "passwd", "token", "apikey", "api_key", "api-key")
 
 Media = List[Tuple[str, bytes]]   # (mime type, the file's bytes): pictures, or PDF pages
 
@@ -56,16 +67,42 @@ def _within(path: Path, folder: Any) -> bool:
     return path == folder or folder in path.parents
 
 
+def mine(target: Path, own: Iterable[Any] = ()) -> Optional[Path]:
+    """Which of Kelvin's own folders (own) target is in, if any."""
+    for folder in own:
+        if folder and _within(target, folder):
+            return Path(folder).expanduser()
+    return None
+
+
+def secret(path: Path) -> bool:
+    """Whether a file, or a folder it is in, may hold sign-ins, keys or tokens (SECRET_*): Kelvin's AI never reads or
+    writes it, wherever it is. A folder of the person's own counts by those folder names alone ("secret project" is
+    theirs to name)."""
+    path = Path(path)
+    parts = [p.lower() for p in path.parts]
+    if any(p in SECRET_FOLDERS for p in parts):
+        return True
+    if not parts or path.is_dir():
+        return False
+    name = parts[-1]
+    return (name in SECRET_FILES or name.startswith(".env.") or Path(name).suffix in SECRET_KINDS
+            or any(w in name for w in SECRET_WORDS))
+
+
 def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: bool = False) -> Optional[str]:
     """Why Kelvin's AI may not reach target through a chat's folder (None: it may). own: Kelvin's own folders (its
     folder, with the lab config, settings, accounts, cards and everyone's chats; the signed-in person's chats), never
-    read or written this way. data: the data folder, whose records (RECORDS) only Kelvin itself writes; a run's
-    record and run.h5 are Kelvin's wherever the run is."""
-    for folder in own:
-        if folder and _within(target, folder):
-            return ("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, the "
-                    "instrument cards and everyone's chats: Kelvin's AI never %s there. Choose a folder for this "
-                    "chat outside it" % (target, Path(folder).expanduser(), "saves" if saving else "reads"))
+    read or written this way; nor is a file that may hold sign-ins, keys or tokens (secret). data: the data folder,
+    whose records (RECORDS) only Kelvin itself writes; a run's record and run.h5 are Kelvin's wherever the run is."""
+    folder = mine(target, own)
+    if folder is not None:
+        return ("%s is in Kelvin's own folder (%s), which holds the lab config, the settings, the accounts, the "
+                "instrument cards and everyone's chats: Kelvin's AI never %s there. Choose a folder for this "
+                "chat outside it" % (target, folder, "saves" if saving else "reads"))
+    if secret(target):
+        return ("%s may hold sign-ins, keys or tokens (a password file, an SSH or cloud key, a .env file, another "
+                "program's sign-in): Kelvin's AI never %s such files" % (target, "saves" if saving else "reads"))
     name = target.name.lower()
     if saving and name in RECORDS and (name in ("run.h5", "record.bin") or data is None or _within(target, data)):
         return ("%s is one of the lab's records (the event log, the mounted sample's protection, the queue, the "

@@ -8,6 +8,7 @@ never waits on the lock.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import csv
 import io
 import json
@@ -16,7 +17,7 @@ import re
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -287,6 +288,40 @@ class ClientCall:
         self.cancelled = False
 
 
+# whose a piece of work is: the project and chat it is filed under, and the marks that keep it unshared (an
+# incognito chat, a chat that keeps unshared work's marks, the rules it ran under, a confidential or unpublished
+# project)
+WHOSE = ("project", "chat", "incognito", "unshared", "rules", "confidential", "unpublished")
+
+
+class Viewer:
+    """Who reads the lab's kept runs and records through Kelvin's tools, and so what of them it may see. Unshared
+    work (a run of an unpublished, confidential or model-limited project, or one an incognito chat, or a chat that
+    keeps such marks, started) is seen only from inside it: by the chat that started it, and by its project's chats,
+    when their model is one its rules allow (allows). Everyone sees the rest. An agent over MCP is no chat, so it
+    sees shared work only; so does a person's report or record made outside every chat."""
+
+    def __init__(self, chat: Optional[str] = None, project: Optional[str] = None,
+                 allows: Optional[Callable[[Dict[str, Any]], bool]] = None, whose: Optional[Dict[str, Any]] = None):
+        self.chat = chat          # the chat asking (a second opinion or a Compare lane asks as its chat)
+        self.project = project    # that chat's project
+        self.allows = allows      # {rules: [rule sets], confidential} -> may its model see that work; None: never
+        self.whose = whose        # the asking chat's own marks (WHOSE), kept with what it adds to the lab's records
+
+
+# the viewer of this thread's work (LabRuntime.viewing), passed on to the threads and tasks it starts with their
+# context; None: Kelvin itself and the person at the Kelvin computer, who see everything
+_VIEWER: "contextvars.ContextVar[Optional[Viewer]]" = contextvars.ContextVar("kelvin_viewer", default=None)
+
+
+def unshared_runs(n: int) -> str:
+    return "%d run%s of unshared work (another project's or chat's)" % (n, "" if n == 1 else "s")
+
+
+def not_shown(n: int) -> str:
+    return "%s %s not shown here" % (unshared_runs(n), "is" if n == 1 else "are")
+
+
 class _ReadingGate:
     """The safety gate, for checking a queue item beside the work that changes the lab (another chat adds it while
     a scan runs): what the check reads of an instrument (a source's fixed range) is read as any reading is, never
@@ -329,6 +364,8 @@ class LabRuntime:
         self._attribution: Dict[str, Any] = {}   # see attribution
         self._attributed = threading.local()     # a thread's own (attributed)
         self._client = threading.local()   # the MCP client's call this thread works for (ClientCall), if any
+        self._viewers: Dict[str, Viewer] = {}   # the portal chats' tool calls going on, by their tokens (viewer_of)
+        self._viewers_lock = threading.Lock()
         self._holder: Optional["ClientCall"] = None   # the client's call that has the lab now, if one has
         self._script_cards: Optional[Tuple[Any, Any]] = None   # (the lab's cards folder as it was, the registry)
         self.busy: Optional[str] = None
@@ -381,7 +418,11 @@ class LabRuntime:
         self.caps_waiting = False
         self._apply_protection(recheck=True)
         self.running_meta: Dict[str, Any] = {}      # the running plan's project and marks (_attribute), while it runs
-        # what Kelvin knows about a project (name, devices, notes, references, summary); the portal sets this
+        self.live_meta: Dict[str, Any] = {}         # and the marks of the run the live view shows, after it ends too
+        # the watches unshared work added, with whose work it is: their notes are that work's own
+        self.unshared_watches: Dict[str, Dict[str, Any]] = {}
+        # what Kelvin knows about a project (name, devices, notes, references, summary, rules, marks); the portal
+        # sets this
         self.project_info: Callable[[Optional[str]], Dict[str, Any]] = default_project_info
         self.project_ids: Callable[[], List[Optional[str]]] = lambda: [None]   # None is the General workspace
         self.project_chat_runs: Callable[[Optional[str]], List[str]] = lambda pid: []   # runs its chats started
@@ -408,8 +449,10 @@ class LabRuntime:
         self._watching_stop = threading.Event()
         subscribe = getattr(approver, "subscribe", None)
         if subscribe:  # a person is needed: tell them, wherever they are
-            subscribe(lambda r: None if r.get("auto") else self.notifier(
-                "approval", "Approval needed: " + r["title"], (r.get("items") or [""])[0]))
+            subscribe(lambda r: None if r.get("auto") else self.tell(
+                "approval", "Approval needed: " + r["title"], (r.get("items") or [""])[0], bool(r.get("unshared"))))
+        if hasattr(approver, "origin"):   # a card of unshared work goes to phones through the hub without its names
+            approver.origin = self._unshared_request
         if hasattr(approver, "where"):   # each card says where it acts: SIMULATOR or REAL HARDWARE
             approver.where = self.where
         if hasattr(approver, "notes"):   # and when an instrument it names is out of calibration (profiles.py)
@@ -449,6 +492,167 @@ class LabRuntime:
         finally:
             self._attributed.value = old
 
+    # ------------------------------------------------------------------ who may see what: unshared work (Viewer)
+
+    @contextlib.contextmanager
+    def viewing(self, viewer: Optional[Viewer]) -> Iterator[None]:
+        """The runs and records read in this thread, and in the threads and tasks it starts with its context, are
+        those this viewer may see (None: everything, as for Kelvin itself and the person at the computer)."""
+        token = _VIEWER.set(viewer)
+        try:
+            yield
+        finally:
+            _VIEWER.reset(token)
+
+    @property
+    def viewer(self) -> Optional[Viewer]:
+        return _VIEWER.get()
+
+    def register_viewer(self, viewer: Viewer) -> str:
+        """A token for a portal chat's tool call, which names its viewer in the call's meta (agent/server.py):
+        only this process knows it, so no other client can claim to be that chat."""
+        import secrets
+        token = secrets.token_hex(16)
+        with self._viewers_lock:
+            self._viewers[token] = viewer
+        return token
+
+    def forget_viewer(self, token: str) -> None:
+        with self._viewers_lock:
+            self._viewers.pop(token, None)
+
+    def viewer_of(self, token: Any) -> Viewer:
+        """The viewer a token names; any other caller is an agent over MCP: no chat, so it sees shared work only."""
+        with self._viewers_lock:
+            found = self._viewers.get(str(token or ""))
+        return found if found is not None else Viewer()
+
+    def _info(self, pid: Optional[str], cache: Optional[Dict[Any, Any]] = None) -> Dict[str, Any]:
+        """project_info, kept in cache for one look through many runs."""
+        if cache is None:
+            return self.project_info(pid)
+        if pid not in cache:
+            cache[pid] = self.project_info(pid)
+        return cache[pid]
+
+    def unshared_work(self, marks: Any, cache: Optional[Dict[Any, Any]] = None) -> bool:
+        """Do these marks (a run's meta, a queue item's, a record's whose) belong to unshared work: an incognito
+        chat's, a chat's that keeps unshared work's marks or rules, or a project's that isn't shared (unpublished,
+        confidential or model-limited)?"""
+        if not isinstance(marks, dict):
+            return False
+        if any(marks.get(k) for k in ("incognito", "unshared", "unpublished", "confidential", "rules")):
+            return True
+        pid = marks.get("project")
+        return bool(pid) and bool(self._info(pid, cache).get("unshared"))
+
+    def may_see(self, marks: Any, cache: Optional[Dict[Any, Any]] = None) -> bool:
+        """May the viewer of this thread (viewing) see the work these marks belong to? Unshared work only from inside:
+        the chat that started it, or a chat of its project, with a model its rules allow."""
+        viewer = _VIEWER.get()
+        if viewer is None or not self.unshared_work(marks, cache):
+            return True
+        pid = marks.get("project")
+        inside = (bool(marks.get("chat")) and marks.get("chat") == viewer.chat) or \
+            (bool(pid) and pid == viewer.project and not marks.get("incognito"))
+        if not inside or viewer.allows is None:
+            return False
+        info = self._info(pid, cache) if pid else {}
+        return bool(viewer.allows({"rules": [marks.get("rules"), info.get("rules")],
+                                   "confidential": bool(marks.get("confidential") or info.get("confidential"))}))
+
+    def _whose_now(self) -> Optional[Dict[str, Any]]:
+        """The marks of the unshared work this thread does (its own attribution, as a queue item's; else the chat
+        whose tool call it is), which what it writes in the lab's record keeps, so that other chats and phones
+        through the Kelvin hub never see it; None for shared work. An attribution may say itself whether it is
+        unshared work (private), as the lab's record asks at every event."""
+        mine = getattr(getattr(self, "_attributed", None), "value", None)
+        if mine is None:
+            viewer = _VIEWER.get()
+            mine = viewer.whose if viewer is not None else None
+        if not mine:
+            return None
+        private = mine.get("private")
+        if not (self.unshared_work(mine) if private is None else private):
+            return None
+        return {k: mine[k] for k in WHOSE if mine.get(k)}
+
+    def _unshared_request(self, request: Any) -> bool:
+        """Is this approval card about unshared work: asked by its chat or its queue item, or the queue's card while
+        an item waiting in it is unshared work? Phones through the Kelvin hub then get it without its names."""
+        if self._whose_now() is not None or getattr(request, "unshared", False):
+            return True
+        return str(getattr(request, "title", "")).startswith("Run the queue") and any(
+            self.unshared_work(i.whose()) for i in list(self.queue.items) if i.status == "waiting")
+
+    def tell(self, kind: str, title: str, text: str = "", unshared: bool = False) -> Any:
+        """A notice for people (notify.py). unshared: it is about unshared work, so phones through the Kelvin hub get
+        it without its names."""
+        notice = self.notifier(kind, title, text)
+        if unshared and isinstance(notice, dict):
+            notice["unshared"] = True
+        return notice
+
+    def _run_marks(self, d: Path) -> Dict[str, Any]:
+        """Whose a run is: its meta (the running plan's, while it runs)."""
+        live = self.live or {}
+        if live.get("run_id") == d.name and live.get("status") == "running" and self.running_meta:
+            return self.running_meta
+        try:
+            return rundata.meta(d)
+        except (KeyError, OSError, ValueError):
+            return {}
+
+    def _hidden_runs(self, cache: Optional[Dict[Any, Any]] = None) -> Dict[str, Tuple[str, str, str]]:
+        """The runs the viewer of this thread may not see (none without one): run id -> (plan, started, finished)."""
+        if _VIEWER.get() is None:
+            return {}
+        out: Dict[str, Tuple[str, str, str]] = {}
+        try:
+            for run_id, plan, started, finished, marks in self._fresh_catalog().marks():
+                if not self.may_see(marks, cache):
+                    out[run_id] = (plan or "", started or "", finished or "9999")
+        except Exception:   # the catalog can't be read now: the runs' own folders still refuse (_run_dir)
+            pass
+        live = self.live or {}
+        if live.get("run_id") and self.live_meta and not self.may_see(self.live_meta, cache):
+            try:
+                started = datetime.strptime(str(live["run_id"])[:15], "%Y%m%d-%H%M%S").isoformat()
+            except ValueError:
+                started = ""
+            out.setdefault(str(live["run_id"]), (str(live.get("plan") or ""), started, "9999"))
+        return out
+
+    def seen_events(self, events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The lab record's events that the viewer of this thread may see (all of them, without one): not what
+        unshared work it may not see wrote (whose), nor its runs' starts and ends, their approvals and their plans'
+        commands while they ran."""
+        events = list(events)
+        if _VIEWER.get() is None:
+            return events
+        cache: Dict[Any, Any] = {}
+        hidden = self._hidden_runs(cache)
+        spans = []
+        for plan, t0, t1 in hidden.values():
+            try:
+                early = (datetime.fromisoformat(t0) - timedelta(minutes=15)).isoformat()
+            except ValueError:
+                early = t0
+            spans.append((plan, early, t0, t1))
+
+        def theirs(e: Dict[str, Any]) -> bool:
+            kind, wall = e.get("type"), str(e.get("wall", ""))
+            for plan, early, t0, t1 in spans:
+                if kind in ("command", "trip") and t0 <= wall <= t1 and (
+                        kind == "trip" or str(e.get("by") or "") == "plan:" + plan):
+                    return True
+                if kind in ("ask", "answer", "preflight") and early <= wall <= t1 and (
+                        kind == "preflight" or "Run plan %s:" % plan in str(e.get("request") or "")):
+                    return True
+            return False
+        return [e for e in events if not (e.get("whose") and not self.may_see(e["whose"], cache))
+                and e.get("run") not in hidden and not (spans and theirs(e))]
+
     def _on_progress(self, event: Dict[str, Any]) -> None:
         """Keep a light copy of the running plan's data (scalars only, latest trace) for live displays."""
         self.last_active = time.monotonic()
@@ -457,6 +661,7 @@ class LabRuntime:
                 self.live = {"run_id": event["run_id"], "plan": event["plan"], "total": event["total"], "done": 0,
                              "eta_s": None, "status": "running", "phase": "setup", "axes": event["axes"],
                              "measures": event["measures"], "rows": [], "trace": None}
+                self.live_meta = dict(self.running_meta)   # whose it is, kept after it ends
             elif self.live is None or self.live["run_id"] != event["run_id"]:
                 return
             elif event["event"] == "point":
@@ -581,16 +786,22 @@ class LabRuntime:
         """What has the lab now, in words: the running plan and how far it is, an approval card waiting for a person,
         the queue, or what Kelvin is doing."""
         live = self.live or {}
+        restricted = _VIEWER.get() is not None   # a chat's tool: unshared work it may not see goes unnamed
         if live.get("status") == "running":
             eta = live.get("eta_s")
-            return "the running plan %s (point %d of %d%s)%s" % (
-                live.get("plan"), live.get("done") or 0, live.get("total") or 0, ", ~%s left" % _dur(eta) if eta else "",
+            seen = not restricted or self.may_see(self.live_meta)
+            return "%s (point %d of %d%s)%s" % (
+                "the running plan %s" % live.get("plan") if seen else "a running scan of unshared work",
+                live.get("done") or 0, live.get("total") or 0, ", ~%s left" % _dur(eta) if eta else "",
                 " in the queue" if self.queue.state in ("running", "pausing") else "")
         pending = getattr(self.approver, "pending_list", lambda: [])()
         if pending:
-            return "an approval card waiting for a person (%s)" % pending[0].get("title")
+            return "an approval card waiting for a person (%s)" % (
+                "unshared work" if restricted and pending[0].get("unshared") else pending[0].get("title"))
         if self.queue.state in ("running", "pausing"):
-            return "the queue (%s)" % (self.busy or "between its items")
+            running = next((i for i in self.queue.items if i.status == "running"), None)
+            hide = restricted and running is not None and not self.may_see(running.whose())
+            return "the queue (%s)" % ("an item of unshared work" if hide else self.busy or "between its items")
         return self.busy or "an earlier request"
 
     def busy_for(self, seconds: float) -> bool:
@@ -751,11 +962,12 @@ class LabRuntime:
         prot = m.get("protection") or {}
         if not prot:
             return []
+        name = m.get("device_name") if self.may_see({"project": m.get("project")}) else \
+            "(a sample of another project's unshared work)"   # its limits hold for every chat; its name is its own
         out = ["mounted device %s is protected (a person set this; it can't be changed or passed): %s" % (
-            m.get("device_name"), "; ".join(protection.summary(prot, self.lab)))]
+            name, "; ".join(protection.summary(prot, self.lab)))]
         if self.protection_missing:
-            out.append("this lab lacks %s, named in %s's protection" % (", ".join(self.protection_missing),
-                                                                       m.get("device_name")))
+            out.append("this lab lacks %s, named in %s's protection" % (", ".join(self.protection_missing), name))
         return out
 
     def _status_lines(self) -> List[str]:
@@ -901,7 +1113,8 @@ class LabRuntime:
             self.lock.release()
 
     def _new_log(self, clock: Any = None) -> EventLog:
-        return EventLog(self.events_path, clock or self.lab.clock, shared=self.shared_log, user=self.user)
+        return EventLog(self.events_path, clock or self.lab.clock, shared=self.shared_log, user=self.user,
+                        whose=self._whose_now)
 
     def use_user(self, user: Optional[str], data_dir: Any, problem: Optional[str] = None) -> None:
         """Work for another person (None: nobody is signed in). Their data folder holds their runs, reports, record
@@ -1197,6 +1410,7 @@ class LabRuntime:
         except PlanError as e:
             return "invalid plan: %s" % e, None
         meta = self._attribute(plan)
+        apart = meta.pop("_apart", "")
         try:
             with self._device_protection(meta) as held, \
                     self.lock.only(self._involved(self._uses(plan_text, plan.requires))):   # the rest stay readable
@@ -1207,9 +1421,12 @@ class LabRuntime:
             made = self._auto_report(report.run_id)
         if report.run_id:
             summary = (report.analysis or {}).get("assessment") or report.message
-            self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
-                          summary[:300])
+            self.tell("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + plan.name,
+                      summary[:300], self.unshared_work(meta))
         lines = list(held)
+        if apart and report.run_id:
+            lines.append("filed under %s without the mounted sample: %s" % (meta.get("project_name") or "General",
+                                                                           apart))
         if report.dry_run is not None and report.status in ("done", "aborted"):
             lines.append(report.dry_run.message)
         lines.append(report.message)
@@ -1401,9 +1618,13 @@ class LabRuntime:
     # ------------------------------------------------------------------ data
 
     def _run_dir(self, run_id: str) -> Path:
+        """A run's folder; KeyError for none, and for a run of unshared work the viewer of this thread may not see
+        (may_see): every tool that reads a run by its id comes here."""
         d = self.runs.find(run_id)
         if d is None:
             raise KeyError("no run %r (see list_runs)" % run_id)
+        if _VIEWER.get() is not None and not self.may_see(self._run_marks(d)):
+            raise KeyError("run %s is unshared work (another project's or chat's): it isn't shown here" % run_id)
         return d.resolve()
 
     def _rows(self, run_id: str) -> List[Dict[str, Any]]:
@@ -1421,17 +1642,28 @@ class LabRuntime:
         return self.engine.columns(self._plan(rec.plan_text))
 
     def runs_index(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Most recent runs first: run_id, plan, status, points, planned_points, reason."""
-        dirs = sorted(self.runs.iterdir(), key=lambda d: d.name, reverse=True)[:limit]
-        out = []
+        """Most recent runs first: run_id, plan, status, points, planned_points, reason, and unshared for a run of
+        unshared work; only the runs the viewer of this thread may see."""
+        return self._runs_seen(limit)[0]
+
+    def _runs_seen(self, limit: int) -> Tuple[List[Dict[str, Any]], int]:
+        """runs_index, and how many runs of unshared work it left out on the way."""
+        dirs = sorted(self.runs.iterdir(), key=lambda d: d.name, reverse=True)
+        out: List[Dict[str, Any]] = []
+        hidden = 0
+        cache: Dict[Any, Any] = {}
         live = self.live_view(10 ** 9)
         for d in dirs:
+            if len(out) >= limit:
+                break
             entry: Dict[str, Any] = {"run_id": d.name, "plan": d.name.split("-", 2)[-1], "status": "unfinished"}
             began = rundata.started_at(d.name)
             if began is not None:
                 entry["started_at"] = began   # the name says this computer's clock; a phone may be elsewhere
+            meta: Dict[str, Any] = {}
             if live and live["run_id"] == d.name and live["status"] == "running":
                 entry.update(status="running", points=live["done"], planned_points=live["total"])
+                meta = self.running_meta
             else:
                 try:
                     meta = rundata.meta(d)
@@ -1439,17 +1671,25 @@ class LabRuntime:
                                  planned_points=meta.get("planned_points"), reason=meta.get("reason"))
                 except (KeyError, OSError, ValueError):
                     pass
+            if not self.may_see(meta, cache):
+                hidden += 1
+                continue
+            if self.unshared_work(meta, cache):   # the portal marks it (the Analysis list)
+                entry["unshared"] = True
             out.append(entry)
-        return out
+        return out, hidden
 
     def list_runs(self, limit: int = 10) -> str:
         lines = []
-        for r in self.runs_index(limit):
+        runs, hidden = self._runs_seen(limit)
+        for r in runs:
             if r["status"] in ("unfinished", "running"):
                 lines.append("%s: %s" % (r["run_id"], r["status"]))
             else:
                 lines.append("%s: %s, %s/%s points%s" % (r["run_id"], r["status"], r["points"], r["planned_points"],
                                                          " (%s)" % r["reason"] if r.get("reason") else ""))
+        if hidden:
+            lines.append("(%s)" % not_shown(hidden))
         return "\n".join(lines) or "no runs yet"
 
     # ------------------------------------------------------------------ every run: kept as run.h5, in the catalog
@@ -1526,16 +1766,19 @@ class LabRuntime:
     def find_runs(self, text: str = "", device: str = "", project: str = "", plan: str = "", status: str = "",
                   since: str = "", until: str = "", quantity: str = "", limit: int = 20) -> str:
         cat = self._fresh_catalog()
-        rows = cat.find(text, device, project, plan, status, since, until, quantity, limit)
-        total = cat.count()
+        hidden = self._hidden_runs()   # unshared work the viewer of this thread may not see
+        rows = cat.find(text, device, project, plan, status, since, until, quantity, limit, skip=hidden)
+        running = self._running_id()
+        total = cat.count() - len(set(hidden) - {running})   # the running run isn't in the catalog yet
         lines = ["%d run%s, newest first (of %d in the data folder):" % (len(rows), "" if len(rows) == 1 else "s",
                                                                           total) if rows else
                  "no run matches (%d in the data folder)" % total]
         for r in rows:
             lines += self._run_lines(r)
-        running = self._running_id()
-        if running:
+        if running and running not in hidden:
             lines.append("running now: %s (in the catalog once it ends)" % running)
+        if hidden:
+            lines.append("(%s)" % not_shown(len(hidden)))
         return "\n".join(lines)
 
     @staticmethod
@@ -1566,8 +1809,9 @@ class LabRuntime:
 
     def query_runs(self, sql: str) -> str:
         cat = self._fresh_catalog()
+        hidden = self._hidden_runs()   # unshared work the viewer of this thread may not see: never in the answer
         try:
-            names, rows, more = cat.query(sql)
+            names, rows, more = cat.query(sql, skip=hidden)
         except ValueError as e:   # catalog.QueryError
             return "query not run: %s" % e
         out = io.StringIO()
@@ -1580,6 +1824,8 @@ class LabRuntime:
             text += "(no rows)"
         elif more:
             text += "(the first %d rows only: narrow the query or use LIMIT/OFFSET)" % len(rows)
+        if hidden:
+            text = text.rstrip("\n") + "\n(%s: the query read the catalog without them)" % not_shown(len(hidden))
         return text.rstrip("\n")
 
     def describe_run(self, run_id: str) -> str:
@@ -1642,7 +1888,9 @@ class LabRuntime:
         plan_name = re.sub(r"[^\w.-]+", "_", (name or "").strip() or "imported_" + table.name)[:48]
         rec = self.engine.store.create(plan_name, {"plan": plan_name, "imported": files}, "import",
                                        self.attribution.get("folder"))
-        rec.meta.update(self._attribute(SimpleNamespace(device=None)))
+        whose = self._attribute(SimpleNamespace(device=None))
+        whose.pop("_apart", None)
+        rec.meta.update(whose)
         rec.meta.update(lab="imported", simulated=False, imported=files)
         axes = [{"key": table.x_key, "unit": table.x_unit, "kind": "imported"}]
         if table.outer:   # a 2-D scan: its slow axis first, as a plan's outer sweep
@@ -1997,27 +2245,53 @@ class LabRuntime:
 
     def _attribute(self, plan: Optional[Plan], project: Optional[str] = None, incognito: Optional[bool] = None,
                    unshared: Optional[bool] = None, legacy: bool = False) -> Dict[str, Any]:
-        """Which project and sample a run belongs to: the plan's own device:, else the mounted device, else the
-        project of the chat that started it (or queued it); runs outside every project go to General. A chat in an
-        unshared (unpublished, confidential or model-limited) project keeps its runs there, without the mounted
-        sample, which is another project's. A run says who made it, and whether an incognito chat started (or
-        queued) it, or a chat that keeps unshared work's marks: such runs, and anyone else's, are never shared on
-        the Kelvin hub. legacy: queued before Kelvin noted these; held like older runs."""
+        """Which project and sample a run belongs to, and whose work it is: the plan's own device:, else the mounted
+        device, else the project of the chat that started it (or queued it: attribution); runs outside every project
+        go to General. Unshared work stays apart: the run of an incognito chat, of a chat that keeps unshared work's
+        marks or of a chat in an unshared (unpublished, confidential or model-limited) project never goes under
+        another project's sample, nor does any chat's run go under the sample of another project's unshared work
+        (_apart says why, for the chat). A run keeps the chat that started it, the rules and marks it ran under, and
+        who made it: runs of unshared work, and anyone else's, are never shared on the Kelvin hub, and only chats
+        inside that work see them (may_see). project, incognito, unshared: in place of the attribution's.
+        legacy: queued before Kelvin noted these; held like older runs."""
+        whose = dict(self.attribution)
+        for key, value in (("project", project), ("incognito", incognito), ("unshared", unshared)):
+            if value is not None:
+                whose[key] = value
         m = self.mounted
-        chat_pid = project if project is not None else self.attribution.get("project")
+        incognito = bool(whose.get("incognito"))
+        chat_pid = None if incognito else whose.get("project")
         pid = m.get("project") if m else chat_pid
-        if m and chat_pid and chat_pid != pid and self.project_info(chat_pid).get("unshared"):
-            pid, m = chat_pid, {}
+        apart = ""
+        if m and (pid or None) != (chat_pid or None):   # the sample in the setup is another project's
+            if incognito:
+                apart = "an incognito chat's runs go under no project or sample"
+            elif whose.get("unshared") or self.project_info(chat_pid).get("unshared"):
+                apart = "this chat's work is unshared, and the mounted sample is another project's"
+            elif self.project_info(pid).get("unshared"):
+                apart = "the mounted sample is another project's unshared work"
+            if apart:
+                pid, m = chat_pid, {}
         info = self.project_info(pid)
         out = {"project": pid, "project_name": info.get("name") or "General",
                "device": m.get("device") if m else None,
                "device_name": m.get("device_name") if m else None, "user": self.user}
-        if self.attribution.get("incognito") if incognito is None else incognito:
+        if whose.get("chat"):
+            out["chat"] = whose["chat"]
+        if incognito:
             out["incognito"] = True
-        if self.attribution.get("unshared") if unshared is None else unshared:
+        if whose.get("unshared"):
             out["unshared"] = True
+        if whose.get("rules"):   # the model rules it ran under, which stay with it
+            out["rules"] = whose["rules"]
+        if whose.get("confidential"):
+            out["confidential"] = True
+        if whose.get("unpublished"):
+            out["unpublished"] = True
         if legacy:
             out["legacy"] = True
+        if apart:   # said to the chat that started it, never kept with the run
+            out["_apart"] = apart
         if plan is not None and plan.device:   # a lab's script (no plan) goes under the mounted device
             dev = next((d for d in info.get("devices") or []
                         if d["id"] == plan.device or d["name"].lower() == plan.device.lower()), None)
@@ -2026,7 +2300,15 @@ class LabRuntime:
         return out
 
     def queue_show(self) -> str:
-        return self.queue.text()
+        return self._queue_text()
+
+    def _queue_text(self) -> str:
+        """The queue in lines, as the viewer of this thread may see it: an item of unshared work it may not see shows
+        only its place and state."""
+        if _VIEWER.get() is None:
+            return self.queue.text()
+        cache: Dict[Any, Any] = {}
+        return self.queue.text(lambda item: not self.may_see(item.whose(), cache))
 
     def queue_view(self) -> Dict[str, Any]:
         return dict(self.queue.view(), saved=saved_queues(self.data_dir / "queues"))
@@ -2064,12 +2346,14 @@ class LabRuntime:
             return "not added: %s" % e
         if problems:
             return "not added: " + "; ".join(problems[:5])
-        item = self.queue.add(text, position, note, by, project=self.attribution.get("project"),
-                              incognito=bool(self.attribution.get("incognito")),
-                              unshared=bool(self.attribution.get("unshared")), folder=self.attribution.get("folder"))
+        whose = self.attribution
+        item = self.queue.add(text, position, note, by, project=whose.get("project"),
+                              incognito=bool(whose.get("incognito")), unshared=bool(whose.get("unshared")),
+                              folder=whose.get("folder"), chat=whose.get("chat"), rules=whose.get("rules"),
+                              confidential=bool(whose.get("confidential")))
         pos = self.queue.items.index(item) + 1
         self.gate.log.write("queue_add", by=by, item=item.id, kind=item.kind, name=item.name, position=pos)
-        return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self.queue.text())
+        return "added %s %s as #%d\n%s" % (item.kind, item.name, pos, self._queue_text())
 
     def queue_edit(self, ref: Any, text: str, by: str = "agent") -> str:
         try:
@@ -2080,7 +2364,7 @@ class LabRuntime:
         except (PlanError, KeyError, ValueError) as e:
             return "not changed: %s" % (e.args[0] if e.args else e)
         self.gate.log.write("queue_edit", by=by, item=item.id, name=item.name)
-        return "changed %s\n%s" % (item.name, self.queue.text())
+        return "changed %s\n%s" % (item.name, self._queue_text())
 
     def queue_change(self, op: str, ref: Any = None, position: Optional[int] = None, by: str = "agent") -> str:
         """move, remove, again (put a finished item back in line), clear (remove finished items)."""
@@ -2094,13 +2378,13 @@ class LabRuntime:
             elif op == "clear":
                 n = self.queue.clear_finished()
                 self.gate.log.write("queue_clear", by=by, removed=n)
-                return "removed %d finished items\n%s" % (n, self.queue.text())
+                return "removed %d finished items\n%s" % (n, self._queue_text())
             else:
                 return "unknown queue change %r" % op
         except (KeyError, ValueError, TypeError) as e:
             return "not changed: %s" % (e.args[0] if e.args else e)
         self.gate.log.write("queue_" + op, by=by, item=item.id, name=item.name)
-        return self.queue.text()
+        return self._queue_text()
 
     def queue_set_on_error(self, value: str, by: str = "human") -> None:
         if value not in ("pause", "continue"):
@@ -2129,7 +2413,7 @@ class LabRuntime:
                 problems.append(out)
             else:
                 added += 1
-        return "\n".join(["added %d items from %s" % (added, name)] + problems + [self.queue.text()])
+        return "\n".join(["added %d items from %s" % (added, name)] + problems + [self._queue_text()])
 
     def _queue_drives(self, items: List[Item]) -> Dict[str, List[Any]]:
         from ..forecast import action_of   # an on_abort action is the card's, not a drive's value
@@ -2234,7 +2518,7 @@ class LabRuntime:
         order on the simulated lab (how long it takes, what would fail); the queue does not start."""
         with self.queue.lock:
             if self.queue.state in ("running", "pausing"):
-                return "the queue is already running\n" + self.queue.text()
+                return "the queue is already running\n" + self._queue_text()
         items = self.queue.waiting()
         if not items:
             return "nothing is waiting in the queue"
@@ -2313,7 +2597,7 @@ class LabRuntime:
             self._queue_thread = threading.Thread(target=self._queue_loop, args=(grants, by), daemon=True,
                                                   name="kelvin-queue")
             self._queue_thread.start()
-            return "queue started: %s\n%s" % (title[len("Run the queue: "):], self.queue.text())
+            return "queue started: %s\n%s" % (title[len("Run the queue: "):], self._queue_text())
         return self._do("starting the queue", prepare, stoppable=True,
                         uses=self._uses("\n".join(item.text for item in items)))   # the rest stay readable
 
@@ -2321,7 +2605,7 @@ class LabRuntime:
         """Finish the item that is running, then stop there. Stop (the Stop button) also ends the running scan."""
         with self.queue.lock:
             if self.queue.state != "running":
-                return "the queue is not running\n" + self.queue.text()
+                return "the queue is not running\n" + self._queue_text()
             self.queue.state, self.queue.reason = "pausing", "paused by %s" % by
             self.queue.save()
         self.gate.log.write("queue_pause", by=by)
@@ -2362,8 +2646,10 @@ class LabRuntime:
             except Exception as e:
                 self.gate.log.write("report_failed", by="kelvin (automatic)", runs=len(ran), error=str(e)[:300])
         # the morning's account, from the record alone: done, stopped part-way with its data, not run, every alarm
-        lines = q.summarize(started, list(self.monitor.alarms), self._run_points)
-        self.notifier("run", "Queue finished" if q.state == "idle" else "Queue paused", "\n".join(lines)[:1500])
+        lines = q.summarize(started, list(self.monitor.alarms), self._run_points,
+                            lambda item: self.unshared_work(item.whose()))
+        self.tell("run", "Queue finished" if q.state == "idle" else "Queue paused", "\n".join(lines)[:1500],
+                  bool((q.last or {}).get("unshared")))
 
     def _run_points(self, run_id: str) -> Optional[Tuple[int, int]]:
         """(points taken, points planned) of a run, from its record; None when it can't be read."""
@@ -2384,11 +2670,14 @@ class LabRuntime:
             self.busy, self._acted = "queue %d/%d: %s" % (position, len(q.items), item.name), True
             try:   # filed as the item was queued, never under a chat whose call goes on meanwhile (attributed)
                 uses = self._involved(self._uses(item.text))   # the instruments it uses; the rest stay readable
+                whose = item.whose()
+                whose["private"] = self.unshared_work(whose)   # asked once, not at every event it writes
                 with self.gate.standing(grants), self.gate.acting_as("queue (started by %s)" % by), \
-                        self.attributed({}):
+                        self.attributed(whose):
                     if item.kind == "plan":
                         plan = self._plan(item.text)
-                        meta = self._attribute(plan, item.project, item.incognito, item.unshared, item.legacy)
+                        meta = self._attribute(plan, legacy=item.legacy)
+                        meta.pop("_apart", None)
                         with self._device_protection(meta), self.lock.only(uses + self._involved(plan.requires)):
                             report = self.engine.run(plan, meta=dict(meta, queue={
                                 "item": item.id, "position": position, "note": item.note}), folder=item.folder)
@@ -2683,12 +2972,22 @@ class LabRuntime:
         return data, "%s. %s" % (head, caption)
 
     def events(self, n: int = 20, about: str = "") -> str:
-        """The last n entries of the event log; about: only those that mention it (an instrument, a run, a word)."""
+        """The last n entries of the event log; about: only those that mention it (an instrument, a run, a word).
+        Never what the viewer of this thread may not see of unshared work (seen_events)."""
         n = max(1, min(int(n), 200))
+        restricted = _VIEWER.get() is not None
         if not about.strip():
-            return "\n".join(event_line(e) for e in tail_events(self.events_path, n)) or "no events yet"
+            tail = tail_events(self.events_path, 5000 if restricted else n)
+            seen = self.seen_events(tail)[-n:]
+            lines = [event_line(e) for e in seen]
+            left = len(tail) - (tail.index(seen[0]) if seen else 0) - len(seen)   # left out among them
+            if left:
+                lines.append("(%d entr%s of unshared work (another project's or chat's) not shown here)"
+                             % (left, "y" if left == 1 else "ies"))
+            return "\n".join(lines) or "no events yet"
         word = about.strip().lower()
-        lines = [line for line in map(event_line, tail_events(self.events_path, 5000)) if word in line.lower()]
+        lines = [line for line in map(event_line, self.seen_events(tail_events(self.events_path, 5000)))
+                 if word in line.lower()]
         return "\n".join(lines[-n:]) or "nothing about %r in the last 5000 events" % about.strip()
 
     def calculate(self, expression: str) -> str:
@@ -2727,17 +3026,23 @@ class LabRuntime:
         shared = Path(self.shared_log) if self.shared_log else None
         paths = [shared] if shared is not None and shared.exists() else [self.events_path]
         try:
-            return provenance.activity(provenance.read_events(paths), since, until, who, kinds, limit)
+            every = provenance.read_events(paths)
+            seen = {id(e) for e in self.seen_events(every)}
+            return provenance.activity(every, since, until, who, kinds, limit,
+                                       hidden=(lambda e: id(e) not in seen) if len(seen) < len(every) else None)
         except ValueError as e:
             return "no activity read: %s" % e
 
     def _chain_device(self, device: str) -> Tuple[Optional[str], Optional[str]]:
-        """(id, name) of a device named in a chat (in the mounted device's project), or of the mounted one."""
+        """(id, name) of a device named in a chat (in the mounted device's project), or of the mounted one; never one
+        of another project's unshared work (may_see)."""
         m = self.mounted or {}
         if not device:
             return m.get("device"), m.get("device_name")
         wanted = device.strip().lower()
         for pid in dict.fromkeys([m.get("project"), self.attribution.get("project")] + list(self.project_ids())):
+            if not self.may_see({"project": pid}):
+                continue
             for d in self.project_info(pid).get("devices") or []:
                 if wanted in (str(d.get("id") or "").lower(), str(d.get("name") or "").lower()):
                     return d.get("id"), d.get("name")
@@ -2746,8 +3051,13 @@ class LabRuntime:
     def measurement_chain(self, device: str = "", chain: Any = None, by: str = "agent", remove: bool = False) -> str:
         """Read, record or remove a device's measurement chain (chain.py): device by name (default the mounted one;
         "setup" for the setup's own, which a device without one of its own uses). Recorded chains are stamped into
-        every run of that device from then on."""
+        every run of that device from then on. The mounted sample of another project's unshared work is that
+        project's: its chain is kept and read from its own chats."""
         from ..chain import ChainError, Chains, lines, parse
+        m = self.mounted or {}
+        if not device.strip() and m and not self.may_see({"project": m.get("project")}):
+            return ("the mounted sample is another project's unshared work: its measurement chain is kept and read in "
+                    "that project's chats (\"setup\" names the setup's own)")
         store = Chains(self.data_dir)
         dev_id, dev_name = (None, None) if device.strip().lower() == "setup" else self._chain_device(device)
         whose = dev_name or "the setup"
@@ -3404,10 +3714,17 @@ class LabRuntime:
         return "\n".join(lines + ["warning: " + w for w in warnings])
 
     def read_examples(self, path: str) -> str:
+        """A maker's files, read for a card: never in Kelvin's own folder (the lab config, the settings, the accounts,
+        the cards, everyone's chats), nor a file that may hold sign-ins, keys or tokens (carddraft.read_sources)."""
         try:
-            return carddraft.read_sources(path)
+            return carddraft.read_sources(path, own=self._kelvins())
         except (OSError, ValueError) as e:
             return "not read: %s" % e
+
+    def _kelvins(self) -> List[Path]:
+        """Kelvin's own folder (~/Kelvin: the lab config, the settings, the accounts, the cards, everyone's chats),
+        which the tools that read a folder a person or the model names never reach."""
+        return [self.home] if self.home is not None else []
 
     def script_cards(self) -> Any:
         """Every card Kelvin can use here, to match the lab's scripts against: Kelvin's own and the lab's. Kept
@@ -3431,7 +3748,7 @@ class LabRuntime:
         from .. import scripts as lab_scripts
         from ..adapters import resource_name
         try:
-            found = lab_scripts.survey(path, self.script_cards())
+            found = lab_scripts.survey(path, self.script_cards(), own=self._kelvins())
         except (OSError, ValueError) as e:
             return "not read: %s" % e
         in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
@@ -3571,6 +3888,7 @@ class LabRuntime:
             gate.log.write("run_declined", by=gate.operator, plan=prep.name)
             return "declined: script %s not run%s" % (prep.name, " (%s)" % request.note if request.note else "")
         meta = self._attribute(None)
+        apart = meta.pop("_apart", "")
 
         def busy(text: str) -> None:
             self.busy = text
@@ -3581,9 +3899,12 @@ class LabRuntime:
         for name in names if report.status != "done" else []:
             self.engine._healthy.pop(name, None)   # checked again before the next run on them
         made = self._auto_report(report.run_id)
-        self.notifier("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + prep.name,
-                      report.message[:300])
+        self.tell("run", ("Run finished: " if report.status == "done" else "Run stopped: ") + prep.name,
+                  report.message[:300], self.unshared_work(meta))
         lines = list(held) + [report.message]
+        if apart and report.run_id:
+            lines.append("filed under %s without the mounted sample: %s" % (meta.get("project_name") or "General",
+                                                                           apart))
         if report.analysis:
             lines += self._analysis_lines(report.analysis)
         elif report.rows:
@@ -4781,7 +5102,30 @@ class LabRuntime:
         return self.data_dir / "reports"
 
     def pick_runs(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0) -> List[str]:
-        return pick_runs(self.runs, runs, day, last)
+        """Run ids, oldest first: the ones named, a day's, or the last N (reports.pick_runs); only those the viewer of
+        this thread may see (one named that it may not see is not found)."""
+        return self.picked(runs, day, last)[0]
+
+    def picked(self, runs: Optional[List[str]] = None, day: str = "", last: int = 0) -> Tuple[List[str], int]:
+        """pick_runs, and how many runs of unshared work a day's or the latest left out."""
+        if _VIEWER.get() is None:
+            return pick_runs(self.runs, runs, day, last), 0
+        if runs:
+            for r in runs:
+                if self.runs.find(r) is not None:
+                    self._run_dir(r)   # KeyError: unshared work this viewer may not see
+            return pick_runs(self.runs, runs), 0
+        every = pick_runs(self.runs, None, day) if day else pick_runs(self.runs, last=10 ** 9) if last else []
+        kept: List[str] = []
+        cache: Dict[Any, Any] = {}
+        for r in reversed(every):   # the newest first, as the last N are
+            if last and not day and len(kept) >= last:
+                break
+            d = self.runs.find(r)
+            if d is not None and self.may_see(self._run_marks(d), cache):
+                kept.append(r)
+        seen = (every.index(kept[-1]) if kept else 0) if last and not day else 0
+        return kept[::-1], len(every) - seen - len(kept)
 
     def report(self, run_ids: List[str], title: str = "", summary: str = "", fmt: str = "pdf",
                notes: Any = (), by: str = "human", references: Any = (), folder: Optional[Path] = None,
@@ -5083,13 +5427,16 @@ class LabRuntime:
             return "\n".join("scan report: runs/%s/%s (open it from the run in the Runs pane)" % (r, f)
                              for r, files in made for f in files) or "no report: no runs yet"
         try:
-            ids = self.pick_runs(runs, day, last)
+            ids, left = self.picked(runs, day, last)
             if not (runs or day or last):
-                ids = self.pick_runs(day="today") or self.pick_runs(last=1)
+                ids, left = self.picked(day="today")
+                if not ids:
+                    ids, left = self.picked(last=1)
         except (KeyError, ValueError) as e:
             return "no report: %s" % (e.args[0] if e.args else e)
         if not ids:
-            return "no report: no runs %s" % ("on %s" % day if day else "yet")
+            return "no report: no runs %s%s" % ("on %s" % day if day else "yet", " (%s)" % not_shown(left)
+                                                 if left else "")
         try:
             files = self.report(ids, title, summary, fmt, notes, by, references, pages=max(0, int(pages or 0)))
         except (ValueError, OSError) as e:
@@ -5097,6 +5444,8 @@ class LabRuntime:
         lines = ["report: %s (%d run%s, %s)" % (f["name"], len(ids), "" if len(ids) == 1 else "s",
                                                 "%d pages" % f["pages"] if "pages" in f else "%d slides" % f["slides"])
                  for f in files]
+        if left:   # unshared work of another project or chat is never mixed in
+            lines.append("left out: %s" % unshared_runs(left))
         lines.append("saved in %s; the user can open it from the chat" % self.reports_dir)
         return "\n".join(lines)
 
@@ -5178,6 +5527,9 @@ class LabRuntime:
         if not spec.numeric or spec.get_cmd is None:
             raise ValueError("%s is not a numeric reading, so it has no range to watch" % key)
         w = self.monitor.add(Watch(key, above, below, max(0.0, float(for_s)), 10.0, [], False, source, note[:200]))
+        whose = self._whose_now()
+        if whose:   # added by unshared work: its note is that work's (phones through the Kelvin hub go without it)
+            self.unshared_watches[w.id] = whose
         self._save_watches()
         view = next(v for v in self.monitor.list() if v["id"] == w.id)
         self.gate.log.write("watch", by=source, change="added", watch=w.id, rule=view["rule"])
@@ -5185,6 +5537,7 @@ class LabRuntime:
 
     def remove_watch(self, watch_id: str, source: str = "person") -> None:
         w = self.monitor.remove(watch_id, source)   # watches from the lab config change only there
+        self.unshared_watches.pop(w.id, None)
         self._save_watches()
         self.gate.log.write("watch", by=source, change="removed", watch=w.id, rule=w.rule())
 
@@ -5202,17 +5555,21 @@ class LabRuntime:
             return False
         until = time.strftime("%H:%M", time.localtime(request.get("until") or time.time()))
         self.gate.log.write("approval_escalated", by="kelvin", request=request.get("title"), until=until)
-        self.notifier("alarm", "Waiting for your answer: %s" % request.get("title"),
-                      "Nobody answered at the Kelvin computer. Kelvin waits until %s for an answer from your phone (the "
-                      "Kelvin app) or the computer; then it declines%s. Asked: %s" % (
-                          until, ", and the queue pauses there" if self.queue.state in ("running", "pausing") else "",
-                          "; ".join(request.get("items") or [])[:300]))
+        self.tell("alarm", "Waiting for your answer: %s" % request.get("title"),
+                  "Nobody answered at the Kelvin computer. Kelvin waits until %s for an answer from your phone (the "
+                  "Kelvin app) or the computer; then it declines%s. Asked: %s" % (
+                      until, ", and the queue pauses there" if self.queue.state in ("running", "pausing") else "",
+                      "; ".join(request.get("items") or [])[:300]), bool(request.get("unshared")))
         return True
 
     def _monitor_said(self, kind: str, title: str, text: str = "") -> Any:
-        """The monitor raised or cleared an alarm: kept with the alarm history, then told to people."""
+        """The monitor raised or cleared an alarm: kept with the alarm history, then told to people. One that says
+        the note of a watch unshared work added is marked so: phones through the Kelvin hub get its reading, not its
+        note."""
         self._save_alarms()
-        return self.notifier(kind, title, text)
+        notes = [w.note for i, w in list(self.monitor.watches.items()) if i in self.unshared_watches and w.note] \
+            if getattr(self, "monitor", None) is not None else []
+        return self.tell(kind, title, text, any(n in text for n in notes))
 
     def _save_alarms(self) -> None:
         try:
@@ -5254,8 +5611,10 @@ class LabRuntime:
     def _save_watches(self) -> None:
         """This lab's person and agent watches, kept next to the queue (the lab's own are in its config)."""
         labs = self._saved_watches()
-        labs[self.lab.config.name] = [{"read": w.key, "above": w.above, "below": w.below, "for": w.for_s,
-                                       "every": w.every, "source": w.source, "note": w.note}
+        labs[self.lab.config.name] = [dict({"read": w.key, "above": w.above, "below": w.below, "for": w.for_s,
+                                            "every": w.every, "source": w.source, "note": w.note},
+                                           **({"whose": self.unshared_watches[w.id]}
+                                              if w.id in self.unshared_watches else {}))
                                       for w in list(self.monitor.watches.values()) if w.source != "lab"]
         try:
             _write_json(self.data_dir / self.WATCHES, {"labs": labs})
@@ -5274,6 +5633,8 @@ class LabRuntime:
                     continue
                 w = self.monitor.add(Watch(key, v.get("above"), v.get("below"), for_s, float(v.get("every") or 10),
                                            [], False, str(v.get("source") or "person"), str(v.get("note") or "")[:200]))
+                if isinstance(v.get("whose"), dict):   # unshared work's watch stays its own
+                    self.unshared_watches[w.id] = v["whose"]
                 have.add((key, w.above, w.below, for_s))
                 back.append(w.rule(self.lab.resolve(key)[1].unit))
             except (KeyError, TypeError, ValueError) as e:

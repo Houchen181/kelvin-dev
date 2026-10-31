@@ -1748,7 +1748,8 @@
     $("report-msg").textContent = "Writing…";
     try {
       const r = await api("/api/reports", { body });
-      $("report-msg").textContent = r.runs + (r.runs === 1 ? " run" : " runs") + " · done";
+      $("report-msg").textContent = r.runs + (r.runs === 1 ? " run" : " runs") + " · done"
+        + (r.left ? " · " + r.left + " of unshared work (another project's or chat's) left out" : "");
       const box = $("report-files");
       box.replaceChildren(...reportFiles(r.files.map((f) => f.name)).childNodes,
         h("p", { class: "report-folder" }, "Saved in " + r.folder));
@@ -2342,7 +2343,7 @@
     const item = h("div", { class: "chat-item" + (c.id === S.chatId ? " active" : "") + (mark ? " " + mark[0] : ""),
       role: "button", tabindex: "0", draggable: "true" },
       mark ? h("span", { class: "chat-dot", title: mark[1], "aria-label": mark[1] }) : null,
-      h("span", { class: "t" }, c.title || "New chat"), more);
+      h("span", { class: "t" }, c.title || "New chat"), lockMark(chatPrivacy(c)), more);
     item.addEventListener("click", () => openChat(c.id));
     item.addEventListener("keydown", (e) => { if (e.key === "Enter") openChat(c.id); });
     item.addEventListener("dragstart", (e) => {
@@ -2363,7 +2364,8 @@
     } else {
       head = h("div", { class: "proj-row" + (holdsActive && !S.chatId ? " active" : ""), role: "button", tabindex: "0", "aria-expanded": String(open), title: p.name },
         h("span", { class: "chev-s" + (open ? " open" : "") }, icon("chev")), icon("folder"),
-        h("span", { class: "t" }, p.name), h("span", { class: "count" }, chats.length ? String(chats.length) : ""),
+        h("span", { class: "t" }, p.name), lockMark(privacyOf(p.rules, p)),
+        h("span", { class: "count" }, chats.length ? String(chats.length) : ""),
         rowButton("plus", "New chat in " + p.name, () => newChat(p.id, true)),
         rowButton("dots", "Options for " + p.name, (e) => projectMenu(e.currentTarget, p, chats)));
       const toggle = () => {
@@ -2487,6 +2489,7 @@
     }));
     $("project-literature").checked = rules.literature !== false;
     $("project-sharing").value = p.unpublished ? "unpublished" : p.confidential ? "confidential" : "";
+    $("project-confidential").checked = !!p.confidential;
     $("rules-summary").textContent = rulesText(rules);
     $("project-msg").textContent = "";
     renderNotes(p);
@@ -2625,6 +2628,7 @@
         p.summary = $("project-summary").value;
       }
       applyRules();
+      renderChats();   // its lock in the sidebar, and its chats', at once
       $("project-dialog").close();
       toast("Saved. Conversations in " + p.name + " use it from their next message.");
     } catch (e) {
@@ -2640,6 +2644,38 @@
     for (const g of S.groups || []) if (!ids.includes(g.provider)) ids.push(g.provider);
     for (const p of chosen || []) if (!ids.includes(p)) ids.push(p);
     return ids.map((id) => [id, id === "local" ? "Local models" : providerName(id)]);
+  }
+  // unshared work at a glance: a confidential, unpublished or model-limited project, and the chats that keep its marks
+  // (its runs stay inside it; it never goes to the Kelvin hub)
+  function mergeRules(...sets) {   // the stricter of several rule sets, as Kelvin combines them (rules.py)
+    let providers = null, literature = true;
+    for (const r of sets) {
+      if (!r) continue;
+      if (r.providers) providers = providers === null ? [...r.providers] : providers.filter((x) => r.providers.includes(x));
+      literature = literature && r.literature !== false;
+    }
+    return { providers, literature };
+  }
+  function privacyOf(rules, marks) {   // {label, why}, or null for shared work
+    const r = rules || {};
+    const m = marks || {};
+    const why = [];
+    if (r.providers) why.push("only " + r.providers.map(providerName).join(" and ") + " may see it");
+    if (r.literature === false) why.push("no literature or web search");
+    if (m.confidential) why.push("never through the Kelvin hub");
+    if (!why.length && !m.unpublished) return null;
+    why.push("not shared on the hub, and its runs stay in its own chats");
+    const label = m.confidential || r.providers ? "Confidential" : m.unpublished ? "Unpublished" : "No search";
+    return { label, why: label + ": " + why.join("; ") };
+  }
+  function chatPrivacy(c) {   // its own marks and rules (it left such a project, or ran under them), and its project's
+    if (!c) return null;
+    const p = c.project && S.projects.find((x) => x.id === c.project);
+    return privacyOf(mergeRules(c.rules, p && p.rules), { confidential: c.confidential || (p && p.confidential),
+      unpublished: c.unpublished || (p && p.unpublished) });
+  }
+  function lockMark(privacy) {
+    return privacy ? h("span", { class: "lock-mark", title: privacy.why, "aria-label": privacy.why }, icon("lock")) : null;
   }
   function rulesText(rules) {
     if (!rules) return "";
@@ -2669,10 +2705,12 @@
     S.compare = S.compare.filter((k) => modelAllowed(k, rules));
     compareLabel();
     showPlanChip();
-    const text = rulesText(rules);
-    $("rules-chip").hidden = !text;
-    $("rules-chip").title = text ? "This chat's rules: " + text : "";
-    $("rules-chip-text").textContent = text ? "Confidential" : "";
+    const chat = S.chats.find((c) => c.id === S.chatId);   // a new chat: the project it starts in
+    const privacy = S.incognito ? null : chatPrivacy(Object.assign({ project: SIDE.newProject }, chat,
+      { rules: mergeRules(chat && chat.rules, rules) }));
+    $("rules-chip").hidden = !privacy;
+    $("rules-chip").title = privacy ? privacy.why : "";
+    $("rules-chip-text").textContent = privacy ? privacy.label : "";
     updateSend();
   }
 
@@ -6111,7 +6149,8 @@
     log10: ["log₁₀ |y|", []],
   };
   const anWhen = (r) => r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
-  const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "");
+  const anRunLabel = (r) => r.plan + " · " + anWhen(r) + (r.status && r.status !== "done" ? " · " + r.status : "")
+    + (r.unshared ? " · unshared" : "");
 
   function toggleAnalysis(open) {
     ANA.open = open === undefined ? !ANA.open : open;
@@ -6124,7 +6163,8 @@
     else loadAnalysisRuns().then(renderAnalysisForm);   // runs measured since it was last open
   }
   async function loadAnalysisRuns() {
-    try { ANA.runs = (await api("/api/runs?limit=100")).runs; } catch (e) { ANA.runs = []; }
+    // the runs this chat's model may see: what the pane hands to Kelvin goes into this chat
+    try { ANA.runs = (await api("/api/runs?limit=100&chat=" + encodeURIComponent(S.chatId || ""))).runs; } catch (e) { ANA.runs = []; }
     $("an-run").replaceChildren(...ANA.runs.map((r) => h("option", { value: r.run_id }, anRunLabel(r))));
   }
   // the pane opened by a person: the run the Runs pane shows, else the latest
@@ -6589,7 +6629,8 @@
     $("open-help").addEventListener("click", () => openHelp());
     $("help-go").addEventListener("click", helpSearch);
     $("help-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); helpSearch(); } });
-    $("eln-day-go").addEventListener("click", () => fetchDownload("/api/eln?day=" + encodeURIComponent($("eln-day").value || "today"),
+    $("eln-day-go").addEventListener("click", () => fetchDownload("/api/eln?day=" + encodeURIComponent($("eln-day").value || "today")
+      + "&chat=" + encodeURIComponent(S.chatId || ""),   // this chat's view: never another project's unshared work
       ($("eln-day").value || "today") + "-lab-record.zip", "day's lab notebook record"));
     $("owner-pin-set").addEventListener("click", () => ownerPinChange(false));
     $("owner-pin-remove").addEventListener("click", () => ownerPinChange(true));
@@ -6784,6 +6825,18 @@
     zoomKeys();
     $("save-settings").addEventListener("click", saveSettings);
     $("save-project").addEventListener("click", saveProjectSettings);
+    $("project-confidential").addEventListener("change", () => {   // one switch for the rules and the hub's mark
+      const on = $("project-confidential").checked;
+      if (on) {
+        for (const b of document.querySelectorAll("#project-providers input")) b.checked = b.value === "local";
+        $("project-literature").checked = false;
+      }
+      const sharing = $("project-sharing");
+      sharing.value = on ? "confidential" : sharing.value === "confidential" ? "" : sharing.value;
+    });
+    $("project-sharing").addEventListener("change", () => {
+      $("project-confidential").checked = $("project-sharing").value === "confidential";
+    });
     $("quit-app").hidden = !boot.can_quit;
     $("quit-app").addEventListener("click", async () => {
       if (!confirm("Quit Kelvin? The lab keeps its current settings.")) return;

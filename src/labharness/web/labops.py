@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import unquote
 
 from starlette.requests import Request
@@ -82,8 +82,10 @@ def checklist(runtime: Any, settings: Any, home: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def routes(runtime: Any, settings: Any, home: Any, who: Callable[[Request], str]) -> List[Route]:
-    """The routes, for app.py's list. who(request): the person asking, as the lab's record names them."""
+def routes(runtime: Any, settings: Any, home: Any, who: Callable[[Request], str],
+           viewer: Optional[Callable[[Request], Any]] = None) -> List[Route]:
+    """The routes, for app.py's list. who(request): the person asking, as the lab's record names them. viewer(request):
+    who a day's record is for (the chat it is asked from, ?chat=: never another project's or chat's unshared work)."""
     home = Path(home)
 
     async def help_view(request: Request) -> Response:
@@ -165,8 +167,11 @@ def routes(runtime: Any, settings: Any, home: Any, who: Callable[[Request], str]
         as a .zip to put in an ELN. It is kept in the data folder's eln/ too."""
         run_id = request.path_params.get("run_id")
         day = "" if run_id else request.query_params.get("day", "today")
+        seen = viewer(request) if viewer is not None and not run_id else None   # a day's: the asking chat's view
         try:
-            result = await asyncio.to_thread(eln.export, runtime, [run_id] if run_id else None, day, 0, who(request))
+            with runtime.viewing(seen):
+                result = await asyncio.to_thread(eln.export, runtime, [run_id] if run_id else None, day, 0,
+                                                 who(request))
             data = await asyncio.to_thread(eln.zipped, result["folder"])
         except KeyError as e:
             return _error(404, e.args[0] if e.args else "no such run")

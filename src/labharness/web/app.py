@@ -31,7 +31,7 @@ from ..accounts import Accounts, LabRoles, OwnerPin, RoleRefused, cipher_for, ha
 from ..configversions import ConfigVersions, widens as config_widens
 from .. import central, edition
 from ..agent.approval import WebApprover
-from ..agent.runtime import SETUP_STEPS, LabRuntime, writable_folder
+from ..agent.runtime import SETUP_STEPS, LabRuntime, Viewer, not_shown, writable_folder
 from ..agent.server import build_server
 from ..adapters import AdapterError
 from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
@@ -599,7 +599,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     def unshared_meta(meta: Any) -> bool:
         if not isinstance(meta, dict):
             return False
-        return bool(meta.get("incognito") or meta.get("unshared")) or unshared_project(meta.get("project"))
+        return bool(meta.get("incognito") or meta.get("unshared") or meta.get("confidential") or meta.get("rules")) \
+            or unshared_project(meta.get("project"))
 
     def unshared_run(run_id: str) -> bool:
         live = runtime.live_view(10 ** 9) or {}
@@ -660,7 +661,102 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return NOT_THROUGH_HUB
         if kind == "projects" and len(parts) > 2 and parts[2] != "general" and unshared_project(parts[2]):
             return NOT_THROUGH_HUB
+        if kind == "approvals" and len(parts) > 2 and method == "POST":
+            try:
+                ask = json.loads(body or b"{}")
+            except ValueError:
+                ask = {}
+            card = next((p for p in getattr(runtime.approver, "pending_list", lambda: [])() if p.get("id") == parts[2]),
+                        {})
+            if isinstance(ask, dict) and ask.get("approve") and card.get("unshared"):   # a card it never saw
+                return ("That request is unshared work's, so its card doesn't go through the Kelvin hub: approve it "
+                        "where you can see it, on the lab network or through Tailscale. Decline works from here.")
         return None
+
+    UNSHARED_CARD = "Open Kelvin on the lab network or through Tailscale to see it."
+
+    def hub_state(data: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+        """The lab's state (/api/state) for a phone through the Kelvin hub: what keeps the lab safe stays (that a run
+        is on and how far, Stop, that a request waits and its Decline, alarms, the instruments' values), without
+        the names and data of unshared work: its cards and notices, queue items, watches' notes, the mounted sample,
+        the record's lines, the chats it continued."""
+        hidden = 0
+        out = dict(data)
+
+        def card(entry: Dict[str, Any]) -> Dict[str, Any]:
+            return dict(entry, title="A request of unshared work", items=[UNSHARED_CARD], lessons=[], figures=[],
+                        reasons=[])
+        if isinstance(data.get("pending"), list):
+            out["pending"] = [card(p) if isinstance(p, dict) and p.get("unshared") else p for p in data["pending"]]
+        if isinstance(data.get("history"), list):
+            out["history"] = [card(p) if isinstance(p, dict) and p.get("unshared") else p for p in data["history"]]
+        if isinstance(data.get("notices"), list):
+            kept = []
+            for n in data["notices"]:
+                if isinstance(n, dict) and n.get("unshared"):
+                    hidden += 1   # an alarm keeps its reading (its title); its note goes
+                    n = dict(n, text="") if n.get("kind") == "alarm" and not str(n.get("title", "")).startswith(
+                        "Waiting for") else dict(n, title="A notice of unshared work", text=UNSHARED_CARD)
+                kept.append(n)
+            out["notices"] = kept
+        queue = data.get("queue")
+        if isinstance(queue, dict) and isinstance(queue.get("items"), list):
+            items, names = [], []
+            for i in queue["items"]:
+                if isinstance(i, dict) and runtime.unshared_work(i):
+                    names.append(str(i.get("name") or ""))
+                    i = dict(i, name="an item of unshared work", text="", note="", message="", run_id=None,
+                             folder=None)
+                    hidden += 1
+                items.append(i)
+            reason = str(queue.get("reason") or "")
+            last = queue.get("last")
+            out["queue"] = dict(queue, items=items, reason="at an item of unshared work" if any(
+                n and n in reason for n in names) else reason, last=dict(last, lines=[
+                    "The queue's account names unshared work. " + UNSHARED_CARD]) if isinstance(last, dict)
+                and last.get("unshared") else last)
+        if isinstance(data.get("watches"), list):
+            out["watches"] = hub_watches(data["watches"])
+        mounted = data.get("mounted")
+        if isinstance(mounted, dict) and unshared_project(mounted.get("project")):
+            out["mounted"] = dict(mounted, project_name="unshared work", device_name="a sample of unshared work")
+        work = unshared_meta(runtime.live_meta) and (runtime.live or {}).get("status") == "running"
+        running = next((i for i in runtime.queue.items if i.status == "running"), None)
+        if work or (running is not None and runtime.unshared_work(running.whose())):
+            out["busy"] = "running a scan of unshared work" if data.get("busy") else data.get("busy")
+        if work or any(isinstance(p, dict) and p.get("unshared") for p in data.get("pending") or []):
+            out["instruments"] = [dict(i, in_use="it is in use (unshared work)") if isinstance(i, dict)
+                                  and i.get("in_use") else i for i in data.get("instruments") or []]
+        if isinstance(data.get("events"), list):   # the record's lines again, without unshared work's
+            from ..agent.runtime import event_line, tail_events
+            with runtime.viewing(Viewer()):
+                lines = [event_line(e) for e in reversed(runtime.seen_events(tail_events(runtime.events_path, 25)))]
+            hidden += max(0, len(data["events"]) - len(lines))
+            out["events"] = lines
+        incident = data.get("incident")
+        if isinstance(incident, dict) and incident.get("runs"):   # runs a restart cut short: unshared work's unnamed
+            with runtime.viewing(Viewer()):
+                cut = set(runtime._hidden_runs()) & set(incident["runs"])
+
+            def unnamed(text: Any) -> Any:
+                for run_id in cut:
+                    text = str(text).replace(run_id, "a run of unshared work")
+                return text
+            if cut:
+                out["incident"] = dict(incident, runs=[unnamed(r) for r in incident["runs"]],
+                                       lines=[unnamed(line) for line in incident.get("lines") or []])
+        if isinstance(data.get("wakes"), list):
+            out["wakes"] = [dict(w, text="", note="") if isinstance(w, dict) and unshared_chat(str(w.get("chat_id")))
+                            else w for w in data["wakes"]]
+        woke = data.get("woke")
+        if isinstance(woke, dict) and unshared_chat(str(woke.get("chat_id"))):
+            out["woke"] = dict(woke, title="a chat of unshared work", why="")
+        return out, hidden
+
+    def hub_watches(watches: List[Any]) -> List[Any]:
+        """Watches for a phone through the Kelvin hub: those unshared work added keep their rule, not their note."""
+        return [dict(w, note="") if isinstance(w, dict) and w.get("id") in runtime.unshared_watches else w
+                for w in watches]
 
     def relay_trim(method: str, path: str, data: Any) -> Tuple[Any, int]:
         """An answer through the Kelvin hub without unshared work, and how much was left out."""
@@ -696,14 +792,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             hidden += len(data["runs"]) - len(kept)
             data = dict(data, runs=kept)
         elif path in ("/api/state", "/api/live") and isinstance(data, dict):
-            live = data.get("live")   # both answer {"live": the running plan's view, ...}
-            if isinstance(live, dict) and live.get("status") == "running" and unshared_meta(runtime.running_meta):
+            live = data.get("live")   # both answer {"live": the running (or last) plan's view, ...}
+            if isinstance(live, dict) and (
+                    (live.get("status") == "running" and unshared_meta(runtime.running_meta))
+                    or (live.get("run_id") == (runtime.live or {}).get("run_id")
+                        and unshared_meta(runtime.live_meta))):   # while it runs, and after it ended
                 live = dict(live, plan="a scan of unshared work", rows=[], trace=None, run_id="unshared")
                 hidden += 1
                 data = dict(data, live=live)
-            mounted = data.get("mounted") if path == "/api/state" else None
-            if isinstance(mounted, dict) and unshared_project(mounted.get("project")):
-                data = dict(data, mounted=dict(mounted, project_name="unshared work"))
+            if path == "/api/state":
+                data, n = hub_state(data)
+                hidden += n
+        elif path == "/api/watches" and isinstance(data, dict) and isinstance(data.get("watches"), list):
+            data = dict(data, watches=hub_watches(data["watches"]))
         return data, hidden
 
     relay_link = RelayLink(lambda *a: relay_app["app"](*a), relay_target, relay_hello, relay_private, relay_trim)
@@ -1460,12 +1561,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 store.set_summary(pid, body.get("text") or "")
                 return JSONResponse({"summary": store.summary_of(pid)})
             key = str(body.get("model") or settings.get("default_model") or "")
-            rules = store.project(pid).get("rules") if pid else None
-            if not key or not rulebook.allows(rulebook.merge(None, rules), key):
+            if not key:
                 return error(400, "Choose a model this project's rules allow.")
+            why = agent.not_for_project(store.project(pid) if pid else None, key)   # its rules, and never through
+            if why:                                                                # the hub for confidential work
+                return error(400, why)
             provider, model_id = agent.provider_for(key)
             text = await asyncio.wait_for(review.ask(provider, model_id, SUMMARY_SYSTEM,
-                                                     await asyncio.to_thread(summary_prompt, pid)), 180)
+                                                     await asyncio.to_thread(summary_prompt, pid, key)), 180)
             store.set_summary(pid, text.strip())
             return JSONResponse({"summary": store.summary_of(pid), "model": key})
         except KeyError as e:
@@ -1475,11 +1578,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         except asyncio.TimeoutError:
             return error(504, "The model did not answer within 3 minutes.")
 
-    def summary_prompt(pid: Optional[str]) -> str:
+    def summary_prompt(pid: Optional[str], key: str = "") -> str:
+        """What a model writes the master report's opening from: the project's devices, notes and scans; for model
+        key, only the scans it may see (the General workspace's: never an incognito chat's, nor unshared work)."""
         from ..reports import kinds
         info = agent.project_info(pid)
         owners = runtime._run_owners()
-        ds = [d for d in runtime._digests() if owners.get(d.run_id) == pid]
+
+        def allows(marks: Dict[str, Any]) -> bool:
+            rules = rulebook.merge(*[r for r in marks.get("rules") or [] if r])
+            return not agent.not_for_project({"rules": rules, "confidential": marks.get("confidential")}, key)
+        with runtime.viewing(Viewer(project=pid, allows=allows) if key else None):
+            ds = [d for d in runtime._digests() if owners.get(d.run_id) == pid
+                  and runtime.may_see(runtime._run_marks(runtime.runs / d.run_id))]
         lines = ["Project: %s" % info["name"],
                  "Devices: " + ("; ".join("%s (%s) %s" % (d["name"], d.get("material") or "", d.get("description") or "")
                                           for d in info["devices"]) or "none")]
@@ -2080,7 +2191,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def reports_view(request: Request) -> Response:
         """GET: recent reports. POST {scope: chat|project|today|last|run, chat_id, project_id, run, last, title,
-        summary, format}: write one."""
+        summary, format}: write one. Today's runs and the last N are those of the chat it is asked from (chat_id),
+        and of its project: never another project's or chat's unshared work (left, the runs it left out)."""
         if request.method == "GET":
             return JSONResponse({"reports": runtime.reports_index(), "folder": str(runtime.reports_dir)})
         body = await request.json()
@@ -2088,6 +2200,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         notes: List[Any] = []
         references: List[str] = []
         title = str(body.get("title") or "")
+        left = 0
         try:
             if scope in ("chat", "project"):
                 chat = store.load(str(body.get("chat_id") or ""))
@@ -2096,10 +2209,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 notes = agent.report_notes(project)
                 references = agent.report_references(project)
                 title = title or ("%s report" % project["name"] if project else chat.get("title") or "")
-            elif scope == "today":
-                runs = runtime.pick_runs(day="today")
-            elif scope == "last":
-                runs = runtime.pick_runs(last=max(1, min(50, int(body.get("last") or 5))))
+            elif scope in ("today", "last"):
+                last = max(1, min(50, int(body.get("last") or 5))) if scope == "last" else 0
+                with runtime.viewing(chat_viewer(body.get("chat_id"), person=True)):
+                    runs, left = await asyncio.to_thread(runtime.picked, None, "today" if scope == "today" else "",
+                                                         last)
             elif scope == "run":
                 runs = runtime.pick_runs([str(body.get("run") or "")])
             else:
@@ -2109,14 +2223,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         except (TypeError, ValueError) as e:
             return error(400, str(e))
         if not runs:
-            return error(400, "There are no runs to report here yet.")
+            return error(400, "There are no runs to report here yet%s." % (
+                " (%s: report them from a chat of their project)" % not_shown(left) if left else ""))
         try:
             files = await asyncio.to_thread(runtime.report, runs, title, str(body.get("summary") or ""),
                                             str(body.get("format") or "pdf"), notes, "human", references)
         except ValueError as e:
             return error(400, str(e))
         return JSONResponse({"files": [{k: v for k, v in f.items() if k != "path"} for f in files],
-                             "runs": len(runs), "folder": str(runtime.reports_dir)})
+                             "runs": len(runs), "left": left, "folder": str(runtime.reports_dir)})
 
     async def report_file(request: Request) -> Response:
         try:
@@ -3115,12 +3230,25 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"live": runtime.live_view(since)})
 
     async def runs(request: Request) -> Response:
-        """GET ?limit=<n>: the latest runs (20; the Analysis panel's run picker asks for more)."""
+        """GET ?limit=<n>: the latest runs (20; the Analysis panel's run picker asks for more), each run of unshared
+        work marked unshared. ?chat=<id>: only those that chat's model may see (the Analysis pane, whose work goes
+        into that chat), or with no chat named, the shared ones."""
         try:
             limit = max(1, min(int(request.query_params.get("limit") or 20), 200))
         except ValueError:
             limit = 20
-        return JSONResponse({"runs": await asyncio.to_thread(runtime.runs_index, limit)})
+        seen = chat_viewer(request.query_params.get("chat")) if "chat" in request.query_params else None
+        with runtime.viewing(seen):
+            listed = await asyncio.to_thread(runtime.runs_index, limit)
+        return JSONResponse({"runs": listed})
+
+    def chat_viewer(chat_id: Any, person: bool = False) -> Viewer:
+        """Who sees the lab's runs in a portal view tied to a chat: that chat's model (person: the person in it),
+        inside its project; with no chat, or one that is gone, the shared runs only."""
+        try:
+            return agent.viewer_for(store.load(str(chat_id)), person=person) if chat_id else Viewer()
+        except KeyError:
+            return Viewer()
 
     async def stop_run(request: Request) -> Response:
         try:
@@ -3303,7 +3431,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/runs/{run_id}/export", run_export),
         Route("/static/{name}", static),
         # Help and the first-run checklist, ELN records, calibration, cards in the reader's language (labops.py)
-        *labops.routes(runtime, settings, home, lambda request: runtime.user or person(request)),
+        *labops.routes(runtime, settings, home, lambda request: runtime.user or person(request),
+                       lambda request: chat_viewer(request.query_params.get("chat"), person=True)),
     ]
     from . import governance   # the config history (audit view, rollback), the lab's roles, the owner's notices
     routes += governance.routes(runtime, settings, accounts, needs_owner, lab_post, person, configure_notifications,
