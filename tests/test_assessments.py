@@ -297,3 +297,57 @@ def test_a_gate_sweeps_headline_is_the_sample_not_its_leakage():
     assert head.startswith("lockin.X has a peak at smu.V = "), head   # the sample's reading leads: inside the sweep
     assert float(head.split(" = ", 1)[1].split()[0]) == pytest.approx(1.50, abs=0.01)   # whatever the noise's draw
     assert "edge of the sweep; the feature may extend" not in r.analysis["assessment"]
+
+# ------------------------------------------------------------------ the review of 0.3.34 (2026-10-31)
+
+
+def test_a_line_as_wide_as_the_sweep_gets_no_width_or_q_and_a_narrower_one_its_own():
+    rng = np.random.default_rng(12)
+    f = np.linspace(4.999e9, 5.001e9, 201)                                       # a 2 MHz window
+    for fwhm in (1.4e6, 2e6, 3e6):
+        y = 1 - 0.5 / (1 + ((f - 5.0001e9) / (fwhm / 2)) ** 2) + rng.normal(0, 0.002, f.size)
+        s = analyze_curve(f.tolist(), y.tolist(), "vna.frequency", "vna.S21", "Hz", "")
+        assert s["kind"] == "dip" and s["params"]["center"][0] == pytest.approx(5.0001e9, abs=5e3), s["summary"]
+        if fwhm < 2e6:   # its own Q, not a Gaussian's 1.4 times too high
+            assert s["params"]["Q"][0] == pytest.approx(5.0001e9 / fwhm, rel=0.02), s["summary"]
+        else:
+            assert "wider than the sweep: its FWHM and Q need a wider one" in s["summary"], s["summary"]
+            assert "Q ≈" not in s["summary"] and set(s["params"]) == {"center"}
+            assert any("wider than the 2 MHz sweep: widen the range" in flag for flag in s["flags"])
+
+
+@pytest.mark.parametrize("tc, width", [(4, 0.05), (5.5, 0.2), (7, 0.5), (10, 1.0)])
+def test_a_superconducting_transition_is_a_step_not_a_peak_or_two_dips(tc, width):
+    rng = np.random.default_rng(11)
+    t = np.linspace(2, 12, 101)
+    s = analyze_curve(t.tolist(), (50 * (1 + np.tanh((t - tc) / width)) + rng.normal(0, 0.1, t.size)).tolist(),
+                      "temp.T", "R", "K", "Ω")
+    assert s["kind"] == "step" and s["summary"].startswith("R steps up from "), s["summary"]
+    center, error, _ = s["params"]["center"]
+    assert abs(center - tc) < 4 * error and s["params"]["change"][0] == pytest.approx(100, rel=0.01)
+    assert s["params"]["rise"][0] == pytest.approx(2 * math.atanh(0.8) * width, rel=0.05)   # 10 % to 90 %
+
+
+def test_a_switch_sharper_than_the_points_is_placed_between_two_of_them_and_steps_are_never_a_peak():
+    rng = np.random.default_rng(3)
+    b = np.linspace(-2, 2, 81)
+    s = analyze_curve(b.tolist(), (np.where(b > 0.3, 1.0, 0.0) + rng.normal(0, 0.01, b.size)).tolist(),
+                      "magnet.B", "V", "T", "V")
+    assert s["kind"] == "step" and "sharper than the 50 mT step between points" in s["summary"], s["summary"]
+    center, error, _ = s["params"]["center"]
+    assert error == pytest.approx(0.025) and abs(center - 0.275) <= error   # between 250 and 300 mT
+    assert "rise" not in s["params"] and "use a step ≤ 12.5 mT" in s["flags"][0]
+    two = np.where(b > 0.5, 1.0, 0.0) + np.where(b > -0.5, 1.0, 0.0) + rng.normal(0, 0.01, b.size)
+    stairs = 25812.8 / np.clip(np.floor(np.abs(b) * 3 + 1), 1, None) + rng.normal(0, 5, b.size)   # quantum Hall
+    for y in (two, stairs):
+        s = analyze_curve(b.tolist(), y.tolist(), "magnet.B", "R_xy", "T", "Ω")
+        assert s["kind"] not in ("peak", "dip"), s["summary"]
+
+
+def test_a_dip_with_a_shoulder_is_not_given_one_lines_q():
+    rng = np.random.default_rng(9)
+    f = np.linspace(4.99e9, 5.01e9, 401)
+    q = 2 * (f - 5e9) / 1e6
+    y = 1 - 0.6 / (1 + q ** 2) - 0.25 / (1 + ((q - 3) / 1.5) ** 2) + rng.normal(0, 0.005, f.size)
+    s = analyze_curve(f.tolist(), y.tolist(), "vna.frequency", "vna.S21", "Hz", "")
+    assert s.get("lines") == 2 or "Q ≈" not in s["summary"], s["summary"]   # one Lorentzian: half the main dip's Q
