@@ -42,6 +42,9 @@ KEPT = ".kelvin-old"   # beside a file Kelvin replaced: each version before, by 
 RECORDS = {"events.jsonl", "mounted.json", "queue.json", "folders.json", "watches.json", "alarms.jsonl",
            "catalog.sqlite", "catalog.sqlite-wal", "catalog.sqlite-shm", "catalog.sqlite-journal", "record.bin",
            "run.h5"}
+# a script run's own account of what ran, in its folder wherever the run is kept: the script as it ran (which runs
+# again, as it ran, from the Runs panel), its output and every command it sent. Only Kelvin itself writes them
+RUN_RECORDS = {"script.py", "output.txt", "commands.jsonl"}
 # what holds sign-ins, keys and tokens, which Kelvin's AI never reads or writes, wherever it is (secret): the folders
 # of SSH, GnuPG, the cloud tools and AI tools' sign-ins (Claude Code's, Codex's); such files by name or kind; and
 # files whose name says what they hold
@@ -153,6 +156,9 @@ def off_limits(target: Path, own: Iterable[Any] = (), data: Any = None, saving: 
     if saving and name in RECORDS and (name in ("run.h5", "record.bin") or data is None or _within(target, data)):
         return ("%s is one of the lab's records (the event log, the mounted sample's protection, the queue, the "
                 "catalog, a run's data), which only Kelvin itself writes" % target)
+    if saving and name in RUN_RECORDS and run_of(target.parent) == target.parent:
+        return ("%s is part of a Kelvin run's record of what ran (the script as it ran, its output, its commands), "
+                "which only Kelvin itself writes" % target)
     return None
 
 

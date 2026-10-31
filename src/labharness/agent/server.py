@@ -115,9 +115,10 @@ You are connected to a physics lab through Kelvin.
   nothing on a stage or positioner moves until they unlock it. Plan within these; when one refuses something, say
   which and leave it to the person.
 - To line up scans for later (overnight, or one after another), use the queue: queue_add each plan, and steps
-  between them (step: name, set: {...}, stabilize: {read, within, for, timeout}, wait: seconds), then queue_start.
-  A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
-  queued and roughly how long it takes; queue_show follows it.
+  between them (step: name, set: {...}, stabilize: {read, within, for, timeout}, wait: seconds), or one of the
+  lab's own scripts (script: its file, params, args), then queue_start. A person approves the whole queue once (a
+  script asks again as it starts); it runs in the background and pauses on a failure or Stop. Say what is queued
+  and roughly how long it takes; queue_show follows it.
 - Kelvin changes the lab one thing at a time, from any chat or client. While a run, a queue scan or another change
   goes on, readings, lookups, the queue and watches still work: an instrument that work uses isn't asked, and
   lab_status and get_value give its latest values with how old they are. When the person asks you to stop, call
@@ -137,9 +138,9 @@ You are connected to a physics lab through Kelvin.
   folder the person names reads how it works (addresses, connection settings, commands, the values used, the card
   that fits each instrument) without running anything; set the lab up from it with the person, and offer each
   measurement script as a recipe. When the person wants one of their scripts run as it is (from the lab's scripts
-  folder), use run_script: it runs in the lab's own Python with every command it sends through the gate, after one
-  approval, and its readings become a run like a plan's. params changes its settings for that run (check_script
-  lists them); never edit the person's script to change a value.
+  folder, or one they imported in the Runs panel), use run_script: it runs in the lab's own Python with every
+  command it sends through the gate, after one approval, and its readings become a run like a plan's. params
+  changes its settings for that run (check_script lists them); never edit the person's script to change a value.
 - An instrument the scan doesn't find or doesn't identify: find out what it is yourself. find_on_network for one on
   the network whose address nobody knows (it sweeps this computer's networks, or the range named, for the ports
   instruments and their gateways use, and asks each who it is), inspect_address for one at a known address (what its
@@ -453,8 +454,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     def run_script(script: str, params: Optional[Dict[str, Any]] = None, args: Optional[List[str]] = None,
                    drives: Optional[Dict[str, Any]] = None) -> str:
         """Run one of the lab's own measurement scripts (Python or a notebook) as it is, in the lab's own Python:
-        script is its file name or path in the lab's scripts folder (the one the person named in Set up; Kelvin runs
-        nothing from elsewhere). Every command it sends to a lab instrument (pyvisa, pyserial, a socket) goes through
+        script is its file name or path in the lab's scripts folder (the one the person named in Set up), or one the
+        person imported in the Runs panel; Kelvin runs nothing from elsewhere. Every command it sends to a lab
+        instrument (pyvisa, pyserial, a socket) goes through
         the safety gate on Kelvin's own connection: readings and settings run, drives are checked against the
         limits, ramped and watched. A person approves the run once; Kelvin reads the script first for the drive
         ranges it uses. params: values for its settings for this run, without editing the file ({"VMAX": 2});
@@ -761,22 +763,25 @@ def build_server(rt: LabRuntime) -> MCPServer:
 
     @server.tool(annotations=READ, structured_output=False)
     def queue_show() -> str:
-        """The scan queue: each item (a plan, or a step that sets values and waits), its status and run, and whether
-        the queue is running, paused or idle."""
+        """The scan queue: each item (a plan, a step that sets values and waits, or one of the lab's scripts), its
+        status and run, and whether the queue is running, paused or idle."""
         return rt.queue_show()
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def queue_add(item: str, position: Optional[int] = None, note: str = "") -> str:
-        """Add to the scan queue (it does not start it): a plan (YAML, as for run_plan) or a step between scans, e.g.
+        """Add to the scan queue (it does not start it): a plan (YAML, as for run_plan), a step between scans, e.g.
         "step: cool to 2 K\nset: {tc.T_set: 2}\nstabilize: {read: tc.T, within: 0.02, for: 120, timeout: 7200}\n
-        wait: 600". position: 1 = first; default last. note: a line kept with the run."""
+        wait: 600", or one of the lab's own scripts as run_script runs it, e.g. "script: sweep.py\nparams: {VMAX:
+        2}\nargs: [--fast]" (version: <run id> runs that run's script.py as it ran then). A script asks a person
+        itself as it starts; the queue's one approval covers its plans and steps. position: 1 = first; default
+        last. note: a line kept with the run."""
         return rt.queue_add(item, position, note)
 
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def queue_edit(item: str, text: str) -> str:
-        """Replace a waiting or finished queue item (by its number or id) with new plan or step text."""
+        """Replace a waiting or finished queue item (by its number or id) with new plan, step or script text."""
         return rt.queue_edit(item, text)
 
     @server.tool(annotations=ACT, structured_output=False)
