@@ -506,14 +506,15 @@ class Monitor:
         """The interlocks are enforced, not only checked when their drive moves: every INTERLOCK_EVERY lab seconds,
         each one whose drive is away from safe has its condition read. When it fails, or can't be read (an open
         sensor, its instrument gone), an alarm goes up, the running plan stops and the drive goes to safe, even where
-        the lab config says hold: hold is for a stop, and a held field once stayed at 1 T above its interlock. The
-        alarm clears once the drive is at safe, or the condition has held again for INTERLOCK_CLEAR_S (a sample at its
-        interlock's 10 K raised and cleared it six times in 15 s). While it is up, a drive set away from safe again
-        goes back to safe."""
+        the lab config says hold: hold is for a stop, and a held field once stayed at 1 T above its interlock. A drive
+        counts as at safe once its reading is (a field ramping down is still up: its alarm once cleared on the set
+        point while the field was 1.5 T). The alarm clears once the drive is at safe, or the condition has held again
+        for INTERLOCK_CLEAR_S (a sample at its interlock's 10 K raised and cleared it six times in 15 s). While it is
+        up, a drive set away from safe again goes back to safe."""
         if now - self._last_interlock_check < INTERLOCK_EVERY:
             return
         self._last_interlock_check = now
-        from .gate import _unreachable, interlock_problem
+        from .gate import _unreachable, interlock_problem, reading_away
         for i, lock in enumerate(self.lab.config.interlocks):
             try:
                 inst, spec = self.lab.resolve(lock.drive)
@@ -522,7 +523,12 @@ class Monitor:
                 at = self.gate._current(inst, spec)
             except Exception:
                 continue   # its drive can't be read: silence is the read failures' job
-            safe = at is not None and spec.distance(at) == 0
+            try:   # where it is, not only where it is set to
+                there = inst.read(spec.readback) if spec.readback and spec.ramp == "instrument" else at
+            except Exception:
+                there = at   # its reading can't be read: by its set point, as before
+            set_safe = at is not None and spec.distance(at) == 0
+            safe = set_safe and not reading_away(spec, there)   # set to safe, and there: a field ramping down is up
             broken = None if safe else interlock_problem(self.lab, lock)
             if broken is None:
                 if i in self._broken and (safe or now - self._holding.setdefault(i, now) >= INTERLOCK_CLEAR_S):
@@ -532,13 +538,15 @@ class Monitor:
                 continue
             self._holding.pop(i, None)
             if i in self._broken:
-                if not _unreachable(spec):   # set away from safe again while it is broken: back to safe it goes
+                if not set_safe and not _unreachable(spec):   # set away again while it is broken: back to safe
                     a = self._broken[i]
                     a.actions += [m for m in (r.message for r in self.gate.abort_to_safe([lock.drive], "monitor",
                                                                                          hold=False))
                                   if m not in a.actions]
                 continue
-            text = "Interlock: %s is at %s, which needs %s%s" % (lock.drive, spec.show(at), lock.require.text, broken)
+            moving = spec.readback and _number(at) and _number(there) and abs(at - there) > spec.tol
+            shown = spec.show(there if _number(there) else at) + (" (set to %s)" % spec.show(at) if moving else "")
+            text = "Interlock: %s is at %s, which needs %s%s" % (lock.drive, shown, lock.require.text, broken)
             a = self._broken[i] = self._new("interlock", lock.drive, text, source="interlock %d" % i)
             self.gate.request_abort("the interlock on %s (it needs %s%s)" % (lock.drive, lock.require.text, broken))
             a.actions = ["stopped the running plan"] + [r.message for r in self.gate.abort_to_safe([lock.drive], "monitor",

@@ -27,7 +27,7 @@ from .. import frames, pulses
 from ..cards import ParamSpec, num, plot_points, thin, trace_x
 from ..engine import RunEngine, RunReport
 from ..eventlog import EventLog, RunFolderError, RunFolders, RunStore
-from ..gate import ApprovalRequest, Approver, SafetyGate, _dur
+from ..gate import ApprovalRequest, Approver, SafetyGate, _dur, reading_away
 from ..lab import Lab
 from ..lablock import HELD, LabLock
 from ..labconfig import Allowed, ConfigError, Envelope, load_lab_config
@@ -5868,9 +5868,11 @@ class LabRuntime:
     def left_on(self) -> List[str]:
         """What is away from safe now, read from the instruments, in words: what a stop left on (a stop once left a
         laser emitting 6 mW with its shutter open, and a magnet at -2.5 T, and nothing said so). Each output that
-        reaches the sample with its levels, and temperature, field and the like, a set point with its reading. A level
-        whose switch is off doesn't reach the sample and isn't listed, nor is how a drive is applied (its rate, range,
-        current limit). What reaches the sample comes first. The caller holds the lock."""
+        reaches the sample with its levels, and temperature, field and the like, a set point with its reading: one set
+        to safe whose reading is still away too (a field ramping down, or held up by a rate of 0, which it says; one
+        at 2.5 T was once left out). A level whose switch is off doesn't reach the sample and isn't listed, nor is how
+        a drive is applied (its rate, range, current limit). What reaches the sample comes first. The caller holds the
+        lock."""
         out: List[str] = []
         for name, inst in sorted(self.lab.instruments.items(),
                                  key=lambda kv: not protection.applies_to_sample(kv[1].card)):
@@ -5884,7 +5886,13 @@ class LabRuntime:
                     continue
                 try:
                     v = inst.read(spec.name)
-                    if v is None or spec.distance(v) == 0:
+                    if v is None:
+                        continue
+                    try:
+                        there = inst.read(spec.readback) if spec.readback and spec.ramp == "instrument" else None
+                    except Exception:
+                        there = None   # its reading can't be read: by its set point, as before
+                    if spec.distance(v) == 0 and not reading_away(spec, there):
                         continue
                     switch = self.gate._switch_of(inst, spec)
                     state = self.gate._current(inst, switch) if switch is not None else None
@@ -5893,12 +5901,16 @@ class LabRuntime:
                 if state is not None and switch.distance(state) == 0:
                     continue   # its switch is off: it doesn't reach the sample
                 text = "%s.%s %s" % (name, spec.name, spec.show(v))
+                notes = []
                 if spec.readback:
                     try:
-                        text += " (%s %s)" % (spec.readback, inst.spec(spec.readback).show(inst.read(spec.readback)))
+                        notes.append("%s %s" % (spec.readback, inst.spec(spec.readback).show(inst.read(spec.readback))))
                     except Exception:
                         pass
-                out.append(text)
+                    stuck = self.gate._no_rate(inst, spec)   # Bring to safe doesn't change a rate: say what does
+                    if stuck:
+                        notes.append(stuck)
+                out.append(text + (" (%s)" % "; ".join(notes) if notes else ""))
         return out
 
     def _after_stop(self, by: str, gen: int) -> None:

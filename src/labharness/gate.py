@@ -234,6 +234,15 @@ def _unreachable(spec: ParamSpec) -> bool:
             and isinstance(spec.safe, (int, float)) and spec.safe <= 0)
 
 
+def reading_away(spec: ParamSpec, reading: Any) -> bool:
+    """A set point the instrument ramps to by itself whose reading is still away from safe, wherever it is set (a
+    field ramping down after a stop, or held up by a rate of 0): its alarm once cleared, and a stop's account said
+    nothing was left on, while the field was 1.5 T. Not one whose safe value no instrument reaches (0 K)."""
+    return (spec.ramp == "instrument" and bool(spec.readback) and spec.numeric and not _unreachable(spec)
+            and isinstance(reading, (int, float)) and not isinstance(reading, bool)
+            and abs(reading - spec.safe) > max(spec.tol, 1e-12))
+
+
 UNDO_DEPTH = 20      # changes each chat can undo, the latest first
 OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
 ARRIVED_SETTLE = 5.0   # lab seconds a reading may take to settle once its stage's status says the move is over
@@ -598,6 +607,7 @@ class SafetyGate:
         if dry_run is None or not getattr(dry_run, "ok", False):
             return False, ["the dry run did not finish cleanly"]
         fine, blockers = [], []
+        ranges = {k: sorted(a.values, key=str) if a.values is not None else [a.lo, a.hi] for k, a in grants.items()}
         for key, allowed in grants.items():
             inst, spec = self.lab.resolve(key)
             unsure = self.unsure(inst)
@@ -605,7 +615,11 @@ class SafetyGate:
                 blockers.append("%s: %s, so a person approves it until they %s" % (key, unsure,
                                                                                   self.review_steps(inst)))
                 continue
-            values = sorted(allowed.values, key=str) if allowed.values is not None else [allowed.lo, allowed.hi]
+            values = ranges[key]
+            freeze = self._plan_freezes(inst, spec, values, ranges)[1]
+            if freeze:   # a rate that keeps the drive it paces from getting back to safe: never Kelvin's own yes
+                blockers.append("%s: %s, which a person approves" % (key, freeze))
+                continue
             ok, why = self.auto_verdict(inst, spec, values)
             (fine if ok else blockers).append(why)
             tripped, acts = self.trips(key, values, grants, "the run")
@@ -714,6 +728,10 @@ class SafetyGate:
             if toward:   # on a draft card even a change toward safe asks: the plan's one approval covers it (a queue's
                 # every value: in the night an item may find the drive changed, at the front panel)
                 away = [v for v in values if whole_path or current is None or not _same(spec, v, current)]
+            # a ramp rate so low that the drive it paces couldn't get back to safe from where the run takes it asks,
+            # though it goes toward the rate's safe value (_freezes)
+            frozen, freeze = self._plan_freezes(inst, spec, values, drive_values)
+            away += [v for v in frozen if v not in away]
             if not away:
                 if forecast is not None and key in forecast.changes:   # toward safe: it runs, so it is shown
                     lines.append((False, "; ".join(shown(inst, spec, current, values, "toward its safe value"))))
@@ -726,13 +744,13 @@ class SafetyGate:
                 problems.append(problem)
                 continue
             unsure = self.unsure(inst)
-            if not unsure and inst.trust == "envelope" and self.envelope and all(self.envelope.covers(key, v)
-                                                                                  for v in away):
+            if not unsure and not frozen and inst.trust == "envelope" and self.envelope and all(
+                    self.envelope.covers(key, v) for v in away):
                 if forecast is not None:
                     lines.append((False, "; ".join(shown(inst, spec, current, values, "inside the project envelope"))))
                 continue
             grants[key] = Allowed.of(spec, values)
-            bits = shown(inst, spec, current, values)
+            bits = shown(inst, spec, current, values) + ([freeze] if freeze else [])
             g = self._guard_text(inst, spec, now=forecast is not None)
             if g:
                 bits.append(g)
@@ -750,15 +768,18 @@ class SafetyGate:
             lines.append((True, "; ".join(bits)))
         for key, change in (forecast.settings(every=whole_path) if forecast is not None else {}).items():
             inst, spec = self.lab.resolve(key)
-            if not self._draft(inst):
-                continue   # a setting on a reviewed card only configures: it never asks
+            frozen, freeze = self._plan_freezes(inst, spec, change.values, drive_values)
+            draft = self._draft(inst)
+            if not draft and not frozen:
+                continue   # a setting on a reviewed card only configures: it never asks, unless it freezes a drive
             standing = self._standing.get(key)
             if standing is not None and all(standing.covers(v) for v in change.values):
                 continue
             # on a draft card each setting asks (nobody has checked which are drives): this one approval covers them
             grants[key] = Allowed.of(spec, change.values)
-            lines.append((True, "; ".join(shown(inst, spec, change.start, change.values) + [
-                "Kelvin isn't sure about %s: %s" % (inst.name, self.unsure(inst))])))
+            lines.append((True, "; ".join(shown(inst, spec, change.start, change.values) + ([freeze] if freeze else [])
+                                          + (["Kelvin isn't sure about %s: %s" % (inst.name, self.unsure(inst))]
+                                             if draft else []))))
         for key, change in (forecast.drives() if forecast is not None else {}).items():
             if key not in drive_values:   # a drive in a part of the run these values don't list: shown all the same
                 inst, spec = self.lab.resolve(key)
@@ -815,7 +836,12 @@ class SafetyGate:
             stuck = None if _same(spec, current, target) else self._no_rate(inst, spec)
             if stuck and (not spec.is_drive or current is not None and spec.distance(target) < spec.distance(current)):
                 return self._done(Result(False, "refused", key, value=target, message="refused: " + stuck), "set", by)
-            if not spec.is_drive:
+            # a ramp rate so low that the drive it paces couldn't get back to safe: a person approves it, though it
+            # goes toward the rate's safe value (a magnet's rate set to 0 unasked kept its field up past an interlock)
+            freezing = "" if _same(spec, current, target) else self._freezes(inst, spec, target)
+            if freezing:
+                res = self._freeze(inst, spec, current, target, freezing, wait, gen, undo)
+            elif not spec.is_drive:
                 how = None
                 if inst.card.status == "draft" and not inst.simulated and not _same(spec, current, target):
                     # nobody has checked this card's measure/drive tags yet: a "setting" might reach the sample. The
@@ -1040,6 +1066,91 @@ class SafetyGate:
             return None
         return "%s.%s is %s, so %s.%s can't move: set %s.%s first" % (
             inst.name, rspec.name, rspec.show(rate), inst.name, spec.name, inst.name, rspec.name)
+
+    def _how_far(self, inst: Instrument, spec: ParamSpec) -> Optional[float]:
+        """How far from safe a set point is: where it is set or where its reading is (a field ramping down), whichever
+        is further. Neither known: as far as its limits let it go; None without limits either."""
+        out = []
+        for name in (spec.name, spec.readback):
+            try:
+                v = (self._current(inst, spec) if name == spec.name else inst.read(name)) if name else None
+            except Exception:
+                v = None
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                out.append(abs(v - spec.safe))
+        if out:
+            return max(out)
+        lim = inst.limits(spec.name)
+        return max(abs(lim[0] - spec.safe), abs(lim[1] - spec.safe)) if lim else None
+
+    def _freezes(self, inst: Instrument, spec: ParamSpec, target: Any, far: Optional[float] = None) -> str:
+        """A ramp rate set so low that the drive it paces (a magnet's field) couldn't get back to safe: 0, or so slow
+        that the way back would take longer than that drive's card allows for a move (its timeout). Such a change is
+        never "toward safe", nor only a setting: a magnet's rate set to 0 that way, unasked, kept its field at 1.5 T
+        through a failed interlock. far: how far from safe the drive gets (a plan's or queue's furthest value), else
+        where it is now (_how_far); a drive at safe stays there, frozen or not. The words for its card, or ""."""
+        paced = paces(inst.card, spec.name)
+        if paced is None or not paced.is_drive or not paced.numeric or not isinstance(target, (int, float)) \
+                or isinstance(target, bool):
+            return ""
+        if far is None:
+            far = self._how_far(inst, paced)
+        if far is not None and far <= max(paced.tol, 1e-12):
+            return ""
+        from .monitor import rate_per_s
+        key = "%s.%s" % (inst.name, paced.name)
+        per_s = rate_per_s(inst, paced, target)
+        if per_s is None:
+            return "at %s %s can't move, so a stop, an interlock or Bring to safe couldn't bring it back to safe" % (
+                spec.show(target), key)
+        if far is None or far / per_s <= paced.timeout:
+            return ""
+        return ("at %s %s would take %s to get back to safe (its card allows %s for a move), so a stop, an interlock "
+                "or Bring to safe couldn't bring it back in time" % (spec.show(target), key, _dur(far / per_s),
+                                                                     _dur(paced.timeout)))
+
+    def _plan_freezes(self, inst: Instrument, spec: ParamSpec, values: List[Any],
+                      drive_values: Dict[str, List[Any]]) -> Tuple[List[Any], str]:
+        """A plan's or queue's values for a ramp rate that freeze the drive it paces where the run takes it (or where
+        it is now, if further), and the words for the slowest (_freezes)."""
+        paced = paces(inst.card, spec.name)
+        if paced is None or not paced.is_drive or not paced.numeric:
+            return [], ""
+        far = self._how_far(inst, paced)
+        for v in drive_values.get("%s.%s" % (inst.name, paced.name), []):
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                far = max(far or 0.0, abs(v - paced.safe))
+        frozen = [v for v in values if self._freezes(inst, spec, v, far)]
+        return frozen, self._freezes(inst, spec, min(frozen), far) if frozen else ""
+
+    def _freeze(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any, freezing: str, wait: bool,
+                gen: Optional[int], undo: str) -> Result:
+        """A ramp rate set so low that the drive it paces couldn't get back to safe (_freezes): a person approves it,
+        whatever the rate's kind, though it goes toward the rate's safe value, and the result says it. A plan's or
+        queue's approval that showed it covers it; auto mode and the project envelope never do."""
+        key = "%s.%s" % (inst.name, spec.name)
+        if gen is not None and self._stop_gen != gen:   # stopped since the plan began
+            return Result(False, "stopped", key, value=current, message="%s stays %s (%s)" % (
+                key, spec.show(current), self.stop_words()))
+        how = self._covered(inst, spec, target, envelope=False)
+        if how is None:
+            request = ApprovalRequest("%sApprove drive change on %s?" % ("Undo: " if undo else "", inst.name), [
+                "%s; %s" % (self._describe_move(inst, spec, current, target), freezing)] + ([undo] if undo else []))
+            unsure = self.unsure(inst)
+            if unsure:
+                request.items.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
+            if self.auto:
+                request.items.append("Auto mode does not cover this: a rate that keeps %s.%s from getting back to "
+                                     "safe is a person's to approve" % (inst.name, paces(inst.card, spec.name).name))
+            if not self.ask(request):
+                note = " (%s)" % request.note if request.note else ""
+                return Result(False, "declined", key, value=current, message="declined: %s stays %s%s" % (
+                    key, spec.show(current), note))
+            how = "approved"
+        res = self._move(inst, spec, current, target, away=True, wait=wait, how=how, gen=gen)
+        if res.ok:
+            res.message += "; " + freezing
+        return res
 
     def _away_problem(self, inst: Instrument, spec: ParamSpec, later: bool = False) -> Optional[str]:
         """Why this drive can't move away from safe now (hands on the sample, a guard or interlock that can't be
@@ -1330,9 +1441,10 @@ class SafetyGate:
                     stop = self._wait(inst, spec, current, target, watch=away, gen=gen, arrived=moving, since=since)
                     if stop is not None:
                         return stop
-                else:
+                else:   # a to-safe at a rate of 0 says the drive doesn't move (it once said "ramping")
                     eta = self._eta(inst, spec, current, target)
-                    notes.append("ramping" + (", ~%s" % _dur(eta) if eta else ""))
+                    notes.append((None if eta else self._no_rate(inst, spec)) or
+                                 "ramping" + (", ~%s" % _dur(eta) if eta else ""))
             elif away:
                 trip = self._guard_trip(inst, spec)
                 if trip:
