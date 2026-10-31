@@ -96,6 +96,7 @@ final class AppModel: ObservableObject {
             sessions[c.id] = nil
             list.remove(c.id)
         }
+        list.forgetAccount(account.hub)
         if let token { await HubClient(hub: account.hub, token: token, transport: transport).signOut() }
         tokens.delete(Account.tokenID)
         self.account = nil
@@ -322,7 +323,22 @@ final class LabSession: ObservableObject {
         guard let token = tokens.token(for: computer.id) else {
             throw KelvinError(.unpaired, "This phone is not paired with \(computer.lab) any more. Pair it again.")
         }
-        let (found, me) = try await reach(computer.addresses, token: token, transport: transport) { try await $0.me() }
+        let reached: (KelvinClient, Me)
+        do {
+            reached = try await reach(computer.addresses, token: token, transport: transport) { try await $0.me() }
+        } catch let e as KelvinError where e.kind == .unreachable {
+            // away from the lab: through the hub, when this phone's Kelvin account reaches the computer too
+            guard let relay = app?.list.computers.first(where: { $0.id == computer.id })?.accountRelay,
+                  let account = app?.accountToken else { throw e }
+            let c = KelvinClient(base: relay, token: account, transport: transport, timeout: 15, bearer: true)
+            _ = try await c.me()
+            client = c
+            connected = relay
+            computer.kinds = (computer.kinds ?? [:]).merging([relay.absoluteString: "hub"]) { _, new in new }
+            app?.update(computer)
+            return c
+        }
+        let (found, me) = reached
         let c = KelvinClient(base: found.base, token: token, transport: transport)   // the usual wait, not the probe's
         client = c
         connected = c.base

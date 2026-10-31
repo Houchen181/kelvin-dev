@@ -209,7 +209,6 @@ final class ScannerController: UIViewController {
             say("There is no camera here. Type the address and code instead.")
             return
         }
-        ScannerController.closeUp(device)
         session.addInput(input)
         let output = AVCaptureMetadataOutput()
         guard session.canAddOutput(output) else { return }
@@ -222,6 +221,7 @@ final class ScannerController: UIViewController {
         layer.frame = view.layer.bounds
         view.layer.insertSublayer(layer, at: 0)
         preview = layer
+        ScannerController.closeUp(device)   // once the session chose the camera's format, which resets its zoom
         run(true)
     }
 

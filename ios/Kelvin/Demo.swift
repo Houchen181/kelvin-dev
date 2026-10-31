@@ -29,6 +29,7 @@ final class DemoTransport: Transport, @unchecked Sendable {
     private var hands: JSON?            // the hands-on-the-sample lock
     private var team: [JSON] = DemoTransport.firstTeam()
     private var chats: [JSON] = []      // chats begun here, the newest last, kept while the app runs
+    private var begun = 0               // chats begun here, incognito ones too: each its own id
 
     // ------------------------------------------------------------------ the lab
 
@@ -638,7 +639,8 @@ final class DemoTransport: Transport, @unchecked Sendable {
             return (200, chat())
         case ("POST", "/api/chats"):
             let asked = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? JSON
-            var c: JSON = ["id": "demo-\(chats.count + 1)", "title": "New chat", "model": "demo:kelvin"]
+            begun += 1
+            var c: JSON = ["id": "demo-\(begun)", "title": "New chat", "model": "demo:kelvin"]
             c["updated"] = Date().timeIntervalSince1970
             c["messages"] = [JSON]()
             if asked?["incognito"] as? Bool != true { chats.append(c) }   // an incognito chat keeps nothing

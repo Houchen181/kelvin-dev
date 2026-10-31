@@ -115,7 +115,13 @@ final class ModelTests: XCTestCase {
         list.sync([HubKelvin(id: "a", name: "lab-pc", online: true), HubKelvin(id: "b", name: "LAPTOP", online: true)],
                   hub: hub)
         XCTAssertEqual(list.computers.map(\.host), ["LAB-PC", "LAPTOP"])
-        XCTAssertFalse(list.computers[0].viaAccount)                                     // the pairing stays
+        XCTAssertFalse(list.computers[0].viaAccount)                                     // the pairing stays,
+        XCTAssertEqual(list.computers[0].accountRelay?.lastPathComponent, "a")          // with the hub for away
+        list.update(Computer(id: list.computers[0].id, lab: "Cryostat lab", host: "LAB-PC", phoneName: "P",
+                             role: "control", addresses: []))                           // a session's older copy
+        XCTAssertEqual(list.computers[0].accountKelvin, "a")
+        list.forgetAccount(hub)
+        XCTAssertNil(list.computers[0].accountRelay)
     }
 
     func testALongRunIsThinnedForThePhone() {

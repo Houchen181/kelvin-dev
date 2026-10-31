@@ -15,6 +15,10 @@ public struct Computer: Codable, Equatable, Identifiable, Sendable {
     // the direct ones, tried first, with the token it gave this phone through the hub.
     public var hub: URL?
     public var kelvin: String?
+    // A paired computer the Kelvin account reaches too (ComputerList.sync): its one row is the pairing, and away
+    // from the lab, without Tailscale, the phone reaches it through the hub with the account's token.
+    public var accountHub: URL?
+    public var accountKelvin: String?
 
     public init(id: UUID = UUID(), lab: String, host: String? = nil, phoneName: String, role: String,
                 addresses: [URL], paired: Date = Date(), version: String? = nil) {
@@ -40,6 +44,12 @@ public struct Computer: Codable, Equatable, Identifiable, Sendable {
     }
 
     public func route(_ url: URL) -> Route { Route(url, kinds: kinds) }
+
+    /// The hub's way to a paired computer the account reaches too.
+    public var accountRelay: URL? {
+        guard let accountHub, let accountKelvin else { return nil }
+        return accountHub.appendingPathComponent("api/relay/kelvins").appendingPathComponent(accountKelvin)
+    }
 
     /// "Cryostat lab" or, when two computers share a lab name, "Cryostat lab (LAB-PC-2)".
     public func title(among all: [Computer]) -> String {
@@ -121,8 +131,22 @@ public struct ComputerList: Codable, Equatable, Sendable {
         if selected == id { selected = computers.first?.id }
     }
 
+    /// A computer as a session saw it. Whether the account reaches it too is the list's to say (sync), whatever an
+    /// older copy says.
     public mutating func update(_ c: Computer) {
-        if let i = computers.firstIndex(where: { $0.id == c.id }) { computers[i] = c }
+        guard let i = computers.firstIndex(where: { $0.id == c.id }) else { return }
+        var c = c
+        c.accountHub = computers[i].accountHub
+        c.accountKelvin = computers[i].accountKelvin
+        computers[i] = c
+    }
+
+    /// Signed out of the account at `hub`: paired computers are reached only directly again.
+    public mutating func forgetAccount(_ hub: URL) {
+        for i in computers.indices where computers[i].accountHub == hub {
+            computers[i].accountHub = nil
+            computers[i].accountKelvin = nil
+        }
     }
 
     /// One of the account's Kelvins, as the hub lists it: a new one is added (and shown if nothing else is), one
@@ -159,6 +183,13 @@ public struct ComputerList: Codable, Equatable, Sendable {
             return same.max { ($0.lastSeen ?? 0) < ($1.lastSeen ?? 0) }?.id == k.id
         }
         for k in shown { account(k, hub: hub) }
+        for i in computers.indices where !computers[i].viaAccount {   // a paired one: the hub for when it's away
+            guard let host = computers[i].host?.lowercased() else { continue }
+            let same = listed.filter { $0.name.lowercased() == host && !removed.contains($0.id) }
+            let k = same.first(where: \.online) ?? same.max { ($0.lastSeen ?? 0) < ($1.lastSeen ?? 0) }
+            computers[i].accountHub = k == nil ? nil : hub
+            computers[i].accountKelvin = k?.id
+        }
         let ids = Set(shown.map(\.id))
         let gone = computers.filter { c in c.hub == hub && c.kelvin.map { !ids.contains($0) } ?? false }.map(\.id)
         for id in gone { remove(id) }

@@ -418,6 +418,23 @@ final class AppTests: XCTestCase {
         XCTAssertEqual(script.bearers.last, "Bearer khub_new")
     }
 
+    func testAPairedComputerOnTheAccountTooIsReachedThroughTheHubFromAway() async throws {
+        let script = Script()
+        let (app, _) = try await paired(script)
+        script.on("POST /api/signin", "{\"access_token\": \"khub_phone\", \"user\": {\"name\": \"Ada\", \"email\": \"ada@example.org\"}}")
+        script.on("GET /api/relay/kelvins", "{\"kelvins\": [{\"id\": \"pc-1\", \"name\": \"LAB-PC\", \"online\": true}]}")
+        script.on("GET /api/relay/kelvins/pc-1/api/me", "{\"role\": \"control\", \"name\": \"iPhone\", \"lab\": \"Cryostat lab\"}")
+        script.on("GET /api/relay/kelvins/pc-1/api/state", "{\"lab\": \"Cryostat lab\"}")
+        try await app.signIn(hub: URL(string: "https://kelvin.example.org")!, email: "ada@example.org", password: "pw")
+        XCTAssertEqual(app.list.computers.count, 1)                              // one row: the pairing
+        script.unreachable = ["192.168.1.50", "100.101.7.9"]                     // away from the lab, no Tailscale
+        let session = app.session(for: try XCTUnwrap(app.list.computers.first))
+        await session.refresh()
+        XCTAssertNil(session.problem)
+        XCTAssertEqual(session.route, .hub)
+        XCTAssertEqual(script.bearers.last, "Bearer khub_phone")
+    }
+
     func testTheKeychain() throws {
         let keychain = Keychain(service: "Kelvin tests")
         let id = UUID()
