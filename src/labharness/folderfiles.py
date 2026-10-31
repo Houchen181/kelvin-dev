@@ -199,6 +199,8 @@ def environment(path: Path) -> Optional[str]:
     if {p.lower() for p in path.parts} & {"site-packages", "dist-packages"}:
         return "a Python environment's installed packages"
     for folder in path.parents:
+        if folder.parent == folder:   # a drive or the file system's root is never one: on Linux /lib leads to /usr/lib,
+            continue                  # whose python3.x/os.py would make / look like a Python installation
         try:
             if (folder / "pyvenv.cfg").is_file() or (folder / "conda-meta").is_dir():
                 return "a Python environment (%s)" % folder
