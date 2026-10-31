@@ -467,10 +467,11 @@ def _clean(xs: Sequence[Any], ys: Sequence[Any]) -> Tuple[Any, Any, int]:
 def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name: str,
                   x_unit: str = "", y_unit: str = "", force: Optional[str] = None,
                   deadline: Optional[float] = None, protocol: Optional[str] = None,
-                  models: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+                  models: Optional[Sequence[str]] = None, tail: bool = False) -> Dict[str, Any]:
     """Classify one y(x) curve and quantify it. Returns kind, summary, results, fit, flags. force: fit this model
     whatever the curve shows; models: the only shapes to look for (one model for every row of a run); protocol: the
-    pulse protocol the run played, which says what its sweep shows (EXPECT)."""
+    pulse protocol the run played, which says what its sweep shows (EXPECT); tail: the curve after its first point
+    (a decay's slow part, below)."""
     np = _np()
     out: Dict[str, Any] = {"x": x_name, "y": y_name, "kind": "none", "summary": "", "results": [], "flags": [], "fit": None}
     xs_s, ys_s, total = _clean(xs, ys)
@@ -764,6 +765,27 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
                                 % (si(float(ys_s[k]), y_unit), x_name, si(float(xs_s[k]), x_unit),
                                    abs(float(ys_s[k]) - mid) / spread))
         return out
+
+    if chosen is None and force is None and models is None and not tail and n >= 8:
+        # a decay whose fast part is over by the second point (photoluminescence at time zero): that first point
+        # is kept and said, and the slow part told from the rest
+        rest = ys_s[1:]
+        spread, noise = float(np.ptp(rest)), noise_estimate(rest)
+        if abs(ys_s[0] - (2 * rest[0] - rest[1])) > 10 * max(noise, 0.02 * spread, 1e-300) and \
+                abs(ys_s[0] - float(np.median(rest))) > 3 * max(spread, noise, 1e-300):
+            slow = analyze_curve(xs_s[1:], rest, x_name, y_name, x_unit, y_unit, None, deadline, protocol, None, True)
+            if slow["kind"] == "relaxation":
+                falls = bool(ys_s[0] > rest[0])
+                slow["summary"] = "%s %s from %s at %s = %s to %s within one step (%s), then %s" % (
+                    y_name, "drops" if falls else "rises", si(float(ys_s[0]), y_unit), x_name,
+                    si(float(xs_s[0]), x_unit), si(float(rest[0]), y_unit), si(step, x_unit),
+                    slow["summary"][len(y_name) + 1:])
+                slow["results"].insert(0, {"name": "first point", "value": si(float(ys_s[0]), y_unit),
+                                           **_numeric(float(ys_s[0]), None, y_unit)})
+                slow["flags"].append("part of the %s is faster than the %s step: a finer step near %s = %s "
+                                     "would show it" % ("decay" if falls else "rise", si(step, x_unit), x_name,
+                                                        si(float(xs_s[0]), x_unit)))
+                return slow
 
     if chosen is None:
         diffs = np.diff(ys_s)
@@ -1352,9 +1374,9 @@ def _recorded(fit: Dict[str, Any], rows: List[Dict[str, Any]], swept: str, x_key
 
 def _first_point(rows: List[Dict[str, Any]], measures: List[Dict[str, str]], axes: List[Dict[str, str]]
                  ) -> Tuple[Set[str], List[str]]:
-    """Instruments whose first reading lies far outside all their others along the first sweep (a counter read
-    before its first acquisition was in: 0 counts at every pulse-generator run's first point): those instruments,
-    and what to say. Their first point is left out of the analysis."""
+    """Instruments whose first reading along the first sweep is an empty one, 0 where the rest are not (a counter
+    read before its first acquisition was in: 0 counts at every pulse-generator run's first point): those
+    instruments, and what to say. Their first point is left out of the analysis."""
     np = _np()
     if len(rows) < 7:
         return set(), []
@@ -1370,9 +1392,10 @@ def _first_point(rows: List[Dict[str, Any]], measures: List[Dict[str, str]], axe
             continue
         spread, noise = float(np.ptp(rest)), noise_estimate(rest.tolist())
         trend = 2 * rest[0] - rest[1]   # where the next points say the first should be
-        empty = v0 == 0 and float(np.abs(rest).min()) > 10 * max(noise, 1e-300)   # nothing read yet: 0, the rest not
-        if empty or (abs(v0 - trend) > 10 * max(noise, 0.02 * spread, 1e-300) and
-                     abs(v0 - float(np.median(rest))) > 3 * max(spread, noise, 1e-300)):
+        # nothing read yet: 0 where the rest are far from it and the next points don't lead there (a sweep of a
+        # light's power from 0 W reads 0 there too). A large first point is kept: a decay's fast part starts there
+        if v0 == 0 and float(np.abs(rest).min()) > 10 * max(noise, 1e-300) and \
+                abs(v0 - trend) > 10 * max(noise, 0.02 * spread, 1e-300):
             found.setdefault(m["key"].split(".")[0], []).append(
                 "%s on %s (the rest %s to %s)" % (si(v0, m.get("unit", "")), m["key"], si(float(rest.min()),
                                                                                         m.get("unit", "")),

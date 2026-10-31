@@ -380,3 +380,22 @@ def test_a_swept_excitation_gives_each_point_its_own_current():
     a = analyze_run(rows, axes + [{"key": "magnet.B", "unit": "T", "kind": "instrument"}], measures,
                     {"status": "done", "points": len(rows)}, derive=derive)
     assert a["assessment"].startswith("R_xx rises as magnet.B² from 1 kΩ") and "does not change" in a["trends"][0]
+
+
+def test_a_decays_first_point_is_kept_and_said_and_only_an_empty_one_is_left_out():
+    rng = np.random.default_rng(2)
+    t = np.arange(21) * 1e-9   # photoluminescence: a 100 ps part over by the second point, then 10 ns
+    rows = [{"delay.t": float(x), "spc.counts": float(9000 * math.exp(-x / 1e-10) + 1000 * math.exp(-x / 1e-8) +
+                                                      rng.normal(0, 5))} for x in t]
+    a = analyze_run(rows, [{"key": "delay.t", "unit": "s", "kind": "instrument"}],
+                    [{"key": "spc.counts", "unit": "counts", "kind": "scalar"}], {"status": "done", "points": 21})
+    (s,) = a["series"]
+    assert a["assessment"].startswith("spc.counts drops from 1e+04 counts at delay.t = 0 s to 902.6 counts within one "
+                                      "step (1 ns), then relaxes exponentially"), a["assessment"]
+    assert s["params"]["τ"][0] == pytest.approx(1e-8, rel=0.05) and "left out" not in a["assessment"]
+    assert any("faster than the 1 ns step" in i for i in a["issues"])
+    p = np.linspace(0, 1e-3, 21)   # a light's power from 0 W: no counts there, as the line says
+    rows = [{"laser.power": float(x), "counter.rate": float(0.0 if x == 0 else 5e6 * x + rng.normal(0, 30))} for x in p]
+    a = analyze_run(rows, [{"key": "laser.power", "unit": "W", "kind": "instrument"}],
+                    [{"key": "counter.rate", "unit": "1/s", "kind": "scalar"}], {"status": "done", "points": 21})
+    assert a["series"][0]["kind"] == "linear" and a["issues"] == [], a["issues"]
