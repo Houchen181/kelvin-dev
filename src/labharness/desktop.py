@@ -179,6 +179,18 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
             return ""
         return str(chosen[0]) if chosen else ""
 
+    def pick_file(start: str = "") -> str:
+        """The computer's own file picker, for the portal's Import a script…: the Python script or notebook the person
+        chose, or "" if they closed it. start: the folder to open at (or a file in it)."""
+        kind = getattr(getattr(webview, "FileDialog", None), "OPEN", None) or webview.OPEN_DIALOG
+        folder = start if os.path.isdir(start or "") else os.path.dirname(start or "")
+        try:
+            chosen = window.create_file_dialog(kind, directory=folder if os.path.isdir(folder) else "",
+                                               file_types=("Python scripts and notebooks (*.py;*.ipynb)",))
+        except Exception:
+            return ""
+        return str(chosen[0]) if chosen else ""
+
     def set_zoom(factor: float) -> bool:
         """The person's text size: this window's page scaled like a browser's zoom (the window's own Ctrl+ and Ctrl-
         are off). False where this window can't."""
@@ -187,7 +199,7 @@ def _window(url: str, agent: Any, runtime: Any, home: Path, closer: Optional[dic
         except Exception:
             return False
 
-    window.expose(pick_folder, set_zoom)
+    window.expose(pick_folder, pick_file, set_zoom)
     try:
         webview.settings["ALLOW_DOWNLOADS"] = True   # reports can be saved from the window too
     except (AttributeError, TypeError):

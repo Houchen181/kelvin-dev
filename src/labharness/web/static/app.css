@@ -784,6 +784,8 @@ a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .lane .pane-menu.review-menu { left: auto; right: 0; }
 .report-files { display: grid; gap: 6px; margin: 6px 0; }
 .report-files.rv-files { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 4px; }
+.rv-file-text { flex: 1 1 100%; margin: 2px 0 0; max-height: 320px; overflow: auto; font: 12px/1.5 ui-monospace, Consolas, monospace;
+  background: var(--code); border-radius: 8px; padding: 8px 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .report-file { display: flex; align-items: center; gap: 10px; border: 1px solid var(--line); border-radius: 12px;
   background: var(--panel); padding: 8px 12px; font-size: 14px; }
 .report-file > svg { width: 20px; height: 20px; flex: none; color: var(--accent); }
@@ -963,8 +965,73 @@ body.resizing .plot-svg { pointer-events: none; }
 .lib-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
 .lib-label { min-width: 140px; color: var(--text-2); }
 .q-badge { margin-left: 6px; background: var(--accent-soft); color: var(--text); }
-#open-queue.on { background: var(--active); }
 #open-queue.live .q-badge { background: var(--accent); color: #fff; }
+/* the runs pane's header: Runs · Scans · Queue; the open runs' tabs in a row below it */
+.runs-seg button { display: inline-flex; align-items: center; padding: 5px 12px; font-size: 13px; }
+.runs-seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.runs-seg .badge { height: 16px; min-width: 16px; font-size: 11px; }
+.runs-seg button.on .q-badge { background: var(--raised); }
+.runpane > .run-tabs { flex: none; padding: 6px 10px 0; background: var(--panel); box-shadow: inset 0 -1px 0 var(--line); }
+.runpane > .run-tabs .run-tab { margin-bottom: 0; }
+.pane-filter { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 9px; font-size: 13px;
+  background: var(--raised); }
+.runs-list { padding: 12px 12px 24px; display: grid; gap: 8px; align-content: start; }
+.runs-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.runs-items .pane-menu-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.rv-back { justify-self: start; margin: -8px 0 -6px -6px; }
+/* Run again, in a finished run's view */
+.rv-again > summary { cursor: pointer; font-size: 13.5px; font-weight: 550; color: var(--text-2); width: max-content; }
+.ra-body { display: grid; gap: 8px; justify-items: start; margin: 8px 0 2px 5px; padding-left: 12px; border-left: 2px solid var(--line); }
+.ra-body p { margin: 0; }
+.ra-body p:empty { display: none; }
+.said, #scans-msg { white-space: pre-line; overflow-wrap: anywhere; }
+.ra-body > .rv-plan, .ra-body > .ra-conds { justify-self: stretch; }
+.ra-script { display: flex; align-items: center; gap: 8px; max-width: 100%; }
+.ra-script code { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ra-params { font: 12.5px/1.5 ui-monospace, Consolas, monospace; color: var(--text-2); overflow-wrap: anywhere; }
+.ra-conds { max-height: 220px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.ra-conds table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+.ra-conds th { position: sticky; top: 0; background: var(--panel); text-align: left; font-size: 12px; font-weight: 500; color: var(--muted); padding: 4px 10px; }
+.ra-conds td { padding: 3px 10px; border-top: 1px solid var(--line); white-space: nowrap; }
+.ra-conds td .tag { margin-left: 6px; }
+.ra-actions { display: flex; gap: 8px; align-items: center; }
+.tag.warn { color: var(--warn); border-color: var(--warn-line); }
+/* Scans: Kelvin's scans and the person's scripts */
+.scans-view { padding: 12px 12px 24px; display: grid; gap: 10px; align-content: start; }
+.scans-view h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 4px 0 6px; }
+.scans-view > p { margin: 0; }
+.scans-view > p:empty { display: none; }
+.scans-top { display: flex; gap: 8px; align-items: center; }
+.scans-top .btn { flex: none; white-space: nowrap; }
+.scans-path { display: flex; gap: 8px; }
+.scans-path input { flex: 1; min-width: 0; border: 1px solid var(--line-strong); border-radius: 8px; padding: 5px 9px; font-size: 13px;
+  background: var(--raised); font-family: ui-monospace, Consolas, monospace; }
+.scans-check { margin: 0; display: grid; gap: 4px; }
+.sc-head { display: flex; align-items: center; gap: 8px; }
+.sc-head b { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.sc-head .icon-btn { padding: 3px; }
+.sc-head .icon-btn svg { width: 14px; height: 14px; }
+.scans-check ul { margin: 0; padding-left: 18px; color: var(--danger); }
+.sc-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); font-size: 12.5px; }
+.q-item.lib { grid-template-columns: minmax(0, 1fr) auto; }
+.q-item.lib .q-acts { justify-self: end; }
+.q-item.lib .q-acts button:first-child { color: var(--accent); }
+.q-item.lib.fresh { border-color: var(--accent); }
+.q-item.lib .q-sub { grid-column: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lib-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.lib-name .side-input { font-size: 13px; padding: 3px 7px; }
+.lib-used { color: var(--muted); font-size: 12px; white-space: nowrap; text-align: right; }
+.q-acts svg { width: 15px; height: 15px; display: block; }
+.lib-detail { grid-column: 1 / -1; }
+.lib-plan { margin: 2px 0 0; font: 12.5px/1.5 ui-monospace, Consolas, monospace; background: var(--code); border-radius: 8px;
+  padding: 8px 10px; overflow: auto; max-height: 260px; }
+.lib-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 6px 12px; margin-top: 2px; }
+.lib-param { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.lib-param span { font: 12.5px ui-monospace, Consolas, monospace; color: var(--text-2); overflow-wrap: anywhere; }
+.lib-param input:not([type="checkbox"]) { flex: 1; width: 0; min-width: 60px; border: 1px solid var(--line-strong); border-radius: 7px;
+  padding: 3px 6px; background: var(--raised); font: 12.5px ui-monospace, Consolas, monospace; }
+.lib-args { grid-column: 1 / -1; font: 12.5px ui-monospace, Consolas, monospace; color: var(--muted); }
+.lib-problem { grid-column: 1 / -1; }
 .queue-view { padding: 14px 16px 24px; display: grid; gap: 12px; }
 .q-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .q-head .q-state { font-weight: 600; }

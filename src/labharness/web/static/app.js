@@ -904,9 +904,11 @@
   }
 
   // ------------------------------------------------------------------ runs pane (beside the chat, like a terminal pane)
-  // One tab per run. A running run is polled from /api/live (so runs started by any agent show up);
-  // a finished run shows its assessment, key results, plots with fits, table and plan.
-  const RUNS = { open: false, tabs: new Map(), active: null, polling: false, cache: new Map(), dismissed: new Set() };
+  // Three views: Runs (one tab per open run, else the recent runs), Scans (what can run again) and the Queue.
+  // A running run is polled from /api/live (so runs started by any agent show up); a finished run shows its
+  // assessment, key results, plots with fits, table, and Run again.
+  const RUNS = { open: false, tabs: new Map(), active: null, polling: false, cache: new Map(), dismissed: new Set(),
+                 view: "runs", list: null };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const etaText = (s) => (s ? " · about " + (s < 90 ? Math.max(1, Math.round(s)) + " s" : Math.round(s / 60) + " min") + " left" : "");
   const durText = (s) => (s < 90 ? Math.round(s) + " s" : s < 5400 ? (s / 60).toFixed(1) + " min" : (s / 3600).toFixed(1) + " h");
@@ -945,7 +947,8 @@
     close.addEventListener("click", () => closeRunTab(runId));
     RUNS.tabs.set(runId, tab);
     $("run-tabs").append(btn);
-    $("run-body").append(body);
+    $("run-tabs").hidden = false;
+    $("runs-view").append(body);
     if (RUNS.tabs.size > 8) {  // keep the strip short: drop the oldest finished tab
       const old = [...RUNS.tabs.values()].find((t) => t.status !== "running" && t !== tab);
       if (old) closeRunTab(old.runId);
@@ -960,15 +963,8 @@
   function selectRun(runId) {
     const tab = RUNS.tabs.get(runId);
     if (!tab) return;
-    hideQueue();
     RUNS.active = runId;
-    for (const t of RUNS.tabs.values()) {
-      const on = t === tab;
-      t.btn.classList.toggle("on", on);
-      t.btn.setAttribute("aria-selected", String(on));
-      t.body.hidden = !on;
-    }
-    $("run-body").querySelector(".pane-empty").hidden = true;
+    showView("runs");
     tab.btn.scrollIntoView({ block: "nearest", inline: "nearest" });
     if (tab.status !== "running" && tab.status !== "finishing" && !tab.final) loadFinal(tab);
     else renderRunView(tab);
@@ -980,18 +976,98 @@
     RUNS.dismissed.add(runId);  // closing a running run's tab must not bring it back
     tab.btn.remove(); tab.body.remove();
     RUNS.tabs.delete(runId);
+    $("run-tabs").hidden = !RUNS.tabs.size;
     if (RUNS.active === runId) {
-      RUNS.active = null;
-      const next = [...RUNS.tabs.keys()].pop();
-      if (next) selectRun(next); else if (!QUEUE.open) $("run-body").querySelector(".pane-empty").hidden = false;
+      RUNS.active = [...RUNS.tabs.keys()].pop() || null;
+      if (RUNS.view === "runs") { if (RUNS.active) selectRun(RUNS.active); else showView("runs"); }
     }
     $("runs-dot").hidden = ![...RUNS.tabs.values()].some((t) => t.status === "running");
   }
+  // the pane's view: "runs" (the active run, or with none the recent runs), "scans" or "queue"
+  const VIEWS = { runs: ["open-runs", "runs-view"], scans: ["open-scans", "scans-view"], queue: ["open-queue", "queue-view"] };
+  function showView(view) {
+    RUNS.view = view;
+    for (const [v, [seg, panel]] of Object.entries(VIEWS)) {
+      const on = v === view;
+      $(seg).classList.toggle("on", on);
+      $(seg).setAttribute("aria-selected", String(on));
+      $(seg).tabIndex = on ? 0 : -1;
+      $(panel).hidden = !on;
+    }
+    QUEUE.open = view === "queue";
+    const active = view === "runs" && RUNS.tabs.get(RUNS.active);
+    for (const t of RUNS.tabs.values()) {
+      const on = t === active;
+      t.btn.classList.toggle("on", on);
+      t.btn.setAttribute("aria-selected", String(on));
+      t.body.hidden = !on;
+    }
+    $("runs-list").hidden = !!active;
+    if (view === "runs" && !active) loadRunList();
+    if (view === "scans") loadScans();
+  }
+  function showRunList() {   // ← All runs: the open tabs stay open
+    RUNS.active = null;
+    showView("runs");
+  }
+  // the segmented control is a tab list: the arrow keys, Home and End move along it
+  function segKeys(e) {
+    const order = Object.keys(VIEWS), i = order.indexOf(RUNS.view);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: order.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const view = order[(next + order.length) % order.length];
+    if (view === "queue") showQueue(); else showView(view);
+    $(VIEWS[view][0]).focus();
+  }
+
+  // the recent runs, while no run is open: status, name, points and when it started (this computer's time)
+  function startedText(r) {   // 14:22 today, else 30 Oct 14:22
+    const t = r.started_at ? new Date(r.started_at * 1000) : null;
+    if (!t) return r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " · " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
+    const day = dayText(t);
+    return (day === "today" ? "" : day + " ") + t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  function dayText(t) {   // today, or the day: 30 Oct; another year's: 30 Oct 2025
+    const now = new Date();
+    if (t.toDateString() === now.toDateString()) return "today";
+    return t.toLocaleDateString(undefined, t.getFullYear() === now.getFullYear()
+      ? { day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" });
+  }
+  async function loadRunList() {
+    if (!RUNS.list) $("runs-items").replaceChildren(h("li", { class: "pane-empty" }, "Loading…"));
+    try { RUNS.list = (await api("/api/runs?limit=50")).runs; } catch (e) { if (!RUNS.list) RUNS.list = []; }
+    renderRunList();
+  }
+  function renderRunList() {
+    const runs = RUNS.list || [];
+    const q = $("runs-filter").value.trim().toLowerCase();
+    const shown = q ? runs.filter((r) => r.run_id.toLowerCase().includes(q)) : runs;
+    $("runs-filter").hidden = !runs.length;
+    $("runs-items").replaceChildren(...(shown.length ? shown.map((r) => {
+      const st = h("span", { class: "state", role: "img", "aria-label": r.status, title: r.status + (r.reason ? ": " + r.reason : "") });
+      setState(st, r.status);
+      const pts = r.points != null ? r.points + (r.planned_points && r.planned_points !== r.points ? "/" + r.planned_points : "") + " pts · " : "";
+      const b = h("button", { class: "pane-menu-item", type: "button", title: r.run_id }, st,
+        h("span", { class: "pm-plan" }, r.plan), h("span", { class: "pm-meta" }, pts + startedText(r)));
+      b.addEventListener("click", () => {
+        if (r.status !== "running") { openRun(r.run_id, r.plan); return; }
+        RUNS.dismissed.delete(r.run_id);   // a running run whose tab was closed opens again when asked for
+        if (RUNS.tabs.has(r.run_id)) openRun(r.run_id, r.plan); else noticeRun(r.run_id, r.plan);
+      });
+      return h("li", {}, b);
+    }) : [h("li", { class: "pane-empty" }, runs.length ? "Nothing matches." : "No runs yet.")]));
+  }
   function toggleRuns(open) {
+    const was = RUNS.open;
     RUNS.open = open === undefined ? !RUNS.open : open;
     $("runpane").hidden = !RUNS.open;
     $("toggle-runs").setAttribute("aria-pressed", String(RUNS.open));
     $("toggle-runs").classList.toggle("on", RUNS.open);
+    if (RUNS.open && !was) {   // opened: its list as it is now
+      if (RUNS.view === "scans") loadScans();
+      else if (RUNS.view === "runs" && !RUNS.tabs.get(RUNS.active)) loadRunList();
+    }
     fitLayout();
   }
   function openRun(runId, plan) {
@@ -1064,17 +1140,104 @@
       if (!v.table.hidden) v.table.replaceChildren(runTable(runViewData(tab)));
       v.tableBtn.textContent = v.table.hidden ? "Show table" : "Hide table";
     });
-    const requeue = h("button", { class: "btn small ghost", type: "button" }, "Add to the queue");
-    requeue.addEventListener("click", async () => {
-      if (await queueOp({ op: "add", text: (tab.final && tab.final.plan_text) || "" })) showQueue();
-    });
-    v.plan = h("details", { class: "rv-plan", hidden: true }, h("summary", {}, "Plan"), h("pre", {}), requeue);
+    v.again = h("details", { class: "rv-again", hidden: true }, h("summary", {}, "Run again"), h("div", { class: "ra-body" }));
+    v.again.addEventListener("toggle", () => { if (v.again.open) loadAgain(tab); });   // the lab read now, each time
     v.files = h("div", { class: "report-files rv-files", hidden: true });
     v.foot = h("div", { class: "plots-foot" }, h("span", {}, tab.runId), v.tableBtn);
-    tab.body.replaceChildren(
+    const back = h("button", { class: "link soft rv-back", type: "button" }, "← All runs");
+    back.addEventListener("click", showRunList);
+    tab.body.replaceChildren(back,
       h("div", { class: "rv-head" }, v.state, h("code", { class: "rv-plan-name" }, tab.plan), h("div", { class: "spacer" }), v.stop),
-      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.files, v.charts, v.foot, v.table, v.plan);
+      h("div", { class: "rv-progress" }, v.count), v.barBox, v.analysis, v.files, v.again, v.charts, v.foot, v.table);
     tab.view = v;
+  }
+
+  // Run again: what ran (the plan, or the script and its settings), the start settings that differ from the lab now,
+  // and whether to set those back first (GET/POST /api/runs/{id}/again)
+  async function loadAgain(tab) {
+    const box = tab.view.again.querySelector(".ra-body");
+    if (!box.firstChild) box.append(h("p", { class: "hint" }, "Reading the lab…"));
+    let d;
+    try { d = await api("/api/runs/" + encodeURIComponent(tab.runId) + "/again"); }
+    catch (e) { box.replaceChildren(h("p", { class: "hint bad" }, e.message)); return; }
+    box.replaceChildren(...againParts(tab, d));
+  }
+  function againParts(tab, d) {
+    const parts = [];
+    const pick = { version: "then" };
+    if (d.text != null) {
+      parts.push(h("details", { class: "rv-plan" }, h("summary", {}, "Plan"), h("pre", {}, d.text)));
+    } else if (d.script) {
+      const s = d.script;
+      const tag = !s.exists ? h("span", { class: "tag warn" }, "missing") : s.changed ? h("span", { class: "tag" }, "changed") : null;
+      parts.push(h("div", { class: "ra-script" }, h("code", { title: s.path }, s.path), tag));
+      const set = paramText(s.params, s.args);
+      if (set) parts.push(h("div", { class: "ra-params" }, set));
+      if (s.exists && s.changed) {   // the file was edited since: as it ran then (the run's copy), or as it is now
+        const seg = h("div", { class: "seg", role: "group", "aria-label": "Which version of the script" });
+        for (const [v, label] of [["then", "As it ran then"], ["now", "As it is now"]]) {
+          const b = h("button", { type: "button", "aria-pressed": String(v === pick.version), class: v === pick.version ? "on" : "" }, label);
+          b.addEventListener("click", () => {
+            pick.version = v;
+            for (const x of seg.children) { x.classList.toggle("on", x === b); x.setAttribute("aria-pressed", String(x === b)); }
+          });
+          seg.append(b);
+        }
+        parts.push(seg);
+      }
+    }
+    const differ = (d.conditions || []).filter((c) => c.differs && c.settable);
+    if (!d.read_now) parts.push(h("p", { class: "hint" }, "Couldn't read the lab now."));
+    else if (!differ.length) parts.push(h("p", { class: "hint" }, "Every setting is as it was."));
+    if (differ.length) {
+      parts.push(h("div", { class: "ra-conds" }, h("table", {},
+        h("thead", {}, h("tr", {}, h("th", {}, h("span", { class: "sr-only" }, "Setting")), h("th", {}, "then"), h("th", {}, "now"))),
+        h("tbody", {}, ...differ.map((c) => {
+          const [then, now] = condValues(c);
+          return h("tr", {}, h("td", {}, h("code", {}, c.key), c.drive ? h("span", { class: "tag", title: "It drives the sample" }, "drive") : null),
+            h("td", {}, then), h("td", {}, now));
+        })))));
+    }
+    const n = d.differ || 0;
+    const restore = h("input", { type: "checkbox" });
+    restore.checked = n > 0;
+    if (n) parts.push(h("label", { class: "check" }, restore, n === 1 ? "Restore this setting first" : "Restore these " + n + " settings first"));
+    const msg = h("p", { class: "hint said", role: "status" });
+    const go = async (queue, btn) => {
+      const body = { restore: n > 0 && restore.checked };
+      if (d.script && d.script.exists && d.script.changed) body.version = pick.version;
+      if (d.script && !d.script.exists) body.version = "then";
+      if (queue) body.queue = true;
+      btn.disabled = true;
+      msg.classList.remove("bad");
+      msg.textContent = queue ? "" : "Starting…";   // the queue's approval is asked first
+      try {
+        const r = await api("/api/runs/" + encodeURIComponent(tab.runId) + "/again", { body });
+        queueFromState(r.queue);
+        renderQueue();
+        msg.textContent = r.message || "";
+        if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
+      } catch (e) { msg.classList.add("bad"); msg.textContent = e.message; }
+      finally { btn.disabled = false; }
+    };
+    const run = h("button", { class: "btn small primary", type: "button" }, "Run again");
+    const later = h("button", { class: "btn small ghost", type: "button" }, "Add to the queue");
+    run.addEventListener("click", () => go(false, run));
+    later.addEventListener("click", () => go(true, later));
+    parts.push(h("div", { class: "ra-actions" }, run, later), msg);
+    return parts;
+  }
+  // a setting's start and present values, in its unit; told apart even when they round alike
+  function condValues(c) {
+    const one = (v, digits) => v == null ? "—" : typeof v === "number" ? (digits ? Number(v.toPrecision(digits)) + (c.unit ? " " + c.unit : "") : fmt(v, c.unit))
+      : typeof v === "object" ? JSON.stringify(v) : String(v);
+    const a = one(c.then), b = one(c.now);
+    return a === b && typeof c.then === "number" && typeof c.now === "number" ? [one(c.then, 10), one(c.now, 10)] : [a, b];
+  }
+  function paramText(params, args) {   // V_MAX = 3 · N = 61 · args: --fast
+    const out = Object.entries(params || {}).map(([k, v]) => k + " = " + (typeof v === "string" ? v : JSON.stringify(v)));
+    if (args && args.length) out.push("args: " + args.join(" "));
+    return out.join(" · ");
   }
   function runViewData(tab) {
     if (tab.final) return tab.final;
@@ -1111,8 +1274,7 @@
       clearTimeout(tab.timer); tab.timer = 0;
       v.analysis.replaceChildren(...(tab.final.analysis ? [analysisBlock(tab.final.analysis)] : []));
       v.charts.replaceChildren(runCharts(tab.final));
-      v.plan.hidden = !tab.final.plan_text;
-      v.plan.querySelector("pre").textContent = tab.final.plan_text || "";
+      v.again.hidden = false;
       runFiles(tab, v.files);
       if (!v.table.hidden) v.table.replaceChildren(runTable(tab.final));
       return;
@@ -1125,30 +1287,6 @@
         if (!v.table.hidden) v.table.replaceChildren(runTable(runViewData(tab)));
       }, 300);
     }
-  }
-
-  async function showRunsMenu() {
-    const menu = $("runs-menu");
-    if (!menu.hidden) { menu.hidden = true; $("runs-history").setAttribute("aria-expanded", "false"); return; }
-    menu.replaceChildren(h("div", { class: "pane-menu-note" }, "Loading…"));
-    menu.hidden = false;
-    $("runs-history").setAttribute("aria-expanded", "true");
-    let runs = [];
-    try { runs = (await api("/api/runs")).runs; } catch (e) { /* keep the note */ }
-    menu.replaceChildren(...(runs.length ? runs.map((r) => {
-      const st = h("span", { class: "state" });
-      setState(st, r.status);
-      const when = r.run_id.slice(9, 11) + ":" + r.run_id.slice(11, 13) + " · " + r.run_id.slice(4, 6) + "/" + r.run_id.slice(6, 8);
-      const pts = r.points != null ? r.points + (r.planned_points && r.planned_points !== r.points ? "/" + r.planned_points : "") + " pts · " : "";
-      const b = h("button", { class: "pane-menu-item", type: "button", role: "menuitem" }, st,
-        h("span", { class: "pm-plan" }, r.plan), h("span", { class: "pm-meta" }, pts + when));
-      b.addEventListener("click", () => {
-        menu.hidden = true;
-        $("runs-history").setAttribute("aria-expanded", "false");
-        if (r.status === "running") noticeRun(r.run_id, r.plan); else openRun(r.run_id, r.plan);
-      });
-      return b;
-    }) : [h("div", { class: "pane-menu-note" }, "No runs yet.")]));
   }
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
@@ -1290,14 +1428,15 @@
   function initRunsPane() {
     $("toggle-runs").addEventListener("click", () => toggleRuns());
     $("close-runs").addEventListener("click", () => toggleRuns(false));
-    $("runs-history").addEventListener("click", showRunsMenu);
-    document.addEventListener("click", (e) => {
-      if (!$("runs-menu").hidden && !e.target.closest(".pane-menu-wrap")) {
-        $("runs-menu").hidden = true;
-        $("runs-history").setAttribute("aria-expanded", "false");
-      }
-    });
-    document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("runs-menu").hidden = true; });
+    $("open-runs").addEventListener("click", () => showView("runs"));
+    $("open-scans").addEventListener("click", () => showView("scans"));
+    $("open-queue").addEventListener("click", showQueue);
+    $("runs-seg").addEventListener("keydown", segKeys);
+    $("runs-filter").addEventListener("input", renderRunList);
+    $("scans-filter").addEventListener("input", renderScans);
+    $("scans-import").addEventListener("click", importScript);
+    $("scans-path").addEventListener("submit", (e) => { e.preventDefault(); if ($("scans-path-input").value.trim()) importPath($("scans-path-input").value.trim()); });
+    $("scans-path-input").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); $("scans-path").hidden = true; $("scans-import").focus(); } });
     window.addEventListener("resize", fitLayout);
   }
 
@@ -1349,23 +1488,37 @@
     return h("table", {}, h("thead", {}, head), h("tbody", {}, ...rows));
   }
 
-  // the files Kelvin keeps in a run's folder: its report, slides and data, opened on this computer
-  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "run.h5": "Data (HDF5)" };
+  // the files Kelvin keeps in a run's folder: its report, slides and data, opened on this computer; a script run's
+  // own account of what ran (view: script.py as it ran, its output, its commands), read here as text, never opened
+  const RUN_FILE_LABEL = { "report.pdf": "Report (PDF)", "report.pptx": "Slides", "run.h5": "Data (HDF5)",
+                           "script.py": "Script", "output.txt": "Output", "commands.jsonl": "Commands" };
   function runFiles(tab, box) {
     const files = (tab.final && tab.final.files) || [];
     const base = "/api/runs/" + encodeURIComponent(tab.runId);
     const openIt = async (path, what) => {
       try { await api(path, { body: {} }); toast("Opening " + what + "…"); } catch (e) { toast(e.message); }
     };
+    const text = h("pre", { class: "rv-file-text", hidden: true });
+    const readIt = async (name) => {
+      if (!text.hidden && text.dataset.name === name) { text.hidden = true; return; }
+      try {
+        const res = await fetch(base + "/files/" + encodeURIComponent(name), { headers: { "X-Kelvin-Token": token } });
+        if (!res.ok) throw new Error(((await res.json().catch(() => ({}))).error) || "HTTP " + res.status);
+        text.textContent = await res.text();
+        text.dataset.name = name;
+        text.hidden = false;
+      } catch (e) { toast(e.message); }
+    };
     const buttons = files.map((f) => {
       const b = h("button", { class: f.name === "report.pdf" ? "btn small" : "btn small ghost", type: "button",
         title: f.name }, RUN_FILE_LABEL[f.name] || f.name);
-      b.addEventListener("click", () => openIt(base + "/files/" + encodeURIComponent(f.name) + "/open", f.name));
+      b.addEventListener("click", () => (f.view ? readIt(f.name)
+        : openIt(base + "/files/" + encodeURIComponent(f.name) + "/open", f.name)));
       return b;
     });
     const folder = h("button", { class: "link soft", type: "button" }, "Open folder");
     folder.addEventListener("click", () => openIt(base + "/open", "the run's folder"));
-    box.replaceChildren(...buttons, folder, runDownloads(tab.runId));
+    box.replaceChildren(...buttons, folder, runDownloads(tab.runId), text);
     box.hidden = false;
   }
 
@@ -1448,7 +1601,7 @@
     const sel = $("report-scope");
     const chat = S.chats.find((c) => c.id === S.chatId);
     const opts = [];
-    const active = RUNS.active && RUNS.tabs.get(RUNS.active);
+    const active = RUNS.view === "runs" && RUNS.active && RUNS.tabs.get(RUNS.active);   // the run shown
     if (active && active.status !== "running") opts.push(["run", "This run: " + (active.plan || RUNS.active)]);
     if (chat && chat.project) opts.push(["project", "Runs in project " + (projectName(chat.project) || "")]);
     if (S.chatId && !S.incognito) opts.push(["chat", "Runs in this chat"]);
@@ -4227,6 +4380,7 @@
   const QUEUE_STEP = "step: cool to 2 K\nset: { tc.T_set: 2 }\nstabilize: { read: tc.T, within: 0.02, for: 120, timeout: 7200 }\nwait: 600";
   const Q_STATE = { idle: "Idle", running: "Running", pausing: "Pausing after this item", paused: "Paused" };
   const Q_STATUS = { waiting: "waiting", running: "running…", done: "done", failed: "failed", stopped: "stopped", skipped: "skipped" };
+  const Q_KIND = { plan: "scan", step: "step", script: "script" };
 
   function buildQueueView() {
     const add = h("button", { id: "queue-add", class: "btn small", type: "button" }, "Add to the queue");
@@ -4273,20 +4427,10 @@
   }
   function showQueue() {
     if (!QUEUE.built) buildQueueView();
+    showView("queue");
     toggleRuns(true);
-    RUNS.active = null;
-    for (const t of RUNS.tabs.values()) { t.btn.classList.remove("on"); t.btn.setAttribute("aria-selected", "false"); t.body.hidden = true; }
-    $("run-body").querySelector(".pane-empty").hidden = true;
-    $("queue-view").hidden = false;
-    $("open-queue").classList.add("on");
-    QUEUE.open = true;
     renderQueue();
     api("/api/queue").then((q) => { QUEUE.data = q; renderQueue(); }, () => {});
-  }
-  function hideQueue() {
-    QUEUE.open = false;
-    $("queue-view").hidden = true;
-    $("open-queue").classList.remove("on");
   }
   async function queueOp(body, quiet) {
     try {
@@ -4330,10 +4474,11 @@
     const st = i.status === "running" ? h("span", { class: "spinner" }) : i.status === "done" ? icon("check")
       : ["failed", "stopped"].includes(i.status) ? icon("warn") : h("span", { class: "muted" }, "·");
     const sub = [h("span", { class: "q-status" }, Q_STATUS[i.status] || i.status)];
+    if (i.then_pause && i.status === "waiting") sub.push(h("span", { title: "The queue pauses after this item" }, "then pauses "));
     if (i.note) sub.push(h("span", {}, i.note + " "));
     if (i.message) sub.push(h("span", {}, "— " + i.message));
     const li = h("li", { class: "q-item " + i.status, tabindex: "0", title: i.text },
-      h("span", { class: "q-num" }, st), h("span", { class: "q-kind" }, i.kind === "plan" ? "scan" : "step"),
+      h("span", { class: "q-num" }, st), h("span", { class: "q-kind" }, Q_KIND[i.kind] || i.kind),
       h("span", { class: "q-name" }, n + ". " + i.name), h("span", { class: "q-acts" }, ...buttons), h("div", { class: "q-sub" }, ...sub));
     li.addEventListener("keydown", (e) => {   // Special Measure's keys: u / d move the item, Delete removes it
       if (e.target !== li) return;
@@ -4381,6 +4526,188 @@
     QUEUE.data = Object.assign({}, q);
     if (!old || old.changed !== q.changed || old.state !== q.state || old.reason !== q.reason) renderQueue();
     else queueBadge(q);
+  }
+
+  // ------------------------------------------------------------------ scans and scripts, kept to run again
+  // Each scan Kelvin runs and each script a person imports (GET/POST /api/library): Run puts it first in the queue,
+  // which pauses after it; Queue puts it last. A script runs with the settings last used, or those shown.
+  const SCANS = { data: null, shown: new Set(), params: new Map(), renaming: null, fresh: null, empty: "" };
+
+  async function loadScans() {   // a fresh visit: the last import's check and message go
+    $("scans-check").hidden = true;
+    scansSay("");
+    SCANS.fresh = null;
+    try { SCANS.data = await api("/api/library"); } catch (e) { scansSay(e.message, true); }
+    renderScans();
+  }
+  function scansSay(text, bad) {
+    $("scans-msg").textContent = text;
+    $("scans-msg").classList.toggle("bad", !!bad);
+  }
+  async function scansOp(body) {
+    try {
+      const r = await api("/api/library", { body });
+      if (r.library) SCANS.data = r.library;
+      return r;
+    } catch (e) { scansSay(e.message, true); return null; }
+  }
+  function renderScans() {
+    const lib = SCANS.data || {};
+    const q = $("scans-filter").value.trim().toLowerCase();
+    const match = (e) => !q || [e.name, e.summary, e.path].some((s) => s && String(s).toLowerCase().includes(q));
+    let any = 0, shown = 0;
+    for (const [id, list] of [["scans-scripts", lib.scripts || []], ["scans-plans", lib.scans || []]]) {
+      const kept = list.filter(match);
+      any += list.length; shown += kept.length;
+      $(id).hidden = !kept.length;
+      $(id).querySelector("ul").replaceChildren(...kept.map(scanEntry));
+    }
+    SCANS.empty = SCANS.empty || $("scans-empty").textContent;
+    $("scans-filter").hidden = !any;
+    $("scans-empty").hidden = !SCANS.data || shown > 0;
+    $("scans-empty").textContent = any ? "Nothing matches." : SCANS.empty;
+    const field = document.querySelector(".lib-rename");
+    if (field && document.activeElement !== field) { field.focus(); field.select(); }
+  }
+  function scanEntry(e) {
+    const script = e.kind === "script";
+    const act = (label, title, fn) => {
+      const b = h("button", { type: "button", title }, label);
+      b.addEventListener("click", () => fn(b));
+      return b;
+    };
+    const more = h("button", { type: "button", "aria-label": "More: " + e.name, "aria-haspopup": "menu" }, icon("dots"));
+    more.addEventListener("click", (ev) => { ev.stopPropagation(); scanMenu(more, e); });
+    const tag = !script ? null : !e.exists ? h("span", { class: "tag warn", title: "The file is gone" }, "missing")
+      : e.changed ? h("span", { class: "tag", title: "Edited since its last run" }, "changed") : null;
+    const used = e.count ? "ran " + e.count + "×" + (e.used ? " · last " + dayText(new Date(e.used * 1000)) : "") : "not run yet";
+    const what = script ? e.path : e.summary || "";
+    const li = h("li", { class: "q-item lib" + (SCANS.fresh === e.id ? " fresh" : ""), "data-id": e.id },
+      h("span", { class: "lib-name" }, SCANS.renaming === e.id ? renameField(e) : h("span", { class: "q-name" }, e.name), tag),
+      h("span", { class: "q-acts" }, act("Run", "First in the queue, which pauses after it", (b) => runScan(e, false, b)),
+        act("Queue", "Last in the queue", (b) => runScan(e, true, b)), more),
+      h("span", { class: "q-sub", title: what }, what), h("span", { class: "lib-used" }, used));
+    if (SCANS.shown.has(e.id)) li.append(scanDetail(e));
+    return li;
+  }
+  function scanMenu(anchor, e) {
+    const shown = SCANS.shown.has(e.id);
+    const items = [{ label: shown ? "Hide" : "Show", icon: e.kind === "script" ? "sliders" : "doc", onClick: () => {
+      if (shown) SCANS.shown.delete(e.id); else SCANS.shown.add(e.id);
+      renderScans();
+      focusMore(e.id);
+    } }];
+    if (e.last_run) items.push({ label: "Open last run", icon: "chev", onClick: () => openRun(e.last_run, e.last_run.split("-").slice(2).join("-") || e.name) });
+    items.push({ label: "Rename", icon: "pencil", onClick: () => { SCANS.renaming = e.id; renderScans(); } },
+      { sep: true }, { label: "Remove", icon: "trash", danger: true, onClick: async () => {
+        if (await scansOp({ op: "remove", id: e.id })) { SCANS.shown.delete(e.id); SCANS.params.delete(e.id); renderScans(); }
+      } });
+    popMenu(anchor, items);
+  }
+  function focusMore(id) {   // after a redraw, the keyboard goes on from the entry's ⋯
+    const more = document.querySelector('#scans-view li[data-id="' + CSS.escape(id) + '"] .q-acts button:last-child');
+    if (more) more.focus();
+  }
+  function renameField(e) {
+    const input = h("input", { class: "side-input lib-rename", value: e.name, maxlength: "80", spellcheck: "false", "aria-label": "Name" });
+    let done = false;
+    const finish = async (save, keys) => {
+      if (done || !input.isConnected) return;   // redrawn meanwhile: the new field goes on
+      done = true;
+      SCANS.renaming = null;
+      const name = input.value.trim();
+      if (save && name && name !== e.name) await scansOp({ op: "rename", id: e.id, name });
+      renderScans();
+      if (keys) focusMore(e.id);
+    };
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") { ev.preventDefault(); finish(true, true); }
+      else if (ev.key === "Escape") { ev.preventDefault(); ev.stopPropagation(); finish(false, true); }
+    });
+    input.addEventListener("blur", () => finish(true, false));
+    return input;
+  }
+  // a script's settings, as fields (settable: {name: value in the file}, notes: {name: its comment}): the values last
+  // used, else the file's; with the file unreadable, those last used. Run sends them once shown.
+  function scriptFields(e) {
+    const params = e.params || {}, notes = e.notes || {};
+    const unread = e.exists === false || !!e.problem;
+    return Object.entries(unread ? params : e.settable || {}).map(([name, value]) =>
+      ({ name, value: name in params ? params[name] : value, note: notes[name] || "" }));
+  }
+  const paramRaw = (v) => (typeof v === "boolean" ? v : typeof v === "string" ? v : JSON.stringify(v));
+  function paramValue(base, raw) {   // what was typed, as the kind of value the script has there
+    if (raw === undefined) return base;
+    if (typeof base === "boolean" || typeof base === "string") return raw;
+    if (typeof base === "number") return raw.trim() !== "" && isFinite(Number(raw)) ? Number(raw) : raw;
+    try { return JSON.parse(raw); } catch (err) { return raw; }
+  }
+  function scanDetail(e) {
+    if (e.kind !== "script") return h("pre", { class: "lib-detail lib-plan" }, e.text || "");
+    const fields = scriptFields(e);
+    if (!SCANS.params.has(e.id)) SCANS.params.set(e.id, Object.fromEntries(fields.map((f) => [f.name, paramRaw(f.value)])));
+    const raw = SCANS.params.get(e.id);
+    const rows = fields.map((f) => {
+      const input = typeof f.value === "boolean" ? h("input", { type: "checkbox" })
+        : h("input", { value: raw[f.name] === undefined ? paramRaw(f.value) : raw[f.name], spellcheck: "false", autocomplete: "off",
+                       inputmode: typeof f.value === "number" ? "decimal" : null });
+      if (input.type === "checkbox") {
+        input.checked = raw[f.name] === undefined ? f.value : !!raw[f.name];
+        input.addEventListener("change", () => { raw[f.name] = input.checked; });
+      } else input.addEventListener("input", () => { raw[f.name] = input.value; });
+      return h("label", { class: "lib-param", title: f.note || null }, h("span", {}, f.name), input);
+    });
+    const args = e.args && e.args.length ? h("span", { class: "lib-args" }, "args: " + e.args.join(" ")) : null;
+    const problem = e.problem ? h("span", { class: "lib-problem hint bad" }, e.problem) : null;
+    return h("div", { class: "lib-detail lib-params" }, problem,
+      ...(rows.length ? rows : problem ? [] : [h("span", { class: "hint" }, "No settings to change.")]), args);
+  }
+  async function runScan(e, queue, btn) {
+    const body = { op: "run", id: e.id };
+    const raw = e.kind === "script" && SCANS.params.get(e.id);
+    if (raw) body.params = Object.fromEntries(scriptFields(e).map((f) => [f.name, paramValue(f.value, raw[f.name])]));
+    if (queue) body.queue = true;
+    scansSay(queue ? "" : "Starting…");   // the queue's approval is asked first
+    btn.disabled = true;
+    const r = await scansOp(body);
+    btn.disabled = false;
+    if (!r) return;
+    queueFromState(r.queue);
+    renderQueue();
+    scansSay(r.message || "");
+    if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
+  }
+  // Import a script…: the computer's own file picker in the Kelvin app; in a browser, its path typed
+  function hasFilePicker() { return !!(window.pywebview && window.pywebview.api && window.pywebview.api.pick_file); }
+  async function importScript() {
+    if (!hasFilePicker()) {
+      $("scans-path").hidden = false;
+      $("scans-path-input").focus();
+      return;
+    }
+    let path = "";
+    try { path = (await window.pywebview.api.pick_file(store("lh.scriptFolder") || LAB.scriptsFolder || "")) || ""; } catch (e) { return; }
+    if (path) importPath(path);
+  }
+  async function importPath(path) {
+    scansSay("");
+    const r = await scansOp({ op: "import", path });
+    if (!r) return;
+    store("lh.scriptFolder", path.replace(/[\\/][^\\/]*$/, ""));
+    $("scans-path").hidden = true;
+    $("scans-path-input").value = "";
+    SCANS.fresh = r.entry ? r.entry.id : null;
+    $("scans-filter").value = "";
+    const check = r.check || {};
+    const problems = check.problems || [];
+    const close = h("button", { class: "icon-btn", type: "button", "aria-label": "Close" }, icon("x"));
+    close.addEventListener("click", () => { $("scans-check").hidden = true; });
+    $("scans-check").className = "callout small scans-check" + (problems.length ? "" : " calm");
+    $("scans-check").replaceChildren(...[h("div", { class: "sc-head" }, h("b", {}, r.entry ? r.entry.name : path), close),
+      problems.length ? h("ul", {}, ...problems.map((p) => h("li", {}, p))) : null,
+      check.text ? h("div", { class: "sc-text" }, check.text) : null].filter(Boolean));
+    $("scans-check").hidden = false;
+    renderScans();
   }
 
   // ------------------------------------------------------------------ why the lab has no instruments yet
@@ -6767,7 +7094,6 @@
       try { await api("/api/reports/open-folder", { body: {} }); } catch (e) { toast(e.message); }
     });
     loadMount();
-    $("open-queue").addEventListener("click", () => (QUEUE.open ? hideQueue() : showQueue()));
     $("make-report").addEventListener("click", makeReport);
     $("watch-add-toggle").addEventListener("click", () => { $("watch-form").hidden = !$("watch-form").hidden; });
     $("watch-form").addEventListener("submit", addWatch);
