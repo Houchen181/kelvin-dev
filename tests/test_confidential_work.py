@@ -460,3 +460,29 @@ def test_the_protection_of_a_confidential_sample_holds_for_every_chat_without_it
                                ("devices", {})])
     assert "outside device %s limits" % SECRET in inside["c0"] and "mounted now: %s" % SECRET in inside["c1"]
     assert SECRET in p.agent.context(p.store.load(p.secret))["system"]   # its chain, in its own chats' brief
+
+
+def test_the_restart_card_counts_the_confidential_work_it_cut_short_without_naming_it(rt, tmp_path, monkeypatch):
+    from test_team_and_analysis import _relay
+    p = Portal(tmp_path, rt)
+    p.turn(p.secret, [("run_plan", {"plan": NDA}), ("queue_add", {"item": NDA, "note": "W17"})])
+    p.turn(p.other, [("run_plan", {"plan": OPEN})])
+    run, _ = newest(rt, "acme_gate")
+    shared, _ = newest(rt, "thesis_gate")
+    rt.interrupted, rt.queue.cut_short = [run, shared], [rt.queue.items[0]]   # as after a crash
+    rt._incident_due = True
+    rt._incident_check()
+    assert rt.incident and "acme_gate" in json.dumps(rt.ui_state()["incident"])   # the person at the computer
+    notices = [n for n in rt.notifier.notices if "restarted" in n["title"]]
+    assert notices and "acme" not in json.dumps(notices) and "1 run of unshared work" in notices[-1]["text"]
+    assert shared in notices[-1]["text"] and "1 item of unshared work" in notices[-1]["text"]
+    ask = _relay(rt, tmp_path, monkeypatch)
+    status, raw = ask("GET", "/api/state")
+    assert status == 200 and b"acme" not in raw.lower() and shared.encode() in raw
+    other = p.turn(p.other, [("lab_status", {}), ("recent_events", {"n": 60})])
+    for call, text in other.items():
+        assert "acme" not in text.lower(), (call, text)
+    assert "AFTER KELVIN RESTARTED" in other["c0"] and "1 run of unshared work" in other["c0"]
+    inside = p.turn(p.secret, [("lab_status", {}), ("recent_events", {"n": 60})])
+    assert run in inside["c0"] and "the queue was running acme_gate" in inside["c0"]
+    assert "cut short %s" % run in inside["c1"]   # the project's own record of it

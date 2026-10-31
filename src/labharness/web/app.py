@@ -733,18 +733,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 lines = [event_line(e) for e in reversed(runtime.seen_events(tail_events(runtime.events_path, 25)))]
             hidden += max(0, len(data["events"]) - len(lines))
             out["events"] = lines
-        incident = data.get("incident")
-        if isinstance(incident, dict) and incident.get("runs"):   # runs a restart cut short: unshared work's unnamed
+        if isinstance(data.get("incident"), dict):   # what a restart cut short: unshared work unnamed
             with runtime.viewing(Viewer()):
-                cut = set(runtime._hidden_runs()) & set(incident["runs"])
-
-            def unnamed(text: Any) -> Any:
-                for run_id in cut:
-                    text = str(text).replace(run_id, "a run of unshared work")
-                return text
-            if cut:
-                out["incident"] = dict(incident, runs=[unnamed(r) for r in incident["runs"]],
-                                       lines=[unnamed(line) for line in incident.get("lines") or []])
+                out["incident"] = runtime.incident_view()
+            hidden += sum(1 for k in ("runs", "queue") for a, b in zip(data["incident"].get(k) or [],
+                                                                      (out["incident"] or {}).get(k) or []) if a != b)
         if isinstance(data.get("wakes"), list):
             out["wakes"] = [dict(w, text="", note="") if isinstance(w, dict) and unshared_chat(str(w.get("chat_id")))
                             else w for w in data["wakes"]]

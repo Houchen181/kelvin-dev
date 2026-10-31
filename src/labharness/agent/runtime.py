@@ -160,6 +160,8 @@ def event_line(e: Dict[str, Any]) -> str:
         text = "after a restart: %s" % "; ".join(
             "%s %s" % (k, ", ".join(map(str, v)) if isinstance(v, list) else v) for k, v in e.items()
             if k in ("outputs", "runs", "queue", "alarms", "safe"))
+    elif kind == "cut_short":
+        text = "after a restart: cut short %s" % (e.get("run") or "the queue's %s" % e.get("item"))
     elif kind == "left_on":
         text = "after the stop: %s" % ("still on: " + ", ".join(e["left"]) if e.get("left") else "nothing left on")
     elif kind == "bring_to_safe":
@@ -5850,8 +5852,9 @@ class LabRuntime:
                 if (key, v.get("above"), v.get("below"), for_s) in have:
                     continue
                 device = str(v.get("device") or "")
-                if device and device != mounted:
-                    raise ValueError("made for %s, which is no longer mounted" % device)
+                if device and device != mounted:   # unshared work's sample goes unnamed on the restart's card
+                    raise ValueError("made for %s, which is no longer mounted" % ("its sample" if v.get("whose")
+                                                                                 else device))
                 w = self.monitor.add(Watch(key, v.get("above"), v.get("below"), for_s, float(v.get("every") or 10),
                                            [], False, str(v.get("source") or "person"), str(v.get("note") or "")[:200],
                                            device=device))
@@ -6024,14 +6027,19 @@ class LabRuntime:
             for inst in self.lab.instruments.values():
                 if inst.enabled and not protection.applies_to_sample(inst.card):
                     away += self._away(inst, inst.card.drives)
-            queue = [i.name for i in getattr(self.queue, "cut_short", [])]
+            cut = list(getattr(self.queue, "cut_short", []))
+            queue = [i.name for i in cut]
             runs = list(self.interrupted)
             unattended = bool(queue)
+            marks: Dict[str, Any] = {"runs": {}, "queue": [self._unshared_marks(i.whose()) for i in cut]}
             for run_id in runs:
                 try:
-                    unattended = unattended or bool(rundata.meta(self.runs / run_id).get("queue"))
+                    meta = rundata.meta(self.runs / run_id)
                 except (KeyError, OSError, ValueError):
-                    pass
+                    meta = {"unshared": True}   # whose it was can't be read: kept apart
+                unattended = unattended or bool(meta.get("queue"))
+                if self._unshared_marks(meta):
+                    marks["runs"][run_id] = self._unshared_marks(meta)
             alarms = [a["text"] for a in self.alarms_before]
             if not (outputs or runs or queue or alarms or self.restored["dropped"]):
                 if self.restored["back"]:
@@ -6041,23 +6049,63 @@ class LabRuntime:
             incident: Dict[str, Any] = {
                 "at": datetime.now().isoformat(timespec="seconds"), "outputs": sorted(outputs),
                 "on": sum((outputs[n] for n in sorted(outputs)), []), "away": away, "runs": runs, "queue": queue, "alarms": alarms, "watches": dict(self.restored),
-                "unattended": unattended, "safe": []}
+                "unattended": unattended, "safe": [], "marks": marks}
             if unattended and outputs:   # nobody was there when it stopped: what reaches the sample goes to safe now
                 incident["safe"] = self._outputs_to_safe(sorted(outputs), "kelvin (after a restart)")
             self.incident = incident
-            self.gate.log.write("incident", by="kelvin", **{k: v for k, v in incident.items() if v and k != "at"})
-            self.notifier("alarm", "Kelvin restarted: check the lab", "; ".join(self.incident_lines())[:300])
+            with self.viewing(Viewer()):   # what everyone reads (the record, the notice): unshared work unnamed
+                shown, said = self.incident_view() or {}, "; ".join(self.incident_lines())
+            self.gate.log.write("incident", by="kelvin", **{k: v for k, v in shown.items()
+                                                            if v and k not in ("at", "lines")})
+            for run_id, whose in marks["runs"].items():   # and unshared work's own record of what was cut short
+                self.gate.log.write("cut_short", by="kelvin", run=run_id, whose=whose)
+            for item, whose in zip(cut, marks["queue"]):
+                if whose:
+                    self.gate.log.write("cut_short", by="kelvin", item=item.name, whose=whose)
+            self.notifier("alarm", "Kelvin restarted: check the lab", said[:300])
         finally:
             self.lock.release()
 
+    def _unshared_marks(self, marks: Any) -> Optional[Dict[str, Any]]:
+        """The marks (WHOSE) of unshared work, as its records keep them; None for shared work."""
+        return {k: marks[k] for k in WHOSE if marks.get(k)} if self.unshared_work(marks) else None
+
+    def _incident_unseen(self, i: Dict[str, Any]) -> Tuple[set, set]:
+        """The runs, and the queue items (by place), a restart cut short that the viewer of this thread may not see."""
+        marks = i.get("marks") or {}
+        runs = set(self._hidden_runs()) if i.get("runs") else set()
+        runs |= {r for r, m in (marks.get("runs") or {}).items() if not self.may_see(m)}
+        whose = marks.get("queue") or []
+        return runs, {k for k, m in enumerate(whose) if m and not self.may_see(m)}
+
+    def incident_view(self) -> Optional[Dict[str, Any]]:
+        """The card after a restart (or a person's Stop) as the viewer of this thread may read it (/api/state, phones
+        through the Kelvin hub, the record): runs and queue items of unshared work it may not see go unnamed."""
+        i = self.incident
+        if not i:
+            return None
+        runs, items = self._incident_unseen(i)
+        return dict({k: v for k, v in i.items() if k != "marks"},
+                    runs=["a run of unshared work" if r in runs else r for r in i.get("runs") or []],
+                    queue=["an item of unshared work" if k in items else n for k, n in enumerate(i.get("queue") or [])],
+                    lines=self.incident_lines())
+
     def incident_lines(self) -> List[str]:
-        """The restart's card in words (lab_status, notices); or, after a person's Stop, what it left on."""
+        """The restart's card in words (lab_status, notices); or, after a person's Stop, what it left on. Unshared work
+        it cut short is counted, not named, for a viewer outside it."""
         i = self.incident
         if not i:
             return []
         if i.get("kind") == "stop":
             return ["still on: %s" % ", ".join(i["on"])] + (["put to safe: %s" % "; ".join(i["safe"])]
                                                            if i["safe"] else [])
+
+        def named(names: List[str], unseen: int, what: str) -> str:
+            return ", ".join(names + (["%d %s%s of unshared work" % (unseen, what, "" if unseen == 1 else "s")]
+                                      if unseen else []))
+        hidden_runs, hidden_items = self._incident_unseen(i)
+        runs = [r for r in i["runs"] if r not in hidden_runs]
+        queue = [n for k, n in enumerate(i["queue"]) if k not in hidden_items]
         lines = []
         if i["outputs"]:
             lines.append("left on: %s" % ", ".join(i.get("on") or i["outputs"]))
@@ -6067,9 +6115,11 @@ class LabRuntime:
         if i["away"]:
             lines.append("as they were (temperature, field, positions): %s" % ", ".join(i["away"]))
         if i["runs"]:
-            lines.append("runs it cut short (kept up to their last point): %s" % ", ".join(i["runs"]))
+            lines.append("runs it cut short (kept up to their last point): %s" % named(
+                runs, len(i["runs"]) - len(runs), "run"))
         if i["queue"]:
-            lines.append("the queue was running %s; it waits for a person to start it again" % ", ".join(i["queue"]))
+            lines.append("the queue was running %s; it waits for a person to start it again" % named(
+                queue, len(i["queue"]) - len(queue), "item"))
         if i["alarms"]:
             lines.append("alarms that were on: %s" % "; ".join(i["alarms"]))
         if i["watches"].get("back"):
@@ -6333,7 +6383,7 @@ class LabRuntime:
                                  if not i.simulated and i.card.status == "draft"),
                 "watches": self.monitor.list(),
                 "alarms": self.alarms_view(),
-                "incident": dict(self.incident, lines=self.incident_lines()) if self.incident else None,
+                "incident": self.incident_view(),
                 "notices": list(self.notifier.notices)[-20:],
                 "instruments": self.instruments(),
                 "live": {k: v for k, v in (self.live_view(10 ** 9) or {}).items()
