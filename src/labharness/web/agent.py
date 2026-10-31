@@ -775,8 +775,9 @@ class ChatAgent:
             return
         for text in waiting:
             chat["messages"].append({"role": "user", "text": text, "steer": True})
-        chat.pop("outside", None)   # the person wrote: what the chat read before no longer pauses auto mode
-        self.runtime.gate.outside_chat = None
+        # the person wrote: what the chat read before no longer pauses auto mode (its next lab call sets the gate's
+        # mark from the chat; the gate's mark now may be another chat's, working the lab meanwhile)
+        chat.pop("outside", None)
         self.store.save(chat)
         await emit({"type": "steered", "texts": waiting})
 
