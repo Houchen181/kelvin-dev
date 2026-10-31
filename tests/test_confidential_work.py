@@ -517,3 +517,20 @@ def test_a_persons_answer_to_a_card_of_confidential_work_stays_that_works_own(tm
     assert status == 200 and b"acme" not in raw.lower()
     inside = p.turn(p.secret, [("recent_events", {"n": 40})])["c0"]
     assert "declined" in inside and "acme_gate" in inside   # the project's own record of it
+
+
+def test_whose_a_run_is_fails_closed(rt, tmp_path, monkeypatch):
+    from labharness import rundata
+    p = Portal(tmp_path, rt)
+    p.turn(p.secret, [("run_plan", {"plan": NDA})])
+    run, _ = newest(rt, "acme_gate")
+
+    def locked():
+        raise OSError("the catalog is locked")
+    monkeypatch.setattr(rt, "_fresh_catalog", locked)   # each run's own record says whose it is
+    with rt.viewing(Viewer()):
+        assert run in rt._hidden_runs()
+    monkeypatch.setattr(rundata, "meta", lambda d: {}["damaged"])   # nor can that be read: kept apart
+    with rt.viewing(Viewer()):
+        assert run in rt._hidden_runs() and not rt.may_see(rt._run_marks(rt.runs / run))
+    assert rt.may_see(rt._run_marks(rt.runs / run))   # the person at the computer

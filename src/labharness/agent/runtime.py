@@ -620,14 +620,16 @@ class LabRuntime:
         return notice
 
     def _run_marks(self, d: Path) -> Dict[str, Any]:
-        """Whose a run is: its meta (the running plan's, while it runs)."""
+        """Whose a run is: its meta (the running plan's, while it runs). One whose meta can't be read is kept apart
+        (unshared): only the person at the computer sees it."""
         live = self.live or {}
         if live.get("run_id") == d.name and live.get("status") == "running" and self.running_meta:
             return self.running_meta
         try:
-            return rundata.meta(d)
-        except (KeyError, OSError, ValueError):
-            return {}
+            meta = rundata.meta(d)
+        except Exception:
+            return {"unshared": True}
+        return meta if isinstance(meta, dict) else {"unshared": True}
 
     def _hidden_runs(self, cache: Optional[Dict[Any, Any]] = None) -> Dict[str, Tuple[str, str, str]]:
         """The runs the viewer of this thread may not see (none without one): run id -> (plan, started, finished)."""
@@ -635,11 +637,16 @@ class LabRuntime:
             return {}
         out: Dict[str, Tuple[str, str, str]] = {}
         try:
-            for run_id, plan, started, finished, marks in self._fresh_catalog().marks():
-                if not self.may_see(marks, cache):
-                    out[run_id] = (plan or "", started or "", finished or "9999")
-        except Exception:   # the catalog can't be read now: the runs' own folders still refuse (_run_dir)
-            pass
+            rows = self._fresh_catalog().marks()
+        except Exception:   # the catalog can't be read now: each run's own record says whose it is
+            rows = []
+            for d in self.runs.iterdir():
+                marks = self._run_marks(d)
+                rows.append((d.name, str(marks.get("plan") or ""), str(marks.get("started") or ""),
+                             str(marks.get("finished") or ""), marks))
+        for run_id, plan, started, finished, marks in rows:
+            if not self.may_see(marks, cache):
+                out[run_id] = (plan or "", started or "", finished or "9999")
         live = self.live or {}
         if live.get("run_id") and self.live_meta and not self.may_see(self.live_meta, cache):
             try:
