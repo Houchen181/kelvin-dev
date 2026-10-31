@@ -4,7 +4,10 @@ different model on each row (a Q "drop" of 14 % that wasn't there), a centred re
 first point of 0 counts, Ramsey told to widen its sweep; a parabola called a dip 117 T wide and a gate map's
 magnetoresistance a 2-D Gaussian spot; fits of noise given as numbers and failed fits kept unmarked; smooth() pulling
 a sweep's ends down; a Hall density from a zero R_H, a lock-in's volts where the measurement chain gives ohms, and a
-leakage current leading a gate sweep's headline."""
+leakage current leading a gate sweep's headline. And from the review of 0.3.34: a Q for a line as wide as the sweep,
+superconducting transitions called peaks or two dips, a swept excitation's every point divided by its first current,
+a decay's first point left out, hysteresis from readings paired with the wrong x, "both sides" of a kinked line's
+end, and a Hall density beside "not significant"."""
 import math
 import random
 
@@ -237,7 +240,7 @@ def test_a_hall_density_only_from_an_r_h_that_stands_out_in_ohms():
     noise = np.random.default_rng(2).normal(0, 0.5, b.size)
     r = fitting.fit(hall, b, 5 + noise, x_unit="T", y_unit="Ω")
     assert not any(d["name"].startswith("carrier") for d in r["derived"])
-    assert any("within 3σ of 0" in w for w in r["warnings"])
+    assert any("is not significant" in w for w in r["warnings"])
     r = fitting.fit(hall, b, 1e-5 * b + noise * 1e-8, x_unit="T", y_unit="V")
     assert not r["derived"] and any("not ohms" in w for w in r["warnings"])
     ohms = fitting.fit(hall, b, 5 - b / (fitting.QE * 2e16) + noise, x_unit="T", y_unit="Ω")
@@ -424,3 +427,15 @@ def test_a_kinked_line_has_no_both_sides_and_no_share_of_a_level_at_or_below_zer
     assert "both sides of a minimum" in low["summary"] and "%" not in low["summary"], low["summary"]
     zero = analyze_curve(b.tolist(), (b ** 2 + rng.normal(0, 0.01, b.size)).tolist(), "magnet.B", "V", "T", "V")
     assert zero["summary"].startswith("V rises as magnet.B² from ") and "%" not in zero["summary"], zero["summary"]
+
+
+def test_a_hall_density_never_stands_beside_not_significant():
+    hall = fitting.MODELS["hall"]()
+    b = np.linspace(-1, 1, 41)
+    noise = np.random.default_rng(2).normal(0, 0.5, b.size)
+    rh = next(p for p in fitting.fit(hall, b, 5 + noise, x_unit="T", y_unit="Ω")["params"] if p["name"] == "R_H")
+    for z in (3.2, 4.5):   # past 3σ but short of p ≤ 1e-3 (41 points); and past both
+        r = fitting.fit(hall, b, 5 + noise + (z * rh["error"] - rh["value"]) * b, x_unit="T", y_unit="Ω")
+        density = any(d["name"].startswith("carrier") for d in r["derived"])
+        assert density == (z > 4) == (r["p_flat"] <= fitting.SIGNIFICANT), (z, r["p_flat"])
+        assert any("not significant" in w for w in r["warnings"]) != density, r["warnings"]

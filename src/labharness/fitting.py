@@ -972,9 +972,9 @@ def fit(model: Model, x: Any, y: Any, sigma: Any = None, start: Optional[Dict[st
     _shape(np, out, model, xs)
     if model.derived:
         out["derived"] = _derived(np, model, p, free, cov, x_unit, y_unit)
-    if model.name == "hall":
-        _hall_density(out, x_unit, y_unit)
     _significance(np, out, model, xs, y, sig)
+    if model.name == "hall":   # after the significance: the density follows the same test
+        _hall_density(out, x_unit, y_unit)
     out["failed"] = _failed(out, sol, model, xs)
     return out
 
@@ -1063,17 +1063,21 @@ def _failed(out: Dict[str, Any], sol: Solution, model: Model, x: Any) -> Optiona
 
 
 def _hall_density(out: Dict[str, Any], x_unit: str, y_unit: str) -> None:
-    """A carrier density and type only from an R_H that stands out from 0 (3σ), with y a resistance and x a field."""
+    """A carrier density and type only from an R_H that is significant by the fit's own test against a flat line
+    (one threshold: a density never beside "not significant"), with y a resistance and x a field."""
     rh = next(p for p in out["params"] if p["name"] == "R_H")
+    p = out.get("p_flat")
+    if p is None and rh["error"]:   # R0 held: R_H alone against a flat line, the same F test (its t squared)
+        p = f_sf((rh["value"] / rh["error"]) ** 2, 1, max(1, out["dof"]))
     if y_unit and y_unit not in OHMS:
         out["warnings"].append("y is in %s, not ohms: R_H gives a carrier density only for a resistance (divide by "
                                "the current, or record the measurement chain)" % y_unit)
     elif x_unit and x_unit not in TESLA:
         out["warnings"].append("x is in %s, not tesla: R_H gives a carrier density only against the field" % x_unit)
-    elif rh["error"] is None or abs(rh["value"]) < 3 * rh["error"]:
+    elif not rh["error"] or p is None or p > SIGNIFICANT:
         out["derived"] = [d for d in out["derived"] if not d["name"].startswith(("carrier", "Hall mobility"))]
-        out["warnings"].append("R_H = %s is within 3σ of 0: no carrier density or type follows from it"
-                               % fmt(rh["value"], rh["error"], rh["unit"]))
+        out["warnings"].append("R_H = %s is not significant (p = %.2g): no carrier density or type follows from it"
+                               % (fmt(rh["value"], rh["error"], rh["unit"]), p if p is not None else 1.0))
     elif not y_unit:
         out["warnings"].append("y has no unit: the carrier density takes it to be in ohms")
 
