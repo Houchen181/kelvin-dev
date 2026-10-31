@@ -27,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
-from . import pulses
+from . import protection, pulses
 from .cards import ParamSpec, num
 from .eventlog import EventLog
 from .instrument import Instrument
@@ -197,6 +197,36 @@ def interlock_problem(lab: Any, lock: Any) -> Optional[str]:
     return " (now %s)" % shown
 
 
+def feeds_of(inst: Any, spec: ParamSpec) -> List[str]:
+    """What setting this parameter decides: itself, and the reading a set point drives (its readback: tc.setpoint
+    drives tc.T_sample), which is what labs write interlocks, guards and watches on."""
+    key = "%s.%s" % (inst.name, spec.name)
+    return [key] + (["%s.%s" % (inst.name, spec.readback)] if spec.readback else [])
+
+
+def paces(card: Any, name: str) -> Optional[ParamSpec]:
+    """The set point whose ramp rate this parameter is (a magnet's rate paces its field), or None. Going to safe never
+    sends a rate to its safe value: a rate of 0 is not safe, it freezes the drive where it is."""
+    return next((p for p in card.params.values() if p.rate_param == name and p.name != name), None)
+
+
+def no_further(lab: Any, lock: Any, target: Any) -> bool:
+    """An interlock's condition that fails now, which this value for it takes no further from holding (a cool-down
+    to 11 K while the sample is at 12 K, under "T < 10"). False when the condition holds now or can't be read."""
+    try:
+        ok, now = lock.require.check(lab.read)
+    except Exception:
+        return False
+    numbers = all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in (now, target, lock.require.value))
+    if ok or not numbers:
+        return False
+    if lock.require.op in ("<", "<="):
+        return target <= now
+    if lock.require.op in (">", ">="):
+        return target >= now
+    return False
+
+
 def _unreachable(spec: ParamSpec) -> bool:
     """A set point the instrument ramps to by itself whose safe value no instrument reaches: absolute zero. After a
     stop it holds where its reading is; waiting for 0 K hung a stopped run until the wait timed out."""
@@ -204,6 +234,7 @@ def _unreachable(spec: ParamSpec) -> bool:
             and isinstance(spec.safe, (int, float)) and spec.safe <= 0)
 
 
+UNDO_DEPTH = 20      # changes each chat can undo, the latest first
 OUTSIDE_S = 1800   # how long auto mode pauses after the model read text from the web, for clients without chats
 ARRIVED_SETTLE = 5.0   # lab seconds a reading may take to settle once its stage's status says the move is over
 WAIT_STALL_S = 600.0   # a wait for a set point ends once its reading has not got closer for this long (lab seconds)
@@ -237,8 +268,14 @@ class SafetyGate:
         # alarm(kind, key, text, actions): what the gate meets while it changes something goes up as an alarm (a
         # guard's trip, a wait for a set point that gave up). The monitor sets it (Monitor.from_gate); None on a twin
         self.alarm: Optional[Callable[..., Any]] = None
-        self._undo: List[Tuple[str, str, Any]] = []
+        # each chat's own direct changes (None: a client with no chats), (instr, param, before, after, when), latest
+        # last: undo takes back only its own chat's, never a run's steps or another chat's (an undo in one chat once
+        # switched another chat's heater back on)
+        self._undo: Dict[Any, List[Tuple[str, str, Any, Any, str]]] = {}
+        self._undoing = threading.local()   # whose direct change this thread makes (undoable)
         self._stop_gen = 0
+        self.stop_reason = ""   # why the latest stop came, when not from a person (an interlock): said with its result
+        self.trip_count = 0     # guard trips so far: an item that trips one pauses the queue, whatever on_error says
         self._prefixes: Dict[int, Template] = {}
         self._acting = threading.local()   # a person's own command (the portal's terminal), on this thread only
 
@@ -311,6 +348,10 @@ class SafetyGate:
             if any(b.match(c) is not None for b in inst.card.blocked):
                 return self._done(Result(False, "refused", target, message="refused: %r is blocked on %s" % (c, instr)),
                                   "action")
+        held = None if re.match(r"(stop|halt|abort)\b", "%s %s" % (name, action.label), re.I) else \
+            self._held_still(inst, target)   # a stage's own stop still works with hands on the sample
+        if held:
+            return self._done(Result(False, "refused", target, message="refused: %s" % held), "action")
         if action.drives:
             hands = self._hands_problem(target)
             if hands:
@@ -327,11 +368,45 @@ class SafetyGate:
                                  message="%s: %s%s" % (instr, action.label, " → " + said[-1] if said else "")),
                           "action", None, instrument=instr, name=name)
 
-    def undo(self) -> Result:
-        if not self._undo:
-            return Result(False, "refused", "", message="nothing to undo")
-        instr, param, before = self._undo.pop()
-        r = self._set(instr, param, before, True, self._who(), record_undo=False)
+    @contextmanager
+    def undoable(self, owner: Any) -> Iterator[None]:
+        """The agent's direct changes on this thread (set_value, send_raw) are owner's: its chat (None, outside any:
+        a client with no chats). What they change goes on that owner's undo list. A run's, a queue's or a script's
+        steps and a person's own commands never go on any."""
+        old = getattr(self._undoing, "owner", None)
+        self._undoing.owner = owner
+        try:
+            yield
+        finally:
+            self._undoing.owner = old
+
+    def undo(self, owner: Any = None) -> Result:
+        """Take back owner's (a chat's) latest direct change, through every check again. Only while the value is still
+        what that change left: one changed since (by another chat, a run, a person) is left alone, and said so. An
+        undo that moves away from safe asks a person, its card saying what it undoes."""
+        stack = self._undo.get(owner) or []
+        if not stack:
+            return Result(False, "refused", "", message="nothing to undo: this chat has made no change Kelvin can take "
+                                                        "back (a run's steps and other chats' changes aren't undone)")
+        instr, param, before, after, when = stack.pop()
+        key = "%s.%s" % (instr, param)
+        try:
+            inst = self.lab.instrument(instr)
+            spec = inst.spec(param)
+            now = self._current(inst, spec)
+        except Exception as e:
+            return Result(False, "refused", key, message="nothing undone: %s can't be read (%s)" % (key, e))
+        lim = inst.limits(spec.name) if spec.numeric else None
+        close = spec.numeric and now is not None and abs(now - after) <= max(
+            spec.tol, 0.01 * abs(after), 1e-3 * (lim[1] - lim[0]) if lim else 0.0, 1e-12)   # as it reads it back
+        if not (close or _same(spec, now, after)):
+            return self._done(Result(False, "refused", key, value=now, message=(
+                "nothing undone: %s is %s now, not the %s this chat set at %s; someone else (another chat, a run or a "
+                "person) has changed it since, so Kelvin leaves it" % (key, spec.show(now), spec.show(after), when))),
+                "set")
+        r = self._set(instr, param, before, True, self._who(), record_undo=False,
+                      undo="Undo of this chat's change at %s: %s %s → %s" % (when, key, spec.show(before),
+                                                                             spec.show(after)))
         r.message = "undo: " + r.message
         return r
 
@@ -403,11 +478,18 @@ class SafetyGate:
                        "for this setup")
         return "; ".join(why) or None
 
-    def request_abort(self) -> None:
+    def request_abort(self, why: str = "") -> None:
+        """Stop what runs now. why: what stopped it, when not a person ("the interlock on magnet.B"), which the
+        stopped change and run then say instead of "stop requested"."""
+        self.stop_reason = why
         self._stop_gen += 1
         stops = getattr(self.lab, "stops", None)
         if stops is not None:
             stops.pulse()   # every long wait ends now: a settle, a ramp's step, an instrument's sweep
+
+    def stop_words(self) -> str:
+        """Why the latest stop came, for what it stopped: "stop requested" for a person's."""
+        return "stopped by %s" % self.stop_reason if self.stop_reason else "stop requested"
 
     def _pause(self, seconds: float, gen: int) -> None:
         """The clock's sleep, cut short by a stop."""
@@ -424,19 +506,32 @@ class SafetyGate:
     # ------------------------------------------------------------------ auto mode
 
     def auto_verdict(self, inst: Instrument, spec: ParamSpec, values: List[Any]) -> Tuple[bool, str]:
-        """Is driving this parameter to these values low-risk enough to skip the human? And why, in words."""
+        """Is driving this parameter to these values low-risk enough to skip the human? And why, in words. A mounted
+        device's protection narrows the lab's own auto range too: auto mode stays within auto_fraction of the way to
+        the device's limit (a gate protected to ±6 V once went to 5 V unasked, inside the lab's auto range ±5 V)."""
         key = "%s.%s" % (inst.name, spec.name)
         rule = inst.config.auto.get(spec.name, inst.config.auto.get("*"))
         if rule == "never":
             return False, "%s is never auto-approved in this lab" % key
+        device = spec.numeric and spec.name in inst.device_limits
         if isinstance(rule, Allowed):
-            if all(rule.covers(v) for v in values):
+            if not all(rule.covers(v) for v in values):
+                return False, "%s leaves its auto range %s" % (key, rule.show(spec))
+            if not device:
                 return True, "%s stays in its auto range %s" % (key, rule.show(spec))
-            return False, "%s leaves its auto range %s" % (key, rule.show(spec))
+            ok, why = self._fraction_verdict(inst, spec, values)
+            return ok, "%s stays in its auto range %s, %s" % (key, rule.show(spec), why) if ok else why
         if not spec.numeric:
             if all(spec.distance(v) <= 1 for v in values):
                 return True, "%s is one step from safe" % key
             return False, "%s goes more than one step from safe" % key
+        ok, why = self._fraction_verdict(inst, spec, values)
+        return ok, "%s %s" % (key, why) if ok else why
+
+    def _fraction_verdict(self, inst: Instrument, spec: ParamSpec, values: List[Any]) -> Tuple[bool, str]:
+        """Whether these values stay within auto_fraction of the way from safe to the drive's limit (the lab's, or a
+        mounted device's where it is tighter), and why in words."""
+        key = "%s.%s" % (inst.name, spec.name)
         lim = inst.limits(spec.name)
         if lim is None or spec.safe is None:
             return False, "%s has no limits to measure the step against" % key
@@ -446,10 +541,13 @@ class SafetyGate:
             span = abs(edge - spec.safe)
             worst = max(worst, abs(v - spec.safe) / span if span > 0 else (0.0 if v == spec.safe else math.inf))
         fraction = self.lab.config.auto_fraction
+        src = inst.limits_source(spec.name)
+        whose = "its limit" if src in ("lab", "vendor") else "%s's limit, [%s, %s]%s" % (
+            src, num(lim[0]), num(lim[1]), " " + spec.unit if spec.unit else "")
         if worst <= fraction + 1e-9:
-            return True, "%s stays within %.0f%% of the way from safe to its limit" % (key, 100 * worst)
-        return False, "%s goes %.0f%% of the way from safe to its limit (auto mode covers %.0f%%)" % (
-            key, 100 * worst, 100 * fraction)
+            return True, "stays within %.0f%% of the way from safe to %s" % (100 * worst, whose)
+        return False, "%s goes %.0f%% of the way from safe to %s (auto mode covers %.0f%%)" % (
+            key, 100 * worst, whose, 100 * fraction)
 
     def note_outside(self, source: str) -> None:
         """The model has read text from the web: until it has been a while, auto mode asks a person (a portal chat
@@ -504,6 +602,9 @@ class SafetyGate:
             values = sorted(allowed.values, key=str) if allowed.values is not None else [allowed.lo, allowed.hi]
             ok, why = self.auto_verdict(inst, spec, values)
             (fine if ok else blockers).append(why)
+            tripped, acts = self.trips(key, values, grants, "the run")
+            if acts:
+                blockers.append("%s sets off what its card lists: %s" % (key, "; ".join(tripped)))
         if blockers:
             return False, blockers
         return True, fine + ["the dry run finished cleanly"]
@@ -626,7 +727,7 @@ class SafetyGate:
                 continue
             grants[key] = Allowed.of(spec, values)
             bits = shown(inst, spec, current, values)
-            g = self._guard_text(inst, spec)
+            g = self._guard_text(inst, spec, now=forecast is not None)
             if g:
                 bits.append(g)
             if forecast is not None:
@@ -656,6 +757,10 @@ class SafetyGate:
             if key not in drive_values:   # a drive in a part of the run these values don't list: shown all the same
                 inst, spec = self.lab.resolve(key)
                 lines.append((False, "; ".join(shown(inst, spec, change.start, change.values))))
+        if forecast is not None:   # what its set points set off: another drive's guard, a lab watch
+            on = [k for k, vs in drive_values.items() if any(self.lab.resolve(k)[1].distance(v) > 0 for v in vs)]
+            for key, values in drive_values.items():
+                lines += [(False, "%s: %s" % (key, t)) for t in self.trips(key, values, on, "the run")[0]]
         # what the person approves first (a phone's notice shows the first line), then what else the run changes
         items = [text for asks, text in lines if asks] + [text for asks, text in lines if not asks]
         if forecast is not None:
@@ -665,9 +770,11 @@ class SafetyGate:
     # ------------------------------------------------------------------ internals
 
     def _set(self, instr: str, param: str, value: Any, wait: bool, by: str, record_undo: bool = True,
-             gen: Optional[int] = None) -> Result:
+             gen: Optional[int] = None, undo: str = "") -> Result:
         """gen: the stop generation a plan or queue item started at; a stop since then ends this change's waits and
-        refuses a move away from safe (by default, only a stop during the change itself counts)."""
+        refuses a move away from safe (by default, only a stop during the change itself counts). record_undo: the
+        change goes on its chat's undo list when the agent makes it directly (undoable). undo: this change undoes an
+        earlier one, in words: its card says so, and auto mode leaves it to a person."""
         key = "%s.%s" % (instr, param)
         try:
             inst = self.lab.instrument(instr)
@@ -688,12 +795,20 @@ class SafetyGate:
             if problem:
                 return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
             current = self._current(inst, spec)
+            if not _same(spec, current, target):
+                problem = self._held_still(inst, key)
+                if problem:
+                    return self._done(Result(False, "refused", key, value=target, message="refused: " + problem),
+                                      "set", by)
             owner = inst.card.range_owner(spec.name)
             if owner is not None and not _same(spec, current, target):
                 problem = self._range_problem(inst, owner, spec, target)
                 if problem:
                     return self._done(Result(False, "refused", key, value=target, message="refused: " + problem),
                                       "set", by)
+            stuck = None if _same(spec, current, target) else self._no_rate(inst, spec)
+            if stuck and (not spec.is_drive or current is not None and spec.distance(target) < spec.distance(current)):
+                return self._done(Result(False, "refused", key, value=target, message="refused: " + stuck), "set", by)
             if not spec.is_drive:
                 how = None
                 if inst.card.status == "draft" and not inst.simulated and not _same(spec, current, target):
@@ -731,18 +846,26 @@ class SafetyGate:
                                                  % (key, spec.show(current), note)), "set", by)
                     how = "toward safe, approved"
                 res = self._move(inst, spec, current, target, away=False, wait=wait, how=how, gen=gen)
+                if res.ok and self._asked is None:   # a direct change: what it sets off (a run's card said it)
+                    res.message += "".join("; " + t for t in self.trips(key, [target])[0])
             else:
                 if gen is not None and self._stop_gen != gen:   # stopped since the plan began: nothing goes up
-                    return self._done(Result(False, "stopped", key, value=current, message="%s stays %s (stop requested)"
-                                             % (key, spec.show(current))), "set", by)
-                problem = self._away_problem(inst, spec) or self._fixed_range_problem(inst, spec, target)
+                    return self._done(Result(False, "stopped", key, value=current, message="%s stays %s (%s)"
+                                             % (key, spec.show(current), self.stop_words())), "set", by)
+                direct = self._asked is None   # not a step of a run, whose card showed all this (and a step reads less)
+                problem = self._away_problem(inst, spec) or (self._guard_past(inst, spec) if direct else None) or \
+                    self._fixed_range_problem(inst, spec, target) or stuck
                 if problem:
                     return self._done(Result(False, "refused", key, value=target, message="refused: " + problem), "set", by)
                 unsure = self.unsure(inst)
                 how = self._covered(inst, spec, target, envelope=not unsure)
-                if how is None:
-                    request = ApprovalRequest("Approve drive change on %s?" % inst.name,
-                                              [self._describe_move(inst, spec, current, target)])
+                dark = self._dark(inst, spec, target) if direct or how is None else ""
+                tripped, acts = self.trips(key, [target], stops="this change" if wait else "") \
+                    if direct or how is None else ([], False)
+                if how is None:   # the move (and whether it reaches the sample), what it sets off, what it undoes
+                    move = "; ".join([self._describe_move(inst, spec, current, target)] + ([dark] if dark else []))
+                    request = ApprovalRequest("%sApprove drive change on %s?" % ("Undo: " if undo else "", inst.name),
+                                              [move] + tripped + ([undo] if undo else []))
                     pulses.illustrate(request, inst, {spec.name: target})   # a generator's timing, if it starts one
                     if unsure:
                         request.items.append("Kelvin isn't sure about %s: %s" % (inst.name, unsure))
@@ -753,6 +876,10 @@ class SafetyGate:
                             inst.name, self.review_steps(inst))
                     elif self.outside_reason():
                         ok, why = False, self.outside_reason()
+                    elif undo:
+                        ok, why = False, "it undoes an earlier change, which a person approves"
+                    elif acts:
+                        ok, why = False, "it sets off what is listed above"
                     else:
                         ok, why = self.auto_verdict(inst, spec, [target])
                     if ok:
@@ -770,12 +897,18 @@ class SafetyGate:
                 res = self._move(inst, spec, current, target, away=True, wait=wait, how=how, gen=gen)
                 if res.ok and spec.enables:
                     res = self._reapply(inst, spec, res, wait, by, gen)
+                if res.ok:   # said with the result too, so the model doesn't take a dark level for one applied
+                    res.message += "".join("; " + t for t in ([dark] if dark else []) + tripped)
         except Exception as e:
             res = Result(False, "error", key, message="%s: instrument error: %s" % (key, e))
             current = None
-        undoable = res.ok and record_undo and res.action != "no-change" and current is not None
+        # a direct change only: while a plan, a queue item or a script runs (_asked), its steps are its own, not undone
+        undoable = res.ok and record_undo and res.action != "no-change" and current is not None and \
+            self._asked is None
         if undoable and getattr(self._acting, "by", None) is None:
-            self._undo.append((instr, param, current))
+            stack = self._undo.setdefault(getattr(self._undoing, "owner", None), [])
+            stack.append((instr, param, current, target, time.strftime("%H:%M:%S")))
+            del stack[:-UNDO_DEPTH]
         if res.ok and spec.is_drive and self._asked is not None:
             self._asked[key] = target
         return self._done(res, "set", by)
@@ -877,6 +1010,31 @@ class SafetyGate:
         return ("%s: %s has hands on the sample (since %s), so every drive stays at safe until a person unlocks it "
                 "in the Lab panel" % (what, hands.get("by") or "someone", hands.get("since") or "now"))
 
+    def _held_still(self, inst: Instrument, what: str) -> Optional[str]:
+        """While a person has their hands on the sample, nothing on an instrument that moves the sample or the optics
+        around it (a motion stage, a positioner) moves either way: a stage that carries the sample or an objective
+        could pinch or crash (protection.holds_position). Reading it, and its own stop, still work."""
+        hands = getattr(self.lab, "hands_on", None)
+        if not hands or not protection.holds_position(inst.card):
+            return None
+        return ("%s: %s has hands on the sample (since %s), so nothing on %s moves until a person unlocks it in the "
+                "Lab panel" % (what, hands.get("by") or "someone", hands.get("since") or "now", inst.name))
+
+    def _no_rate(self, inst: Instrument, spec: ParamSpec) -> Optional[str]:
+        """A set point the instrument moves to at its own rate can't move while that rate is zero: said now, not after
+        a wait that gets nowhere (a stop once zeroed a magnet's rate, and the field couldn't come down)."""
+        rspec = inst.card.params.get(spec.rate_param or "")
+        if spec.ramp != "instrument" or rspec is None or rspec.set_cmd is None:   # one Kelvin can't set: the maker's
+            return None
+        try:
+            rate = inst.read(spec.rate_param)
+        except Exception:
+            return None
+        if not isinstance(rate, (int, float)) or isinstance(rate, bool) or rate > 0:
+            return None
+        return "%s.%s is %s, so %s.%s can't move: set %s.%s first" % (
+            inst.name, rspec.name, rspec.show(rate), inst.name, spec.name, inst.name, rspec.name)
+
     def _away_problem(self, inst: Instrument, spec: ParamSpec, later: bool = False) -> Optional[str]:
         """Why this drive can't move away from safe now (hands on the sample, a guard or interlock that can't be
         watched or doesn't hold), or None. later: a queue's start, for a drive whose interlock an item before it works
@@ -902,12 +1060,16 @@ class SafetyGate:
         return None
 
     def _breaks_interlock(self, inst: Instrument, spec: ParamSpec, target: Any) -> Optional[str]:
-        """Setting the condition of an interlock (a switch, a set point it names) is checked against it too: refused
-        when the new value fails it while its drive is away from safe. A reading that drifts out of it is the
-        monitor's to catch (Monitor._check_interlocks)."""
+        """Setting the condition of an interlock is checked against it too: a switch or a set point it names, and a
+        set point that drives the reading it names (tc.setpoint drives tc.T_sample; labs write interlocks on the
+        reading, and a 70 K set point with the field up once went ahead). Refused when the new value fails it while its
+        drive is away from safe, unless the condition fails already and the change takes it no further (cooling while
+        the monitor brings the field down). A reading that drifts out of it is the monitor's to catch
+        (Monitor._check_interlocks)."""
         key = "%s.%s" % (inst.name, spec.name)
+        feeds = set(feeds_of(inst, spec))
         for lock in self.lab.config.interlocks:
-            if lock.require.key != key:
+            if lock.require.key not in feeds:
                 continue
             ok, _ = lock.require.check(lambda i, p: target)
             if ok:
@@ -919,9 +1081,12 @@ class SafetyGate:
                 now = None
             if now is not None and dspec.distance(now) == 0:
                 continue   # its drive is at safe: nothing the interlock protects
-            return ("interlock: %s (now %s) needs %s; setting %s to %s would break it, so bring %s to safe first"
+            if no_further(self.lab, lock, target):
+                continue
+            via = "" if lock.require.key == key else " (it takes %s there)" % lock.require.key
+            return ("interlock: %s (now %s) needs %s; setting %s to %s%s would break it, so bring %s to safe first"
                     % (lock.drive, dspec.show(now) if now is not None else "unknown", lock.require.text, key,
-                       spec.show(target), lock.drive))
+                       spec.show(target), via, lock.drive))
         return None
 
     def _covered(self, inst: Instrument, spec: ParamSpec, target: Any, envelope: bool = True) -> Optional[str]:
@@ -953,12 +1118,122 @@ class SafetyGate:
             out.append("interlock: needs %s (now %s)" % (lock.require.text, now))
         return out
 
-    def _guard_text(self, inst: Instrument, spec: ParamSpec) -> str:
-        parts = []
+    def trips(self, key: str, values: List[Any], on: Iterable[str] = (), stops: str = "") -> Tuple[List[str], bool]:
+        """What setting this drive (a set point) to these values sets off, for its card (a card for heating to 25 K
+        once didn't say that the laser was on, nor that the laser's guard and the lab's watch sit at 20 K): another
+        drive's guard on the reading it drives while that drive is away from safe (now, or in the run: on), and a lab
+        watch on that reading whose range it leaves. stops: what such a watch stops, when it stops the running work
+        ("the run"; "" when nothing waits on it). The lines, and whether one acts on something that is on or stops the
+        work (auto mode leaves that to a person)."""
+        try:
+            inst, spec = self.lab.resolve(key)
+        except KeyError:
+            return [], False
+        nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if not spec.numeric or not nums:
+            return [], False
+        feeds, on = feeds_of(inst, spec), set(on)
+        lines: List[str] = []
+        acts = False
+
+        def up(dkey: str) -> Optional[str]:
+            """How a drive is away from safe now (its value), "in the run" for one the run takes there, else None."""
+            try:
+                dinst, dspec = self.lab.resolve(dkey)
+                now = self._current(dinst, dspec) if dinst.enabled else None
+            except Exception:
+                now = None
+            if now is not None and dspec.distance(now) > 0:
+                return dspec.show(now)
+            return "away from safe in the run" if dkey in on else None
+
+        worst = max(nums, key=abs)
+        for name, other in self.lab.instruments.items():
+            for dspec in other.card.drives:
+                for g in other.guards(dspec.name):
+                    if g.key not in feeds or abs(worst) <= g.max_abs:
+                        continue
+                    dkey = "%s.%s" % (name, dspec.name)
+                    state = up(dkey)
+                    if state is None:
+                        continue
+                    gspec = self.lab.resolve(g.key)[1]
+                    line = "at %s, %s's guard (|%s| ≤ %s) fails while %s is %s" % (
+                        gspec.show(worst), dkey, g.key, gspec.show(g.max_abs), dkey, state)
+                    if line not in lines:
+                        lines.append(line)
+                        acts = True
+        for w in self.lab.config.watches:
+            if w["read"] not in feeds:
+                continue
+            rspec = self.lab.resolve(w["read"])[1]
+            if w.get("above") is not None and max(nums) >= w["above"]:
+                at, edge = max(nums), "above %s" % rspec.show(w["above"])
+            elif w.get("below") is not None and min(nums) <= w["below"]:
+                at, edge = min(nums), "below %s" % rspec.show(w["below"])
+            else:
+                continue
+            offs = []
+            for instr, param, safe in w["then"]:
+                dkey = "%s.%s" % (instr, param)
+                if up(dkey) is not None:
+                    offs.append("%s %s" % (dkey, self.lab.resolve(dkey)[1].show(safe)))
+            stopping = ["stops " + stops] if stops and w["stop_run"] else []
+            does = (["sets " + ", ".join(offs)] if offs else []) + stopping
+            lines.append("at %s, the lab watch on %s (%s) %s" % (rspec.show(at), w["read"], edge,
+                                                                 " and ".join(does) if does else "raises an alarm"))
+            acts = acts or bool(does)
+        return lines, acts
+
+    def _guard_text(self, inst: Instrument, spec: ParamSpec, now: bool = False) -> str:
+        """Its guards, each once (a lab's and a mounted device's alike); now: with each reading as it is now, for a
+        card (a laser ramp was approved with the sample already past its guard)."""
+        parts: List[str] = []
         for g in inst.guards(spec.name):
-            unit = self.lab.instruments[g.instr].spec(g.param).unit
-            parts.append("|%s| > %s%s" % (g.key, num(g.max_abs), " " + unit if unit else ""))
+            gspec = self.lab.instruments[g.instr].spec(g.param)
+            text = "|%s| > %s%s" % (g.key, num(g.max_abs), " " + gspec.unit if gspec.unit else "")
+            if text in parts or any(p.startswith(text + " (") for p in parts):
+                continue
+            if now:
+                try:
+                    val = self.lab.read(g.instr, g.param)
+                except Exception:
+                    val = None
+                if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val):
+                    text += " (now %s%s)" % (gspec.show(val), ", past it" if abs(val) > g.max_abs else "")
+            parts.append(text)
         return "stops if " + " or ".join(parts) if parts else ""
+
+    def _guard_past(self, inst: Instrument, spec: ParamSpec) -> Optional[str]:
+        """A guard whose reading is past its limit already: a move away from safe would trip at its first step, after
+        the light or the level had reached the sample (a laser went up at 25 K under a 20 K guard), so it is refused
+        before anything moves. A reading that can't be had is left to the ramp's own check."""
+        for g in inst.guards(spec.name):
+            try:
+                val = self.lab.read(g.instr, g.param)
+            except Exception:
+                continue
+            if isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val) \
+                    and abs(val) > g.max_abs:
+                gspec = self.lab.instruments[g.instr].spec(g.param)
+                return ("%s.%s: its guard needs |%s| ≤ %s, and it reads %s now, so it would trip at once"
+                        % (inst.name, spec.name, g.key, gspec.show(g.max_abs), gspec.show(abs(val))))
+        return None
+
+    def _dark(self, inst: Instrument, spec: ParamSpec, target: Any) -> str:
+        """A level set away from safe while the switch that applies it is off: it doesn't reach the sample (a gate set
+        to 5 V with its output off was then read as if at 5 V). "" otherwise."""
+        switch = self._switch_of(inst, spec)
+        if switch is None or spec.distance(target) == 0:
+            return ""
+        try:
+            state = self._current(inst, switch)
+        except Exception:
+            return ""
+        if state is None or switch.distance(state) > 0:
+            return ""
+        return "%s.%s is %s, so %s.%s won't reach the sample" % (inst.name, switch.name, switch.show(state), inst.name,
+                                                                 spec.name)
 
     def _eta(self, inst: Instrument, spec: ParamSpec, current: Any, target: Any) -> Optional[float]:
         if not spec.numeric or current is None:
@@ -996,7 +1271,7 @@ class SafetyGate:
             mode = mode_words(inst, now)
             if mode:
                 bits.append(mode)
-        g = self._guard_text(inst, spec)
+        g = self._guard_text(inst, spec, now=True)
         if g:
             bits.append(g)
         return "; ".join(bits)
@@ -1137,7 +1412,8 @@ class SafetyGate:
         for k in range(1, n + 1):
             if watch and self._stop_gen != gen:
                 return Result(False, "stopped", "%s.%s" % (inst.name, spec.name), value=v, before=current,
-                              message="%s.%s stopped at %s (stop requested)" % (inst.name, spec.name, spec.show(v)))
+                              message="%s.%s stopped at %s (%s)" % (inst.name, spec.name, spec.show(v),
+                                                                    self.stop_words()))
             v = target if k == n else current + delta * k / n
             if spec.type == "int":
                 v = int(round(v))
@@ -1192,9 +1468,10 @@ class SafetyGate:
                 if watch:
                     inst.write(spec.name, val)
                     return Result(False, "stopped", key, value=val,
-                                  message="%s stopped at %s (stop requested)" % (key, spec.show(val)))
-                return Result(False, "stopped", key, value=val, message="%s: stopped waiting at %s (stop requested); "
-                              "it goes on to %s by itself" % (key, spec.show(val), spec.show(target)))
+                                  message="%s stopped at %s (%s)" % (key, spec.show(val), self.stop_words()))
+                return Result(False, "stopped", key, value=val, message="%s: stopped waiting at %s (%s); "
+                              "it goes on to %s by itself" % (key, spec.show(val), self.stop_words(),
+                                                              spec.show(target)))
             if way is not None and way.update(val, clock.now()) >= WAIT_STALL_S:
                 switch = switch_words(inst, spec)
                 return self._gave_up(inst, spec, val, target, watch, "%s: %s has not got closer to %s for %s (it reads "
@@ -1264,7 +1541,7 @@ class SafetyGate:
                 return None
             if self._stop_gen != gen:
                 return Result(False, "stopped", key, value=target, before=current, message=(
-                    "%s: stopped waiting for it to reach %s (stop requested)" % (key, spec.show(target))))
+                    "%s: stopped waiting for it to reach %s (%s)" % (key, spec.show(target), self.stop_words())))
             if clock.now() - t0 > timeout:
                 return Result(False, "timeout", key, value=target, before=current, message=(
                     "%s: its status says it isn't at %s after %s" % (key, spec.show(target), _dur(timeout))))
@@ -1310,6 +1587,7 @@ class SafetyGate:
         else:
             end = self._cut(inst, spec, at)[1]
         msg = "%s tripped at %s: %s; %s" % (key, spec.show(at), detail, end)
+        self.trip_count += 1
         self.log.write("trip", by=self._who(), target=key, at=at, guard=g.key,
                        reading=val if not isinstance(val, Exception) else str(val), message=msg)
         # an alarm that stays until a person says Got it: a gate's leakage trip in the night went into the record and
@@ -1376,11 +1654,13 @@ class SafetyGate:
                 out.append(r)
         return out
 
-    def abort_to_safe(self, keys: List[str], by: str) -> List[Result]:
+    def abort_to_safe(self, keys: List[str], by: str, hold: bool = True) -> List[Result]:
         """After a stop or a failure: these drives go to safe, each instrument's in its card's safe order, or hold
         where the lab config says hold. Nothing here waits for a set point the instrument ramps to by itself (a stop
         must not hang on a cool-down: it is set and ramps there on its own), and one whose safe value no instrument
-        reaches (0 K) holds where its reading is instead. Never raises: each result says what happened."""
+        reaches (0 K) holds where its reading is instead. A drive's ramp rate stays as it is (_safe_one). hold=False:
+        the lab config's hold doesn't apply (an interlock that failed, a person's Bring to safe). Never raises: each
+        result says what happened."""
         wanted: Dict[str, List[str]] = {}
         for key in keys:
             instr, _, param = key.partition(".")
@@ -1397,7 +1677,7 @@ class SafetyGate:
             seq = inst.card.safe_sequence
             for param in [p for p in seq if p in params] + [p for p in params if p not in seq]:
                 try:
-                    r = self._safe_one(inst, inst.spec(param), wait=False)
+                    r = self._safe_one(inst, inst.spec(param), wait=False, hold=hold)
                 except Exception as e:
                     r = Result(False, "error", "%s.%s" % (instr, param),
                                message="%s.%s: instrument error: %s" % (instr, param, e))
@@ -1405,11 +1685,25 @@ class SafetyGate:
                     out.append(self._done(r, "safe", by))
         return out
 
-    def _safe_one(self, inst: Instrument, spec: ParamSpec, wait: bool) -> Optional[Result]:
-        """One drive to safe (None: already there). Held instead where the lab config says hold, or, when not
-        waiting, where a set point's safe value can't be reached."""
+    def all_to_safe(self, by: str) -> List[Result]:
+        """A person's Bring to safe: every instrument's drives to their safe values, as each card declares them and in
+        its safe order, the person's press being the approval (nothing asks, a draft card's included). The lab
+        config's hold is for stops, so it doesn't apply here. As after a stop, a set point the instrument ramps to by
+        itself is set and not waited for, one no instrument reaches (0 K) holds where its reading is, and a drive's
+        rate stays as it is; what moves the sample (stages, positioners) stays where it is. Never raises."""
+        keys = ["%s.%s" % (name, p.name) for name, inst in self.lab.instruments.items()
+                if not protection.holds_position(inst.card) for p in inst.card.drives if p.set_cmd is not None]
+        return self.abort_to_safe(keys, by, hold=False)
+
+    def _safe_one(self, inst: Instrument, spec: ParamSpec, wait: bool, hold: bool = True) -> Optional[Result]:
+        """One drive to safe (None: already there, or a rate). Held instead where the lab config says hold, or, when
+        not waiting, where a set point's safe value can't be reached. A drive's ramp rate (a magnet's) is never sent to
+        its safe value: it is how fast the drive gets back to safe, and a stop that zeroed it froze a magnet at
+        -2.5 T above its interlock."""
         key = "%s.%s" % (inst.name, spec.name)
-        if self.lab.config.safe_actions.get(key) == "hold":
+        if paces(inst.card, spec.name) is not None:
+            return None
+        if hold and self.lab.config.safe_actions.get(key) == "hold":
             return self._hold(inst, spec, "")
         if not wait and _unreachable(spec):
             return self._hold(inst, spec, " (its safe %s can't be reached)" % spec.show(spec.safe))
@@ -1419,12 +1713,14 @@ class SafetyGate:
         return self._move(inst, spec, current, spec.safe, away=False, wait=wait, how="safe state")
 
     def _hold(self, inst: Instrument, spec: ParamSpec, why: str) -> Optional[Result]:
-        """A set point the instrument ramps to by itself stays where its reading is: the ramp stops there."""
+        """A set point the instrument ramps to by itself stays where its reading is: the ramp stops there. One already
+        sent to safe (an interlock that failed) goes on there: holding it would take it away from safe again."""
         if spec.ramp != "instrument" or not spec.readback:
             return None
         key = "%s.%s" % (inst.name, spec.name)
         actual = inst.read(spec.readback)
-        if abs(inst.read(spec.name) - actual) <= spec.tol:
+        target = inst.read(spec.name)
+        if abs(target - actual) <= spec.tol or spec.distance(target) == 0:
             return None
         inst.write(spec.name, actual)
         return Result(True, "held", key, value=actual, message="%s held at %s%s" % (key, spec.show(actual), why))
@@ -1476,6 +1772,9 @@ class SafetyGate:
             for name, action in card.actions.items():   # the card's own named command: as do_action sends it
                 if len(action.send) == 1 and action.send[0].strip().lower() == cmd.strip().lower():
                     return self.act(inst.name, name)
+            held = None if _HARMLESS.match(cmd) else self._held_still(inst, inst.name)
+            if held:   # a stage or positioner with hands on the sample: no move, reset or unknown command reaches it
+                return refused("%r not sent; %s" % (cmd, held))
             for r in card.reset:
                 if r.match(cmd) is not None:
                     prep = self._to_safe(inst, wait=True)

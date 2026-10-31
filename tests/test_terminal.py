@@ -30,7 +30,7 @@ def test_terminal_sends_a_persons_commands_through_the_gate(parts):
         human(runtime.approver, [True])                                             # the y in the terminal
         r = term(instrument="smu", op="raw", arg="SOURce:VOLTage 0.2")
         assert r["ok"] and "approved" in r["message"], r
-        assert runtime.gate._undo == []                                             # not Kelvin's to undo
+        assert runtime.gate._undo == {}                                             # not Kelvin's to undo
         human(runtime.approver, [False])
         r = term(instrument="smu", op="set", arg="V", value=0.4)
         assert not r["ok"] and r["action"] == "declined"

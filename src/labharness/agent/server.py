@@ -111,8 +111,9 @@ You are connected to a physics lab through Kelvin.
   sample is in, call mount_device; a plan can name another device on the same chip with device: <name>. Reports
   keep themselves up to date: each scan's report, each device's report and the project's master report.
 - A mounted device may carry protection a person set (shown in the lab status): its limits, a leakage stop on each
-  gate and caps in the source itself. While a person has their hands on the sample, every drive stays at safe until
-  they unlock it. Plan within these; when one refuses something, say which and leave it to the person.
+  gate and caps in the source itself. While a person has their hands on the sample, every drive stays at safe and
+  nothing on a stage or positioner moves until they unlock it. Plan within these; when one refuses something, say
+  which and leave it to the person.
 - To line up scans for later (overnight, or one after another), use the queue: queue_add each plan, and steps
   between them (step: name, set: {...}, stabilize: {read, within, for, timeout}, wait: seconds), then queue_start.
   A person approves the whole queue once; it runs in the background and pauses on a failure or Stop. Say what is
@@ -358,7 +359,9 @@ def build_server(rt: LabRuntime) -> MCPServer:
     @server.tool(annotations=ACT, structured_output=False)
     @cancellable
     def undo_last() -> str:
-        """Undo the last successful set_value (through the same safety rules)."""
+        """Undo this chat's latest set_value or send_raw change, through the same safety rules. Never a run's steps or
+        another chat's change, and never a value someone has changed since; an undo that drives the sample harder asks
+        a person."""
         return rt.undo()
 
     @server.tool(annotations=ACT, structured_output=False)
@@ -800,7 +803,8 @@ def build_server(rt: LabRuntime) -> MCPServer:
         """Stop what the lab is doing now, as the person's Stop button does, when they ask you to stop (in any chat,
         whoever started it): the running plan or queue scan ends and the drives it touched go to safe (or hold where
         the lab config says), the queue stops after it, a ramp or wait ends where it is, and open approval cards are
-        declined. It works at once, also while another chat's run holds the lab. reason: the person's words."""
+        declined. It works at once, also while another chat's run holds the lab, then says what is still on (outputs,
+        field, temperature): tell the person. reason: the person's words."""
         return rt.stop_work(reason)
 
     @server.tool(annotations=ACT, structured_output=False)

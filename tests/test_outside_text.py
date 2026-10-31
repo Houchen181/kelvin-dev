@@ -122,7 +122,7 @@ def test_auto_mode_goes_on_once_the_person_writes_again(tmp_path):
     results = [r for m in store.load(chat["id"])["messages"] if m["role"] == "tool" for r in m["results"]]
     assert results[1]["content"].startswith("declined") and "read text from outside the lab (a web page)" in " ".join(
         approver.requests[0].items)                                          # the turn that read the web asked
-    assert results[3]["content"].endswith("(auto-approved)")                 # the person wrote again: auto again
+    assert "(auto-approved)" in results[3]["content"]                       # the person wrote again: auto again
     assert len(approver.requests) == 1 and "outside" not in store.load(chat["id"])
 
 

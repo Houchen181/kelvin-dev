@@ -57,7 +57,8 @@ def test_the_cards_kelvin_asks_most_read_in_chinese(tmp_path):
         assert shown["where"] == "真实硬件"
     first = cardlang.card(asked[0].title, asked[0].items, None, ZH)
     assert first["title"] == "批准 smu 的驱动变更？"
-    assert first["items"][0] == "smu.V：0 V → 3 V；斜坡速率 0.5 V/s（约 6 s）；若 |smu.I| > 1e-09 A 则停止"
+    assert re.fullmatch(r"smu\.V：0 V → 3 V；斜坡速率 0\.5 V/s（约 6 s）；若 \|smu\.I\| > 1e-09 A（当前 \S+ fA） 则停止；"
+                        r"smu\.output 为 off，所以 smu\.V 不会作用到样品上", first["items"][0]), first["items"][0]
     plan = next(r for r in asked if r.title.startswith("Run plan"))
     text = "\n".join(cardlang.card(plan.title, plan.items, None, ZH)["items"])
     assert cardlang.line(plan.title, ZH, title=True) == "运行计划 cool_and_sweep：5 个点，至少约 13 s"

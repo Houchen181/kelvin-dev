@@ -36,11 +36,18 @@ MAX_ITEMS = 24
 # sample they stay as they are: no temperature or field change, and nothing moves under the person's hands.
 SURROUNDINGS = {"temperature-controller", "cryostat", "magnet-supply", "positioner", "motion-stage", "monochromator",
                 "spectrometer", "camera", "power-meter", "multimeter", "nanovoltmeter", "photon-counter"}
+POSITIONS = {"positioner", "motion-stage"}   # of those, the ones that move the sample or the optics around it
 
 
 def applies_to_sample(card: Any) -> bool:
     """Does this instrument apply something to the sample (a source, an excitation, light, RF)?"""
     return card.kind not in SURROUNDINGS
+
+
+def holds_position(card: Any) -> bool:
+    """Does this instrument move the sample or the optics around it (a motion stage, a positioner)? With hands on the
+    sample nothing on it moves, either way: in an optics set-up a stage often carries the sample or an objective."""
+    return card.kind in POSITIONS
 
 
 def gate_limit(dielectric: str, thickness_nm: Optional[float]) -> Optional[float]:

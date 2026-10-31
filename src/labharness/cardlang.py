@@ -31,6 +31,7 @@ _K = r"([A-Za-z_][\w-]*\.\w+)"   # an instrument's parameter, instr.param
 # {1}: the group as written; {t1}: the group as a part of its own (translated); {l1}: a list ("a, b and c")
 _ZH_TITLES = _rules([
     (r"Approve drive change on (\S+)\?", "批准 {1} 的驱动变更？"),
+    (r"Undo: Approve drive change on (\S+)\?", "撤销：批准 {1} 的驱动变更？"),
     (r"Change a setting on (\S+)\?", "更改 {1} 的设置？"),
     (r"Run plan (\S+): (.+)", "运行计划 {1}：{t2}"),
     (r"Run the queue: (.+)", "运行队列：{t1}"),
@@ -48,6 +49,8 @@ _ZH_TITLES = _rules([
 ])
 
 _ZH_LINES = _rules([
+    (r"If an item fails, the queue goes on to the next \(on a failure: continue\); a stop, a guard trip or an "
+     r"interlock still pauses it", "若某项失败，队列会继续下一项（失败时：继续）；停止、保护跳闸或联锁仍会让它暂停"),
     (r"This approval covers every item now waiting; anything outside these ranges asks again\.",
      "此批准涵盖队列中现在等待的每一项；超出这些范围的操作会再次询问。"),
     (r"You switched it off in the Lab panel\. On, Kelvin connects to it again and reads it; output changes still ask "
@@ -84,7 +87,24 @@ _ZH_PARTS = _rules([
     (r"the plan", "计划"),
     (r"the queue", "队列"),
     (r"stops if (.+)", "若 {t1} 则停止"),
-    (r"(\|\S+\| > .+?) or (.+)", "{1} 或 {t2}"),
+    (r"(\|\S+\| > .+?) or (.+)", "{t1} 或 {t2}"),
+    (r"(\|\S+\| > [^(]+?) \(now (.+?), past it\)", "{1}（当前 {2}，已超过）"),
+    (r"(\|\S+\| > [^(]+?) \(now (.+?)\)", "{1}（当前 {2}）"),
+    # a level whose output is off, and what a set point sets off (gate.trips)
+    (_K + r" is (.+?), so " + _K + r" won't reach the sample", "{1} 为 {2}，所以 {3} 不会作用到样品上"),
+    (_K + r": (at .+)", "{1}：{t2}"),
+    (r"at (.+?), " + _K + r"'s guard \((.+)\) fails while " + _K + r" is (.+)",
+     "在 {1} 时，{2} 的保护（{3}）不再满足，而 {4} 为 {t5}"),
+    (r"away from safe in the run", "运行中偏离安全值"),
+    (r"at (.+?), the lab watch on " + _K + r" \(above (.+?)\) (.+)", "在 {1} 时，实验室对 {2} 的监视（高于 {3}）会{t4}"),
+    (r"at (.+?), the lab watch on " + _K + r" \(below (.+?)\) (.+)", "在 {1} 时，实验室对 {2} 的监视（低于 {3}）会{t4}"),
+    (r"raises an alarm", "报警"),
+    (r"sets (.+) and stops (the run|this change)", "设 {l1}，并停止{t2}"),
+    (r"sets (.+)", "设 {l1}"),
+    (r"stops (the run|this change)", "停止{t1}"),
+    (r"the run", "运行"),
+    (r"this change", "这次变更"),
+    (r"Undo of this chat's change at (\S+): " + _K + r" (.+?) → (.+)", "撤销本对话在 {1} 的变更：{2} {3} → {4}"),
     (r"interlock: needs (.+) \(now (.+)\)", "联锁：需要 {1}（当前 {2}）"),
     (r"its interlock needs (.+), which doesn't hold now(.*): an item before it works on that, and it is checked "
      r"again before (\S+) moves \(if it still doesn't hold, the queue pauses there\)",
@@ -101,6 +121,8 @@ _ZH_PARTS = _rules([
     (r"Kelvin added it to the lab itself, and its limits are the maker's: nobody has reviewed them for this setup",
      "它是 Kelvin 自己加入实验室的，限值是厂家的：还没有人针对这套装置审核过"),
     (r"Auto mode does not cover this: (.+)", "自动模式不涵盖此项：{t1}"),
+    (r"it sets off what is listed above", "它会触发上面列出的保护或监视"),
+    (r"it undoes an earlier change, which a person approves", "它撤销之前的一次变更，须由人批准"),
     (r"Not approved by Kelvin itself: (.+)", "Kelvin 不会自行批准：{t1}"),
     # what the run leaves, and what its time doesn't count
     (r"At the end it leaves (.+)", "结束时保持：{l1}"),

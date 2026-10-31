@@ -36,6 +36,7 @@ ALIVE_EVERY = 20.0           # lab seconds between checks that each real instrum
 RESET_EVERY = 5.0            # lab seconds between checks that the outputs the running plan switched on are still on
 GARBLE_CLEAR_S = 300.0       # lab seconds without a garbled reply before a comms fault clears
 INTERLOCK_EVERY = 5.0        # lab seconds between checks of the interlocks whose drive is away from safe
+INTERLOCK_CLEAR_S = 60.0     # lab seconds a broken interlock's condition must hold again before its alarm clears
 STALL_S = 300.0              # lab seconds a set point's reading may go without getting closer before the alarm
 SETPOINT_EVERY = 15.0        # lab seconds between the set-point watchdog's looks
 FOLD_S = 600.0               # lab seconds: the same alarm again within this of its clearing, unseen, folds into it
@@ -265,6 +266,7 @@ class Monitor:
         self._garbled_lab: Dict[str, float] = {}  # lab time the latest garbled reply was seen
         self._last_interlock_check = -1e18
         self._broken: Dict[int, Alarm] = {}   # interlocks found broken (by their place in the lab config)
+        self._holding: Dict[int, float] = {}  # of those, the ones whose condition holds again: since when (lab time)
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -503,8 +505,10 @@ class Monitor:
     def _check_interlocks(self, now: float) -> None:
         """The interlocks are enforced, not only checked when their drive moves: every INTERLOCK_EVERY lab seconds,
         each one whose drive is away from safe has its condition read. When it fails, or can't be read (an open
-        sensor, its instrument gone), an alarm goes up, the running plan stops and the drive goes to safe (or holds
-        where the lab config says hold). The alarm clears once the condition holds again or the drive is at safe."""
+        sensor, its instrument gone), an alarm goes up, the running plan stops and the drive goes to safe, even where
+        the lab config says hold: hold is for a stop, and a held field once stayed at 1 T above its interlock. The
+        alarm clears once the drive is at safe, or the condition has held again for INTERLOCK_CLEAR_S (a sample at its
+        interlock's 10 K raised and cleared it six times in 15 s)."""
         if now - self._last_interlock_check < INTERLOCK_EVERY:
             return
         self._last_interlock_check = now
@@ -517,19 +521,22 @@ class Monitor:
                 at = self.gate._current(inst, spec)
             except Exception:
                 continue   # its drive can't be read: silence is the read failures' job
-            broken = None if at is not None and spec.distance(at) == 0 else interlock_problem(self.lab, lock)
+            safe = at is not None and spec.distance(at) == 0
+            broken = None if safe else interlock_problem(self.lab, lock)
             if broken is None:
-                if i in self._broken:
-                    self._clear(self._broken.pop(i).id, "interlock %s: %s holds again, or the drive is at safe"
-                                % (lock.drive, lock.require.text))
+                if i in self._broken and (safe or now - self._holding.setdefault(i, now) >= INTERLOCK_CLEAR_S):
+                    self._holding.pop(i, None)
+                    again = "the drive is at safe" if safe else "%s holds again" % lock.require.text
+                    self._clear(self._broken.pop(i).id, "interlock %s: %s" % (lock.drive, again))
                 continue
+            self._holding.pop(i, None)
             if i in self._broken:
                 continue
             text = "Interlock: %s is at %s, which needs %s%s" % (lock.drive, spec.show(at), lock.require.text, broken)
             a = self._broken[i] = self._new("interlock", lock.drive, text, source="interlock %d" % i)
-            self.gate.request_abort()
-            a.actions = ["stopped the running plan"] + [r.message for r in self.gate.abort_to_safe([lock.drive],
-                                                                                                "monitor")]
+            self.gate.request_abort("the interlock on %s (it needs %s%s)" % (lock.drive, lock.require.text, broken))
+            a.actions = ["stopped the running plan"] + [r.message for r in self.gate.abort_to_safe([lock.drive], "monitor",
+                                                                                                hold=False)]
             self._tell(a, "; ".join(a.actions), interlock=lock.drive)
 
     def _check_setpoints(self, now: float) -> None:
