@@ -293,5 +293,7 @@ def test_a_gate_sweeps_headline_is_the_sample_not_its_leakage():
         "plan: gate\nsetup: {lockin.amplitude: 0.05, smu.output: on}\nsweep: {smu.V: {from: 0, to: 2, points: 41}}\n"
         "settle: 0.5\nmeasure: [lockin.X, smu.I]\nafter: {smu.V: 0}")
     assert r.status == "done", r.message
-    assert r.analysis["assessment"].startswith("lockin.X has a peak at smu.V = 1.50")   # inside the sweep
+    head = r.analysis["assessment"]
+    assert head.startswith("lockin.X has a peak at smu.V = "), head   # the sample's reading leads: inside the sweep
+    assert float(head.split(" = ", 1)[1].split()[0]) == pytest.approx(1.50, abs=0.01)   # whatever the noise's draw
     assert "edge of the sweep; the feature may extend" not in r.analysis["assessment"]
