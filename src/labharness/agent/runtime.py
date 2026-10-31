@@ -3182,10 +3182,29 @@ class LabRuntime:
                 whole = False
         return now, whole
 
-    def _conditions(self, then: Dict[str, Any], now: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _own(self, rec: Any, plan: Dict[str, Any], kind: str) -> set:
+        """What a run set itself, so never a setting to put back before it runs again: a plan's setup and sweeps, or
+        what a script set (its meta's sets; a script run before Kelvin kept them has none)."""
+        if kind == "plan":
+            return self._own_keys(plan)
+        return {str(k) for k in (rec.meta or {}).get("sets") or []}
+
+    def _own_keys(self, plan: Dict[str, Any]) -> set:
+        """What a plan sets itself: its setup and what it sweeps. A run's start snapshot is read before its setup, so
+        these are never settings to put back: the plan sets them again."""
+        try:
+            p = self._plan(plan_text(plan))
+        except Exception:   # a plan this lab can't read now: nothing is its own, as for a script
+            return set()
+        return {s.key for s in p.setup} | {a.key for a in p.axes if a.kind in ("instrument", "ramp")}
+
+    def _conditions(self, then: Dict[str, Any], now: Dict[str, Dict[str, Any]],
+                    own: Iterable[str] = ()) -> List[Dict[str, Any]]:
         """A run's start (its snapshot) beside the lab now, one line per setting or reading: {key, then, now, unit,
-        differs, settable, drive}. Settable: its card sets it (and its instrument is in the lab); a reading that
-        failed then, a trace and an acquisition are left out. now is None where it couldn't be read now."""
+        differs, settable, drive, own}. Settable: its card sets it (and its instrument is in the lab); own: the plan
+        sets it itself (_own_keys), so it never differs; a reading that failed then, a trace and an acquisition are
+        left out. now is None where it couldn't be read now."""
+        own = set(own)
         out = []
         for name, values in then.items():
             if not isinstance(values, dict):
@@ -3199,11 +3218,12 @@ class LabRuntime:
                     continue
                 got = (now.get(name) or {}).get(param)
                 got = got if _restorable(got) else None
-                out.append({"key": "%s.%s" % (name, param), "then": was, "now": got,
+                key = "%s.%s" % (name, param)
+                out.append({"key": key, "then": was, "now": got,
                             "unit": spec.unit if spec is not None else "",
-                            "differs": got is not None and not _same_value(spec, was, got),
+                            "differs": key not in own and got is not None and not _same_value(spec, was, got),
                             "settable": spec is not None and spec.set_cmd is not None,
-                            "drive": spec is not None and spec.is_drive})
+                            "drive": spec is not None and spec.is_drive, "own": key in own})
         return out
 
     def _to_restore(self, conditions: List[Dict[str, Any]], whole: bool) -> Tuple[Dict[str, Any], List[str]]:
@@ -3266,7 +3286,7 @@ class LabRuntime:
         rec, plan, kind = self._ran(run_id)
         then = rec.snapshots.get("start") or {}
         now, whole = self.lab_now(then)
-        conditions = self._conditions(then, now)
+        conditions = self._conditions(then, now, self._own(rec, plan, kind))
         out: Dict[str, Any] = {"kind": kind, "name": str(plan.get("plan") or run_id.split("-", 2)[-1]),
                                "conditions": conditions,
                                "differ": sum(1 for c in conditions if c["settable"] and c["differs"]),
@@ -3292,7 +3312,7 @@ class LabRuntime:
         if restore:
             then = rec.snapshots.get("start") or {}
             now, whole = self.lab_now(then)
-            restoring, notes = self._to_restore(self._conditions(then, now), whole)
+            restoring, notes = self._to_restore(self._conditions(then, now, self._own(rec, plan, kind)), whole)
             if not then:
                 notes.append("Run %s kept no settings from its start, so nothing is restored" % run_id)
         if kind == "plan":

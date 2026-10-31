@@ -1423,7 +1423,7 @@ class ScriptRun:
         self.rec.set_columns(report.columns)
         meta = dict(status=status, reason=reason, points=len(self.rows), duration_s=round(duration, 3),
                     cleanup=cleanup, warnings=report.warnings, exit_code=code, commands=self.n_commands,
-                    files=files, figures=report.figures)
+                    files=files, figures=report.figures, sets=sorted(self.state))   # sets: what the script set
         if self.rows and report.columns["axes"] and report.columns["measures"]:
             try:
                 from .analysis import analyze_run

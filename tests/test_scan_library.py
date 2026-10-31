@@ -383,15 +383,16 @@ def test_a_plan_runs_again_with_the_settings_it_started_with(tmp_path):
     assert view["text"].startswith("plan: gate_sweep") and "script" not in view
     by_key = {c["key"]: c for c in view["conditions"]}
     assert by_key["lockin.frequency"] == {"key": "lockin.frequency", "then": 17.777, "now": 77.7, "unit": "Hz",
-                                          "differs": True, "settable": True, "drive": False}
-    assert by_key["smu.nplc"]["differs"] and by_key["smu.output"]["drive"] and by_key["smu.output"]["differs"]
+                                          "differs": True, "settable": True, "drive": False, "own": False}
+    assert by_key["smu.nplc"]["differs"] and by_key["smu.output"]["drive"]
+    assert by_key["smu.output"]["own"] and not by_key["smu.output"]["differs"]      # the plan sets it itself
+    assert by_key["smu.V"]["own"] and not by_key["smu.V"]["differs"]                # and sweeps this
     assert not by_key["lockin.X"]["settable"] and not by_key["tc.setpoint"]["differs"]
-    assert view["differ"] == sum(1 for c in view["conditions"] if c["settable"] and c["differs"]) >= 4
+    assert view["differ"] == sum(1 for c in view["conditions"] if c["settable"] and c["differs"]) >= 2
 
     queued = client.post("/api/runs/%s/again" % run_id, json={"restore": True, "queue": True})
     assert queued.status_code == 200, queued.text
     body = queued.json()
-    assert "The plan sets lockin.amplitude, smu.output itself" in body["message"]
     item = body["queue"]["items"][-1]
     assert item["kind"] == "plan" and item["status"] == "waiting" and not item["then_pause"]
     assert body["queue"]["state"] == "idle"                    # queue: true adds it, nothing starts
@@ -409,6 +410,9 @@ def test_a_plan_runs_again_with_the_settings_it_started_with(tmp_path):
     assert item.status == "done", item.message
     assert item.then_pause and rt.queue.state == "idle"         # nothing else waited: it just ends
     assert lab.read("lockin", "frequency") == 17.777 and lab.read("smu", "nplc") == 1.0
+    again = client.get("/api/runs/%s/again" % item.run_id).json()            # the run made so: nothing to put back
+    assert again["differ"] == 0, [c for c in again["conditions"] if c["differs"]]
+    assert {c["key"] for c in again["conditions"] if c["own"]} >= {"lockin.frequency", "smu.nplc", "smu.output"}
     assert client.get("/api/runs/nope/again").status_code == 404
 
 
@@ -569,3 +573,17 @@ def test_queue_items_keep_then_pause_and_say_script_items(tmp_path):
     assert q.set_then_pause(a.id, False).then_pause is False
     assert "1. [waiting] script sweep.py" in q.text()
     assert q.text(lambda i: True).startswith("queue: idle\n1. [waiting] a script of unshared work")
+
+
+def test_what_a_script_set_itself_is_never_put_back(tmp_path, scripts):
+    write(scripts, "sweep.py", SCRIPT)
+    rt = script_runtime(tmp_path, scripts, ScriptedApprover([True, True, True]))
+    rt.set("smu", "output", True)                              # on as it starts; the script turns it off at its end
+    ran = rt.run_script("sweep.py")
+    assert "script sweep.py done" in ran, ran
+    run_id = run_id_of(ran)
+    assert {"smu.output", "smu.V"} <= set(rundata.meta(rt._run_dir(run_id))["sets"])
+    view = rt.run_again_view(run_id)
+    by_key = {c["key"]: c for c in view["conditions"]}
+    assert by_key["smu.output"]["own"] and not by_key["smu.output"]["differs"]   # the script switches it itself
+    assert view["differ"] == 0
