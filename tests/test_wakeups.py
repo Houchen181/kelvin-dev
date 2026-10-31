@@ -58,6 +58,7 @@ def test_a_chat_is_continued_when_the_time_comes(tmp_path):
             assert agent.waker.view() and len(provider.turns) == 1
             agent.waker.pending[chat["id"]].due = 0          # the time comes
             await agent.waker.tick()
+            await asyncio.gather(*agent.waker.waking)        # the continued turn, in its own task
         finally:
             await agent.close()
     asyncio.run(day())
@@ -152,3 +153,93 @@ def test_a_wake_up_is_kept_over_a_restart(tmp_path):
     assert w["chat_id"] == chat["id"] and w["text"] == "tc.T_sample < 300 for 5 min" and 43000 < w["left_s"] <= 43200
     assert again.pending[chat["id"]].restored and again.pending[chat["id"]].condition.key == "tc.T_sample"
     assert again.cancel(chat["id"]) and not (store.root / "_wakes.json").exists()
+
+
+def test_a_long_continued_turn_holds_up_no_other_chat(tmp_path, monkeypatch):
+    """Two chats wait. The one continued first answers a long while (a plan it runs can take hours): the other is
+    continued when its own time comes, not after that turn."""
+    import time
+    from labharness.web.providers.base import SESSION, TurnResult
+    monkeypatch.setattr(wakeups, "TICK_S", 0.05)
+    rt, store, provider, agent, notices = setup(tmp_path, [])
+    a, b = store.create("scripted:m1"), store.create("scripted:m1")
+    started = {}
+
+    async def stream(model, system, history, tools, emit):
+        started[SESSION.get()] = time.monotonic()
+        if SESSION.get() == a["id"]:
+            await asyncio.sleep(60)                                       # chat A's continued turn: a long step
+        return TurnResult(say("Continuing."), model=model)
+    provider.stream = stream
+    waker = agent.waker
+    waker.add(a["id"], {"after_minutes": 1, "note": "check the fridge"})
+    waker.add(b["id"], {"after_minutes": 1, "note": "check the pressure"})
+    t0 = time.monotonic()
+    waker.pending[a["id"]].due, waker.pending[b["id"]].due = t0, t0 + 0.3   # A is due now, B a moment later
+
+    async def day():
+        await agent.start()
+        loop = asyncio.ensure_future(waker.run())
+        try:
+            while not (waker.latest() or {}).get("done") and time.monotonic() - t0 < 10:   # B answered
+                await asyncio.sleep(0.05)
+            assert agent.answering(a["id"])                               # chat A still answers meanwhile
+            assert waker.latest()["chat_id"] == b["id"]                   # the portal shows B's answer
+        finally:
+            loop.cancel()
+            await agent.close()
+    asyncio.run(day())
+    assert started[a["id"]] - t0 < 1 and started[b["id"]] - t0 < 2
+
+
+def test_a_stop_while_kelvin_summarises_a_continued_chat_ends_only_that_turn(tmp_path, monkeypatch):
+    """The person stops a chat Kelvin continued while Kelvin summarises its long day for the model: that turn ends as
+    stopped, and Kelvin still continues the other chats when their time comes."""
+    import time
+    from labharness.web import compaction
+    from labharness.web.providers.base import SESSION, TurnResult
+    monkeypatch.setattr(wakeups, "TICK_S", 0.05)
+    rt, store, provider, agent, notices = setup(tmp_path, [])
+    provider.context_window = lambda model_id: 50                        # every request fills the model's window
+    a, b = store.create("scripted:m1"), store.create("scripted:m1")
+    summarising = set()
+
+    async def stream(model, system, history, tools, emit):
+        if system == compaction.HANDOFF:
+            summarising.add(SESSION.get())
+            if SESSION.get() == a["id"]:
+                await asyncio.sleep(60)                                   # chat A's summary takes a while
+            return TurnResult(say("The earlier turns."), model=model)
+        return TurnResult(say("Continuing."), model=model)
+    provider.stream = stream
+    for chat in (a, b):                                                   # a long day: earlier turns to summarise
+        for i in range(3):
+            chat["messages"] += [{"role": "user", "text": "turn %d" % i},
+                                 {"role": "assistant", "provider": "scripted", "model": "m1", "raw": None,
+                                  "blocks": say("answer %d" % i)}]
+        store.save(chat)
+    waker = agent.waker
+    waker.add(a["id"], {"after_minutes": 1, "note": "check the fridge"})
+    waker.add(b["id"], {"after_minutes": 1, "note": "check the pressure"})
+    waker.pending[a["id"]].due = time.monotonic()                          # A is due now, B much later
+
+    def last(chat):
+        return store.load(chat["id"])["messages"][-1].get("blocks")
+
+    async def day():
+        await agent.start()
+        loop = asyncio.ensure_future(waker.run())
+        try:
+            while a["id"] not in summarising:
+                await asyncio.sleep(0.05)
+            assert agent.stop(a["id"])                                    # the person presses Stop in chat A
+            waker.pending[b["id"]].due = time.monotonic()                 # chat B's time comes
+            until = time.monotonic() + 10
+            while last(b) != say("Continuing.") and time.monotonic() < until:
+                await asyncio.sleep(0.05)
+            assert not loop.done()                                        # the waker goes on
+        finally:
+            loop.cancel()
+            await agent.close()
+    asyncio.run(day())
+    assert last(a) == say("(stopped)") and last(b) == say("Continuing.")

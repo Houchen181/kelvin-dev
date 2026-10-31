@@ -1265,12 +1265,25 @@ class ChatAgent:
                 partial.clear()
             await emit(event)
 
+        async def stopped() -> bool:
+            """The person pressed stop: what the model had said so far, marked stopped, ends the turn."""
+            said = "".join(partial).strip()
+            chat["messages"].append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
+                                     "blocks": [{"type": "text", "text": (said + " …" if said else "") + "(stopped)"}]})
+            self.store.save(chat)
+            await emit({"type": "turn_end", "reason": "stopped"})
+            return False
+
         history = compaction.view(chat)
         if compaction.size(context["system"], context["tools"], history) > \
                 compaction.SHARE * compaction.window(provider, model_id):   # a long day: earlier turns, summarised
             self._stream_task = asyncio.ensure_future(compaction.compact(chat, provider, model_id))
             try:
                 folded = await self._stream_task
+            except asyncio.CancelledError:   # stopped while summarising: ends the turn as a stopped answer does
+                if not self._stop:
+                    raise
+                return await stopped()
             finally:
                 self._stream_task = None
             if folded:
@@ -1288,12 +1301,7 @@ class ChatAgent:
         except asyncio.CancelledError:
             if not self._stop:
                 raise
-            said = "".join(partial).strip()
-            chat["messages"].append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
-                                     "blocks": [{"type": "text", "text": (said + " …" if said else "") + "(stopped)"}]})
-            self.store.save(chat)
-            await emit({"type": "turn_end", "reason": "stopped"})
-            return False
+            return await stopped()
         finally:
             self._stream_task = None
 

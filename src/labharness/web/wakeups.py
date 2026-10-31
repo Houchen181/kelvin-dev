@@ -15,7 +15,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..conditions import Condition, parse_condition
 
@@ -72,6 +72,7 @@ class Waker:
         self.history: Dict[str, List[float]] = {}   # when each chat was woken, for the daily limit
         self.last: Optional[Dict[str, Any]] = None   # the latest wake-up, for the portal
         self.loaded: Optional[str] = None            # the chat folder whose kept wake-ups are read
+        self.waking: Set[asyncio.Future] = set()     # the turns of chats being continued now, each its own task
 
     # -------------------------------------------------------------- asked for by a chat
 
@@ -213,14 +214,18 @@ class Waker:
         return None
 
     async def run(self) -> None:
-        while True:
-            await asyncio.sleep(TICK_S)
-            try:
-                await self.tick()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
+        try:
+            while True:
+                await asyncio.sleep(TICK_S)
+                try:
+                    await self.tick()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    pass
+        finally:   # Kelvin is closing: the chats it is continuing stop with it, as the person's do
+            for task in list(self.waking):
+                task.cancel()
 
     async def tick(self) -> None:
         self._restore()
@@ -236,7 +241,11 @@ class Waker:
                 continue
             self.pending.pop(chat_id, None)
             self._keep()
-            await self._wake(w, why)
+            # its own task: the other chats' wake-ups never wait for this turn (a plan it runs can take hours), and
+            # whatever ends it (an error, a stop) ends only it, never the waker
+            task = asyncio.ensure_future(self._wake(w, why))
+            self.waking.add(task)
+            task.add_done_callback(lambda t: self.waking.discard(t) or t.cancelled() or t.exception())
 
     async def _wake(self, w: Wake, why: str) -> None:
         from .agent import Busy
@@ -255,7 +264,8 @@ class Waker:
         except (KeyError, ValueError):
             return   # its model is no longer there
         self.history.setdefault(w.chat_id, []).append(time.time())
-        self.last = {"chat_id": w.chat_id, "at": time.time(), "why": why, "title": chat.get("title"), "root": w.root}
+        last = self.last = {"chat_id": w.chat_id, "at": time.time(), "why": why, "title": chat.get("title"),
+                            "root": w.root}
         agent.runtime.tell("run", "Kelvin continued “%s”" % (chat.get("title") or "a chat"), why,
                            agent._stays_here(chat))   # an unshared chat's title never goes through the hub
         why = why[0].upper() + why[1:]
@@ -264,7 +274,7 @@ class Waker:
         async def keep(event: Dict[str, Any]) -> None:   # nobody is watching: the chat keeps what happens
             pass
         await agent.run_turn(w.chat_id, text, model, provider, keep, wake="%s. Next: %s" % (why, w.note))
-        self.last = dict(self.last, done=time.time())
+        self.last = dict(last, done=time.time())   # this chat's, though another may have been continued since
 
 
 def _dur(seconds: float) -> str:
