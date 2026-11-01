@@ -1132,6 +1132,19 @@ body.resizing .plot-svg { pointer-events: none; }
   .empty { padding-top: 8vh; }
 }
 
+/* ---------- full screen (a panel's own button; FULL in app.js): that panel alone below the top bar, whose buttons,
+   badges and alarms stay; the chat, the conversation list and the other panels stay as they are, out of sight ---------- */
+.full-btn .i-min, .full-btn[aria-pressed="true"] .i-max { display: none; }
+.full-btn[aria-pressed="true"] .i-min { display: inline; }
+#app.full .sidebar, #app.full #toggle-sidebar, #app.full .main > .scroller, #app.full .main > .composer-wrap,
+#app.full:not(.full-term) .main > .termpane, #app.full .dock-col:not(.full-in), #app.full .dock-col > :not(.full-on),
+#app.full .pane-resize, #app.full .term-resize { display: none !important; }
+#app.full:not(.full-term) { flex-direction: column; }
+#app.full:not(.full-term) .main { flex: none; }
+#app.full #workcol, #app.full #sidecol { position: static; flex: 1 1 auto; min-height: 0; width: auto !important; box-shadow: none; }
+#app.full .full-on { flex: 1 1 auto; width: auto !important; height: auto !important; min-width: 0; min-height: 0;
+  border-left: 0; border-top: 0; }
+
 /* Settings, Instruments: what Kelvin installed for instruments */
 .env-list { list-style: none; padding: 0; margin: 4px 0 6px; }
 .env-list li { display: flex; gap: 10px; align-items: baseline; justify-content: space-between; padding: 6px 0;

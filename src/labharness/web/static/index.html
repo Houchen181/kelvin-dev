@@ -217,6 +217,9 @@
         <button id="term-clear" class="icon-btn" type="button" aria-label="Clear the terminal" title="Clear (Ctrl+L)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 12.5h9l1-12.5"/></svg>
         </button>
+        <button class="icon-btn full-btn" type="button" data-pane="termpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+        </button>
         <button id="close-term" class="icon-btn" type="button" aria-label="Close the terminal">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
         </button>
@@ -236,6 +239,9 @@
       </div>
       <div class="spacer"></div>
       <button id="open-report" class="btn small ghost" type="button" title="A PDF or PowerPoint of runs, to share or discuss">Report…</button>
+      <button class="icon-btn full-btn" type="button" data-pane="runpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
       <button id="close-runs" class="icon-btn" type="button" aria-label="Close the runs pane">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
@@ -285,6 +291,9 @@
       <span id="ed-from" class="ed-from"></span>
       <div class="spacer"></div>
       <button id="ed-text" class="btn small ghost" type="button" aria-expanded="false" aria-controls="ed-plan" title="The plan it makes, as YAML">Plan text</button>
+      <button class="icon-btn full-btn" type="button" data-pane="edpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
       <button id="close-editor" class="icon-btn" type="button" aria-label="Close the scan editor">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
@@ -349,6 +358,9 @@
       <h2 class="pane-title">Analysis</h2>
       <div class="spacer"></div>
       <button id="an-ask" class="btn small ghost" type="button" title="Ask Kelvin about this analysis">Ask Kelvin</button>
+      <button class="icon-btn full-btn" type="button" data-pane="anpane" aria-label="Full screen" aria-pressed="false" title="Full screen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
       <button id="close-analysis" class="icon-btn" type="button" aria-label="Close the analysis pane">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
@@ -398,6 +410,9 @@
       <h2>Lab</h2>
       <span id="agent-state" class="agent-chip"></span>
       <div class="spacer"></div>
+      <button class="icon-btn full-btn" type="button" data-pane="labpanel" aria-label="Full screen" aria-pressed="false" title="Full screen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
       <button id="close-lab" class="icon-btn" type="button" aria-label="Close the lab panel">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>
@@ -474,6 +489,9 @@
       <h2>Team chat</h2>
       <div class="spacer"></div>
       <button id="team-name" class="team-me" type="button" title="Your name in the team chat, on this browser"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></svg><span id="team-name-text"></span></button>
+      <button class="icon-btn full-btn" type="button" data-pane="teampanel" aria-label="Full screen" aria-pressed="false" title="Full screen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-max" d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path class="i-min" d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>
+      </button>
       <button id="close-team" class="icon-btn" type="button" aria-label="Close the team chat">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button>

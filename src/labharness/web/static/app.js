@@ -1385,6 +1385,7 @@
         open.forEach((id, i) => { $(id).style.width = got[i] + "px"; });
       }
     }
+    syncFull();
     syncScrim();
   }
   // a pane's left edge, dragged or moved with the arrow keys: its width, or in a shared column the column's. Only the
@@ -1440,6 +1441,49 @@
       done();
     });
   }
+  // Full screen, from a panel's own button: that panel alone takes the window below the top bar, whose buttons, badges
+  // and alarms stay; the chat, the conversation list and the other panels stay as they were, out of sight. A panel the
+  // person asks for meanwhile (its top-bar button, Edit on a scan), or one with a request waiting for them, takes the
+  // screen in turn, and closing it gives the screen back to the one before. The button again or Esc ends it, and so
+  // does whatever needs the chat: an approval asked there, another chat, Ask Kelvin.
+  const FULL = [];   // the panels in full screen, the one on the screen last
+  const isOpen = (id) => (id === "termpane" ? TERM.open : PANES[id][0]());
+  function syncFull() {
+    for (let i = FULL.length - 1; i >= 0; i--) if (!isOpen(FULL[i])) FULL.splice(i, 1);   // closed: out of it
+    const top = FULL[FULL.length - 1] || null, app = $("app");
+    app.classList.toggle("full", !!top);
+    app.classList.toggle("full-term", top === "termpane");
+    for (const id of ["termpane", ...Object.keys(PANES)]) $(id).classList.toggle("full-on", id === top);
+    for (const col of ["workcol", "sidecol"]) {
+      $(col).classList.toggle("full-in", !!top && top !== "termpane" && PANES[top][1] === col);
+    }
+    for (const b of document.querySelectorAll(".full-btn")) {
+      const on = b.dataset.pane === top;
+      b.setAttribute("aria-pressed", String(on));
+      b.title = on ? "Exit full screen (Esc)" : "Full screen";
+    }
+  }
+  function toggleFull(id) {   // a panel's own button
+    if (FULL.length) FULL.length = 0; else FULL.push(id);
+    fitLayout();
+  }
+  function fullShow(id) {   // in full screen, an open panel to the screen
+    if (!FULL.length || !isOpen(id)) return;
+    if (FULL.includes(id)) FULL.splice(FULL.indexOf(id), 1);
+    FULL.push(id);
+    fitLayout();
+  }
+  function exitFull() {   // the chat back, beside the open panels
+    if (!FULL.length) return;
+    FULL.length = 0;
+    fitLayout();
+  }
+  // a top-bar button opens or closes its panel; in full screen, an open panel out of sight comes to the screen instead
+  function pillClick(id, toggle) {
+    if (FULL.length && isOpen(id) && FULL[FULL.length - 1] !== id) { fullShow(id); return; }
+    toggle();
+    if (isOpen(id)) fullShow(id);
+  }
   function initPanes() {
     const kept = (key) => Number(store(key)) || 0;
     PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(720, Math.max(420, window.innerWidth * 0.42)));
@@ -1454,9 +1498,16 @@
         for (const p of Object.keys(PANES)) store(PANES[p][3], String(PANE_W[p]));
       });
     }
+    for (const b of document.querySelectorAll(".full-btn")) b.addEventListener("click", () => toggleFull(b.dataset.pane));
+    document.addEventListener("keydown", (e) => {   // Esc ends full screen, unless a field, a menu or a dialog takes it
+      if (e.key !== "Escape" || !FULL.length || e.defaultPrevented) return;
+      if (document.querySelector("dialog[open], .pane-menu:not([hidden])")) return;
+      if (e.target.closest && e.target.closest("input, textarea, select, [contenteditable]")) return;
+      exitFull();
+    });
   }
   function initRunsPane() {
-    $("toggle-runs").addEventListener("click", () => toggleRuns());
+    $("toggle-runs").addEventListener("click", () => pillClick("runpane", toggleRuns));
     $("close-runs").addEventListener("click", () => toggleRuns(false));
     $("open-runs").addEventListener("click", () => showView("runs"));
     $("open-scans").addEventListener("click", () => showView("scans"));
@@ -3003,6 +3054,7 @@
     $("input").placeholder = askHint();
   }
   function toggleIncognito() {
+    exitFull();
     if (S.incognito) { newChat(); return; }   // leaving: forget it and start a normal chat
     if (S.chatId) newChat();
     S.incognito = true;
@@ -3016,6 +3068,7 @@
   async function openChat(id) {   // another chat may go on answering meanwhile: its answer waits for you there
     let chat;
     try { chat = await api("/api/chats/" + id); } catch (e) { toast(e.message); return; }
+    exitFull();
     leaveIncognito();
     S.chatId = id;
     S.unread.delete(id);
@@ -3041,6 +3094,7 @@
   }
   const titleOf = (id) => (S.chats.find((c) => c.id === id) || {}).title || "a chat";
   function newChat(projectId, ask) {   // ask: the person started it, so the folder picker opens (in the app)
+    exitFull();
     leaveIncognito();
     S.chatId = null;
     if (S.defaultModel && S.labels[S.defaultModel]) { $("model").value = S.defaultModel; updateSend(); }
@@ -3869,6 +3923,7 @@
       case "tool_start": reply.toolStart(ev.id, ev.name, ev.input); break;
       case "approval":
         reply.approval(ev);
+        if (here && !ev.auto) exitFull();   // its card is in this chat, and declines itself unless someone answers
         if (!here) {   // asked in a chat you left: say where, and take you there
           S.asking.add(chatId);
           renderChats();
@@ -4062,7 +4117,10 @@
     const badge = $("lab-badge");
     badge.textContent = String(s.pending.length);
     badge.hidden = !s.pending.length;
-    if (fresh && !S.labOpen) toggleLab(true);
+    if (fresh) {   // a request no conversation shows: the Lab panel, on the screen even in full screen
+      if (!S.labOpen) toggleLab(true);
+      fullShow("labpanel");
+    }
     showMode(s.approval_mode, s.approval_rule);
     renderAlerts(s.alarms, s.incident);
     renderWatches(s.watches || [], s.status);
@@ -4922,7 +4980,7 @@
   // when asked for again, and goes only when the person says so
   async function openEditor(id) {
     const same = !!ED.parts && ED.id === (id || null);
-    if (same && edDirty()) { toggleEditor(true); $("ed-name").focus(); return; }
+    if (same && edDirty()) { toggleEditor(true); fullShow("edpane"); $("ed-name").focus(); return; }
     if (ED.parts && !same && edDirty() && !confirm("Discard your changes to " + (ED.parts.name || "this scan") + "?")) return;
     let d;
     try { d = await api("/api/library", { body: { op: "parts", id: id || null } }); }
@@ -4945,6 +5003,7 @@
     edSay("");
     renderEditor();
     toggleEditor(true);
+    fullShow("edpane");
     $("ed-name").focus();
   }
   const edDirty = () => !!ED.parts && JSON.stringify(ED.parts) !== ED.base;
@@ -6127,6 +6186,7 @@
     $("toggle-term").setAttribute("aria-pressed", String(TERM.open));
     $("toggle-term").classList.toggle("on", TERM.open);
     store("lh.term", TERM.open ? "1" : "0");
+    fitLayout();   // full screen, and the scrim, follow
     if (!TERM.open) return;
     if (!termOut().childElementCount) termLine("Kelvin terminal. Type to Kelvin, or /help for instrument commands.", "dim");
     termSync();
@@ -6164,14 +6224,14 @@
       const cur = $("termpane").getBoundingClientRect().height;
       store("lh.termHeight", String(setTermHeight(cur + (e.key === "ArrowUp" ? 32 : -32))));
     });
-    $("toggle-term").addEventListener("click", () => toggleTerm());
+    $("toggle-term").addEventListener("click", () => pillClick("termpane", toggleTerm));
     $("close-term").addEventListener("click", () => toggleTerm(false));
     $("term-clear").addEventListener("click", () => { termOut().replaceChildren(); $("term-input").focus(); });
     $("term-input").addEventListener("keydown", termKey);
     termOut().addEventListener("mouseup", () => { if (!window.getSelection().toString()) $("term-input").focus(); });
     $("model").addEventListener("change", termSync);
     document.addEventListener("keydown", (e) => {
-      if (e.ctrlKey && (e.key === "`" || e.code === "Backquote")) { e.preventDefault(); toggleTerm(); }
+      if (e.ctrlKey && (e.key === "`" || e.code === "Backquote")) { e.preventDefault(); pillClick("termpane", toggleTerm); }
     });
     if (store("lh.term") === "1") toggleTerm(true);
   }
@@ -6415,6 +6475,7 @@
     for (const l of p.lessons || []) termLine("  from the lab's memory: " + l, "dim");
     termSync();
     if (!TERM.open) toggleTerm(true);
+    fullShow("termpane");
     $("term-input").focus();
   }
   function termEndAsk(note) {
@@ -6996,7 +7057,7 @@
   function closeSidebar() { $("app").classList.remove("side-open"); syncScrim(); }
   function syncScrim() {
     const narrow = window.matchMedia("(max-width: 1100px)").matches;
-    $("scrim").hidden = !($("app").classList.contains("side-open") || ((S.labOpen || RUNS.open || TEAM.open || ANA.open || ED.open) && narrow));
+    $("scrim").hidden = FULL.length > 0 || !($("app").classList.contains("side-open") || ((S.labOpen || RUNS.open || TEAM.open || ANA.open || ED.open) && narrow));
   }
 
 
@@ -7143,11 +7204,11 @@
     try {
       const theirs = (await api("/api/team?after=" + from)).messages.filter((m) => m.name !== teamName());
       const m = theirs[theirs.length - 1];
-      if (m) toast(m.name + ": " + (m.text.length > 90 ? m.text.slice(0, 90) + "…" : m.text), () => toggleTeam(true));
+      if (m) toast(m.name + ": " + (m.text.length > 90 ? m.text.slice(0, 90) + "…" : m.text), () => { toggleTeam(true); fullShow("teampanel"); });
     } catch (e) { /* the dot still says */ }
   }
   function initTeam() {
-    $("toggle-team").addEventListener("click", () => toggleTeam());
+    $("toggle-team").addEventListener("click", () => pillClick("teampanel", toggleTeam));
     $("close-team").addEventListener("click", () => toggleTeam(false));
     $("team-form").addEventListener("submit", sendTeam);
     $("team-name-form").addEventListener("submit", saveTeamName);
@@ -7506,6 +7567,7 @@
   function askAboutAnalysis() {
     const s = ANA.spec;
     if (!s.runs.length) return;
+    exitFull();   // the question is asked in the chat
     const parts = [s.runs.join(", "), "y = " + s.y, "x = " + s.x];
     if (s.where) parts.push("where " + s.where);
     if (s.group) parts.push("a curve per " + s.group);
@@ -7546,7 +7608,7 @@
     $("an-more-run").setAttribute("aria-expanded", "true");
   }
   function initAnalysis() {
-    $("toggle-analysis").addEventListener("click", () => toggleAnalysis());
+    $("toggle-analysis").addEventListener("click", () => pillClick("anpane", toggleAnalysis));
     $("close-analysis").addEventListener("click", () => toggleAnalysis(false));
     $("an-add-step").replaceChildren(h("option", { value: "" }, "+ Step"),
       ...Object.entries(AN_STEPS).map(([op, [name]]) => h("option", { value: op }, name)));
@@ -7862,7 +7924,7 @@
       if (ANA.open) toggleAnalysis(false);
       if (ED.open) toggleEditor(false);
     });
-    $("toggle-lab").addEventListener("click", () => toggleLab());
+    $("toggle-lab").addEventListener("click", () => pillClick("labpanel", toggleLab));
     $("inst-filter").addEventListener("input", (e) => { PANEL.filter = e.target.value; renderInstruments(); });
     for (const b of document.querySelectorAll("#inst-seg button")) {
       b.addEventListener("click", () => {
