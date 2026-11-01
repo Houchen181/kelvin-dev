@@ -7,7 +7,7 @@ status: community
 manual: "Quantum Design MultiPyVu documentation (the MultiVu server and its Python client)"
 manual_url: "https://qdusa.com/siteDocs/appNotes/1070-220.pdf"
 notes:
-  - "Controlled through MultiPyVu (which Kelvin installs on this computer once a person approves), with its server running on the MultiVu computer; address qd://<that computer>:5000"
+  - "Controlled through MultiPyVu (which Kelvin installs on this computer itself), with its server running on the MultiVu computer; address qd://<that computer>:5000"
   - "MultiVu ramps temperature and field itself; Kelvin sets the rate, then the setpoint, and waits for the reading"
   - "To measure while it ramps (R(T) on a cool-down, a field sweep), sweep T_set or B_set with ramp: in a plan, e.g. {ramp: [{to: 2, rate: 10}], every: 10} (rate in K/min, or T/s for B_set)"
 requires: [MultiPyVu]

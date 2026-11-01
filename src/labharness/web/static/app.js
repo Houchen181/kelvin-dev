@@ -6082,8 +6082,8 @@
     } finally { save.disabled = false; }
   }
 
-  // A maker's package the lab's instruments need is missing (envs.py): install it, once the person approves what is
-  // downloaded (the request appears with the other approvals), then connect the lab again.
+  // A maker's package the lab's instruments need is missing (envs.py): install it (the person's click is their yes),
+  // then connect the lab again.
   function installOffer(install, after) {
     if (!install || !install.packages || !install.packages.length) return [];
     const names = andList(install.packages);
@@ -6091,7 +6091,7 @@
     const said = h("span", { class: "install-said" });
     button.addEventListener("click", async () => {
       button.disabled = true;
-      said.textContent = " Approve the download above to go on…";
+      said.textContent = " Installing…";
       try {
         const r = await api("/api/lab/install", { body: install });
         said.textContent = " " + r.message;

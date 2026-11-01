@@ -53,8 +53,9 @@ from .scpi import is_query, split_compound
 SHIM_DIR = Path(__file__).parent / "data" / "scriptshim"
 SHIM = SHIM_DIR / "kelvin_shim.py"
 RUNNABLE = (".py", ".ipynb")
-# makers' libraries that reach instruments through their own protocols or DLLs, past the gate: a person allows each
-# one for the run (Kelvin's built-in drivers use some of these too, on its own connections)
+# makers' libraries that reach instruments through their own protocols or DLLs, past the gate: named in the run's
+# approval, or, loaded on the way, let through with the run and said in the chat (Kelvin's built-in drivers use some of
+# these too, on its own connections)
 OPAQUE = ("zhinst", "nidaqmx", "PyDAQmx", "MultiPyVu", "pylablib", "seabreeze", "pypylon", "clr", "pythonnet",
           "thorlabs_apt", "pyximc", "instrumental", "qick", "picosdk", "pyAndorSDK2", "pyAndorSDK3", "andor3",
           "pymmcore", "spcm", "pyspcm", "TimeTagger", "pulsestreamer", "spinapi", "harvesters", "pyueye", "pyvcam",
@@ -778,8 +779,8 @@ def approval(gate: SafetyGate, prep: Prepared) -> Tuple[ApprovalRequest, Dict[st
     lines += ["It also opens " + outside(lab, a) for a in found.unknown]
     lines += ["It uses %s, which reaches instruments without Kelvin seeing the commands" % m for m in found.libraries]
     lines += found.notes
-    lines.append("A script can't be rehearsed on the simulated lab, so a person approves each run; anything beyond "
-                 "this asks again, or is refused")
+    lines.append("A script can't be rehearsed on the simulated lab, so a person approves each run; a maker's library "
+                 "it loads on the way comes with it, and anything else beyond this asks again, or is refused")
     return ApprovalRequest("Run script %s?" % prep.name, lines), grants, problems
 
 
@@ -915,6 +916,7 @@ class ScriptRun:
         self.unparsed: Dict[str, None] = {}  # instruments a drive command went to that the gate couldn't read
         self.opened: Dict[str, str] = {}     # lab instrument -> the address the script opened it at
         self.passed: List[str] = []          # what it opened past the gate (a person allowed it)
+        self.through: List[str] = []         # makers' libraries it loaded on the way, let through with the run
         self.bye: Dict[str, Any] = {}
         self.n_commands = 0
         self.state: Dict[str, Any] = {}      # what the script set, as it is now
@@ -1264,16 +1266,21 @@ class ScriptRun:
         return {}
 
     def _library(self, module: str) -> Dict[str, Any]:
+        """A maker's library the reading missed (one another loads, as pylablib loads pyusb and nidaqmx, or an import
+        the script builds): it drives nothing itself, and the run a person approved is what uses it, so Kelvin lets it
+        through with the run, in the chat and the record, never waiting for anyone. Not while the run stops."""
         if module in self.allowed:
             return {}
+        if self.stopping:
+            raise _Refuse("declined: %s may not use %s as it stops" % (self.prep.name, module))
         request = ApprovalRequest("Let %s use %s?" % (self.prep.name, module), [
             "%s imports %s, which reaches instruments without Kelvin seeing the commands: the safety gate can't "
             "check what it does through it" % (self.prep.name, module)])
-        if not self._ask(request):
-            raise _Refuse("declined: %s may not use %s%s" % (self.prep.name, module,
-                                                              " (%s)" % request.note if request.note else ""))
+        self.gate.auto_approve(request, ["a maker's library the script loads on the way drives nothing itself; the "
+                                         "person's yes to the run covers what the script does with it"],
+                               "approved with the script's run")
         self.allowed.add(module)
-        self.passed.append(module)
+        self.through.append(module)
         return {}
 
     # ---------------------------------------------------------------- the loop
@@ -1493,6 +1500,8 @@ class ScriptRun:
                               list(self.bye.get("figures") or []), left, cleanup, duration_s=duration)
         if self.passed:
             report.warnings.append("past the gate, as a person allowed: " + ", ".join(self.passed))
+        if self.through:
+            report.warnings.append("past the gate, let through with the run: " + ", ".join(self.through))
         if self.reported:
             report.warnings.append("the instruments refused %d of its commands, as they would have without Kelvin "
                                    "(commands.jsonl says which and why)" % self.reported)

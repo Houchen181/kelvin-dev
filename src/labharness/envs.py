@@ -383,7 +383,7 @@ def attach(name: str = DRIVERS, home: Any = None) -> Optional[str]:
 def missing(*packages: str) -> str:
     """What to say when a built-in driver's maker's package is not on this computer."""
     one = len(packages) == 1
-    return ("%s %s not on this computer: Kelvin installs %s into its drivers environment once a person approves "
+    return ("%s %s not on this computer: Kelvin installs %s into its drivers environment itself "
             "(install_for_instrument with env %s and packages %s); from source, pip install %s"
             % (" and ".join(packages), "is" if one else "are", "it" if one else "them", DRIVERS,
                json.dumps(list(packages)), " ".join(packages)))

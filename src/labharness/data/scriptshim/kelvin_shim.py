@@ -13,8 +13,8 @@ stand-ins for the instruments in Kelvin's lab:
                 instrument's reply; any other address opens as usual once Kelvin allows it (it asks a person)
     pyserial    Serial on a lab instrument's port: the same, a line at a time
     socket      a connection to a lab instrument's address (TCPIP::host::port::SOCKET): the same
-    a maker's library (zhinst, nidaqmx, ...)   reaches instruments without Kelvin seeing the commands: Kelvin asks a
-                person before the script first imports it
+    a maker's library (zhinst, nidaqmx, ...)   reaches instruments without Kelvin seeing the commands: Kelvin hears
+                of it before the script first imports it, and lets it through with the run
     time.sleep  in the main thread, ends at once when the run stops
 
 A command the gate refuses ends the script with KelvinRefused; a person's stop with KeyboardInterrupt (once), so the
@@ -199,7 +199,7 @@ class _Link(object):
         return self.request("lookup", address=address).get("instrument")
 
     def library(self, module):
-        """May the script import this maker's library? Kelvin asks a person once."""
+        """May the script import this maker's library? Kelvin says once: yes with the run, unless it stops."""
         if module not in self.asked:
             try:
                 self.request("library", module=module)
@@ -664,7 +664,7 @@ def _patch_socket():
 # ------------------------------------------------------------------ makers' libraries, and installing it all
 
 class _Libraries(importlib.abc.MetaPathFinder):
-    """Asks Kelvin before the script first imports a maker's library that reaches instruments past the gate (one that
+    """Tells Kelvin before the script first imports a maker's library that reaches instruments past the gate (one that
     is installed: a missing one fails as it always would)."""
 
     def find_spec(self, fullname, path=None, target=None):

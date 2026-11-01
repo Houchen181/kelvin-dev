@@ -428,7 +428,7 @@ def test_a_serial_port_approved_up_front_is_not_asked_again_however_it_is_spelle
     assert report.status == "done", report.message
 
 
-def test_a_makers_library_is_named_in_the_approval_or_asked_about_before_it_is_imported(lab, folder, tmp_path):
+def test_a_makers_library_is_named_in_the_approval_or_comes_with_the_run(lab, folder, tmp_path):
     (tmp_path / "fakes" / "zhinst").mkdir()
     (tmp_path / "fakes" / "zhinst" / "__init__.py").write_text("")
     (tmp_path / "fakes" / "nidaqmx").mkdir()
@@ -438,18 +438,20 @@ def test_a_makers_library_is_named_in_the_approval_or_asked_about_before_it_is_i
         import zhinst                                  # read ahead: in the run's approval
         print("zhinst in")
         try:
-            importlib.import_module("nida" + "qmx")   # hidden from the reading: asked when it is imported
+            importlib.import_module("nida" + "qmx")   # hidden from the reading: comes with the run, said so
         except ImportError as e:
             print("no nidaqmx:", e)
             raise
     """)
-    gate, request, report = run(lab, folder, tmp_path, "uses_zhinst.py", answers=(True, False))
+    gate, request, report = run(lab, folder, tmp_path, "uses_zhinst.py", answers=(True,))
     assert "It uses zhinst, which reaches instruments without Kelvin seeing the commands" in str(request)
     assert "nidaqmx" not in str(request)
-    assert [r.title for r in gate.approver.requests][1:] == ["Let uses_zhinst.py use nidaqmx?"]
+    assert [r.title for r in gate.approver.requests] == ["Run script uses_zhinst.py?"]   # nobody asked again
+    [own] = [e for e in gate.log.events() if e.get("type") == "ask" and e.get("answer") == "auto-approved"]
+    assert own["request"].startswith("Let uses_zhinst.py use nidaqmx?") and "with the script's run" in own["note"]
     out = output(report)
-    assert "zhinst in" in out and "no nidaqmx: Kelvin: declined" in out
-    assert report.status == "aborted"
+    assert "zhinst in" in out and "no nidaqmx" not in out
+    assert report.status == "done" and "past the gate, let through with the run: nidaqmx" in report.warnings
 
 
 def test_a_notebook_runs_its_code_cells(lab, folder, tmp_path):

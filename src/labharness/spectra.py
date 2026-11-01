@@ -1,7 +1,7 @@
 """Spectrometers and spectrographs.
 
     seabreeze://<serial>     Ocean Insight / Ocean Optics USB spectrometers (USB2000+, USB4000, Flame, HR4000, QE Pro,
-                             Maya...) through python-seabreeze (Kelvin installs it once a person approves;
+                             Maya...) through python-seabreeze (Kelvin installs it itself;
                              seabreeze_os_setup once for its USB driver). seabreeze:// is the first one found.
     shamrock://<index>       Andor Shamrock and Kymera spectrographs (also monochromators) through Andor's
                              spectrograph library (atspectrograph or ShamrockCIF DLL, installed with Solis or the

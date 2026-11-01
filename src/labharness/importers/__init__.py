@@ -5,4 +5,4 @@ arrays, TIFF images).
 Each reader keeps to what its format's documentation (or a long-used open reader of it) says, and refuses a file it
 can't read with certainty rather than guess at its layout: a wrong guess would put wrong numbers in a run. None needs
 a package the app doesn't bring (NumPy only, where arrays are read), but TDMS: npTDMS, which Kelvin installs on
-demand, once a person approves (envs.py)."""
+demand (envs.py)."""

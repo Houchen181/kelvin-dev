@@ -85,10 +85,11 @@ def asked(tmp_path):
 
 
 def test_kelvin_installs_a_drivers_package_and_says_what(kelvin, tmp_path):
-    kelvin.approver.answers = [True]                                  # a download onto their computer: a person says
     said = kelvin.install_for_instrument("drivers", ["qick==0.2.436", "Pyro4"], why="the RFSoC 4x2")
-    [request] = kelvin.approver.requests                              # (F3 P6: 71 MB came unasked)
-    shown = str(request)
+    assert kelvin.approver.requests == []                             # it drives nothing: nobody waits for a yes
+    [own] = asked(tmp_path)                                           # Kelvin's own, in the chat and the record
+    assert own["answer"] == "auto-approved" and "drives nothing" in own["note"]
+    shown = own["request"]
     assert "Install on this computer for the RFSoC 4x2?" in shown
     assert "a new environment drivers" in shown and "Python %s" % envs.app_python()[0] in shown
     assert "qick==0.2.436 from PyPI (qick; latest 0.2.436): Quantum Instrumentation Control Kit" in shown
@@ -131,9 +132,8 @@ def test_a_library_gets_an_environment_of_its_own(kelvin, tmp_path):
     sdk = tmp_path / "attocube" / "attoDRYLib"
     sdk.mkdir(parents=True)
     (sdk / "attoDRYLib.dll").write_bytes(b"MZ")
-    kelvin.approver.answers = [True]
     said = kelvin.install_for_instrument("attodry", python="3.8", bits=32, files=str(sdk), why="the attoDRY2100")
-    assert "a new environment attodry" in str(kelvin.approver.requests[0])
+    assert "a new environment attodry" in asked(tmp_path)[0]["request"]   # what Kelvin approved itself
     made = next(i for i, c in enumerate(kelvin.uv.calls) if c[1] == "venv")
     assert kelvin.uv.calls[made][-2:] == ["--python", "3.8"] and kelvin.uv.envs[made]["UV_PYTHON_ARCH"] == "x86"
     rec = envs.info("attodry", tmp_path)
@@ -147,7 +147,6 @@ def test_an_sdk_python_package_is_installed_not_copied(kelvin, tmp_path):
     sdk = tmp_path / "Andor SDK3" / "Python" / "pyAndorSDK3"
     sdk.mkdir(parents=True)
     (sdk / "setup.py").write_text("from setuptools import setup; setup(name='pyAndorSDK3')")
-    kelvin.approver.answers = [True]
     said = kelvin.install_for_instrument("drivers", files=str(sdk), why="the Zyla")
     assert "installed as a Python package" in said
     install = next(c for c in kelvin.uv.calls if c[1:3] == ["pip", "install"])
@@ -178,20 +177,18 @@ def test_uv_is_fetched_once_and_checked(tmp_path):
 
 
 def test_removing_an_environment_asks_only_when_an_instrument_uses_it(kelvin, tmp_path):
-    kelvin.approver.answers = [True]
     kelvin.install_for_instrument("drivers", ["qick"])
     kelvin.lab.instruments["smu"].config.address = "lib://Dev1?env=drivers"   # Kelvin would lose this instrument
     kelvin.approver.answers = [False, True]
     assert kelvin.remove_environment("drivers").startswith("declined")
-    assert "used by smu" in "\n".join(kelvin.approver.requests[1].items)
+    assert "used by smu" in "\n".join(kelvin.approver.requests[0].items)
     assert kelvin.remove_environment("drivers") == "removed environment drivers"
     assert envs.listing(tmp_path) == [] and not (tmp_path / "env" / "drivers").exists()
     assert kelvin.remove_environment("drivers") == "no environment drivers"
     kelvin.lab.instruments["smu"].config.address = "GPIB0::24::INSTR"
-    kelvin.approver.answers = [True]
     kelvin.install_for_instrument("drivers", ["qick"])
     assert kelvin.remove_environment("drivers") == "removed environment drivers"   # nothing uses it: no question
-    assert len(kelvin.approver.requests) == 4                         # two installs and two removals were asked
+    assert len(kelvin.approver.requests) == 2                         # only the removals of one smu used asked
 
 
 def test_a_library_address_runs_its_environments_python(tmp_path, monkeypatch):
@@ -421,7 +418,6 @@ def test_settings_lists_what_kelvin_installed_and_removes_it(kelvin, tmp_path, m
     from labharness.web.store import ChatStore
     from test_web import Scripted
     monkeypatch.setitem(envs.HOME, "path", tmp_path)
-    kelvin.approver.answers = [True]
     kelvin.install_for_instrument("drivers", ["qick==0.2.436"], why="the RFSoC 4x2")
     settings = Settings(tmp_path / "settings.json")
     app = webapp.create_app(kelvin, settings, ChatStore(tmp_path / "chats"), hosts=["testserver"],

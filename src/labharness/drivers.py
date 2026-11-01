@@ -25,7 +25,7 @@ like a SCPI instrument. The address names the driver:
     uvc://0, genicam://<serial>           USB video cameras (OpenCV), GenICam cameras (Harvesters) (cameras.py)
 
 The makers' libraries are not in the app: Kelvin installs the one an instrument needs into its drivers environment
-(envs.py) once a person approves, and says so when one is missing. From source, pip install them."""
+(envs.py) itself, and says so when one is missing. From source, pip install them."""
 from __future__ import annotations
 
 import math

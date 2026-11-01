@@ -10,7 +10,7 @@
                              none: a camera on no spectrograph), &pixel_um=<pixel width> where the SDK can't say.
     uvc://<index>            USB video cameras (webcams, microscope cameras) through OpenCV
     genicam://<serial>       GenICam industrial cameras through Harvesters and the maker's GenTL producer (.cti)
-                             (OpenCV and Harvesters: Kelvin installs them once a person approves)
+                             (OpenCV and Harvesters: Kelvin installs them itself)
 
 Connecting opens the camera and sets nothing. A Basler camera keeps every setting. Andor's SDK2 starts each session
 from its own defaults (the SDK, not Kelvin, does that; cooling is off until someone turns it on); Kelvin then changes
@@ -203,7 +203,7 @@ class AndorCamera(Camera):
                     import pyAndorSDK2 as module   # type: ignore
             except ImportError as e:
                 raise AdapterError("%s needs Andor's pyAndorSDK%s, from Andor's SDK: Kelvin installs it from the SDK's "
-                                   "Python folder into its drivers environment once a person approves "
+                                   "Python folder into its drivers environment itself "
                                    "(install_for_instrument, env %s, files <that folder>)"
                                    % (name, self.sdk_version, envs.DRIVERS)) from e
         self.mod = module
@@ -481,7 +481,7 @@ class UsbCamera(Camera):
 
 class GenicamCamera(Camera):
     """Industrial cameras that follow GenICam (Teledyne FLIR, Allied Vision, IDS, The Imaging Source, Lucid...)
-    through Harvesters, which Kelvin installs once a person approves, and the camera maker's GenTL producer: the .cti
+    through Harvesters, which Kelvin installs itself, and the camera maker's GenTL producer: the .cti
     file its SDK installs. Address genicam://<serial>?cti=<that .cti file> (genicam:// for the first camera; without
     cti, the producers the makers' SDKs list in GENICAM_GENTL64_PATH). Paths: exposure (s), gain (dB), width, height."""
 

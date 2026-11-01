@@ -6073,7 +6073,8 @@ class LabRuntime:
                                files: str = "", why: str = "", by: str = "agent") -> str:
         """Install what an instrument needs on this computer, in one of Kelvin's environments (envs.py): its maker's
         Python packages from PyPI, at the version the instrument needs, and its own files (a folder or a download).
-        A person approves first, seeing what, which version and from where."""
+        It drives nothing, so Kelvin approves it itself, in the chat with what, which version and from where; a person
+        answers after the chat read text from the web (gate.auto_simple)."""
         from .. import envs, profiles
         from ..gate import ApprovalRequest
         packages = [p.strip() for p in (packages or []) if str(p).strip()]
@@ -6121,9 +6122,11 @@ class LabRuntime:
             items.append("the maker's files from %s, kept in the environment (a Python package among them is "
                          "installed)" % files)
         request = ApprovalRequest("Install on this computer%s?" % (" for " + why if why else ""), items)
-        # a download onto the person's computer is theirs to say yes to (F3 P6: ~71 MB came unasked); the Lab panel's
-        # Install button is that yes already
-        if not by.startswith("human") and not self.gate.ask(request):
+        # the lab's rule: only driving the sample waits for a person (an install asked every time: user, 2026-11-01);
+        # the Lab panel's Install button is a person's yes already
+        if not by.startswith("human") and not self.gate.auto_simple(request, "installing a maker's package drives "
+                                                                              "nothing") \
+                and not self.gate.ask(request):
             note = " (%s)" % request.note if request.note else ""
             return "declined: nothing installed%s" % note
         try:

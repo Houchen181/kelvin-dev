@@ -6,7 +6,7 @@ kind: spectrometer
 status: community
 manual: "LightField Add-ins and Automation: Automation, IExperiment (Load, Capture, GetValue, SetValue, Exists, IsReadyToRun, IsRunning, SystemColumnCalibration), CameraSettings.ShutterTimingExposureTime (ms), SensorTemperatureReading / SensorTemperatureSetPoint / SensorTemperatureStatus, ExperimentSettings.AcquisitionFramesToStore (FrameSettingsFramesToStore before LightField 6), SpectrometerSettings.Grating / GratingCenterWavelength (nm)"
 notes:
-  - "Address lightfield://<experiment>: the experiment saved in LightField to load (lightfield:// keeps the one LightField opens). Add ?visible=0 to start LightField without its window. Needs LightField, with its license, on this computer, and pythonnet, which Kelvin installs on this computer once a person approves."
+  - "Address lightfield://<experiment>: the experiment saved in LightField to load (lightfield:// keeps the one LightField opens). Add ?visible=0 to start LightField without its window. Needs LightField, with its license, on this computer, and pythonnet, which Kelvin installs on this computer itself."
   - "Kelvin starts LightField itself, a normal window you can watch and use, and that LightField then has the camera: close a LightField you opened by hand first. Don't also add the same camera through PICam (picam://): one program per camera."
   - "Kelvin changes only what a person or a plan sets; the experiment as saved in LightField stays as it was."
   - "Each reading captures the experiment's frames (no file is saved) and averages them. Spectrum sums each column's rows; its wavelengths come from LightField's calibration of the spectrograph (column numbers when the experiment has none)."

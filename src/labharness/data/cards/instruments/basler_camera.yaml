@@ -6,7 +6,7 @@ kind: camera
 status: community
 manual: "pypylon: InstantCamera, GrabOne; GenICam features ExposureTime / ExposureTimeAbs, Gain / GainRaw"
 notes:
-  - "Address pylon://<serial> (pylon:// for the first). Needs pypylon (it brings the pylon runtime), which Kelvin installs on this computer once a person approves. Close pylon Viewer first: one program at a time."
+  - "Address pylon://<serial> (pylon:// for the first). Needs pypylon (it brings the pylon runtime), which Kelvin installs on this computer itself. Close pylon Viewer first: one program at a time."
   - "Connecting changes nothing: exposure, gain, pixel format and region stay as they are."
   - "A frame is kept as a .npy file: a run puts each in its frames/ folder and data.csv names it. Mean, max, min and sum are readings of a frame (one taken just before is used, else a new one)."
   - "Gain is in dB on cameras with Gain, in raw steps on older ones with only GainRaw."

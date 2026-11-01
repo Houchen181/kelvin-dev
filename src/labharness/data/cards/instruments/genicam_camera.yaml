@@ -6,7 +6,7 @@ kind: camera
 status: community
 manual: "GenICam SFNC (ExposureTime in us, Gain in dB, Width, Height) through Harvesters and the maker's GenTL producer"
 notes:
-  - "Address genicam://<serial> (genicam:// for the first camera), with ?cti=<the .cti file> when the maker's SDK doesn't list its GenTL producer in GENICAM_GENTL64_PATH. Needs harvesters, which Kelvin installs on this computer once a person approves, and the camera maker's SDK (its installer, run by a person), which brings the .cti file. Close the maker's viewer first."
+  - "Address genicam://<serial> (genicam:// for the first camera), with ?cti=<the .cti file> when the maker's SDK doesn't list its GenTL producer in GENICAM_GENTL64_PATH. Needs harvesters, which Kelvin installs on this computer itself, and the camera maker's SDK (its installer, run by a person), which brings the .cti file. Close the maker's viewer first."
   - "Connecting changes nothing: exposure, gain, pixel format and region stay as they are."
   - "A frame is kept as a .npy file: a run puts each in its run.h5. Mean, max, min and sum are readings of a frame."
 requires: [harvesters]

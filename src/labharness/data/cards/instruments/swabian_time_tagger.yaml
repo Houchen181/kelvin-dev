@@ -7,7 +7,7 @@ status: community
 manual: "Time Tagger documentation, event counting (GatedCounter, Countrate) and time-difference histograms (Correlation)"
 manual_url: "https://www.swabianinstruments.com/static/documentation/TimeTagger/api/measurements/event_counting.html"
 notes:
-  - "Address timetagger://<serial, or empty for the first>?click=1&gate=2 (inputs, 1-based: the detector, and the pulse generator's gate; &level=0.5 sets both trigger levels in volts). Needs Swabian-TimeTagger, which Kelvin installs on this computer once a person approves, and the Opal Kelly USB driver (Swabian's installer, run by a person)."
+  - "Address timetagger://<serial, or empty for the first>?click=1&gate=2 (inputs, 1-based: the detector, and the pulse generator's gate; &level=0.5 sets both trigger levels in volts). Needs Swabian-TimeTagger, which Kelvin installs on this computer itself, and the Opal Kelly USB driver (Swabian's installer, run by a person)."
   - "Counts the detector in the gate windows: a signal window, then a reference window, each period. Kelvin finds which comes first from the generator's own timing, and reads both from one acquisition."
   - "g2 (Hanbury Brown-Twiss, two detectors behind a beam splitter): give the second detector's input in the address, &click2=2. g2 correlates the two for the integration time (normalised to uncorrelated light, over g2_bins bins of g2_binwidth around zero delay); g2_zero, g2_zero_err and g2_tau come from fitting that correlation with A(1 - rho exp(-|t - t0|/tc)): g2(0) = 1 - rho with its 1-sigma error, and tc. g2(0) below 0.5 says a single emitter. Measure g2 with them in the same plan, and the fit is of that correlation."
 requires: [Swabian-TimeTagger]

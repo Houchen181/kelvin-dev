@@ -1,5 +1,5 @@
 """NI's TDMS data files (what LabVIEW saves measurements in) become runs (importers/tdms.py), read with npTDMS: a
-reader Kelvin installs once a person approves, and never ships. Without it, the import says so in the words that let
+reader Kelvin installs on demand, and never ships. Without it, the import says so in the words that let
 Kelvin offer the install (envs.missing: install_for_instrument, the drivers environment)."""
 import builtins
 

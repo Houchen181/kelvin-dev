@@ -2630,8 +2630,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     async def lab_install(request: Request) -> Response:
         """POST {env, packages}: install the makers' packages the lab's instruments need, from the Install button
-        shown where the lab can't connect because one is missing. The person approves what is downloaded, with
-        its versions and sources, as for Kelvin's own installs (envs.py); then the Lab panel connects again."""
+        shown where the lab can't connect because one is missing: the person's click is their yes (envs.py); then the
+        Lab panel connects again."""
         body = await request.json()
         packages = body.get("packages")
         if not isinstance(packages, list) or not packages or not all(isinstance(p, str) for p in packages):

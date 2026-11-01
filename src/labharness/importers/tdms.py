@@ -1,5 +1,5 @@
 """NI's TDMS files (.tdms: what LabVIEW and NI's programs save measurements in) as a run, read with npTDMS (an
-open-source reader, BSD licence), which Kelvin installs on this computer once a person approves (envs.py: the
+open-source reader, BSD licence), which Kelvin installs on this computer itself (envs.py: the
 drivers environment) and never ships. A TDMS file holds groups of channels, each a column of values with its
 properties (a unit, a waveform's start and step). How one is read:
 - the group with the most values: its channels of one length side by side (the other groups, and channels of

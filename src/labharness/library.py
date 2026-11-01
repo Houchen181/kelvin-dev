@@ -5,7 +5,7 @@ Address: lib://<what the library connects to>?python=<python.exe>&path=<folder w
 The part after lib:// is {address} in the card's open calls (a COM port, an IP address, a serial number). python is
 the interpreter that can load the library (a 32-bit one for a 32-bit DLL; by default Kelvin's own), and path is the
 folder holding the maker's module or DLL. Or env=<name>: one of the environments Kelvin installs a maker's package
-or files into, once a person approves (envs.py), with the Python the library needs:
+or files into (envs.py), with the Python the library needs:
     lib://192.168.1.20?env=attodry
 
 The card says what to load and how to call it, under library:
@@ -226,7 +226,7 @@ class LibraryInstrument(DriverBackend):
             hint = (" A 32-bit DLL needs a 32-bit Python: set python= in the address, or use an environment made with "
                     "bits 32." if bits == 64 and lib.get("dll") and "WinError 193" in str(e) else "")
             if "No module named" in str(e) and q.get("env"):
-                hint = (" Kelvin installs the maker's package into environment %s once a person approves "
+                hint = (" Kelvin installs the maker's package into environment %s itself "
                         "(install_for_instrument with env %s and packages %s, or files for the maker's own folder)"
                         % (q["env"], q["env"], json.dumps(card.requires) if card.requires else "<its pip name>"))
             raise AdapterError(str(e) + hint) from e

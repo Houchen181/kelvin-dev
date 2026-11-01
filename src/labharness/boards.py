@@ -7,7 +7,7 @@ It speaks Jupyter's own interfaces: the login page (a password, or a token), /ap
 /api/kernels for a fresh Python kernel, and the kernel's websocket for running code and reading what it prints.
 
 Boards and lab computers without Jupyter (a Red Pitaya, a Raspberry Pi controller) take shell commands over SSH:
-ssh_run, through paramiko, which Kelvin installs once a person approves; this computer's SSH key, or a password."""
+ssh_run, through paramiko, which Kelvin installs itself; this computer's SSH key, or a password."""
 from __future__ import annotations
 
 import http.cookiejar

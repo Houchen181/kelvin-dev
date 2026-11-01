@@ -5,7 +5,7 @@ compute, look_at, plot_runs, fit_run, run_python, reports, the automatic fits):
   a long table of a 2-D scan (x, y, value rows) becomes a 2-D run;
 - Excel workbooks (.xlsx): the first sheet with numbers, or an Arbin export's Channel sheets;
 - makers' files: BioLogic's EC-Lab .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel exports, LabVIEW's measurement
-  files (.lvm) and NI's TDMS (.tdms: read with npTDMS, which Kelvin installs once a person approves) (importers/), and
+  files (.lvm) and NI's TDMS (.tdms: read with npTDMS, which Kelvin installs on demand) (importers/), and
   LightField's .spe spectra;
 - NumPy's .npy and .npz, and TIFF images: an array of numbers, a table, or camera frames (a frame or a stack of them,
   one point per frame, which look_at shows).

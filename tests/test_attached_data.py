@@ -181,7 +181,7 @@ def test_the_portal_takes_a_data_file(parts):
 
 def test_a_tdms_file_attached_without_its_reader_says_how_to_get_it(parts, monkeypatch):
     """npTDMS isn't on this computer: the person reads what is missing in plain words, and how to have it installed
-    (Kelvin asks them to approve the download), never the words meant for the model."""
+    (ask Kelvin), never the words meant for the model."""
     from test_tdms_import import without_nptdms
     without_nptdms(monkeypatch)
     client, headers = client_for(parts, {"scripted": Scripted([])})
@@ -190,5 +190,5 @@ def test_a_tdms_file_attached_without_its_reader_says_how_to_get_it(parts, monke
                     headers=dict(headers, **{"X-File-Name": "sweep.tdms"}))
     assert r.status_code == 400
     assert r.json()["error"] == ("Not imported: sweep.tdms is an NI TDMS file, which Kelvin reads with npTDMS: npTDMS "
-                                 "isn't on this computer yet. Ask Kelvin to install npTDMS: you approve the "
-                                 "download, then attach the file again.")
+                                 "isn't on this computer yet. Ask Kelvin to install npTDMS, then attach the file "
+                                 "again.")

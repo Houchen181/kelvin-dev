@@ -4,7 +4,7 @@ have plain cards instead).
     anc300://COM5            attocube ANC300 on its USB or RS-232 serial port: its command line, spoken directly
     anc300://192.168.1.10    attocube ANC300 over the network (TCP 7230; ?pwd=<its password>, 123456 by default)
     anc350://0               attocube ANC350 closed-loop controller (USB, index), through pylablib (not in the
-                             app: Kelvin installs it once a person approves)
+                             app: Kelvin installs it itself)
 
 The axis is the card's `axis` variable (ANC300: 1-7; ANC350: 0-2), so one lab-config entry per axis, as a stage.
 Connecting changes no axis setting: Kelvin only switches the ANC300's command echo off, which is its link, not an
