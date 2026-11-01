@@ -94,11 +94,10 @@ def test_an_account_from_before_joins_a_central_one_and_keeps_its_keys(tmp_path,
     client, settings = computer(tmp_path)
     assert client.post("/api/session", json={"name": "Ada", "password": "pw1234"}).status_code == 200
     settings.update({"anthropic_api_key": "sk-ada"})
-    client.delete("/api/session")
-
     assert not client.get("/api/session").json()["central"]
-    s = client.post("/api/session/hub", json={"url": HUB}).json()       # nobody here has a central account yet
+    s = client.post("/api/session/hub", json={"url": HUB}).json()       # nobody else has an account here
     assert s["central"] and s["hub"] == HUB and s["unlinked"] == ["Ada"]
+    client.delete("/api/session")
     r = client.post("/api/accounts", json={"name": "Ada Lovelace", "consent": True, **ADA})
     assert r.status_code == 200 and r.json()["link"] == ["Ada"]           # made on the hub; which one here is hers?
     assert h.authenticate(ADA["email"], ADA["password"])["name"] == "Ada Lovelace"
@@ -117,7 +116,7 @@ def test_an_account_from_before_joins_a_central_one_and_keeps_its_keys(tmp_path,
     assert client.request("DELETE", "/api/account", json={}).status_code == 401      # her password, to take her off
 
     client.delete("/api/session")
-    assert client.post("/api/session/hub", json={"url": ""}).status_code == 401   # not by just anyone now
+    assert client.post("/api/session/hub", json={"url": ""}).status_code == 403   # not by just anyone now
     line.up = False                                                       # offline: this computer knows her password
     r = client.post("/api/session", json=ADA)
     assert r.status_code == 200 and r.json()["offline"] and settings.get("anthropic_api_key") == "sk-ada"
@@ -173,7 +172,7 @@ def test_someone_new_on_a_computer_with_old_accounts_can_start_fresh(tmp_path, h
     h, line = hub
     Accounts(tmp_path).create("Ada", "")
     client, settings = computer(tmp_path)
-    client.post("/api/session/hub", json={"url": HUB})
+    settings.set_account_hub(HUB)                                          # the hub, as built into Kelvin
     ben = {"email": "ben@example.org", "password": "ben's password"}
     r = client.post("/api/accounts", json={"name": "Ben", "consent": False, **ben})
     assert r.status_code == 400                                            # the hub's terms first
@@ -236,6 +235,48 @@ def test_a_kelvin_account_is_deleted_everywhere_from_its_settings(tmp_path, hub)
     assert r.json()["user"] is None and r.json()["accounts"] == [] and r.json()["everywhere"]
     assert not h.find_users(ADA["email"])                                           # gone on the hub
     assert client.post("/api/session", json=ADA).status_code == 401                 # so on every computer
+
+
+def test_wrong_passwords_from_anywhere_never_lock_someone_out_of_their_own_computer(tmp_path, hub):
+    """Ten wrong passwords for an email, from anyone anywhere, make the hub hold off for 15 minutes (429). Kelvin then
+    checks the password this computer knows for that person, as offline, rather than turning the right one away."""
+    h, line = hub
+    client, settings = computer(tmp_path)
+    client.post("/api/session/hub", json={"url": HUB})
+    assert client.post("/api/accounts", json={"name": "Ada Lovelace", "consent": True, **ADA}).status_code == 200
+    client.delete("/api/session")
+    for _ in range(10):                                                    # someone else tries her email
+        with pytest.raises(central.CentralError):
+            central.Central(HUB).sign_in(ADA["email"], "guess", "urn:uuid:someone-else")
+    with pytest.raises(central.CentralError) as held:
+        central.Central(HUB).sign_in(ADA["email"], ADA["password"], "urn:uuid:someone-else")
+    assert held.value.status == 429
+    r = client.post("/api/session", json=ADA)                              # Ada, at her own computer
+    assert r.status_code == 200 and r.json()["offline"] and r.json()["user"]["email"] == ADA["email"]
+    client.delete("/api/session")
+    r = client.post("/api/session", json=dict(ADA, password="wrong pw!"))
+    assert r.status_code == 401 and "Too many tries" in r.json()["error"]  # not her password: the hub's no stands
+
+
+def test_the_hub_people_sign_in_to_changes_only_with_the_owners_pin(tmp_path, hub):
+    """Every sign-in sends the computer's hub the person's email and password, and anyone could point it at a hub of
+    their own by making an account first. Now it takes the lab owner's PIN; with none set, nobody else's account."""
+    h, line = hub
+    client, settings = computer(tmp_path)
+    assert client.post("/api/session/hub", json={"url": HUB}).status_code == 200      # nobody has an account yet
+    assert client.post("/api/accounts", json={"name": "Ada Lovelace", "consent": True, **ADA}).status_code == 200
+    assert client.post("/api/session/hub", json={"url": HUB}).status_code == 200      # only hers here
+    client.delete("/api/session")
+    ben = {"email": "ben@example.org", "password": "ben's password"}
+    assert client.post("/api/accounts", json={"name": "Ben", "consent": True, **ben}).status_code == 200
+    r = client.post("/api/session/hub", json={"url": "https://elsewhere.example.org"})
+    assert r.status_code == 403 and "owner's PIN" in r.json()["error"] and settings.account_hub == HUB
+    assert client.post("/api/owner-pin", json={"pin": "2468"}).json()["set"]
+    r = client.post("/api/session/hub", json={"url": "https://elsewhere.example.org"})
+    assert r.status_code == 403 and r.json()["pin"] and settings.account_hub == HUB  # the portal asks for it
+    client.delete("/api/session")
+    assert client.post("/api/session/hub", json={"url": "", "pin": "2468"}).status_code == 200   # the owner, too
+    assert settings.account_hub == ""                                                # signed out: Kelvin's own
 
 
 def test_an_older_hub_says_where_to_delete_the_account(hub):

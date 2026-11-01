@@ -190,13 +190,23 @@ class Accounts:
 
     def forget(self, name: str) -> Dict[str, Any]:
         """Take the account off this computer's list (whoever may do so has been checked); returns it. Its folder
-        stays: a new account never gets it, nor what Kelvin kept before accounts if this one had taken that."""
+        stays: a new account never gets it, nor what Kelvin kept before accounts if this one had taken that. The role
+        the lab's owner gave it goes with it (LabRoles.drop)."""
+        roles = LabRoles(self.home)   # a roles.json from before roles were kept with their accounts takes them first
         with self._lock:
             accounts = self._read()
             gone = next(a for a in accounts if a["name"].lower() == name.lower())
             marks = {"legacy_taken": True} if gone.get("data") == "virtual-lab" else {}
             self._write([a for a in accounts if a is not gone], **marks)
+        roles.drop(gone)
         return gone
+
+    @staticmethod
+    def ident(account: Dict[str, Any]) -> str:
+        """What tells this account from every other, ever, even from a later one with the same name (the lab's roles
+        are kept with it): made from the account's own random salt, which it got when it was made and keeps."""
+        seed = str(account.get("key_salt") or account.get("created") or "")
+        return hashlib.sha256(("kelvin account " + seed).encode("utf-8")).hexdigest()[:16] if seed else ""
 
     # ------------------------------------------------------------------ central Kelvin accounts (central.py)
 
@@ -355,8 +365,11 @@ class LabRoles:
       trainee at all, PIN or not: an operator or the owner signs in to do them;
     - only an owner, signed in and with the PIN, changes the roles and where the owner hears of safety changes.
     Whoever the owner gave no role (an account made later) is a trainee, and so is a person Kelvin can't name (its
-    approval page as an MCP server, where nobody signs in). The PIN must be set for roles, and stays while they are
-    on. Not a wall: whoever can edit this computer's files can delete roles.json, and the lab's record shows that."""
+    approval page as an MCP server, where nobody signs in). A role is kept with the account it was given to
+    (Accounts.ident): it goes when that account is taken off this computer, and a later account with the same name
+    never has it; the roles stay on until the owner takes them away. The PIN must be set for roles, and stays while
+    they are on. Not a wall: whoever can edit this computer's files can delete roles.json, and the lab's record shows
+    that."""
     TRIES = 5            # wrong passwords or PINs for a trainee's yes before it locks for a while
     LOCKED_S = 300.0
 
@@ -364,6 +377,7 @@ class LabRoles:
         self.path = Path(home) / "roles.json"
         self._wrong: List[float] = []
         self._lock = threading.Lock()
+        self.all()   # a roles.json from before roles were kept with their accounts takes them now, once
 
     def _data(self) -> Dict[str, Any]:
         """The file's contents; {"unreadable": True} for a file that is there but can't be read (then everyone is a
@@ -388,13 +402,48 @@ class LabRoles:
         os.replace(tmp, self.path)
 
     def all(self) -> Dict[str, str]:
-        """Each account the owner gave a role, with it: {} while the lab has no roles."""
-        roles = self._data().get("roles")
-        return {str(k): str(v) for k, v in roles.items() if v in ROLES} if isinstance(roles, dict) else {}
+        """Each account the owner gave a role, with it: {} while the lab has no roles. Only accounts still on this
+        computer, each the very one the role was given to: not a later account with a removed one's name."""
+        data = self._data()
+        if isinstance(data.get("roles"), dict) and not isinstance(data.get("accounts"), dict):
+            data = self._kept_with_accounts()
+        roles, ids = data.get("roles"), data.get("accounts")
+        if not isinstance(roles, dict) or not isinstance(ids, dict) or not roles:
+            return {}
+        here = {a["name"].lower(): Accounts.ident(a) for a in Accounts(self.path.parent)._read()}
+        return {str(n): str(r) for n, r in roles.items()
+                if r in ROLES and ids.get(n) and ids.get(n) == here.get(str(n).lower())}
+
+    def _kept_with_accounts(self) -> Dict[str, Any]:
+        """A roles.json from before roles were kept with their accounts (Kelvin 0.3.35 and older kept names only):
+        each name takes the account that has it now, once, and a name no account has any more is dropped, the roles
+        staying on. Returns the file as it is then (as it was, while accounts.json can't be read)."""
+        book = Accounts(self.path.parent)
+        here = {a["name"].lower(): Accounts.ident(a) for a in book._read()}
+        with self._lock:
+            data = self._data()
+            roles = data.get("roles")
+            if not isinstance(roles, dict) or isinstance(data.get("accounts"), dict) or (
+                    not here and book.path.exists() and not book._data()):
+                return data
+            kept = {str(n): str(r) for n, r in roles.items() if r in ROLES and here.get(str(n).lower())}
+            data.update(roles=kept, accounts={n: here[n.lower()] for n in kept},
+                        on=any(r in ROLES for r in roles.values()))
+            try:
+                self._write(data)
+            except OSError:   # kept as it was; only the accounts that have the names count meanwhile
+                pass
+            return data
 
     @property
     def on(self) -> bool:
-        return bool(self.all()) or bool(self._data().get("unreadable"))
+        """Roles are on from when the owner gives them until the owner takes them away, even once the accounts they
+        were given to are gone (then whoever is left is a trainee, and with no owner left, the PIN alone changes
+        them)."""
+        data = self._data()
+        roles = data.get("roles")
+        return (bool(data.get("unreadable")) or data.get("on") is True
+                or isinstance(roles, dict) and any(r in ROLES for r in roles.values()))
 
     def role(self, name: Optional[str]) -> Optional[str]:
         """None while the lab has no roles; else this person's: the one the owner gave, or trainee (nobody named,
@@ -423,27 +472,51 @@ class LabRoles:
     def set(self, roles: Dict[str, Any], owner: Optional[OwnerPin], pin: Any, signed_in: Optional[str],
             accounts: Optional["Accounts"] = None) -> Dict[str, str]:
         """Give people their roles ({} or all empty: no roles, everyone equal again). Each name is an account on this
-        computer, and at least one is the owner. ValueError and PermissionError say why not."""
+        computer, and at least one is the owner; each role is kept with its account (Accounts.ident). ValueError and
+        PermissionError say why not."""
+        book = accounts if accounts is not None else Accounts(self.path.parent)
         out: Dict[str, str] = {}
+        ids: Dict[str, str] = {}
         for name, role in (roles or {}).items():
             if role in (None, "", "none"):
                 continue
             if role not in ROLES:
                 raise ValueError("a role is owner, operator or trainee, not %r" % role)
-            if accounts is not None:
-                try:
-                    name = accounts.find(name)["name"]
-                except KeyError:
-                    raise ValueError("there is no account %r on this computer" % name) from None
-            out[str(name)] = str(role)
+            try:
+                account = book.find(name)
+            except KeyError:
+                raise ValueError("there is no account %r on this computer" % name) from None
+            out[account["name"]] = str(role)
+            ids[account["name"]] = Accounts.ident(account)
         if out and "owner" not in out.values():
             raise ValueError("Give at least one person the owner's role: the owner changes the roles.")
         self._may_change(owner, pin, signed_in)
         with self._lock:
             data = self._data()
-            data.update(roles=out, changed=time.strftime("%Y-%m-%dT%H:%M:%S"), by=signed_in or None)
+            data.update(roles=out, accounts=ids, on=bool(out), changed=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        by=signed_in or None)
             self._write(data)
         return out
+
+    def drop(self, account: Dict[str, Any]) -> Optional[str]:
+        """The role of an account taken off this computer goes with it (Accounts.forget), and a later account with its
+        name never has it. The roles stay on: whoever is left without one is a trainee, and with no owner's account
+        left, the PIN alone changes them. Returns the role the account had, if any."""
+        with self._lock:
+            data = self._data()
+            roles, ids = data.get("roles"), data.get("accounts")
+            name = next((n for n in roles if str(n).lower() == str(account.get("name") or "").lower()),
+                        None) if isinstance(roles, dict) else None
+            if name is None:
+                return None
+            role = roles.pop(name)
+            theirs = isinstance(ids, dict) and ids.pop(name, None) == Accounts.ident(account)
+            data["on"] = data.get("on") is True or role in ROLES
+            try:
+                self._write(data)
+            except OSError:   # still in the file, but the account it was kept with is gone: it counts for nobody
+                pass
+        return role if theirs and role in ROLES else None
 
     # ------------------------------------------------------------------ a trainee's yes, confirmed
 

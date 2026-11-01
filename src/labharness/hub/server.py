@@ -233,6 +233,12 @@ def safe_next(value: Any, default: str = "/account") -> str:
     return text if text.startswith("/") and not text.startswith(("//", "/\\")) else default
 
 
+def cells(row: List[Any]) -> List[Any]:
+    """A row of the owner's CSV downloads that a spreadsheet only shows: text starting like a formula (= + - @, a tab
+    or a return) gets a ' in front. People choose their names and emails, and a Kelvin says what version it is."""
+    return ["'" + v if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r") else v for v in row]
+
+
 class Limiter:
     """Too many failed tries from one key (an address, an email) in a window: refuse for a while."""
 
@@ -1368,10 +1374,10 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         while True:
             people = await call(hub.find_users, "", 1000, start)
             for u in people:
-                w.writerow([u["id"], u["name"], u["email"], u["orcid"] or "", when(u["email_confirmed_at"])
-                            if u["email_confirmed_at"] else "", when(u["created_at"]), when(u["last_seen"]),
-                            when(u["disabled_at"]) if u["disabled_at"] else "", u["computers"], u["kelvin"],
-                            u["consent_version"] or ""])
+                w.writerow(cells([u["id"], u["name"], u["email"], u["orcid"] or "", when(u["email_confirmed_at"])
+                                  if u["email_confirmed_at"] else "", when(u["created_at"]), when(u["last_seen"]),
+                                  when(u["disabled_at"]) if u["disabled_at"] else "", u["computers"], u["kelvin"],
+                                  u["consent_version"] or ""]))
             if len(people) < 1000:
                 break
             start += 1000
@@ -1467,8 +1473,8 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
         w = csv.writer(out)
         w.writerow(["month", "user_id", "name", "email", "requests", "tokens_in", "tokens_out", "usd", "budget_usd"])
         for p in rep["people"]:
-            w.writerow([rep["month"], p["user_id"], p["name"], p["email"], p["requests"], p["input"], p["output"],
-                        "%.4f" % (p["usd"] or 0), "%.2f" % p["budget"]])
+            w.writerow(cells([rep["month"], p["user_id"], p["name"], p["email"], p["requests"], p["input"],
+                              p["output"], "%.4f" % (p["usd"] or 0), "%.2f" % p["budget"]]))
         return Response(out.getvalue(), media_type="text/csv; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="kelvin-models-%s.csv"' % rep["month"],
                                  "Cache-Control": "no-store"})

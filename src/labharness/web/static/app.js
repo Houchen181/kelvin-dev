@@ -290,12 +290,12 @@
   // ------------------------------------------------------------------ who is using Kelvin (accounts)
   const initials = (name) => String(name).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
 
-  function hubLink(session, text, edit) {   // which Kelvin hub people sign in to on this computer ("" = accounts here only)
+  function hubLink(session, text, edit) {   // which Kelvin hub people sign in to on this computer ("" = Kelvin's own)
     $(text).textContent = session.central ? "Kelvin hub: " + String(session.hub).replace(/^https?:\/\//, "")
       : "Accounts on this computer only.";
     $(edit).textContent = session.central ? "change" : "Use a Kelvin hub";
     $(edit).onclick = async () => {
-      const url = prompt("The Kelvin hub people sign in to on this computer (https://…). Leave it empty for accounts on this computer only.", session.hub || "");
+      const url = prompt("The Kelvin hub people sign in to on this computer (https://…). Leave it empty for Kelvin's own hub. Changing it takes the lab owner's PIN; with no PIN set, only while nobody else has an account here.", session.hub || "");
       if (url === null) return;
       try { await api("/api/session/hub", { body: { url: url.trim() } }); location.reload(); } catch (e) { toast(e.message); }
     };

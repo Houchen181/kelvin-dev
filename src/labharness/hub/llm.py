@@ -61,6 +61,9 @@ SERVICES: Dict[str, Dict[str, Any]] = {
 }
 MODEL_LISTS = {"anthropic": "v1/models", "openai": "v1/models", "gemini": "v1beta/models", "opencode": "v1/models",
                "opencode-go": "v1/models"}
+# Google's parameters that reshape an answer (a part of it only, JSONP, protobuf), so the Meter couldn't read its token
+# counts: never passed on, alt only as alt=sse (all Kelvin sends)
+RESHAPING = ("fields", "$fields", "callback", "$callback", "alt", "$alt")
 MAX_BODY = 40 * 2 ** 20       # bytes of one request: pictures and PDFs ride in it
 MAX_METERED = 32 * 2 ** 20    # bytes of a whole (not streamed) answer read for its token counts
 DEFAULT_BUDGET = 20.0         # dollars per person per month, until the owner sets another
@@ -120,7 +123,8 @@ def cost(price: Dict[str, Any], used: Dict[str, int]) -> float:
 class Meter:
     """The tokens an answer used, read from it as it passes: Anthropic's message_start and message_delta events, the
     usage OpenAI-style services send last (stream_options.include_usage, which the hub asks for), Gemini's
-    usageMetadata, or a whole JSON answer."""
+    usageMetadata, or a whole JSON answer (Gemini's streamGenerateContent without ?alt=sse: its answers as one JSON
+    array, the last one's counts the totals)."""
 
     def __init__(self, service: str, streamed: bool):
         self.service, self.streamed = service, streamed
@@ -163,6 +167,11 @@ class Meter:
                 self.used[k] = v if latest else max(self.used[k], v)
 
     def _take(self, obj: Any) -> None:
+        if isinstance(obj, list):   # answers streamed as one JSON array: each in turn
+            for item in obj:
+                if isinstance(item, dict):
+                    self._take(item)
+            return
         if not isinstance(obj, dict):
             return
         if self.service == "anthropic":
@@ -524,7 +533,8 @@ class Gateway:
         client = self._http()
         try:
             answer = await client.send(client.build_request(
-                method, "%s/%s" % (spec["upstream"], path), params=[(k, v) for k, v in query if k != "key"],
+                method, "%s/%s" % (spec["upstream"], path), params=[
+                    (k, v) for k, v in query if k != "key" and (k not in RESHAPING or (k, v) == ("alt", "sse"))],
                 headers=sent, content=body or None), stream=True)
         except Exception as e:   # unreachable, refused, timed out: never the request's text in the log
             if ticket:

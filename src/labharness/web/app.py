@@ -424,9 +424,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
 
     def phones_away() -> int:
         """Phones that see this person's requests and alarms (the Kelvin app, while it is open): those with their own
-        token (Settings → Phone) and, while this Kelvin is on the hub, those that reached it through the hub in the
-        last 30 days."""
-        direct = settings.devices
+        token (Settings → Phone) while phone access is on (Kelvin listens for them) and, while this Kelvin is on the
+        hub, those that reached it through the hub in the last 30 days."""
+        direct = settings.devices if remote.port is not None else []
         try:
             online = relay_link.state == "online"
         except NameError:   # asked before the hub link exists
@@ -908,9 +908,15 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                     raise PermissionError("Wrong password. (Kelvin can't reach the hub now, so it checked the "
                                           "password this computer knows.)")
             except central.CentralError as e:
-                if e.status in (401, 403, 429):
+                # the hub holds off for a while (too many wrong passwords for this email, from anyone anywhere) or
+                # fails: someone this computer knows still signs in with the password it knows, as offline
+                held = e.status == 429 or e.status >= 500
+                if held and account is not None and accounts.matches(account["name"], password):
+                    online = False
+                elif e.status in (401, 403, 429):
                     raise PermissionError(str(e))
-                raise ValueError(str(e))
+                else:
+                    raise ValueError(str(e))
         display = ((answer or {}).get("user") or {}).get("name") or ""
         if account is None:   # their first sign-in on this computer
             choices = accounts.unlinked()
@@ -990,14 +996,22 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         return JSONResponse({"ok": True})
 
     async def session_hub(request: Request) -> Response:
-        """POST {url}: the Kelvin hub this computer's people sign in to ("" for accounts on this computer only). By
-        someone signed in; signed out, only until someone has signed in here with a central account (so nobody can
-        quietly point the sign-in screen at a hub of their own)."""
+        """POST {url, pin}: the Kelvin hub this computer's people sign in to ("" for Kelvin's own). Every sign-in here
+        sends it their email and password, so it changes only with the lab owner's PIN; with no PIN set, only while
+        nobody else has an account on this computer (so nobody can quietly point the others' sign-in at a hub of
+        their own)."""
         if accounts is None:
             return error(404, "Kelvin runs without accounts here.")
-        if session["user"] is None and any(a.get("email") for a in accounts.list()):
-            return error(401, "Sign in to change the Kelvin hub people here sign in to.")
-        url = str((await request.json()).get("url") or "").strip().rstrip("/")
+        body = await request.json()
+        refused = needs_owner(body, None)   # the lab owner's PIN, when one is set
+        if refused:
+            return refused
+        me = str((session["user"] or {}).get("name") or "").lower()
+        if not runtime.owner.is_set and any(a["name"].lower() != me for a in accounts.list()):
+            return error(403, "Others have accounts on this computer, so the Kelvin hub they sign in to changes only "
+                              "with the lab owner's PIN: set one in Settings → Instruments → Lab owner's PIN, then "
+                              "change the hub.")
+        url = str(body.get("url") or "").strip().rstrip("/")
         if url:
             from ..hub.client import HubClientError, check_url
             try:
@@ -1133,9 +1147,14 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """Off this computer as uninstalling would take them (uninstall.remove_person): their settings and API keys,
         ChatGPT sign-in, chats, projects and memory go; their measurements stay."""
         from ..uninstall import remove_person as wipe
+        had = runtime.roles.all().get(account["name"])   # their role in the lab goes with them (accounts.LabRoles)
         gone = accounts.forget(account["name"])
         report = wipe(accounts.dir(gone), accounts.chats_dir(gone), cipher_for(password, gone))
-        runtime.gate.log.write("account_removed", user=gone["name"], kelvin_account_deleted=everywhere)
+        runtime.gate.log.write("account_removed", user=gone["name"], kelvin_account_deleted=everywhere,
+                               **({"role": had} if had else {}))
+        if had:
+            runtime.audit_event("lab roles: %s's role (%s) went with their account" % (gone["name"], had),
+                                "human (portal)", "", False, roles=runtime.roles.all())
         return report
 
     async def removal(account: Dict[str, Any], body: Dict[str, Any]) -> Response:

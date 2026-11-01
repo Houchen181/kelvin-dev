@@ -146,6 +146,19 @@ def test_the_network_listener_starts_and_stops(app):
         assert local.post("/api/phone", json={"on": True, "port": 80}, headers=owner).status_code == 400
 
 
+def test_a_phone_with_its_own_token_is_away_only_while_kelvin_listens_for_it(app, parts):
+    """A request nobody answers here waits for the phones away (an hour by default) instead of being declined: only
+    for a phone that can see it. With phone access off, nothing listens for a phone's own token."""
+    guard, settings = app
+    runtime = parts[0]
+    with TestClient(guard):
+        guard.remote.issue("Ana's phone", "control", "ios-ana")       # its token, from while phone access was on
+        assert guard.remote.port is None and runtime.notifier.phones() == 0
+        assert not runtime.notifier.reaches_away("alarm") and "only in the portal" in runtime.alarms_reach()
+        guard.remote.port = 8771                                       # as if the network listener were running
+        assert runtime.notifier.phones() == 1 and runtime.notifier.reaches_away("alarm")
+
+
 # ------------------------------------------------------------------ reaching the computer
 
 class FakeSocket:
