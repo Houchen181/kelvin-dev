@@ -4248,7 +4248,7 @@
   const KIND_NAME = { "source-meter": "smu", "lock-in": "lockin", "temperature-controller": "tc", "magnet-supply": "magnet",
     "laser": "laser", "laser-driver": "laser", "power-meter": "pm", "preamp": "preamp", "multimeter": "dmm",
     "nanovoltmeter": "nvm", "function-generator": "fg", "voltage-source": "vsrc", "vna": "vna" };
-  const LAB = { cards: [], found: [], scripts: null, scriptsFolder: "" };
+  const LAB = { cards: [], found: [], scripts: null, scriptsFolder: "" };   // scripts: the last survey, of scripts or LabVIEW
 
   function cardSelect(selected, placeholder) {
     const sel = h("select", { "aria-label": "Card" });
@@ -4621,7 +4621,8 @@
     };
     const more = h("button", { type: "button", "aria-label": "More: " + e.name, "aria-haspopup": "menu" }, icon("dots"));
     more.addEventListener("click", (ev) => { ev.stopPropagation(); scanMenu(more, e); });
-    const tag = !script ? null : !e.exists ? h("span", { class: "tag warn", title: "The file is gone" }, "missing")
+    const tag = !script ? (e.source === "labview" ? h("span", { class: "tag", title: "From " + (e.path || e.vi) }, "LabVIEW") : null)
+      : !e.exists ? h("span", { class: "tag warn", title: "The file is gone" }, "missing")
       : e.changed ? h("span", { class: "tag", title: "Edited since its last run" }, "changed") : null;
     const used = e.count ? "ran " + e.count + "×" + (e.used ? " · last " + dayText(new Date(e.used * 1000)) : "") : "not run yet";
     const what = script ? e.path : e.summary || "";
@@ -5265,15 +5266,93 @@
     } catch (e) { $("lab-msg").textContent = e.message; }
     finally { btn.disabled = false; btn.textContent = "From your scripts…"; }
   }
+  // ------------------------------------------------------------------ setting up from the lab's LabVIEW
+  // NI MAX and the folder's projects and VIs, read (no VI is run) into the same review as the scripts', and each VI
+  // read translated into a scan to keep in the person's library
+  async function fromLabview() {
+    const folder = await pickFolder(store("lh.labviewFolder") || "", "The folder with your lab's LabVIEW projects and VIs:");
+    if (!folder) return;
+    store("lh.labviewFolder", folder);
+    const btn = $("lab-labview");
+    btn.disabled = true; btn.textContent = "Reading your LabVIEW…";
+    $("lab-msg").textContent = "Reading NI MAX and the LabVIEW in " + folder + " (never running a VI), then asking each instrument who it is…";
+    try {
+      LAB.scripts = await api("/api/instruments/labview", { body: { folder } });
+      renderScripts();
+      const n = LAB.scripts.instruments.length, k = LAB.scripts.vis.filter((v) => v.scan && v.scan.text).length;
+      $("lab-msg").textContent = (n ? "Found " + n + " instrument" + (n === 1 ? "" : "s") + ". Check the cards and limits, then add the ones you want."
+        : "No instruments in NI MAX or the LabVIEW there.") + (k === 1 ? " 1 VI can become a scan." : k ? " " + k + " VIs can become scans." : "");
+    } catch (e) { $("lab-msg").textContent = e.message; }
+    finally { btn.disabled = false; btn.textContent = "From your LabVIEW…"; }
+  }
+  function labviewHead(r) {   // In C:\Lab: 2 projects, 14 VIs, 3 NI MAX aliases; none run.
+    const count = (n, one) => n + " " + one + (n === 1 ? "" : one.endsWith("s") ? "es" : "s");
+    const parts = [count(r.projects.length, "project"), count(r.vis.length, "VI")];
+    const aliases = Object.keys((r.max && r.max.aliases) || {}).length, daq = ((r.max && r.max.daqmx) || []).length;
+    if (aliases) parts.push(count(aliases, "NI MAX alias"));
+    if (daq) parts.push(count(daq, "NI-DAQmx device"));
+    if (!(r.max && r.max.files && r.max.files.length)) parts.push("no NI MAX file on this computer");
+    return "In " + r.folder + ": " + parts.join(", ") + "; none run.";
+  }
+  function renderVis() {   // the VIs: each one read with its scan, to keep; the others by name
+    const r = LAB.scripts, box = $("lab-vis");
+    const vis = r && r.kind === "labview" ? r.vis || [] : [];
+    box.hidden = !vis.length;
+    if (!vis.length) return;
+    const rows = vis.filter((v) => v.scan).map((v) => {
+      const s = v.scan, can = !!s.text;
+      const check = h("input", { type: "checkbox", "aria-label": "Keep " + v.name + " as a scan", disabled: !can });
+      check.checked = v.ui ? v.ui.check.checked : can && !s.gaps.length;
+      v.ui = { check };
+      const how = h("details", { class: "lv-how" }, h("summary", {}, can ? "How it translates" : "Why no scan"),
+        h("ul", { class: "why-lines" }, ...s.mapping.map((m) => h("li", {}, m.vi + " → " + m.plan))),
+        can ? h("pre", { class: "mono lv-plan" }, s.text) : null);
+      return h("div", { class: "found-wrap" },
+        h("label", { class: "found lv-vi" }, check, h("span", { class: "found-name", title: v.path }, v.name),
+          h("span", { class: "found-model", title: s.summary }, can ? s.summary : "no scan")),
+        s.gaps.length ? h("div", { class: "found-write muted small" }, "Not translated: " + s.gaps.join("; ")) : null,
+        h("div", { class: "found-write" }, how));
+    });
+    const unread = vis.filter((v) => v.read === "no"), plain = vis.filter((v) => !v.scan && v.read !== "no");
+    for (const [list, said] of [[unread, "not read yet"], [plain, "read, no scan"]]) {
+      if (!list.length) continue;
+      rows.push(h("details", { class: "found-wrap lv-names" },
+        h("summary", {}, list.length + " VI" + (list.length === 1 ? "" : "s") + ", " + said),
+        h("ul", { class: "why-lines" }, ...list.map((v) => h("li", { title: v.path },
+          v.name + (list === plain && v.unread.length ? " (" + v.unread.join("; ") + ")" : ""))))));
+    }
+    box.replaceChildren(...rows);
+  }
+  async function keepScans() {   // the checked VIs' scans, translated with the names and cards chosen above
+    const r = LAB.scripts;
+    const vis = (r.vis || []).filter((v) => v.ui && v.ui.check.checked).map((v) => v.path);
+    if (!vis.length) { $("lab-msg").textContent = "No VI checked."; return; }
+    const instruments = r.instruments.filter((it) => !it.in_lab && it.ui).map((it) => ({
+      address: it.address || it.ui.addr.value.trim(), name: it.ui.name.value.trim(), card: it.ui.model.value }));
+    const btn = $("lab-keep-scans");
+    btn.disabled = true;
+    try {
+      const k = await api("/api/instruments/labview/scans", { body: { folder: r.folder, vis, instruments } });
+      if (k.library) SCANS.data = k.library;
+      $("lab-msg").textContent = [k.kept.length ? "Kept " + andList(k.kept.map((x) => x.name)) + " in Runs → Scans." : "",
+        ...k.not.map((x) => x.vi + ": " + x.gaps.join("; "))].filter(Boolean).join(" ");
+    } catch (e) { $("lab-msg").textContent = e.message; }
+    finally { btn.disabled = false; }
+  }
   function renderScripts() {
     const r = LAB.scripts, box = $("lab-from-scripts");
-    box.hidden = !r || !r.instruments.length;
-    $("lab-scripts-actions").hidden = !r || (!r.instruments.length && !r.scripts.length);
+    const labview = !!r && r.kind === "labview";
+    const scans = labview && r.vis.some((v) => v.scan && v.scan.text);
+    box.hidden = !r || (!r.instruments.length && !labview);
+    $("lab-scripts-actions").hidden = !r || (!r.instruments.length && !(labview ? scans : r.scripts.length));
     $("lab-add-scripts").hidden = !r || !r.instruments.some((it) => !it.in_lab);
-    $("lab-recipes").hidden = !r || !r.scripts.length;
+    $("lab-recipes").hidden = !r || labview || !r.scripts.length;
+    $("lab-keep-scans").hidden = !scans;
+    renderVis();
     if (!r) return;
     const span = (lim) => Object.entries(lim || {}).map(([p, v]) => p + " " + v[0] + " to " + v[1]).join(", ");
-    box.replaceChildren(h("p", { class: "hint" }, "In " + r.folder + ": " + r.scripts.length + " script" + (r.scripts.length === 1 ? "" : "s") + " read, none run."),
+    const head = labview ? labviewHead(r) : "In " + r.folder + ": " + r.scripts.length + " script" + (r.scripts.length === 1 ? "" : "s") + " read, none run.";
+    box.replaceChildren(h("p", { class: "hint" }, head),
       ...r.instruments.map((it) => {
         if (it.in_lab) {
           const row = h("div", { class: "found in-lab" }, h("span", { class: "found-name" }, it.in_lab),
@@ -5281,7 +5360,7 @@
           const lim = it.card && Object.keys(it.card.limits || {}).length ? it.card.limits : null;
           if (!lim) return row;
           const use = h("button", { class: "link soft", type: "button" }, "Use these limits");
-          const note = h("div", { class: "found-write muted small" }, "Limits from the values your scripts use: " + span(lim) + " ", use);
+          const note = h("div", { class: "found-write muted small" }, "Limits from the values your " + (labview ? "VIs" : "scripts") + " use: " + span(lim) + " ", use);
           use.addEventListener("click", async () => {   // a person's choice, like Save limits in Limits…
             try {
               await api("/api/instruments/" + encodeURIComponent(it.in_lab) + "/limits", { body: { limits: lim } });
@@ -5301,7 +5380,7 @@
         model.addEventListener("change", () => { if (model.value && (it.address || it.ui.addr.value.trim())) check.checked = true; });
         const addr = it.address ? h("code", { class: "found-addr", title: it.where.join(", ") }, it.address)
           : h("input", { class: "found-input found-addr-in", placeholder: "its address", spellcheck: "false", "aria-label": "Address",
-            title: "The scripts set it as " + (it.expression || "?"), value: was ? was.addr : "" });
+            title: labview ? "The VIs set it" : "The scripts set it as " + (it.expression || "?"), value: was ? was.addr : "" });
         it.ui = { check, name, model, addr };
         const why = [card ? card.why : "no card of Kelvin's fits: choose one, or make one under Cards",
           it.idn && !(card && card.why.includes("answered")) ? "answered " + it.idn.slice(0, 60) : it.asked || "",
@@ -5313,14 +5392,14 @@
       }));
   }
   function addScripts() {
-    const items = [];
+    const items = [], labview = (LAB.scripts || {}).kind === "labview";
     for (const it of (LAB.scripts || {}).instruments || []) {
       if (!it.ui || !it.ui.check.checked) continue;
       const address = it.address || it.ui.addr.value.trim(), card = it.ui.model.value;
       if (!address || !card) { $("lab-msg").textContent = (it.ui.name.value || "An instrument") + " needs its address and its card."; return; }
       items.push({ name: it.ui.name.value.trim() || "instr", card, address, connection: it.connection,
-        limits: it.card && it.card.id === card ? it.card.limits : null,
-        note: (it.idn || (it.card && it.card.why) || "from your scripts").slice(0, 60) });
+        limits: it.card && it.card.id === card ? it.card.limits : null, from: labview ? "labview" : null,
+        note: (it.idn || (it.card && it.card.why) || (labview ? "from your LabVIEW" : "from your scripts")).slice(0, 60) });
     }
     addToConfig(items);
   }
@@ -7185,6 +7264,8 @@
     $("lab-scan").addEventListener("click", scanLab);
     $("lab-add-found").addEventListener("click", addFound);
     $("lab-scripts").addEventListener("click", fromScripts);
+    $("lab-labview").addEventListener("click", fromLabview);
+    $("lab-keep-scans").addEventListener("click", keepScans);
     $("setup-scripts-choose").addEventListener("click", () => answerScripts(false));
     $("setup-scripts-none").addEventListener("click", () => answerScripts(true));
     $("setup-wait").addEventListener("close", () => { WAIT.closed = true; });

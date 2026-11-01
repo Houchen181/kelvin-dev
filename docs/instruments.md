@@ -52,6 +52,8 @@ Kelvin has no virtual lab of simulated instruments. A plan's rehearsal (`simulat
 - **Running them as they are:** Kelvin can also run a script from that folder in your lab's own Python, after you approve the run, with every command it sends to the lab's instruments through the safety gate (`run_script`; see [Your own scripts](data.md#your-own-scripts)). The folder **From your scripts…** reads becomes your lab's scripts folder, the only one Kelvin runs scripts from (Settings → Instruments shows it).
 - **What it skips:** library folders (`site-packages`, `python_libs`, `venv`, `lib`, ...). It reads up to 300 files, each up to 1 MB.
 
+**From your lab's LabVIEW.** **From your LabVIEW…** does the same from NI MAX and a folder of LabVIEW projects and VIs, and turns each measurement VI into a scan ([portal.md](portal.md#from-labview)).
+
 **Limits for one instrument.** In **Set up…**, each instrument of your lab has **Limits…** on its row. It lists the instrument's numeric settings, outputs first, with the card's limits and your lab's.
 - **Changing them:** set the lowest and highest values (leave both empty for the card's limits) and press **Save limits**. They are written into `lab.yaml`, and the rest of the file, comments included, stays as it was. They hold at once, also during a run, without reconnecting.
 - **Beyond the card:** a limit beyond the card's own is refused; that needs [your version of the card](#cards-for-new-instruments).

@@ -585,7 +585,8 @@ def rated_limits(card: Card, idn: str) -> Dict[str, Tuple[float, float]]:
 
 def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
     """One instrument entry of a lab config, with its drives' vendor limits to tighten. Optional: connection and
-    vars (what the person or the manual says), added_by: kelvin (Kelvin added it; no person has reviewed it)."""
+    vars (what the person or the manual says), added_by: kelvin (Kelvin added it; no person has reviewed it), from:
+    labview (its limits are the values the lab's VIs use, not its scripts')."""
     card = registry.get(item["card"])
     note = item.get("note") or card.model.split(" (")[0]
     lines = ["  %s:" % item["name"], "    card: %s        # %s" % (card.id, note), "    address: %s" % json.dumps(item["address"])]
@@ -594,8 +595,9 @@ def instrument_block(item: Dict[str, Any], registry: CardRegistry) -> List[str]:
     lim = ["%s: [%g, %g]" % (p.name, p.limits[0], p.limits[1]) for p in card.drives
            if p.numeric and p.limits and p.name not in used and p.name not in rated]
     if used:
-        lines.append("    limits: { %s }   # from your scripts (the values they use): check them, and tighten the "
-                     "rest" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim))
+        lines.append("    limits: { %s }   # from your %s (the values they use): check them, and tighten the rest" % (
+            ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in used.items()] + lim),
+            "LabVIEW VIs" if item.get("from") == "labview" else "scripts"))
     elif rated:
         lines.append("    limits: { %s }   # its own rating, from its identity reply: tighten to what your sample "
                      "can take" % ", ".join(["%s: [%g, %g]" % (p, v[0], v[1]) for p, v in rated.items()] + lim))

@@ -4,7 +4,8 @@ compute, look_at, plot_runs, fit_run, run_python, reports, the automatic fits):
   settings, with dates and times (as seconds from the first), a decimal comma, and text columns (left out, and said);
   a long table of a 2-D scan (x, y, value rows) becomes a 2-D run;
 - Excel workbooks (.xlsx): the first sheet with numbers, or an Arbin export's Channel sheets;
-- makers' files: BioLogic's EC-Lab .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel exports (importers/), and
+- makers' files: BioLogic's EC-Lab .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel exports, LabVIEW's measurement
+  files (.lvm) and NI's TDMS (.tdms: read with npTDMS, which Kelvin installs once a person approves) (importers/), and
   LightField's .spe spectra;
 - NumPy's .npy and .npz, and TIFF images: an array of numbers, a table, or camera frames (a frame or a stack of them,
   one point per frame, which look_at shows).
@@ -32,9 +33,10 @@ MAX_ROWS = 200000
 MAX_FRAMES = 5000
 UNIT = re.compile(r"^(.*?)\s*[\(\[]\s*([^\)\]]{1,20})\s*[\)\]]\s*$")   # "Wavelength (nm)", "Intensity [counts]"
 DATA_SUFFIXES = (".csv", ".tsv", ".txt", ".dat", ".asc", ".xlsx", ".xlsm", ".mpt", ".mpr", ".dta", ".npy", ".npz",
-                 ".tif", ".tiff", ".spe")
+                 ".tif", ".tiff", ".spe", ".lvm", ".tdms")
 WHAT = ("tables (CSV, TSV, text, Excel .xlsx), BioLogic's .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel "
-        "exports, LightField's .spe, NumPy's .npy and .npz, and TIFF images")
+        "exports, LabVIEW's .lvm and TDMS (.tdms, with npTDMS installed), LightField's .spe, NumPy's .npy and .npz, "
+        "and TIFF images")
 
 
 class DataError(ValueError):
@@ -296,6 +298,9 @@ def _read(p: Path) -> Table:
     with open(p, "rb") as f:
         head = f.read(64)
     from .importers import arrays, biologic, tiff
+    if suffix == ".tdms" or head.startswith(b"TDSm"):
+        from .importers import tdms
+        return tdms.read_tdms(p)
     if suffix == ".spe":
         return read_spe(p)
     if head.startswith(b"BIO-LOGIC MODULAR FILE"):
@@ -329,7 +334,7 @@ def takes(name: Any, data: bytes) -> bool:
     from .importers import tiff
     suffix = Path(str(name or "")).suffix.lower()
     return suffix in DATA_SUFFIXES or tiff.is_tiff(data[:4]) or data[:6] == b"\x93NUMPY" or \
-        data[:22] == b"BIO-LOGIC MODULAR FILE"
+        data[:22] == b"BIO-LOGIC MODULAR FILE" or data[:4] == b"TDSm"
 
 
 # ------------------------------------------------------------------ tables
@@ -351,7 +356,9 @@ def text_of(raw: bytes, name: str) -> str:
 def read_table(p: Path) -> Table:
     text = text_of(p.read_bytes(), p.name)
     first = text.lstrip()[:40]
-    from .importers import biologic, gamry
+    from .importers import biologic, gamry, lvm
+    if first.startswith(lvm.MARK):   # a .lvm LabVIEW wrote without headers is a table, read as one below
+        return lvm.read_lvm(p, text.lstrip())
     if first.startswith(("EC-Lab ASCII FILE", "BT-Lab ASCII FILE")):
         return biologic.read_mpt(p, text)
     if p.suffix.lower() == ".mpt":

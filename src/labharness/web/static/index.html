@@ -198,7 +198,7 @@
                   title="Attach a photo, a screenshot, a PDF or a data file: CSV, Excel, NumPy, TIFF, BioLogic, Gamry or Arbin files become runs Kelvin reads (you can also paste or drop them here)">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8"/></svg>
           </button>
-          <input id="attach-input" type="file" accept="image/*,application/pdf,.csv,.tsv,.txt,.dat,.asc,.xlsx,.xlsm,.mpt,.mpr,.dta,.npy,.npz,.tif,.tiff,.spe,.py,.pyw,.ipynb,.m,.jl,.r,.c,.h,.cpp,.hpp,.cs,.java,.js,.ts,.sh,.ps1,.bat,.cmd,.vb,.bas,.ino,.pro,.ipf,.tex,.bib,.md,.rst,.log,.json,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm" multiple hidden>
+          <input id="attach-input" type="file" accept="image/*,application/pdf,.csv,.tsv,.txt,.dat,.asc,.xlsx,.xlsm,.mpt,.mpr,.dta,.npy,.npz,.tif,.tiff,.spe,.lvm,.py,.pyw,.ipynb,.m,.jl,.r,.c,.h,.cpp,.hpp,.cs,.java,.js,.ts,.sh,.ps1,.bat,.cmd,.vb,.bas,.ino,.pro,.ipf,.tex,.bib,.md,.rst,.log,.json,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm" multiple hidden>
           <div class="spacer"></div>
           <button id="send" class="send" type="submit" aria-label="Send">
             <svg class="i-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
@@ -814,12 +814,14 @@
     </div>
     <div class="field">
       <div class="field-row"><span class="field-label">Find instruments</span>
-        <span class="field-actions"><button id="lab-scripts" class="btn small" type="button">From your scripts…</button><button id="lab-scan" class="btn small" type="button">Scan</button></span></div>
-      <span class="hint">Scanning sets nothing. Scripts are read, never run.</span>
+        <span class="field-actions"><button id="lab-scripts" class="btn small" type="button">From your scripts…</button><button id="lab-labview" class="btn small" type="button">From your LabVIEW…</button><button id="lab-scan" class="btn small" type="button">Scan</button></span></div>
+      <span class="hint">Scanning sets nothing. Scripts and VIs are read, never run.</span>
       <div id="lab-from-scripts" class="found-list" hidden></div>
+      <div id="lab-vis" class="found-list" hidden></div>
       <div class="field-actions" id="lab-scripts-actions" hidden>
         <button id="lab-add-scripts" class="btn small" type="button">Add the checked ones to the lab config</button>
         <button id="lab-recipes" class="btn small" type="button">Turn the measurement scripts into recipes…</button>
+        <button id="lab-keep-scans" class="btn small" type="button" hidden>Keep the checked VIs as scans</button>
       </div>
       <div id="lab-survey" class="survey-box" hidden><p id="lab-survey-why"></p><ul id="lab-survey-lines" class="why-lines"></ul></div>
       <div id="lab-found" class="found-list" hidden></div>

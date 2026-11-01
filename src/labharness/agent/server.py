@@ -141,6 +141,9 @@ You are connected to a physics lab through Kelvin.
   folder, or one they imported in the Runs panel), use run_script: it runs in the lab's own Python with every
   command it sends through the gate, after one approval, and its readings become a run like a plan's. params
   changes its settings for that run (check_script lists them); never edit the person's script to change a value.
+- A lab that runs its instruments from LabVIEW: survey_labview on its LabVIEW folder reads NI MAX and its projects
+  and VIs the same way (never running a VI) and translates each VI it could read into a scan, saying what didn't
+  translate; a scan is a plan, run with run_plan once the person agrees. Never guess what a VI not read does.
 - An instrument the scan doesn't find or doesn't identify: find out what it is yourself. find_on_network for one on
   the network whose address nobody knows (it sweeps this computer's networks, or the range named, for the ports
   instruments and their gateways use, and asks each who it is), inspect_address for one at a known address (what its
@@ -440,6 +443,16 @@ def build_server(rt: LabRuntime) -> MCPServer:
         outline of each script (sweeps, waits, readings, files saved) to keep as recipes. Only reads them: nothing
         is run, and nothing is sent to an instrument."""
         return outside(rt, "the lab's scripts", rt.survey_scripts(path))
+
+    @server.tool(annotations=READ, structured_output=False)
+    def survey_labview(path: str) -> str:
+        """Read a lab's LabVIEW (the folder of its projects and VIs the person named) and NI MAX on this computer, to
+        switch the lab to Kelvin as it works now: NI-VISA's aliases and resources (the lab's names for its
+        instruments, and their addresses), NI-DAQmx devices, each project's VIs, drivers and hardware targets, the
+        Kelvin card that fits each instrument, and each VI Kelvin could read translated into a scan (the plan, what
+        each part of the VI became, and what didn't translate). Only reads: no VI is run (LabVIEW isn't needed), and
+        nothing is sent to an instrument."""
+        return outside(rt, "the lab's LabVIEW files", rt.survey_labview(path))
 
     @server.tool(annotations=READ, structured_output=False)
     def check_script(script: str, params: Optional[Dict[str, Any]] = None) -> str:
@@ -944,9 +957,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
         compute, look_at, plot_runs, fit_run, run_python, reports, the automatic fits): another program's tables
         (CSV, TSV, text, Excel .xlsx; dates become seconds, text columns are left out; a long x, y, value table of a
         2-D scan becomes a 2-D run), makers' files (BioLogic .mpt and .mpr, Gamry .dta, Arbin's CSV and Excel
-        exports, LightField's .spe), NumPy's .npy and .npz, and TIFF images (a camera frame, or a stack: a point per
-        frame). paths: the files' full paths, ';' between several, or a folder of data files (up to 20); files with
-        the same x values go side by side into
+        exports, LabVIEW's .lvm and .tdms (TDMS needs npTDMS: when it isn't installed, the message says how to
+        install it, once the person approves), LightField's .spe), NumPy's .npy and .npz, and TIFF images (a camera
+        frame, or a stack: a point per frame). paths: the files' full paths, ';' between several, or a folder of data
+        files (up to 20); files with the same x values go side by side into
         one run, to compare, normalise or subtract them with compute. name: the run's name. Only numbers are read.
         Data files a person attaches in the chat are imported as they attach them."""
         return rt.import_data(paths, name)
