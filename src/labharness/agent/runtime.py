@@ -75,6 +75,13 @@ SCRIPTS_NEXT = ("Next, with the person (nothing above was sent to any instrument
                 "(an outer loop, the outer axis), its readings the measure list, its waits the settle times, its "
                 "setup and its end the setup and after steps; say what it can't carry over (the script's own "
                 "processing, plotting). Never run the scripts.")
+LABVIEW_NEXT = ("Next, with the person (nothing above was sent to any instrument, and no VI was run): add each "
+                "instrument that is not in the lab yet with add_instrument at its address and the likely card, under "
+                "the name the scans give it; one with no card fitting: draft_card. The limits above come from the "
+                "values the VIs use: propose them and set them only once the person agrees. A translated scan is a "
+                "plan: show it with what didn't translate, and run it (run_plan) only once the person agrees; the "
+                "person keeps scans in their library in Lab → Set up… → From your LabVIEW…. A VI not read yet "
+                "can't be translated: never guess what it does. Never run a VI.")
 
 
 def _light(card: Any) -> bool:
@@ -2054,8 +2061,9 @@ class LabRuntime:
 
     def import_data(self, paths: Any, name: str = "") -> str:
         """Files Kelvin didn't measure, as a run (imports.py): another program's tables (CSV, TSV, text, Excel),
-        makers' files (BioLogic .mpt/.mpr, Gamry .dta, Arbin's exports, LightField .spe), NumPy arrays and TIFF
-        images (camera frames); several with the same x values side by side in one run, to compare or subtract.
+        makers' files (BioLogic .mpt/.mpr, Gamry .dta, Arbin's exports, LabVIEW .lvm, LightField .spe), NumPy
+        arrays and TIFF images (camera frames); several with the same x values side by side in one run, to compare
+        or subtract.
         A folder stands for its data files. What a person put in the data folder's runs is theirs to import
         (issue #6: a collaborator pasted data there); Kelvin's own folders and records, runs the chat may not see
         and files of sign-ins are not (_unreadable). The run goes with this chat's runs, gets the automatic fits,
@@ -4797,29 +4805,49 @@ class LabRuntime:
         (*IDN? only; a serial port isn't tried, as its framing takes long to find). An identity reply decides the
         card. Raises OSError for a folder that isn't there."""
         from .. import scripts as lab_scripts
-        from ..adapters import resource_name
-        from ..discovery import SHORT_NAMES, identify
         registry = self.script_cards()
         found = lab_scripts.survey(folder, registry)
         view = found.view()
-        in_lab = {resource_name(ic.address): name for name, ic in self.lab.config.instruments.items()}
-        taken = [n for n, ic in self.lab.config.instruments.items() if not ic.address.startswith("sim://")]
+        self._in_lab(view["instruments"], found.instruments)
+        self._ask_found(view["instruments"], found.instruments, registry,
+                        "asking the scripts' instruments who they are")
+        self._name_found(view["instruments"])
+        return view
+
+    def _in_lab(self, items: List[Dict[str, Any]], instruments: List[Any]) -> None:
+        """Set up's review of instruments a survey found (the lab's scripts, its LabVIEW): each one the lab has at
+        its address marked in_lab, with its card here and the limits the values found give on it."""
+        from .. import scripts as lab_scripts
+        from ..labview import address_key
+        in_lab = {address_key(ic.address): name for name, ic in self.lab.config.instruments.items()}
+        for item, inst in zip(items, instruments):
+            item["in_lab"] = in_lab.get(address_key(inst.address)) if inst.address else None
+            item["idn"] = ""
+            if item["in_lab"] in self.lab.instruments:
+                card = self.lab.instruments[item["in_lab"]].card
+                item["card"] = {"id": card.id, "model": card.model, "kind": card.kind, "sure": True,
+                                "why": "in this lab as %s" % item["in_lab"],
+                                "mapped": lab_scripts.mapping(card, inst.commands),
+                                "limits": lab_scripts.limits(card, inst.commands)}
+
+    def _ask_found(self, items: List[Dict[str, Any]], instruments: List[Any], registry: Any, busy: str) -> None:
+        """Who answers at each address a survey found that the lab doesn't have yet, asked as a scan asks (*IDN?, and
+        the likely card's own identity query): an identity reply decides the card. A serial port isn't asked (its
+        framing takes long to find: Scan tries each card's), nor an NI-DAQmx device."""
+        from .. import scripts as lab_scripts
+        from ..adapters import is_serial, resource_name
+        from ..discovery import identify
         with self.lock:
-            self.busy = "asking the scripts' instruments who they are"
+            self.busy = busy
             try:
-                for item, inst in zip(view["instruments"], found.instruments):
-                    item["in_lab"] = in_lab.get(resource_name(inst.address)) if inst.address else None
-                    item["idn"] = ""
-                    if item["in_lab"] in self.lab.instruments:   # its card here: the limits the scripts' values give
-                        card = self.lab.instruments[item["in_lab"]].card
-                        item["card"] = {"id": card.id, "model": card.model, "kind": card.kind, "sure": True,
-                                        "why": "in this lab as %s" % item["in_lab"],
-                                        "mapped": lab_scripts.mapping(card, inst.commands),
-                                        "limits": lab_scripts.limits(card, inst.commands)}
+                for item, inst in zip(items, instruments):
                     if not inst.address or item["in_lab"]:
                         continue
-                    if inst.address.startswith("serial://"):
+                    if inst.address.startswith("serial://") or is_serial(resource_name(inst.address)):
                         item["asked"] = "not asked: a serial port (Scan tries each card's framing on it)"
+                        continue
+                    if inst.address.startswith("nidaq://"):
+                        item["asked"] = "not asked: an NI-DAQmx device (connecting it asks NI-DAQmx)"
                         continue
                     queries = ["*IDN?"]   # and the likely card's own identity query
                     likely = registry.get(item["card"]["id"]) if item["card"] else None
@@ -4845,7 +4873,13 @@ class LabRuntime:
                         item["card"]["sure"] = True
             finally:
                 self.busy = None
-        for item in view["instruments"]:   # a name for each, from the scripts or the kind of instrument
+
+    def _name_found(self, items: List[Dict[str, Any]]) -> None:
+        """A name for each instrument a survey found that the lab hasn't got: the survey's (as the lab names it in its
+        scripts, or in NI MAX), else its kind's, never one the lab or another of them has."""
+        from ..discovery import SHORT_NAMES
+        taken = [n for n, ic in self.lab.config.instruments.items() if not ic.address.startswith("sim://")]
+        for item in items:
             if item["in_lab"]:
                 continue
             kind = (item["card"] or {}).get("kind", "")
@@ -4855,7 +4889,94 @@ class LabRuntime:
                 name, i = "%s%d" % (base, i), i + 1
             taken.append(name)
             item["name"] = name
+
+    # ------------------------------------------------------------------ the lab's LabVIEW (labview.py, viscan.py)
+
+    def _scan_instruments(self, items: List[Dict[str, Any]], registry: Any) -> Dict[str, Tuple[str, Any]]:
+        """The instruments a translated scan names, by address (labview.address_key): the lab's by its names and
+        cards; the others as Set up's review names them, with the card chosen there."""
+        from ..labview import address_key
+        out = {address_key(ic.address): (name, self.lab.instruments[name].card)
+               for name, ic in self.lab.config.instruments.items() if name in self.lab.instruments}
+        for item in items:
+            card = (item.get("card") or {}).get("id")
+            if item.get("address") and not item.get("in_lab") and card in registry and \
+                    str(item.get("name") or "").isidentifier():
+                out.setdefault(address_key(item["address"]), (item["name"], registry.get(card)))
+        return out
+
+    def survey_labview(self, path: str) -> str:
+        """The lab's LabVIEW, read for how the lab works now (labview.py): NI MAX's names and addresses for its
+        instruments, its projects and drivers, the card that fits each instrument, and each VI read translated into
+        a scan (viscan.py). Nothing is run, LabVIEW isn't needed, and no instrument is asked."""
+        from .. import labview
+        registry = self.script_cards()
+        try:
+            found = labview.survey(path, registry, own=self._kelvins())
+        except (OSError, ValueError) as e:
+            return "not read: %s" % e
+        view = found.view()
+        self._in_lab(view["instruments"], found.instruments)
+        self._name_found(view["instruments"])
+        scans = found.translations(self._scan_instruments(view["instruments"], registry))
+        named = ["%s (%s, %s)" % (item["in_lab"] or item["name"], item["address"], "in the lab" if item["in_lab"] else
+                                  (item["card"] or {}).get("id") or "no card")
+                 for item in view["instruments"] if item["address"]]
+        return found.text(scans) + ("\n\nThe scans name them: " + ", ".join(named) if named and scans else "") + \
+            "\n\n" + LABVIEW_NEXT
+
+    def labview_found(self, folder: str) -> Dict[str, Any]:
+        """The lab's LabVIEW read for the Set up panel (a person chose the folder): its instruments as the script
+        survey shows them (asked who they are as a scan asks), NI MAX, its projects, and each VI read translated into
+        a scan with the instruments named as the review names them. Raises OSError for a folder that isn't there."""
+        from .. import labview
+        registry = self.script_cards()
+        found = labview.survey(folder, registry)
+        view = found.view()
+        self._in_lab(view["instruments"], found.instruments)
+        self._ask_found(view["instruments"], found.instruments, registry, "asking LabVIEW's instruments who they are")
+        view["instruments"] = labview.fold_drivers(view["instruments"])   # a driver's instrument, now it said who
+        self._name_found(view["instruments"])
+        scans = found.translations(self._scan_instruments(view["instruments"], registry))
+        for item in view["vis"]:
+            t = scans.get(item["path"])
+            if t is not None:
+                item["scan"] = {k: t[k] for k in ("name", "title", "text", "summary", "mapping", "gaps")}
         return view
+
+    def labview_scans(self, folder: str, paths: List[str], chosen: List[Dict[str, Any]],
+                      by: str = "human") -> Dict[str, Any]:
+        """Measurement VIs a person chose in Set up, translated into scans (viscan.py) and kept in their library
+        (scanlibrary.keep_scan): the lab's instruments by the lab's names, the others as the person named them in the
+        review (chosen: [{address, name, card}]). Only the VIs of that folder are translated. {kept: [{vi, path, id,
+        name, gaps}], not: [{vi, path, gaps}]}."""
+        from .. import labview
+        from ..viscan import on_target, translate
+        registry = self.script_cards()
+        found = labview.survey(folder, registry)
+        items = [{"address": str(c.get("address") or "").strip(), "name": str(c.get("name") or "").strip(),
+                  "card": {"id": str(c.get("card") or "")}, "in_lab": None}
+                 for c in chosen or [] if isinstance(c, dict)]
+        instruments = self._scan_instruments(items, registry)
+        vis = {labview.same_path(s["path"]): s for s in found.vis}
+        kept: List[Dict[str, Any]] = []
+        missed: List[Dict[str, Any]] = []
+        for path in paths:
+            s = vis.get(labview.same_path(path))
+            if s is None:
+                missed.append({"vi": Path(str(path)).name, "path": str(path),
+                               "gaps": ["not one of the VIs in %s" % folder]})
+                continue
+            target = found.target_of(s)
+            t = on_target(s, target) if target else translate(s, instruments, found.aliases)
+            if t["plan"] is None:
+                missed.append({"vi": s["name"], "path": s["path"], "gaps": t["gaps"]})
+                continue
+            entry = self.library.keep_scan(t["text"], t["title"], t["summary"], s["name"], s["path"])
+            self.gate.log.write("library", by=by, change="kept from LabVIEW", name=entry["name"], path=s["path"])
+            kept.append({"vi": s["name"], "path": s["path"], "id": entry["id"], "name": entry["name"],
+                         "gaps": t["gaps"]})
+        return {"kept": kept, "not": missed}
 
     # ------------------------------------------------------------------ the lab's own scripts, run (scriptrun.py)
 

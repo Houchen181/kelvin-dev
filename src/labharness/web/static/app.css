@@ -645,6 +645,14 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .found-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .found-name { font: 600 12.5px ui-monospace, Consolas, monospace; }
 .found-addr { font-size: 12px; color: var(--muted); white-space: nowrap; }
+/* the LabVIEW survey's VIs: each one read, with its scan; the others by name */
+.found.lv-vi { grid-template-columns: 18px minmax(0, 180px) minmax(0, 1fr); }
+.found.lv-vi .found-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv-how { flex: 1 1 100%; min-width: 0; }
+.lv-how summary, .lv-names summary { cursor: pointer; }
+.lv-names summary { padding: 7px 10px; font-size: 13px; color: var(--muted); }
+.lv-plan { margin: 6px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--raised); overflow: auto; max-height: 220px; }
+.lv-names .why-lines { padding: 0 10px 8px 38px; }
 .add-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 220px) auto; gap: 8px; }
 .add-row input, .add-row select { border: 1px solid var(--line-strong); border-radius: 10px; padding: 7px 10px; background: var(--raised); color: var(--text); min-width: 0; }
 /* setting up connected instruments: status, the observe-only lock, each instrument's folder */

@@ -2848,6 +2848,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             except KeyError:
                 return error(400, "%s: choose a card" % name)
             item = {"name": name, "card": card, "address": address, "note": str(it.get("note") or "")[:60]}
+            if it.get("from") == "labview":   # its limits from the values its VIs use, so said in the lab config
+                item["from"] = "labview"
             limits = it.get("limits")   # from the lab's scripts: the values they use (the person reviews them)
             if isinstance(limits, dict):
                 item["limits"] = {str(p): [float(v[0]), float(v[1])] for p, v in limits.items()
@@ -2882,6 +2884,23 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if Path(folder).expanduser().is_dir():
             settings.set_lab_scripts(folder)   # a person's choice: run_script runs the scripts in it from now on
         return JSONResponse(found)
+
+    async def labview_view(request: Request) -> Response:
+        """The lab's LabVIEW, read (no VI is run, LabVIEW isn't needed) to switch the lab to Kelvin as it works now:
+        {folder}. NI MAX's aliases and resources, the folder's projects and VIs; each instrument with its likely card,
+        the limits from the values its VIs use and who answers at its address now (asked as a scan asks); each VI
+        read, translated into a scan (viscan.py)."""
+        problem = busy_problem()
+        if problem:
+            return error(409, problem)
+        body = await request.json()
+        folder = str(body.get("folder") or "").strip()
+        if not folder:
+            return error(400, "Choose the folder with your LabVIEW projects and VIs.")
+        try:
+            return JSONResponse(await asyncio.to_thread(runtime.labview_found, folder))
+        except (OSError, ValueError) as e:
+            return error(400, str(e))
 
     def limits_view(name: str) -> Dict[str, Any]:
         inst = runtime.lab.instruments[name]
@@ -3443,6 +3462,30 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         out["library"] = await asyncio.to_thread(runtime.library_view)
         return JSONResponse(out)
 
+    async def labview_scans(request: Request) -> Response:
+        """POST {folder, vis: [the VIs' paths], instruments: [{address, name, card}]}: measurement VIs a person chose in
+        Set up, translated into scans and kept in their library (Runs → Scans) as LabVIEW's, with the instruments
+        named as in the review. On this computer only, as the library is. {kept, not, library}."""
+        if role_of(request) != "owner":
+            return error(403, ON_THIS_COMPUTER)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict) or not str(body.get("folder") or "").strip():
+            return error(400, "send {folder, vis, instruments}")
+        vis = [str(v) for v in body.get("vis") or [] if isinstance(v, str)]
+        if not vis:
+            return error(400, "Choose the VIs to keep as scans.")
+        chosen = [c for c in body.get("instruments") or [] if isinstance(c, dict)]
+        try:
+            out = await asyncio.to_thread(as_person, runtime.labview_scans, str(body["folder"]).strip(), vis, chosen,
+                                          person(request))
+        except (OSError, ValueError) as e:
+            return error(400, str(e))
+        out["library"] = await asyncio.to_thread(runtime.library_view)
+        return JSONResponse(out)
+
     async def run_again(request: Request) -> Response:
         """A run again, from the Runs panel; on this computer only. GET: {kind, name, text? (a plan's), script? ({path,
         exists, changed, sha256, params, args, python}), conditions ([{key, then, now, unit, differs, settable,
@@ -3568,6 +3611,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         Route("/api/instruments/scan", scan_view, methods=["POST"]),
         Route("/api/instruments/scripts", scripts_view, methods=["POST"]),
         Route("/api/instruments/scripts-folder", scripts_folder, methods=["POST"]),
+        Route("/api/instruments/labview", labview_view, methods=["POST"]),
+        Route("/api/instruments/labview/scans", labview_scans, methods=["POST"]),
         Route("/api/instruments/{name}/limits", instrument_limits, methods=["GET", "POST"]),
         Route("/api/instruments/setup", setup_view, methods=["GET", "POST"]),
         Route("/api/terminal", terminal, methods=["POST"]),

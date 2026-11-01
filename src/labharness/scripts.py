@@ -142,12 +142,14 @@ class Survey:
     def view(self) -> Dict[str, Any]:
         """For the portal's Set up: each instrument with its likely card and proposed limits."""
         return {"folder": self.folder, "scripts": [s.path for s in self.scripts], "others": self.others,
-                "skipped": self.skipped,
-                "instruments": [{"address": i.address, "expression": i.expression, "names": i.names,
-                                 "name": i.name, "library": i.library, "where": i.where[:6],
-                                 "connection": connection(i.settings), "hints": i.hints[:6],
-                                 "commands": len(i.commands), "calls": i.calls[:10],
-                                 "card": i.card} for i in self.instruments]}
+                "skipped": self.skipped, "instruments": [view_of(i) for i in self.instruments]}
+
+
+def view_of(i: Instrument) -> Dict[str, Any]:
+    """One instrument as Set up's review shows it (the LabVIEW survey's too, labview.py)."""
+    return {"address": i.address, "expression": i.expression, "names": i.names, "name": i.name,
+            "library": i.library, "where": i.where[:6], "connection": connection(i.settings), "hints": i.hints[:6],
+            "commands": len(i.commands), "calls": i.calls[:10], "card": i.card}
 
 
 def _num(x: float) -> str:
@@ -1303,10 +1305,11 @@ def _annotate(found: Survey) -> None:
 
 # ------------------------------------------------------------------ the card that fits
 
-def match(inst: Instrument, registry: Iterable[Any]) -> Optional[Dict[str, Any]]:
+def match(inst: Instrument, registry: Iterable[Any], named_in: str = "the scripts") -> Optional[Dict[str, Any]]:
     """Kelvin's card that fits this instrument best: a model the scripts name (in a comment, a driver's class, the
     file's name) that the card's identity or model says, and the share of its commands the card has. With it: each
-    command's parameter on the card, and limits from the values the scripts use."""
+    command's parameter on the card, and limits from the values the scripts use. named_in: where the model was
+    named, as its why says it (LabVIEW, for labview.py)."""
     best, best_score, best_why = None, 0.0, ""
     hints = [h for h in inst.hints if h != "asks *IDN?"]
     samples = list(dict.fromkeys(c.sample() for c in inst.commands))
@@ -1320,7 +1323,7 @@ def match(inst: Instrument, registry: Iterable[Any]) -> Optional[Dict[str, Any]]
         if score > best_score:
             why = []
             if named:
-                why.append("%s named in the scripts" % named)
+                why.append("%s named in %s" % (named, named_in))
             if samples:
                 why.append("%d of %d commands are on it" % (hit, len(samples)))
             best, best_score, best_why = card, score, "; ".join(why)
