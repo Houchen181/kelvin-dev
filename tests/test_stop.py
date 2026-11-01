@@ -220,6 +220,64 @@ def test_typing_stop_in_a_chat_stops_the_lab_at_once_without_asking_the_model(tm
     assert '"by": "human (portal, typed STOP)"' in (tmp_path / "data" / "events.jsonl").read_text(encoding="utf-8")
 
 
+def test_stop_and_bring_to_safe_answer_at_once_while_the_servers_other_threads_are_all_taken(tmp_path, monkeypatch):
+    """Twelve LabVIEW folders being read took every one of the server's shared threads, and a Stop waited 9 s for one.
+    Stop, Bring to safe and the restart card's safe each run on a thread started for them; a LabVIEW folder is read
+    one at a time on a thread of its own (another is refused meanwhile), and the scan editor's checks on theirs."""
+    import os
+    from labharness import labview
+    rt = real_runtime(tmp_path)
+    client, headers, _ = portal(tmp_path, rt)
+    release, entered, lock = threading.Event(), {"library": 0, "labview": 0, "check": 0}, threading.Lock()
+
+    def held(kind, answer):
+        def work(*args, **kwargs):
+            with lock:
+                entered[kind] += 1
+            release.wait(30)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return work
+    monkeypatch.setattr(rt, "library_view", held("library", {"scripts": [], "scans": []}))   # a shared thread each
+    monkeypatch.setattr(labview, "survey", held("labview", OSError("read no further")))
+    monkeypatch.setattr(rt, "scan_check", held("check", {"problems": []}))
+    for name in ("bring_to_safe", "incident_safe"):   # where they run, not what they do (a VNA's power ramps 6 s)
+        monkeypatch.setattr(rt, name, lambda by, name=name: ["%s by %s" % (name, by)])
+    cpus = (getattr(os, "process_cpu_count", None) or os.cpu_count)() or 1
+    shared = min(32, cpus + 4)   # asyncio's default executor, as Python sizes it: every one taken, more waiting
+    calls = [lambda: client.get("/api/library", headers=headers)] * (shared + 2)
+    calls += [lambda: client.post("/api/instruments/labview", json={"folder": str(tmp_path)}, headers=headers)]
+    calls += [lambda k=k: client.post("/api/library", json={"op": "check", "parts": {}, "editor": "e%d" % k},
+                                      headers=headers) for k in range(4)]
+    with client:
+        workers = [threading.Thread(target=call, daemon=True) for call in calls]
+        for w in workers:
+            w.start()
+        t0 = time.time()
+        while entered != {"library": shared, "labview": 1, "check": 2} and time.time() - t0 < 10:
+            time.sleep(0.02)
+        try:
+            assert entered == {"library": shared, "labview": 1, "check": 2}   # checks and LabVIEW: threads of their own
+            again = client.post("/api/instruments/labview", json={"folder": str(tmp_path)}, headers=headers)
+            assert again.status_code == 409 and "reading a LabVIEW folder already" in again.json()["error"]
+            for path, body in (("/api/stop", {}), ("/api/safe", {}), ("/api/runs/stop", {}),
+                               ("/api/incident", {"action": "safe"})):
+                out = {}
+                press = threading.Thread(target=lambda: out.update(r=client.post(path, json=body, headers=headers)),
+                                         daemon=True)
+                t1 = time.time()
+                press.start()
+                press.join(5)
+                assert "r" in out and out["r"].status_code == 200 and time.time() - t1 < 3, path
+            assert out["r"].json()["lines"] == ["incident_safe by human (portal)"]
+        finally:
+            release.set()
+            for w in workers:
+                w.join(10)
+    assert '"type": "stop"' in (tmp_path / "data" / "events.jsonl").read_text(encoding="utf-8")
+
+
 def test_no_dialog_stands_between_a_person_and_stop():
     """The portal's Stop sat behind a native confirm(), which a browser can suppress: then Stop did nothing (P1)."""
     pytest.importorskip("starlette")

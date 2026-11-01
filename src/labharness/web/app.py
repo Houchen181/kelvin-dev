@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import hmac
+import itertools
 import json
 import logging
 import math
@@ -15,8 +17,10 @@ import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -31,7 +35,7 @@ from ..accounts import Accounts, LabRoles, OwnerPin, RoleRefused, cipher_for, ha
 from ..configversions import ConfigVersions, widens as config_widens
 from .. import central, edition
 from ..agent.approval import WebApprover
-from ..agent.runtime import SETUP_STEPS, LabRuntime, Viewer, not_shown, writable_folder
+from ..agent.runtime import SETUP_STEPS, LabRuntime, Underway, Viewer, not_shown, writable_folder
 from ..agent.server import build_server
 from ..adapters import AdapterError
 from ..autosetup import AutoSetup, log as setup_log, reviewed as mark_reviewed
@@ -228,6 +232,36 @@ def channel(request: Request) -> Tuple[str, Optional[str]]:
 
 STOPPED = ("Stopped: Kelvin's answer, the ramp or run in progress (a run's safe-stop steps run) and the queue; open "
            "approvals were declined.")
+
+
+async def own_thread(fn: Callable[..., Any], *args: Any) -> Any:
+    """fn(*args) on a thread started for it alone, with this request's context (who asks), awaited: what only makes
+    the lab safer (Stop, Bring to safe, the incident card's safe) never waits behind other work for one of the
+    server's shared threads, nor behind another of its kind (a Stop waited 9 s behind twelve LabVIEW folders being
+    read). It finishes before Kelvin exits, as the shared threads' work does."""
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+    context = contextvars.copy_context()
+
+    def settle(result: Any, error: Optional[BaseException]) -> None:
+        if done.cancelled():
+            return
+        if error is not None:
+            done.set_exception(error)
+        else:
+            done.set_result(result)
+
+    def work() -> None:
+        try:
+            result, error = context.run(fn, *args), None
+        except BaseException as e:   # said to the request, as asyncio.to_thread says it
+            result, error = None, e
+        try:
+            loop.call_soon_threadsafe(settle, result, error)
+        except RuntimeError:   # the server stopped meanwhile: the work is done all the same
+            pass
+    threading.Thread(target=work, name="kelvin-safe").start()
+    return await done
 
 
 SUMMARY_SYSTEM = ("You write the opening of a physics project's master report: two or three short paragraphs "
@@ -2889,7 +2923,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         """The lab's LabVIEW, read (no VI is run, LabVIEW isn't needed) to switch the lab to Kelvin as it works now:
         {folder}. NI MAX's aliases and resources, the folder's projects and VIs; each instrument with its likely card,
         the limits from the values its VIs use and who answers at its address now (asked as a scan asks); each VI
-        read, translated into a scan (viscan.py)."""
+        read, translated into a scan (viscan.py). One folder at a time, on the thread kept for that (409 meanwhile)."""
         problem = busy_problem()
         if problem:
             return error(409, problem)
@@ -2898,7 +2932,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if not folder:
             return error(400, "Choose the folder with your LabVIEW projects and VIs.")
         try:
-            return JSONResponse(await asyncio.to_thread(runtime.labview_found, folder))
+            return JSONResponse(await asyncio.wrap_future(runtime.labview_reads.submit(runtime.labview_found, folder)))
+        except Underway as e:
+            return error(409, str(e))
         except (OSError, ValueError) as e:
             return error(400, str(e))
 
@@ -3011,7 +3047,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def hard_stop(chat_id: str, request: Request) -> None:
         """A typed STOP: this chat's answer and the lab's work, whoever started it, as the Stop for everything."""
         agent.stop(chat_id)
-        await asyncio.to_thread(runtime.stop, person(request)[:-1] + ", typed STOP)")
+        await own_thread(runtime.stop, person(request)[:-1] + ", typed STOP)")
 
     async def turn(request: Request) -> Response:
         chat_id = request.path_params["chat_id"]
@@ -3172,7 +3208,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         chat_id = body.get("chat_id")
         stopped = agent.stop(str(chat_id) if chat_id else None)
         if not chat_id or body.get("lab"):
-            await asyncio.to_thread(runtime.stop, person(request))
+            await own_thread(runtime.stop, person(request))
             stopped = True
         return JSONResponse({"ok": stopped, "message": STOPPED if stopped and (not chat_id or body.get("lab")) else ""})
 
@@ -3181,7 +3217,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         safe values its card declares. People only: no agent tool reaches this. A watch-only phone can't."""
         if role_of(request) == "watch":
             return error(403, "This phone can watch, not act. Use the Kelvin computer, or Hands on the sample.")
-        lines = await asyncio.to_thread(runtime.bring_to_safe, person(request))
+        lines = await own_thread(runtime.bring_to_safe, person(request))
         return JSONResponse({"ok": True, "lines": lines})
 
     async def incident(request: Request) -> Response:
@@ -3191,7 +3227,7 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         if action == "safe":
             if role_of(request) == "watch":
                 return error(403, "This phone can watch, not act. Use the Kelvin computer, or Hands on the sample.")
-            lines = await asyncio.to_thread(runtime.incident_safe, person(request))
+            lines = await own_thread(runtime.incident_safe, person(request))
             return JSONResponse({"ok": True, "lines": lines})
         if action == "dismiss":
             if runtime.operating:   # the guard lets the card's safe through while Claude works the screen, not this
@@ -3347,15 +3383,19 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             body = await request.json()
         except ValueError:
             body = {}
-        if isinstance(body, dict) and body.get("queue"):
-            runtime.stop(person(request))
-            return JSONResponse({"ok": True})
-        if runtime.stop_run(person(request)):
-            return JSONResponse({"ok": True})
-        if runtime.queue.state in ("running", "pausing"):   # between its scans
-            runtime.stop(person(request))
-            return JSONResponse({"ok": True})
-        return JSONResponse({"ok": False})
+        with_queue, by = isinstance(body, dict) and body.get("queue"), person(request)
+
+        def stopping() -> bool:
+            if with_queue:
+                runtime.stop(by)
+                return True
+            if runtime.stop_run(by):
+                return True
+            if runtime.queue.state in ("running", "pausing"):   # between its scans
+                runtime.stop(by)
+                return True
+            return False
+        return JSONResponse({"ok": await own_thread(stopping)})
 
     async def queue(request: Request) -> Response:
         """GET: the scan queue. POST {op, ...}: a person's change to it. start asks for the queue's approval as usual
@@ -3420,6 +3460,30 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         with runtime.attributed({}):
             return fn(*args)
 
+    # the scan editor's checks, on threads of their own (a check never takes one of the server's shared threads,
+    # which a Stop's work once waited for), and of an editor's checks still waiting, only its newest
+    checks = ThreadPoolExecutor(max_workers=2, thread_name_prefix="kelvin-check")
+    newest_check: Dict[str, int] = {}   # each editor's latest check asked for
+    check_count = itertools.count(1)
+
+    async def checked(editor: str, fn: Any, *args: Any) -> Any:
+        """fn(*args), a scan editor's check, on the checks' threads, with this request's context. editor: the editor
+        that asks (its own key; "" for none): a check it asked for before its newest, still waiting when its turn
+        comes, is dropped (None)."""
+        n = next(check_count)
+        if editor:
+            newest_check[editor] = n
+
+        def work() -> Any:
+            if editor and newest_check.get(editor) != n:
+                return None   # the scan changed again meanwhile: only the newest is checked
+            return fn(*args)
+        try:
+            return await asyncio.get_running_loop().run_in_executor(checks, contextvars.copy_context().run, work)
+        finally:
+            if editor and newest_check.get(editor) == n:
+                del newest_check[editor]
+
     async def library(request: Request) -> Response:
         """The person's library of scans and scripts (scanlibrary.py), for the Runs panel. GET: {scripts, scans}, the
         latest used first. POST, a person's change on this computer (no phone, no agent tool): {op: import, path}
@@ -3427,9 +3491,9 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         args?, queue?} → {queue, message}: at the front of the queue and started, pausing after it (it returns once
         the queue's approval is answered), or with queue: true at its end. The scan editor (scanedit.py): {op: parts,
         id?} → {id, name, edited_from, parts, lab, check}, a scan as its parts (a new one without id); {op: check,
-        parts} → its check (points, time, problems, its plan's text); {op: save, parts, from?} → {entry, new,
-        library}, an entry of its own; {op: run, parts, from?, queue?} → {queue, message, entry, library}: saved, then
-        run as above."""
+        parts, editor?} → its check (points, time, problems, its plan's text), or {superseded: true} when the same
+        editor asked for a newer one meanwhile; {op: save, parts, from?} → {entry, new, library}, an entry of its own;
+        {op: run, parts, from?, queue?} → {queue, message, entry, library}: saved, then run as above."""
         if role_of(request) != "owner":   # remote.py lists none of it either
             return error(403, ON_THIS_COMPUTER)
         if request.method == "GET":
@@ -3460,9 +3524,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                                                             body.get("params"), body.get("args"),
                                                             bool(body.get("queue")), by))
             elif op == "parts":
-                return JSONResponse(await asyncio.to_thread(runtime.scan_parts, entry_id or None))
+                return JSONResponse(await checked("", runtime.scan_parts, entry_id or None))
             elif op == "check":
-                return JSONResponse(await asyncio.to_thread(runtime.scan_check, body.get("parts")))
+                check = await checked(str(body.get("editor") or "")[:80], runtime.scan_check, body.get("parts"))
+                return JSONResponse(check if check is not None else {"superseded": True})
             elif op == "save":
                 out = await asyncio.to_thread(runtime.scan_save, body.get("parts"), base, by)
             else:
@@ -3480,7 +3545,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
     async def labview_scans(request: Request) -> Response:
         """POST {folder, vis: [the VIs' paths], instruments: [{address, name, card}]}: measurement VIs a person chose in
         Set up, translated into scans and kept in their library (Runs → Scans) as LabVIEW's, with the instruments
-        named as in the review. On this computer only, as the library is. {kept, not, library}."""
+        named as in the review. On this computer only, as the library is. {kept, not, library}. The folder is read
+        again as Set up reads it: one at a time, on the thread kept for that (409 meanwhile)."""
         if role_of(request) != "owner":
             return error(403, ON_THIS_COMPUTER)
         try:
@@ -3494,8 +3560,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(400, "Choose the VIs to keep as scans.")
         chosen = [c for c in body.get("instruments") or [] if isinstance(c, dict)]
         try:
-            out = await asyncio.to_thread(as_person, runtime.labview_scans, str(body["folder"]).strip(), vis, chosen,
-                                          person(request))
+            out = await asyncio.wrap_future(runtime.labview_reads.submit(
+                as_person, runtime.labview_scans, str(body["folder"]).strip(), vis, chosen, person(request)))
+        except Underway as e:
+            return error(409, str(e))
         except (OSError, ValueError) as e:
             return error(400, str(e))
         out["library"] = await asyncio.to_thread(runtime.library_view)

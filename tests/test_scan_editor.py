@@ -361,6 +361,48 @@ def test_the_editor_routes_and_an_edited_scan_runs_through_the_queue(ran, tmp_pa
         "loop 1: choose what it steps (instrument.parameter)"]
 
 
+def test_checks_have_threads_of_their_own_and_of_an_editors_waiting_checks_only_the_newest_runs(ran, tmp_path,
+                                                                                                monkeypatch):
+    """Each pause in typing asked for a check, which took one of the server's shared threads for as long as it ran
+    (34 s for a million points), and none was ever dropped: the checks have threads of their own, and of the checks
+    an editor asked for that still wait, only its newest runs (the others come back superseded)."""
+    import threading
+    import time
+    from test_scan_library import portal
+    rt, _ = ran
+    client, _ = portal(rt, tmp_path)
+    release, ran_on, check = threading.Event(), [], rt.scan_check
+    parts, out = rt.scan_parts()["parts"], {}
+
+    def slow(parts):
+        ran_on.append((threading.current_thread().name, parts.get("name")))
+        release.wait(30)
+        return check(parts)
+    monkeypatch.setattr(rt, "scan_check", slow)
+
+    def ask(name, editor):
+        out[name] = client.post("/api/library", json={"op": "check", "parts": dict(parts, name=name),
+                                                      "editor": editor}).json()
+    with client:
+        workers = [threading.Thread(target=ask, args=(n, n)) for n in ("x", "y")]   # both check threads taken
+        for w in workers:
+            w.start()
+        t0 = time.time()
+        while len(ran_on) < 2 and time.time() - t0 < 10:
+            time.sleep(0.02)
+        for name in ("e1", "e2", "e3"):   # one editor, typing on: each waits for a thread
+            workers.append(threading.Thread(target=ask, args=(name, "e")))
+            workers[-1].start()
+            time.sleep(0.3)
+        release.set()
+        for w in workers:
+            w.join(30)
+    assert sorted(name for _, name in ran_on) == ["e3", "x", "y"], ran_on
+    assert all(thread.startswith("kelvin-check") for thread, _ in ran_on), ran_on
+    assert out["e1"] == out["e2"] == {"superseded": True}
+    assert out["e3"]["loads"] and out["e3"]["text"].startswith("plan: e3") and out["x"]["loads"]
+
+
 def test_a_script_isnt_edited_here_and_phones_get_none_of_it(tmp_path, monkeypatch):
     pytest.importorskip("mcp")
     from labharness.web.remote import allowed

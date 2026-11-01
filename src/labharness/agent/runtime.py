@@ -19,6 +19,7 @@ import re
 import sys
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -346,6 +347,39 @@ def _installed_by_a_maker(folder: str) -> bool:
     return False
 
 
+class Underway(RuntimeError):
+    """Work of a kind that goes one at a time was asked for while one is under way (OneAtATime): said in words."""
+
+
+class OneAtATime:
+    """Work of one kind (a LabVIEW folder read) on a thread kept for it alone, one at a time: it never takes one of
+    the threads other work waits for (a Stop waited 9 s behind twelve LabVIEW folders being read), and while one
+    goes on, another is refused at once (Underway, in words), never queued behind it."""
+
+    def __init__(self, name: str, busy: str):
+        self.name, self.busy = name, busy
+        self._lock = threading.Lock()
+        self._pool: Optional[ThreadPoolExecutor] = None
+
+    def submit(self, fn: Callable[..., Any], *args: Any) -> "Future[Any]":
+        """fn(*args) on its thread, with this thread's context (whose work it is). Underway while another goes on."""
+        if not self._lock.acquire(blocking=False):
+            raise Underway(self.busy)
+        try:
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=self.name)
+            future = self._pool.submit(contextvars.copy_context().run, fn, *args)
+        except BaseException:
+            self._lock.release()
+            raise
+        future.add_done_callback(lambda _: self._lock.release())
+        return future
+
+    def run(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """The same, waited for on this thread (an agent's tool call)."""
+        return self.submit(fn, *args).result()
+
+
 class ClientCall:
     """A tool call an MCP client made, while Kelvin works on it (agent/server.py). The client may cancel it or go away;
     then Kelvin does nothing more for it (LabRuntime.cancel_call)."""
@@ -578,6 +612,9 @@ class LabRuntime:
         # leaves the folder as it is. The app sets it where no person or account has a folder of their own
         self.lab_folder: Optional[Callable[[Lab, Dict[str, Any]], Optional[Path]]] = None
         self.scan_network = True                    # scans also look on the local network (a Settings switch)
+        # the lab's LabVIEW folder read (Set up's survey and Keep, survey_labview): one at a time, on its own thread
+        self.labview_reads = OneAtATime("kelvin-labview", "Kelvin is reading a LabVIEW folder already: try again once "
+                                                          "that is done.")
         self.last_survey: Optional[Dict[str, Any]] = None   # what the last scan looked through, and why (survey.py)
         self.last_found: List[str] = []                     # the addresses it found: where Kelvin may try a card
         self.found_info: Dict[str, Dict[str, Any]] = {}     # what it learnt of each, by VISA resource: identity, card
@@ -5148,7 +5185,11 @@ class LabRuntime:
     def survey_labview(self, path: str) -> str:
         """The lab's LabVIEW, read for how the lab works now (labview.py): NI MAX's names and addresses for its
         instruments, its projects and drivers, the card that fits each instrument, and each VI read translated into
-        a scan (viscan.py). Nothing is run, LabVIEW isn't needed, and no instrument is asked."""
+        a scan (viscan.py). Nothing is run, LabVIEW isn't needed, and no instrument is asked. One folder at a time, on
+        the thread kept for that (labview_reads), as Set up reads one: Underway while another is read."""
+        return self.labview_reads.run(self._survey_labview, path)
+
+    def _survey_labview(self, path: str) -> str:
         from .. import labview
         registry = self.script_cards()
         try:
@@ -5168,7 +5209,8 @@ class LabRuntime:
     def labview_found(self, folder: str) -> Dict[str, Any]:
         """The lab's LabVIEW read for the Set up panel (a person chose the folder): its instruments as the script
         survey shows them (asked who they are as a scan asks), NI MAX, its projects, and each VI read translated into
-        a scan with the instruments named as the review names them. Raises OSError for a folder that isn't there."""
+        a scan with the instruments named as the review names them. Raises OSError for a folder that isn't there.
+        The portal reads it on labview_reads, as it keeps the scans (labview_scans)."""
         from .. import labview
         registry = self.script_cards()
         found = labview.survey(folder, registry)
