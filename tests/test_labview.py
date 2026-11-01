@@ -638,3 +638,21 @@ def test_labview_measurement_files_become_runs(tmp_path):
     with pytest.raises(DataError, match="header never ends"):
         read("cut.lvm", LVM.split("***End_of_Header***")[0])
     assert imports.takes("old run.lvm", b"LabVIEW Measurement")
+
+
+def test_a_survey_looks_through_so_many_files_and_says_where_it_stopped(tmp_path, monkeypatch):
+    """A whole drive chosen as the LabVIEW folder: the walk stops after MAX_LOOKED files and folders and says so;
+    hidden folders and SKIP_DIRS are never gone into."""
+    root = tmp_path / "Everything"
+    for i in range(6):
+        (root / ("d%d" % i)).mkdir(parents=True)
+        (root / ("d%d" % i) / "a.vi").write_bytes(b"RSRC")
+    (root / ".git").mkdir()
+    (root / ".git" / "x.vi").write_bytes(b"RSRC")
+    whole = lv._files(root, [])
+    assert [p.parent.name for p in whole["vis"]] == ["d0", "d1", "d2", "d3", "d4", "d5"] and not whole["skipped"]
+    monkeypatch.setattr(lv, "MAX_LOOKED", 8)
+    cut = lv._files(root, [])
+    assert [p.parent.name for p in cut["vis"]] == ["d0", "d1", "d2"]
+    assert cut["skipped"] == ["stopped looking after 9 files and folders: choose the folder that holds the lab's "
+                              "LabVIEW projects and VIs"]

@@ -103,12 +103,13 @@ def _self_test(port: int, key: str) -> int:
         hardware = False
     if getattr(sys, "frozen", False):   # the app must bring them; a source checkout may be installed without them
         page_ok = page_ok and hardware and _run_file_ok()
-    from . import library
+    from . import library, viworker
     bridge_ok = library.self_test()   # the helper for makers' libraries starts (Kelvin.exe --bridge) and answers
-    page_ok = page_ok and bridge_ok
+    reader_ok = viworker.self_test()   # so does the reader of a lab's LabVIEW files, and it reads
+    page_ok = page_ok and bridge_ok and reader_ok
     # the models' list loads (the services are packaged); a fresh install has no key yet, so none need be offered
     ok = page_ok and bool(boot.get("lab")) and isinstance((boot.get("models") or {}).get("groups"), list)
-    extra = ""
+    extra = "" if reader_ok else " (the LabVIEW reader FAILED)"
     if os.environ.get("KELVIN_SELFTEST_ENVS") == "1":   # the release builds, which have the network (envs.py)
         from . import envs
         try:

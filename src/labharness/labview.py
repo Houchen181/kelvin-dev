@@ -18,6 +18,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,8 @@ VISACONF = Path(os.environ.get("PROGRAMDATA") or r"C:\ProgramData") / "National 
 MAX_INI_BYTES = 2_000_000
 MAX_PROJECT_BYTES = 5_000_000
 MAX_VIS = 3000             # VIs listed from one folder
+MAX_LOOKED = 200_000      # files and folders a survey looks through in one folder (a whole drive chosen, say)
+WALK_SECONDS = 60.0       # and for at most this long
 MAX_SHOWN = 40             # VIs the model's report names one by one
 MAX_WALKED = 1000          # a loop's values gone through for what its VI sends; more: its first and its extremes
 SKIP_DIRS = {".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv", "venv"}
@@ -862,13 +865,30 @@ def address_key(address: str) -> str:
     return resource_name(address).upper()
 
 
+def _walk(root: Path, skipped: List[str]) -> List[Path]:
+    """The files in a folder a survey looks at (LABVIEW_FILES), in order: never inside SKIP_DIRS, a hidden folder or a
+    link to a folder, and through at most MAX_LOOKED files and folders, for at most WALK_SECONDS; past them, where it
+    stopped is said in skipped."""
+    found: List[Path] = []
+    looked, end = 0, time.monotonic() + WALK_SECONDS
+    for top, dirs, names in os.walk(str(root)):   # a link to a folder isn't gone into (followlinks=False)
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.startswith("."))
+        looked += len(dirs) + len(names)
+        found += [Path(top, n) for n in names if Path(n).suffix.lower() in LABVIEW_FILES]
+        if looked > MAX_LOOKED or time.monotonic() > end:
+            skipped.append("stopped looking after %d files and folders: choose the folder that holds the lab's "
+                           "LabVIEW projects and VIs" % looked)
+            break
+    return sorted(found)
+
+
 def _files(root: Path, own: Iterable[Any]) -> Dict[str, Any]:
     """The LabVIEW files in a folder (or the one file): projects, VIs (the lab's, and those in copies of LabVIEW's
     library folders), libraries, NI-VISA's visaconf.ini and other .ini files (a MAX export)."""
     from .folderfiles import mine, run_of, secret
     out: Dict[str, Any] = {"projects": [], "vis": [], "driver_vis": [], "libraries": [], "visaconf": [], "ini": [],
                            "skipped": []}
-    paths = [root] if root.is_file() else sorted(root.rglob("*"))
+    paths = [root] if root.is_file() else _walk(root, out["skipped"])
     real_root = str(root.resolve())
     for p in paths:
         rel = (p.relative_to(root).parts if p != root else (p.name,))
@@ -897,7 +917,7 @@ def _files(root: Path, own: Iterable[Any]) -> Dict[str, Any]:
                 out["driver_vis"].append(p)
             elif len(out["vis"]) < MAX_VIS:
                 out["vis"].append(p)
-            elif not out["skipped"]:
+            elif "more than %d VIs: the rest" % MAX_VIS not in out["skipped"]:
                 out["skipped"].append("more than %d VIs: the rest" % MAX_VIS)
         elif suffix in (".lvlib", ".llb", ".lvclass"):
             out["libraries"].append((p, in_lib))
