@@ -25,6 +25,7 @@ run.h5 is the run's one data file. h5py, MATLAB (h5read), Igor Pro, Origin and H
 Without h5py (Kelvin's core alone) a run keeps its record, and everything here reads that instead."""
 from __future__ import annotations
 
+import atexit
 import json
 import math
 import os
@@ -32,9 +33,11 @@ import re
 import shutil
 import struct
 import sys
+import threading
 import time
 import zlib
 from array import array
+from contextlib import contextmanager
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,10 +66,80 @@ def have_h5() -> bool:
         try:
             import h5py  # noqa: F401
             import numpy  # noqa: F401
+            _hook_exit()
             _H5 = True
         except ImportError:
             _H5 = False
     return _H5
+
+
+# ------------------------------------------------------------------ run.h5 while Python exits
+
+EXIT_WAIT_S = 30.0      # the longest Python's exit waits for the run.h5 work begun before it
+_GATE = threading.Condition()
+_open = 0               # run.h5 files open in this Kelvin now, in any thread
+_closing = False        # Python is exiting: no run.h5 is opened any more
+_hooked = False
+
+
+def _hook_exit() -> None:
+    """_at_exit, once h5py is imported: registered after h5py's own exit (its import registers that), so it runs
+    first."""
+    global _hooked
+    with _GATE:
+        if not _hooked:
+            atexit.register(_at_exit)
+            _hooked = True
+
+
+def _at_exit() -> None:
+    """Python is exiting: no run.h5 is opened from now on, the ones open end first, and then no other thread runs
+    h5py at all (EXIT_WAIT_S for both, at most). This runs before h5py's own exit, after which a run.h5's text can't
+    be read ("Failed to find converter for 8 -> b'PYTHON:OBJECT'"), and a thread in HDF5 meanwhile crashes Python
+    (a segmentation fault) or hangs it: the automatic reports rewritten 20 s after a run (flush_reports), a tidy, a
+    queue ending its run. A run's record stays until its run.h5 is written and read back (finish), so a run cut off
+    here is finished at the next start."""
+    global _closing
+    deadline = time.monotonic() + EXIT_WAIT_S
+    with _GATE:
+        _closing = True
+        _GATE.wait_for(lambda: _open == 0, timeout=EXIT_WAIT_S)
+    _hold_h5py(deadline)
+
+
+def _hold_h5py(deadline: float) -> None:
+    """h5py's lock (phil), taken for good by the thread exiting Python. h5py's own exit unregisters its converters
+    in HDF5 without that lock or the GIL, and HDF5 here serves one thread at a time: a thread still releasing h5py
+    objects then (a dataset of a run.h5 just read) crashed Python inside H5Tunregister. Every other thread now
+    waits at h5py's lock until Python is gone; this one may still take it again (it is re-entrant)."""
+    try:
+        from h5py._objects import phil
+    except ImportError:
+        return
+    while not phil.acquire(False):
+        if time.monotonic() > deadline:
+            return
+        time.sleep(0.005)
+
+
+@contextmanager
+def h5_file(path: Any, mode: str = "r") -> Iterator[Any]:
+    """h5py.File(path, mode): how Kelvin opens every run.h5, so that none is open as Python exits (_at_exit).
+    OSError: Python is exiting."""
+    import h5py
+    global _open
+    _hook_exit()
+    with _GATE:
+        if _closing:
+            raise OSError("Kelvin is closing: %s is left as it is" % Path(path).name)
+        _open += 1
+    try:
+        with h5py.File(path, mode) as f:
+            yield f
+    finally:
+        with _GATE:
+            _open -= 1
+            _GATE.notify_all()
 
 
 def _jsonable(v: Any) -> Any:
@@ -463,7 +536,7 @@ def write_h5(folder: Path, rec: Recorded) -> Path:
     aux = [k for k in keys if (k.endswith(".x") or k.endswith(".axis")) and k.rsplit(".", 1)[0] in traced
            and k in traced]
     tmp = folder / (RUN_FILE + ".tmp")
-    with h5py.File(tmp, "w") as f:
+    with h5_file(tmp, "w") as f:
         f.attrs["format"] = FORMAT
         for k in ("run_id", "plan", "status", "started", "finished", "points", "planned_points", "duration_s",
                   "reason", "operator", "user", "lab", "simulated", "project", "project_name", "device",
@@ -556,9 +629,8 @@ def _frames_into(group: Any, folder: Path, key: str, refs: List[Any], np: Any) -
 
 def read_h5(folder: Path, with_rows: bool = True) -> Recorded:
     """run.h5 read back as the record it came from (rows as Kelvin keeps them, frames as their place in run.h5)."""
-    import h5py
     rec = Recorded(finished=True)
-    with h5py.File(Path(folder) / RUN_FILE, "r") as f:
+    with h5_file(Path(folder) / RUN_FILE, "r") as f:
         rec.meta = json.loads(f.attrs.get("meta_json", "{}"))
         rec.columns = json.loads(f.attrs.get("columns_json", '{"axes": [], "measures": []}'))
         rec.plan_text = _text(f.get("plan"))
@@ -818,8 +890,7 @@ def columns(folder: Path) -> Columns:
     sizes: Dict[str, List[int]] = {}
     kinds: Dict[str, str] = {}
     if (folder / RUN_FILE).exists() and have_h5():
-        import h5py
-        with h5py.File(folder / RUN_FILE, "r") as f:
+        with h5_file(folder / RUN_FILE, "r") as f:
             cols = json.loads(f.attrs.get("columns_json", "{}"))
             for k, ds in datasets(f.get("points")):
                 if ds.dtype.kind in "fiub":
@@ -870,8 +941,7 @@ def trace_row(folder: Path, key: str, i: int) -> Optional[Dict[str, Any]]:
     folder = Path(folder)
     if not (folder / RUN_FILE).exists() or not have_h5():
         return None
-    import h5py
-    with h5py.File(folder / RUN_FILE, "r") as f:
+    with h5_file(folder / RUN_FILE, "r") as f:
         traces = dict(datasets(f.get("traces")))
         if key not in traces or key.endswith(".length"):
             raise KeyError(key)
@@ -895,7 +965,7 @@ def frame(folder: Path, ref: str) -> Any:
     if sep and head == RUN_FILE and rest.endswith("]") and "[" in rest:
         key, _, i = rest[:-1].rpartition("[")
         import h5py
-        with h5py.File(folder / RUN_FILE, "r") as f:
+        with h5_file(folder / RUN_FILE, "r") as f:
             item = f["frames"][h5_name(key) if h5_name(key) in f["frames"] else key]
             if isinstance(item, h5py.Group):   # frames of different sizes: one dataset per point
                 return item["%05d" % int(i)][()]
@@ -914,8 +984,7 @@ def meta(folder: Path) -> Dict[str, Any]:
 def card(folder: Path) -> Dict[str, Any]:
     folder = Path(folder)
     if (folder / RUN_FILE).exists() and have_h5():
-        import h5py
-        with h5py.File(folder / RUN_FILE, "r") as f:
+        with h5_file(folder / RUN_FILE, "r") as f:
             if "card" in f:
                 return json.loads(_text(f["card"]) or "{}")
     return make_card(load(folder))
@@ -929,7 +998,7 @@ def set_analysis(folder: Path, analysis: Dict[str, Any]) -> None:
         rec = read_h5(folder)
         rec.analysis = analysis
         text = json.dumps(_jsonable(make_card(rec)), ensure_ascii=False)
-        with h5py.File(folder / RUN_FILE, "r+") as f:
+        with h5_file(folder / RUN_FILE, "r+") as f:
             for name, value in (("analysis", json.dumps(_jsonable(analysis), ensure_ascii=False)), ("card", text)):
                 if name in f:
                     del f[name]
