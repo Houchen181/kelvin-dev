@@ -151,7 +151,7 @@ def test_run_again_follows_the_contract():
 
 def test_scans_follow_the_contract():
     for text in ('op: "import", path', 'op: "rename", id: e.id, name', 'op: "remove", id: e.id', 'op: "run", id: e.id',
-                 "body.queue = true", "body.params", "pick_file", ">Your scripts</h3>", ">Kelvin's scans</h3>"):
+                 "body.queue = true", "body.params", "pick_file", ">Your scripts</h3>", ">Scans</h3>"):
         assert text in JS + PAGE, text
     entry = _js("scanEntry")
     assert '"missing"' in entry and '"changed"' in entry and '"not run yet"' in entry and '"ran "' in entry
