@@ -5,19 +5,7 @@ on:
   pull_request:
 
 jobs:
-  exitdiag:
-    name: TEMP which daemon threads crash Python's exit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - run: pip install -e ".[web,dev]"
-      - run: bash tests/_tmp_exit_diag.sh
-
   core:
-    if: false
     name: core (Python 3.9, PyYAML only)
     runs-on: ubuntu-latest
     steps:
@@ -29,7 +17,6 @@ jobs:
       - run: python -m pytest -q
 
   full:
-    if: false
     name: full (Python 3.13, MCP server + portal)
     runs-on: ubuntu-latest
     steps:
