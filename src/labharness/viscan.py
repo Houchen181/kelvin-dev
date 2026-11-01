@@ -11,6 +11,10 @@ the summary doesn't say enough about to carry over exactly is left out, and said
     a wait after a loop's set       that loop's settle:
     file writes             nothing to do: Kelvin records every point (run.h5); each column is a reading or a sweep
 
+A loop's stop condition (a While loop's, a For loop's conditional terminal) is never dropped: a reading compared with
+a value becomes its sweep's until: (or its time series'), a Stop button is Kelvin's own Stop, and stopping after its
+last value is where its range ends anyway, each said; any other condition gives no scan, and says why.
+
 Not translated, and said: state machines, event structures, code that runs in parallel, Call Library nodes, property
 nodes, sub-VIs whose commands aren't known, a wait anywhere else, a set or reading the instrument's card doesn't have,
 a value worked out as the VI runs, and a loop that ends only when someone presses Stop. A VI whose flow can't be
@@ -23,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import scripts
 from .eventlog import plan_text
-from .labview import address_key, address_of, controls_of, range_values, validate, value_of
+from .labview import STOP_OPS, address_key, address_of, controls_of, finite, range_values, validate, value_of
 from .plans import PlanError, load_plan
 from .scanlibrary import summary
 
@@ -171,7 +175,7 @@ class _Scan:
             ms = "ms" in n
             v = value_of(n.get("ms") if ms else n.get("s"), self.controls)
             what = "Wait %s %s" % (self.words(n.get("ms") if ms else n.get("s")), "ms" if ms else "s")
-            if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
+            if not finite(v) or v < 0:
                 self.gap("%s: how long isn't known before it runs" % what)
                 return []
             return [("wait", v / 1000.0 if ms else float(v), what)]
@@ -264,6 +268,9 @@ class _Scan:
         if v is None:
             self.gap("%s: %s has no value saved with the VI" % (what, src.get("control", "its value")))
             return False, None
+        if isinstance(v, float) and not finite(v):
+            self.gap("%s: %s isn't a finite number (%s)" % (what, words, v))
+            return False, None
         try:
             return True, spec.coerce(v)
         except ValueError as e:
@@ -292,7 +299,7 @@ class _Scan:
             self.gap("a case structure on %s: which case runs is known only as it runs" % who)
             return []
         label = ("True" if v else "False") if isinstance(v, bool) else (
-            str(int(v)) if isinstance(v, (int, float)) and v == int(v) else str(v))
+            str(int(v)) if finite(v) and v == int(v) else str(v))
         for name in (label, '"%s"' % label, "Default"):
             if name in cases:
                 self.map("case structure on %s" % who, "its %s case" % name)
@@ -372,7 +379,7 @@ class _Scan:
         got = {k: value_of(rng[k], self.controls) for k in ("from", "to", "step", "points") if k in rng}
         for k in got:
             self.words(rng[k])
-        numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in got.values())
+        numbers = all(finite(v) for v in got.values())
         if "values" in rng or "count" in rng or (rng.get("log") and (scale <= 0 or offset)):
             self.words(rng.get("values") or rng.get("count") or {})
             values = [f(x) for x in range_values(rng, self.controls)]
@@ -441,8 +448,7 @@ class _Scan:
             self.gap("%s (%s): nothing it sets follows its value" % (what, self.range_words(rng)), fatal=True)
             return
         times = value_of(rng.get("count"), self.controls) if axis is None else None
-        if axis is None and not (isinstance(times, (int, float)) and not isinstance(times, bool) and times >= 1
-                                 and times == int(times)):
+        if axis is None and not (finite(times) and times >= 1 and times == int(times)):
             self.gap("%s: how many times it runs isn't in the summary" % what, fatal=True)
             return
         reads_here = [a for _, a in head if a[0] == "read"]
@@ -500,6 +506,8 @@ class _Scan:
                 self.map(a[1], "nothing for the scan")
         if axis is not None and settle:
             self.sweep[axis[1]]["settle"] = round(settle, 6)
+        if not self.stop(n, what, axis, bool(inner)):
+            return
         if inner:
             self.nest(inner[0], outer + [var])
         for _, a in tail:
@@ -512,6 +520,47 @@ class _Scan:
                 self.file(a[1], a[2])
             else:
                 self.map(a[1], "nothing for the scan")
+
+    def stop(self, n: Dict[str, Any], what: str, axis: Optional[Tuple[Any, ...]], inner: bool) -> bool:
+        """A loop's stop condition (until, said exactly in stop_if) carried over, never dropped: a reading this loop
+        takes itself, compared with a number, is its sweep's until: (or its time series'); a Stop button, Kelvin's
+        own Stop; stopping after its last value, where its sweep ends anyway; each said. Anything else is a gap that
+        keeps the VI from being a scan (False)."""
+        until = str(n.get("until") or "").strip()
+        stop = n.get("stop_if")
+        if not until and stop is None:
+            return True
+        if isinstance(stop, dict) and set(stop) == {"button"}:
+            self.map("%s: its %s button" % (what, stop["button"]), "Kelvin's Stop (a person stops the run)")
+            return True
+        if stop == {"last": True}:
+            self.map("%s: it stops after its last value" % what, "where the sweep ends")
+            return True
+        rule = self.rule(stop) if isinstance(stop, dict) and "read" in stop and not inner else None
+        where = (self.sweep.get(axis[1]) if axis is not None else self.time) if rule else None
+        if rule and where is not None and "until" not in where:
+            where["until"] = rule
+            self.map("%s: it stops once %s %s %s" % (what, stop["read"], stop["op"], self.words(stop["than"])),
+                     "%s: until: %s" % ("sweep: %s" % axis[1] if axis is not None else "time", rule))
+            return True
+        self.gap("%s: it can also stop early (%s): a scan can't stop the same way" % (
+            what, until or "a condition of its own"), fatal=True)
+        return False
+
+    def rule(self, stop: Dict[str, Any]) -> Optional[str]:
+        """A reading compared with a number, as a plan's rule ("smu.I > 0.001"); None unless it is exactly that: a
+        reading this scan measures as one key, compared with a finite number (or True, False for == and !=)."""
+        key = self.readings.get(str(stop.get("read")))
+        than = value_of(stop.get("than"), self.controls)
+        if not key or key.startswith("one of ") or stop.get("op") not in STOP_OPS:
+            return None
+        if isinstance(than, bool) and stop["op"] in ("==", "!="):
+            text = "true" if than else "false"
+        elif finite(than):
+            text = repr(float(than)) if isinstance(than, float) else str(than)
+        else:
+            return None
+        return "%s %s %s" % (key, stop["op"], text)
 
     @staticmethod
     def _read_before(head: List[Tuple[Dict[str, Any], Tuple[Any, ...]]], node: Dict[str, Any]) -> bool:
@@ -608,5 +657,12 @@ def translate(vi: Dict[str, Any], instruments: Dict[str, Tuple[str, Any]],
     """A VI's summary as a scan. instruments: the lab's, {labview.address_key(address): (its name in the lab, its
     card)}; aliases: NI MAX's names for addresses. {name, title, vi, path, plan (None when no scan can come of it),
     text (the plan as YAML), summary (in one line), mapping ([{vi: the VI's element, plan: what it became}]),
-    gaps (what didn't translate, in words)}. The same summary always gives the same scan; no model is asked."""
-    return _Scan(vi, instruments, aliases or {}).run()
+    gaps (what didn't translate, in words)}. The same summary always gives the same scan; no model is asked. Never
+    raises: a summary it trips on gives no scan, and says so."""
+    try:
+        return _Scan(vi, instruments, aliases or {}).run()
+    except Exception as e:
+        name = str(vi.get("name") or "") if isinstance(vi, dict) else ""
+        return {"name": plan_name(name), "title": re.sub(r"(?i)\.vit?$", "", name or "VI"), "vi": name,
+                "path": vi.get("path") if isinstance(vi, dict) else None, "plan": None, "text": "", "summary": "",
+                "mapping": [], "gaps": ["it couldn't be translated (%s)" % type(e).__name__]}

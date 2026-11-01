@@ -54,48 +54,69 @@ def _waveform(channel: Any) -> Optional[Tuple[float, float]]:
     return (start, step) if step else None
 
 
+def _numbers(channel: Any) -> bool:
+    """Whether a channel holds numbers, dates or times (not text), as its metadata says."""
+    kind = getattr(channel.dtype, "kind", "")
+    return bool(kind) and kind in "biufcM"
+
+
 def read_tdms(p: Path) -> Table:
     """A .tdms file as a Table. DataError: npTDMS isn't on this computer (saying how Kelvin installs it), or the
-    file isn't TDMS, or holds no channel of numbers."""
+    file isn't TDMS, or holds no channel of numbers, or more than MAX_ROWS of them: told from its metadata, before
+    any value is read (then only the chosen group's are)."""
     try:
         from nptdms import TdmsFile
     except ImportError:
         raise DataError("%s is an NI TDMS file, which Kelvin reads with npTDMS: %s" % (p.name, missing()))
     import numpy as np
     try:
-        f = TdmsFile.read(str(p))
-        groups = [(g.name, list(g.channels())) for g in f.groups()]
+        with TdmsFile.open(str(p)) as f:   # its metadata now; a channel's values only when asked for
+            return _table(p, [(g.name, list(g.channels())) for g in f.groups()], np)
+    except DataError:
+        raise
     except Exception as e:   # npTDMS's own errors for a file that isn't TDMS, or is damaged
         raise DataError("%s could not be read as a TDMS file (%s)" % (
             p.name, str(e).splitlines()[0][:120] if str(e) else type(e).__name__))
-    best: Optional[Tuple[int, str, List[Tuple[Any, List[float], str, str]], int]] = None
+
+
+def _table(p: Path, groups: List[Tuple[str, List[Any]]], np: Any) -> Table:
+    best: Optional[Tuple[int, str, List[Any], int]] = None
     texts: List[str] = []
-    for name, channels in groups:
-        columns = []
+    for name, channels in groups:   # by the metadata alone: how many values each channel has, and of what
+        numeric = []
         for c in channels:
-            try:
-                values, unit, how = _column(c, np)
-            except Exception as e:
-                texts.append("%s/%s (%s)" % (name, c.name, type(e).__name__))
-                continue
-            if values is None:
+            if not _numbers(c):
                 texts.append("%s/%s" % (name, c.name))
-            elif values:
-                columns.append((c, values, unit, how))
-        if not columns:
+            elif len(c):
+                numeric.append(c)
+        if not numeric:
             continue
-        length = Counter(len(v) for _, v, _, _ in columns).most_common(1)[0][0]
-        same = [col for col in columns if len(col[1]) == length]
+        length = Counter(len(c) for c in numeric).most_common(1)[0][0]
+        same = [c for c in numeric if len(c) == length]
         size = length * len(same)
         if best is None or size > best[0]:
-            best = (size, name, same, len(columns) - len(same))
+            best = (size, name, same, len(numeric) - len(same))
     if best is None:
         raise DataError("%s holds no channel of numbers%s" % (
             p.name, " (its text channels: %s)" % ", ".join(texts[:10]) if texts else ""))
-    _, group, columns, other_length = best
-    length = len(columns[0][1])
-    if length > MAX_ROWS:
+    _, group, chosen, other_length = best
+    if len(chosen[0]) > MAX_ROWS:
         raise DataError("%s's channels have more than %d values" % (p.name, MAX_ROWS))
+    columns: List[Tuple[Any, List[float], str, str]] = []
+    for c in chosen:   # only now are values read: the chosen group's, MAX_ROWS at most each
+        try:
+            values, unit, how = _column(c, np)
+        except Exception as e:
+            texts.append("%s/%s (%s)" % (group, c.name, type(e).__name__))
+            continue
+        if values is None:
+            texts.append("%s/%s" % (group, c.name))
+        elif values:
+            columns.append((c, values, unit, how))
+    if not columns:
+        raise DataError("%s holds no channel of numbers%s" % (
+            p.name, " (its text channels: %s)" % ", ".join(texts[:10]) if texts else ""))
+    length = len(columns[0][1])
     named: List[Tuple[str, List[float]]] = []
     notes: List[str] = []
     keys = [key_of(c.name, "channel") for c, _, _, _ in columns]

@@ -17,7 +17,8 @@ Kelvin doesn't know is left out of the steps (it only works a value out), and na
 """
 from __future__ import annotations
 
-import os
+import heapq
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,6 +34,9 @@ CALLS = {"iUse", "polyIUse", "dynIUse", "callParentDynIUse", "genIUse", "dynPoly
 MAX_DEPTH = 40            # structures inside structures, values followed back through nodes
 MAX_SUBVI_DEPTH = 2       # sub-VIs read for the commands they send: a driver's VI, and the VIs it calls
 MAX_SUBVIS = 60           # sub-VI files read for one summary
+MAX_STEPS = 3_000_000     # work for one summary, its sub-VIs' included: objects gone through, values followed
+MAX_WORDS = 400           # characters of a value said in words ("computed")
+MAX_TEXT = 4096           # characters of a command's text, filled in
 
 # LabVIEW's functions, by their number (primResID)
 VISA_WRITE, VISA_READ, VISA_CLEAR = 1926, 1925, 1927
@@ -40,6 +44,7 @@ TCP_WRITE, TCP_READ = 1714, 1716
 TDMS_WRITE = 2010
 TEXT_WRITE = 8080
 WAIT_MS = 1302            # Wait (ms) (Wait Until Next ms Multiple has the same terminals; both wait that long)
+ADD, SUBTRACT, INCREMENT, EQUAL, ARRAY_SIZE = 1050, 1051, 1057, 1102, 1809
 ARITHMETIC = {1050: "+", 1051: "-", 1052: "*", 1053: "/"}
 PRIMS = {1050: "Add", 1051: "Subtract", 1052: "Multiply", 1053: "Divide", 1057: "Increment", 1102: "Equal?",
          1166: "Type Cast", 1300: "Tick Count", 1302: "Wait (ms)", 1303: "Get Date/Time In Seconds",
@@ -91,13 +96,16 @@ class Graph:
         self.dco_owner: Dict[int, Obj] = {}      # a tunnel's (or a structure's own terminal's) structure
         self.diagrams: Dict[int, Diagram] = {}
         self.root: Optional[Diagram] = None
+        self.size = 0                            # objects gone through (a summary's budget counts them)
         if vi.panel is not None:
             for o in vi.panel.walk():
+                self.size += 1
                 if o.uid is not None and o.cls is not None:
                     self.panel[o.uid] = o
         if vi.diagram is None:
             return
         for o in vi.diagram.walk():
+            self.size += 1
             if o.uid is not None and o.cls is not None:
                 self.objs[o.uid] = o
         for o in vi.diagram.walk():
@@ -197,6 +205,11 @@ class Graph:
         return terms[0] if terms else None
 
 
+def _set(o: Optional[Obj]) -> bool:
+    """Whether a flag the heap keeps is set: there, with content that isn't all zeros."""
+    return o is not None and (o.value is True or (isinstance(o.value, (bytes, bytearray)) and any(o.value)))
+
+
 def bounds(o: Obj) -> Tuple[int, int, int, int]:
     """An object's place on the diagram: (top, left, bottom, right)."""
     raw = o.raw("bounds") or b""
@@ -250,7 +263,7 @@ class Val:
 
 
 def computed(how: str) -> Val:
-    return Val("computed", how)
+    return Val("computed", how if len(how) <= MAX_WORDS else how[:MAX_WORDS - 1] + "…")
 
 
 def _key(v: Val, taken: Set[str]) -> str:
@@ -268,25 +281,34 @@ def _key(v: Val, taken: Set[str]) -> str:
 
 
 def render(v: Val) -> Tuple[str, Dict[str, Dict[str, Any]]]:
-    """Text with a {name} for each value the diagram fills in, and those values."""
+    """Text with a {name} for each value the diagram fills in, and those values: at most MAX_TEXT characters (text
+    built of the same parts over and over is cut there, with "…")."""
     taken: Set[str] = set()
     values: Dict[str, Dict[str, Any]] = {}
-    out = []
+    out: List[str] = []
+    size = [0]
 
-    def add(part: Any) -> None:
+    def put(text: str) -> None:
+        out.append(text[:MAX_TEXT + 1 - size[0]])
+        size[0] += len(out[-1])
+
+    def add(part: Any, depth: int) -> None:
+        if size[0] > MAX_TEXT or depth > MAX_DEPTH:
+            return
         if isinstance(part, str):
-            out.append(part.replace("{", "{{").replace("}", "}}"))
+            put(part.replace("{", "{{").replace("}", "}}"))
         elif isinstance(part, Val) and part.kind == "text":
             for p in part.parts or []:
-                add(p)
+                add(p, depth + 1)
         elif isinstance(part, Val) and part.kind == "value":
-            out.append(_written(part.value, part.fmt).replace("{", "{{").replace("}", "}}"))
+            put(_written(part.value, part.fmt).replace("{", "{{").replace("}", "}}"))
         elif isinstance(part, Val):
             key = _key(part, taken)
             values[key] = part.source()
-            out.append("{%s}" % key)
-    add(v)
-    return "".join(out), values
+            put("{%s}" % key)
+    add(v, 0)
+    text = "".join(out)
+    return (text if size[0] <= MAX_TEXT else text[:MAX_TEXT] + "…"), values
 
 
 def _plain(x: Any) -> str:
@@ -364,13 +386,46 @@ def _control(c: vifile.Control) -> Dict[str, Any]:
 
 
 def _jsonable(x: Any) -> Any:
+    """A value as the summary keeps it: plain JSON, with no number that isn't finite (Inf, NaN: None)."""
     if isinstance(x, complex):
-        return [x.real, x.imag]
-    if isinstance(x, float) and x != x:
+        return [_jsonable(x.real), _jsonable(x.imag)]
+    if isinstance(x, float) and not math.isfinite(x):
         return None
     if isinstance(x, (list, tuple)):
         return [_jsonable(v) for v in x]
     return x
+
+
+def all_finite(x: Any, depth: int = 0) -> bool:
+    """Whether a value holds only finite numbers (no Inf or NaN, in its parts either)."""
+    if isinstance(x, float):
+        return math.isfinite(x)
+    if isinstance(x, complex):
+        return math.isfinite(x.real) and math.isfinite(x.imag)
+    if isinstance(x, (list, tuple)):
+        return depth > 40 or all(all_finite(v, depth + 1) for v in x)
+    if isinstance(x, dict):
+        return depth > 40 or all(all_finite(v, depth + 1) for v in x.values())
+    return True
+
+
+def plain_numbers(x: Any, depth: int = 0) -> Tuple[Any, int]:
+    """A summary (or any part of it) with each number that isn't finite made None: (the summary, how many were)."""
+    if isinstance(x, float) and not math.isfinite(x):
+        return None, 1
+    if isinstance(x, (list, tuple, dict)) and depth <= 400:
+        n = 0
+        items = x.items() if isinstance(x, dict) else enumerate(x)
+        out: Any = {} if isinstance(x, dict) else []
+        for k, v in items:
+            v, m = plain_numbers(v, depth + 1)
+            n += m
+            if isinstance(out, dict):
+                out[k] = v
+            else:
+                out.append(v)
+        return out, n
+    return x, 0
 
 
 _SCPI = re.compile(r"^\s*(\*[A-Za-z]{2,5}\??|:?[A-Za-z][A-Za-z0-9]*(?::[A-Za-z*][A-Za-z0-9]*)+\??)(?:[\s,].*)?$",
@@ -382,18 +437,57 @@ def looks_scpi(text: str) -> bool:
     return bool(text) and len(text) <= 200 and bool(_SCPI.match(text))
 
 
+class TooBig(vifile.TooBig):
+    """A summary that would take more than MAX_STEPS: its diagram isn't followed further."""
+
+
+@dataclass
+class _Shared:
+    """What one summary shares with the sub-VIs read for it: the folder sub-VIs are read from (never outside it),
+    Kelvin's own folders (never read), the files read (by path), each VI's graph, and what is left of its budget."""
+    folder: str = ""
+    own: Tuple[Any, ...] = ()
+    files: Dict[str, Optional[vifile.VI]] = field(default_factory=dict)
+    graphs: Dict[int, "Graph"] = field(default_factory=dict)
+    paths: Dict[Tuple[str, Tuple[str, ...]], Optional[Path]] = field(default_factory=dict)
+    steps: int = field(default_factory=lambda: MAX_STEPS)
+
+    def spend(self, n: int = 1) -> None:
+        self.steps -= n
+        if self.steps < 0:
+            raise TooBig("its block diagram: bigger than Kelvin follows in one VI")
+
+    def graph(self, vi: vifile.VI) -> "Graph":
+        g = self.graphs.get(id(vi))
+        if g is None:
+            g = self.graphs[id(vi)] = Graph(vi)
+            self.spend(g.size)
+        return g
+
+    def within(self, under: Path, names: List[str]) -> Optional[Path]:
+        """vifile.within, for the summary's folder: each path worked out once."""
+        key = (str(under), tuple(names))
+        if key not in self.paths:
+            self.paths[key] = vifile.within(self.folder, names, under)
+        return self.paths[key]
+
+
 class _Reader:
     """Reads one VI's diagram into the summary's nodes. args: when the VI is read as a sub-VI a call fills in,
-    the value of each of its controls (by name) as the caller gives it; a control not given has its saved value."""
+    the value of each of its controls (by name) as the caller gives it; a control not given has its saved value.
+    shared: what the summary it is read for shares (by default the VI's own: sub-VIs from its folder)."""
 
     def __init__(self, vi: vifile.VI, link: Link, depth: int, files: Dict[str, Optional[vifile.VI]],
-                 args: Optional[Dict[str, Val]] = None):
+                 args: Optional[Dict[str, Val]] = None, shared: Optional[_Shared] = None):
         self.vi = vi
-        self.g = Graph(vi)
+        self.shared = shared or _Shared(folder=str(Path(vi.path).parent) if vi.path else "", files=files)
+        self.g = self.shared.graph(vi)
         self.link = link
         self.depth = depth
-        self.files = files
+        self.files = self.shared.files
         self.args = args
+        self.memo: Dict[int, Val] = {}            # what each terminal gives, once followed (produced)
+        self.cut = 0                              # values cut short so far (a loop of wires, MAX_DEPTH)
         self.controls = {c.uid: c for c in vi.controls if c.uid is not None}
         self.by_ddo = {c.ddo: c for c in vi.controls if c.ddo is not None}
         self.links = {}
@@ -405,7 +499,7 @@ class _Reader:
         self.taken: Set[str] = set()
         self.gaps: List[str] = []
         self.visa: List[Dict[str, Any]] = []
-        self.strings: List[str] = []
+        self.strings: Dict[str, None] = {}         # string constants, in the order met
         self.formats: Set[str] = set()
 
     # -------------------------------------------------- names of loops and readings
@@ -423,12 +517,17 @@ class _Reader:
                     if src.kind == "control":
                         var = _key(src, set())
                 if not var or var in self.taken:
-                    var = next(v for v in ("i", "j", "k", "l", "m", "n") + tuple("i%d" % k for k in range(2, 99))
-                               if v not in self.taken)
+                    var = next((v for v in ("i", "j", "k", "l", "m", "n") + tuple("i%d" % k for k in range(2, 99))
+                                if v not in self.taken), "")
+                    k = 99
+                    while not var or var in self.taken:
+                        var, k = "i%d" % k, k + 1
                 self.taken.add(var)
                 self.loop_vars[n.uid] = var
             for sub in self.g.subdiagrams(n):
                 self.name_loops(sub, level + 1)
+        if level == 0:   # what was followed while the loops had no names yet is followed again, with them
+            self.memo.clear()
 
     def _indexing_input(self, loop: Obj) -> Optional[int]:
         """A loop's first auto-indexing input tunnel (the loop takes each of an array's values), by its outer
@@ -468,6 +567,7 @@ class _Reader:
         """The indicator a value ends in, through tunnels and text-to-number functions."""
         if level > 4:
             return ""
+        self.shared.spend()
         for sink in self.g.sinks.get(term, []):
             dco = self.g.term_dco.get(sink)
             if dco is None:
@@ -502,10 +602,22 @@ class _Reader:
         return self.produced(src, seen, level)
 
     def produced(self, src: int, seen: Set[int], level: int) -> Val:
-        """What a terminal gives the wires that leave it."""
+        """What a terminal gives the wires that leave it: followed once, then known (a value used many times, or
+        x + x + x..., costs no more than once)."""
         if level > MAX_DEPTH or src in seen:
+            self.cut += 1
             return computed("a value that goes round a loop")
-        seen = seen | {src}
+        known = self.memo.get(src)
+        if known is not None:
+            return known
+        self.shared.spend()
+        cut = self.cut
+        v = self._produced(src, seen | {src}, level)
+        if self.cut == cut:   # not cut short anywhere: the same wherever it is asked for
+            self.memo[src] = v
+        return v
+
+    def _produced(self, src: int, seen: Set[int], level: int) -> Val:
         dco = self.g.term_dco.get(src)
         node = self.g.term_node.get(src)
         if dco is None:
@@ -580,11 +692,14 @@ class _Reader:
 
     def constant(self, dco: Obj) -> Val:
         t = self.vi.types.of_heap(dco.number("typeDesc"))
-        v, ok = vifile.decode(dco.raw("ConstValue") or dco.raw("DefaultData"), t, self.vi.types)
+        why: List[str] = []
+        v, ok = vifile.decode(dco.raw("ConstValue") or dco.raw("DefaultData"), t, self.vi.types, why)
         if not ok:
-            return computed("a constant Kelvin couldn't read")
-        if isinstance(v, str) and v and v not in self.strings:
-            self.strings.append(v)
+            return computed("a constant %s" % ("bigger than Kelvin reads" if why else "Kelvin couldn't read"))
+        if not all_finite(v):   # Inf or NaN: no number a scan can take
+            return computed("a constant that isn't a finite number (%s)" % _plain(v)[:60])
+        if isinstance(v, str) and v:
+            self.strings.setdefault(v)
         kind = vifile.kind_of(t)
         if kind == "visa" and isinstance(v, str) and v:
             self._visa(v, "")
@@ -743,6 +858,7 @@ class _Reader:
         it was opened, following it back through the functions and sub-VIs it passes through."""
         if term is None or level > MAX_DEPTH:
             return {"computed": "a VISA session"}
+        self.shared.spend()
         src = self.g.source.get(term)
         if src is None:
             return {"computed": "no VISA resource wired"}
@@ -778,23 +894,41 @@ class _Reader:
     def order(self, d: Diagram) -> List[Obj]:
         """A diagram's nodes in the order they run: each after the nodes whose outputs it takes, the rest left to
         right (as LabVIEW's diagrams read)."""
-        nodes = list(d.nodes)
-        ids = {id(n) for n in nodes}
-        after: Dict[int, Set[int]] = {id(n): set() for n in nodes}
-        for n in nodes:
+        nodes = list({id(n): n for n in d.nodes}.values())   # each once
+        self.shared.spend(len(nodes))
+        left = sorted(nodes, key=lambda n: (bounds(n)[1], bounds(n)[0]))
+        rank = {id(n): i for i, n in enumerate(left)}
+        waiting = [0] * len(left)                        # inputs from nodes not done yet
+        feeds: List[List[int]] = [[] for _ in left]
+        for i, n in enumerate(left):
+            sources = set()
             for t in self.g.inputs(n):
                 src_node = self.g.term_node.get(self.g.source[t])
-                if src_node is not None and id(src_node) in ids and src_node is not n:
-                    after[id(n)].add(id(src_node))
-        place = {id(n): (bounds(n)[1], bounds(n)[0]) for n in nodes}
+                if src_node is not None and id(src_node) in rank and src_node is not n:
+                    sources.add(rank[id(src_node)])
+            waiting[i] = len(sources)
+            for s in sources:
+                feeds[s].append(i)
+        ready = [i for i in range(len(left)) if not waiting[i]]   # in order: already a heap
+        finished = [False] * len(left)
         done: List[Obj] = []
-        left = sorted(nodes, key=lambda n: place[id(n)])
-        finished: Set[int] = set()
-        while left:
-            ready = next((n for n in left if after[id(n)] <= finished), left[0])   # a loop of wires: by place
-            done.append(ready)
-            finished.add(id(ready))
-            left.remove(ready)
+        first = 0
+        while len(done) < len(left):
+            # the leftmost node whose inputs are all done; when none is (a loop of wires), the leftmost left
+            while ready and finished[ready[0]]:
+                heapq.heappop(ready)
+            if ready:
+                i = heapq.heappop(ready)
+            else:
+                while finished[first]:
+                    first += 1
+                i = first
+            finished[i] = True
+            done.append(left[i])
+            for j in feeds[i]:
+                waiting[j] -= 1
+                if not waiting[j] and not finished[j]:
+                    heapq.heappush(ready, j)
         return done
 
     def diagram(self, d: Optional[Diagram], level: int = 0) -> List[Dict[str, Any]]:
@@ -837,12 +971,14 @@ class _Reader:
         sets: Dict[int, List[Obj]] = {}
         for n in ordered:
             sets.setdefault(top(group[id(n)]), []).append(n)
-        with_loops = [g for g in sets.values() if any(n in loops for n in g)]
+        is_loop = {id(n) for n in loops}
+        with_loops = [k for k, g in sets.items() if any(id(n) in is_loop for n in g)]
         if len(with_loops) < 2:
             return []
-        rest = [n for g in sets.values() if g not in with_loops for n in g]
-        groups = [list(g) for g in with_loops]
-        groups[0] = sorted(groups[0] + rest, key=lambda n: ordered.index(n))
+        looped = set(with_loops)
+        rest = [n for k, g in sets.items() if k not in looped for n in g]
+        groups = [list(sets[k]) for k in with_loops]
+        groups[0] = sorted(groups[0] + rest, key=lambda n: group[id(n)])
         return groups
 
     def gap(self, words: str) -> None:
@@ -851,6 +987,7 @@ class _Reader:
 
     def step(self, n: Obj, level: int) -> List[Dict[str, Any]]:
         """The summary's nodes for one of the diagram's (none for one that only works a value out)."""
+        self.shared.spend()
         k = n.kind
         if k in ("forLoop", "whileLoop", "timeLoop"):
             return [self.loop(n, level)]
@@ -897,8 +1034,8 @@ class _Reader:
         parms = self.g.by_parm(n)
         if rid in (VISA_WRITE, TCP_WRITE):
             text, values = render(self.text(parms.get(10) if rid == VISA_WRITE else self._data_input(n)))
-            if text and not values and text not in self.strings:
-                self.strings.append(text)
+            if text and not values:
+                self.strings.setdefault(text)
             resource = self.resource(parms.get(11)) if rid == VISA_WRITE else {"computed": "a TCP connection"}
             return [{"node": "write", "resource": resource, "text": text, "values": values}]
         if rid in (VISA_READ, TCP_READ):
@@ -932,6 +1069,7 @@ class _Reader:
         subs = self.g.subdiagrams(n)
         rng: Dict[str, Any] = {}
         until = ""
+        stop_if: Optional[Dict[str, Any]] = None
         values = self.loop_values.get(n.uid)
         if values is not None:   # each value of an array: a ramp's range, else the array
             rng = self.ramp(values) or {"values": self.origin(values, set()).source()}
@@ -940,18 +1078,104 @@ class _Reader:
             count = self.g.ends(limit)[-1] if limit is not None and self.g.ends(limit) else None
             if values is None and count is not None and count in self.g.source:
                 rng = {"count": self.origin(count, set()).source()}
-        else:
-            test = self.g.inner_term(self.g.resolve(n.get("loopTestDCO")))
+        test = self.g.inner_term(self.g.resolve(n.get("loopTestDCO")))
+        if kind == "while" or test is not None:   # a For loop's conditional terminal, too
             cond = self.origin(test, set()) if test is not None else computed("nothing")
             until = self.condition(cond)
+            stop_if = self.stop_if(n, test, cond)
+        elif _set(n.get("fLoopCondTerm")):
+            until = "a condition Kelvin couldn't read"
         parallel = n.get("ParForWorkers") is not None or any(
             o.kind == "parForWorkers" for o in n.kids)
         out = {"node": "loop", "kind": kind, "var": var, "range": rng, "until": until, "parallel": parallel,
                "body": self.diagram(subs[0], level + 1) if subs else []}
+        if stop_if is not None:
+            out["stop_if"] = stop_if
         if n.kind == "timeLoop":
             out["timed"] = True
-        machine = self.state_machine(n, subs[0] if subs else None)
+        machine = self.state_machine(n, subs[0] if subs else None, level)
         return machine or out
+
+    def stop_if(self, loop: Obj, test: Optional[int], cond: Val) -> Optional[Dict[str, Any]]:
+        """What ends a loop, where the diagram says it exactly: a Boolean control (a button a person presses),
+        {"button": name}; or its count reaching its number of values less one (i = N - 1, or i + 1 = N), {"last":
+        true}: it stops after its last value (a While loop goes on past the end of an array it takes value by value
+        unless told to stop). None for anything else (until says it in words)."""
+        if cond.kind == "control" and self.args is None:
+            c = next((c for c in self.vi.controls if c.name == cond.value), None)
+            return {"button": c.name} if c is not None and c.kind == "bool" and not c.indicator else None
+        node = self.g.term_node.get(self._back(test)) if test is not None else None
+        if node is None or node.kind != "prim" or (node.number("primResID") or 0) != EQUAL:
+            return None
+        sides = [self._back(t) for t in self.g.inputs(node)]   # back through the tunnels they come in by
+        if len(sides) != 2 or None in sides:
+            return None
+        for a, b in (sides, sides[::-1]):
+            if self._is_count(a, loop) and self._less_one(b, loop) or \
+                    self._plus_one(a, loop) and self._number_of_values(b, loop):
+                return {"last": True}
+        return None
+
+    def _is_count(self, src: Optional[int], loop: Obj) -> bool:
+        """Whether a terminal is the loop's own count (i)."""
+        dco = self.g.term_dco.get(src) if src is not None else None
+        return dco is not None and dco.kind == "lCnt" and self._loop_of(dco) is loop
+
+    def _arith_of(self, src: Optional[int], rid: int) -> Optional[Dict[int, int]]:
+        """The terminals (by number) of the function a terminal is the output of, when it is that function."""
+        node = self.g.term_node.get(src) if src is not None else None
+        if node is None or node.kind != "prim" or (node.number("primResID") or 0) != rid:
+            return None
+        return self.g.by_parm(node)
+
+    def _one(self, term: Optional[int]) -> bool:
+        v = self.origin(term, set()) if term is not None else None
+        return v is not None and v.kind == "value" and v.value == 1 and not isinstance(v.value, bool)
+
+    def _less_one(self, src: int, loop: Obj) -> bool:
+        """N - 1, N the loop's number of values."""
+        parms = self._arith_of(src, SUBTRACT)
+        return parms is not None and self._one(parms.get(1)) and \
+            self._number_of_values(self._back(parms.get(2)), loop)
+
+    def _plus_one(self, src: int, loop: Obj) -> bool:
+        """i + 1 (Increment, or Add 1), i the loop's count."""
+        parms = self._arith_of(src, INCREMENT)
+        if parms is not None:
+            return any(self._is_count(self._back(t), loop) for t in self.g.inputs(self.g.term_node[src]))
+        parms = self._arith_of(src, ADD)
+        return parms is not None and any(self._is_count(self._back(parms.get(a)), loop) and self._one(parms.get(b))
+                                         for a, b in ((2, 1), (1, 2)))
+
+    def _number_of_values(self, src: Optional[int], loop: Obj) -> bool:
+        """Whether a terminal is how many values the loop takes: Array Size of its array, or the number of samples
+        LabVIEW's Ramp Pattern (by Delta) gives beside the ramp it takes."""
+        values = self._back(self.loop_values.get(loop.uid)) if loop.uid in self.loop_values else None
+        if src is None or values is None:
+            return False
+        size = self._arith_of(src, ARRAY_SIZE)
+        if size is not None:
+            ins = self.g.inputs(self.g.term_node[src])
+            return len(ins) == 1 and self._back(ins[0]) == values
+        node = self.g.term_node.get(src)
+        if node is None or node is not self.g.term_node.get(values) or node.kind not in CALLS or src == values:
+            return False
+        name, _ = self._call_name(node)
+        return "ramp pattern" in name.lower() and "delta" in (self._menu(node) or name).lower() and \
+            self._type(src) == "number"
+
+    def _back(self, term: Optional[int]) -> Optional[int]:
+        """The terminal that feeds an input, back through the tunnels it comes in by (never through a node)."""
+        src = self.g.source.get(term) if term is not None else None
+        for _ in range(MAX_DEPTH):
+            dco = self.g.term_dco.get(src) if src is not None else None
+            if dco is None or dco.kind not in TUNNELS or dco.kind in ("lSR", "rSR", "matedLSR", "matedRSR"):
+                return src
+            ends = self.g.ends(dco)
+            if not ends or src == ends[-1]:
+                return src
+            src = self.g.source.get(ends[-1])
+        return src
 
     def ramp(self, term: int) -> Optional[Dict[str, Any]]:
         """The range of an array a loop takes value by value, when LabVIEW's Ramp Pattern made it: by Delta
@@ -1019,7 +1243,7 @@ class _Reader:
             return "at once (a constant %s)" % _plain(cond.value)
         return cond.words() if cond.kind != "computed" else "a condition worked out on the diagram (%s)" % cond.value
 
-    def state_machine(self, loop: Obj, body: Optional[Diagram]) -> Optional[Dict[str, Any]]:
+    def state_machine(self, loop: Obj, body: Optional[Diagram], level: int = 0) -> Optional[Dict[str, Any]]:
         """A while loop whose case structure is chosen by a value the loop keeps (a shift register): a state
         machine, which a scan has no place for."""
         if body is None or loop.kind != "whileLoop":
@@ -1033,7 +1257,7 @@ class _Reader:
                 continue
             v = self.origin(ends[-1], set())
             if v.kind == "computed" and ("shift register" in str(v.value) or "loop keeps" in str(v.value)):
-                case = self.case(n, 0)
+                case = self.case(n, level + 1)
                 return {"node": "state_machine", "states": [", ".join(names) for names in self.case_names(n)],
                         "cases": case["cases"]}
         return None
@@ -1180,28 +1404,35 @@ class _Reader:
         return self._open(self.vi.path, link)
 
     def _open(self, beside: str, link: vifile.Link) -> Optional[vifile.VI]:
+        """A sub-VI's file, where its link says it is, read once: only in the summary's folder (vifile.within: no
+        other computer's, no absolute place, nothing outside it), never in Kelvin's own folders or a file of
+        sign-ins."""
+        from .folderfiles import mine, secret
         vi_file = Path(beside)
         parts = list(link.path)
-        if not parts:
+        if not parts or not self.shared.folder:
             return None
         if parts[0].startswith("<"):   # in one of LabVIEW's folders: the copy of it beside the VI, if any
             folder = parts[0].strip("<>").replace("lib", ".lib")
-            candidates = [vi_file.parent.joinpath(*parts[1:]), vi_file.parent.joinpath(folder, *parts[1:])]
+            candidates = [(vi_file.parent, parts[1:]), (vi_file.parent, [folder] + parts[1:])]
         else:   # relative to the VI's file: each empty part is up one (the first, to the VI's folder)
-            rel = [".." if p == "" else p for p in parts]
-            candidates = [Path(os.path.normpath(os.path.join(str(vi_file), *rel))), vi_file.parent / parts[-1]]
-        for c in candidates:
+            candidates = [(vi_file, [".." if p == "" else p for p in parts]), (vi_file.parent, parts[-1:])]
+        for under, names in candidates:
+            c = self.shared.within(under, names)
+            if c is None:
+                continue
             key = str(c)
             if key in self.files:
                 return self.files[key]
             try:
-                exists = c.is_file()
+                exists = c.is_file() and not secret(c) and mine(c, self.shared.own) is None
             except OSError:
                 exists = False
             if not exists:
                 continue
             if len(self.files) >= MAX_SUBVIS:
                 return None
+            self.shared.spend()
             try:
                 self.files[key] = vifile.read(c)
             except (vifile.ReadError, OSError):
@@ -1220,7 +1451,7 @@ class _Reader:
                 args[c.name] = self.origin(t, set())
         if sub.diagram is None:
             return [], "%s's block diagram wasn't read (%s)" % (sub.name, "; ".join(sub.unread) or "not in the file")
-        inner = _Reader(sub, self.link, self.depth + 1, self.files, args)
+        inner = _Reader(sub, self.link, self.depth + 1, self.files, args, self.shared)
         with vifile.text_encoding(sub.encoding):
             inner.name_loops(inner.g.root)
             steps = inner.diagram(inner.g.root)
@@ -1278,6 +1509,7 @@ class _Reader:
         """The values an array is built of (Build Array), through the tunnels it leaves loops by."""
         if level > 8:
             return []
+        self.shared.spend()
         node, dco = self.g.term_node.get(src), self.g.term_dco.get(src)
         if node is not None and node.kind == "aBuild":
             return [self.origin(t, set()) for t in self.g.inputs(node)]
@@ -1312,6 +1544,7 @@ class _Reader:
     def _channel(self, term: int, level: int) -> str:
         if level > MAX_DEPTH:
             return ""
+        self.shared.spend()
         src = self.g.source.get(term)
         dco = self.g.term_dco.get(src) if src is not None else None
         node = self.g.term_node.get(src) if src is not None else None
@@ -1351,6 +1584,8 @@ class _Reader:
         if vi.panel is not None:
             out["read"] = "panel"
             out["controls"] = [_control(c) for c in vi.controls]
+            out["unread"] += ["the saved value of %s isn't a finite number (Inf or NaN): left out" % c.name
+                              for c in vi.controls if c.has_default and not all_finite(c.default)]
             for c in vi.controls:
                 if c.kind == "visa" and not c.indicator and c.has_default and isinstance(c.default, str) and c.default:
                     self._visa(c.default, c.name)
@@ -1388,9 +1623,10 @@ def _arith(op: str, x: Val, y: Val) -> Optional[Val]:
     a, b = num(x), num(y)
     if a is not None and b is not None:
         try:
-            return Val("value", {"+": a + b, "-": a - b, "*": a * b, "/": a / b if b else float("nan")}[op])
+            got = {"+": a + b, "-": a - b, "*": a * b, "/": a / b if b else float("nan")}[op]
         except (ZeroDivisionError, OverflowError):
             return None
+        return Val("value", got) if math.isfinite(got) else None   # Inf or NaN: said in words, as computed
     var, c = (x, b) if b is not None else (y, a) if a is not None else (None, None)
     if var is None or c is None or var.kind not in ("control", "loop", "read"):
         return None
@@ -1408,6 +1644,8 @@ def _arith(op: str, x: Val, y: Val) -> Optional[Val]:
     elif op == "/" and var is x and c:
         scale, offset = scale / c, offset / c
     else:
+        return None
+    if not (math.isfinite(scale) and math.isfinite(offset)):
         return None
     return Val(var.kind, var.value, scale=scale, offset=offset)
 
@@ -1451,9 +1689,25 @@ def walk(nodes: Any) -> Iterator[Dict[str, Any]]:
                 yield from walk(part)
 
 
-def _summarise(vi: vifile.VI, link: Link, depth: int, files: Dict[str, Optional[vifile.VI]]) -> Dict[str, Any]:
-    with vifile.text_encoding(vi.encoding):
-        return _Reader(vi, link, depth, files).summary()
+def _summarise(vi: vifile.VI, link: Link, shared: _Shared) -> Dict[str, Any]:
+    """A VI's summary, never an error: a diagram that can't be followed (or is bigger than MAX_STEPS) is said, with
+    the VI's linkage and controls; no number in it that isn't finite (each said)."""
+    try:
+        with vifile.text_encoding(vi.encoding):
+            out = _Reader(vi, link, 0, shared.files, shared=shared).summary()
+    except Exception as e:
+        out = _not_read(vi.path, "")
+        out.update(name=vi.name, labview=vi.labview, read="panel" if vi.panel is not None else "names",
+                   linkage=[link(ln.name, ln.where) for ln in vi.links
+                            if ln.kind in ("vi", "control", "library", "class", "dll")],
+                   controls=[_control(c) for c in vi.controls],
+                   unread=list(vi.unread) + [str(e) if isinstance(e, TooBig) else
+                                             "its block diagram: it couldn't be followed (%s)" % type(e).__name__])
+    out, n = plain_numbers(out)
+    if n:
+        out["unread"].append("%d value%s that aren't finite numbers (Inf or NaN): left out"
+                             % (n, "" if n == 1 else "s"))
+    return out
 
 
 def _not_read(path: Any, why: str) -> Dict[str, Any]:
@@ -1463,44 +1717,59 @@ def _not_read(path: Any, why: str) -> Dict[str, Any]:
             "unread": ["not read: %s" % why]}
 
 
-def summary(path: Any, link: Optional[Link] = None) -> Dict[str, Any]:
+def summary(path: Any, link: Optional[Link] = None, folder: Any = None, own: Any = ()) -> Dict[str, Any]:
     """A VI's summary (labview.py's layout), from its file. link(name, where): a linkage entry with the maker and
-    model a driver library's name says (labview.link); without it, maker and model are left empty. A file that
-    can't be read gives a summary that says why ("read": "no"), never an error."""
+    model a driver library's name says (labview.link); without it, maker and model are left empty. folder: where
+    the sub-VIs it calls may be read from (default: the VI's own folder; never outside it); own: Kelvin's own
+    folders, never read. A file that can't be read gives a summary that says why ("read": "no"), never an error."""
     try:
         vi = vifile.read(path)
     except vifile.ReadError as e:
         return _not_read(path, str(e))
     except Exception as e:   # a file damaged in a way no reader foresaw: said, never raised
         return _not_read(path, "it looks damaged (%s)" % (type(e).__name__))
-    try:
-        return _summarise(vi, link or _link, 0, {})
-    except Exception as e:
-        out = _not_read(path, "its diagram couldn't be followed (%s)" % type(e).__name__)
-        out.update(labview=vi.labview, read="names", linkage=[(link or _link)(ln.name, ln.where) for ln in vi.links
-                                                              if ln.kind in ("vi", "control", "library", "class",
-                                                                             "dll")],
-                   controls=[_control(c) for c in vi.controls])
-        return out
+    return _summarise(vi, link or _link, _Shared(folder=str(folder or Path(str(path)).parent), own=tuple(own or ())))
 
 
-def summaries(path: Any, link: Optional[Link] = None) -> List[Dict[str, Any]]:
+def summaries(path: Any, link: Optional[Link] = None, folder: Any = None, own: Any = ()) -> List[Dict[str, Any]]:
     """Each VI a VI library (.llb) holds, as its summary (its path: the library's, then the VI's name)."""
+    return list(each_summary(path, link, folder, own))
+
+
+def each_summary(path: Any, link: Optional[Link] = None, folder: Any = None, own: Any = ()) -> Iterator[Dict[str, Any]]:
+    """Each VI a VI library (.llb) holds, as its summary, one at a time (each VI's bytes let go before the next is
+    unpacked). One whose name in the library isn't a plain file name (../Main.vi, a path; COM3.vi, a device) isn't
+    read: an entry for the library says so, last."""
     try:
         files = vifile.members(path)
     except vifile.ReadError as e:
-        return [_not_read(path, str(e))]
-    out = []
-    for name, data in files:
-        where = "%s/%s" % (path, name)
-        if not name.lower().endswith((".vi", ".vit", ".ctl", ".ctt")):
-            continue
-        if not data:
-            out.append(_not_read(where, "kept compressed in a way Kelvin doesn't read"))
-            continue
-        try:
-            vi = vifile.read_bytes(data, where, name)
-            out.append(_summarise(vi, link or _link, 0, {}))
-        except Exception as e:
-            out.append(_not_read(where, str(e) if isinstance(e, vifile.ReadError) else type(e).__name__))
-    return out
+        yield _not_read(path, str(e))
+        return
+    odd: List[str] = []
+    try:
+        for name, data in files:
+            try:
+                if not name.lower().endswith((".vi", ".vit", ".ctl", ".ctt")):
+                    continue
+                if not vifile.plain_name(name):
+                    odd.append(name)
+                    continue
+                where = "%s/%s" % (path, name)
+                if not data:
+                    yield _not_read(where, "kept compressed in a way Kelvin doesn't read")
+                    continue
+                try:
+                    vi = vifile.read_bytes(data, where, name)
+                    data = None
+                    s = _summarise(vi, link or _link, _Shared(folder=str(folder or Path(str(path)).parent),
+                                                              own=tuple(own or ())))
+                except Exception as e:
+                    s = _not_read(where, str(e) if isinstance(e, vifile.ReadError) else type(e).__name__)
+                yield s
+            finally:
+                data = None
+    except vifile.ReadError as e:   # past what Kelvin unpacks from one library
+        yield _not_read(path, str(e))
+    if odd:
+        yield _not_read(path, "%d VI%s in it whose names aren't plain file names (%s)" % (
+            len(odd), "" if len(odd) == 1 else "s", ", ".join(repr(n)[:60] for n in odd[:5])))

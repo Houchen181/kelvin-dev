@@ -62,6 +62,8 @@ datas += [(str(ROOT / "docs" / name), "labharness/data/docs") for name in
 datas.append((str(ROOT / "src" / "labharness" / "data" / "bridge" / "kelvin_bridge.py"), "labharness/data/bridge"))
 # run_python's sandbox runs as a script the same way (labharness/sandbox.py)
 datas.append((str(ROOT / "src" / "labharness" / "data" / "sandbox" / "kelvin_sandbox.py"), "labharness/data/sandbox"))
+# and so does the reader of a lab's LabVIEW files, in a process of its own (labharness/viworker.py)
+datas.append((str(ROOT / "src" / "labharness" / "data" / "labview" / "kelvin_labview.py"), "labharness/data/labview"))
 # the stand-in for the lab's instruments while Kelvin runs one of the lab's scripts (labharness/scriptrun.py)
 datas += [(str(ROOT / "src" / "labharness" / "data" / "scriptshim" / name), "labharness/data/scriptshim")
           for name in ("kelvin_shim.py", "sitecustomize.py")]

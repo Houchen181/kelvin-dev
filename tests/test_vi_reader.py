@@ -310,6 +310,239 @@ def test_a_vi_library_in_the_labs_folder_has_its_vis_surveyed(tmp_path, monkeypa
     assert found.vis[0]["path"].endswith("Power supply.llb/set_v.vi")
 
 
+def test_a_while_loops_stop_after_its_last_value_is_read_exactly():
+    """LabVIEW's While loop goes past the end of an array it takes value by value unless told to stop: the I-V sweep
+    stops when its count is the ramp's number of samples less one, its last value."""
+    s = vigraph.summary(KEYSIGHT / "SMU_IV single.vi")
+    outer = next(n for n in s["diagram"] if n["node"] == "loop")
+    inner = next(n for n in outer["body"] if n["node"] == "loop")
+    assert outer["stop_if"] == inner["stop_if"] == {"last": True}
+    assert "Equal?" in outer["until"]   # said in words too
+    assert labview.validate(s) == []
+
+
+# ------------------------------------------------------------------ files made to hang or swell the reader
+
+class Diagram:
+    """A block diagram built here: LabVIEW functions (by their number) with numbered terminals, constants on the
+    diagram (of the VI's types), and the wires between them."""
+
+    def __init__(self):
+        self.uid, self.nodes, self.consts, self.wires = 100, [], [], []
+
+    def next(self):
+        self.uid += 1
+        return self.uid
+
+    def prim(self, rid, parms):
+        node, terms = self.next(), {}
+        self.nodes += [entry(-6, 0, cls=47, uid=node), entry(203, content=rid.to_bytes(2, "big")), entry(268, 0)]
+        for p in parms:
+            terms[p] = self.next()
+            self.nodes += [entry(-6, 0, cls=21, uid=terms[p]), entry(48, 0, cls=48, uid=self.next()),
+                           entry(191, content=bytes([p])), entry(48, 2), entry(-6, 2)]
+        self.nodes += [entry(268, 2), entry(-6, 2)]
+        return terms
+
+    def constant(self, type_id, value):
+        term = self.next()
+        self.consts += [entry(-6, 0, cls=21, uid=term), entry(48, 0, cls=19, uid=self.next()),
+                        entry(283, content=type_id.to_bytes(2, "big")), entry(589, content=value), entry(48, 2),
+                        entry(-6, 2)]
+        return term
+
+    def wire(self, src, *sinks):
+        self.wires.append((src, sinks))
+
+    def heap(self):
+        holder = [entry(-6, 0, cls=29, uid=self.next()), entry(268, 0)] + self.consts + [entry(268, 2), entry(-6, 2)]
+        sig = []
+        for src, sinks in self.wires:
+            sig += [entry(-6, 0, cls=23, uid=self.next()), entry(268, 0), entry(-6, 1, uid=src)]
+            sig += [entry(-6, 1, uid=s) for s in sinks] + [entry(268, 2), entry(-6, 2)]
+        return heap_block([entry(214, 0, cls=27, uid=1), entry(164, 0)] + holder + self.nodes +
+                          [entry(164, 2), entry(233, 0)] + sig + [entry(233, 2), entry(214, 2)])
+
+
+def packed(body):
+    import zlib
+    return struct.pack(">I", len(body)) + zlib.compress(body)
+
+
+def rsrc_shared(ident, body, n, kind=b"LVIN"):
+    """A resource file whose one block has n sections that all point at the same bytes, kept once."""
+    data = struct.pack(">I", len(body)) + body + b"\x00" * (-len(body) % 4)
+    heads = struct.pack(">4sII", ident, n - 1, 16)
+    starts = b"".join(struct.pack(">iIIII", i, 0xFFFFFFFF, 0, 0, 0) for i in range(n))
+    info = struct.pack(">I", 0) + heads + starts
+    head = b"RSRC\r\n" + struct.pack(">H4s4sIIII", 3, kind, b"LBVW", 32 + len(data), 52 + len(info), 32, len(data))
+    return head + data + head + struct.pack(">IIIII", 0, 0, 32, 52, len(info)) + info
+
+
+def test_a_value_used_over_and_over_is_followed_once(tmp_path, monkeypatch):
+    """30 Adds chained x + x (each one's output into both inputs of the next) into a VISA Write: 2^30 ways back
+    through them, one value; followed once each (a small budget of steps is plenty), said in a few words."""
+    monkeypatch.setattr(vigraph, "MAX_STEPS", 5000)
+    d, prev = Diagram(), None
+    for _ in range(30):
+        t = d.prim(1050, (1, 2, 3))
+        if prev is not None:
+            d.wire(prev, t[1], t[2])
+        prev = t[3]
+    write = d.prim(1926, (10, 11))
+    d.wire(prev, write[10])
+    (tmp_path / "chain.vi").write_bytes(rsrc([(b"BDHb", [(0, "", d.heap())])]))
+    s = vigraph.summary(tmp_path / "chain.vi")
+    assert s["diagram"][0]["node"] == "write" and not any("bigger" in u for u in s["unread"])
+    assert len(json.dumps(s["diagram"])) < 2000
+    monkeypatch.setattr(vigraph, "MAX_STEPS", 50)   # past its budget: said, with what was read
+    s = vigraph.summary(tmp_path / "chain.vi")
+    assert s["read"] == "names" and s["unread"] == ["its front panel (not in the file)",
+                                                    "its block diagram: bigger than Kelvin follows in one VI"]
+
+
+def clusters_vi(n, levels):
+    """A VI whose one control is a cluster of n clusters of n clusters... (levels deep, the innermost empty: each takes
+    no bytes), saved with a one-byte value."""
+    types = [struct.pack(">HBBH", 6, 0, 0x50, 0)] + [struct.pack(">HBBH", 6 + 2 * n, 0, 0x50, n) +
+                                                     struct.pack(">H", k - 1) * n for k in range(1, levels + 1)]
+    vctp = struct.pack(">I", len(types)) + b"".join(types) + struct.pack(">HH", 1, levels)
+    panel = [entry(214, 0, cls=18, uid=5), entry(52, 1, cls=83, uid=6), entry(283, content=b"\x00\x01"),
+             entry(571, content=b"\x00"), entry(214, 2)]
+    return rsrc([(b"VCTP", [(0, "", packed(vctp))]), (b"DTHP", [(0, "", struct.pack(">HH", 1, 1))]),
+                 (b"FPHb", [(0, "", heap_block(panel))])])
+
+
+def test_a_saved_value_of_clusters_in_clusters_is_read_only_so_far(tmp_path):
+    """Seven levels of ten empty clusters are 10^7 values in a 300-byte file: read up to MAX_DECODE, then said."""
+    (tmp_path / "deep.vi").write_bytes(clusters_vi(10, 7))
+    vi = vifile.read(tmp_path / "deep.vi")
+    assert vi.controls[0].kind == "cluster" and not vi.controls[0].has_default
+    assert "the saved value of unlabelled cluster 1: bigger than Kelvin reads" in vi.unread
+    (tmp_path / "small.vi").write_bytes(clusters_vi(2, 2))   # one that fits is read
+    assert vifile.read(tmp_path / "small.vi").controls[0].default == [[[], []], [[], []]]
+
+
+def test_a_type_is_read_from_its_own_bytes_only():
+    """A cluster (or enum) that claims 10000 parts and has none reads none from the types after it: 2000 of them in a
+    file of some kilobytes were 20 million reads."""
+    for code in (0x50, 0x15):
+        vctp = struct.pack(">I", 2000) + struct.pack(">HBBH", 6, 0, code, 10000) * 2000 + bytes(40000) + \
+            struct.pack(">HH", 0, 0)
+        kinds = vifile.types(vifile.container(rsrc([(b"VCTP", [(0, "", packed(vctp))])])))
+        assert len(kinds.flat) == 2000 and all(t.items == [] and t.names == [] for t in kinds.flat)
+
+
+def test_a_linkage_block_is_read_in_one_pass():
+    """Thousands of paths with no link's name before them (256 kB unpacked from a 700-byte file): one pass, never a
+    search back from each; a block that would take more than MAX_LINK_WORK tries says so."""
+    assert vifile.links_in((b"PTH0" + b"\x00" * 4 + b"\xff" * 4) * 20000) == []
+    notes = []
+    assert vifile.links_in((b"\x00" * 1196 + b"PTH0\x00\x00\x00\x00") * 400, notes) == []
+    assert notes == ["its linkage: more than Kelvin reads (the links after the first 0 left out)"]
+
+
+def test_sections_that_share_bytes_are_left_out_never_copied():
+    """200 sections of one block all pointing at the same megabyte: one kept, as a view of the file's bytes, and
+    the rest said; a file's sections hold no more than the file."""
+    c = vifile.container(rsrc_shared(b"XTRA", b"\x00" * 2 ** 20, 200))
+    assert len(c.blocks["XTRA"]) == 1 and isinstance(c.blocks["XTRA"][0].data, memoryview)
+    assert c.problems == ["block XTRA: its data overlaps another block's (it is damaged)"]
+
+
+def test_a_vi_librarys_vis_are_unpacked_one_at_a_time_within_one_budget(tmp_path, monkeypatch):
+    """Each VI of a library is unpacked only when it is reached; past MAX_LLB_UNPACKED in all, the rest are said."""
+    monkeypatch.setattr(vifile, "MAX_LLB_UNPACKED", 3 * 2 ** 20)
+    vis = [(i, "m%d.vi" % i, packed(bytes([i]) * 2 ** 20)) for i in range(5)]
+    (tmp_path / "big.llb").write_bytes(rsrc([(b"ZCRF", vis)], kind=b"LVAR"))
+    unpacked = []
+    real = vifile.unpack
+    monkeypatch.setattr(vifile, "unpack", lambda data: unpacked.append(1) or real(data))
+    held = vifile.members(tmp_path / "big.llb")
+    assert unpacked == []
+    assert next(held)[0] == "m0.vi" and unpacked == [1]   # the first only, once reached
+    out = vigraph.summaries(tmp_path / "big.llb")
+    assert [s["name"] for s in out] == ["m0.vi", "m1.vi", "m2.vi", "big.llb"]
+    assert out[-1]["unread"] == ["not read: its VIs are bigger than Kelvin unpacks from one library (3 MB): m3.vi "
+                                 "and the VIs after it"]
+
+
+def test_a_vi_librarys_vi_whose_name_is_a_path_isnt_read_as_one(tmp_path):
+    """An .llb's VI named ../Main.vi would take the path of the folder's own Main.vi, and COM3.vi would open a port:
+    neither is read, and the library says so."""
+    inner = (AIM / "set_v.vi").read_bytes()
+    (tmp_path / "x.llb").write_bytes(rsrc([(b"UCRF", [(0, "../Main.vi", inner), (1, "COM3.vi", inner),
+                                                      (2, "set_v.vi", inner)])], kind=b"LVAR"))
+    out = vigraph.summaries(tmp_path / "x.llb")
+    assert [(s["name"], s["read"]) for s in out] == [("set_v.vi", "full"), ("x.llb", "no")]
+    assert out[0]["path"] == str(tmp_path / "x.llb") + "/set_v.vi"
+    assert out[1]["unread"] == ["not read: 2 VIs in it whose names aren't plain file names ('../Main.vi', "
+                                "'COM3.vi')"]
+
+
+def test_a_path_a_file_names_is_only_ever_one_in_the_folder(tmp_path, monkeypatch):
+    """Another computer's share, a device, an absolute place, a drive's own folder, or a way out of the folder: told
+    from the text alone, before anything is looked at (on Windows, looking at \\\\host\\share logs on to it)."""
+    (tmp_path / "lab").mkdir()
+    (tmp_path / "lab" / "sub.vi").write_bytes(b"RSRC")
+    (tmp_path / "elsewhere.vi").write_bytes(b"RSRC")
+    looked = []
+    for name in ("stat", "lstat"):
+        real = getattr(os, name)
+        monkeypatch.setattr(os, name, lambda p, *a, _real=real, **k: looked.append(str(p)) or _real(p, *a, **k))
+    lab = tmp_path / "lab"
+    for parts in (["\\\\kelvin-test.invalid\\share", "x.vi"], ["", "", "kelvin-test.invalid", "x.vi"],
+                  ["\\\\?\\UNC", "kelvin-test.invalid", "x.vi"], ["\\\\.\\COM3"], ["COM3.vi"], ["NUL"], ["C:", "x.vi"],
+                  ["C:x.vi"], ["/C", "x.vi"], ["\\x.vi"], ["..", "elsewhere.vi"], ["sub.vi:stream"], ["..  ", "x.vi"],
+                  ["a\x00b.vi"]):
+        assert vifile.within(lab, parts) is None, parts
+    assert not [p for p in looked if "kelvin-test" in p or "COM3" in p or "elsewhere" in p]
+    assert vifile.within(lab, ["sub.vi"]) == (lab / "sub.vi").resolve()
+    assert vifile.within(lab, ["..", "sub.vi"], lab / "main.vi") == (lab / "sub.vi").resolve()   # beside a VI
+
+
+def test_a_sub_vi_outside_the_folder_or_in_kelvins_own_is_never_read(tmp_path):
+    """A VI's links (as LabVIEW saves them: an empty part is up one) lead only to sub-VIs in the summary's folder,
+    and never into Kelvin's own folders."""
+    (tmp_path / "lab").mkdir()
+    (tmp_path / "lab" / "kelvin").mkdir()
+    for p in (tmp_path / "secret.vi", tmp_path / "lab" / "sub.vi", tmp_path / "lab" / "kelvin" / "k.vi"):
+        p.write_bytes((AIM / "set_v.vi").read_bytes())
+    main = vifile.VI(path=str(tmp_path / "lab" / "main.vi"), name="main.vi")
+    reader = vigraph._Reader(main, vigraph._link, 0, {}, shared=vigraph._Shared(
+        folder=str(tmp_path / "lab"), own=(str(tmp_path / "lab" / "kelvin"),)))
+
+    def opened(path):
+        return reader._open(main.path, vifile.Link("x.vi", path, "vi", "", "VIVI"))
+    assert opened(["", "sub.vi"]).name == "sub.vi"
+    assert opened(["", "", "secret.vi"]) is None                                   # up out of the folder
+    assert opened(["", str(tmp_path / "secret.vi")]) is None                        # an absolute part never wins
+    assert opened(["", "\\\\kelvin-test.invalid\\share", "x.vi"]) is None
+    assert opened(["<vilib>", "..", "..", "secret.vi"]) is None
+    assert opened(["", "kelvin", "k.vi"]) is None                                  # Kelvin's own folder
+    assert list(reader.files) == [str((tmp_path / "lab" / "sub.vi").resolve())]
+
+
+def test_numbers_that_arent_finite_are_said_never_kept(tmp_path):
+    """A constant of +Inf wired to a Wait, a control saved as NaN: the summary keeps no number that isn't finite (it
+    is plain JSON a survey can always send), and says each."""
+    dbl = struct.pack(">HBB", 4, 0, 0x0A)
+    vctp = struct.pack(">I", 1) + dbl + struct.pack(">HH", 1, 0)
+    d = Diagram()
+    wait = d.prim(1302, (1,))
+    d.wire(d.constant(1, struct.pack(">d", float("inf"))), wait[1])
+    panel = [entry(214, 0, cls=18, uid=5), entry(52, 1, cls=80, uid=6), entry(283, content=b"\x00\x01"),
+             entry(571, content=struct.pack(">d", float("nan"))), entry(214, 2)]
+    (tmp_path / "inf.vi").write_bytes(rsrc([(b"VCTP", [(0, "", packed(vctp))]),
+                                            (b"DTHP", [(0, "", struct.pack(">HH", 1, 1))]),
+                                            (b"FPHb", [(0, "", heap_block(panel))]), (b"BDHb", [(0, "", d.heap())])]))
+    s = vigraph.summary(tmp_path / "inf.vi")
+    assert s["diagram"] == [{"node": "wait", "ms": {"computed": "a constant that isn't a finite number (inf)"}}]
+    assert s["controls"][0]["default"] is None
+    assert "the saved value of unlabelled number 1 isn't a finite number (Inf or NaN): left out" in s["unread"]
+    json.dumps(s, allow_nan=False)
+
+
 def test_every_downloaded_vi_reads_without_an_error():
     """The public VIs a developer downloaded for the reader (KELVIN_LABVIEW_SAMPLES: their folder), when there."""
     folder = os.environ.get("KELVIN_LABVIEW_SAMPLES")
