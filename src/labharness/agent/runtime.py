@@ -44,6 +44,7 @@ from ..scanlibrary import Library
 from ..scanqueue import (KINDS, Item, ScanQueue, ScriptItem, load_named, load_script_item, load_step, parse_item,
                          save_named, saved_queues)
 from ..reports import Collector, pick_runs, write_pdf, write_pptx
+from ..reports.collect import LOG_TYPES, RUN_EVENT_TYPES
 from ..reports import kinds as report_kinds
 from ..reports.document import write_document_pdf, write_document_pptx
 from ..timing import Timing
@@ -3974,12 +3975,13 @@ class LabRuntime:
 
     def run_provenance(self, run_id: str) -> str:
         """A run's plan as it ran, its conditions at the start and the end, its measurement chain, every approval it
-        needed with who gave it, and the stops, trips and alarms while it ran (provenance.py). Files only."""
+        needed with who gave it, and the stops, trips and alarms while it ran (provenance.py). Files only. Never
+        what the viewer of this thread may not see of unshared work (seen_events)."""
         from .. import provenance
         try:
             d = self._run_dir(run_id)
-            return provenance.run_provenance(d, self.lab, self.gate.log.events(),
-                                             [f["name"] for f in self.run_files(run_id)])
+            events = self.seen_events(e for e in self.gate.log.events() if e.get("type") in provenance.RUN_EVENTS)
+            return provenance.run_provenance(d, self.lab, events, [f["name"] for f in self.run_files(run_id)])
         except (KeyError, OSError, ValueError) as e:
             return "cannot read %s: %s" % (run_id, e.args[0] if e.args else e)
 
@@ -6281,7 +6283,7 @@ class LabRuntime:
         lab_name = ", ".join(labs) if labs else self.lab.config.name
         simulated = all(m.get("simulated", True) for m in metas) if labs else \
             all(i.simulated for i in self.lab.instruments.values())
-        report = Collector(self.runs, self.lab, columns, self.gate.log.events, event_line).report(
+        report = Collector(self.runs, self.lab, columns, self._seen_log, event_line).report(
             run_ids, title.strip()[:120], summary.strip()[:4000], notes, lab_name, simulated, references)
         target = folder or self.reports_dir / "custom"
         target.mkdir(parents=True, exist_ok=True)
@@ -6336,7 +6338,31 @@ class LabRuntime:
                 return self._columns(rundata.load(self._run_dir(run_id), with_rows=False))
             except Exception:   # the run's instruments are not in this lab any more
                 return None
-        return Collector(self.runs, self.lab, columns, self.gate.log.events, event_line)
+        return Collector(self.runs, self.lab, columns, self._seen_log, event_line)
+
+    def _seen_log(self) -> List[Dict[str, Any]]:
+        """The lab record's events a report or record made in this thread may hold (the kinds reports read): only
+        those the viewer of this thread may see (seen_events), as recent_events shows them."""
+        return self.seen_events(e for e in self.gate.log.events() if e.get("type") in LOG_TYPES)
+
+    def _own_events(self, d: Path, events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """The lab record's events a run's own report may hold (its scan report, its part of its device's and its
+        project's reports), whoever's thread writes it: what everyone who may see the run may see. Shared work's and
+        the run's own (whose: the same chat, project and marks as the run), never another chat's or project's
+        unshared work, nor what the runs of unshared work the run's viewers may not see did."""
+        marks = self._run_marks(d)
+        cache: Dict[Any, Any] = {}
+        unshared = self.unshared_work(marks, cache)
+        own = {k: marks.get(k) or None for k in ("chat", "project", "incognito", "rules", "confidential")}
+        viewer = Viewer(chat=own["chat"], project=None if own["incognito"] else own["project"],
+                        allows=lambda _: True) if unshared else Viewer()   # shared work: what everyone sees
+        with self.viewing(viewer):
+            seen = self.seen_events(e for e in events if e.get("type") in RUN_EVENT_TYPES)
+
+        def kept(whose: Any) -> bool:   # marks that can't be read are kept apart
+            return not whose or isinstance(whose, dict) and (not self.unshared_work(whose, cache) or unshared and
+                                                             {k: whose.get(k) or None for k in own} == own)
+        return [e for e in seen if kept(e.get("whose"))]
 
     def _write_doc(self, doc: Any, base: Path, fmt: Optional[str] = None) -> List[str]:
         base.parent.mkdir(parents=True, exist_ok=True)
@@ -6353,7 +6379,7 @@ class LabRuntime:
         dg = report_kinds.digest(d)
         if dg is None:
             raise KeyError("run %s has not finished" % run_id)
-        part = self._collector().run(run_id, self.gate.log.events())
+        part = self._collector().run(run_id, self._own_events(d, self.gate.log.events()))
         files = {p.name for p in d.iterdir() if p.is_file()} | {"report." + f for f in self._formats(fmt)}
         doc = report_kinds.scan_document(part, dg, files, dg.lab or self.lab.config.name, dg.simulated)
         return self._write_doc(doc, d / "report", fmt)
@@ -6421,6 +6447,7 @@ class LabRuntime:
         targets = list(dict.fromkeys(projects)) if projects is not None else list(self.project_ids())
         events = self.gate.log.events()
         collector = self._collector()
+        run_part = lambda run_id: collector.run(run_id, self._own_events(self.runs / run_id, events))   # noqa: E731
         written: Dict[str, List[str]] = {}
         for pid in targets:
             info = self.project_info(pid)
@@ -6444,7 +6471,7 @@ class LabRuntime:
                     for plan in {d.plan for d in mine}:
                         done = [d for d in mine if d.plan == plan and d.ok]
                         if done:
-                            latest[plan] = collector.run(max(done, key=lambda d: d.started).run_id, events)
+                            latest[plan] = run_part(max(done, key=lambda d: d.started).run_id)
                     doc = report_kinds.device_document(dev, info.get("name") or "General", mine, latest,
                                                        self._mounts(events, dev["name"]), lab, simulated)
                     base = folder / "devices" / report_kinds.safe_name(dev["name"])
@@ -6457,7 +6484,7 @@ class LabRuntime:
                     done = [d for d in ds if d.plan == plan and d.ok]
                     if done:
                         last = max(done, key=lambda d: d.started)
-                        latest_any[plan] = (collector.run(last.run_id, events), last)
+                        latest_any[plan] = (run_part(last.run_id), last)
                 doc = report_kinds.project_document(dict(info, devices=devices), ds, latest_any, device_files, lab,
                                                     simulated)
                 base = folder / (report_kinds.safe_name(info.get("name") if pid else "General") + "_master")

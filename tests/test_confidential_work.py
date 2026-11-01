@@ -244,6 +244,40 @@ def test_the_portals_day_records_reports_and_analysis_list_follow_the_chat_they_
     assert (made["runs"], made["left"]) == (2, 0)
 
 
+def test_reports_records_and_provenance_hold_only_the_events_their_reader_may_see(rt, tmp_path, monkeypatch):
+    """A confidential chat's approval asked while a shared run measures (bug hunt of 2026-10-31): an ordinary chat's
+    ELN record, report and run_provenance of the shared run leave it out, as its recent_events does; the shared run's
+    own reports leave it out whoever writes them; the confidential work's own chats and runs keep it."""
+    from datetime import datetime
+    from pathlib import Path
+    from labharness import eventlog
+    from test_reports import pdf_strings
+    p = Portal(tmp_path, rt)
+    p.turn(p.secret, [("run_plan", {"plan": NDA})])
+    own, _ = newest(rt, "acme_gate")
+    assert "Run plan acme_gate" in " ".join(pdf_strings(rt.runs.find(own) / "report.pdf"))   # its own approval
+    p.turn(p.other, [("run_plan", {"plan": OPEN})])
+    run, meta = newest(rt, "thesis_gate")
+    t0, t1 = datetime.fromisoformat(meta["started"]), datetime.fromisoformat(meta["finished"])
+    with monkeypatch.context() as m:   # while the shared run measured
+        m.setattr(eventlog, "_now", lambda: (t0 + (t1 - t0) / 2).isoformat(timespec="milliseconds"))
+        rt.gate.log.write("ask", by="ada", request="Run plan acme_gate: sweep smu.V on Acme-HfO2-D1",
+                          answer="approved", whose={"chat": p.secret, "project": p.nda, "confidential": True})
+
+    def eln(said):
+        return Path(said.split("ELN record: ")[1].split(" (")[0]).read_text(encoding="utf-8")
+    out = p.turn(p.other, [("recent_events", {"n": 50}), ("export_eln", {"runs": [run]}),
+                           ("make_report", {"runs": [run]}), ("run_provenance", {"run_id": run})])
+    report = rt.reports_dir / out["c2"].split("report: ")[1].split(" (")[0]
+    for text in (out["c0"], eln(out["c1"]), " ".join(pdf_strings(report)), out["c3"]):
+        assert "acme" not in text.lower() and "thesis_gate" in text, text
+    # the shared run's scan report, written again from the confidential chat, is everyone's: still without it
+    p.turn(p.secret, [("make_report", {"kind": "scan", "runs": [run]})])
+    assert "acme" not in " ".join(pdf_strings(rt.runs.find(run) / "report.pdf")).lower()
+    inside = p.turn(p.secret, [("export_eln", {"runs": [run]}), ("run_provenance", {"run_id": run})])
+    assert "Acme-HfO2-D1" in eln(inside["c0"]) and "Acme-HfO2-D1" in inside["c1"]   # its own chats keep it
+
+
 def test_writing_a_confidential_projects_summary_never_goes_through_the_hub(rt, tmp_path):
     from starlette.testclient import TestClient
     from labharness.web.app import create_app

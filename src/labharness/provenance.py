@@ -19,6 +19,8 @@ from . import chain as chains
 from . import rundata
 
 PLAN_LINES = 60   # a longer plan is cut here: the whole is in run.h5 (/plan)
+# what run_provenance reads of the lab record: approvals, stops, trips and alarms
+RUN_EVENTS = {"ask", "answer", "stop", "trip", "alarm", "alarm_cleared", "call_cancelled", "hands_on"}
 
 # what the activity tool's kinds stand for
 GROUPS = {"approvals": {"ask", "answer"},
@@ -155,8 +157,7 @@ def _run_events(meta: Dict[str, Any], plan: Dict[str, Any], events: Sequence[Dic
             out.append((queue[-1]["wall"], "the queue's approval, which covered it: " + _ask(queue[-1])))
     for e in events:
         wall = str(e.get("wall", ""))
-        if not (t0 <= wall <= t1) or e.get("type") not in ("ask", "answer", "stop", "trip", "alarm", "alarm_cleared",
-                                                           "call_cancelled", "hands_on"):
+        if not (t0 <= wall <= t1) or e.get("type") not in RUN_EVENTS:
             continue
         out.append((wall, _ask(e) if e.get("type") == "ask" else _who(e) + event_line(e)[9:]))
     return ["%s %s" % (_when(w)[11:], text) for w, text in sorted(out, key=lambda x: x[0])]
