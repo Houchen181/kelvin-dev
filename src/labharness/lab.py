@@ -304,7 +304,8 @@ class Lab:
         state = getattr(inst.backend, "state", None)
         if isinstance(state, dict):
             return dict(state)
-        return {k: v for k, v in self.snapshot()[inst.name].items()
+        # this instrument's readings only: a twin read the whole lab once per instrument (530 reads, not 53)
+        return {k: v for k, v in self.snapshot([inst.name])[inst.name].items()
                 if v is not None and not (isinstance(v, str) and v.startswith("ERROR"))}
 
     def make_twin(self, seed: int = 0) -> "Lab":

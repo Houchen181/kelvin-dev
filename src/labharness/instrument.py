@@ -364,6 +364,9 @@ class Instrument:
             self._error_form = True
         elif self._error_form:   # it has answered as SCPI's error queue does, and this isn't that: a garbled reply
             raise self._garbled(command, raw)
+        fields = [f.strip() for f in resp.split(",")]
+        if len(fields) > 1 and all(re.match(r"^[+-]?\d+$", f) for f in fields):   # error registers, each a number:
+            return None if all(int(f) == 0 for f in fields) else resp   # a Lake Shore 625's quench is 000,032,000
         return None if re.match(r"^\+?0+\s*(,|$)", resp) else resp   # "0,No error", 0 (SRS LERR?), 0000 (Pfeiffer ERR)
 
     def drain_errors(self, most: int = 10) -> Tuple[List[str], bool]:

@@ -59,6 +59,7 @@ after: { isrc.output: off }
 ```
 
 - **Each leg** sets its rate (on the card's rate parameter, in its unit; `describe_instrument` shows it) and its target without waiting. It then measures every `every` seconds until the reading (the card's read-back, or `read:`) is within the card's tolerance (or `within:`), goes on for `hold:` seconds more, and moves to the next leg. A bare number is a leg at the rate the instrument has.
+- **Its guards are read** on a leg away from safe, at every point and between points, as a set point's wait reads them: one past its limit trips (the drive to safe, its switch off) and the run stops. A ramp once heated the sample to 50 K past its guard at 20 K.
 - **The ramp's column is the reading it follows,** so R is recorded and analysed against the temperature reached, not against the set point. The legs are kept with the run (`legs`: when each began, got there and ended).
 - **It is the innermost loop.** Stepped sweeps can go outside it (an R(T) at several fields); `time:` can't go with it.
 - **A ramp that stops getting closer** for `stall:` seconds (600 unless the plan says; `0` never) stops the run as Stop does: its outputs go to safe and its points are kept. The reason names the switch the set point goes through when it is below its highest setting (*tc.heater_range is only low: a higher range may be needed*) rather than calling the instrument stuck. The [set-point watchdog](safety.md#watches-and-notifications) also raises an alarm after 5 minutes.
@@ -67,7 +68,7 @@ after: { isrc.output: off }
 
 ### Ending early
 
-`until:` ends a loop once its condition holds, and `while:` once it no longer does. Both are checked after each point, on that point's readings (anything else is read). A condition compares readings with numbers, also their size (`abs(...)`), joined by `and` or `or`: `"abs(smu.I) > 1e-6"`, `"nvm.V < 1e-6 or ppms.T < 1.9"`.
+`until:` ends a loop once its condition holds, and `while:` once it no longer does. Both are checked after each point, on that point's readings (anything else is read). A condition compares readings with numbers, also their size (`abs(...)`), joined by `and` or `or`: `"abs(smu.I) > 1e-6"`, `"nvm.V < 1e-6 or ppms.T < 1.9"`. A mode or a switch is compared with its word, `==` or `!=`: `"tc.heater_range == off"`.
 - **On a sweep axis,** its remaining values are skipped, and the loops outside it go on.
 - **On a ramp,** the ramp ends. Its set point stays where it was sent; `after:` decides where it goes next.
 - **On `time:`,** the series ends: `time: {every: 10, for: 7200, until: "tc.T_sample < 2.1"}`.

@@ -15,9 +15,10 @@ from . import frames, pulses, techniques
 from ._version import __version__
 from .analysis import analyze_run
 from .chain import derived_readings
+from .conditions import typed
 from .eventlog import EventLog, RunStore
 from .forecast import Forecast, action_of, runs
-from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur, feeds_of, paces
+from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur, applied_by, feeds_of, paces
 from .instrument import InstrumentOff, SensorError, Stopped
 from .monitor import Approach, rate_per_s, switch_words
 from .plans import MAX_POINTS, Axis, Plan, PlanError, Stabilize, Step, load_plan
@@ -29,6 +30,9 @@ HEALTHY_FOR = 600.0
 # A set point in a plan's setup that holds the run longer than this before its first point is said in the report:
 # nothing is measured on the way (a ramp: sweep measures while it ramps).
 LONG_WAIT_S = 120.0
+# A ramp away from safe reads its drive's guards at every point and between points, as often as a set point's wait
+# reads them (gate._wait): a 50th of the leg's time, at least every this many lab seconds.
+GUARD_EVERY_S = 5.0
 
 
 class _Abort(Exception):
@@ -293,6 +297,16 @@ class RunEngine:
                     errors.append("%s.%s cannot be read" % (instr, param))
             except KeyError as e:
                 errors.append(e.args[0])
+        # a switch's or a mode's word in a condition, as its reading gives it: "tc.heater_range == off"
+        for where, conds in [("preconditions", plan.preconditions)] + [
+                (r.text, [t for group in r.any_of for t in group]) for r in plan.rules()]:
+            for c in conds:
+                try:
+                    typed(c, lab.resolve(c.key)[1])
+                except KeyError:
+                    pass   # said above
+                except ValueError as e:
+                    errors.append("%s: %s" % (where, e))
         if ramp is not None and not errors:
             ramp.estimate = self._estimate(ramp)
         if not errors:   # a technique's values and levels, at every value its sweep gives them
@@ -409,22 +423,29 @@ class RunEngine:
             ranked.append((rank, i, s))
         return [s for _, _, s in sorted(ranked, key=lambda r: (r[0], r[1]))]
 
+    def planned(self, plan: Plan) -> set:
+        """The settings a plan sets before and while it measures (its setup and sweep): a switch it turns on takes the
+        set points it applies to the plan's levels, not to where they were (gate._planned)."""
+        return {s.key for s in plan.setup} | {a.key for a in plan.axes if a.kind in ("instrument", "ramp")}
+
     def interlock_problems(self, plan: Optional[Plan], state: Optional[Dict[str, Any]] = None, who: str = "the plan",
                            sets: Optional[List[Tuple[str, str, Any]]] = None) -> List[str]:
         """Where a plan would break an interlock, foreseen before it runs (a temperature series with a 12 K step at
         -2.5 T ran 1.6 h before its interlock, T < 10 K, stopped it): a moment when an interlock's drive is away from
         safe while the plan has its condition failing, by setting it or the set point that drives it (tc.setpoint
-        drives tc.T_sample: labs write interlocks on the reading). Setup and after steps in the engine's order; every
-        value of a sweep meets every other (its loops are nested). A condition that fails already, before the plan, is
-        the gate's to refuse (plan_approval). state: what the walk starts from, updated as it goes (a queue's items,
-        each from where the one before leaves the lab); who: what the lines name; sets: a queue's step between scans
-        (instr, param, value), in place of a plan."""
+        drives tc.T_sample: labs write interlocks on the reading), or by switching on what applies a set point (a
+        heater range on takes tc.T_sample to tc.setpoint, where it was left unless the plan sets it). Setup and after
+        steps in the engine's order; every value of a sweep meets every other (its loops are nested). A condition that
+        fails already, before the plan, is the gate's to refuse (plan_approval). state: what the walk starts from,
+        updated as it goes (a queue's items, each from where the one before leaves the lab); who: what the lines name;
+        sets: a queue's step between scans (instr, param, value), in place of a plan."""
         locks = self.lab.config.interlocks
         state = {} if state is None else state
         if not locks:
             return []
         problems: List[str] = []
         done: set = set()
+        planned = self.planned(plan) if plan is not None else set()
 
         def now(key: str) -> Tuple[Any, Optional[str]]:
             """(its value, what in the walk set it: None for the lab as it is now)."""
@@ -447,6 +468,17 @@ class RunEngine:
                 cause = "%s sets %s to %s" % (where, key, spec.show(v))
                 for k in feeds_of(inst, spec):
                     out.setdefault(k, []).append((v, cause))
+                deps = [d for d in applied_by(inst, spec) if "%s.%s" % (inst.name, d.name) not in planned]
+                if deps and spec.distance(v) > 0:   # a switch going on: its set points take their readings there
+                    try:
+                        was = now(key)[0]
+                        off = was is None or spec.distance(was) == 0
+                    except (TypeError, ValueError):   # it reads what it can't be set to
+                        off = True
+                    for d in deps if off else []:
+                        level = now("%s.%s" % (inst.name, d.name))[0]
+                        out.setdefault("%s.%s" % (inst.name, d.readback), []).append(
+                            (level, "%s, with %s.%s at %s" % (cause, inst.name, d.name, d.show(level))))
             return out
 
         def check(moment: Dict[str, List[Tuple[Any, Optional[str]]]]) -> None:
@@ -801,13 +833,14 @@ class RunEngine:
                     clock.sleep(s - spent)
             return value
 
-        def aim(instr: str, param: str, value: Any) -> None:
+        def aim(instr: str, param: str, value: Any) -> Any:
             """A ramp's set point, set without waiting for its reading: the ramp measures while it gets there."""
             if gate.stop_generation != gen:
                 raise _Abort(gate.stop_words())
             r = gate._set(instr, param, value, False, "plan:" + plan.name, gen=gen)
             if not r.ok:
                 raise _Abort(r.message)
+            return r
 
         def time_left(done: int) -> float:
             wall, lab_t = time.time() - wall0, clock.now() - t0
@@ -990,13 +1023,36 @@ class RunEngine:
         def ramped(axis: Axis, at: Dict[str, Any]) -> bool:
             """A ramp: each leg's rate and target set without waiting, then a point every axis.every seconds until
             its reading is within tolerance of the target, and hold: seconds more. A leg whose reading stops getting
-            closer for axis.stall stops the run (fail closed: a stuck cryostat isn't waited on for hours)."""
+            closer for axis.stall stops the run (fail closed: a stuck cryostat isn't waited on for hours). A leg away
+            from safe reads its drive's guards at every point and between points, as a set point's wait does: nothing
+            else reads them while the instrument ramps by itself (a ramp heated the sample to 50 K past its guard at
+            20 K, and ended "done")."""
             inst, spec = lab.resolve(axis.key)
             tol = axis.within if axis.within is not None else spec.tol
+            own = "%s.%s" % (axis.instr, spec.readback) if spec.readback else None
+
+            def guarded(seen: Any = None) -> None:
+                """A guard past its limit trips as in a set point's wait (the drive to safe, or held), and the run
+                stops. seen: the reading the ramp follows, just taken."""
+                trip = gate._guard_trip(inst, spec)
+                if trip is None:
+                    return
+                try:   # where the drive's own reading is, for the trip's words and its move to safe
+                    where = seen if own == followed and seen is not None else inst.read(spec.readback) if own else None
+                except Exception:
+                    where = None
+                raise _Abort(gate._tripped(inst, spec, where if _num(where) else None, trip).message)
+
             for leg in axis.segments:
                 if leg.rate is not None:
                     apply(axis.instr, spec.rate_param, leg.rate)
-                aim(axis.instr, axis.param, leg.to)
+                r = aim(axis.instr, axis.param, leg.to)
+                watch = r.action == "set" and (r.before is None or not spec.distance(leg.to) < spec.distance(r.before))
+                try:
+                    eta = gate._eta(inst, spec, r.before, leg.to) if watch else None
+                except Exception:
+                    eta = None
+                poll = max(0.1, min(GUARD_EVERY_S, (eta or 10.0) / 50))
                 began = clock.now()
                 way = Approach(leg.to, tol, began, rate_per_s(inst, spec, leg.rate), axis.stall or None)
                 info: Dict[str, Any] = {"to": leg.to, "rate": leg.rate, "hold": leg.hold,
@@ -1005,6 +1061,8 @@ class RunEngine:
                 due, there = began, None
                 while True:
                     row = take(at)
+                    if watch:
+                        guarded(row.get(followed))
                     now, value = clock.now(), row.get(followed)
                     stuck = way.update(value, now)
                     if there is None and way.there(value):
@@ -1028,13 +1086,18 @@ class RunEngine:
                             followed, spec.show(leg.to), _dur(stuck), spec.show(value) if _num(value) else repr(value),
                             "; " + switch if switch else "", "" if switch else ": the instrument may be stuck"))
                     due = max(due + axis.every, clock.now())
-                    if not lab.stops.sleep(clock, max(0.0, due - clock.now()), stops):
-                        raise _Abort(gate.stop_words())   # a stop ends the wait for the next point at once
+                    while True:
+                        left = max(0.0, due - clock.now())
+                        if not lab.stops.sleep(clock, min(left, poll) if watch else left, stops):
+                            raise _Abort(gate.stop_words())   # a stop ends the wait for the next point at once
+                        if not watch or clock.now() >= due - 1e-9:
+                            break
+                        guarded()
                 info["ended_t"] = round(clock.now() - t0, 3)
             return True
 
         try:
-            with gate.preapproved(grants):
+            with gate.preapproved(grants, self.planned(plan)):
                 if gate.stop_generation != gen:   # stopped before it began: not even its setup
                     raise _Abort(gate.stop_words())
                 for step in self.ordered(plan.setup):

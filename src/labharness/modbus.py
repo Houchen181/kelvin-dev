@@ -107,6 +107,7 @@ class ModbusInstrument(DriverBackend):
         target = (url.netloc + url.path).strip("/")
         self.serial = None
         self.sock = None
+        self.where: Optional[Tuple[str, int]] = None   # a TCP device's host and port, to connect again
         if isinstance(module, dict) and module.get("transport"):
             self.transport = module["transport"]   # tests: a function from a request frame to the reply frame
             self.rtu = bool(module.get("rtu"))
@@ -122,7 +123,8 @@ class ModbusInstrument(DriverBackend):
                                             stopbits=int(q.get("stop", 1)), timeout=self.timeout)
             else:
                 host, _, port = target.partition(":")
-                self.sock = socket.create_connection((host, int(port or 502)), timeout=self.timeout)
+                self.where = (host, int(port or 502))
+                self.sock = socket.create_connection(self.where, timeout=self.timeout)
         except (OSError, ValueError, KeyError, ImportError) as e:
             raise AdapterError("%s: could not reach %s by Modbus: %s" % (name, target, e)) from e
 
@@ -138,8 +140,7 @@ class ModbusInstrument(DriverBackend):
                 self.serial.write(self._frame(pdu))
                 reply = self._read_rtu(pdu[0])
             else:
-                self.sock.sendall(self._frame(pdu))
-                reply = self._read_tcp()
+                reply = self._tcp(self._frame(pdu))
         body = self._unframe(reply)
         if body[0] & 0x80:
             code = body[1] if len(body) > 1 else 0
@@ -187,6 +188,43 @@ class ModbusInstrument(DriverBackend):
         if len(head) < 7:
             return head
         return head + self._recv(struct.unpack(">H", head[4:6])[0] - 1)
+
+    def _tcp(self, frame: bytes) -> bytes:
+        """One request over TCP, and its reply. What waits in the connection before it (a reply that came after its
+        time) is read out of the way, and a reply to an earlier request that comes after it is passed over: one late
+        reply made every read after it take the one before's, until Kelvin restarted. A connection that broke, or
+        whose replies no longer start where a reply starts, is closed, and the next request opens a new one."""
+        try:
+            if self.sock is None:
+                self.sock = socket.create_connection(self.where, timeout=self.timeout)
+            self.sock.settimeout(0)
+            try:
+                while self.sock.recv(4096):
+                    pass
+                self._drop()   # the device closed it
+                self.sock = socket.create_connection(self.where, timeout=self.timeout)
+            except BlockingIOError:   # nothing more waiting
+                pass
+            self.sock.settimeout(self.timeout)
+            self.sock.sendall(frame)
+            for _ in range(8):   # a few late replies, at most
+                reply = self._read_tcp()
+                if len(reply) >= 7 and reply[2:4] != b"\x00\x00":
+                    self._drop()
+                if len(reply) < 7 or reply[:2] == frame[:2] or self.sock is None:
+                    return reply
+            return reply
+        except OSError:
+            self._drop()
+            raise
+
+    def _drop(self) -> None:
+        sock, self.sock = self.sock, None
+        try:
+            if sock is not None:
+                sock.close()
+        except OSError:
+            pass
 
     def _read_rtu(self, function: int) -> bytes:
         head = self.serial.read(3)

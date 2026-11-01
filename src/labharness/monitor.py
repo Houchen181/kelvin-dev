@@ -298,8 +298,10 @@ class Monitor:
         return watch
 
     def remove(self, watch_id: str, source: Optional[str] = None, why: str = "") -> Watch:
-        """Stop a watch; its alarm, if on, clears with it (it once stayed on, and came back after a restart). Watches
+        """Stop a watch; its alarm, if on, clears with it (it once stayed on, and came back after a restart), and so
+        does its instrument's "can't be read" once no watch reads that instrument (nothing else could end it). Watches
         from the lab config change only there (PermissionError when a source is given)."""
+        unread = None
         with self._lock:
             w = self.watches.get(watch_id)
             if w is None:
@@ -307,9 +309,16 @@ class Monitor:
             if source is not None and w.source == "lab":
                 raise PermissionError("%s comes from the lab config; change it there" % watch_id)
             self.watches.pop(watch_id)
+            instr = w.key.split(".")[0]
+            if not any(x.key.split(".")[0] == instr for x in self.watches.values()):   # no watch reads it now
+                self._fails.pop(instr, None)
+                unread = self._unreadable.pop(instr, None)
         if w.alarm:
             self._clear(w.alarm, "%s is no longer watched (%s)" % (w.key, why or "the watch was removed"))
             w.alarm = None
+        if unread is not None:
+            self._clear(unread.id, "%s is no longer read: no watch is on it (%s)" % (instr, why or
+                                                                                   "its watch was removed"))
         return w
 
     def end_for(self, device: str, why: str) -> List[Watch]:
@@ -518,8 +527,8 @@ class Monitor:
         a = self._new("reading", w.key, text, source=w.id)
         w.alarm = a.id
         actions = []
-        if w.stop_run:
-            self.gate.request_abort()
+        if w.stop_run:   # the run says what stopped it, not "stop requested", as if a person had
+            self.gate.request_abort("a watch (%s)" % text)
             actions.append("stopped the running plan")
         for instr, param, safe in w.then:   # only ever toward safe: lab-config watches name safe values
             try:   # its switch goes off too (gate.cut): V = 0 does nothing on a source in current mode
@@ -871,7 +880,8 @@ class Monitor:
                 else:
                     a = self._new("reset", name, text)
                 self._reset[name] = a
-            self.gate.request_abort()
+            self.gate.request_abort("%s.%s, found %s under the running plan (%s restarted, or someone switched it "
+                                    "off)" % (name, param, spec.show(now), name))
             a.actions.append("stopped the running plan, which would have gone on measuring with %s.%s %s"
                              % (name, param, spec.show(now)))
             if recent is None:
