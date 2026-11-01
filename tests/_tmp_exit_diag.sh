@@ -19,18 +19,16 @@ for k in range(3):
 EOF
 runs="$work/0/20261024-101500-gate_sweep $work/1/20261024-101500-gate_sweep $work/2/20261024-101500-gate_sweep"
 
-cat > "$work/busy.py" <<'EOF'
-import sys, threading, time
-if sys.argv[1] == "h5py":
-    import h5py, numpy  # noqa: F401
+cat > "$work/jsonspin.py" <<'EOF'
+import json, sys, threading, time
+big = {"k%d" % i: [float(j) for j in range(50)] for i in range(200)}
 def work():
-    n = 0
+    if sys.argv[1] == "h5":   # this thread reads run.h5 a few times first, then only encodes JSON
+        from labharness import rundata
+        for folder in sys.argv[2:]:
+            rundata.meta(folder)
     while True:
-        n += 1
-        try:
-            raise OSError("x %d" % n)
-        except Exception:
-            pass
+        json.dumps(big)
 threading.Thread(target=work, daemon=True).start()
 time.sleep(1.0)
 EOF
@@ -38,7 +36,7 @@ EOF
 cat > "$work/loop.py" <<'EOF'
 import sys, threading, time
 from labharness import rundata
-pause = float(sys.argv[1])
+park = sys.argv[1] == "park"
 def work():
     n = 0
     while True:
@@ -47,9 +45,11 @@ def work():
             try:
                 rundata.meta(folder)
                 rundata.set_analysis(folder, {'assessment': 'pass %d' % n, 'series': []})
+            except OSError as e:
+                if park and "closing" in str(e):
+                    threading.Event().wait()
             except Exception:
-                if pause:
-                    time.sleep(pause)
+                pass
 threading.Thread(target=work, daemon=True).start()
 time.sleep(1.0)
 EOF
@@ -62,15 +62,14 @@ tally() {   # name, runs, command...
     if [ "$rc" -ne 0 ]; then
       bad=$((bad + 1))
       if [ "$shown" -lt 2 ]; then
-        shown=$((shown + 1)); echo "--- $name run $i: exit $rc"; tail -40 "$work/out.txt"
+        shown=$((shown + 1)); echo "--- $name run $i: exit $rc"; tail -12 "$work/out.txt"
       fi
     fi
   done
   echo "=== $name: $bad of $n exits not clean"
 }
 
-tally "pure Python busy daemon" 30 python -X faulthandler "$work/busy.py" none
-tally "busy daemon, h5py imported" 30 python -X faulthandler "$work/busy.py" h5py
-tally "run.h5 loop, fixed, spinning" 30 python -X faulthandler "$work/loop.py" 0 $runs
-tally "run.h5 loop, fixed, 5 ms after a refusal" 30 python -X faulthandler "$work/loop.py" 0.005 $runs
-tally "flush_reports at exit, fixed" 8 python -X faulthandler tests/_tmp_flush_at_exit.py tests
+tally "A json spin, no h5py" 60 python -X faulthandler "$work/jsonspin.py" none
+tally "D json spin after run.h5 reads in that thread" 60 python -X faulthandler "$work/jsonspin.py" h5 $runs
+tally "B run.h5 loop, fixed, raising" 60 python -X faulthandler "$work/loop.py" raise $runs
+tally "C run.h5 loop, fixed, parked once refused" 60 python -X faulthandler "$work/loop.py" park $runs
