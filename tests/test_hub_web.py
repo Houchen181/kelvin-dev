@@ -515,6 +515,29 @@ def test_kelvin_signs_in_with_its_own_api(tmp_path):
     assert r.status_code == 403 and r.json()["registered"] and "Confirm" in r.json()["error"]
 
 
+def test_strangers_wrong_passwords_hold_off_only_their_own_tries(tmp_path):
+    """Kelvin's sign-in counts wrong passwords per email and computer, and per address: strangers elsewhere never lock
+    a person out of a computer they are signed in on. Past 30 an hour for an email, other computers wait the hour."""
+    hub, client = make(tmp_path, sharing=False)
+    pc = {"id": "urn:uuid:lab-pc", "name": "Lab PC", "platform": "win32", "version": "0.3.35"}
+    ada = {"email": "ada@example.org", "password": "correct horse"}
+    assert client.post("/api/register", json=dict(ada, name="Ada", consent=True, installation=pc)).status_code == 200
+    for n in range(3):                                        # strangers at three addresses, a new computer each try
+        stranger = TestClient(client.app, client=("198.51.100.%d" % (n + 1), 50000))
+        for i in range(10):
+            r = stranger.post("/api/signin", json=dict(ada, password="a guess", installation=dict(
+                pc, id="urn:uuid:stranger-%d-%d" % (n, i))))
+            assert r.status_code == 401
+        r = stranger.post("/api/signin", json=dict(ada, installation=dict(pc, id="urn:uuid:another")))
+        assert r.status_code == 429                           # that address waits, even with the right password
+    r = client.post("/api/signin", json=dict(ada, installation=dict(pc, id="urn:uuid:new-laptop")))
+    assert r.status_code == 429 and "an hour" in r.json()["error"]   # 30 wrong for her email: a new computer waits
+    assert client.post("/api/signin", json=dict(ada, installation=pc)).status_code == 200   # hers never does
+    for _ in range(10):                                       # her own computer's wrong passwords count for it
+        assert client.post("/api/signin", json=dict(ada, password="a typo", installation=pc)).status_code == 401
+    assert client.post("/api/signin", json=dict(ada, installation=pc)).status_code == 429
+
+
 def test_a_hub_for_kelvin_accounts_only(tmp_path, monkeypatch):
     """The default: the hub keeps Kelvin accounts for the Kelvin team, and is no place for labs to share work."""
     import labharness.hub.server as hub_server

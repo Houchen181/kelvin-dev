@@ -901,6 +901,14 @@ class Hub:
                                " ORDER BY i.last_seen DESC", (user_id,)).fetchall()
         return [dict(r) for r in rows]
 
+    def signs_in_on(self, email: Any, installation: Any) -> bool:
+        """Is this account signed in on this computer (or phone)? Wrong passwords strangers try for the email never
+        hold off its sign-ins there (server.py api_signin)."""
+        with self.connect() as con:
+            return con.execute("SELECT 1 FROM tokens t JOIN users u ON u.id = t.user_id WHERE u.email = ? AND"
+                               " t.installation_id = ? AND t.kind = 'app' LIMIT 1",
+                               (str(email or "").strip().lower(), str(installation or ""))).fetchone() is not None
+
     def sign_out_app(self, token: Any, ip: Optional[str] = None) -> bool:
         """A Kelvin or a phone signs out: its token stops working at once."""
         app = self.app(token)

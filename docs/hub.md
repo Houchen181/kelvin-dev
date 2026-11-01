@@ -255,7 +255,8 @@ Kelvin accepts a hub address on the internet only with https.
 
   | What | Limit |
   |---|---|
-  | Signing in, and the password on the connect page | 10 failures in 15 minutes, per email and per address |
+  | Signing in on the hub's pages, and the password on the connect page | 10 failures in 15 minutes, per email and per address |
+  | Signing in to Kelvin (`/api/signin`) | 10 failures in 15 minutes, per email and computer (its installation id) and per address, so strangers elsewhere can't lock a person out of their own computer; past 30 failures an hour for an email, only computers the account is signed in on still try |
   | New accounts | 20 an hour per address |
   | Reset mails | 20 an hour per address |
   | Token trades | 30 failures in 15 minutes per address |

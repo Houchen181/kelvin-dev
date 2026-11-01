@@ -907,16 +907,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 if not accounts.matches(account["name"], password):
                     raise PermissionError("Wrong password. (Kelvin can't reach the hub now, so it checked the "
                                           "password this computer knows.)")
-            except central.CentralError as e:
-                # the hub holds off for a while (too many wrong passwords for this email, from anyone anywhere) or
-                # fails: someone this computer knows still signs in with the password it knows, as offline
-                held = e.status == 429 or e.status >= 500
-                if held and account is not None and accounts.matches(account["name"], password):
-                    online = False
-                elif e.status in (401, 403, 429):
+            except central.CentralError as e:   # the hub's no stands: never the password this computer keeps instead
+                if e.status in (401, 403, 429):
                     raise PermissionError(str(e))
-                else:
-                    raise ValueError(str(e))
+                raise ValueError(str(e))
         display = ((answer or {}).get("user") or {}).get("name") or ""
         if account is None:   # their first sign-in on this computer
             choices = accounts.unlinked()
