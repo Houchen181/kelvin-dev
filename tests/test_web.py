@@ -574,6 +574,40 @@ def test_an_index_kelvin_cant_read_is_never_taken_for_none(tmp_path, monkeypatch
     assert index.read_text(encoding="utf-8") == damaged   # never written over
 
 
+def test_a_file_held_elsewhere_never_holds_up_the_rest_and_the_list_skips_it_a_while(tmp_path, monkeypatch):
+    """Review of the fixes: the store waited for a file in use while holding its lock, so a chat file a backup or a
+    virus scanner held stalled every other read and save (and the event loop) for up to 2 s, on every refresh of the
+    chat list. It waits without the lock now, and the list leaves such a file out a while, unless it changes."""
+    from pathlib import Path
+    from labharness.web import store as stored
+    store = ChatStore(tmp_path / "chats")
+    held, other = store.create("local:x"), store.create("local:x")
+    path = tmp_path / "chats" / ("%s.json" % held["id"])
+    real, tries, until = Path.read_text, [], {"t": time.time() + 0.6}
+
+    def read_text(p, *args, **kwargs):
+        if p == path and time.time() < until["t"]:
+            tries.append(1)
+            raise PermissionError(13, "Permission denied")
+        return real(p, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", read_text)
+    waiting = threading.Thread(target=lambda: store.load(held["id"]), daemon=True)
+    waiting.start()
+    time.sleep(0.1)                                         # it is trying again and again meanwhile
+    start = time.time()
+    store.save(store.load(other["id"]))
+    assert time.time() - start < 0.3 and waiting.is_alive()
+    waiting.join(5)
+    monkeypatch.setattr(stored, "IN_USE_TRIES", 2)
+    until["t"] = time.time() + 3600                         # held for good
+    del tries[:]
+    assert [c["id"] for c in store.list()] == [other["id"]] and len(tries) == 2
+    assert [c["id"] for c in store.list()] == [other["id"]] and len(tries) == 2   # not tried again yet
+    until["t"] = 0                                          # free again, and changed: listed at once
+    store.save(store.load(held["id"]))
+    assert {c["id"] for c in store.list()} == {held["id"], other["id"]}
+
+
 REMEMBER_QUIRK =[{"type": "text", "text": "Noting it."},
                   {"type": "tool_call", "id": "n1", "name": "remember",
                    "input": {"scope": "project", "kind": "quirk", "text": "Gate on D3 leaks above 6 V."}}]
