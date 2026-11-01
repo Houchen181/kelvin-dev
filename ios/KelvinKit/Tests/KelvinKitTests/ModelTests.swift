@@ -215,6 +215,37 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(d.runID, "r2")
     }
 
+    func testLiveDataTakesEachRowOnceWhenTwoLooksOverlap() throws {
+        func live(_ from: Int, _ to: Int) throws -> LiveRun {
+            let rows = (from..<to).map { "{\"i\": \($0), \"smu.voltage\": \($0), \"smu.current\": \($0)}" }
+            return try decode(LiveRun.self, """
+            {"run_id": "r1", "plan": "iv", "total": 10, "done": \(to), "status": "running",
+             "axes": [{"key": "smu.voltage", "unit": "V", "kind": "sweep"}],
+             "measures": [{"key": "smu.current", "unit": "A", "kind": "scalar"}],
+             "rows": [\(rows.joined(separator: ", "))], "since": \(from)}
+            """)
+        }
+        var d = LiveData()
+        d.take(try live(0, 2), since: 0)
+        d.take(try live(2, 4), since: 2)            // the look every few seconds and a pull to refresh, both from row 2
+        XCTAssertFalse(d.take(try live(2, 5), since: 2))
+        XCTAssertEqual(d.since, 4)
+        d.take(try live(4, 6), since: 4)
+        XCTAssertEqual(d.rows.compactMap { $0["i"]?.int }, [0, 1, 2, 3, 4, 5])   // each row once, none skipped
+    }
+
+    func testEveryChatAnsweringNowShowsAsAnswering() throws {
+        let s = try decode(LabState.self, """
+        {"lab": "L", "active": {"chat_id": "c2", "model": "m"},
+         "answering": [{"chat_id": "c1", "model": "m"}, {"chat_id": "c2", "model": "m", "wake": true}]}
+        """)
+        XCTAssertTrue(s.answers("c1"))                                            // not only the one that began last
+        XCTAssertTrue(s.answers("c2"))
+        XCTAssertFalse(s.answers("c3"))
+        let older = try decode(LabState.self, "{\"lab\": \"L\", \"active\": {\"chat_id\": \"c1\"}}")
+        XCTAssertTrue(older.answers("c1"))
+    }
+
     func testAxesInSIUnits() {
         func scale(_ v: [Double], _ unit: String) -> String {
             let (f, u) = SI.scale(v, unit: unit)

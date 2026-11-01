@@ -78,6 +78,26 @@ final class TranscriptTests: XCTestCase {
         XCTAssertEqual(t.lines.last?.text, "Stopped.")
     }
 
+    func testAStepWhoseEndWasNotSeenIsNotShownAsDone() throws {
+        var t = Transcript()
+        t.say("Ramp B to 1 T")
+        t.apply(.toolStart(id: "t1", name: "get_value", input: .object(["instrument": .string("magnet")])))
+        t.apply(.toolEnd(id: "t1", content: "0 T", isError: false, runID: nil))
+        t.apply(.toolStart(id: "t2", name: "run_plan", input: .object(["plan": .string("plan: ramp\n")])))
+        t.lost()                                                                 // the stream broke here
+        XCTAssertFalse(t.answering)
+        XCTAssertEqual(t.lines.map(\.unknown), [false, false, true])            // not a green tick
+        XCTAssertFalse(t.lines.contains { $0.working })
+
+        let chat = try decode(ChatDetail.self, """
+        {"id": "c1", "title": "Ramp", "messages": [{"role": "user", "text": "Ramp B to 1 T"},
+          {"role": "assistant", "blocks": [{"type": "tool_call", "id": "t1", "name": "get_value", "input": {}},
+                                           {"type": "tool_call", "id": "t2", "name": "run_plan", "input": {}}]},
+          {"role": "tool", "results": [{"id": "t1", "content": "0 T", "is_error": false}]}]}
+        """)
+        XCTAssertEqual(Transcript(chat).lines.map(\.unknown), [false, false, true])   // still running there
+    }
+
     func testALongAnswerIsCondensedWithTheWholeOneKept() {
         var t = Transcript()
         t.say("How did the sweep go?")

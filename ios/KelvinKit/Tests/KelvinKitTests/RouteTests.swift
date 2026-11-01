@@ -18,4 +18,17 @@ final class RouteTests: XCTestCase {
         XCTAssertTrue(Route.tailscale.encrypted)
         XCTAssertFalse(Route.lab.encrypted)
     }
+
+    func testTheDirectTokenGoesOnlyToTheLabNetworkAndTailscale() {
+        var c = Computer(lab: "Cryostat lab", host: "LAB-PC", phoneName: "P", role: "control", addresses: [
+            URL(string: "http://140.247.10.20:8771")!, URL(string: "http://192.168.1.50:8771")!,
+            URL(string: "http://100.101.7.9:8771")!, URL(string: "http://128.103.5.6:8771")!,
+        ])
+        c.kinds = ["http://140.247.10.20:8771": "public", "http://192.168.1.50:8771": "network",
+                   "http://100.101.7.9:8771": "tailscale"]
+        XCTAssertEqual(c.directAddresses.map(\.absoluteString),   // plain http: never across the internet
+                       ["http://192.168.1.50:8771", "http://100.101.7.9:8771"])
+        XCTAssertFalse(Route.other.direct)
+        XCTAssertFalse(Route.hub.direct)
+    }
 }

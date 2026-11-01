@@ -182,6 +182,15 @@ final class ClientTests: XCTestCase {
         XCTAssertTrue(t.asked[0].url!.absoluteString.hasSuffix("/files/report%202.pdf"))
     }
 
+    func testANameIsSavedUnderItsLastPartOnly() {
+        XCTAssertEqual(KelvinClient.lastPart("report 2.pdf"), "report 2.pdf")
+        XCTAssertEqual(KelvinClient.lastPart("../Library/Preferences"), "Preferences")   // a run id from a bad answer
+        XCTAssertEqual(KelvinClient.lastPart("..\\..\\evil.plist"), "evil.plist")
+        XCTAssertNil(KelvinClient.lastPart(".."))
+        XCTAssertNil(KelvinClient.lastPart("runs/"))
+        XCTAssertEqual(KelvinClient.fileName(contentDisposition: "attachment; filename=\"../x.csv\""), "x.csv")
+    }
+
     func testLiveAsksFromWhereItLeftOff() async throws {
         let t = Scripted()
         t.on("GET /api/live", "{\"live\": null}")
@@ -209,6 +218,36 @@ final class ClientTests: XCTestCase {
                                 .other("thinking"), .text("now."), .ended(reason: "end")])
         XCTAssertEqual(t.body(0)?["text"], .string("sweep"))
         XCTAssertEqual(t.asked[0].timeoutInterval, 3600)        // an answer may wait long for an approval
+    }
+
+    func testAStreamCutShortIsALostConnectionNotAFinishedAnswer() async throws {
+        let t = Scripted()   // through the hub, a Kelvin that drops off ends the answer cleanly, without turn_end
+        t.on("POST /api/chats/c1/turn", "{\"type\": \"turn_start\"}\n"
+             + "{\"type\": \"tool_start\", \"id\": \"t1\", \"name\": \"run_plan\", \"input\": {}}\n")
+        let c = KelvinClient(base: base, token: "tok", transport: t)
+        var events: [ChatEvent] = []
+        do {
+            for try await e in try await c.turn(chat: "c1", text: "ramp B to 1 T", model: "m") { events.append(e) }
+            XCTFail("an answer cut short ended as if it were over")
+        } catch let e as KelvinError {
+            XCTAssertEqual(e.kind, .unreachable)
+        }
+        XCTAssertEqual(events.count, 2)                          // what came before the cut still came
+    }
+
+    func testTheChatStreamsLinesEndAtNewlinesOnly() {
+        // as Kelvin writes them: text from a paper with U+2028 in it, an instrument's reply read as Latin-1 (U+0085)
+        let wire = "{\"type\": \"turn_start\"}\n{\"type\": \"text\", \"delta\": \"The abstract says:\u{2028}"
+            + "superconductivity at 4 K.\u{2029}\"}\n{\"type\": \"tool_end\", \"id\": \"c1\", \"content\": "
+            + "\"refused: SMU reply 1.2\u{85}V\"}\r\n{\"type\": \"turn_end\", \"reason\": \"end\"}"
+        var breaker = LineBreaker()
+        var lines = Array(wire.utf8).compactMap { breaker.take($0) }
+        if let last = breaker.end() { lines.append(last) }
+        XCTAssertEqual(lines.compactMap { ChatEvent(line: $0) }, [
+            .started(model: nil, title: nil), .text("The abstract says:\u{2028}superconductivity at 4 K.\u{2029}"),
+            .toolEnd(id: "c1", content: "refused: SMU reply 1.2\u{85}V", isError: false, runID: nil),
+            .ended(reason: "end"),
+        ])
     }
 
     func testABusyChatSaysSo() async {

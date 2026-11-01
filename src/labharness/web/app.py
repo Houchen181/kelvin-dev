@@ -3025,7 +3025,10 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
                 event = await queue.get()
                 if event is None:
                     return
-                yield json.dumps(event, ensure_ascii=False) + "\n"
+                # one event per line, ended by "\n" alone: U+2028, U+2029 and U+0085 (text from a paper, a reply
+                # read as Latin-1) escaped, as some readers end a line at them too (the iPhone app's did)
+                yield json.dumps(event, ensure_ascii=False).replace("\u2028", "\\u2028").replace(
+                    "\u2029", "\\u2029").replace("\x85", "\\u0085") + "\n"
 
         return StreamingResponse(events(), media_type="application/x-ndjson",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})

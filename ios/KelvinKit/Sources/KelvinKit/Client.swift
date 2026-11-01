@@ -10,6 +10,34 @@ public protocol Transport: Sendable {
     func lines(for request: URLRequest) async throws -> (HTTPURLResponse, AsyncThrowingStream<String, Error>)
 }
 
+/// A response's body cut into lines as Kelvin writes the chat stream: one JSON event per line, each ended by "\n"
+/// alone. Foundation's `lines` also ends a line at U+2028, U+2029 and U+0085, which an event's text may hold (text
+/// from a paper, an instrument's reply read as Latin-1): that cut the event in two, and both halves were lost.
+public struct LineBreaker: Sendable {
+    private var line: [UInt8] = []
+
+    public init() {}
+
+    /// The line this byte ends, if it ends one.
+    public mutating func take(_ byte: UInt8) -> String? {
+        guard byte == UInt8(ascii: "\n") else {
+            line.append(byte)
+            return nil
+        }
+        return cut()
+    }
+
+    /// The last line, when the body ended without a "\n".
+    public mutating func end() -> String? { line.isEmpty ? nil : cut() }
+
+    private mutating func cut() -> String {
+        if line.last == UInt8(ascii: "\r") { line.removeLast() }
+        let text = String(decoding: line, as: UTF8.self)
+        line.removeAll(keepingCapacity: true)
+        return text
+    }
+}
+
 /// What went wrong, in words for the screen, and what kind of thing it was.
 public struct KelvinError: LocalizedError, Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
@@ -170,7 +198,9 @@ public struct KelvinClient: Sendable {
     }
 
     /// Send a message; Kelvin's answer arrives as events while it works. The turn goes on on the computer even if
-    /// this phone goes away, so a lost stream loses nothing: load the chat again.
+    /// this phone goes away, so a lost stream loses nothing: load the chat again. A stream that ends without
+    /// turn_end was cut (through the hub, a Kelvin that went offline or a long wait for an approval ends it as if it
+    /// were over): it fails as unreachable, so the answer isn't taken as done.
     public func turn(chat id: String, text: String, model: String) async throws -> AsyncThrowingStream<ChatEvent, Error> {
         let body = JSONValue.object(["text": .string(text), "model": .string(model)])
         let request = self.request("POST", "/api/chats/\(segment(id))/turn", body: body, timeout: 3600)
@@ -189,10 +219,18 @@ public struct KelvinClient: Sendable {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
+                    var ended = false
                     for try await line in lines {
-                        if let event = ChatEvent(line: line) { continuation.yield(event) }
+                        guard let event = ChatEvent(line: line) else { continue }
+                        if case .ended = event { ended = true }
+                        continuation.yield(event)
                     }
-                    continuation.finish()
+                    if ended {
+                        continuation.finish()
+                    } else {
+                        continuation.finish(throwing: KelvinError(.unreachable, "The connection to Kelvin ended before "
+                                                                                + "its answer did."))
+                    }
                 } catch is CancellationError {
                     continuation.finish()
                 } catch {
@@ -270,9 +308,15 @@ public struct KelvinClient: Sendable {
                 plain = String(p.dropFirst("filename=".count)).trimmingCharacters(in: CharacterSet(charactersIn: "\""))
             }
         }
-        guard let name = (full ?? plain)?.components(separatedBy: CharacterSet(charactersIn: "/\\")).last,
-              !name.isEmpty, name != ".", name != ".." else { return nil }
-        return name
+        return (full ?? plain).flatMap(lastPart)
+    }
+
+    /// The last part of a name a Kelvin or the hub gave, to save a file under: it can't lead out of the folder it is
+    /// saved in. nil when nothing is left ("", ".", "..").
+    public static func lastPart(_ name: String) -> String? {
+        guard let part = name.components(separatedBy: CharacterSet(charactersIn: "/\\")).last,
+              !part.isEmpty, part != ".", part != ".." else { return nil }
+        return part
     }
 
     /// A header of an answer, its name in any case.

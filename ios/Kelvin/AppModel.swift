@@ -61,6 +61,10 @@ final class AppModel: ObservableObject {
     /// The hub to sign in to: the one Kelvin hub, unless this phone signed in to another (development).
     var lastHub: URL { defaults.string(forKey: "kelvin.hub").flatMap { URL(string: $0) } ?? Account.defaultHub }
 
+    /// Signing out of the account, or deleting it: each Kelvin is told to forget this phone's direct token, so none
+    /// is asked for another meanwhile.
+    private(set) var leaving = false
+
     // ------------------------------------------------------------------ the Kelvin account
 
     /// Sign in with the Kelvin account: keep the hub's token for this phone, and add the account's Kelvins.
@@ -100,12 +104,11 @@ final class AppModel: ObservableObject {
     /// Sign this phone out of the account: each Kelvin forgets its direct token, the hub forgets this phone.
     func signOut() async {
         guard let account else { return }
+        leaving = true
+        defer { leaving = false }
         let token = accountToken
+        await forgetDirect(account)
         for c in list.computers where c.hub == account.hub && c.viaAccount {
-            if let token, let base = c.relayBase {
-                _ = try? await KelvinClient(base: base, token: token, transport: transport, timeout: 5, bearer: true)
-                    .forgetDirect()
-            }
             tokens.delete(c.id)
             sessions[c.id]?.pause()
             sessions[c.id] = nil
@@ -121,11 +124,26 @@ final class AppModel: ObservableObject {
         save()
     }
 
-    /// Delete the Kelvin account on the hub (its password), then sign this phone out of it.
+    /// Delete the Kelvin account on the hub (its password), then sign this phone out of it. Each Kelvin forgets this
+    /// phone's direct token first, while the hub still takes the phone to it: after, nothing could tell it, and it
+    /// would count the phone among those that answer from away for good (its requests would wait for a gone phone).
     func deleteAccount(password: String) async throws {
         guard let account else { return }
+        leaving = true
+        defer { leaving = false }
+        await forgetDirect(account)
         try await HubClient(hub: account.hub, transport: transport).deleteAccount(email: account.email, password: password)
         await signOut()
+    }
+
+    /// Each of the account's Kelvins forgets the direct token it gave this phone, through the hub.
+    private func forgetDirect(_ account: Account) async {
+        guard let token = accountToken else { return }
+        for c in list.computers where c.hub == account.hub && c.viaAccount {
+            guard let base = c.relayBase else { continue }
+            _ = try? await KelvinClient(base: base, token: token, transport: transport, timeout: 5, bearer: true)
+                .forgetDirect()
+        }
     }
 
     /// What the hub last said about one of the account's Kelvins.
@@ -216,6 +234,7 @@ final class LabSession: ObservableObject {
     @Published private(set) var connected: URL?
     @Published private(set) var live = LiveData()
     @Published private(set) var teamRead: Int?     // the newest team chat message shown on this phone
+    private(set) var stateAsked = Date.distantPast   // when the state shown was asked for (looks can overlap)
 
     private weak var app: AppModel?
     private let transport: Transport
@@ -249,9 +268,10 @@ final class LabSession: ObservableObject {
         app?.setTeamRead(id, computer)
     }
 
-    /// Look every few seconds until paused.
+    /// Look every few seconds until paused. The first look after the app was away is on screen: no sound for it.
     func resume() {
         guard loop == nil else { return }
+        Notifier.shared.returned(to: computer)
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
@@ -276,7 +296,9 @@ final class LabSession: ObservableObject {
     func refresh() async {
         do {
             let c = try await ready()
+            let asked = Date()
             let s = try await c.state()
+            stateAsked = asked
             state = s
             problem = nil
             if let last = s.team {   // the first look: what was there is not news; lower than the look before:
@@ -337,9 +359,10 @@ final class LabSession: ObservableObject {
     }
 
     private func readyThroughAccount(_ relay: URL) async throws -> KelvinClient {
-        if let direct = tokens.token(for: computer.id), !computer.addresses.isEmpty {
+        let addresses = computer.directAddresses   // never one on the internet: plain http there
+        if let direct = tokens.token(for: computer.id), !addresses.isEmpty {
             do {   // on the lab network or Tailscale: faster, and unshared work opens too
-                let (found, me) = try await reach(computer.addresses, token: direct, transport: transport, timeout: 2.5) {
+                let (found, me) = try await reach(addresses, token: direct, transport: transport, timeout: 2.5) {
                     try await $0.me()
                 }
                 let c = KelvinClient(base: found.base, token: direct, transport: transport)   // the usual wait now
@@ -366,7 +389,7 @@ final class LabSession: ObservableObject {
         computer.version = me.version ?? computer.version
         computer.kinds = (computer.kinds ?? [:]).merging([relay.absoluteString: "hub"]) { _, new in new }
         app?.update(computer)
-        if tokens.token(for: computer.id) == nil { await askDirect(c) }
+        if tokens.token(for: computer.id) == nil, app?.leaving == false { await askDirect(c) }
         return c
     }
 
@@ -409,12 +432,14 @@ final class LabSession: ObservableObject {
 
     func run(_ id: String) async throws -> RunDetail { try await ready().run(id) }
 
-    /// A run's file, saved where Quick Look can open it.
+    /// A run's file, saved where Quick Look can open it: under the last part of its run's id and of its name, so a
+    /// name with "../" in it can't lead out of the app's temporary folder.
     func runFile(_ id: String, _ name: String) async throws -> URL {
         let data = try await ready().runFile(id, name)
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(id, isDirectory: true)
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent(KelvinClient.lastPart(id) ?? "run", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let url = folder.appendingPathComponent(name)
+        let url = folder.appendingPathComponent(KelvinClient.lastPart(name) ?? "file")
         try data.write(to: url, options: .atomic)
         return url
     }
@@ -472,6 +497,9 @@ final class ChatModel: ObservableObject {
     let session: LabSession
     private(set) var id: String?
     private var model: String?
+    private var sending = false      // the message is on its way: Kelvin doesn't have it yet
+    private var stopWanted = false   // Stop pressed meanwhile: sent once Kelvin has the message
+    private var ended: Date?         // when this phone saw Kelvin's answer end: a state asked before still has it on
 
     init(session: LabSession, chat: ChatSummary?, incognito: Bool = false) {
         self.session = session
@@ -480,6 +508,16 @@ final class ChatModel: ObservableObject {
         transcript = Transcript(title: chat?.title ?? (incognito ? "Incognito chat" : "New chat"), model: chat?.model,
                                 incognito: chat?.incognito ?? incognito)
     }
+
+    /// Kelvin answers this chat on its computer while this phone doesn't follow the answer: the chat was opened
+    /// while it answered, or the connection was lost. It shows as working, with Stop, and loads again once over.
+    var answeringElsewhere: Bool {
+        guard let id, !transcript.answering, session.state?.answers(id) == true else { return false }
+        return ended.map { session.stateAsked > $0 } ?? true
+    }
+
+    /// An answer is under way: the one this phone follows, or one Kelvin goes on with without it.
+    var working: Bool { transcript.answering || answeringElsewhere }
 
     /// The conversation as Kelvin keeps it (also after the phone lost an answer that went on without it).
     func load() async {
@@ -497,15 +535,18 @@ final class ChatModel: ObservableObject {
     @discardableResult
     func send() -> Task<Void, Never>? {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !transcript.answering else { return nil }
+        guard !text.isEmpty, !working else { return nil }
         draft = ""
         problem = nil
+        sending = true
+        stopWanted = false
         transcript.say(text)
         return Task { await self.answer(text) }
     }
 
     private func answer(_ text: String) async {
         var reached = false   // Kelvin has the message
+        defer { sending = false }
         do {
             if id == nil || model == nil {
                 let models = try await session.models()
@@ -519,19 +560,25 @@ final class ChatModel: ObservableObject {
             }
             let events = try await session.turn(chat: id ?? "", text: text, model: model ?? "")
             reached = true
+            sending = false
+            if stopWanted {   // Stop was pressed before Kelvin had the message: now there is an answer to stop
+                stopWanted = false
+                await stop()
+            }
             for try await event in events {
                 transcript.apply(event)
             }
             transcript.finish()
-        } catch let e as KelvinError where e.kind == .unreachable {
-            transcript.finish()
-            if reached {
-                problem = "Lost the connection. Kelvin goes on with the answer on its computer; pull down to load it."
-            } else {   // it never got there: back in the box, to send again
-                transcript.unsay()
-                if draft.isEmpty { draft = text }
-                problem = e.message + " Not sent."
-            }
+            ended = Date()
+        } catch let e as KelvinError where e.kind == .unreachable && reached {
+            transcript.lost()   // Kelvin goes on without this phone: what it has of the answer now, or once it's over
+            if !answeringElsewhere { await load() }
+            problem = "Lost the connection. Kelvin goes on with the answer on its computer; it shows here once it's "
+                + "over (or pull down to load it)."
+        } catch let error where !reached {   // refused, or it never got there: back in the box, to send again
+            transcript.unsay()
+            if draft.isEmpty { draft = text }
+            problem = error.localizedDescription + " Not sent."
         } catch {
             transcript.apply(.error(error.localizedDescription))
             transcript.finish()
@@ -539,7 +586,11 @@ final class ChatModel: ObservableObject {
     }
 
     func stop() async {
-        guard let id else { return }   // not on Kelvin yet: nothing there to stop
+        if sending {   // Kelvin doesn't have the message yet, so nothing there to stop: stopped once it does
+            stopWanted = true
+            return
+        }
+        guard let id else { return }
         do {
             try await session.stopChat(id)
         } catch {
