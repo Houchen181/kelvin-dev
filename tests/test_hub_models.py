@@ -94,6 +94,9 @@ class Services:
                                       "include_usage", False)))
         if host == "generativelanguage.googleapis.com":
             assert request.headers["x-goog-api-key"] == self.keys["gemini"] and request.url.params.get("key") is None
+            if path.endswith(":streamGenerateContent") and request.url.params.get("alt") != "sse":   # one JSON array
+                return httpx.Response(200, headers={"content-type": "application/json; charset=UTF-8"}, content=(
+                    b"[" + b",".join(e[5:].strip() for e in GEMINI_STREAM.split(b"\r\n\r\n") if e) + b"]"))
             return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=GEMINI_STREAM)
         if host == "opencode.ai":   # Zen and Go: each key works only at its own addresses
             go = path.startswith("/inference/go/")
@@ -213,6 +216,21 @@ def test_gemini_through_the_hub_and_a_dearer_tier_past_its_size(gateway):
     [row] = wait_for_usage(hub, 1)
     assert (row["model"], row["input"], row["cache_read"], row["output"]) == ("gemini-3.1-pro", 200000, 100000, 75)
     assert row["usd"] == pytest.approx((200000 * 4 + 100000 * 4 + 75 * 18) / 1e6)   # past 200k: the dearer tier
+
+
+def test_gemini_streamed_as_one_json_array_is_metered_too(gateway):
+    """Without ?alt=sse, Google streams the same answers as one JSON array: a request made by hand like that once went
+    unmetered, and that person's budget never ran out. Nor do Google's parameters that would hide the counts go on."""
+    hub, client, services, token = gateway
+    owner_keys(hub, services, ("gemini",))
+    path = "/llm/gemini/v1beta/models/gemini-3.1-pro:streamGenerateContent"
+    for query in ("", "?alt=json&fields=candidates&callback=f&%24alt=proto"):
+        r = client.post(path + query, headers={"x-goog-api-key": token},
+                        json={"contents": [{"role": "user", "parts": [{"text": "z"}]}]})
+        assert r.status_code == 200 and json.loads(r.content)[0]["candidates"]
+        assert services.seen[-1][1].endswith(":streamGenerateContent")      # nothing that reshapes the answer
+    rows = wait_for_usage(hub, 2)
+    assert [(row["input"], row["cache_read"], row["output"]) for row in rows] == [(200000, 100000, 75)] * 2
 
 
 def test_only_kelvins_calls_pass_and_only_for_a_signed_in_kelvin(gateway):

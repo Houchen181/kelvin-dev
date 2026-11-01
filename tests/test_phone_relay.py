@@ -206,6 +206,62 @@ def test_only_a_kelvin_opens_the_relay(tmp_path, hub):
         assert bad.status_code == 404                                            # only the phone API goes through
 
 
+def test_a_phone_that_goes_away_before_the_answer_starts_leaves_no_slot_taken(tmp_path):
+    """The phone goes away while the answer's head is still on its way (its network stalled): the answer ends before
+    its stream starts. Its slot is free again and the Kelvin is told to stop. Freed only in the stream, each such slot
+    stayed taken until the hub restarted, and 16 of them made every request of that person through the hub a 429."""
+    import asyncio
+    from labharness.hub.relay import END, Link
+    h = Hub(tmp_path / "hub")
+    gate = hub_app(h, hosts=["testserver"], backups=False)
+    relay = gate.app.state.relay
+    h.register(ADA["email"], "Ada", ADA["password"], True)
+    token = h.sign_in_app(ADA["email"], ADA["password"], dict(PHONE))["access_token"]
+    uid = h.app(token)["user"]["id"]
+    frames = []
+
+    class Kelvin:   # the Kelvin's end of its socket: it answers each request at once
+        async def send_text(self, text):
+            frame = json.loads(text)
+            frames.append(frame["t"])
+            if frame["t"] == "req":
+                for item in (("head", 200, [["content-type", "application/json"]]), b'{"lab": "x"}', END):
+                    relay.links[uid]["LAB-PC"].waiting[frame["id"]].put_nowait(item)
+
+    async def ask(gone):
+        """The phone's request; gone: it left before the answer's head reached it."""
+        relay.links[uid] = {"LAB-PC": Link(Kelvin(), "LAB-PC", "0.3.35", False)}
+        asked, got = [], []
+
+        async def receive():
+            if not asked:
+                asked.append(1)
+                return {"type": "http.request", "body": b"", "more_body": False}
+            if gone:
+                return {"type": "http.disconnect"}
+            await asyncio.Event().wait()
+
+        async def send(message):
+            if message["type"] == "http.response.start":
+                await asyncio.sleep(0)   # the head takes a moment on its way out
+            got.append(message)
+        path = "/api/relay/kelvins/LAB-PC/api/state"
+        await gate({"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1",
+                    "method": "GET", "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"",
+                    "root_path": "", "client": ("127.0.0.1", 50000), "server": ("testserver", 80),
+                    "headers": [(b"host", b"testserver"), (b"authorization", b"Bearer " + token.encode())]},
+                   receive, send)
+        for _ in range(20):   # the cancel goes out in a task of its own
+            await asyncio.sleep(0)
+        return relay.in_flight.get(uid), relay.links[uid]["LAB-PC"].waiting, b"".join(
+            m.get("body", b"") for m in got)
+
+    assert asyncio.run(ask(gone=False)) == (0, {}, b'{"lab": "x"}') and frames == ["req"]
+    frames.clear()
+    in_flight, waiting, body = asyncio.run(ask(gone=True))
+    assert (in_flight, waiting) == (0, {}) and frames == ["req", "cancel"]
+
+
 def test_a_phone_through_the_hub_is_kept_hourly_and_forgotten_when_it_signs_out(tmp_path):
     settings = Settings(tmp_path / "settings.json")
     settings.saw_hub_phone("ios-1", "Ada's iPhone")

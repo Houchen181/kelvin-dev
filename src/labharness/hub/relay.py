@@ -68,6 +68,23 @@ class Link:
         self.waiting.clear()
 
 
+class Passed(StreamingResponse):
+    """An answer passed on to the phone as it streams back. ended() runs however the answer ends, around the whole
+    response rather than in its stream: a phone that goes away while the answer's head is still on its way (its
+    network stalled) ends it before the stream ever starts, and a slot freed only in the stream stayed taken for
+    good."""
+
+    def __init__(self, content: Any, ended: Callable[[], None], **kw: Any):
+        super().__init__(content, **kw)
+        self.ended = ended
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self.ended()
+
+
 class Relay:
     """Which Kelvins are on the hub now: account -> installation id -> its socket. In memory: a restart of the hub
     drops them, and each Kelvin connects again by itself."""
@@ -219,26 +236,27 @@ def routes(hub: Any, call: Callable[..., Any], read_body: Callable[..., Any],
             release()
             return api_error("The Kelvin computer answered out of turn.", 502)
         headers = {str(k): str(v) for k, v in first[2] if str(k).lower() in PASSED}
+        finished = {"yes": False}
 
         async def answer() -> Any:
-            finished = False
             try:
                 while True:
                     item = await asyncio.wait_for(queue.get(), IDLE)
                     if item is END:
-                        finished = True
+                        finished["yes"] = True
                         return
                     if isinstance(item, Exception):
                         return
                     yield item
             except asyncio.TimeoutError:
                 return
-            finally:
-                release()
-                if not finished:   # the phone went away, or the answer stopped: the Kelvin stops working on it
-                    asyncio.ensure_future(_cancel(link, rid))
 
-        return StreamingResponse(answer(), status_code=first[1], headers=headers)
+        def ended() -> None:
+            release()
+            if not finished["yes"]:   # the phone went away, or the answer stopped: the Kelvin stops working on it
+                asyncio.ensure_future(_cancel(link, rid))
+
+        return Passed(answer(), ended, status_code=first[1], headers=headers)
 
     async def _cancel(link: Link, rid: int) -> None:
         try:

