@@ -112,7 +112,7 @@ def test_no_agent_tool_changes_the_lab():
             return (await client.list_tools()).tools
     tools = anyio.run(main)
     assert "scan_instruments" in [t.name for t in tools]
-    assert {t.name for t in tools if "lab" in t.name} == {"lab_status", "lab_config"}
+    assert {t.name for t in tools if "lab" in t.name} == {"lab_status", "lab_config", "survey_labview"}
     assert all(t.annotations.read_only_hint for t in tools if "lab" in t.name)   # they read the lab, never change it
     assert builtin_registry().get("keithley/2400")
 

@@ -4,8 +4,8 @@ compute, look_at, plot_runs, fit_run, run_python, reports, the automatic fits):
   settings, with dates and times (as seconds from the first), a decimal comma, and text columns (left out, and said);
   a long table of a 2-D scan (x, y, value rows) becomes a 2-D run;
 - Excel workbooks (.xlsx): the first sheet with numbers, or an Arbin export's Channel sheets;
-- makers' files: BioLogic's EC-Lab .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel exports (importers/), and
-  LightField's .spe spectra;
+- makers' files: BioLogic's EC-Lab .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel exports, LabVIEW's measurement
+  files (.lvm) (importers/), and LightField's .spe spectra;
 - NumPy's .npy and .npz, and TIFF images: an array of numbers, a table, or camera frames (a frame or a stack of them,
   one point per frame, which look_at shows).
 
@@ -32,9 +32,9 @@ MAX_ROWS = 200000
 MAX_FRAMES = 5000
 UNIT = re.compile(r"^(.*?)\s*[\(\[]\s*([^\)\]]{1,20})\s*[\)\]]\s*$")   # "Wavelength (nm)", "Intensity [counts]"
 DATA_SUFFIXES = (".csv", ".tsv", ".txt", ".dat", ".asc", ".xlsx", ".xlsm", ".mpt", ".mpr", ".dta", ".npy", ".npz",
-                 ".tif", ".tiff", ".spe")
+                 ".tif", ".tiff", ".spe", ".lvm")
 WHAT = ("tables (CSV, TSV, text, Excel .xlsx), BioLogic's .mpt and .mpr, Gamry's .dta, Arbin's CSV and Excel "
-        "exports, LightField's .spe, NumPy's .npy and .npz, and TIFF images")
+        "exports, LabVIEW's .lvm, LightField's .spe, NumPy's .npy and .npz, and TIFF images")
 
 
 class DataError(ValueError):
@@ -351,7 +351,9 @@ def text_of(raw: bytes, name: str) -> str:
 def read_table(p: Path) -> Table:
     text = text_of(p.read_bytes(), p.name)
     first = text.lstrip()[:40]
-    from .importers import biologic, gamry
+    from .importers import biologic, gamry, lvm
+    if first.startswith(lvm.MARK):   # a .lvm LabVIEW wrote without headers is a table, read as one below
+        return lvm.read_lvm(p, text.lstrip())
     if first.startswith(("EC-Lab ASCII FILE", "BT-Lab ASCII FILE")):
         return biologic.read_mpt(p, text)
     if p.suffix.lower() == ".mpt":

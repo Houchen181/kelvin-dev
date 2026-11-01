@@ -3,8 +3,11 @@ it is, so the exact same measurement is a click away; and the scripts a person i
 are outside the lab's scripts folder (a person chose each one; scriptrun.locate).
 
     library.json, in the data folder (each person's own, beside queue.json):
-    {"entries": [{"id", "kind": "plan" | "script", "name", "source": "kelvin" | "you", "added", "used", "count",
-                  "runs": [run ids, newest first, at most 10], ...}]}
+    {"entries": [{"id", "kind": "plan" | "script", "name", "source": "kelvin" | "you" | "labview", "added", "used",
+                  "count", "runs": [run ids, newest first, at most 10], ...}]}
+
+A scan a person kept from LabVIEW (Set up → From your LabVIEW…: a VI translated by viscan.py) is a plan entry with
+source "labview", the VI's name (vi) and path; it is theirs, as a script they imported is.
 
 A plan is kept by the sha256 of its text as it ran (the run's /plan), with a line that says what it does; a script by
 its path (resolved), with the values (params) and arguments its last run had, the Python it ran in, and the sha256 of
@@ -241,16 +244,33 @@ class Library:
     @staticmethod
     def _keep(found: Dict[str, Dict[str, Any]]) -> None:
         """At most MAX_ENTRIES: the entries Kelvin noted itself go first, least recently used first; a script a person
-        imported, or an entry they named, stays."""
+        imported, a scan they kept from LabVIEW, or an entry they named, stays."""
         extra = len(found) - MAX_ENTRIES
         if extra <= 0:
             return
-        spare = sorted((e for e in found.values() if e.get("source") != "you" and not e.get("named")),
+        spare = sorted((e for e in found.values() if e.get("source") not in ("you", "labview") and not e.get("named")),
                        key=lambda e: e.get("used") or e.get("added") or 0)
         for e in spare[:extra]:
             found.pop(e["id"], None)
 
     # ------------------------------------------------------------------ a person's changes
+
+    def keep_scan(self, text: str, name: Any, about: str, vi: str, path: str) -> Dict[str, Any]:
+        """A scan a person keeps before it ever ran: a LabVIEW VI translated into a plan (viscan.py), kept by its
+        plan's text as every scan is (its runs are noted under it), with source "labview" and the VI it came from.
+        One already in the library keeps its runs and its name, and becomes theirs."""
+        entry_id = plan_id(text)
+        with _LOCK:
+            found = self._read()
+            entry = found.get(entry_id) or {
+                "id": entry_id, "kind": "plan", "name": plain_name(name), "added": time.time(), "used": None,
+                "count": 0, "runs": [], "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text,
+                "summary": about}
+            entry.update(source="labview", vi=str(vi), path=str(path))
+            found[entry_id] = entry
+            self._keep(found)
+            self._write(found)
+            return entry
 
     def add_script(self, path: Any) -> Dict[str, Any]:
         """A script a person imported (its path, checked by the caller): it may run from now on. One already in the
