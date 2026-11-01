@@ -411,22 +411,73 @@ class _ReadingGate:
             return self._rt.gate.fixed_range(inst, spec)
 
 
-class _SeenLab:
-    """The lab, for the scan editor's check: a reading is the latest Kelvin has seen of it (LabRuntime._kept, else what
-    Kelvin set), never asked of the instrument; ValueError when Kelvin hasn't seen it."""
+SENDS_NOTHING = "the scan editor's check sends nothing to an instrument"
 
-    def __init__(self, gate: "_SeenGate"):
-        self._gate = gate
+
+class _Data:
+    """What a check may look at of an object of the lab (an instrument's connection: a pulse generator's limits, a
+    twin's state): its data, never a method that could send something (AttributeError, as for one it hasn't)."""
+
+    def __init__(self, obj: Any):
+        self._obj = obj
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._gate._rt.lab, name)
+        value = getattr(object.__getattribute__(self, "_obj"), name)
+        if callable(value):
+            raise AttributeError("%s: %s" % (name, SENDS_NOTHING))
+        return value
+
+
+class _SeenInstrument(_Data):
+    """An instrument, for the scan editor's check: its card, limits, rates and guards as they are; a reading is the
+    latest Kelvin has seen of it (_SeenGate.seen), never asked, and ValueError (not known) when Kelvin hasn't seen
+    it; anything that would send it something (a set, an action, a command) is refused. Every helper a plan's check
+    calls (a pulse generator's sequence, a ramp's rate, a source's range) gets this, never the instrument."""
+    PURE = ("spec", "limits", "limits_source", "limits_where", "rate", "guards")   # its card's and the lab's, as set
+
+    def __init__(self, gate: "_SeenGate", inst: Any):
+        super().__init__(inst)
+        self._gate = gate
+        self.backend = _Data(inst.backend)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in self.PURE:
+            return getattr(self._obj, name)
+        return super().__getattr__(name)
+
+    def read(self, param: str) -> Any:
+        self._obj.spec(param)   # KeyError for a parameter its card hasn't, as a reading says
+        value = self._gate.seen(self._obj, param)
+        if value is None:
+            raise ValueError("%s.%s: not known (Kelvin hasn't read it yet)" % (self._obj.name, param))
+        return value
+
+
+class _SeenLab(_Data):
+    """The lab, for the scan editor's check: its instruments as _SeenInstrument, so whatever the check asks of one is
+    the latest Kelvin has seen of it, never asked of the instrument; nothing is sent to any (a lab's method that
+    could, refused)."""
+
+    def __init__(self, gate: "_SeenGate"):
+        super().__init__(gate._rt.lab)
+        self._gate = gate
+        self.instruments = {name: _SeenInstrument(gate, inst) for name, inst in self._obj.instruments.items()}
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "away":   # why an instrument isn't in use (switched off, not connected): nothing is sent
+            return self._obj.away
+        return super().__getattr__(name)
+
+    def instrument(self, name: str) -> Any:
+        self._obj.instrument(name)   # an unknown or switched-off one is refused as the lab refuses it
+        return self.instruments[name]
+
+    def resolve(self, key: str) -> Tuple[Any, ParamSpec]:
+        _, spec = self._obj.resolve(key)
+        return self.instruments[key.partition(".")[0]], spec
 
     def read(self, instr: str, param: str) -> Any:
-        inst = self._gate._rt.lab.instrument(instr)
-        value = self._gate.seen(inst, param)
-        if value is None:
-            raise ValueError("%s.%s: Kelvin hasn't read it yet" % (instr, param))
-        return value
+        return self.instrument(instr).read(param)
 
 
 class _SeenGate(_ReadingGate):

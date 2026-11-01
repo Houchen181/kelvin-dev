@@ -234,6 +234,52 @@ def test_the_check_says_points_time_and_whats_wrong_reading_no_instrument(ran, m
     assert asked == []
 
 
+def test_every_helper_the_check_calls_gets_what_kelvin_has_seen_never_an_instrument(ran, monkeypatch):
+    """A pulse generator's sequence (is it playing, its times), a ramp's rate, a source's fixed range, a stage's
+    velocity and a counter's integration: each read as Kelvin last saw it, or not known; a pulse generator was asked
+    OUTPut? in the middle of a run."""
+    from labharness.agent.runtime import _SeenGate
+    from labharness.instrument import Instrument
+    rt, _ = ran
+    asked = []
+
+    def no(inst, fn, *args, **kw):
+        asked.append((inst.name, args))
+        raise AssertionError("the editor's check asked an instrument")
+    monkeypatch.setattr(Instrument, "_io", no)
+    with rt._readings_lock:
+        rt._readings.pop("pg", None)                                 # never seen: is it playing? not known
+    parts = rt.scan_parts()["parts"]
+    parts.update(measure=["counter.contrast"], loops=[dict(scanedit._blank("pg.tau", "values"), values=[1e-7, 1e-3])])
+    assert rt.scan_check(parts)["problems"] == []                   # taken as not playing; the queue reads it
+    rt._keep("pg", {"running": True, "protocol": "rabi", "t_laser": 3e-6, "t_wait": 1e-6}, "read")
+    playing = rt.scan_check(parts)                                   # seen playing: every tau checked, as seen
+    assert playing["problems"] == ["pg at tau = 1 ms: the microwave is on 100% of the time, above the lab's 50% limit "
+                                   "(heating): lengthen t_wait or shorten the MW pulses"], playing
+    rt._keep("magnet", {"B_actual": 0.0, "rate": 0.5}, "read")
+    parts.update(loops=[dict(scanedit._blank("magnet.B", "ramp"), legs=[{"to": 1}], every=10)], measure=["smu.I"])
+    assert rt.scan_check(parts)["points"] == 13                      # 1 T at the 0.5 T/min it reads
+    rt._keep("smu", {"V_autorange": False, "V_range": 2.1}, "read")
+    parts["loops"] = [dict(scanedit._blank("smu.V", "values"), values=[0, 5]),
+                      dict(scanedit._blank("stage.position", "values"), values=[0, 1])]
+    assert any("beyond its fixed range (2.1 V)" in p for p in rt.scan_check(parts)["problems"])
+    assert asked == []
+
+    lab = _SeenGate(rt).lab                                          # what the plan code gets for the lab
+    pg = lab.instruments["pg"]
+    assert lab.resolve("pg.tau")[0] is pg and lab.instrument("pg") is pg and pg.read("running") is True
+    assert pg.limits("tau") == (0.0, 0.01) and pg.card.id == "virtual/pulse-generator"
+    with rt._readings_lock:
+        rt._readings.pop("counter", None)
+    with pytest.raises(ValueError, match="not known"):
+        lab.read("counter", "contrast")
+    for send in ("write", "act", "query_raw", "write_raw", "_io", "instrument_error"):
+        assert not hasattr(pg, send), send
+    assert isinstance(pg.backend.state, dict) and not hasattr(pg.backend, "query")
+    assert not hasattr(lab, "snapshot") and not hasattr(lab, "health_check") and lab.away("pg") is None
+    assert asked == []
+
+
 def test_an_edited_scan_is_a_new_entry_and_the_old_one_stays(ran):
     rt, entry = ran
     marks = {"project": "p1", "confidential": True}
