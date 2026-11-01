@@ -957,9 +957,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
         compute, look_at, plot_runs, fit_run, run_python, reports, the automatic fits): another program's tables
         (CSV, TSV, text, Excel .xlsx; dates become seconds, text columns are left out; a long x, y, value table of a
         2-D scan becomes a 2-D run), makers' files (BioLogic .mpt and .mpr, Gamry .dta, Arbin's CSV and Excel
-        exports, LabVIEW's .lvm, LightField's .spe), NumPy's .npy and .npz, and TIFF images (a camera frame, or a
-        stack: a point per frame). paths: the files' full paths, ';' between several, or a folder of data files (up
-        to 20); files with the same x values go side by side into
+        exports, LabVIEW's .lvm and .tdms (TDMS needs npTDMS: when it isn't installed, the message says how to
+        install it, once the person approves), LightField's .spe), NumPy's .npy and .npz, and TIFF images (a camera
+        frame, or a stack: a point per frame). paths: the files' full paths, ';' between several, or a folder of data
+        files (up to 20); files with the same x values go side by side into
         one run, to compare, normalise or subtract them with compute. name: the run's name. Only numbers are read.
         Data files a person attaches in the chat are imported as they attach them."""
         return rt.import_data(paths, name)

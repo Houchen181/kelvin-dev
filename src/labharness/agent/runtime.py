@@ -2061,7 +2061,7 @@ class LabRuntime:
 
     def import_data(self, paths: Any, name: str = "") -> str:
         """Files Kelvin didn't measure, as a run (imports.py): another program's tables (CSV, TSV, text, Excel),
-        makers' files (BioLogic .mpt/.mpr, Gamry .dta, Arbin's exports, LabVIEW .lvm, LightField .spe), NumPy
+        makers' files (BioLogic .mpt/.mpr, Gamry .dta, Arbin's exports, LabVIEW .lvm and .tdms, LightField .spe), NumPy
         arrays and TIFF images (camera frames); several with the same x values side by side in one run, to compare
         or subtract.
         A folder stands for its data files. What a person put in the data folder's runs is theirs to import

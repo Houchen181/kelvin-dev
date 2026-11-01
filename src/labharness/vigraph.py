@@ -932,21 +932,18 @@ class _Reader:
         subs = self.g.subdiagrams(n)
         rng: Dict[str, Any] = {}
         until = ""
+        values = self.loop_values.get(n.uid)
+        if values is not None:   # each value of an array: a ramp's range, else the array
+            rng = self.ramp(values) or {"values": self.origin(values, set()).source()}
         if kind == "for":
-            values = self.loop_values.get(n.uid)
             limit = self.g.resolve(n.get("loopLimitDCO"))
             count = self.g.ends(limit)[-1] if limit is not None and self.g.ends(limit) else None
-            if values is not None:
-                rng = {"values": self.origin(values, set()).source()}
-            elif count is not None and count in self.g.source:
+            if values is None and count is not None and count in self.g.source:
                 rng = {"count": self.origin(count, set()).source()}
         else:
             test = self.g.inner_term(self.g.resolve(n.get("loopTestDCO")))
             cond = self.origin(test, set()) if test is not None else computed("nothing")
             until = self.condition(cond)
-            values = self.loop_values.get(n.uid)
-            if values is not None:
-                rng = {"values": self.origin(values, set()).source()}
         parallel = n.get("ParForWorkers") is not None or any(
             o.kind == "parForWorkers" for o in n.kids)
         out = {"node": "loop", "kind": kind, "var": var, "range": rng, "until": until, "parallel": parallel,
@@ -955,6 +952,65 @@ class _Reader:
             out["timed"] = True
         machine = self.state_machine(n, subs[0] if subs else None)
         return machine or out
+
+    def ramp(self, term: int) -> Optional[Dict[str, Any]]:
+        """The range of an array a loop takes value by value, when LabVIEW's Ramp Pattern made it: by Delta
+        {from, to, step}, by Samples {from, to, points} (its inputs in the order of its terminals: start, end, then
+        delta; samples is the whole number). None for any other array, or a ramp whose inputs aren't all wired."""
+        node, level = None, 0
+        src = self.g.source.get(term)
+        while src is not None and level < MAX_DEPTH:   # back through the tunnels it comes in by
+            dco = self.g.term_dco.get(src)
+            if dco is not None and dco.kind in TUNNELS and dco.kind not in ("lSR", "rSR"):
+                ends = self.g.ends(dco)
+                if not ends or src == ends[-1]:
+                    return None
+                src, level = self.g.source.get(ends[-1]), level + 1
+                continue
+            node = self.g.term_node.get(src)
+            break
+        if node is None or node.kind not in CALLS:
+            return None
+        name, _ = self._call_name(node)
+        if "ramp pattern" not in name.lower():
+            return None
+        instance = (self._menu(node) or name).lower()
+        ins = [t for t in self.g.terms(node) if t in self.g.source and not self._is_error(t)]
+        if any(self._type(t) == "bool" and self.origin(t, set()).value is not False for t in ins):
+            return None   # exclude end? set, or worked out: no plain range
+        numbers = [t for t in ins if self._type(t) == "number"]
+        whole = [t for t in numbers if self._numeric(t)[:1] in ("I", "U")]
+        real = [t for t in numbers if t not in whole]
+        if "delta" in instance and len(real) == 3 and not whole:
+            start, end, step = (self.origin(t, set()).source() for t in real)
+            return {"from": start, "to": end, "step": step}
+        if "delta" not in instance and len(real) == 2 and len(whole) == 1:
+            start, end = (self.origin(t, set()).source() for t in real)
+            return {"from": start, "to": end, "points": self.origin(whole[0], set()).source()}
+        return None
+
+    def _numeric(self, term: int) -> str:
+        dco = self.g.term_dco.get(term)
+        p = vifile.plain(self.vi.types.of_heap(dco.number("typeDesc"))) if dco is not None else None
+        return p.numeric if p is not None else ""
+
+    def _menu(self, node: Obj) -> str:
+        """The instance a polymorphic VI's call shows in its selector ("Ramp by Delta")."""
+        sel = node.get("instanceSelector")
+        if sel is None:
+            return ""
+        buf = next((o.value for o in sel.walk() if o.tag == vifile.TAG["buf"] and isinstance(o.value, bytes)), b"")
+        names, at = [], 0
+        while at < len(buf):
+            try:
+                name, at = vifile._pascal(buf, at)
+            except vifile.ReadError:
+                break
+            names.append(name)
+        used = node.number("menuInstanceUsed") or 0
+        if used <= 0:   # Automatic: the instance it was given (after Automatic and the separator)
+            used = 2 + (node.number("preferredInstIndex") or 0)
+        return names[used] if 0 <= used < len(names) else ""
 
     def condition(self, cond: Val) -> str:
         if cond.kind == "control":
@@ -1288,7 +1344,10 @@ class _Reader:
                                "diagram": [], "unread": list(vi.unread)}
         for ln in vi.links:
             if ln.kind in ("vi", "control", "library", "class", "dll", "xcontrol"):
-                out["linkage"].append(self.link(ln.name, ln.where))
+                entry = self.link(ln.name, ln.where)
+                if ln.kind == "library" and not entry.get("library"):   # the library itself (a driver's .lvlib)
+                    entry = dict(entry, library=ln.name, vi="")
+                out["linkage"].append(entry)
         if vi.panel is not None:
             out["read"] = "panel"
             out["controls"] = [_control(c) for c in vi.controls]

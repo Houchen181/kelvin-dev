@@ -7,8 +7,8 @@ be installed), and nothing is sent to an instrument.
                 [DAQmxDevice ...] sections), as MAX's own database needs NI's software to read
     projects    each LabVIEW project (.lvproj, XML): its VIs, libraries, dependencies and hardware targets, and the
                 instrument drivers it uses (maker and model, as the driver library's name says them)
-    VIs         each VI's summary (the layout below), from read_vi(): until Kelvin reads VIs, a VI has its name and
-                path only, "not read yet"
+    VIs         each VI's summary (the layout below), from read_vi(): read from the VI's own file as bytes (vifile.py,
+                vigraph.py), the VIs a VI library (.llb) holds too; what couldn't be read is said, in unread
 
 survey() gathers them by instrument, in the script survey's form (scripts.Instrument, its card by scripts.match),
 for the same review in Set up.
@@ -504,9 +504,17 @@ def validate(summary: Any) -> List[str]:
 
 
 def read_vi(path: Any) -> Dict[str, Any]:
-    """A VI's summary. Kelvin doesn't read VIs yet (their blocks: linkage, front panel, block diagram): until it does,
-    the summary has the VI's name and path, and says it was not read yet."""
-    return vi(path)
+    """A VI's summary, read from its own file as bytes, never run (vigraph.summary: its linkage, front panel and
+    block diagram, the commands its drivers send when they are beside it), each linked driver library's maker and
+    model by link(). A file that can't be read gives a summary that says why (read "no")."""
+    from .vigraph import summary
+    return summary(path, link=link)
+
+
+def read_library(path: Any) -> List[Dict[str, Any]]:
+    """The summary of each VI a VI library (.llb) holds; its path is the library's, then the VI's name."""
+    from .vigraph import summaries
+    return summaries(path, link=link)
 
 
 # ------------------------------------------------------------------ values in a summary
@@ -689,10 +697,16 @@ class Survey:
                                                 else ""))
             if t is not None:
                 lines += ["    " + x for x in _scan_lines(t)]
-        if unread:
-            names = ", ".join(s["name"] for s in unread[:MAX_SHOWN])
-            lines.append("  %s: %s%s" % (NOT_READ_YET, names, " and %d more" % (len(unread) - MAX_SHOWN)
-                                          if len(unread) > MAX_SHOWN else ""))
+        later = [s for s in unread if s.get("unread") == [NOT_READ_YET]]
+        if later:
+            names = ", ".join(s["name"] for s in later[:MAX_SHOWN])
+            lines.append("  %s: %s%s" % (NOT_READ_YET, names, " and %d more" % (len(later) - MAX_SHOWN)
+                                          if len(later) > MAX_SHOWN else ""))
+        failed = [s for s in unread if s.get("unread") != [NOT_READ_YET]]
+        if failed:   # files that aren't VIs Kelvin reads, damaged ones: each with why
+            lines.append("  not read: " + "; ".join("%s (%s)" % (s["name"], "; ".join(s.get("unread") or [])[:160])
+                                                     for s in failed[:MAX_SHOWN]) +
+                         (" and %d more" % (len(failed) - MAX_SHOWN) if len(failed) > MAX_SHOWN else ""))
         if self.driver_vis:
             lines.append("  %d VIs in LabVIEW's library folders (drivers), not listed" % self.driver_vis)
         if self.skipped:
@@ -846,6 +860,16 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), visaconf: A
         if wrong:
             s = vi(f, read="no", unread=["not read: " + "; ".join(wrong[:3])])
         out.vis.append(s)
+    for lib, in_lib in files["libraries"] if read is None else []:   # the lab's VI libraries: the VIs they hold
+        if in_lib or lib.suffix.lower() != ".llb" or len(out.vis) >= MAX_VIS:
+            continue
+        try:
+            held = read_library(lib)
+        except Exception as e:
+            held = [vi(lib, read="no", unread=["not read: %s" % (str(e).splitlines()[0][:160] or type(e).__name__)])]
+        for s in held[:MAX_VIS - len(out.vis)]:
+            out.vis.append(s if not validate(s) else vi(s.get("path") or lib, read="no",
+                                                         unread=["not read: " + "; ".join(validate(s)[:3])]))
     out.drivers = list(drivers.values())
     out.instruments = _instruments(out, registry)
     return out

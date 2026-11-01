@@ -1,6 +1,8 @@
 """A lab that runs LabVIEW switches to Kelvin directly (Set up → From your LabVIEW…): its LabVIEW folder and NI MAX
 read (no VI is run), its instruments proposed through the same review as the script survey, each measurement VI read
 translated into a scan and kept in the person's library; and Kelvin reading the same in a chat (survey_labview)."""
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("starlette")
@@ -97,3 +99,26 @@ def test_kelvin_reads_the_labview_as_text_from_outside_the_lab(tmp_path, lab_vis
     assert "not read yet: Main.vi" in result and "scan iv_sweep: smu.V 0 → 1 V, 11 points" in result
     assert "The scans name them: smu (GPIB0::24::INSTR, keithley/2400)" in result and "Never run a VI" in result
     assert chat["outside"] == "the lab's LabVIEW files"                 # auto mode asks until the person writes
+
+
+def test_real_vis_are_read_by_kelvins_own_reader_in_set_up(bench, monkeypatch, tmp_path):
+    """A lab's folder of real VIs (an Aim-TTi CPX400SP power supply's, tests/fixtures/labview): each read from its
+    bytes, the driver its linkage names proposed, and why its scans can't be kept yet said: no address is saved."""
+    (runtime, settings, store), bus, home = bench
+    monkeypatch.setattr(labview, "VISACONF", tmp_path / "no NI-VISA" / "visaconf.ini")
+    folder = Path(__file__).parent / "fixtures" / "labview" / "aim_tti_cpx400sp"
+    client, headers = client_for((runtime, settings, store), {"scripted": Scripted([])})
+    with client:
+        view = client.post("/api/instruments/labview", json={"folder": str(folder)}, headers=headers).json()
+        vis = {v["name"]: v for v in view["vis"]}
+        assert {(n, v["read"], v["measures"]) for n, v in vis.items()} == {
+            ("set_v.vi", "full", True), ("get_set_v.vi", "full", True), ("measure_v.vi", "full", True)}
+        assert vis["set_v.vi"]["labview"] == "LabVIEW 2018 (18.0)" and vis["set_v.vi"]["unread"] == []
+        driver = next(i for i in view["instruments"] if "Aim-TTi CPX400SP.lvlib" in i["calls"])
+        assert driver["address"] == "" and "CPX400SP" in driver["hints"]   # its address is set as the VI runs
+        scan = vis["set_v.vi"]["scan"]
+        assert scan["gaps"] == ["VISA write to ?: V{Channel} {Voltage}: no instrument of the lab is at ?",
+                                "it reads nothing Kelvin can measure, so it is no scan"]
+        kept = client.post("/api/instruments/labview/scans", json={"folder": str(folder), "vis": [
+            vis["set_v.vi"]["path"]], "instruments": []}, headers=headers).json()
+        assert kept["kept"] == [] and kept["not"][0]["gaps"] == scan["gaps"]

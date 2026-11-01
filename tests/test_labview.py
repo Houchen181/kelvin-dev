@@ -185,7 +185,10 @@ def test_a_vi_summary_is_plain_json_and_checked():
     assert json.loads(json.dumps(s)) == s and lv.validate(s) == []
     assert s["controls"][0] == {"name": "Start (V)", "type": "number", "unit": "V", "default": 0.0, "choices": [],
                                 "indicator": False}
-    assert lv.read_vi("C:/Lab/Main.vi") == lv.vi("C:/Lab/Main.vi") and lv.read_vi("x.vi")["unread"] == ["not read yet"]
+    assert lv.vi("C:/Lab/Main.vi")["unread"] == ["not read yet"]
+    gone = lv.read_vi("C:/Lab/Main.vi")   # the real reader (vigraph.py): a file it can't read says why
+    assert gone["read"] == "no" and gone["unread"][0].startswith("not read: it can't be read") and \
+        lv.validate(gone) == []
     assert lv.range_values(s["diagram"][2]["range"], lv.controls_of(s))[-1] == 1.0
     assert len(lv.range_values(s["diagram"][2]["range"], lv.controls_of(s))) == 11
     bad = dict(s, summary=2, read="most", controls=[{"name": "x"}],
@@ -312,7 +315,7 @@ def test_what_doesnt_translate_is_said_and_never_guessed(cards):
     assert t["plan"] is None and t["gaps"] == [
         "While loop over i: it runs until Stop button; a scan needs its end (a range, or time: for:)"]
     assert "2 loops one after another" in scan(sweep, sweep)["gaps"][0]
-    t = viscan.translate(lv.read_vi("C:/Lab/x.vi"), lab)
+    t = viscan.translate(lv.vi("C:/Lab/x.vi"), lab)
     assert t["plan"] is None and t["gaps"] == ["its block diagram isn't read (not read yet)"]
     t = scan(lv.node("write", resource="GPIB0::24::INSTR", text=":SENS:CURR:PROT {c}", values={"c": lv.reading("I")}),
              lv.loop("V", [lv.node("query", resource="GPIB0::24::INSTR", text=":READ?"),
@@ -368,7 +371,8 @@ def test_the_survey_reads_max_projects_and_vis_never_running_one(tmp_path, cards
     found = lv.survey(root, cards["registry"])
     assert found.max["files"] == [str(root / "visaconf.ini"), str(root / "max export.ini")]
     assert [s["name"] for s in found.vis] == ["Main.vi", "IV sweep.vi"] and found.driver_vis == 1
-    assert all(s["read"] == "no" and s["unread"] == ["not read yet"] for s in found.vis)
+    assert all(s["read"] == "no" and s["unread"] == ["not read: it is cut short (4 bytes): only the start of a "
+                                                     "LabVIEW file"] for s in found.vis)   # each said, with why
     rows = {i.address or i.calls[0]: i for i in found.instruments}
     assert rows["GPIB0::24::INSTR"].names == ["SMU"] and rows["GPIB0::24::INSTR"].card is None   # SMU names no model
     assert rows["GPIB0::8::INSTR"].card["id"] == "srs/sr830"                # its alias names the model
@@ -383,7 +387,7 @@ def test_the_survey_reads_max_projects_and_vis_never_running_one(tmp_path, cards
     assert view["kind"] == "labview" and view["projects"][0]["drivers"] == ["Keithley 2400 Series.lvlib"]
     assert view["projects"][0]["targets"] == ["cRIO-9068"] and found.translations({}) == {}
     text = found.text()
-    assert "never run" in text and "not read yet: Main.vi, IV sweep.vi" in text
+    assert "never run" in text and "not read: Main.vi (not read: it is cut short (4 bytes)" in text
     assert "target cRIO-9068 (RT CompactRIO, 192.168.1.20): modules NI 9215: its VIs run there" in text
 
     def reader(path):   # a reader that reads the I-V sweep (until Kelvin's own does)

@@ -110,6 +110,8 @@ def text_encoding(name: str) -> Iterator[None]:
 def container(raw: bytes) -> Container:
     """The blocks of a resource file. ReadError: not one, or its block list is damaged (a block whose data is
     damaged is listed in problems, the rest kept)."""
+    if raw[:4] == b"RSRC" and len(raw) < 32:
+        raise ReadError("it is cut short (%d bytes): only the start of a LabVIEW file" % len(raw))
     if len(raw) < 32 or raw[:6] != b"RSRC\r\n":
         raise ReadError("it isn't a LabVIEW file (no RSRC header)")
     out = Container(KINDS.get(raw[8:12], "other (%s)" % raw[8:12].decode("latin-1", "replace").strip("\x00 ")))
@@ -387,7 +389,7 @@ TAG = {"root": 214, "nodeList": 164, "diagramList": 63, "termList": 268, "signal
        "seqLocDCOList": 229, "inArrDCO": 111, "outputDCO": 180, "conPane": 38, "name": 361,
        "kSLHDefaultValueMatchesCtlVI": 624, "buf": 15, "ringSparseValues": 459, "dcoList": 51, "permDCOList": 197,
        "dcoAgg": 49, "srcDCO": 244, "outputNode": 181, "preferredInstIndex": 201, "paramIdx": 189,
-       "libPath": 133}
+       "libPath": 133, "instanceSelector": 122, "menuInstanceUsed": 149}
 SYS_ELEMENT = -6
 ATTR_CLASS, ATTR_UID, ATTR_ELEMENTS = -2, -3, -5
 CLASSES = {1: "textHair", 0: "fontRun", 10: "label", 13: "multiLabel", 14: "bigMultiLabel", 18: "fPDCO",

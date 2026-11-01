@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from labharness import vifile, vigraph
+from labharness import labview, vifile, vigraph, viscan
+from labharness.homelab import builtin_registry
 
 FIXTURES = Path(__file__).parent / "fixtures" / "labview"
 AIM = FIXTURES / "aim_tti_cpx400sp" / "Public"
@@ -145,8 +146,8 @@ def test_a_drivers_write_is_read_with_the_values_the_diagram_fills_in():
                              "text": "V{Channel} {Voltage}",   # "V" + channel + Space Constant.vi + the number
                              "values": {"Channel": {"control": "Channel"}, "Voltage": {"control": "Voltage (V)"}}}]
     assert s["scpi"] == ["V{Channel} {Voltage}"]
-    assert {"name": "Aim-TTi CPX400SP.lvlib", "library": "", "vi": "Aim-TTi CPX400SP.lvlib", "where": "instr.lib",
-            "maker": "", "model": ""} in s["linkage"]
+    assert {"name": "Aim-TTi CPX400SP.lvlib", "library": "Aim-TTi CPX400SP.lvlib", "vi": "", "where": "instr.lib",
+            "maker": "", "model": ""} in s["linkage"]   # the library it belongs to: a driver's
 
 
 def test_a_write_then_a_read_of_one_resource_is_a_query_into_the_indicator_it_shows():
@@ -163,7 +164,8 @@ def test_an_iv_sweep_is_read_with_its_drivers_commands_from_the_vis_beside_it():
     outer = next(n for n in top if n["node"] == "loop")
     inner = next(n for n in outer["body"] if n["node"] == "loop")
     assert (outer["kind"], outer["var"], inner["var"]) == ("while", "i", "j")
-    assert "Ramp Pattern.vi" in inner["range"]["values"]["computed"]
+    assert inner["range"] == {"from": {"control": "Starting Voltage (V)"}, "to": {"control": "Stopping Voltage (V)"},
+                              "step": {"control": "Voltage Interval  (DV)"}}   # the ramp each value comes from
     calls = [n for n in inner["body"] if n["node"] == "call"]
     # a polymorphic VI's call is the instance it uses, read from beside the VI, its inputs named by its own panel
     drain = calls[0]
@@ -258,11 +260,54 @@ def test_text_is_read_in_the_encoding_the_vi_was_saved_in():
 
 
 def test_summaries_fit_the_layout_the_labview_survey_takes():
-    labview = pytest.importorskip("labharness.labview")   # phase A's: the survey and the translation
     for p in sorted(FIXTURES.rglob("*.vi")):
-        s = vigraph.summary(p, link=labview.link)
+        s = labview.read_vi(p)   # the survey's reader is this one
         assert labview.validate(s) == [], p.name
-    assert labview.measures(vigraph.summary(AIM / "set_v.vi", link=labview.link))
+        assert s == vigraph.summary(p, link=labview.link)
+    driver = next(e for e in labview.read_vi(AIM / "set_v.vi")["linkage"] if e["name"] == "Aim-TTi CPX400SP.lvlib")
+    assert (driver["where"], driver["model"]) == ("instr.lib", "CPX400SP")   # maker and model, as labview.link says
+
+
+def test_the_survey_reads_a_labs_real_vis_and_their_drivers(monkeypatch):
+    monkeypatch.setattr(labview, "VISACONF", FIXTURES / "no NI-VISA here" / "visaconf.ini")
+    found = labview.survey(KEYSIGHT, builtin_registry())
+    read = {s["name"]: s["read"] for s in found.vis}
+    assert read == {"SMU_IV single.vi": "full", "Configure Channel.vi": "panel", "Read Output.vi": "panel",
+                    "Configure Channel (Current).vi": "full", "Configure Channel (Voltage).vi": "full",
+                    "Configure Output.vi": "full", "Read Output (Single).vi": "full"}
+    driver = next(i for i in found.instruments if "Agilent U2722.lvlib" in i.calls)   # its driver, from the linkage
+    assert driver.address == "" and "U2722" in driver.hints
+    view = {v["name"]: v for v in found.view()["vis"]}
+    assert view["SMU_IV single.vi"]["measures"] and not view["Configure Channel.vi"]["measures"]
+    text = found.text()
+    assert "SMU_IV single.vi (LabVIEW 2022 (22.3)): read full" in text
+    assert "it is a polymorphic VI" in text
+
+
+def test_a_real_iv_sweep_translates_as_far_as_its_vi_says_and_names_the_rest():
+    s = labview.read_vi(KEYSIGHT / "SMU_IV single.vi")
+    t = viscan.translate(s, {})
+    assert t["plan"] is None   # no address is saved with the VI: the person picks the instrument in Set up
+    assert "Agilent U2722.lvlib:Configure Output.vi on ?: :OUTP 1,(@{Drain_Source_Channel}): no instrument of the lab " \
+           "is at ?" in t["gaps"]   # the command its driver sends, read from the driver beside the VI
+    assert "calls Agilent U2722.lvlib:Initialize.vi: what it sends to the instrument isn't known" in t["gaps"]
+    assert "While loop over i (from Starting Voltage (V) 2 = 0 to Stopping Voltage (V) 2 = 1, step Voltage " \
+           "Interval 2 (DV) = 0): nothing it sets follows its value" in t["gaps"]
+    loop = next(n for n in s["diagram"] if n["node"] == "loop")
+    assert loop["range"] == {"from": {"control": "Starting Voltage (V) 2"}, "to": {"control": "Stopping Voltage (V) 2"},
+                             "step": {"control": "Voltage Interval 2 (DV)"}}   # LabVIEW's Ramp Pattern by Delta
+    assert labview.range_values({"from": {"value": 0.0}, "to": {"value": 1.0}, "step": {"value": 0.5}}, {}) == \
+        [0.0, 0.5, 1.0]
+
+
+def test_a_vi_library_in_the_labs_folder_has_its_vis_surveyed(tmp_path, monkeypatch):
+    monkeypatch.setattr(labview, "VISACONF", tmp_path / "no NI-VISA here" / "visaconf.ini")
+    (tmp_path / "Lab").mkdir()
+    (tmp_path / "Lab" / "Power supply.llb").write_bytes(rsrc([(b"UCRF", [(0, "set_v.vi", (AIM / "set_v.vi").read_bytes())])],
+                                                             kind=b"LVAR"))
+    found = labview.survey(tmp_path / "Lab", builtin_registry())
+    assert [(s["name"], s["read"]) for s in found.vis] == [("set_v.vi", "full")]
+    assert found.vis[0]["path"].endswith("Power supply.llb/set_v.vi")
 
 
 def test_every_downloaded_vi_reads_without_an_error():
