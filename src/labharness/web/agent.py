@@ -2380,7 +2380,11 @@ class ChatAgent:
             try:
                 made = self.runtime.import_attached(path, name, self._attribution(chat))
             except imports.DataError as e:
-                raise ValueError("Not imported: %s" % e)
+                from .. import envs
+                need = envs.needed(str(e))   # a reader Kelvin installs on demand (npTDMS for .tdms): say how
+                raise ValueError("Not imported: %s%s" % (envs.for_people(str(e)), (
+                    " Ask Kelvin to install %s: you approve the download, then attach the file again."
+                    % " and ".join(need["packages"])) if need else ""))
             except OSError as e:
                 raise ValueError("Not imported: %s" % (e.strerror or e))
         return {"name": name, "file": self.store.put_media(chat_id, data, "dat"), "mime": "application/octet-stream",
