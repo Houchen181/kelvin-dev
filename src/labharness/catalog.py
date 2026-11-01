@@ -361,10 +361,9 @@ def _read_only(action: int, a: Any, b: Any, db: Any, trigger: Any) -> int:
 
 def _h5_stats(folder: Path) -> Dict[str, Dict[str, Any]]:
     """Each column's statistics straight from run.h5 (no rows read into Python)."""
-    import h5py
     import numpy as np
     out: Dict[str, Dict[str, Any]] = {}
-    with h5py.File(folder / rundata.RUN_FILE, "r") as f:
+    with rundata.h5_file(folder / rundata.RUN_FILE, "r") as f:
         for key, ds in rundata.datasets(f.get("points")):   # each by its column's key (rundata.h5_name)
             if ds.dtype.kind not in ("f", "i", "u"):
                 continue

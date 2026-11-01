@@ -1239,9 +1239,8 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
     for as attributes, the values, errors and covariance, and the points with the model and residuals at each. Who
     kept it (by: the agent or a person; account: the person signed in, when people sign in) and when (stored) go with
     it, for the run's reports; so does why it failed (failed), for a failed fit kept on purpose."""
-    import h5py
     np = _np()
-    from .rundata import RUN_FILE
+    from .rundata import RUN_FILE, h5_file
     name = fit_name(name) or result["model"]
     path = Path(folder) / RUN_FILE
     data = {k: np.asarray(result[k], dtype=float) for k in ("x", "y", "fit", "residuals") if result.get(k) is not None}
@@ -1262,7 +1261,7 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
     last: Optional[Exception] = None
     for _ in range(20):   # another reader may hold the file for a moment
         try:
-            with _STORE, h5py.File(path, "r+") as f:
+            with _STORE, h5_file(path, "r+") as f:
                 fits = f.require_group("fits")
                 if name in fits:
                     del fits[name]
@@ -1283,13 +1282,12 @@ def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any],
 def stored(folder: Path, with_data: bool = False) -> List[Dict[str, Any]]:
     """The fits kept in a run's run.h5, oldest first (attributes read back as values). Read while no fit is being
     kept in this Kelvin: one thread at a time has the file."""
-    from .rundata import RUN_FILE, have_h5
+    from .rundata import RUN_FILE, h5_file, have_h5
     path = Path(folder) / RUN_FILE
     if not path.exists() or not have_h5():
         return []
-    import h5py
     out = []
-    with _STORE, h5py.File(path, "r") as f:
+    with _STORE, h5_file(path, "r") as f:
         for name, g in (f["fits"].items() if "fits" in f else []):
             item: Dict[str, Any] = {"name": name}
             for k, v in g.attrs.items():

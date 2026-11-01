@@ -1,7 +1,16 @@
 """Each run's data: the record kept while measuring (nothing measured is lost to a crash), run.h5, older runs
 upgraded, the catalog of every run, and the AI's tools to find runs and compute from them."""
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
 import pytest
 
+import labharness
 from labharness import ScriptedApprover, rundata
 from simlab import build_virtual_lab
 
@@ -165,6 +174,74 @@ def test_a_new_analysis_updates_run_h5_and_its_card(tmp_path):
     assert rundata.load(folder, with_rows=False).analysis["assessment"] == "a clear peak"
     card = rundata.card(folder)
     assert card["assessment"] == "a clear peak" and card["results"] == ["lockin.X: center 0.25 ± 0.01 V"]
+
+
+def test_as_python_exits_a_run_h5_open_is_finished_and_none_is_opened_after(tmp_path, monkeypatch):
+    """Python's exit (before h5py's own, which takes away how a run.h5's text is read) waits for a run.h5 a thread
+    has open, and no run.h5 is opened after it: a thread on its way to one is told Kelvin is closing."""
+    pytest.importorskip("h5py")
+    monkeypatch.setattr(rundata, "_closing", False)   # as it was again after this test, which ends Kelvin "exiting"
+    folder = crashed_run(tmp_path)
+    rundata.finish(folder)
+    inside, leave, read = threading.Event(), threading.Event(), []
+
+    def reading():
+        with rundata.h5_file(folder / rundata.RUN_FILE) as f:
+            inside.set()
+            leave.wait(10)
+            read.append(json.loads(f.attrs["meta_json"])["status"])
+
+    reader = threading.Thread(target=reading)
+    reader.start()
+    assert inside.wait(10)
+    exiting = threading.Thread(target=rundata._at_exit)
+    exiting.start()
+    deadline = time.monotonic() + 10
+    while not rundata._closing and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert rundata._closing and exiting.is_alive()                  # it waits for the run.h5 open
+    with pytest.raises(OSError, match="Kelvin is closing"):
+        rundata.meta(folder)                                        # and opens none now
+    leave.set()
+    reader.join(10)
+    exiting.join(10)
+    assert not exiting.is_alive() and read == ["interrupted"]
+
+
+def test_runs_read_and_written_in_the_background_as_python_exits_never_crash_it(tmp_path):
+    """Kelvin 0.3.36 in CI on Linux: every test passed, then Python said "Failed to find converter for 8 ->
+    b'PYTHON:OBJECT'" three times and crashed as it exited (a segmentation fault, exit 139). A thread in the
+    background was still reading runs' run.h5 after h5py's own exit had taken away how their text is read: the
+    automatic reports a run rewrites 20 s after it ends (flush_reports), as the tests' last plans did; a tidy, the
+    catalog or a queue ending its run can do the same. Such a thread now finishes the run.h5 it has open first, and
+    opens no other: Python exits as it should, where it hung or crashed (on Windows too)."""
+    pytest.importorskip("h5py")
+    folders = []
+    for k in range(3):
+        folder = crashed_run(tmp_path / str(k))
+        rundata.finish(folder)
+        folders.append(str(folder))
+    code = ("import sys, threading, time\n"
+            "from labharness import rundata\n"
+            "def work():\n"
+            "    n = 0\n"
+            "    while True:\n"
+            "        for folder in sys.argv[1:]:\n"
+            "            n += 1\n"
+            "            try:\n"
+            "                rundata.meta(folder)\n"
+            "                rundata.set_analysis(folder, {'assessment': 'pass %d' % n, 'series': []})\n"
+            "            except Exception:\n"
+            "                pass   # as the catalog does: on to the next run\n"
+            "threading.Thread(target=work, daemon=True).start()\n"
+            "time.sleep(1.0)\n")
+    src = str(Path(labharness.__file__).resolve().parents[1])   # this Kelvin, wherever it is
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in (src, os.environ.get("PYTHONPATH")) if p))
+    done = subprocess.run([sys.executable, "-c", code] + folders, capture_output=True, text=True, errors="replace",
+                          timeout=60, env=env)
+    said = done.stdout + done.stderr
+    assert done.returncode == 0 and "Failed to find converter" not in said, (done.returncode, said[-3000:])
+    assert [rundata.meta(f)["status"] for f in folders] == ["interrupted"] * 3   # each run.h5 whole
 
 
 def test_the_catalog_finds_runs_and_answers_read_only_sql(tmp_path, monkeypatch):
