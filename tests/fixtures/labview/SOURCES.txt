@@ -1,0 +1,22 @@
+LabVIEW files the VI reader's tests read (tests/test_vi_reader.py), unchanged copies of public, openly licensed
+files. Each folder holds its project's licence (LICENSE), whose notice goes with the files.
+
+aim_tti_cpx400sp/   Public/set_v.vi, get_set_v.vi, measure_v.vi (LabVIEW 2018)
+                    https://github.com/jmball/aim-tti-cpx400sp-lvlib at a35a4509b3fafdbae4062f18415ce7e2fcd3c744
+                    MIT licence, Copyright (c) 2020 James Ball
+
+keysight_u2722/     SMU_IV single.vi and six of its driver's VIs, in their folders (LabVIEW 2022)
+                    https://github.com/aranscha/keysight_U2722A_IV_drivers at 8c474478b19b77b7246069a9d7c6bdb47dcac4ee
+                    MIT licence, Copyright (c) 2023 Alexander Ranschaert
+
+jki_state_machine/  Three Button Dialog CORE - JKI.vi, from examples/3 Button Dialog (LabVIEW 2020)
+                    https://github.com/JKISoftware/JKI-State-Machine at df4a757208bcbe8b250fb4e41f5948c2d6926000
+                    BSD 3-clause licence, Copyright (c) 2018, JKI
+
+labolabo2009/       RemoveDuplicates_D.vi, from array/impl (LabVIEW 2009)
+                    https://github.com/ktakagaki/labolabo2009 at 8748d2a2b39cc533442691e18cc49fac3e425223
+                    Apache License 2.0
+
+svs4od/             Loop Counter 2.vi, from SubVIs/General (LabVIEW 8.5)
+                    https://github.com/orbimation/SVS4OD at 3c6fe0751eab2d3f64574aab69e9a2cde0f574fb
+                    MIT licence, Copyright (c) 2021 orbimation

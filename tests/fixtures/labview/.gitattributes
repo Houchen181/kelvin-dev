@@ -1,0 +1,4 @@
+*.vi binary
+*.ctl binary
+*.llb binary
+*.tdms binary
