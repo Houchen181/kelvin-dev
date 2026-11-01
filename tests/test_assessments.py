@@ -337,6 +337,42 @@ def test_a_peak_in_a_few_points_is_a_peak_not_a_line_that_passes_for_noise():
         s = analyze_curve(x.tolist(), (1 + 0.5 * x + rng.normal(0, 0.4, n)).tolist(), "smu.V", "dmm.I", "V", "A")
         assert s["kind"] == "linear" and s["fit"]["r2"] < 0.9, s["summary"]
 
+
+def test_a_long_steady_traces_slow_wander_is_no_shape_and_a_real_bend_still_is():
+    """The review of the bug hunt's fixes (2026-10-31): the F test that keeps a few points' peak from passing for a
+    line found shapes in a long trace's slow wander too (a random walk, 1/f noise): 1200 points "relax
+    exponentially ... (R² 0.150)", 2000 points "curve". A shape must tell most of the curve, stand out of its noise
+    and leave residuals that don't run, as before the fix. A resistance that curves with temperature still bends."""
+    def one_over_f(rng, n):
+        f = np.fft.rfftfreq(n)
+        spec = rng.normal(size=f.size) + 1j * rng.normal(size=f.size)
+        spec[1:] /= np.sqrt(f[1:])
+        spec[0] = 0
+        x = np.fft.irfft(spec, n)
+        return (x - x.mean()) / (x.std() + 1e-15)
+    rng = np.random.default_rng(3)
+    t = np.arange(1200) * 1.0
+    walk = np.cumsum(rng.normal(0, 1, t.size))
+    y = 1e-6 * (1 + 0.01 * (rng.normal(0, 1, t.size) + 0.4 * (walk - walk.mean()) / walk.std()))
+    s = analyze_curve(t.tolist(), y.tolist(), "time", "lockin.X", "s", "V")
+    assert s["kind"] == "linear", s["summary"]   # a slope with its error, R² 0.0x: not "relaxes exponentially"
+    t = np.arange(2000) * 0.5
+    rng = np.random.default_rng(1004)
+    white = rng.normal(0, 1, t.size)
+    y = 2.5e-3 * (1 + 0.002 * (white + 0.4 * one_over_f(rng, t.size)))
+    s = analyze_curve(t.tolist(), y.tolist(), "time", "nvm.V", "s", "V")
+    assert s["kind"] == "steady", s["summary"]
+    rng = np.random.default_rng(500)   # a drift of 20 sigma, with 1/f noise as large as the white noise
+    white = rng.normal(0, 1, t.size)
+    y = 1.0 + 0.01 * (white + one_over_f(rng, t.size) + 20 * t / t[-1])
+    s = analyze_curve(t.tolist(), y.tolist(), "time", "nvm.V", "s", "V")
+    assert s["kind"] == "linear", s["summary"]
+    rng = np.random.default_rng(2)
+    temp = np.linspace(10, 300, 200)
+    r = 100 + 0.2 * temp + 2e-4 * (temp - 150) ** 2 + rng.normal(0, 3, temp.size)
+    s = analyze_curve(temp.tolist(), r.tolist(), "tc.T_sample", "lockin.R", "K", "ohm")
+    assert s["kind"] == "quadratic", s["summary"]
+
 # ------------------------------------------------------------------ the review of 0.3.34 (2026-10-31)
 
 
