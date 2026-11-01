@@ -15,14 +15,16 @@ for the same review in Set up.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from xml.parsers import expat
 
-from . import scripts
+from . import scripts, vifile
 from .scripts import Command, Instrument, normalize
 
 VISACONF = Path(os.environ.get("PROGRAMDATA") or r"C:\ProgramData") / "National Instruments" / "NIvisa" / "visaconf.ini"
@@ -30,8 +32,10 @@ MAX_INI_BYTES = 2_000_000
 MAX_PROJECT_BYTES = 5_000_000
 MAX_VIS = 3000             # VIs listed from one folder
 MAX_SHOWN = 40             # VIs the model's report names one by one
+MAX_WALKED = 1000          # a loop's values gone through for what its VI sends; more: its first and its extremes
 SKIP_DIRS = {".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv", "venv"}
 LIBRARY_DIRS = {"instr.lib", "vi.lib", "user.lib"}   # LabVIEW's folders of drivers and libraries, copied with the VIs
+LABVIEW_FILES = {".lvproj", ".vi", ".vit", ".lvlib", ".llb", ".lvclass", ".ini"}   # what a survey looks at
 NOT_READ_YET = "not read yet"
 _PORT = re.compile(r"^(?:COM|LPT)\d+$", re.I)        # a port's own name, which NI-VISA gives its serial ports itself
 _WHERE = {"vilib": "vi.lib", "instrlib": "instr.lib", "userlib": "user.lib"}
@@ -51,6 +55,12 @@ _MODEL_WORD = re.compile(r"^[A-Za-z]{0,5}-?\d{2,6}[A-Za-z]{0,4}$")
 
 
 # ------------------------------------------------------------------ NI MAX
+
+def _why(e: BaseException) -> str:
+    """Why a file wasn't read, in a few words: its error's message, or the error's name."""
+    text = getattr(e, "strerror", None) or (str(e).splitlines() or [""])[0]
+    return str(text)[:160] or type(e).__name__
+
 
 def _visa(text: str) -> bool:
     """A VISA resource name (GPIB0::24::INSTR, TCPIP0::host::inst0::INSTR, ASRL3::INSTR...), not a port's name."""
@@ -116,8 +126,17 @@ def read_daqmx(text: str) -> List[Dict[str, str]]:
     return [{"name": n, "model": v} for n, v in models.items() if not re.search(r"(?i)cDAQ-\d", v)]
 
 
+def _head(path: Path, limit: int) -> bytes:
+    """A file's bytes, read no further than limit + 1 (one bigger than limit is so long)."""
+    with open(path, "rb") as f:
+        return f.read(min(os.fstat(f.fileno()).st_size, limit) + 1)
+
+
 def _text(path: Path) -> str:
-    raw = path.read_bytes()[:MAX_INI_BYTES]
+    """An .ini file's text. ValueError: bigger than MAX_INI_BYTES (no NI file is)."""
+    raw = _head(path, MAX_INI_BYTES)
+    if len(raw) > MAX_INI_BYTES:
+        raise ValueError("bigger than %d MB, which no NI MAX file is" % (MAX_INI_BYTES // 1_000_000))
     if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
         return raw.decode("utf-16", errors="replace")
     try:
@@ -136,8 +155,8 @@ def read_max(visaconfs: Iterable[Any] = (), exports: Iterable[Any] = ()) -> Dict
             if not p.is_file():
                 continue
             conf = read_visaconf(_text(p))
-        except OSError as e:
-            out["unread"].append("%s (%s)" % (p, e.strerror or e))
+        except Exception as e:   # one file that can't be read is said, never the whole survey
+            out["unread"].append("%s (%s)" % (p, _why(e)))
             continue
         out["files"].append(str(p))
         out["aliases"].update(conf["aliases"])
@@ -148,8 +167,8 @@ def read_max(visaconfs: Iterable[Any] = (), exports: Iterable[Any] = ()) -> Dict
         p = Path(str(path))
         try:
             devices = read_daqmx(_text(p))
-        except OSError as e:
-            out["unread"].append("%s (%s)" % (p, e.strerror or e))
+        except Exception as e:
+            out["unread"].append("%s (%s)" % (p, _why(e)))
             continue
         if devices:
             out["files"].append(str(p))
@@ -169,19 +188,22 @@ def lv_version(text: Any) -> str:
     return "LabVIEW %d (%s)" % (2000 + major, number) if 9 <= major <= 22 else "LabVIEW %s" % number
 
 
-def _url(url: str, project: Path) -> Tuple[str, str]:
+def _url(url: str, project: Path, folder: Path) -> Tuple[str, str]:
     """A project item's URL as a path (or in one of LabVIEW's own folders: <vilib>/...) and where it is: vi.lib,
     instr.lib, user.lib, another of LabVIEW's folders, or "" (the lab's own). LabVIEW writes a path relative to the
-    project file itself (a VI beside it is ../Main.vi); one that is only there taken from its folder is taken so."""
+    project file itself (a VI beside it is ../Main.vi); one that is only there taken from its folder is taken so.
+    Only a path inside folder (the one being read) is given, decided from the URL's text before anything is looked
+    at (vifile.within): an absolute one (/C/Lab/x.vi), another computer's (//host/share/x.vi) or one that leads out
+    of folder (../../x.vi) is "", never looked at."""
     m = re.match(r"^/<(\w+)>/(.*)$", url)
     if m:
         return "<%s>/%s" % (m.group(1), m.group(2)), _WHERE.get(m.group(1).lower(), "<%s>" % m.group(1))
-    m = re.match(r"^/([A-Za-z])/(.*)$", url)   # an absolute path, as LabVIEW writes one: /C/Lab/x.vi
-    if m:
-        return "%s:/%s" % (m.group(1).upper(), m.group(2)), ""
-    path = os.path.normpath(str(project / url))
-    other = os.path.normpath(str(project.parent / url))
-    return (other if not os.path.exists(path) and os.path.exists(other) else path), ""
+    parts = url.split("/")
+    path = vifile.within(folder, parts, project)
+    other = vifile.within(folder, parts, project.parent)
+    if other is not None and (path is None or not path.exists()) and other.exists():
+        return str(other), ""
+    return (str(path) if path is not None else ""), ""
 
 
 def _target(item: Any) -> Dict[str, Any]:
@@ -197,59 +219,84 @@ def _target(item: Any) -> Dict[str, Any]:
             "modules": modules}
 
 
-def _items(item: Any, project: Path, target: str, dependency: bool, out: Dict[str, Any]) -> None:
-    for it in item.findall("Item"):
+def _items(item: Any, project: Path, folder: Path, target: str, dependency: bool, out: Dict[str, Any]) -> None:
+    """The items under one of a project's (a target's), in their order: each folder's before the next item, as
+    LabVIEW lists them, gone through without recursion (folders may nest thousands deep)."""
+    todo = [(it, dependency) for it in reversed(item.findall("Item"))]
+    while todo:
+        it, dependency = todo.pop()
         kind, name, url = it.get("Type") or "", it.get("Name") or "", it.get("URL") or ""
         low = name.lower()
         if kind == "Build":   # what LabVIEW builds from the project
             continue
         if kind == "Dependencies":
-            _items(it, project, target, True, out)
+            todo += [(x, True) for x in reversed(it.findall("Item"))]
             continue
-        path, where = _url(url, project) if url else ("", "")
+        path, where = _url(url, project, folder) if url else ("", "")
         entry = {"name": name, "path": path, "where": where, "target": target}
         if kind == "VI" or low.endswith((".vi", ".vit")):
             (out["dependencies"] if dependency else out["vis"]).append(dict(entry, kind="vi"))
+            if url and not path and not dependency:   # the lab's VI, somewhere Kelvin doesn't look
+                out["outside"].append(name or url)
         elif kind in ("Library", "LVClass") or low.endswith((".lvlib", ".llb", ".lvclass")):
             (out["dependencies"] if dependency else out["libraries"]).append(dict(entry, kind="library"))
         elif kind == "Document":
             if dependency:
                 out["dependencies"].append(dict(entry, kind="file"))
         else:   # a folder, or a target's chassis and modules
-            _items(it, project, target, dependency, out)
+            todo += [(x, dependency) for x in reversed(it.findall("Item"))]
 
 
-def read_project(path: Any) -> Dict[str, Any]:
+class _Declared(Exception):
+    """A document type (and with it entities) declared in an XML file: a LabVIEW project declares none."""
+
+
+def _no_doctype(raw: bytes) -> None:
+    """_Declared if the XML declares a document type, in whatever encoding it is written (UTF-8, UTF-16...): found
+    as the parser meets it, before any entity in it could be used. ExpatError: not well-formed."""
+    def refuse(*_: Any) -> None:
+        raise _Declared()
+    p = expat.ParserCreate()
+    p.StartDoctypeDeclHandler = refuse
+    p.EntityDeclHandler = refuse
+    p.Parse(raw, True)
+
+
+def read_project(path: Any, folder: Any = None) -> Dict[str, Any]:
     """A LabVIEW project (.lvproj): {name, path, labview, vis, libraries, dependencies (each {name, path, where,
-    target, kind}), targets, drivers, uses (NI-DAQmx, the DLLs it calls), problem}. Only read, as XML."""
+    target, kind}), targets, drivers, uses (NI-DAQmx, the DLLs it calls), outside (the names of its VIs that aren't
+    in folder: never looked at), problem}. Only read, as XML. folder: the one being read (default: the project's
+    own); an item's path outside it is "" (_url)."""
     p = Path(str(path))
     out: Dict[str, Any] = {"name": p.name, "path": str(p), "labview": "", "vis": [], "libraries": [],
-                           "dependencies": [], "targets": [], "drivers": [], "uses": [], "problem": ""}
+                           "dependencies": [], "targets": [], "drivers": [], "uses": [], "outside": [], "problem": ""}
     try:
-        raw = p.read_bytes()[:MAX_PROJECT_BYTES + 1]
+        raw = _head(p, MAX_PROJECT_BYTES)
     except OSError as e:
         out["problem"] = "not read: %s" % (e.strerror or e)
         return out
     if len(raw) > MAX_PROJECT_BYTES:
         out["problem"] = "not read: bigger than %d MB" % (MAX_PROJECT_BYTES // 1_000_000)
         return out
-    if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw:   # a LabVIEW project declares none
-        out["problem"] = "not read: it isn't a LabVIEW project"
-        return out
     try:
+        _no_doctype(raw)
         root = ET.fromstring(raw)
-    except ET.ParseError as e:
+    except _Declared:
+        out["problem"] = "not read: it isn't a LabVIEW project (it declares a document type)"
+        return out
+    except (ET.ParseError, expat.ExpatError) as e:
         out["problem"] = "not read: it isn't well-formed XML (%s)" % e
         return out
     if root.tag != "Project":
         out["problem"] = "not read: it isn't a LabVIEW project"
         return out
     out["labview"] = lv_version(root.get("LVVersion"))
+    base = Path(str(folder)) if folder else p.parent
     for top in root.findall("Item"):
         target = "" if top.get("Type") == "My Computer" else top.get("Name") or ""
         if target:
             out["targets"].append(_target(top))
-        _items(top, p, target, False, out)
+        _items(top, p, base, target, False, out)
     drivers = {}
     for lib in out["libraries"] + [d for d in out["dependencies"] if d["kind"] == "library"]:
         found = driver_of(lib["name"], lib["where"])
@@ -323,8 +370,12 @@ def _driver_hints(d: Dict[str, str]) -> List[str]:
 #   {"node": "loop", "kind": "for" | "while", "var": "V", "range": {...}, "until": "", "parallel": false,
 #    "body": [nodes]}   range: {from, to, step} (the values from, from + step, ... to, as a scan's sweep takes them)
 #        or {from, to, points, log} (sources), {values: source} (an array), {count: source} (n times: the loop's
-#        value is its count, 0 to n - 1), or {} (a while loop without one: until says what ends it, "Stop button"
-#        or the condition in words); parallel: a For loop whose steps run at the same time
+#        value is its count, 0 to n - 1), or {} (a while loop without one); until: what ends it besides its range
+#        (a While loop's condition, a For loop's conditional terminal), in words: "the Stop button", the condition
+#        ("" when nothing does); parallel: a For loop whose steps run at the same time. And "stop_if" where the
+#        reader can say that condition exactly: {"button": "Stop"} (a button a person presses), {"last": true}
+#        (after its last value: i = N - 1), or {"read": "I", "op": ">", "than": source} (a reading compared with a
+#        value; op one of > >= < <= == !=)
 #   {"node": "sequence", "frames": [[nodes], ...]}
 #   {"node": "case", "selector": source, "cases": {"True": [nodes], "False": [nodes], "Default": [nodes]}}
 #   {"node": "wait", "ms": source} (Wait (ms)), or {"node": "wait", "s": source} (Time Delay)
@@ -348,6 +399,7 @@ NODES = {"loop", "sequence", "case", "wait", "write", "query", "read", "call", "
          "state_machine", "event", "call_library", "property", "other"}
 CONTROL_TYPES = {"number", "bool", "string", "enum", "ring", "path", "visa", "array", "cluster", "other"}
 SOURCES = ("value", "control", "loop", "read", "computed")
+STOP_OPS = (">", ">=", "<", "<=", "==", "!=")
 _UNIT_IN_NAME = re.compile(r"\(\s*([^()]{1,8})\s*\)\s*$")   # "Start (V)"
 
 
@@ -415,15 +467,18 @@ def _source(x: Any) -> Dict[str, Any]:
 
 
 def loop(var: str, body: Iterable[Any], kind: str = "for", until: str = "", parallel: bool = False,
-         **span: Any) -> Dict[str, Any]:
+         stop_if: Optional[Dict[str, Any]] = None, **span: Any) -> Dict[str, Any]:
     """A loop node; span: start (from), stop (to), step, points, log, values or count, each a number, a control's
-    name or a source."""
+    name or a source; stop_if: its condition, as the layout says it exactly."""
     rng: Dict[str, Any] = {}
     for key, x in span.items():
         key = {"start": "from", "stop": "to"}.get(key, key)
         rng[key] = bool(x) if key == "log" else _source(x)
-    return {"node": "loop", "kind": kind, "var": var, "range": rng, "until": until, "parallel": parallel,
-            "body": list(body)}
+    out = {"node": "loop", "kind": kind, "var": var, "range": rng, "until": until, "parallel": parallel,
+           "body": list(body)}
+    if stop_if is not None:
+        out["stop_if"] = stop_if
+    return out
 
 
 def node(kind: str, /, **fields: Any) -> Dict[str, Any]:
@@ -459,6 +514,14 @@ def _check_nodes(nodes: Any, where: str, out: List[str], depth: int) -> None:
             for key, src in (n.get("range") or {}).items() if isinstance(n.get("range"), dict) else []:
                 if key != "log":
                     _check_source(src, "%s.range.%s" % (here, key), out)
+            stop = n.get("stop_if")
+            if stop is not None and not (isinstance(stop, dict) and (
+                    set(stop) == {"button"} and isinstance(stop["button"], str) or stop == {"last": True} or
+                    set(stop) == {"read", "op", "than"} and isinstance(stop["read"], str) and stop["op"] in STOP_OPS)):
+                out.append("%s.stop_if: {button: name}, {last: true} or {read: name, op: %s, than: value}"
+                           % (here, " ".join(STOP_OPS)))
+            elif isinstance(stop, dict) and "than" in stop:
+                _check_source(stop["than"], here + ".stop_if.than", out)
             _check_nodes(n.get("body"), here + ".body", out, depth + 1)
         elif kind in ("sequence", "parallel"):
             parts = n.get("frames" if kind == "sequence" else "branches")
@@ -511,6 +574,9 @@ def read_vi(path: Any) -> Dict[str, Any]:
     return summary(path, link=link)
 
 
+_OWN_READER = read_vi   # the survey reads with it in a process of its own; a reader put in its place, in this one
+
+
 def read_library(path: Any) -> List[Dict[str, Any]]:
     """The summary of each VI a VI library (.llb) holds; its path is the library's, then the VI's name."""
     from .vigraph import summaries
@@ -523,9 +589,15 @@ def _number(x: Any) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool)
 
 
+def finite(x: Any) -> bool:
+    """A number that is finite (not Inf or NaN): one a scan can take."""
+    return _number(x) and math.isfinite(x)
+
+
 def value_of(src: Any, controls: Dict[str, Dict[str, Any]]) -> Any:
     """A source's value where the summary says it: a constant, or a control's default (scaled as the source says);
-    None for a loop's value, a reading, something computed, or a control with no default."""
+    None for a loop's value, a reading, something computed, a control with no default, or a number scaled past
+    what is finite."""
     if not isinstance(src, dict):
         return None
     if "value" in src:
@@ -537,27 +609,52 @@ def value_of(src: Any, controls: Dict[str, Dict[str, Any]]) -> Any:
     scale, offset = src.get("scale", 1), src.get("offset", 0)
     if scale == 1 and offset == 0:
         return v
-    if _number(v):
-        return v * scale + offset
-    if isinstance(v, list) and v and all(_number(x) for x in v):
-        return [x * scale + offset for x in v]
+    try:
+        if _number(v):
+            got = v * scale + offset
+            return got if finite(got) else None
+        if isinstance(v, list) and v and all(_number(x) for x in v):
+            got = [x * scale + offset for x in v]
+            return got if all(finite(x) for x in got) else None
+    except (TypeError, OverflowError):
+        pass
     return None
 
 
-def range_values(rng: Dict[str, Any], controls: Dict[str, Dict[str, Any]]) -> List[float]:
-    """A loop's values, as a scan's sweep takes the same range; [] when the summary doesn't say them."""
-    from .plans import _base_values
+def range_values(rng: Dict[str, Any], controls: Dict[str, Dict[str, Any]], most: int = 0) -> List[float]:
+    """A loop's values, as a scan's sweep takes the same range; [] when the summary doesn't say them, says a number
+    that isn't finite (Inf, NaN), or makes more than plans.MAX_POINTS of them (counted before any is made). most:
+    for more values than that, only the first, the smallest and the largest (what the limits of the values a VI
+    sends take), never made."""
+    from .plans import MAX_POINTS, _base_values
     if "values" in rng:
         v = value_of(rng["values"], controls)
-        return [float(x) for x in v] if isinstance(v, list) and all(_number(x) for x in v) else []
+        out = [float(x) for x in v] if isinstance(v, list) and len(v) <= MAX_POINTS and all(finite(x) for x in v) \
+            else []
+        return out if not most or len(out) <= most else [out[0], min(out), max(out)]
     if "count" in rng:
         n = value_of(rng["count"], controls)
-        return [float(i) for i in range(int(n))] if _number(n) and n == int(n) and 0 <= n <= 1_000_000 else []
+        if not (finite(n) and n == int(n) and 0 <= n <= MAX_POINTS):
+            return []
+        return [0.0, 0.0, float(n - 1)] if most and n > most else [float(i) for i in range(int(n))]
     spec: Dict[str, Any] = {k: value_of(rng[k], controls) for k in ("from", "to", "step", "points") if k in rng}
+    if not all(finite(v) for v in spec.values()) or "from" not in spec or "to" not in spec:
+        return []
     if rng.get("log"):
         spec["log"] = True
-    if not all(_number(v) for v in spec.values() if v is not True):
+    if "points" in spec:
+        n = int(spec["points"])
+        if n > MAX_POINTS or n < (2 if rng.get("log") else 1) or rng.get("log") and min(spec["from"], spec["to"]) <= 0:
+            return []
+    elif "step" in spec and not rng.get("log"):
+        n = abs(spec["to"] - spec["from"]) / abs(spec["step"]) + 1 if spec["step"] else math.inf
+        if not math.isfinite(n) or n > MAX_POINTS:
+            return []
+    else:
         return []
+    if most and n > most:
+        a, b = float(spec["from"]), float(spec["to"])
+        return [a, min(a, b), max(a, b)]
     errors: List[str] = []
     values = _base_values(spec, "", errors)
     return [] if errors else [float(v) for v in values]
@@ -581,7 +678,8 @@ def address_of(resource: Any, controls: Dict[str, Dict[str, Any]], aliases: Dict
 
 def walk(nodes: Any, loops: Optional[Dict[str, List[float]]] = None,
          controls: Optional[Dict[str, Dict[str, Any]]] = None) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    """Every node of a diagram in order, nested ones too, each with the values of the loops it is in (by var)."""
+    """Every node of a diagram in order, nested ones too, each with the values of the loops it is in (by var): all
+    of a loop's when it has a few (MAX_WALKED), else its first, smallest and largest (range_values)."""
     loops = loops or {}
     for n in nodes if isinstance(nodes, list) else []:
         if not isinstance(n, dict):
@@ -591,7 +689,8 @@ def walk(nodes: Any, loops: Optional[Dict[str, List[float]]] = None,
         if kind == "loop":
             inner = dict(loops)
             if n.get("var"):
-                inner[str(n["var"])] = range_values(n.get("range") or {}, controls or {})
+                inner[str(n["var"])] = range_values(n.get("range") or {}, controls, most=MAX_WALKED) \
+                    if controls is not None else []   # not asked for: not worked out
             yield from walk(n.get("body"), inner, controls)
         for key in ("frames", "branches"):
             for part in n.get(key) or [] if kind in ("sequence", "parallel") else []:
@@ -646,7 +745,7 @@ class Survey:
         from .viscan import on_target, translate
         return {s["path"]: (on_target(s, self.target_of(s)) if self.target_of(s) else
                             translate(s, instruments, self.aliases))
-                for s in self.vis if s.get("read") == "full" and measures(s)}
+                for s in self.vis if s.get("read") == "full" and measures(s)}   # translate never raises
 
     def text(self, scans: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
         """The report, for Kelvin's model: NI MAX, the projects, the instruments, then the VIs (with their scans)."""
@@ -681,6 +780,9 @@ class Survey:
                 lines.append("  drivers: " + ", ".join(_driver_words(d) for d in p["drivers"]))
             if p["uses"]:
                 lines.append("  uses: " + ", ".join(p["uses"]))
+            if p.get("outside"):
+                lines.append("  not looked at (outside %s, or on another computer): %s" % (
+                    self.folder, ", ".join(p["outside"][:MAX_SHOWN])))
             for t in p["targets"]:
                 lines.append("  target %s (%s%s)%s: its VIs run there, not on this computer" % (
                     t["name"], t["type"], ", " + t["address"] if t["address"] else "",
@@ -720,7 +822,8 @@ class Survey:
                 "max": {k: m.get(k) for k in ("files", "aliases", "resources", "daqmx", "unread")},
                 "projects": [{"name": p["name"], "path": p["path"], "labview": p["labview"], "vis": len(p["vis"]),
                               "drivers": [_driver_words(d) for d in p["drivers"]], "uses": p["uses"],
-                              "targets": [t["name"] for t in p["targets"]], "problem": p["problem"]}
+                              "targets": [t["name"] for t in p["targets"]], "problem": p["problem"],
+                              "outside": p.get("outside") or []}
                              for p in self.projects],
                 "vis": [{"name": s["name"], "path": s["path"], "labview": s.get("labview", ""), "read": s["read"],
                          "unread": s["unread"], "measures": measures(s), "target": self.target_of(s)}
@@ -766,16 +869,27 @@ def _files(root: Path, own: Iterable[Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"projects": [], "vis": [], "driver_vis": [], "libraries": [], "visaconf": [], "ini": [],
                            "skipped": []}
     paths = [root] if root.is_file() else sorted(root.rglob("*"))
+    real_root = str(root.resolve())
     for p in paths:
         rel = (p.relative_to(root).parts if p != root else (p.name,))
-        if any(part in SKIP_DIRS or part.startswith(".") for part in rel[:-1]):
+        suffix = p.suffix.lower()
+        if any(part in SKIP_DIRS or part.startswith(".") for part in rel[:-1]) or suffix not in LABVIEW_FILES:
+            continue
+        if not all(vifile.plain_name(part) for part in rel):   # a device's name (COM3.vi): looking at it opens it
             continue
         try:
-            if not p.is_file() or secret(p) or mine(p.resolve(), own) is not None or run_of(p.resolve()) is not None:
+            if p != root and p.is_symlink():   # where a link leads, from its text: never followed out of the folder
+                if not vifile.is_inside(real_root, os.path.normpath(os.path.join(str(p.parent), os.readlink(p)))):
+                    continue
+            if not p.is_file():
                 continue
-        except OSError:
+            real = p.resolve()
+            if p != root and not vifile.is_inside(real_root, str(real)) or secret(p) or mine(real, own) is not None \
+                    or run_of(real) is not None:
+                continue
+        except (OSError, RuntimeError, ValueError):
             continue
-        suffix, in_lib = p.suffix.lower(), any(part.lower() in LIBRARY_DIRS for part in rel[:-1])
+        in_lib = any(part.lower() in LIBRARY_DIRS for part in rel[:-1])
         if suffix == ".lvproj":
             out["projects"].append(p)
         elif suffix in (".vi", ".vit"):
@@ -799,7 +913,10 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), visaconf: A
     """Read a lab's LabVIEW folder (or one project or VI) and NI MAX on this computer (visaconf: NI-VISA's file, by
     default where NI-VISA keeps it; one in the folder is read too): the instruments, projects and VIs. registry:
     Kelvin's cards, for the card that fits each instrument. own: Kelvin's own folders, never read. read: the VI
-    reader (read_vi)."""
+    reader; Kelvin's own (read_vi) reads every VI and VI library in a process of its own, with time limits and a
+    memory cap (viworker.py), and only from this folder (a project's VI elsewhere, or a sub-VI, isn't looked at).
+    A file that can't be read is said in its own entry (or the survey's notes, skipped), never raised: only a
+    folder that isn't there (FileNotFoundError), or one of Kelvin's own (ValueError), is."""
     from .folderfiles import mine, run_of
     root = Path(str(path)).expanduser()
     if not root.exists():
@@ -812,6 +929,8 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), visaconf: A
     if run_of(root.resolve()) is not None:
         raise ValueError("%s is in a Kelvin run, not the lab's LabVIEW: describe_run and get_run_data read runs" % root)
     reader = read or read_vi
+    folder = root if root.is_dir() else root.parent   # nothing outside it is read
+    own = list(own)
     files = _files(root, own)
     out = Survey(folder=str(root), skipped=list(files["skipped"]))
     out.max = read_max([Path(str(visaconf)) if visaconf else VISACONF] + files["visaconf"], files["ini"])
@@ -824,14 +943,19 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), visaconf: A
         return False
     vis: List[Path] = list(files["vis"])
     for f in files["projects"]:
-        p = read_project(f)
+        try:
+            p = read_project(f, folder)
+        except Exception as e:   # one file that can't be read is said, never the whole survey
+            p = {"name": f.name, "path": str(f), "labview": "", "vis": [], "libraries": [], "dependencies": [],
+                 "targets": [], "drivers": [], "uses": [], "outside": [], "problem": "not read: %s" % _why(e)}
         out.projects.append(p)
         for d in p["drivers"]:
             driver(d, p["name"])
-        for v in p["vis"]:   # the project's own VIs, wherever they are (never in Kelvin's own folders)
+        for v in p["vis"]:   # the project's own VIs in this folder (_url: never elsewhere, nor in Kelvin's own)
             q = Path(v["path"])
             try:
-                if q.suffix.lower() in (".vi", ".vit") and q.is_file() and mine(q.resolve(), own) is None:
+                if q.is_absolute() and q.suffix.lower() in (".vi", ".vit") and q.is_file() and \
+                        mine(q, own) is None:
                     vis.append(q)
                     if v["target"]:
                         out.targets[same_path(q)] = v["target"]
@@ -846,33 +970,57 @@ def survey(path: Any, registry: Any = None, own: Iterable[Any] = (), visaconf: A
         if below:
             driver(driver_of(below[0], "instr.lib"), "instr.lib")
     out.driver_vis = len(files["driver_vis"])
-    seen = set()
+    seen, todo = set(), []
     for f in vis:
         k = same_path(f)
-        if k in seen:
-            continue
-        seen.add(k)
-        try:
-            s = reader(f)
-            wrong = validate(s)
-        except Exception as e:   # a VI that can't be read is said, never a failed survey
-            s, wrong = None, [str(e).splitlines()[0][:160] if str(e) else type(e).__name__]
-        if wrong:
-            s = vi(f, read="no", unread=["not read: " + "; ".join(wrong[:3])])
-        out.vis.append(s)
-    for lib, in_lib in files["libraries"] if read is None else []:   # the lab's VI libraries: the VIs they hold
-        if in_lib or lib.suffix.lower() != ".llb" or len(out.vis) >= MAX_VIS:
-            continue
-        try:
-            held = read_library(lib)
-        except Exception as e:
-            held = [vi(lib, read="no", unread=["not read: %s" % (str(e).splitlines()[0][:160] or type(e).__name__)])]
-        for s in held[:MAX_VIS - len(out.vis)]:
-            out.vis.append(s if not validate(s) else vi(s.get("path") or lib, read="no",
-                                                         unread=["not read: " + "; ".join(validate(s)[:3])]))
+        if k not in seen:
+            seen.add(k)
+            todo.append(("vi", f))
+    if len(todo) > MAX_VIS:
+        if "more than %d VIs: the rest" % MAX_VIS not in out.skipped:
+            out.skipped.append("more than %d VIs: the rest" % MAX_VIS)
+        todo = todo[:MAX_VIS]
+    if read is None and len(todo) < MAX_VIS:   # the lab's VI libraries: the VIs they hold
+        todo += [("llb", lib) for lib, in_lib in files["libraries"] if not in_lib and lib.suffix.lower() == ".llb"]
+    if read is None and read_vi is _OWN_READER:   # Kelvin's own reader: in a process of its own (viworker.py)
+        from . import viworker
+        got, notes = viworker.read_all([(kind, str(f)) for kind, f in todo], folder, own)
+        out.skipped += notes
+    else:
+        got = [[_read_one(reader, f)] if kind == "vi" else _read_library(f) for kind, f in todo]
+    for (kind, f), summaries in zip(todo, got):
+        for s in summaries:
+            if kind == "llb" and len(out.vis) >= MAX_VIS:
+                break
+            wrong = _wrong(s)
+            out.vis.append(s if not wrong else vi((s.get("path") if isinstance(s, dict) else "") or f, read="no",
+                                                  unread=["not read: " + "; ".join(wrong[:3])]))
     out.drivers = list(drivers.values())
     out.instruments = _instruments(out, registry)
     return out
+
+
+def _read_one(reader: Callable[[Path], Dict[str, Any]], f: Path) -> Any:
+    """One VI's summary from a reader given in place of Kelvin's own; what it raises, said in a summary."""
+    try:
+        return reader(f)
+    except Exception as e:   # a VI that can't be read is said, never a failed survey
+        return vi(f, read="no", unread=["not read: " + _why(e)])
+
+
+def _read_library(lib: Path) -> List[Any]:
+    try:
+        return read_library(lib)
+    except Exception as e:
+        return [vi(lib, read="no", unread=["not read: " + _why(e)])]
+
+
+def _wrong(s: Any) -> List[str]:
+    """What is wrong with a summary, as validate says (and what validate itself trips on)."""
+    try:
+        return validate(s)
+    except Exception as e:
+        return ["its summary can't be read (%s)" % type(e).__name__]
 
 
 # ------------------------------------------------------------------ the instruments
@@ -920,7 +1068,10 @@ def _instruments(found: Survey, registry: Any) -> List[Instrument]:
         if where not in inst.where:
             inst.where.append(where)
     for s in found.vis:
-        _from_vi(s, found.aliases, at, driver_row, daq)
+        try:
+            _from_vi(s, found.aliases, at, driver_row, daq)
+        except Exception as e:   # one VI's summary that trips this up is said, never the whole survey
+            s["unread"] = list(s.get("unread") or []) + ["what it says of the instruments (%s)" % _why(e)]
     for d in found.drivers:
         driver_row(d, d.get("found") or "LabVIEW")
     for inst in order + list(loose.values()):

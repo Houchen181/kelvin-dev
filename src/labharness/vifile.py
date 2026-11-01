@@ -24,18 +24,24 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import hashlib
+import os
 import re
 import struct
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 MAX_BYTES = 128 * 2 ** 20       # a VI or VI library bigger than this isn't read
 MAX_UNPACKED = 64 * 2 ** 20     # a front panel or block diagram, unpacked
+MAX_SECTIONS = 200_000          # sections in one file (a VI has some dozens, an .llb of 2000 VIs some thousands)
 MAX_OBJECTS = 2_000_000         # objects in one heap
 MAX_VALUES = 100_000            # elements of one array value read
+MAX_DECODE = 200_000            # parts read of one saved value (its numbers, elements, a cluster's parts)...
+MAX_DECODE_VI = 2_000_000       # ... and of all of one VI's saved values together
+MAX_LINK_WORK = 200_000         # places tried in one linkage block for its links' names
 MAX_LLB_MEMBERS = 2000
+MAX_LLB_UNPACKED = 256 * 2 ** 20   # all of one VI library's VIs, unpacked (one at a time)
 SUFFIXES = (".vi", ".vit", ".ctl", ".ctt", ".llb")
 KINDS = {b"LVIN": "vi", b"sVIN": "template", b"LVCC": "control", b"sVCC": "control template", b"LVAR": "library",
          b"LMNU": "palette", b"LIBP": "packed library", b"LVXC": "xcontrol", b"LVSB": "subroutine"}
@@ -48,13 +54,17 @@ class ReadError(ValueError):
     """A file that isn't a LabVIEW resource file, or is damaged: the message says which, in plain words."""
 
 
+class TooBig(ReadError):
+    """Reading on would take more than Kelvin gives one value or one VI (MAX_DECODE...): what was read is kept."""
+
+
 # ------------------------------------------------------------------ the resource file
 
 @dataclass
 class Section:
     index: int
     name: str
-    data: bytes
+    data: Any            # its bytes: a view of the file's, never a copy
 
 
 @dataclass
@@ -88,9 +98,11 @@ _ENCODING: "contextvars.ContextVar[str]" = contextvars.ContextVar("labview_text"
 REGIONS = {0: "cp1252", 33: "gbk"}   # vers' region code: the Windows encoding the VI's text was saved in
 
 
-def _text(b: bytes) -> str:
+def _text(b: Any) -> str:
     """Text as LabVIEW saved it: UTF-8 where it is, else the encoding of the Windows it was saved on (Western, or
     Chinese where the VI says so): see text_encoding()."""
+    if not isinstance(b, bytes):
+        b = bytes(b)
     try:
         return b.decode("utf-8")
     except UnicodeDecodeError:
@@ -107,14 +119,18 @@ def text_encoding(name: str) -> Iterator[None]:
         _ENCODING.reset(token)
 
 
-def container(raw: bytes) -> Container:
-    """The blocks of a resource file. ReadError: not one, or its block list is damaged (a block whose data is
-    damaged is listed in problems, the rest kept)."""
+def container(raw: Any) -> Container:
+    """The blocks of a resource file (its bytes, or a view of them). Each section's data is a view of raw, never a
+    copy, and no two sections share bytes: one whose data overlaps another's (a damaged file, or one made to look
+    many times its size) is left out and listed in problems. ReadError: not one, or its block list is damaged (a
+    block whose data is damaged is listed in problems, the rest kept)."""
     if raw[:4] == b"RSRC" and len(raw) < 32:
         raise ReadError("it is cut short (%d bytes): only the start of a LabVIEW file" % len(raw))
     if len(raw) < 32 or raw[:6] != b"RSRC\r\n":
         raise ReadError("it isn't a LabVIEW file (no RSRC header)")
-    out = Container(KINDS.get(raw[8:12], "other (%s)" % raw[8:12].decode("latin-1", "replace").strip("\x00 ")))
+    kind = bytes(raw[8:12])
+    out = Container(KINDS.get(kind, "other (%s)" % kind.decode("latin-1", "replace").strip("\x00 ")))
+    view = memoryview(raw)
     info, info_size, data_at = _u32(raw, 16), _u32(raw, 20), _u32(raw, 24)
     if info + 52 > len(raw) or raw[info:info + 6] != b"RSRC\r\n":
         raise ReadError("its list of blocks is missing or damaged")
@@ -127,11 +143,16 @@ def container(raw: bytes) -> Container:
     total = sum(n + 1 for _, n, _ in heads)
     names_at = base + 4 + 12 * count + 20 * total
     end_of_info = min(len(raw), info + info_size) if info_size else len(raw)
+    placed: List[Tuple[int, int, int, str, Section]] = []   # each section's bytes in raw: (from, to, order, ...)
     for ident_b, n, offset in heads:
         ident = ident_b.decode("latin-1")
         if n > 100000:
             out.problems.append("block %s: its sections are damaged" % ident)
             continue
+        if len(placed) + n + 1 > MAX_SECTIONS:
+            out.problems.append("more sections than Kelvin reads (%d): block %s and the blocks after it"
+                                % (MAX_SECTIONS, ident))
+            break
         for k in range(n + 1):
             at = base + offset + 20 * k
             if at + 20 > len(raw):
@@ -144,7 +165,7 @@ def container(raw: bytes) -> Container:
             except ReadError:
                 out.problems.append("block %s: its data is missing" % ident)
                 continue
-            body = raw[start + 4:start + 4 + size]
+            body = view[start + 4:start + 4 + size]
             if len(body) < size:
                 out.problems.append("block %s: its data ends early" % ident)
             name = ""
@@ -153,7 +174,24 @@ def container(raw: bytes) -> Container:
                     name = _pascal(raw, names_at + name_at)[0]
                 except ReadError:
                     name = ""
-            out.blocks.setdefault(ident, []).append(Section(index, name, body))
+            section = Section(index, name, body)
+            out.blocks.setdefault(ident, []).append(section)
+            placed.append((start, start + 4 + len(body), len(placed), ident, section))
+    # no two sections may share bytes: each section's data is kept once, so the sections hold no more than the file
+    shared: Dict[int, str] = {}
+    end = -1
+    for start, stop, _, ident, section in sorted(placed, key=lambda x: (x[0], x[2])):
+        if start < end:
+            shared[id(section)] = ident
+        else:
+            end = stop
+    if shared:
+        for ident in dict.fromkeys(shared.values()):
+            out.problems.append("block %s: its data overlaps another block's (it is damaged)" % ident)
+        for ident in list(out.blocks):
+            out.blocks[ident] = [s for s in out.blocks[ident] if id(s) not in shared]
+            if not out.blocks[ident]:
+                del out.blocks[ident]
     return out
 
 
@@ -174,7 +212,7 @@ def unpack(data: Optional[bytes]) -> Optional[bytes]:
         if len(out) > MAX_UNPACKED:
             raise ReadError("a block is bigger than Kelvin unpacks (%d MB)" % (MAX_UNPACKED // 2 ** 20))
         return out
-    return data
+    return bytes(data)
 
 
 # ------------------------------------------------------------------ version, flags, password, description
@@ -311,24 +349,38 @@ def _where(path: List[str]) -> str:
     return ""
 
 
-def links_in(data: bytes) -> List[Link]:
+_PATH_AT = re.compile(rb"PTH[012]")
+
+
+def links_in(data: bytes, notes: Optional[List[str]] = None) -> List[Link]:
     """The links in a linkage block (LIvi, LIfp, LIbd, LIds): each is four letters, a qualified name and a path,
-    found by their form wherever they are (the rest of a link differs between LabVIEW versions and kinds)."""
+    found by their form wherever they are (the rest of a link differs between LabVIEW versions and kinds). One pass
+    over the block; one that would take more than MAX_LINK_WORK tries gives the links found so far, and says so in
+    notes."""
     out: List[Link] = []
-    at = 0
+    at, work, last = 0, 0, 0   # last: where the last path read ends (a link's name is after it)
     while True:
-        at = min((i for i in (data.find(b"PTH0", at), data.find(b"PTH1", at), data.find(b"PTH2", at)) if i >= 0),
-                 default=-1)
-        if at < 0:
+        m = _PATH_AT.search(data, at)
+        if m is None:
             return out
+        at = m.start()
         path, end = _path(data, at)
-        if path is None:
-            at += 4
-            continue
+        work += 1
         found = None
-        # the qualified name ends just before the path (padded to an even place): try each start that fits, the
-        # nearest first, and take the first with a link's four letters before it
-        for start in range(at - 4, max(-1, at - 1200), -1):
+        # the qualified name ends just before the path (padded to an even place): try each start that fits (where a
+        # count of 16 or less is: three zero bytes, then one of 16 or less), the nearest first, and take the first
+        # with a link's four letters before it
+        lo, before = max(last, at - 1199), at - 1
+        while path is not None and found is None:
+            start = data.rfind(b"\x00\x00\x00", lo, before)
+            if start < 0:
+                break
+            before = start + 2
+            work += 1
+            if work > MAX_LINK_WORK:
+                break
+            if data[start + 3] > 16:
+                continue
             names, p = _qualified(data, start)
             if names is None or not (p == at or (p + 1 == at and data[p] == 0)):
                 continue
@@ -338,20 +390,25 @@ def links_in(data: bytes) -> List[Link]:
             if ident_at >= 0 and _LINK_IDENT.fullmatch(data[ident_at:ident_at + 4]) and \
                     all(b == 0 for b in data[ident_at + 4:start]):
                 found = (data[ident_at:ident_at + 4].decode("latin-1"), names)
-                break
+        if work > MAX_LINK_WORK:
+            if notes is not None:
+                notes.append("its linkage: more than Kelvin reads (the links after the first %d left out)" % len(out))
+            return out
         if found is not None:
             ident, names = found
             name = ":".join(n for n in names if n) or (path[-1] if path else "")
             if name:
                 kind = _kind_of(names[-1] if names and names[-1] else name if not path else path[-1])
                 out.append(Link(name, path, kind, _where(path), ident))
+        if path is not None:
+            last = end
         at = end if end > at else at + 4
 
 
-def linkage(c: Container) -> List[Link]:
+def linkage(c: Container, notes: Optional[List[str]] = None) -> List[Link]:
     """Every link of the VI, once each (by name, with its path where a link says it): its sub-VIs, type
     definitions, libraries, classes and DLLs. An Express VI's own instance ("Instance:4") is part of the VI, not a
-    link of it."""
+    link of it. notes: what of it wasn't read."""
     seen: Dict[str, Link] = {}
     for ident in ("LIvi", "LIfp", "LIbd", "LIds"):
         for s in c.blocks.get(ident) or []:
@@ -359,7 +416,7 @@ def linkage(c: Container) -> List[Link]:
                 data = unpack(s.data) or b""
             except ReadError:
                 continue
-            for link in links_in(data):
+            for link in links_in(data, notes):
                 if link.name.startswith("Instance:"):
                     continue
                 key = link.name.lower()
@@ -636,6 +693,8 @@ def _type_at(b: bytes, at: int, nested: bool = False) -> Tuple[Type, int]:
             n = struct.unpack(">H", b[p:p + 2])[0]
             q = p + 2
             for _ in range(min(n, 10000)):
+                if q >= end:   # its names are in its own data, never the types' after it
+                    break
                 name, q = _pascal(b, q)
                 t.names.append(name)
         elif code in (0x20, 0x21):
@@ -656,6 +715,8 @@ def _type_at(b: bytes, at: int, nested: bool = False) -> Tuple[Type, int]:
             t.kind = "cluster"
             n, q = _u2p2(b, p)
             for _ in range(min(n, 10000)):
+                if q + 2 > end:   # its parts are in its own data, never the types' after it
+                    break
                 k, q = _u2p2(b, q)
                 t.items.append(k)
         elif code == 0x53:
@@ -690,6 +751,7 @@ class Types:
     top: List[int] = field(default_factory=list)
     heap_count: int = 0
     heap_shift: int = 0
+    decoded: int = 0               # parts of its saved values read so far (MAX_DECODE_VI)
 
     def of_heap(self, type_id: Optional[int]) -> Optional[Type]:
         """The type a heap object names (its typeDesc), through DTHP's slice of VCTP's top list."""
@@ -737,10 +799,13 @@ def plain(t: Optional[Type]) -> Optional[Type]:
 
 
 class _Flat:
-    """Reads a value as LabVIEW flattens it (big-endian), by its type."""
+    """Reads a value as LabVIEW flattens it (big-endian), by its type: at most MAX_DECODE parts of it, and no more
+    than its VI has left of MAX_DECODE_VI (a cluster of empty clusters takes no bytes, so bytes alone don't bound
+    it). TooBig past that."""
 
     def __init__(self, data: bytes, kinds: Types):
         self.b, self.at, self.types = data, 0, kinds
+        self.left = self.allowed = max(0, min(MAX_DECODE, MAX_DECODE_VI - kinds.decoded))
 
     def take(self, n: int) -> bytes:
         if self.at + n > len(self.b):
@@ -750,6 +815,9 @@ class _Flat:
         return out
 
     def value(self, t: Optional[Type], depth: int = 0) -> Any:
+        self.left -= 1
+        if self.left < 0:
+            raise TooBig("a value bigger than Kelvin reads")
         t = plain(t)
         if t is None or depth > 20:
             raise ReadError("a value of a type Kelvin can't read")
@@ -813,14 +881,23 @@ def _quad(b: bytes) -> float:
         return sign * float("inf")
 
 
-def decode(data: Optional[bytes], t: Optional[Type], kinds: Types) -> Tuple[Any, bool]:
-    """A flattened value (a control's saved value, a constant's) by its type: (value, whether it was read)."""
+def decode(data: Optional[bytes], t: Optional[Type], kinds: Types,
+           why: Optional[List[str]] = None) -> Tuple[Any, bool]:
+    """A flattened value (a control's saved value, a constant's) by its type: (value, whether it was read). why: told
+    "bigger than Kelvin reads" when that is why it wasn't (MAX_DECODE)."""
     if data is None or t is None:
         return None, False
+    f = _Flat(bytes(data), kinds)
     try:
-        return _Flat(bytes(data), kinds).value(t), True
+        return f.value(t), True
+    except TooBig:
+        if why is not None:
+            why.append("bigger than Kelvin reads")
+        return None, False
     except (ReadError, struct.error, IndexError, KeyError, OverflowError, ValueError):
         return None, False
+    finally:
+        kinds.decoded += f.allowed - max(f.left, 0)
 
 
 def kind_of(t: Optional[Type], cls: str = "") -> str:
@@ -853,6 +930,7 @@ class Control:
     uid: Optional[int] = None        # its data object's (fPDCO), as the block diagram's terminal names it
     numeric: str = ""
     ddo: Optional[int] = None        # its display object's, as an event names it
+    note: str = ""                   # why its saved value wasn't read, when that is worth saying
 
 
 _ZERO = {"number": 0, "bool": False, "string": "", "path": "", "visa": ""}
@@ -903,7 +981,9 @@ def controls(fp: Obj, kinds: Types, major: int = 99) -> List[Control]:
             c.choices = _ring_names(ddo)
         saved = o.raw("DefaultData")
         if saved is not None:
-            c.default, c.has_default = decode(saved, t, kinds)
+            why: List[str] = []
+            c.default, c.has_default = decode(saved, t, kinds, why)
+            c.note = why[0] if why else ""
         elif major < 9 or o.get("kSLHDefaultValueMatchesCtlVI") is not None:
             pass   # kept elsewhere: in LabVIEW 8's data space, or in the control's type definition (.ctl)
         elif p is not None and p.kind == "enum" and p.names:
@@ -939,10 +1019,13 @@ class VI:
 
 
 def _limit(p: Path) -> bytes:
-    size = p.stat().st_size
-    if size > MAX_BYTES:
+    """A file's bytes, read no further than one past MAX_BYTES (one bigger isn't read)."""
+    with open(p, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        raw = f.read(min(size, MAX_BYTES) + 1) if size <= MAX_BYTES else b""
+    if size > MAX_BYTES or len(raw) > MAX_BYTES:
         raise ReadError("it is bigger than Kelvin reads (%d MB)" % (MAX_BYTES // 2 ** 20))
-    return p.read_bytes()
+    return raw
 
 
 def _encoding(c: Container) -> str:
@@ -982,7 +1065,7 @@ def _read(c: Container, path: str, name: str) -> VI:
         names, _ = _qualified(menu, 0)
         vi.instances = names or []
     try:
-        vi.links = linkage(c)
+        vi.links = linkage(c, vi.unread)
     except (ReadError, IndexError, struct.error) as e:
         vi.unread.append("its linkage (%s)" % e)
     try:
@@ -995,6 +1078,7 @@ def _read(c: Container, path: str, name: str) -> VI:
         if fp is not None:
             vi.panel = heap(fp)
             vi.controls = controls(vi.panel, vi.types, major)
+            vi.unread += ["the saved value of %s: %s" % (c.name, c.note) for c in vi.controls if c.note]
             if major < 9 and vi.controls:
                 vi.unread.append("its controls' saved values%s (LabVIEW %s keeps them where Kelvin doesn't read yet)"
                                  % (" and names" if any(c.name.startswith("unlabelled ") for c in vi.controls)
@@ -1028,9 +1112,11 @@ def read(path: Any) -> VI:
     return read_bytes(raw, str(p), p.name)
 
 
-def members(path: Any) -> List[Tuple[str, bytes]]:
-    """The files a VI library (.llb) holds, by name: [(name, bytes)]. Only the uncompressed and zlib-compressed
-    ones (UCRF, ZCRF); one kept another way is listed with no bytes. ReadError: not a VI library."""
+def members(path: Any) -> Iterator[Tuple[str, Any]]:
+    """The files a VI library (.llb) holds, by name: (name, bytes), one at a time, each unpacked only when it is
+    reached (never all at once), at most MAX_LLB_MEMBERS of them and MAX_LLB_UNPACKED bytes unpacked in all: past
+    that, ReadError says so where the next one would be. Only the uncompressed and zlib-compressed ones (UCRF,
+    ZCRF); one kept another way comes with no bytes. ReadError (at once): not a VI library."""
     p = Path(str(path))
     try:
         c = container(_limit(p))
@@ -1038,17 +1124,77 @@ def members(path: Any) -> List[Tuple[str, bytes]]:
         raise ReadError("it can't be read: %s" % (e.strerror or e))
     if c.kind != "library":
         raise ReadError("it isn't a VI library (.llb)")
-    out: List[Tuple[str, bytes]] = []
+    return _members(c)
+
+
+def _members(c: Container) -> Iterator[Tuple[str, Any]]:
+    count, unpacked = 0, 0
     for ident in ("UCRF", "ZCRF", "CPRF"):
         for s in c.blocks.get(ident) or []:
+            if count >= MAX_LLB_MEMBERS:
+                return
             name = s.name or "%s %d" % (ident, s.index)
-            data = s.data if ident == "UCRF" else b""
+            data: Any = s.data if ident == "UCRF" else b""
             if ident == "ZCRF":
+                size = struct.unpack(">I", s.data[:4])[0] if len(s.data) >= 4 else 0
+                if unpacked + min(size, MAX_UNPACKED) > MAX_LLB_UNPACKED:
+                    raise ReadError("its VIs are bigger than Kelvin unpacks from one library (%d MB): %s and the "
+                                    "VIs after it" % (MAX_LLB_UNPACKED // 2 ** 20, name))
                 try:
                     data = unpack(s.data) or b""
                 except ReadError:
                     data = b""
-            out.append((name, data))
-            if len(out) >= MAX_LLB_MEMBERS:
-                return out
-    return out
+                unpacked += len(data)
+            count += 1
+            yield name, data
+            data = None
+
+
+# ------------------------------------------------------------------ paths a file names
+
+_RESERVED = re.compile(r"^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)(\..*)?$", re.I)
+
+
+def plain_name(name: Any) -> bool:
+    """Whether a name is a file's or folder's own: no separator (/ \\), drive or stream (:) or control character
+    in it, not . or .. (Windows drops trailing dots and spaces: "..  " is ..), and not one of Windows' devices (COM3,
+    NUL, CON.vi: looking at one opens it)."""
+    if not isinstance(name, str) or not name:
+        return False
+    bare = name.rstrip(" .")
+    return bool(bare) and not any(ch in name for ch in "/\\:") and \
+        not any(ord(ch) < 32 or ord(ch) == 127 for ch in name) and not _RESERVED.match(bare)
+
+
+def within(folder: Any, parts: Iterable[Any], under: Any = None) -> Optional[Path]:
+    """A path a file names (a project's item, a VI's sub-VI), given as its parts (each the name of a folder or of the
+    file, or ".." for the folder above) taken from under (default: folder), as a path inside folder; None when it
+    isn't a plain path inside folder: one that leads out of it, or names another computer (\\\\host\\share,
+    //host/share), a device (\\\\.\\..., \\\\?\\..., COM3, NUL), a drive or any absolute place (C:\\..., /..., \\...),
+    or a drive's own folder (C:x). Decided from the text, before anything is looked at on disk (on Windows even
+    looking at \\\\host\\share logs on to that host, and looking at COM3 opens the port); then resolved, and still
+    inside folder (a link out of it isn't followed)."""
+    names: List[str] = []
+    for part in parts:
+        if part not in (".", "..") and not plain_name(part):
+            return None
+        names.append(part)
+    try:   # folder and under are Kelvin's own (the chosen folder, a file read in it): looked at as they are
+        base = os.path.realpath(str(folder))
+        start = os.path.realpath(str(under)) if under is not None else base
+        joined = os.path.normpath(os.path.join(start, *names))
+        if not is_inside(base, joined):
+            return None
+        real = os.path.realpath(joined)
+        return Path(real) if is_inside(base, real) else None
+    except (OSError, ValueError):
+        return None
+
+
+def is_inside(folder: str, path: str) -> bool:
+    """Whether a path is folder or inside it, by their text (in one case on Windows, whose names have none)."""
+    f, p = os.path.normcase(folder), os.path.normcase(path)
+    try:
+        return os.path.commonpath([f, p]) == f
+    except ValueError:   # another drive
+        return False

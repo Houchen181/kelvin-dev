@@ -70,3 +70,25 @@ def test_a_tdms_file_that_isnt_one_is_said(tmp_path):
     with pytest.raises(DataError) as e:
         imports.read(tmp_path / "broken.tdms")
     assert "broken.tdms" in str(e.value)
+
+
+def test_a_tdms_file_too_long_is_refused_before_a_value_is_read(tmp_path, monkeypatch):
+    """How many values each channel holds is in the file's metadata: one longer than a run takes (MAX_ROWS) is said
+    before any value is read; otherwise only the group taken is read."""
+    np = pytest.importorskip("numpy")
+    nptdms = pytest.importorskip("nptdms")
+    from labharness.importers import tdms
+    with nptdms.TdmsWriter(str(tmp_path / "long.tdms")) as w:
+        w.write_segment([nptdms.ChannelObject("Long", "a", np.zeros(500)),
+                         nptdms.ChannelObject("Long", "b", np.ones(500)),
+                         nptdms.ChannelObject("Short", "c", np.arange(3.0))])
+    read = []
+    real = tdms._column
+    monkeypatch.setattr(tdms, "_column", lambda c, np: read.append(c.name) or real(c, np))
+    monkeypatch.setattr(tdms, "MAX_ROWS", 100)
+    with pytest.raises(DataError, match="more than 100 values"):
+        imports.read(tmp_path / "long.tdms")
+    assert read == []
+    monkeypatch.setattr(tdms, "MAX_ROWS", 1000)
+    t = imports.read(tmp_path / "long.tdms")
+    assert read == ["a", "b"] and len(t.x) == 500 and any("other groups left out: Short" in n for n in t.notes)

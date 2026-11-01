@@ -2,6 +2,8 @@
 the VI summary and its translation into a scan (viscan.py), the scans a person keeps, and LabVIEW's .lvm data files.
 Every input here is written as its format is documented or as LabVIEW writes it; nothing was downloaded."""
 import json
+import os
+import time
 
 import pytest
 
@@ -132,6 +134,103 @@ def test_a_project_lists_its_vis_libraries_dependencies_and_targets(tmp_path):
                       ("<Library LVVersion='15008000'/>", "isn't a LabVIEW project"), ("<Project>", "well-formed")]:
         (tmp_path / "bad.lvproj").write_text(text, encoding="utf-8")
         assert why in lv.read_project(tmp_path / "bad.lvproj")["problem"]
+
+
+def test_a_projects_items_outside_its_folder_are_never_looked_at(tmp_path, monkeypatch):
+    """Another computer's share (on Windows, looking at one logs on to it), an absolute path, or one leading out of
+    the folder being read: told from the URL's text, never looked at, and said."""
+    lab = tmp_path / "lab"
+    lab.mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "elsewhere" / "secret.vi").write_bytes(b"RSRC")
+    (lab / "Main.vi").write_bytes(b"RSRC")
+    items = "".join('<Item Name="%s" Type="VI" URL="%s"/>' % (n, u) for n, u in (
+        ("Main.vi", "../Main.vi"), ("share.vi", "//kelvin-test.invalid/share/a.vi"), ("abs.vi", "/C/Lab/b.vi"),
+        ("up.vi", "../../elsewhere/secret.vi"), ("drive.vi", "C:/elsewhere/secret.vi"),
+        ("back.vi", "..\\..\\elsewhere\\secret.vi"), ("com.vi", "../COM3.vi")))
+    (lab / "p.lvproj").write_text('<?xml version="1.0"?><Project LVVersion="22308000"><Item Name="My Computer" '
+                                  'Type="My Computer">%s</Item></Project>' % items, encoding="utf-8")
+    looked = []
+    for name in ("stat", "lstat"):
+        real = getattr(os, name)
+        monkeypatch.setattr(os, name, lambda p, *a, _real=real, **k: looked.append(str(p)) or _real(p, *a, **k))
+    p = lv.read_project(lab / "p.lvproj", lab)
+    monkeypatch.undo()
+    assert {v["name"]: v["path"] for v in p["vis"]} == {"Main.vi": str(lab / "Main.vi"), "share.vi": "", "abs.vi": "",
+                                                        "up.vi": "", "drive.vi": "", "back.vi": "", "com.vi": ""}
+    assert p["outside"] == ["share.vi", "abs.vi", "up.vi", "drive.vi", "back.vi", "com.vi"]
+    assert not [x for x in looked if "kelvin-test" in x or "elsewhere" in x or "COM3" in x]
+    found = lv.survey(lab, visaconf=tmp_path / "none.ini", read=lambda f: lv.vi(f))
+    assert [s["name"] for s in found.vis] == ["Main.vi"]
+    assert "not looked at (outside %s, or on another computer): share.vi, abs.vi" % lab in found.text()
+
+
+def test_a_project_is_read_whatever_its_depth_and_never_with_a_document_type(tmp_path):
+    """Folders nested 1500 deep are read (without recursion); a document type, whatever the file's encoding (a
+    UTF-16 one hid it from a search of its bytes), is refused before any entity in it is used."""
+    body = '<Item Name="f" Type="Folder">' * 1500 + '<Item Name="a.vi" Type="VI" URL="../a.vi"/>' + "</Item>" * 1500
+    (tmp_path / "deep.lvproj").write_text('<Project LVVersion="22308000"><Item Name="My Computer" Type="My Computer">'
+                                          '%s</Item></Project>' % body, encoding="utf-8")
+    assert [v["name"] for v in lv.read_project(tmp_path / "deep.lvproj")["vis"]] == ["a.vi"]
+    entities = '<!ENTITY a "x">' + "".join('<!ENTITY a%d "%s">' % (i, "&a;" * 10) for i in range(8))
+    for text in ('<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE Project [<!ENTITY a "Entity.vi">]>'
+                 '<Project><Item Name="My Computer" Type="My Computer"><Item Name="&a;" Type="VI" URL="../x.vi"/>'
+                 '</Item></Project>', '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE p [%s]><Project/>' % entities):
+        (tmp_path / "typed.lvproj").write_bytes(text.encode("utf-16"))
+        p = lv.read_project(tmp_path / "typed.lvproj")
+        assert p["problem"] == "not read: it isn't a LabVIEW project (it declares a document type)" and p["vis"] == []
+
+
+def test_one_file_that_trips_the_survey_up_is_said_and_the_survey_goes_on(tmp_path, cards, monkeypatch):
+    """A loop whose count is +Inf, a project the reader raises on, an NI MAX file too big for one: each said in its
+    own place, and the survey goes on (it was an error for the whole survey)."""
+    monkeypatch.setattr(lv, "VISACONF", tmp_path / "no NI-VISA here" / "visaconf.ini")
+    root = lab_folder(tmp_path)
+    (root / "Bad.lvproj").write_text(PROJECT, encoding="utf-8")
+    (root / "visaconf.ini").write_text(VISACONF + ";" * 50, encoding="utf-8")
+    monkeypatch.setattr(lv, "MAX_INI_BYTES", len(VISACONF) + 10)
+    real = lv.read_project
+    monkeypatch.setattr(lv, "read_project", lambda f, folder=None: real(f, folder) if f.name != "Bad.lvproj" else
+                        1 / 0)
+    infinite = lv.loop("i", [lv.node("write", resource="GPIB0::24::INSTR", text=":SOUR:VOLT 1")],
+                       count={"value": float("inf")})
+
+    def reader(f):
+        if f.name == "Main.vi":
+            raise RuntimeError("the reader tripped")
+        return lv.vi(f, read="full", diagram=[infinite])
+    found = lv.survey(root, cards["registry"], read=reader)
+    assert [p["problem"] for p in found.projects] == ["not read: division by zero", ""]
+    assert found.max["files"] == [str(root / "max export.ini")] and "bigger than" in found.max["unread"][0]
+    assert {s["name"]: s["unread"] for s in found.vis}["Main.vi"] == ["not read: the reader tripped"]
+    scans = found.translations({lv.address_key("GPIB0::24::INSTR"): ("smu", cards["smu"])})
+    t = scans[str(root / "Measurements" / "IV sweep.vi")]
+    assert t["plan"] is None and t["gaps"] == ["For loop over i: how many times it runs isn't in the summary"]
+    found.view(), found.text()
+
+
+def test_a_loops_values_are_never_made_past_what_a_scan_takes(tmp_path):
+    """range_values counts a loop's values before it makes them: none for a number that isn't finite or for more
+    than a plan takes (plans.MAX_POINTS); the survey's walk takes a long loop's first value and extremes only."""
+    inf, nan = float("inf"), float("nan")
+    for rng in ({"count": {"value": inf}}, {"count": {"value": nan}}, {"count": {"value": 10 ** 9}},
+                {"from": {"value": 0}, "to": {"value": inf}, "step": {"value": 1}},
+                {"from": {"value": 0}, "to": {"value": 1}, "step": {"value": nan}},
+                {"from": {"value": 0}, "to": {"value": 1e12}, "step": {"value": 1}},
+                {"from": {"value": 0}, "to": {"value": 1}, "points": {"value": 10 ** 12}},
+                {"from": {"value": 0}, "to": {"value": 1}, "points": {"value": 1e300}},
+                {"from": {"value": 1e308}, "to": {"value": -1e308}, "step": {"value": 1}},
+                {"values": {"value": [0, inf]}},
+                {"from": {"control": "Start"}, "to": {"value": 1}, "step": {"value": 1}}):
+        t0 = time.perf_counter()
+        assert lv.range_values(rng, {"Start": lv.control("Start", inf)}) == [], rng
+        assert time.perf_counter() - t0 < 1
+    assert lv.range_values({"count": {"value": 10 ** 6}}, {}, most=1000) == [0.0, 0.0, 999999.0]
+    assert lv.range_values({"from": {"value": 5}, "to": {"value": -5}, "points": {"value": 10 ** 6}}, {},
+                           most=1000) == [5.0, -5.0, 5.0]
+    assert lv.range_values({"from": {"value": 0}, "to": {"value": 1}, "step": {"value": 0.5}}, {}, most=1000) == \
+        [0.0, 0.5, 1.0]
+    assert lv.value_of({"value": 1e308, "scale": 10}, {}) is None
 
 
 def test_driver_names_give_their_maker_and_model_and_nothing_more():
@@ -347,6 +446,46 @@ def test_what_doesnt_translate_is_said_and_never_guessed(cards):
         "it runs on cRIO-9068, a hardware target of its project, not on this computer"]
 
 
+def test_a_loops_stop_condition_is_carried_over_or_keeps_it_from_being_a_scan(cards):
+    """A loop that steps the voltage but also stops on a condition (the current passing a limit, say) is never
+    swept to its end as if it didn't: a reading compared with a value becomes its sweep's until:, a Stop button is
+    Kelvin's Stop, its last value is where the sweep ends; any other condition gives no scan, and says why."""
+    lab = lab_of(cards, smu="GPIB0::24::INSTR", lockin="GPIB0::8::INSTR")
+
+    def ramp(**loop):
+        return lv.vi("C:/Lab/protect.vi", read="full", controls=[
+            lv.control("Start (V)", 0.0), lv.control("Stop (V)", 20.0), lv.control("Step (V)", 0.5),
+            lv.control("Limit", 0.002)],
+            diagram=[lv.loop("V", [lv.node("write", resource="GPIB0::24::INSTR", text=":SOUR:VOLT {V}",
+                                           values={"V": lv.at("V")}),
+                                   lv.node("query", resource="GPIB0::8::INSTR", text="OUTP? 1", into="X"),
+                                   lv.node("query", resource="GPIB0::24::INSTR", text=":READ?", into="I")],
+                             start="Start (V)", stop="Stop (V)", step="Step (V)", **loop)])
+    sweep = {"from": 0.0, "to": 20.0, "step": 0.5}
+    for until in ("the reading I", "a condition worked out on the diagram (the output of Greater?)"):
+        t = viscan.translate(ramp(kind="while", until=until), lab)   # in words only: nothing exact to carry over
+        assert t["plan"] is None and t["gaps"] == ["While loop over V: it can also stop early (%s): a scan can't stop "
+                                                   "the same way" % until]
+    t = viscan.translate(ramp(until="the reading I", stop_if={"read": "I", "op": ">", "than": lv.const(1e-3)}), lab)
+    assert t["plan"] is None and "For loop over V: it can also stop early" in t["gaps"][0]   # one of a reply's two
+    t = viscan.translate(ramp(kind="while", until="X > Limit", stop_if={"read": "X", "op": ">",
+                                                                       "than": lv.ctl("Limit")}), lab)
+    assert t["plan"]["sweep"] == {"smu.V": dict(sweep, until="lockin.X > 0.002")} and t["gaps"] == []
+    assert {"vi": "While loop over V: it stops once X > Limit = 0.002",
+            "plan": "sweep: smu.V: until: lockin.X > 0.002"} in t["mapping"]
+    assert load_plan(t["plan"]).axes[0].until is not None
+    t = viscan.translate(ramp(kind="while", until="the Stop button", stop_if={"button": "Stop"}), lab)
+    assert t["plan"]["sweep"] == {"smu.V": sweep}
+    assert {"vi": "While loop over V: its Stop button",
+            "plan": "Kelvin's Stop (a person stops the run)"} in t["mapping"]
+    t = viscan.translate(ramp(kind="while", until="i = its samples - 1", stop_if={"last": True}), lab)
+    assert t["plan"]["sweep"] == {"smu.V": sweep}
+    assert {"vi": "While loop over V: it stops after its last value", "plan": "where the sweep ends"} in t["mapping"]
+    bad = ramp(kind="while", until="x", stop_if={"read": "X", "op": "≥", "than": lv.const(1)})
+    assert lv.validate(bad) == ["diagram[0].stop_if: {button: name}, {last: true} or {read: name, op: > >= < <= == "
+                                "!=, than: value}"]
+
+
 # ------------------------------------------------------------------ the survey
 
 def lab_folder(tmp_path):
@@ -470,6 +609,10 @@ def test_labview_measurement_files_become_runs(tmp_path):
     assert t.columns == {"gate.voltage": ("V", [0.1, 0.2, 0.3]), "gate.current": ("A", [1e-6, 2e-6, 3e-6])}
     assert t.notes == ["gate.lvm: a LabVIEW measurement file, started 2026-10-30 14:50:30"]   # no words of its own
     assert read("nox.lvm", lvm_without_x(LVM)).x == [0.0, 0.001, 0.002]
+    blank = LVM.replace("X_Columns\tOne", "X_Columns\tNo")   # as NI writes it: the X column's place left blank
+    blank = "\n".join("\t" + line.split("\t", 1)[1] if line[:1].isdigit() else line for line in blank.splitlines())
+    t = read("blank.lvm", blank + "\n")
+    assert t.x == [0.0, 0.001, 0.002] and t.columns["blank.current"] == ("A", [1e-6, 2e-6, 3e-6])
     two = read("two.lvm", LVM + LVM.split("***End_of_Header***\t\n", 1)[1].replace("0.00", "0.01"))
     assert two.x == [0.0, 0.001, 0.002, 0.01, 0.011, 0.012] and two.columns["two.segment"][1] == [1, 1, 1, 2, 2, 2]
     assert "2 segments one after another" in two.notes[0]

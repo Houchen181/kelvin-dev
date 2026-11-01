@@ -53,8 +53,12 @@ def _header(lines: List[str], i: int, sep: str) -> Tuple[Optional[Dict[str, List
     return None, i
 
 
-def _row(line: str, sep: str, comma: bool) -> bool:
+def _row(line: str, sep: str, comma: bool, blank_x: bool = False) -> bool:
+    """Whether a line is a row of numbers. blank_x: the file has no X column (X_Columns No), whose place NI's format
+    leaves blank at the start of each row: the cell after it is the first number."""
     cells = line.split(sep)
+    if blank_x and len(cells) > 1 and not cells[0].strip():
+        cells = cells[1:]
     return bool(cells) and number_of(cells[0].strip(), comma) is not None
 
 
@@ -76,6 +80,7 @@ def read_lvm(p: Path, text: str) -> Table:
         raise DataError("%s: a LabVIEW measurement file whose header never ends (%s)" % (p.name, END))
     comma = (head.get("Decimal_Separator") or ["."])[0] == ","
     x_columns = ((head.get("X_Columns") or ["One"])[0] or "One").lower()
+    blank_x = x_columns == "no"
     segments: List[Tuple[Dict[str, List[str]], List[str], List[List[str]]]] = []
     seg: Dict[str, List[str]] = {}
     while i < len(lines):
@@ -89,11 +94,11 @@ def read_lvm(p: Path, text: str) -> Table:
             seg = got
             continue
         names: List[str] = []
-        if not _row(lines[i], sep, comma):
+        if not _row(lines[i], sep, comma, blank_x):
             names = _cells(lines[i], sep)
             i += 1
         rows: List[List[str]] = []
-        while i < len(lines) and _row(lines[i], sep, comma):
+        while i < len(lines) and _row(lines[i], sep, comma, blank_x):
             rows.append(lines[i].split(sep))
             i += 1
         if rows:
@@ -120,7 +125,7 @@ def _table(p: Path, head: Dict[str, List[str]], segments: List[Tuple[Dict[str, L
     for k, (seg, names, rows) in enumerate(segments):
         width = max(len(r) for r in rows)
         names = (names + [""] * width)[:width] if names else (
-            ["X_Value"] * (x_columns != "no") + ["y%d" % j for j in range(1, width)])
+            ["X_Value"] * (x_columns != "no") + ["y%d" % j for j in range(1, width + (x_columns == "no"))])
         xs = [j for j, n in enumerate(names) if n == "X_Value"] if x_columns != "no" else []
         if x_columns == "one" and not xs and names:
             xs = [0]
