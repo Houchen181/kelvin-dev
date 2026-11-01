@@ -45,6 +45,7 @@ class Line:
     def __init__(self, hub_client):
         self.up = True
         self.http = through(hub_client)
+        self.app = hub_client.app   # the same hub, for someone at another address
 
     def __call__(self, *args, **kw):
         if not self.up:
@@ -237,25 +238,46 @@ def test_a_kelvin_account_is_deleted_everywhere_from_its_settings(tmp_path, hub)
     assert client.post("/api/session", json=ADA).status_code == 401                 # so on every computer
 
 
-def test_wrong_passwords_from_anywhere_never_lock_someone_out_of_their_own_computer(tmp_path, hub):
-    """Ten wrong passwords for an email, from anyone anywhere, make the hub hold off for 15 minutes (429). Kelvin then
-    checks the password this computer knows for that person, as offline, rather than turning the right one away."""
+def lock_out(email, http=None):
+    """Someone tries wrong passwords for this email until the hub holds off (from this test's address, or http's)."""
+    for _ in range(10):
+        with pytest.raises(central.CentralError):
+            central.Central(HUB, http=http).sign_in(email, "a wrong guess", "urn:uuid:someone-else")
+
+
+@pytest.mark.parametrize("case", ["old password", "disabled", "guessing"])
+def test_while_the_hub_holds_off_kelvin_signs_nobody_in_on_the_password_it_keeps(tmp_path, hub, case):
+    """Anyone can make the hub hold off (429). Kelvin once signed people in then with the password this computer
+    keeps: a password changed on the hub came back, an account the hub disabled got in, and guesses went on."""
     h, line = hub
     client, settings = computer(tmp_path)
     client.post("/api/session/hub", json={"url": HUB})
     assert client.post("/api/accounts", json={"name": "Ada Lovelace", "consent": True, **ADA}).status_code == 200
     client.delete("/api/session")
-    for _ in range(10):                                                    # someone else tries her email
-        with pytest.raises(central.CentralError):
-            central.Central(HUB).sign_in(ADA["email"], "guess", "urn:uuid:someone-else")
-    with pytest.raises(central.CentralError) as held:
-        central.Central(HUB).sign_in(ADA["email"], ADA["password"], "urn:uuid:someone-else")
-    assert held.value.status == 429
-    r = client.post("/api/session", json=ADA)                              # Ada, at her own computer
-    assert r.status_code == 200 and r.json()["offline"] and r.json()["user"]["email"] == ADA["email"]
+    uid = h.authenticate(ADA["email"], ADA["password"])["id"]
+    if case == "old password":
+        h.change_password(uid, ADA["password"], "a brand new password")    # the old one leaked
+    elif case == "disabled":
+        h.set_disabled(uid, True)                                           # she left the lab
+    lock_out(ADA["email"])
+    if case == "guessing":
+        assert {client.post("/api/session", json=dict(ADA, password="guess %d" % i)).status_code
+                for i in range(12)} == {401}
+    assert client.post("/api/session", json=ADA).status_code == 401
+    assert client.get("/api/session").json()["user"] is None
+
+
+def test_strangers_wrong_passwords_never_lock_someone_out_of_their_own_computer(tmp_path, hub):
+    """The hub counts wrong passwords per email and computer, and per address: a stranger elsewhere, without this
+    computer's installation id, makes only their own tries wait."""
+    h, line = hub
+    client, settings = computer(tmp_path)
+    client.post("/api/session/hub", json={"url": HUB})
+    assert client.post("/api/accounts", json={"name": "Ada Lovelace", "consent": True, **ADA}).status_code == 200
     client.delete("/api/session")
-    r = client.post("/api/session", json=dict(ADA, password="wrong pw!"))
-    assert r.status_code == 401 and "Too many tries" in r.json()["error"]  # not her password: the hub's no stands
+    lock_out(ADA["email"], through(TestClient(line.app, client=("203.0.113.7", 50000))))
+    r = client.post("/api/session", json=ADA)                              # Ada, at her own computer
+    assert r.status_code == 200 and not r.json()["offline"] and r.json()["user"]["email"] == ADA["email"]
 
 
 def test_the_hub_people_sign_in_to_changes_only_with_the_owners_pin(tmp_path, hub):

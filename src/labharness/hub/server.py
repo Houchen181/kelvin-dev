@@ -304,6 +304,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
     if hosts is None:
         hosts = {urlsplit(hub.base_url).netloc, "127.0.0.1:%d" % port, "localhost:%d" % port}
     signin_tries = Limiter(10, 900)
+    spray_tries = Limiter(30, 3600)       # wrong passwords for one email from anywhere (Kelvin's sign-in)
     form_tries = Limiter(20, 3600)        # registrations and reset mails per address
     token_tries = Limiter(30, 900)
     operator_tries = Limiter(5, 900)
@@ -1054,14 +1055,21 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
 
     async def api_signin(request: Request) -> Response:
         """Kelvin's sign-in: {email, password, installation: {id, name, platform, version}} -> a token for this
-        Kelvin and who the person is. Same lockouts as the sign-in page."""
+        Kelvin and who the person is. Wrong passwords count per email and computer (its installation id), and per
+        address, so strangers elsewhere never lock a person out of their own computer. Past spray_tries' many for an
+        email from anywhere, only computers the account is signed in on still try for that hour."""
         try:
             body = await json_body(request)
         except (HubError, ValueError) as err:
             return api_error(str(err))
-        keys = ("signin:" + str(body.get("email") or "").strip().lower(), "signin-ip:" + who(request))
+        email = str(body.get("email") or "").strip().lower()
+        inst = body.get("installation") if isinstance(body.get("installation"), dict) else {}
+        keys = ("signin:%s %s" % (email, str(inst.get("id") or "")[:200]), "signin-ip:" + who(request))
         if any(signin_tries.blocked(k) for k in keys):
             return api_error("Too many tries. Wait 15 minutes, or reset your password.", 429)
+        if spray_tries.blocked("signin:" + email) and not await call(hub.signs_in_on, email, inst.get("id")):
+            return api_error("Too many wrong passwords for this account lately. Wait an hour, or reset your "
+                             "password.", 429)
         try:
             result = await call(hub.sign_in_app, body.get("email"), body.get("password"), kelvin_of(body),
                                 ip_of(request))
@@ -1071,6 +1079,7 @@ def create_app(hub: Hub, port: int = 8780, hosts: Optional[Iterable[str]] = None
             if str(err).startswith("Wrong email or password"):
                 for k in keys:
                     signin_tries.hit(k)
+                spray_tries.hit("signin:" + email)
                 return api_error(str(err), 401)
             return api_error(str(err), 403 if "disabled" in str(err) or "Confirm" in str(err) else 400)
         signin_tries.clear(keys[0])
