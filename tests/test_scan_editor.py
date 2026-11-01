@@ -1,0 +1,338 @@
+"""The scan editor (the Runs panel's Edit, Special Measure style): a plan as its parts and back without losing
+anything (scanedit.py), what the editor can't show kept as written; its check (points, time, load_plan's and the
+gate's problems) reads no instrument; an edited scan is saved as a new entry of the library, "edited from" the old one,
+which stays; and it runs only as any scan does, through the queue and its approval (POST /api/library)."""
+import json
+
+import pytest
+import yaml
+
+from labharness import scanedit
+from labharness.yamlio import dump_yaml, load_yaml
+
+PLANS = [
+    # Kelvin's own plans, from plans.py and the tests
+    """plan: gate_sweep
+setup: { lockin.amplitude: 0.05, smu.output: on }
+sweep: { smu.V: {from: 0, to: 2, step: 0.5} }
+settle: 0.1
+measure: [lockin.X, smu.I]
+after: { smu.V: 0 }""",
+    """plan: gate_sweep
+device: D3
+preconditions: ["tc.T_sample < 2.5"]
+setup:   { lockin.amplitude: 0.05, smu.output: on }
+sweep:
+  magnet.B: { values: [0, 0.5, 1], stabilize: { read: tc.T_sample, within: 0.02, for: 30 } }
+  smu.V:    { from: 0, to: 10, step: 0.05, back: true }
+repeat: 3
+time: { every: 2, for: 600 }
+settle: 0.3
+trigger: [dmm.arm, gen.fire]
+measure: [lockin.X, lockin.Y, smu.I]
+after:   { smu.V: 0 }
+on_abort: { smu.V: 0 }""",
+    """plan: rt
+sweep:
+  ppms.T_set: { ramp: [{to: 10, rate: 10}, {to: 2, rate: 1, hold: 600}], every: 10 }
+measure: [ppms.T]""",
+    """plan: one_leg
+sweep: { ppms.T_set: { ramp: 10, every: 10, read: ppms.T, within: 0.1, rate: 2, stall: 0 } }""",
+    """plan: legs
+sweep: { ppms.T_set: { ramp: [10, {hold: 5, to: 2}], every: 10 } }""",
+    """plan: until
+sweep:
+  smu.V:  { from: 0, to: 10, step: 0.1, until: "abs(smu.I) > 1e-6" }
+  tc.setpoint: { values: [2, 5, 10, 50], settle: {50: 600} }
+time: { every: 10, for: 7200, until: "tc.T_sample < 2.1" }
+until: "nvm.V < 1e-6"
+retry: { times: 3, wait: 10 }""",
+    """plan: cv
+technique: { pstat.cv: { start: -0.2, vertex: 0.6, cycles: 2 } }
+sweep:     { pstat.cv.rate: { values: [0.02, 0.05, 0.1] } }""",
+    """measure: []
+sweep: { smu.V: [0, 1, 2], lockin.frequency: {to: 1.0e+6, from: 1e3, points: 31, log: true} }
+description: ''
+plan: written_out_of_order""",
+    # what the editor can't show exactly: kept whole, as written
+    """plan: odd
+sweep: { smu.V: {from: "0", to: 1, step: 0.5}, a.b: 5, c.d: {}, e.f: null, g.h: {from: 0, to: 1, step: 0.5, points: 3},
+         i.j: {values: [1, 2], from: 0}, k.l: {ramp: [{to: 1, rate: null}], every: 1}, m.n: {from: 0, to: 1, every: 2} }
+setup: { smu.V: null }
+settle: "0.3"
+repeat: true
+time: {every: 2, for: 600, until: "x.y > 1"}
+weird: {1: 2}
+1: one""",
+    """description: no name
+sweep: {smu.V: {from: 0, to: 1, points: 5, back: false, settle: [1, 2, 3, 4, 5]}}""",
+    """plan: words
+sweep: {x.y: {values: ["1.0e7", "on", true, 1e7, 3]}}
+setup: {a.b: "1e7", c.d: on}""",
+]
+
+
+def _same(a, b):
+    """Equal, and in the same order: the plan's keys, its loops (outer first) and each loop's keys."""
+    assert a == b
+    assert list(a) == list(b)
+    if isinstance(a.get("sweep"), dict):
+        assert list(a["sweep"]) == list(b["sweep"])
+        for key, spec in a["sweep"].items():
+            if isinstance(spec, dict):
+                assert list(spec) == list(b["sweep"][key]), key
+
+
+@pytest.mark.parametrize("text", PLANS)
+def test_a_plan_goes_to_its_parts_and_back_as_it_was(text):
+    plan = load_yaml(text)
+    parts = scanedit.to_parts(plan)
+    _same(scanedit.to_plan(parts), plan)
+    _same(scanedit.to_plan(json.loads(json.dumps(parts))), plan)   # through the browser too
+    assert load_yaml(dump_yaml(plan)) == plan                       # and the kept text reads back the same
+
+
+def test_what_the_editor_cant_show_is_kept_as_written():
+    parts = scanedit.to_parts(load_yaml(PLANS[1]))
+    assert parts["name"] == "gate_sweep" and parts["measure"] == ["lockin.X", "lockin.Y", "smu.I"]
+    assert parts["setup"] == [{"key": "lockin.amplitude", "value": 0.05}, {"key": "smu.output", "value": True}]
+    assert parts["repeat"] == 3 and parts["settle"] == 0.3 and parts["time"]["every"] == 2
+    assert parts["fixed"] == ["device", "preconditions", "trigger", "on_abort"]
+    assert load_yaml(parts["kept"]) == {"device": "D3", "preconditions": ["tc.T_sample < 2.5"],
+                                        "trigger": ["dmm.arm", "gen.fire"], "on_abort": {"smu.V": 0}}
+    field, steps = parts["loops"]
+    assert (field["key"], field["mode"], field["values"]) == ("magnet.B", "values", [0, 0.5, 1])
+    assert field["fixed"] == ["stabilize"] and "within: 0.02" in field["kept"]
+    assert (steps["mode"], steps["from"], steps["to"], steps["step"], steps["by"], steps["back"]) == \
+        ("range", 0, 10, 0.05, "step", True)
+    odd = scanedit.to_parts(load_yaml(PLANS[8]))
+    modes = {loop["key"]: loop["mode"] for loop in odd["loops"]}
+    assert modes == {"smu.V": "kept", "a.b": "kept", "c.d": "kept", "e.f": "kept", "g.h": "range", "i.j": "kept",
+                     "k.l": "kept", "m.n": "kept"}
+    assert odd["loops"][0]["text"] == "{from: '0', to: 1, step: 0.5}\n"
+    assert odd["loops"][4]["fixed"] == ["step"] and odd["loops"][4]["by"] == "points"   # load_plan takes points
+    assert odd["setup"] is None and odd["settle"] is None and odd["repeat"] is None and odd["time"] is None
+    assert odd["fixed"] == ["setup", "settle", "repeat", "time", "weird", "1"]
+    # fields a person fills in never write over what is kept: the kept part wins
+    odd["settle"], odd["setup"] = 1.0, [{"key": "smu.V", "value": 2}]
+    odd["loops"][4]["step"], odd["loops"][4]["by"] = 0.1, "step"
+    plan = scanedit.to_plan(odd)
+    assert plan["settle"] == "0.3" and plan["setup"] == {"smu.V": None} and plan["sweep"]["g.h"]["step"] == 0.5
+
+
+def test_a_persons_edits_make_the_plan_they_show():
+    parts = scanedit.to_parts(load_yaml(PLANS[1]))
+    field, steps = parts["loops"]
+    steps.update(by="points", points=21, step=None, back=False, settle=0.5)   # points now, not there and back
+    field.update(mode="range", **{"from": -1, "to": 1, "by": "points", "points": 5})   # values → a range
+    parts["loops"] = [steps, field, dict(scanedit.to_parts({"sweep": {"x.y": [1]}})["loops"][0],
+                                          key="lockin.frequency", values=[17, 77])]
+    parts["measure"].remove("lockin.Y")
+    parts["setup"].append({"key": "smu.nplc", "value": 1})
+    parts["setup"].append({"key": "", "value": 3})                   # a row not filled in yet: left out
+    parts["after"] = []
+    parts.update(repeat=None, time=None, description="finer")
+    plan = scanedit.to_plan(parts)
+    assert list(plan) == ["plan", "description", "device", "preconditions", "setup", "sweep", "settle", "trigger",
+                          "measure", "after", "on_abort"]                # a new key where Kelvin writes it
+    assert plan["sweep"] == {"smu.V": {"from": 0, "to": 10, "points": 21, "back": False, "settle": 0.5},
+                             "magnet.B": {"from": -1, "to": 1, "points": 5,
+                                          "stabilize": {"read": "tc.T_sample", "within": 0.02, "for": 30}},
+                             "lockin.frequency": [17, 77]}
+    assert plan["setup"] == {"lockin.amplitude": 0.05, "smu.output": True, "smu.nplc": 1}
+    assert plan["after"] == {} and plan["measure"] == ["lockin.X", "smu.I"] and plan["on_abort"] == {"smu.V": 0}
+    ramp = scanedit.to_parts(load_yaml(PLANS[3]))
+    ramp["loops"][0]["legs"].append({"to": 2, "rate": 1, "hold": 600})
+    assert scanedit.to_plan(ramp)["sweep"]["ppms.T_set"] == {"ramp": [10, {"to": 2, "rate": 1, "hold": 600}],
+                                                            "every": 10, "read": "ppms.T", "within": 0.1, "rate": 2,
+                                                            "stall": 0}
+    new = scanedit.to_parts({"plan": "scan"})
+    new["loops"] = [dict(scanedit._blank("smu.V", "range"), **{"from": 0, "to": 1, "step": 0.1})]
+    new["measure"] = ["smu.I"]
+    assert scanedit.to_plan(new) == {"plan": "scan", "sweep": {"smu.V": {"from": 0, "to": 1, "step": 0.1}},
+                                     "measure": ["smu.I"]}
+    for loops, why in (([dict(scanedit._blank("", "range"))], "loop 1: choose what it steps"),
+                       ([scanedit._blank("smu.V", "values"), scanedit._blank("smu.V", "range")],
+                        "smu.V is stepped by two loops"),
+                       ([dict(scanedit._blank("smu.V", "ramp"), legs=[["to", 1]])], "a ramp's leg"),
+                       ([dict(scanedit._blank("smu.V", "range"), mode="spiral")], "a range, values, a ramp")):
+        with pytest.raises(ValueError, match=why):
+            scanedit.to_plan(dict(new, loops=loops))
+    with pytest.raises(ValueError, match="set twice in setup"):
+        scanedit.to_plan(dict(new, setup=[{"key": "smu.V", "value": 1}, {"key": "smu.V", "value": 2}]))
+    with pytest.raises(ValueError, match="not as the editor sends them"):
+        scanedit.to_plan(dict(new, loops=[dict(scanedit._blank("smu.V", "values"), values=5)]))
+    with pytest.raises(ValueError, match="not as the editor sends them"):
+        scanedit.to_plan(dict(new, kept="a: [b"))
+
+
+# ------------------------------------------------------------------ the runtime: check, save, run
+
+SWEEP = """plan: gate_sweep
+setup: { lockin.amplitude: 0.05, smu.output: on }
+sweep: { smu.V: {from: 0, to: 2, step: 0.5} }
+settle: 0.1
+measure: [lockin.X, smu.I]
+after: { smu.V: 0 }"""
+
+
+@pytest.fixture
+def ran(tmp_path):
+    """A runtime on the test lab whose library has the scan SWEEP, run once."""
+    pytest.importorskip("mcp")
+    from test_scan_library import virtual
+    rt = virtual(tmp_path, [True] * 10)
+    assert "done" in rt.run(SWEEP)
+    (entry,) = rt.library_view()["scans"]
+    return rt, entry
+
+
+def test_the_check_says_points_time_and_whats_wrong_reading_no_instrument(ran, monkeypatch):
+    from labharness.instrument import Instrument
+    rt, entry = ran
+    opened = rt.scan_parts(entry["id"])
+    assert opened["id"] == entry["id"] and opened["name"] == "gate_sweep"
+    assert {"key": "smu.V", "unit": "V", "drive": True} in opened["lab"]["set"]
+    assert {"key": "lockin.X", "unit": "V"} in opened["lab"]["read"]
+    assert not any(c["key"] == "lockin.X" for c in opened["lab"]["set"])   # a reading, never stepped
+    check = opened["check"]
+    assert check["loads"] and check["problems"] == [] and check["points"] == 5 and check["counts"] == {"smu.V": 5}
+    assert check["time"].startswith("~") and yaml.safe_load(check["text"]) == yaml.safe_load(entry["text"])
+
+    asked = []
+
+    def no(inst, fn, *args, **kw):
+        asked.append((inst.name, args))
+        raise AssertionError("the editor's check asked an instrument")
+    monkeypatch.setattr(Instrument, "_io", no)                       # every exchange with an instrument goes here
+    parts = opened["parts"]
+    parts["loops"][0].update(to=20)                                  # beyond smu.V's limits [-15, 15]
+    check = rt.scan_check(parts)
+    assert check["loads"] and check["points"] == 41 and "outside" in " ".join(check["problems"])
+    parts["loops"][0].update(to=2, key="smu.Q")
+    unknown = rt.scan_check(parts)
+    assert unknown["loads"] and unknown["problems"] == ["sweep: virtual/source-meter has no parameter 'Q' "
+                                                        "(has: V, V_range, V_autorange, compliance_I, output, I, nplc)"]
+    parts["loops"][0].update(key="smu.V", step=0)
+    bad = rt.scan_check(parts)
+    assert not bad["loads"] and "nonzero step" in bad["problems"][0] and bad["points"] is None
+    parts["loops"][0].update(step=0.5)
+    parts["setup"].append({"key": "tc.setpoint", "value": 50})       # warms the sample ...
+    parts["loops"].insert(0, dict(scanedit._blank("magnet.B", "values"), values=[0, 1]))   # ... under a field
+    assert any(p.startswith("interlock: magnet.B needs tc.T_sample < 10") for p in rt.scan_check(parts)["problems"])
+    parts["loops"] = [dict(scanedit._blank("tc.setpoint", "ramp"), legs=[{"to": 5}], every=10)]   # a ramp follows T
+    ramp = rt.scan_check(parts)   # at a rate its card can't tell: how many points is not known, never its legs
+    assert ramp["loads"] and ramp["estimate"] and ramp["problems"] == []
+    assert ramp["points"] is None and not ramp["counts"]
+    rt._keep("magnet", {"B_actual": 0.0}, "read")                   # the field as Kelvin last saw it
+    parts["setup"] = []
+    parts["loops"] = [dict(scanedit._blank("magnet.B", "ramp"), legs=[{"to": 1, "rate": 0.5}], every=10)]
+    timed = rt.scan_check(parts)   # 1 T at 0.5 T/min: 120 s, a point every 10 s and one as it starts
+    assert timed["problems"] == [] and timed["points"] == 13 and timed["counts"] == {"magnet.B": 13}, timed
+    assert timed["time"] == "~2.0 min", timed
+    assert rt.scan_check({"loops": "x"})["problems"] and rt.scan_check("x")["problems"] == ["send the scan's parts"]
+    assert asked == []
+
+
+def test_an_edited_scan_is_a_new_entry_and_the_old_one_stays(ran):
+    rt, entry = ran
+    marks = {"project": "p1", "confidential": True}
+    rt.library.note_plan(entry["text"], "gate_sweep", entry["summary"], "r2", marks=marks)   # whose its runs were
+    parts = rt.scan_parts(entry["id"])["parts"]
+    parts["loops"][0].update(step=0.25)
+    saved = rt.scan_save(parts, entry["id"], "human")
+    new = saved["entry"]
+    assert saved["new"] and new["id"] != entry["id"] and new["name"] == "gate_sweep"
+    assert new["edited_from"] == "gate_sweep" and new["source"] == "you" and new["marks"] == marks
+    assert new["count"] == 0 and "smu.V 0 → 2 V, 9 points" in new["summary"]
+    assert {e["id"] for e in rt.library_view()["scans"]} == {entry["id"], new["id"]}   # the old one stays
+    again = rt.scan_save(parts, entry["id"], "human")
+    assert not again["new"] and again["entry"]["id"] == new["id"] and len(rt.library_view()["scans"]) == 2
+    parts["name"] = "gate_fine"                                      # renamed: its own name, nothing else
+    renamed = rt.scan_save(parts, entry["id"], "human")["entry"]
+    assert renamed["name"] == "gate_fine" and "edited_from" not in renamed
+    blank = rt.scan_parts()
+    assert blank["id"] is None and blank["parts"]["name"] == "scan" and not blank["check"]["problems"]
+    made = rt.scan_save(dict(blank["parts"], loops=[dict(scanedit._blank("smu.V", "values"), values=[0, 1])],
+                             measure=["smu.I"]), None, "human")["entry"]
+    assert made["name"] == "scan" and "edited_from" not in made and made["marks"] == {}
+    with pytest.raises(ValueError, match="not saved: .*nonzero step"):
+        parts["loops"][0].update(step=0)
+        rt.scan_save(parts, entry["id"], "human")
+    orphan = rt.scan_save(dict(blank["parts"], name="orphan"), "plan-gone", "human")["entry"]   # its scan taken out
+    assert orphan["name"] == "orphan" and "edited_from" not in orphan and orphan["marks"] == {}
+    events = [json.loads(line) for line in (rt.data_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [e.get("edited_from") for e in events if e["type"] == "library" and e.get("change") == "saved"] == \
+        ["gate_sweep", "gate_sweep", None, None]
+
+
+def test_the_editor_routes_and_an_edited_scan_runs_through_the_queue(ran, tmp_path):
+    from test_scan_library import finish, portal
+    rt, entry = ran
+    client, _ = portal(rt, tmp_path)
+    opened = client.post("/api/library", json={"op": "parts", "id": entry["id"]}).json()
+    assert set(opened) == {"id", "name", "edited_from", "parts", "lab", "check"} and opened["check"]["points"] == 5
+    assert opened["edited_from"] is None
+    parts = opened["parts"]
+    parts["loops"][0].update(to=1)
+    check = client.post("/api/library", json={"op": "check", "parts": parts}).json()
+    assert check["points"] == 3 and check["problems"] == [] and "to: 1" in check["text"]
+    saved = client.post("/api/library", json={"op": "save", "parts": parts, "from": entry["id"]}).json()
+    assert saved["new"] and saved["entry"]["edited_from"] == "gate_sweep"
+    assert [e["id"] for e in saved["library"]["scans"]].count(saved["entry"]["id"]) == 1
+    reopened = client.post("/api/library", json={"op": "parts", "id": saved["entry"]["id"]}).json()
+    assert reopened["edited_from"] == "gate_sweep" and reopened["check"]["points"] == 3
+    client.post("/api/library", json={"op": "rename", "id": saved["entry"]["id"], "name": "short sweep"})
+    assert client.post("/api/library", json={"op": "parts", "id": saved["entry"]["id"]}).json()["edited_from"] is None
+
+    parts["loops"][0].update(to=1.5)                                 # queued: kept in the library, at the end
+    queued = client.post("/api/library", json={"op": "run", "parts": parts, "from": entry["id"], "queue": True}).json()
+    item = queued["queue"]["items"][-1]
+    assert item["kind"] == "plan" and item["status"] == "waiting" and queued["queue"]["state"] == "idle"
+    assert yaml.safe_load(item["text"])["sweep"] == {"smu.V": {"from": 0, "to": 1.5, "step": 0.5}}
+    assert item["library"] == queued["entry"]["id"] and queued["entry"]["id"] in {
+        e["id"] for e in queued["library"]["scans"]}
+    rt.queue_change("remove", item["id"])
+
+    ran_now = client.post("/api/library", json={"op": "run", "parts": parts, "from": entry["id"]})   # run: approved
+    assert ran_now.status_code == 200 and "queue started: 1 scan" in ran_now.json()["message"]
+    finish(rt)
+    (done,) = rt.queue.items
+    assert done.status == "done", done.message
+    kept = rt.library.get(queued["entry"]["id"])
+    assert kept["count"] == 1 and kept["runs"] == [done.run_id]      # its runs are the edited scan's
+
+    over = dict(parts, loops=[dict(parts["loops"][0], to=99)])
+    refused = client.post("/api/library", json={"op": "run", "parts": over, "queue": True})
+    assert refused.status_code == 400 and refused.json()["error"].startswith("not added: ")
+    assert not any("99" in (e.get("text") or "") for e in rt.library_view()["scans"])   # never kept, never queued
+    bad = client.post("/api/library", json={"op": "save", "parts": dict(parts, loops=[])})
+    assert bad.status_code == 200 and bad.json()["new"]              # a scan of one point is a scan
+    assert client.post("/api/library", json={"op": "save", "parts": "nope"}).status_code == 400
+    assert client.post("/api/library", json={"op": "parts", "id": "plan-nope"}).status_code == 404
+    assert client.post("/api/library", json={"op": "parts"}).json()["parts"]["name"] == "scan"
+    assert client.post("/api/library", json={"op": "check", "parts": {"loops": [{}]}}).json()["problems"] == [
+        "loop 1: choose what it steps (instrument.parameter)"]
+
+
+def test_a_script_isnt_edited_here_and_phones_get_none_of_it(tmp_path, monkeypatch):
+    pytest.importorskip("mcp")
+    from labharness.web.remote import allowed
+    from test_scan_library import portal, virtual
+    rt = virtual(tmp_path, [])
+    script = tmp_path / "probe.py"
+    script.write_text("print('hi')\n", encoding="utf-8")
+    entry = rt.library.add_script(script)
+    with pytest.raises(ValueError, match="is a script"):
+        rt.scan_parts(entry["id"])
+    for role in ("watch", "control"):
+        assert not allowed(role, "POST", "/api/library")
+    client, guard = portal(rt, tmp_path)
+    from starlette.testclient import TestClient
+    with TestClient(guard):
+        guard.remote.port = 8771
+        phone = TestClient(guard, base_url="http://192.168.1.50:8771")
+        _, token = guard.remote.issue("Ana's phone", "control", "ios-ana")
+        for op in ("parts", "check", "save", "run"):
+            r = phone.post("/api/library", headers={"X-Kelvin-Token": token}, json={"op": op, "parts": {}})
+            assert r.status_code == 403, op

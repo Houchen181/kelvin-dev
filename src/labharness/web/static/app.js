@@ -1162,6 +1162,7 @@
   const BUSY = new Set();
   function syncBusy() {
     for (const b of document.querySelectorAll("[data-busy]")) b.disabled = b.dataset.busy.split(" ").some((k) => BUSY.has(k));
+    if (ED.parts) edButtons();   // the scan editor's Run waits too
   }
   async function busyWhile(keys, fn) {
     if (keys.some((k) => BUSY.has(k))) return null;   // a second click while one is on its way does nothing
@@ -1316,14 +1317,15 @@
   }
 
   // The side panels each open and close on their own, and each keeps the width it was left at (drag its left edge).
-  // Beside the conversation, which keeps at least CHAT_MIN pixels, they stand side by side: Runs and Analysis, then
-  // Lab and Team chat. When they need more room than there is, they shrink alike; then the sidebar steps aside (the
-  // menu button brings it back over the page); then each pair shares a column, one above the other; and if even that
-  // doesn't fit, the Lab column floats over. Below 1100 px they float over the conversation in one column (app.css),
-  // below 820 px the sidebar too.
+  // Beside the conversation, which keeps at least CHAT_MIN pixels, they stand side by side: Runs, the scan editor and
+  // Analysis, then Lab and Team chat. When they need more room than there is, they shrink alike; then the sidebar steps
+  // aside (the menu button brings it back over the page); then each group shares a column, one above the other; and if
+  // even that doesn't fit, the Lab column floats over. Below 1100 px they float over the conversation in one column
+  // (app.css), below 820 px the sidebar too.
   const CHAT_MIN = 520, SIDEBAR_W = 264;
   const PANES = {   // id: [open?, its column, its least width, where its width is kept]
     runpane: [() => RUNS.open, "workcol", 340, "lh.runsWidth"],
+    edpane: [() => ED.open, "workcol", 360, "lh.edWidth"],
     anpane: [() => ANA.open, "workcol", 340, "lh.anWidth"],
     labpanel: [() => S.labOpen, "sidecol", 300, "lh.labWidth"],
     teampanel: [() => TEAM.open, "sidecol", 280, "lh.teamWidth"],
@@ -1441,6 +1443,7 @@
     const kept = (key) => Number(store(key)) || 0;
     PANE_W.runpane = kept("lh.runsWidth") || Math.round(Math.min(720, Math.max(420, window.innerWidth * 0.42)));
     PANE_W.anpane = kept("lh.anWidth") || PANE_W.runpane;   // until it has its own: the one it shared with Runs
+    PANE_W.edpane = kept("lh.edWidth") || 460;
     PANE_W.labpanel = kept("lh.labWidth") || 380;
     PANE_W.teampanel = kept("lh.teamWidth") || PANE_W.labpanel;
     for (const id of Object.keys(PANES)) {
@@ -1461,6 +1464,11 @@
     $("runs-filter").addEventListener("input", renderRunList);
     $("scans-filter").addEventListener("input", renderScans);
     $("scans-import").addEventListener("click", importScript);
+    $("scans-new").addEventListener("click", () => openEditor(null));
+    $("scans-pick-queue").addEventListener("click", queuePicked);
+    $("scans-pick-run").addEventListener("click", () => { const [e] = pickedScans(); if (e) runScan(e, false, ["start", "lib:" + encodeURIComponent(e.id)]); });
+    $("scans-pick-edit").addEventListener("click", () => { const [e] = pickedScans(); if (e) openEditor(e.id); });
+    $("scans-pick-clear").addEventListener("click", () => pickScan(null));
     $("scans-path").addEventListener("submit", (e) => { e.preventDefault(); if ($("scans-path-input").value.trim()) importPath($("scans-path-input").value.trim()); });
     $("scans-path-input").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); $("scans-path").hidden = true; $("scans-import").focus(); } });
     window.addEventListener("resize", fitLayout);
@@ -4573,7 +4581,9 @@
   // ------------------------------------------------------------------ scans and scripts, kept to run again
   // Each scan Kelvin runs and each script a person imports (GET/POST /api/library): Run puts it first in the queue,
   // which pauses after it; Queue puts it last. A script runs with the settings last used and those changed in Show.
-  const SCANS = { data: null, shown: new Set(), params: new Map(), renaming: null, fresh: null, empty: "" };
+  // A row is selected with a click (Ctrl adds one, Shift a stretch) or the keyboard (Space, Enter, the arrows); the
+  // bar above the list adds the selected to the queue in the order they were selected, runs one, or edits a scan.
+  const SCANS = { data: null, shown: new Set(), params: new Map(), renaming: null, fresh: null, empty: "", sel: [], anchor: null };
 
   async function loadScans() {   // a fresh visit: the last import's check and message go
     $("scans-check").hidden = true;
@@ -4608,6 +4618,7 @@
     $("scans-filter").hidden = !any;
     $("scans-empty").hidden = !SCANS.data || shown > 0;
     $("scans-empty").textContent = any ? "Nothing matches." : SCANS.empty;
+    renderPick();
     const field = document.querySelector(".lib-rename");
     if (field && document.activeElement !== field) { field.focus(); field.select(); }
   }
@@ -4626,13 +4637,95 @@
       : e.changed ? h("span", { class: "tag", title: "Edited since its last run" }, "changed") : null;
     const used = e.count ? "ran " + e.count + "×" + (e.used ? " · last " + dayText(new Date(e.used * 1000)) : "") : "not run yet";
     const what = script ? e.path : e.summary || "";
-    const li = h("li", { class: "q-item lib" + (SCANS.fresh === e.id ? " fresh" : ""), "data-id": e.id },
-      h("span", { class: "lib-name" }, SCANS.renaming === e.id ? renameField(e) : h("span", { class: "q-name" }, e.name), tag),
+    const from = e.edited_from && !e.named ? "edited from " + e.edited_from + " · " : "";   // until renamed
+    const at = SCANS.sel.indexOf(e.id);
+    const li = h("li", { class: "q-item lib" + (SCANS.fresh === e.id ? " fresh" : "") + (at >= 0 ? " sel" : ""), "data-id": e.id,
+        role: "option", "aria-selected": String(at >= 0), tabindex: "0" },
+      h("span", { class: "lib-name" }, SCANS.sel.length > 1 && at >= 0 ? h("span", { class: "lib-order", title: "Queued in this order" }, String(at + 1)) : null,
+        SCANS.renaming === e.id ? renameField(e) : h("span", { class: "q-name" }, e.name), tag),
       h("span", { class: "q-acts" }, act("Run", "First in the queue, which pauses after it", ["start", key], false),
         act("Queue", "Last in the queue", [key], true), more),
-      h("span", { class: "q-sub", title: what }, what), h("span", { class: "lib-used" }, used));
+      h("span", { class: "q-sub", title: what }, what), h("span", { class: "lib-used" }, from + used));
+    li.addEventListener("click", (ev) => {
+      if (ev.target.closest("button, input, select, textarea, label, a, pre")) return;   // its own controls, its detail
+      pickScan(e.id, ev.shiftKey ? "range" : ev.ctrlKey || ev.metaKey ? "toggle" : "only");
+    });
+    li.addEventListener("keydown", (ev) => scanKeys(ev, li, e));
     if (SCANS.shown.has(e.id)) li.append(scanDetail(e));
     return li;
+  }
+  // the selection: "only" this one (a click), "toggle" it (Ctrl+click, Space), a "range" from the last one picked
+  // (Shift+click); null clears it. In the order picked, which is the order Add to queue adds them in
+  function pickScan(id, how) {
+    const ids = [...document.querySelectorAll("#scans-view li.lib")].map((li) => li.dataset.id);
+    if (id === null) SCANS.sel = [];
+    else if (how === "range" && SCANS.anchor && ids.includes(SCANS.anchor)) {
+      const [a, b] = [ids.indexOf(SCANS.anchor), ids.indexOf(id)].sort((x, y) => x - y);
+      SCANS.sel = SCANS.sel.concat(ids.slice(a, b + 1).filter((x) => !SCANS.sel.includes(x)));
+    } else if (how === "toggle") {
+      SCANS.sel = SCANS.sel.includes(id) ? SCANS.sel.filter((x) => x !== id) : SCANS.sel.concat(id);
+      SCANS.anchor = id;
+    } else {
+      SCANS.sel = [id];
+      SCANS.anchor = id;
+    }
+    const focused = document.activeElement && document.activeElement.closest && document.activeElement.closest("#scans-view li.lib");
+    renderScans();
+    const back = focused && document.querySelector('#scans-view li[data-id="' + CSS.escape(focused.dataset.id) + '"]');
+    if (back) back.focus();
+  }
+  function scanKeys(ev, li, e) {   // on a row: Space toggles it, Enter picks it alone, the arrows move, Escape clears
+    if (ev.target !== li) return;
+    const rows = [...document.querySelectorAll("#scans-view li.lib")], i = rows.indexOf(li);
+    if (ev.key === " ") pickScan(e.id, "toggle");
+    else if (ev.key === "Enter") pickScan(e.id, ev.shiftKey ? "range" : "only");
+    else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      const next = rows[i + (ev.key === "ArrowDown" ? 1 : -1)];
+      if (!next) return;
+      next.focus();
+      if (ev.shiftKey) pickScan(next.dataset.id, "range");
+    } else if (ev.key === "Escape" && SCANS.sel.length) pickScan(null);
+    else return;
+    ev.preventDefault();
+  }
+  function pickedScans() {
+    const lib = SCANS.data || {};
+    const all = new Map([...(lib.scripts || []), ...(lib.scans || [])].map((e) => [e.id, e]));
+    return SCANS.sel.map((id) => all.get(id)).filter(Boolean);
+  }
+  function renderPick() {
+    const picked = pickedScans();
+    SCANS.sel = picked.map((e) => e.id);   // what is no longer in the library goes
+    $("scans-pick").hidden = !picked.length;
+    if (!picked.length) return;
+    const one = picked.length === 1 ? picked[0] : null;
+    $("scans-pick-what").textContent = one ? one.name : picked.length + " selected";
+    $("scans-pick-run").hidden = !one;
+    $("scans-pick-edit").hidden = !(one && one.kind === "plan");
+    $("scans-pick-queue").dataset.busy = picked.map((e) => "lib:" + encodeURIComponent(e.id)).join(" ");
+    $("scans-pick-run").dataset.busy = "start" + (one ? " lib:" + encodeURIComponent(one.id) : "");
+    syncBusy();
+  }
+  // Add to queue: each selected scan or script at the end of the queue, in the order they were selected, as its Queue does
+  function queuePicked() {
+    const picked = pickedScans();
+    return busyWhile(picked.map((e) => "lib:" + encodeURIComponent(e.id)), async () => {
+      const names = [];
+      let r = null;
+      for (const e of picked) {
+        const body = { op: "run", id: e.id, queue: true };
+        const params = e.kind === "script" ? scanParams(e) : null;
+        if (params) body.params = params;
+        const got = await scansOp(body);
+        if (!got) break;   // it said why; those before it are in the queue
+        r = got;
+        names.push(e.name);
+        queueFromState(r.queue);
+      }
+      if (!r) return;
+      renderQueue();
+      if (names.length === picked.length) scansSay(names.length === 1 ? r.message || "" : "Added " + andList(names) + " to the queue.");
+    });
   }
   function scanMenu(anchor, e) {
     const shown = SCANS.shown.has(e.id);
@@ -4641,6 +4734,7 @@
       renderScans();
       focusMore(e.id);
     } }];
+    if (e.kind === "plan") items.push({ label: "Edit", icon: "pencil", onClick: () => openEditor(e.id) });
     if (e.last_run) items.push({ label: "Open last run", icon: "chev", onClick: () => openRun(e.last_run, e.last_run.split("-").slice(2).join("-") || e.name) });
     items.push({ label: "Rename", icon: "pencil", onClick: () => { SCANS.renaming = e.id; renderScans(); } },
       { sep: true }, { label: "Remove", icon: "trash", danger: true, onClick: async () => {
@@ -4770,6 +4864,433 @@
       check.text ? h("div", { class: "sc-text" }, check.text) : null].filter(Boolean));
     $("scans-check").hidden = false;
     renderScans();
+  }
+
+  // ------------------------------------------------------------------ the scan editor, Special Measure style
+  // A scan of the library as its loops (outer first: what each steps, from, to, step or points, the values, a ramp's
+  // legs), what it records at each point and what it sets first and at the end, in a panel of its own beside the others
+  // (opening it never closes one). Each change is checked (POST /api/library op check: its points, its time as its card
+  // would say it, what load_plan and the gate find; no instrument is asked). Save keeps it as a new scan of the library,
+  // "edited from" the one it came from, which stays; Run and Add to queue run it as any scan runs, through the queue,
+  // its gate and its approval. What the editor doesn't show as fields is kept as written, read-only.
+  const ED = { open: false, id: null, from: "", parts: null, base: "", units: new Map(), setKeys: new Set(),
+               readKeys: new Set(), check: null, timer: 0, gen: 0, busy: false };
+  const ED_MODES = [["range", "Range"], ["values", "Values"], ["ramp", "Ramp"]];
+
+  function toggleEditor(open) {
+    ED.open = open === undefined ? !ED.open : open;
+    $("edpane").hidden = !ED.open;
+    fitLayout();
+  }
+  // the scan with this library id in the editor, or a new scan (null); the one open there with changes stays open
+  // when asked for again, and goes only when the person says so
+  async function openEditor(id) {
+    const same = !!ED.parts && ED.id === (id || null);
+    if (same && edDirty()) { toggleEditor(true); $("ed-name").focus(); return; }
+    if (ED.parts && !same && edDirty() && !confirm("Discard your changes to " + (ED.parts.name || "this scan") + "?")) return;
+    let d;
+    try { d = await api("/api/library", { body: { op: "parts", id: id || null } }); }
+    catch (e) { scansSay(e.message, true); return; }
+    ED.id = d.id || null;
+    ED.from = d.edited_from || "";
+    ED.parts = d.parts;
+    ED.base = JSON.stringify(d.parts);
+    ED.check = d.check;
+    const lab = d.lab || { set: [], read: [] };
+    ED.units = new Map(lab.set.concat(lab.read).map((p) => [p.key, p.unit || ""]));
+    ED.setKeys = new Set(lab.set.map((p) => p.key));
+    ED.readKeys = new Set(lab.read.map((p) => p.key));
+    $("ed-set-keys").replaceChildren(...lab.set.map((p) => h("option", { value: p.key }, p.unit || (p.action ? "action" : ""))));
+    $("ed-read-keys").replaceChildren(...lab.read.map((p) => h("option", { value: p.key }, p.unit || "")));
+    $("ed-plan").hidden = true;
+    $("ed-text").setAttribute("aria-expanded", "false");
+    edSay("");
+    renderEditor();
+    toggleEditor(true);
+    $("ed-name").focus();
+  }
+  const edDirty = () => !!ED.parts && JSON.stringify(ED.parts) !== ED.base;
+  // what a box holds: a number when it is one, else the text as typed (the check says what is wrong), empty: none
+  const edParse = (s) => { const t = String(s).trim(); if (t === "") return null; const x = Number(t); return isFinite(x) ? x : t; };
+  const edShow = (v) => (v == null ? "" : v === true ? "on" : v === false ? "off" : String(v));
+  const edList = (s) => String(s).split(",").map((t) => t.trim()).filter((t) => t !== "").map(edParse);
+  const edNum = (v) => typeof v === "number" && isFinite(v);
+  // a range's points as plans.py counts them: from, from ± step, … and `to` itself
+  function rangeCount(a, b, step) {
+    if (!edNum(a) || !edNum(b) || !edNum(step) || step === 0) return null;
+    const n = Math.floor(Math.abs(b - a) / Math.abs(step) + 1e-9);
+    if (n >= 1e6) return null;
+    const last = a + (b >= a ? 1 : -1) * Math.abs(step) * n;
+    return n + 1 + (Math.abs(last - b) <= Math.max(1e-9 * Math.max(Math.abs(last), Math.abs(b)), 1e-12) ? 0 : 1);
+  }
+  const rangeStep = (loop) => (edNum(loop.from) && edNum(loop.to) && Number.isInteger(loop.points) && loop.points > 1
+    ? Number((Math.abs(loop.to - loop.from) / (loop.points - 1)).toPrecision(6)) : null);
+  function loopCount(loop) {   // points along a loop, there and back counted; a ramp's: the check's estimate
+    let n = null;
+    if (loop.mode === "range") n = loop.by === "points" ? (Number.isInteger(loop.points) ? loop.points : null) : rangeCount(loop.from, loop.to, loop.step);
+    else if (loop.mode === "values") n = (loop.values || []).length;
+    else {
+      const c = ED.check && ED.check.counts ? ED.check.counts[loop.key] : null;
+      return c == null ? "" : (loop.mode === "ramp" ? "~" : "") + c + (c === 1 ? " point" : " points");
+    }
+    if (n == null) return "";
+    if (loop.back && n > 1) n = 2 * n - 1;
+    return n + (n === 1 ? " point" : " points");
+  }
+  // a loop's values in the order it takes them (a range as plans.py makes it, at most 200), to start another kind with
+  function loopValues(loop) {
+    if (loop.mode === "values") return (loop.values || []).slice();
+    if (loop.mode === "ramp") return (loop.legs || []).map((l) => l.to).filter((v) => v != null);
+    const a = loop.from, b = loop.to, round = (x) => Number(x.toPrecision(10));
+    const n = loop.by === "points" ? loop.points : rangeCount(a, b, loop.step);
+    if (!Number.isInteger(n) || n < 1 || n > 200 || !edNum(a) || !edNum(b)) return [];
+    if (loop.by !== "points") {   // from, from ± step, … and `to` itself where the steps miss it
+      const s = (b >= a ? 1 : -1) * Math.abs(loop.step);
+      const out = Array.from({ length: Math.floor(Math.abs(b - a) / Math.abs(loop.step) + 1e-9) + 1 }, (_, i) => round(a + s * i));
+      return out.length < n ? out.concat(b) : out;
+    }
+    if (loop.log && a > 0 && b > 0 && n > 1) return Array.from({ length: n }, (_, i) => (i === n - 1 ? b : round(a * Math.pow(b / a, i / (n - 1)))));
+    return Array.from({ length: n }, (_, i) => round(n > 1 ? a + (b - a) * i / (n - 1) : a));
+  }
+  function edMode(loop, mode) {
+    const had = loopValues(loop);
+    loop.mode = mode;
+    if (!had.length) return;
+    if (mode === "values" && !(loop.values || []).length) loop.values = had;
+    if (mode === "range" && loop.from == null && loop.to == null && had.every(edNum)) {
+      Object.assign(loop, { from: had[0], to: had[had.length - 1], points: had.length, by: "points" });
+    }
+    if (mode === "ramp" && !(loop.legs || []).length) Object.assign(loop, { legs: [{ to: had[had.length - 1], rate: null, hold: null, bare: true, order: [] }], one: true });
+  }
+  function blankLoop() {
+    return { key: "", mode: "range", from: null, to: null, step: null, points: null, by: "points", log: false, back: false,
+             values: [], form: "", legs: [], one: false, every: null, settle: null, kept: "", fixed: [], order: [] };
+  }
+
+  // a labelled box of the editor: set(value) on each change
+  function edBox(name, value, set, unit, attrs) {
+    const input = h("input", Object.assign({ class: "ed-in", value: edShow(value), inputmode: "decimal", spellcheck: "false",
+      autocomplete: "off" }, attrs || {}));
+    input.addEventListener("input", () => set(edParse(input.value)));
+    const box = h("label", { class: "ed-f" }, name ? h("span", {}, name) : null, input, unit ? h("i", {}, unit) : null);
+    box.input = input;
+    return box;
+  }
+  function edCheckBox(name, on, set, attrs) {
+    const input = h("input", Object.assign({ type: "checkbox" }, attrs || {}));
+    input.checked = !!on;
+    input.addEventListener("change", () => set(input.checked));
+    const box = h("label", { class: "check ed-check" }, input, name);
+    box.input = input;
+    return box;
+  }
+  function renderEditor() {
+    const p = ED.parts, fixed = new Set(p.fixed || []);
+    $("ed-title").textContent = ED.id ? "Edit scan" : "New scan";
+    $("ed-from").textContent = ED.from ? "edited from " + ED.from : "";
+    const field = (id, value, kept) => {   // a part kept as written shows there, not here
+      if (!("hint" in $(id).dataset)) $(id).dataset.hint = $(id).placeholder;
+      $(id).value = kept ? "" : edShow(value);
+      $(id).disabled = kept;
+      $(id).placeholder = kept ? "as written below" : $(id).dataset.hint;
+    };
+    field("ed-name", p.name, p.name === null || fixed.has("plan"));
+    field("ed-desc", p.description, p.description === null || fixed.has("description"));
+    field("ed-repeat", p.repeat, fixed.has("repeat"));
+    field("ed-settle", p.settle, fixed.has("settle"));
+    const time = p.time || {}, byPoints = time.points != null && time.for == null;
+    field("ed-every", time.every, fixed.has("time"));
+    field("ed-for", byPoints ? time.points : time.for, fixed.has("time"));
+    $("ed-for").dataset.key = byPoints ? "points" : "for";
+    $("ed-for-label").textContent = byPoints ? "points" : "for";
+    $("ed-for-unit").hidden = byPoints;
+    const loops = Array.isArray(p.loops) ? p.loops : null;
+    $("ed-add-loop").hidden = !loops;
+    $("ed-loops").replaceChildren(...(loops ? loops.map(edLoop) : [h("li", { class: "hint" }, "As written below.")]));
+    renderEdMeasure();
+    edRows("setup");
+    edRows("after");
+    $("ed-kept").textContent = p.kept || "";
+    $("ed-kept-sec").hidden = !p.kept;
+    renderEdCheck();
+  }
+  function edLoop(loop, i) {
+    const p = ED.parts, n = p.loops.length, name = "Loop " + (i + 1);
+    const acts = h("span", { class: "q-acts ed-acts" });
+    const act = (text, title, fn) => {
+      const b = h("button", { type: "button", title, "aria-label": title + ": " + name }, text);
+      b.addEventListener("click", fn);
+      acts.append(b);
+    };
+    if (i > 0) act("↑", "Outer", () => edMoveLoop(i, i - 1));
+    if (i < n - 1) act("↓", "Inner", () => edMoveLoop(i, i + 1));
+    act("✕", "Remove", () => { p.loops.splice(i, 1); edChanged(true); const at = $("ed-loops").children[Math.min(i, p.loops.length - 1)]; (at ? at.querySelector("input, button") : $("ed-add-loop")).focus(); });
+    const count = h("span", { class: "ed-count" }, loopCount(loop));
+    const head = [h("span", { class: "ed-n" }, String(i + 1))];
+    let body = [];
+    if (loop.mode === "kept") {
+      head.push(h("code", { class: "ed-key-ro" }, loop.key), h("span", { class: "tag", title: "Kept as written: the editor doesn't show this loop as fields" }, "as written"));
+      body = [h("pre", { class: "ed-kept" }, loop.text || "")];
+    } else {
+      const key = h("input", { class: "ed-in ed-key", list: "ed-set-keys", value: loop.key, spellcheck: "false", autocomplete: "off",
+        placeholder: "instrument.parameter", "aria-label": name + ": what it steps" });
+      const unit = h("span", { class: "ed-unit" }, ED.units.get(loop.key) || "");
+      key.addEventListener("input", () => { loop.key = key.value.trim(); unit.textContent = ED.units.get(loop.key) || ""; edChanged(); });
+      const mode = h("select", { class: "ed-mode", "aria-label": name + ": how it steps" }, ...ED_MODES.map(([v, t]) => h("option", { value: v }, t)));
+      mode.value = loop.mode;
+      mode.addEventListener("change", () => {
+        edMode(loop, mode.value);
+        edChanged(true);
+        const li = $("ed-loops").children[i];
+        if (li) li.querySelector(".ed-mode").focus();
+      });
+      head.push(key, unit);
+      body = edModeFields(loop, name, () => { count.textContent = loopCount(loop); });
+      body[0].prepend(mode);   // how it steps, then its values
+      if (loop.kept) body.push(h("pre", { class: "ed-kept", title: "Kept as written" }, loop.kept));
+    }
+    return h("li", { class: "ed-loop" + (loop.mode === "kept" ? " kept" : ""), "data-key": loop.key },
+      h("div", { class: "ed-loop-head" }, ...head, count, acts), h("div", { class: "ed-loop-body" }, ...body),
+      h("ul", { class: "ed-problems ed-loop-problems" }));
+  }
+  function edModeFields(loop, name, recount) {
+    const fixed = new Set(loop.fixed || []);
+    const unit = ED.units.get(loop.key) || "";
+    const changed = () => { recount(); edChanged(); };
+    const settle = edBox("settle", loop.settle, (v) => { loop.settle = v; changed(); }, "s",
+      { class: "ed-in ed-short", "aria-label": name + ": settle (s)", disabled: fixed.has("settle"), title: fixed.has("settle") ? "A hold per value, as written below" : "After setting each value" });
+    if (loop.mode === "values") {
+      const vals = edBox("", (loop.values || []).map(edShow).join(", "), (v) => v, unit,
+        { class: "ed-in ed-values", inputmode: "text", "aria-label": name + ": values", placeholder: "0, 0.5, 1" });
+      vals.input.addEventListener("input", () => { loop.values = edList(vals.input.value); changed(); });
+      const back = edCheckBox("and back", loop.back, (on) => { loop.back = on; changed(); }, { "aria-label": name + ": there and back" });
+      return [h("div", { class: "ed-line" }, vals), h("div", { class: "ed-line" }, back, settle)];
+    }
+    if (loop.mode === "ramp") {
+      const legs = (loop.legs || []).map((leg, j) => {
+        const x = h("button", { class: "icon-btn", type: "button", "aria-label": name + ": remove leg " + (j + 1), title: "Remove" }, icon("x"));
+        x.addEventListener("click", () => { loop.legs.splice(j, 1); edChanged(true); });
+        return h("div", { class: "ed-line ed-leg" },
+          edBox("to", leg.to, (v) => { leg.to = v; changed(); }, unit, { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " to" }),
+          edBox("rate", leg.rate, (v) => { leg.rate = v; changed(); }, "", { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " rate", title: "In its rate setting's unit; empty: as the instrument is set" }),
+          edBox("hold", leg.hold, (v) => { leg.hold = v; changed(); }, "s", { class: "ed-in ed-short", "aria-label": name + ": leg " + (j + 1) + " hold (s)", title: "Measuring on once it is there" }),
+          x);
+      });
+      const add = h("button", { class: "link soft", type: "button" }, "+ Leg");
+      add.addEventListener("click", () => { loop.legs.push({ to: null, rate: null, hold: null, bare: false, order: [] }); loop.one = false; edChanged(true); });
+      const every = edBox("measure every", loop.every, (v) => { loop.every = v; changed(); }, "s", { class: "ed-in ed-short", "aria-label": name + ": measure every (s)" });
+      return legs.concat([h("div", { class: "ed-line" }, add, every)]);
+    }
+    // a range: from, to, and step or points, each following the other (the one typed is the one kept)
+    const from = edBox("from", loop.from, (v) => { loop.from = v; follow(); }, "", { class: "ed-in ed-short", "aria-label": name + ": from" });
+    const to = edBox("to", loop.to, (v) => { loop.to = v; follow(); }, unit, { class: "ed-in ed-short", "aria-label": name + ": to" });
+    const step = edBox("step", loop.by === "points" ? rangeStep(loop) : loop.step, (v) => { loop.step = v; loop.by = "step"; follow(); }, "",
+      { class: "ed-in ed-short", "aria-label": name + ": step", disabled: fixed.has("step") || !!loop.log, title: loop.log ? "A log sweep is given by its points" : null });
+    const pts = edBox("points", loop.by === "points" ? loop.points : rangeCount(loop.from, loop.to, loop.step), (v) => { loop.points = v; loop.by = "points"; follow(); }, "",
+      { class: "ed-in ed-short", inputmode: "numeric", "aria-label": name + ": points" });
+    function follow() {
+      if (document.activeElement !== step.input) step.input.value = edShow(loop.by === "points" ? rangeStep(loop) : loop.step);
+      if (document.activeElement !== pts.input) pts.input.value = edShow(loop.by === "points" ? loop.points : rangeCount(loop.from, loop.to, loop.step));
+      changed();
+    }
+    const log = edCheckBox("log", loop.log, (on) => {
+      loop.log = on;
+      if (on && loop.by !== "points") Object.assign(loop, { points: rangeCount(loop.from, loop.to, loop.step) || 2, by: "points" });
+      step.input.disabled = on || fixed.has("step");
+      follow();
+    }, { "aria-label": name + ": log spaced" });
+    const back = edCheckBox("and back", loop.back, (on) => { loop.back = on; changed(); }, { "aria-label": name + ": there and back" });
+    return [h("div", { class: "ed-line" }, from, to, step, pts), h("div", { class: "ed-line" }, log, back, settle)];
+  }
+  function edMoveLoop(i, j) {
+    const loops = ED.parts.loops;
+    loops.splice(j, 0, loops.splice(i, 1)[0]);
+    edChanged(true);
+    const li = $("ed-loops").children[j];
+    const b = li && li.querySelector('.ed-acts button[title="' + (j < i ? "Outer" : "Inner") + '"]');
+    (b || (li && li.querySelector(".ed-acts button")) || $("ed-add-loop")).focus();
+  }
+  function renderEdMeasure() {
+    const p = ED.parts, kept = p.measure === null;
+    $("ed-read").disabled = kept;
+    $("ed-read").placeholder = kept ? "as written below" : "Add a reading";
+    $("ed-measure").replaceChildren(...(kept ? [] : p.measure.map((m, i) => {
+      const x = h("button", { class: "icon-btn", type: "button", "aria-label": "Don't record " + m, title: "Remove" }, icon("x"));
+      x.addEventListener("click", () => { p.measure.splice(i, 1); renderEdMeasure(); edChanged(); $("ed-read").focus(); });
+      const unit = ED.units.get(m);
+      return h("span", { class: "an-chip ed-chip", title: unit ? m + " (" + unit + ")" : m }, h("span", {}, m), x);
+    })));
+  }
+  function addReading() {
+    const key = $("ed-read").value.trim(), p = ED.parts;
+    if (!key || !Array.isArray(p.measure)) return;
+    if (!p.measure.includes(key)) p.measure.push(key);
+    $("ed-read").value = "";
+    renderEdMeasure();
+    edChanged();
+  }
+  function edRows(which) {   // setup or after: instrument.parameter = value
+    const rows = ED.parts[which], box = $("ed-" + which);
+    $("ed-add-" + which).hidden = !Array.isArray(rows);
+    if (!Array.isArray(rows)) { box.replaceChildren(h("p", { class: "hint" }, "As written below.")); return; }
+    const what = which === "setup" ? "Setup" : "At the end";
+    box.replaceChildren(...rows.map((row, i) => {
+      const key = h("input", { class: "ed-in ed-key", list: "ed-set-keys", value: row.key, spellcheck: "false", autocomplete: "off",
+        placeholder: "instrument.parameter", "aria-label": what + " " + (i + 1) + ": what it sets" });
+      const unit = h("span", { class: "ed-unit" }, ED.units.get(row.key) || "");
+      key.addEventListener("input", () => { row.key = key.value.trim(); unit.textContent = ED.units.get(row.key) || ""; edChanged(); });
+      const value = h("input", { class: "ed-in ed-short", value: edShow(row.value), spellcheck: "false", autocomplete: "off",
+        "aria-label": what + " " + (i + 1) + ": its value" });
+      value.addEventListener("input", () => { row.value = edParse(value.value); edChanged(); });
+      const x = h("button", { class: "icon-btn", type: "button", "aria-label": what + " " + (i + 1) + ": remove", title: "Remove" }, icon("x"));
+      x.addEventListener("click", () => {
+        rows.splice(i, 1);
+        edRows(which);
+        edChanged();
+        const left = box.querySelectorAll(".ed-key")[Math.min(i, rows.length - 1)];
+        (left || $("ed-add-" + which)).focus();
+      });
+      return h("div", { class: "ed-line ed-set" }, key, h("span", { class: "ed-eq" }, "="), value, unit, x);
+    }));
+  }
+  // a change: the buttons now, the check a moment after typing stops (each newer one replaces the one before)
+  function edChanged(redraw) {
+    if (redraw) renderEditor();
+    edSay("");   // what the last Save or Run said is about the scan as it was
+    edButtons();
+    clearTimeout(ED.timer);
+    ED.timer = setTimeout(edCheck, 350);
+  }
+  async function edCheck() {
+    const gen = ++ED.gen;
+    let c;
+    try { c = await api("/api/library", { body: { op: "check", parts: ED.parts } }); }
+    catch (e) { c = { loads: false, problems: [e.message] }; }
+    if (gen !== ED.gen || !ED.parts) return;
+    ED.check = c;
+    renderEdCheck();
+  }
+  // which loop a problem is about (load_plan's sweep.<key>: …, the gate's sweep: <key> …, the editor's loop n: …)
+  function loopOf(problem, loops) {
+    return loops.findIndex((l, i) => l.key && (problem.includes("sweep." + l.key + ":") || problem.includes("sweep." + l.key + ".")
+      || problem.startsWith("sweep: " + l.key + " ") || problem.startsWith(l.key + " is stepped")) || problem.startsWith("loop " + (i + 1) + ":"));
+  }
+  function renderEdCheck() {
+    const c = ED.check || {}, loops = Array.isArray(ED.parts.loops) ? ED.parts.loops : [];
+    const bits = (c.loads && c.points != null ? [(c.estimate ? "~" : "") + c.points + (c.points === 1 ? " point" : " points")] : [])
+      .concat(c.loads && c.time ? [c.time] : []);
+    $("ed-status").textContent = bits.join(" · ");
+    const mine = loops.map(() => []), rest = [];
+    for (const problem of c.problems || []) {
+      const at = loopOf(problem, loops);
+      (at >= 0 ? mine[at] : rest).push(problem);
+    }
+    const lines = (list) => list.map((t) => h("li", {}, t));
+    $("ed-problems").replaceChildren(...lines(rest));
+    [...$("ed-loops").children].forEach((li, i) => {
+      const list = li.querySelector(".ed-loop-problems");
+      if (list) list.replaceChildren(...lines(mine[i] || []));
+      const count = li.querySelector(".ed-count");
+      if (count && loops[i]) count.textContent = loopCount(loops[i]);
+    });
+    $("ed-plan-text").textContent = c.text || "";
+    edButtons();
+  }
+  function edButtons() {
+    const c = ED.check || {}, busy = ED.busy || BUSY.has("ed"), dirty = edDirty();
+    $("ed-save").disabled = busy || !c.loads || !(dirty || !ED.id);
+    $("ed-run").disabled = busy || BUSY.has("start") || !c.loads;
+    $("ed-queue").disabled = busy || !c.loads;
+    $("ed-revert").disabled = busy || !dirty;
+  }
+  function edSay(text, bad) {
+    $("ed-msg").textContent = text;
+    $("ed-msg").classList.toggle("bad", !!bad);
+  }
+  // the scan the editor now edits: the entry it was saved as (the one it came from stays in the library), as it was sent
+  function edSaved(entry, library, sent) {
+    ED.id = entry.id;
+    ED.from = entry.edited_from && !entry.named ? entry.edited_from : "";
+    ED.base = sent;   // what was typed meanwhile is still a change
+    $("ed-title").textContent = "Edit scan";
+    $("ed-from").textContent = ED.from ? "edited from " + ED.from : "";
+    if (library) { SCANS.data = library; SCANS.fresh = entry.id; renderScans(); }
+    edButtons();
+  }
+  async function edSave() {
+    clearTimeout(ED.timer);
+    ED.busy = true;
+    edButtons();
+    try {
+      const sent = JSON.stringify(ED.parts);
+      const r = await api("/api/library", { body: { op: "save", parts: ED.parts, from: ED.id } });
+      edSaved(r.entry, r.library, sent);
+      edSay(r.new ? "Saved." : "Already in your scans.");
+    } catch (e) { edSay(e.message, true); }
+    ED.busy = false;
+    edButtons();
+  }
+  // Run (first in the queue, which pauses after it) or Add to queue (last): the scan as it is in the library, or, changed,
+  // kept as a new scan first; through the queue's check and approval, as any scan
+  function edRun(queue) {
+    return busyWhile(queue ? ["ed"] : ["ed", "start"], async () => {
+      const body = edDirty() || !ED.id ? { op: "run", parts: ED.parts, from: ED.id } : { op: "run", id: ED.id };
+      if (queue) body.queue = true;
+      const sent = JSON.stringify(ED.parts);
+      edSay(queue ? "" : "Starting…");   // the queue's approval is asked first
+      let r;
+      try { r = await api("/api/library", { body }); } catch (e) { edSay(e.message, true); return; }
+      if (r.entry) edSaved(r.entry, r.library, sent);
+      queueFromState(r.queue);
+      renderQueue();
+      edSay((r.message || "").split("\n")[0]);
+      if (!queue) { showQueue(); $("queue-msg").textContent = (r.message || "").split("\n")[0]; pollState(); }   // its run gets its tab
+    });
+  }
+  function edRevert() {
+    ED.parts = JSON.parse(ED.base);
+    edSay("");
+    edChanged(true);
+  }
+  function initEditor() {
+    $("close-editor").addEventListener("click", () => toggleEditor(false));
+    $("ed-name").addEventListener("input", () => { ED.parts.name = $("ed-name").value; edChanged(); });
+    $("ed-desc").addEventListener("input", () => { ED.parts.description = $("ed-desc").value; edChanged(); });
+    for (const key of ["repeat", "settle"]) $("ed-" + key).addEventListener("input", () => { ED.parts[key] = edParse($("ed-" + key).value); edChanged(); });
+    for (const id of ["ed-every", "ed-for"]) {
+      $(id).addEventListener("input", () => {   // a time series: every, and for (s) or points as the plan gives them
+        const t = ED.parts.time || (ED.parts.time = { every: null, for: null, points: null, order: [] });
+        t[id === "ed-every" ? "every" : $("ed-for").dataset.key] = edParse($(id).value);
+        if (t.every == null && t.for == null && t.points == null && !JSON.parse(ED.base).time) ED.parts.time = null;
+        edChanged();
+      });
+    }
+    $("ed-add-loop").addEventListener("click", () => {
+      ED.parts.loops.push(blankLoop());
+      edChanged(true);
+      $("ed-loops").lastChild.querySelector(".ed-key").focus();
+    });
+    for (const which of ["setup", "after"]) {
+      $("ed-add-" + which).addEventListener("click", () => {
+        ED.parts[which].push({ key: "", value: null });
+        edRows(which);
+        edChanged();
+        const keys = $("ed-" + which).querySelectorAll(".ed-key");
+        keys[keys.length - 1].focus();
+      });
+    }
+    $("ed-read").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addReading(); } });
+    $("ed-read").addEventListener("change", () => { if (ED.readKeys.has($("ed-read").value.trim())) addReading(); });   // picked from the list
+    $("ed-text").addEventListener("click", () => {
+      const show = $("ed-plan").hidden;
+      $("ed-plan").hidden = !show;
+      $("ed-text").setAttribute("aria-expanded", String(show));
+    });
+    $("ed-copy").addEventListener("click", () => copyText($("ed-plan-text").textContent, $("ed-copy")));
+    $("ed-save").addEventListener("click", edSave);
+    $("ed-run").addEventListener("click", () => edRun(false));
+    $("ed-queue").addEventListener("click", () => edRun(true));
+    $("ed-revert").addEventListener("click", edRevert);
   }
 
   // ------------------------------------------------------------------ why the lab has no instruments yet
@@ -6433,7 +6954,7 @@
   function closeSidebar() { $("app").classList.remove("side-open"); syncScrim(); }
   function syncScrim() {
     const narrow = window.matchMedia("(max-width: 1100px)").matches;
-    $("scrim").hidden = !($("app").classList.contains("side-open") || ((S.labOpen || RUNS.open || TEAM.open || ANA.open) && narrow));
+    $("scrim").hidden = !($("app").classList.contains("side-open") || ((S.labOpen || RUNS.open || TEAM.open || ANA.open || ED.open) && narrow));
   }
 
 
@@ -7105,6 +7626,7 @@
     initRunsPane();
     initTeam();
     initAnalysis();
+    initEditor();
     fitLayout();
     initTerminal();
     renderChats();
@@ -7296,6 +7818,7 @@
       if (RUNS.open) toggleRuns(false);
       if (TEAM.open) toggleTeam(false);
       if (ANA.open) toggleAnalysis(false);
+      if (ED.open) toggleEditor(false);
     });
     $("toggle-lab").addEventListener("click", () => toggleLab());
     $("inst-filter").addEventListener("input", (e) => { PANEL.filter = e.target.value; renderInstruments(); });
