@@ -92,7 +92,7 @@ def test_the_app_starts_the_reader_with_its_bridge_and_brings_it(tmp_path, monke
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     assert viworker.command() == [sys.executable, "--bridge", str(viworker.RUNNER)]
     monkeypatch.undo()
-    assert viworker.RUNNER.is_file()
+    assert viworker.RUNNER.is_file() and viworker.self_test()   # what the release build's self-test can ask
     job = {"path": [str(ROOT / "src")] + sys.path, "memory_mb": viworker.MEMORY_MB, "folder": str(AIM), "own": [],
            "files": [["vi", str(AIM / "set_v.vi")]]}
     out = subprocess.run([PYTHON if Path(PYTHON).is_file() else sys.executable, "-I",

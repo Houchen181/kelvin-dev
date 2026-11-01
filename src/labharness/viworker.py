@@ -75,6 +75,16 @@ def _took(seconds: float) -> str:
     return "%d minutes" % (seconds // 60) if seconds >= 120 else "%g s" % seconds
 
 
+def self_test() -> bool:
+    """For the release build's self-test: the reader starts the way the app starts it (Kelvin.exe --bridge), reads
+    a file (its own script, which is no VI: said so) and answers."""
+    try:
+        results, _ = read_all([("vi", str(RUNNER))], RUNNER.parent)
+        return "isn't a LabVIEW file" in " ".join(results[0][0]["unread"])
+    except Exception:
+        return False
+
+
 def _read_some(files: Sequence[Tuple[str, str]], start: int, folder: Any, own: List[Any], results: Summaries,
                deadline: float, notes: List[str]) -> int:
     """One reading process for files[start:]: each file's summaries into results. Where the next process starts
