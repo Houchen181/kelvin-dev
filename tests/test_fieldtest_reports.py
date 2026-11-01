@@ -169,6 +169,25 @@ def test_an_accepted_fit_is_the_one_its_report_shows(tmp_path):
     assert "kept as" not in rt.analyze(run_id, "smu.I", "linear")   # looking again keeps nothing
 
 
+def test_a_fit_is_never_accepted_while_its_run_is_measured(tmp_path):
+    """analyze_run with accept on a run still being measured (bug hunt of 2026-10-31): the fit went into its live
+    record through a second writer, the run's own analysis at its end replaced it, and the tool said it was kept."""
+    from labharness import rundata
+    from labharness.eventlog import RunRecord
+    rt = runtime(tmp_path)
+    run_id = "20261031-120000-iv"
+    rec = RunRecord(run_id, rt.runs.home / run_id, {"plan": "iv"}, "op")   # the engine's, open while it measures
+    rec.set_columns({"axes": [{"key": "smu.V", "unit": "V"}], "measures": [{"key": "smu.I", "unit": "A"}]})
+    for i in range(6):
+        rec.add({"i": i, "t": float(i), "smu.V": float(i), "smu.I": 2e-6 * i})
+    record = rt.runs.home / run_id / rundata.RECORD
+    before = record.read_bytes()
+    assert "not kept: the run is still being measured" in rt.analyze(run_id, "smu.I", "linear", accept=True)
+    assert record.read_bytes() == before and not any(e["type"] == "fit_accepted" for e in rt.gate.log.events())
+    rec.finish(status="done", points=6)
+    assert "kept as the run's fit" in rt.analyze(run_id, "smu.I", "linear", accept=True)   # once it has ended
+
+
 def test_the_fits_fit_run_keeps_are_in_the_runs_reports_with_who_kept_them_and_when(tmp_path):
     """fit_run keeps each fit in run.h5 (/fits/<name>), but a report showed only the one accepted with analyze_run.
     A kept fit is now in the run's reports, its points with the model and its values, saying who kept it and when;

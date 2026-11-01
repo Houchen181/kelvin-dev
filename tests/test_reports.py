@@ -112,6 +112,26 @@ def test_ticks_scales_and_labels():
                for seg in segs for x, y in seg)
 
 
+def test_a_long_reply_in_a_stop_reason_is_cut_short_and_its_report_wraps_quickly():
+    """A reading that was a whole trace where one number was expected (bug hunt of 2026-10-31): the error quoted all
+    of it, and the run's automatic report, cutting that one long word a character at a time, held up run_plan and
+    the queue for minutes."""
+    import time
+    from labharness.cards import ParamSpec
+    from labharness.reports.pdf import WIDTH, measure, wrap
+    reply = ",".join("%.6e" % (1e-6 * k) for k in range(1601))
+    with pytest.raises(ValueError) as said:
+        ParamSpec("X", "measure").coerce(reply)
+    assert len(str(said.value)) < 200 and str(said.value).endswith("… (%d characters)" % len(repr(reply)))
+    word = repr(reply)   # as an instrument's own error may still quote it
+    t = time.perf_counter()
+    lines = wrap("stopped: X needs a number, got " + word, WIDTH, 9)
+    assert time.perf_counter() - t < 5   # hours before
+    assert lines[0] == "stopped: X needs a number, got" and "".join(lines[1:]) == word
+    for line, after in zip(lines[1:], lines[2:]):   # each piece as long as fits the line
+        assert measure(line, 9) <= WIDTH < measure(line + after[0], 9)
+
+
 def test_runs_written_up_as_pdf_and_slides(runtime):
     runtime.run(LINE)
     runtime.run(MAP)

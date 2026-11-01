@@ -41,9 +41,35 @@ def moving_average(np: Any, y: Any, n: int) -> Any:
         return np.where(ok & (count > 0), total / np.maximum(count, 1.0), np.nan)
 
 
+def _whole(n: Any, what: str) -> int:
+    """A number numpy takes only as a whole one (decimals, the order of a difference): every number written in an
+    expression is a float, which numpy refused there, so round(x, 3) and diff(x, 2) always failed."""
+    try:
+        f = float(n)
+    except (TypeError, ValueError):
+        raise ExprError("%s needs one number for n" % what)
+    if not f.is_integer():
+        raise ExprError("%s needs a whole number for n, not %s" % (what, n))
+    return int(f)
+
+
 def functions(np: Any) -> Dict[str, Callable[..., Any]]:
     def deriv(y: Any, x: Any) -> Any:
         return np.gradient(y, x)
+
+    def diff(y: Any, n: Any = 1) -> Any:
+        """The n-th difference of neighbouring values (n up to 1000: numpy steps through each)."""
+        n = _whole(n, "diff(y, n)")
+        if not 0 <= n <= 1000:
+            raise ExprError("diff(y, n) needs 0 <= n <= 1000")
+        return np.diff(y, n)
+
+    def round_(y: Any, n: Any = 0) -> Any:
+        """Rounded to n decimals (a negative n: to tens, hundreds...)."""
+        n = _whole(n, "round(y, n)")
+        if not -400 <= n <= 400:   # past a 64-bit float's own digits
+            raise ExprError("round(y, n) needs -400 <= n <= 400")
+        return np.round(y, n)
 
     def smooth(y: Any, n: Any) -> Any:
         """A moving average over n points; near the ends, over the points there are."""
@@ -68,7 +94,7 @@ def functions(np: Any) -> Dict[str, Callable[..., Any]]:
             "cos": np.cos, "tan": np.tan, "arcsin": np.arcsin, "arccos": np.arccos, "arctan": np.arctan,
             "arctan2": np.arctan2, "hypot": np.hypot, "sinh": np.sinh, "cosh": np.cosh, "tanh": np.tanh,
             "deg2rad": np.deg2rad, "rad2deg": np.rad2deg, "sign": np.sign, "floor": np.floor, "ceil": np.ceil,
-            "round": np.round, "clip": np.clip, "where": np.where, "deriv": deriv, "diff": np.diff,
+            "round": round_, "clip": np.clip, "where": np.where, "deriv": deriv, "diff": diff,
             "cumsum": np.nancumsum, "smooth": smooth, "interp": interp, "at_min": at_min, "at_max": at_max,
             "mean": np.nanmean, "std": np.nanstd,
             "min": np.nanmin, "max": np.nanmax, "sum": np.nansum, "median": np.nanmedian,
@@ -124,7 +150,10 @@ def evaluate(text: str, column: Callable[[str], Any], np: Any) -> Any:
             return ev(node.body)
         if isinstance(node, ast.Constant):
             if isinstance(node.value, (bool, int, float)):
-                return np.float64(node.value)
+                try:
+                    return np.float64(node.value)
+                except OverflowError:   # a whole number of hundreds of digits
+                    raise ExprError("%.40s… is too large for a 64-bit float" % node.value)
             raise ExprError("only numbers can be written as values (column names go without quotes)")
         if isinstance(node, (ast.Name, ast.Attribute)):
             return named(_dotted(node))
@@ -174,7 +203,7 @@ def evaluate(text: str, column: Callable[[str], Any], np: Any) -> Any:
                 return funcs[name](*args)
             except ExprError:
                 raise
-            except (TypeError, ValueError, IndexError) as e:
+            except (TypeError, ValueError, IndexError, ArithmeticError) as e:   # smooth(y, 1e400): an infinite n
                 raise ExprError("%s: %s" % (name, e))
         raise ExprError("%s is not allowed in an expression (%s)" % (type(node).__name__, HELP))
 

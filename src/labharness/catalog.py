@@ -365,7 +365,7 @@ def _h5_stats(folder: Path) -> Dict[str, Dict[str, Any]]:
     import numpy as np
     out: Dict[str, Dict[str, Any]] = {}
     with h5py.File(folder / rundata.RUN_FILE, "r") as f:
-        for key, ds in f.get("points", {}).items():
+        for key, ds in rundata.datasets(f.get("points")):   # each by its column's key (rundata.h5_name)
             if ds.dtype.kind not in ("f", "i", "u"):
                 continue
             v = ds[()]
@@ -373,12 +373,13 @@ def _h5_stats(folder: Path) -> Dict[str, Dict[str, Any]]:
             if ok.size:
                 out[key] = {"n": int(ok.size), "min": float(ok.min()), "max": float(ok.max()),
                             "mean": float(ok.mean()), "first": float(ok[0]), "last": float(ok[-1])}
-        traces = f.get("traces", {})
+        traces = dict(rundata.datasets(f.get("traces")))
         for key, ds in traces.items():
             base = key.rsplit(".", 1)[0]
             if key.endswith((".length", ".x", ".axis")) and base in traces:
                 continue
             out[key] = {"n": int(ds.shape[0]), "samples": int(ds.shape[1]) if ds.ndim > 1 else 0, "trace": True}
-        for key, item in f.get("frames", {}).items():
-            out[key] = {"n": int(item.shape[0]) if hasattr(item, "shape") else len(item), "image": True}
+        for name, item in f.get("frames", {}).items():
+            out[rundata.key_of(name)] = {"n": int(item.shape[0]) if hasattr(item, "shape") else len(item),
+                                         "image": True}
     return out

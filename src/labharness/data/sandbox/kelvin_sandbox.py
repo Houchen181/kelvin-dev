@@ -222,6 +222,18 @@ def _value(v):
     return v.item() if hasattr(v, "item") else v
 
 
+def _columns(group):
+    """A run.h5 group's datasets by their columns' keys: a dataset's name writes a / in its key as %2F (a NUL as
+    %00, a % as %25), and an older run.h5 kept such a key as groups inside groups (labharness.rundata.datasets)."""
+    import re
+    import h5py
+    out = []
+    if group is not None:
+        group.visititems(lambda path, item: out.append((re.sub("%(25|2F|00)", lambda m: {
+            "25": "%", "2F": "/", "00": "\x00"}[m.group(1)], path), item)) if isinstance(item, h5py.Dataset) else None)
+    return out
+
+
 class Run:
     """A run's data, read-only. data[key]: a column (1-D, one value per point) or a trace (2-D: points x samples,
     NaN-padded); x(key): a trace's x values (2-D); units[key]; meta: the run (plan, status, times...); fits: the fits
@@ -243,12 +255,12 @@ class Run:
             import h5py
             with h5py.File(self.path, "r") as f:
                 self.meta = json.loads(f.attrs.get("meta_json", "{}"))
-                for k, ds in f.get("points", {}).items():
+                for k, ds in _columns(f.get("points")):
                     v = ds[()]
                     self.data[k] = np.array([x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in v]) \
                         if ds.dtype.kind in "OSU" else np.asarray(v, dtype=float)
                     self.units[k] = str(ds.attrs.get("unit", ""))
-                traces = f.get("traces", {})
+                traces = dict(_columns(f.get("traces")))
                 for k, ds in traces.items():
                     base = k.rsplit(".", 1)[0]
                     if k.endswith((".x", ".axis")) and base in traces:

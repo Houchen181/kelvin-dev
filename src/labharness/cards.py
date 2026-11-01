@@ -56,6 +56,13 @@ def num(x: float) -> str:
     return "%.4g" % x
 
 
+def _got(value: Any, most: int = 80) -> str:
+    """A value an error quotes (as repr), cut short: a reply that was a whole trace where one number was expected
+    once made a run's stop reason thousands of characters long."""
+    text = repr(value)
+    return text if len(text) <= most else "%s… (%d characters)" % (text[:most], len(text))
+
+
 def parity_name(value: Any) -> Optional[str]:
     """none, odd, even, mark or space, from the word or the letter a manual gives (N, O, E, M, S); None for neither."""
     text = str(value).strip().lower()
@@ -183,7 +190,7 @@ class ParamSpec:
             try:
                 x = float(value)
             except (TypeError, ValueError):
-                raise ValueError("%s needs a number, got %r" % (self.name, value))
+                raise ValueError("%s needs a number, got %s" % (self.name, _got(value)))
             if not math.isfinite(x):
                 raise ValueError("%s needs a finite number" % self.name)
             if t == "int":
@@ -201,7 +208,7 @@ class ParamSpec:
                 return True
             if s in _FALSE or s == self.bool_text[1].lower():
                 return False
-            raise ValueError("%s needs on/off, got %r" % (self.name, value))
+            raise ValueError("%s needs on/off, got %s" % (self.name, _got(value)))
         if t == "enum":
             if isinstance(value, bool):  # YAML reads a bare `off` as False
                 value = "on" if value else "off"
@@ -214,7 +221,7 @@ class ParamSpec:
                 short = m.group(1) + m.group(2) if m and m.group(1) else re.match(r"[A-Z]*", str(code)).group(0)
                 if short and short != str(code) and s == short.lower():
                     return name
-            raise ValueError("%s must be one of %s, got %r" % (self.name, ", ".join(self.values or {}), value))
+            raise ValueError("%s must be one of %s, got %s" % (self.name, ", ".join(self.values or {}), _got(value)))
         if t == "str":
             return str(value)
         raise ValueError("%s is a trace and cannot be set" % self.name)
@@ -367,11 +374,13 @@ class Card:
 
 def trace_x(row: Dict[str, Any], key: str, n: int) -> List[float]:
     """The x values of a trace in a recorded row: the values recorded with it (a spectrometer's wavelengths), or
-    evenly spaced between the start and stop recorded with it, or the point index."""
+    evenly spaced between the start and stop recorded with it, or the point index. An x value that isn't a number (a
+    NaN, which the record keeps as None) is NaN."""
     xs = row.get(key + ".x")
     if isinstance(xs, list) and len(xs) == n:
-        return [float(x) for x in xs]
-    x0, x1 = row.get(key + ".axis") or (0, n - 1)
+        return [float(x) if _is_number(x) else float("nan") for x in xs]
+    axis = row.get(key + ".axis")
+    x0, x1 = axis if isinstance(axis, (list, tuple)) and len(axis) == 2 and all(map(_finite, axis)) else (0, n - 1)
     return [x0 + (x1 - x0) * i / (n - 1 if n > 1 else 1) for i in range(n)]
 
 
@@ -395,9 +404,10 @@ def thin(ys: Sequence[Any], most: int) -> List[int]:
 
 
 def plot_points(xs: Sequence[Any], ys: Sequence[Any], most: int) -> Tuple[List[Any], List[Any]]:
-    """A trace as a plot draws it: thinned (thin), with None for a value that is not a number (NaN, inf)."""
+    """A trace as a plot draws it: thinned (thin), with None for a value or an x that is not a number (NaN, inf),
+    which JSON can't carry."""
     keep = thin(ys, most)
-    return [xs[i] for i in keep], [ys[i] if _finite(ys[i]) else None for i in keep]
+    return [xs[i] if _finite(xs[i]) else None for i in keep], [ys[i] if _finite(ys[i]) else None for i in keep]
 
 
 BINARY_REPLY = ("the numbers came in binary, not as text: the instrument's data format was changed, perhaps by another "

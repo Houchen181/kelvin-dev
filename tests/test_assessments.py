@@ -72,6 +72,21 @@ def test_a_resonance_that_moves_with_field_is_followed_out_of_the_window():
     assert a["next"].startswith("Re-centre the sweep on the peak at each magnet.B value")
 
 
+def test_an_outer_loop_of_more_curves_than_are_looked_at_is_read_over_its_whole_range_and_says_so():
+    """20 fields of 5 points each (bug hunt of 2026-10-31): only the first 12 fields were analysed, yet the
+    assessment read "From magnet.B = 0 T to 11 T ...; all 100 points recorded; no problems found"."""
+    rows = [{"i": 5 * j + k, "magnet.B": float(j), "smu.V": float(v), "dmm.I": float(v * (1 + j))}
+            for j in range(20) for k, v in enumerate(np.linspace(-1, 1, 5))]
+    a = analyze_run(rows, [{"key": "magnet.B", "unit": "T", "kind": "instrument"},
+                           {"key": "smu.V", "unit": "V", "kind": "instrument"}],
+                    [{"key": "dmm.I", "unit": "A", "kind": "scalar"}], {"status": "done", "points": 100})
+    groups = [s["group"] for s in a["series"]]
+    assert len(groups) == 12 and groups[0] == "magnet.B = 0 T" and groups[-1] == "magnet.B = 19 T"
+    assert a["trends"][0].startswith("from magnet.B = 0 T to 19 T,")
+    assert "Only some curves analysed: dmm.I at 12 of its 20 magnet.B values" in a["assessment"]
+    assert "no problems found" not in a["assessment"]
+
+
 def test_two_resolved_lines_are_two_and_a_flat_topped_one_is_one():
     rng = np.random.default_rng(5)
     f = np.linspace(2.85e9, 2.89e9, 81)
@@ -300,6 +315,27 @@ def test_a_gate_sweeps_headline_is_the_sample_not_its_leakage():
     assert head.startswith("lockin.X has a peak at smu.V = "), head   # the sample's reading leads: inside the sweep
     assert float(head.split(" = ", 1)[1].split()[0]) == pytest.approx(1.50, abs=0.01)   # whatever the noise's draw
     assert "edge of the sweep; the feature may extend" not in r.analysis["assessment"]
+
+
+def test_a_peak_in_a_few_points_is_a_peak_not_a_line_that_passes_for_noise():
+    """gate_sweep-2 of the test lab (bug hunt of 2026-10-31): six points rising to a peak at 1.6 V and falling were
+    "linear ... (R² 0.7129) ... no problems found": the noise six points make out is the curve's own bend, and the
+    line's residuals passed for it. A Lorentzian tells them to the nanovolt: the line misses it. A straight line
+    with noise stays a line."""
+    volts = [0.0, 0.4, 0.8, 1.2, 1.6, 2.0]
+    x_v = [1.44966027717e-05, 1.99302621859e-05, 2.95443973342e-05, 4.30748685298e-05, 4.77865522742e-05,
+           3.62077161785e-05]
+    a = analyze_run([{"i": i, "smu.V": v, "lockin.X": y} for i, (v, y) in enumerate(zip(volts, x_v))],
+                    [{"key": "smu.V", "unit": "V", "kind": "instrument"}],
+                    [{"key": "lockin.X", "unit": "V", "kind": "scalar"}], {"status": "done", "points": 6})
+    (s,) = a["series"]
+    assert s["kind"] == "peak" and s["params"]["center"][0] == pytest.approx(1.5, abs=0.01), s["summary"]
+    assert "linear" not in a["assessment"] and "no problems found" not in a["assessment"], a["assessment"]
+    rng = np.random.default_rng(0)
+    for n in (6, 20):   # residuals that are noise: a line, as before
+        x = np.linspace(0, 2, n)
+        s = analyze_curve(x.tolist(), (1 + 0.5 * x + rng.normal(0, 0.4, n)).tolist(), "smu.V", "dmm.I", "V", "A")
+        assert s["kind"] == "linear" and s["fit"]["r2"] < 0.9, s["summary"]
 
 # ------------------------------------------------------------------ the review of 0.3.34 (2026-10-31)
 

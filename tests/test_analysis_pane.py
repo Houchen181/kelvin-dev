@@ -318,3 +318,53 @@ def test_the_run_list_follows_the_runs_that_end_and_the_chat_that_opens():
     assert 'const ended = tab.status === "finishing"' in final and "if (ended) refreshAnalysisRuns();" in final
     for name in ("openChat", "newChat"):
         assert "refreshAnalysisRuns();" in _js(name), name
+
+
+# ------------------------------------------------------------------ 11. round, diff, a trace's lost x, a fit named "."
+
+def test_round_and_diff_take_their_n_and_a_huge_number_or_a_dot_for_a_name_is_said_not_raised(rt):
+    """round(x, n) and diff(x, n) always failed (every number written is a float, which numpy refused for n); a
+    number of 400 digits raised an OverflowError and a fit kept as "." a KeyError, neither caught by the pane."""
+    rt.run(GATE)
+    run = last(rt)
+    assert rt.compute(run, "round(max(smu.V) / 7, 3)") == "round(max(smu.V) / 7, 3) = 0.429 (over 61 points)"
+    assert rt.compute(run, "count(diff(smu.V, 2))") == "count(diff(smu.V, 2)) = 59 (over 61 points)"
+    out = compute(rt, {"runs": [run], "x": "smu.V", "y": "round(lockin.X * 1e6, 1)"})
+    assert all(y == round(y, 1) for y in out["curves"][0]["y"])
+    assert "needs a whole number for n, not 0.5" in rt.compute(run, "round(smu.V, 0.5)")
+    assert "needs 0 <= n <= 1000" in rt.compute(run, "diff(smu.V, 1e9)")   # numpy would step through each
+    with pytest.raises(AnalysisError, match="too large for a 64-bit float"):
+        compute(rt, {"runs": [run], "x": "smu.V", "y": "lockin.X * " + "9" * 400})
+    assert "too large for a 64-bit float" in rt.compute(run, "smu.V * " + "9" * 400)
+    spec = {"runs": [run], "x": "smu.V", "y": "smu.I", "fit": {"model": "linear"}}
+    assert "as /fits/smu.I linear;" in keep(rt, spec, name=".")   # a dot is no name: the fit's own
+
+
+def test_a_trace_with_a_lost_x_value_is_analysed_exported_reported_and_drawn(rt, tmp_path):
+    """A NaN among a trace's x values (a spectrometer's wavelengths), read back as None, broke the automatic
+    analysis, the CSV export, the run's report, the pane and the Runs pane (bug hunt of 2026-10-31)."""
+    from labharness import export, rundata
+    from labharness.analysis import analyze_run
+    from labharness.eventlog import RunRecord
+    run = "20261031-120000-spectrum"
+    rec = RunRecord(run, rt.runs.home / run, {"plan": "spectrum"}, "op")
+    cols = {"axes": [{"key": "smu.V", "unit": "V", "kind": "instrument"}],
+            "measures": [{"key": "spec.y", "unit": "counts", "kind": "trace", "x_unit": "nm"}]}
+    rec.set_columns(cols)
+    xs = [400.0 + k for k in range(50)]
+    xs[7] = float("nan")
+    for i in range(3):
+        rec.add({"i": i, "t": float(i), "smu.V": float(i), "spec.y": [float(k % 5) for k in range(50)],
+                 "spec.y.x": xs})
+    rec.finish(status="done", points=3)
+    folder = rt._run_dir(run)
+    rows = rundata.load(folder).rows
+    assert rows[0]["spec.y.x"][7] is None
+    assert analyze_run(rows, cols["axes"], cols["measures"], {"status": "done", "points": 3})["series"]
+    export.export(folder, "csv")
+    assert (folder / "spec.y.csv").read_text(encoding="utf-8").splitlines()[8] == "0,0,,2"   # no x: an empty cell
+    assert compute(rt, {"runs": [run], "y": "spec.y"})["curves"][0]["n"] == 49
+    assert rt.write_scan_report(run) == ["report.pdf", "report.pptx"]
+    client, h = portal(rt, tmp_path)
+    r = client.get("/api/runs/" + run, headers=h)
+    assert r.status_code == 200 and r.json()["traces"][0]["x"][7] is None

@@ -76,6 +76,45 @@ def test_a_run_a_crash_ended_is_kept_as_run_h5_marked_interrupted(tmp_path):
     assert card["swept"] == [{"key": "smu.V", "unit": "V", "from": 0.0, "to": 1.0, "min": 0.0, "max": 1.0}]
 
 
+def test_any_key_and_value_a_run_records_is_kept_in_run_h5_and_read_back(tmp_path, monkeypatch):
+    """Bug hunt of 2026-10-31: a / in a key (a card's dI/dV) made groups of it in run.h5, and the run unreadable once
+    its record was removed; a NUL in a reading or in the stop reason, a list of names or a list of lists kept run.h5
+    from being written at all. An older run.h5 with such groups reads back by its keys."""
+    h5py = pytest.importorskip("h5py")
+    from labharness.eventlog import RunRecord
+    folder = tmp_path / "20261031-100000-mixed"
+    rec = RunRecord(folder.name, folder, {"plan": "p"}, "op")
+    rec.set_columns({"axes": [{"key": "smu.V", "unit": "V"}], "measures": [{"key": "lockin.dI/dV", "unit": "S"}]})
+    rows = [{"i": 0, "t": 0.0, "smu.V": 1.0, "lockin.dI/dV": 0.5, "dev.status": "OK\x00", "dev.names": ["a", "b"],
+             "spec.xy": [[1, 2], [3, 4]], "sa.trace": [1.0, None, 3.0], "rh.%2F": 40.0},
+            {"i": 1, "t": 1.0, "smu.V": 2.0, "lockin.dI/dV": 0.25, "dev.status": "OK", "dev.names": ["c"],
+             "spec.xy": [[5, 6]], "sa.trace": [4.0, 5.0], "rh.%2F": 41.0}]
+    for r in rows:
+        rec.add(r)
+    rec.finish(status="aborted", points=2, reason="error: got 'OK\x00'")
+    assert not rec.meta.get("warnings") and sorted(p.name for p in folder.iterdir()) == ["run.h5"]
+    back = rundata.load(folder)
+    assert back.rows == [dict(rows[0], **{"dev.status": "OK"}), rows[1]]   # the NUL left out, the rest as it was
+    assert back.meta["reason"] == "error: got 'OK\x00'"   # its meta keeps it (JSON); run.h5's attribute can't
+    assert rundata.columns(folder).order == ["i", "t", "smu.V", "lockin.dI/dV", "rh.%2F", "dev.names", "dev.status",
+                                             "spec.xy", "sa.trace"]
+    assert rundata.trace_row(folder, "sa.trace", 1) == {"sa.trace": [4.0, 5.0]}
+
+    old = tmp_path / "20261030-100000-old"   # as an older Kelvin kept a key with a /: groups inside groups
+    old.mkdir()
+    with h5py.File(old / rundata.RUN_FILE, "w") as f:
+        f.attrs["meta_json"] = '{"run_id": "20261030-100000-old", "status": "done", "points": 2}'
+        f.create_dataset("points/i", data=[0.0, 1.0])
+        f.create_dataset("points/lockin.dI/dV", data=[0.5, 0.25])
+    assert rundata.load(old).rows == [{"i": 0, "lockin.dI/dV": 0.5}, {"i": 1, "lockin.dI/dV": 0.25}]
+
+    again = crashed_run(tmp_path / "again")   # a run.h5 that doesn't read back never stands in for the record
+    monkeypatch.setattr(rundata, "columns", lambda f: rundata.Columns(0, {}, {}, {}, {}, []))
+    with pytest.raises(ValueError, match="did not read back as written"):
+        rundata.finish(again)
+    assert sorted(p.name for p in again.iterdir()) == ["record.bin", "record.lock"]
+
+
 def test_without_h5py_a_crashed_record_is_closed_as_interrupted(tmp_path, monkeypatch):
     monkeypatch.setattr(rundata, "have_h5", lambda: False)                    # Kelvin's core alone
     folder = crashed_run(tmp_path, points=4, torn=True)
@@ -196,6 +235,26 @@ def test_compute_and_where_work_on_a_runs_columns_and_nothing_else(tmp_path):
         assert rt.compute(run_id, bad).startswith("not computed"), bad
     assert rt.compute(run_id, "9 ** 9 ** 9") == "9 ** 9 ** 9 = inf (over 21 points)"   # floats: nothing runs away
     assert rt.compute(run_id, "smu.V", where="smu.V").startswith("not computed: where needs a condition")
+
+
+def test_the_ai_reads_numbers_to_twelve_figures_where_a_sweep_steps_finely(tmp_path):
+    """A dip at 4.0000027 GHz swept in 200 Hz steps (bug hunt of 2026-10-31): compute, get_run_data and query_runs
+    gave six significant figures (the dip "at 4e+09", 101 points read as three frequencies)."""
+    from labharness.eventlog import RunRecord
+    rt = runtime(tmp_path)
+    run_id = "20261031-120000-saw_dip"
+    rec = RunRecord(run_id, rt.runs.home / run_id, {"plan": "saw_dip"}, "op")
+    rec.set_columns({"axes": [{"key": "sg.freq", "unit": "Hz"}], "measures": [{"key": "det.V", "unit": "V"}]})
+    for i in range(101):
+        f = 3.99999e9 + 200.0 * i
+        rec.add({"i": i, "t": float(i), "sg.freq": f, "det.V": 1 - 0.5 / (1 + ((f - 4.0000027e9) / 1500.0) ** 2)})
+    rec.finish(status="done", points=101)
+    assert rt.compute(run_id, "at_min(det.V, sg.freq)") == "at_min(det.V, sg.freq) = 4000002600 (over 101 points)"
+    assert "min 0.502212389381 at sg.freq=4000002600;" in rt.compute(run_id, "det.V")
+    freqs = [line.split(",")[2] for line in rt.run_data(run_id, max_rows=200).splitlines()[2:]]
+    assert len(set(freqs)) == 101 and freqs[63] == "4000002600"
+    assert rt.query_runs("SELECT min, max FROM columns WHERE key = 'sg.freq'").splitlines() == \
+        ["min,max", "3999990000,4000010000"]
 
 
 def test_a_trace_is_read_alone_from_run_h5(tmp_path):

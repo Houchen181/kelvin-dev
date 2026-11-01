@@ -1227,8 +1227,10 @@ def _attr(v: Any) -> Any:
 
 
 def fit_name(name: Any) -> str:
-    """A fit's name as run.h5 keeps it: letters, digits, spaces and ._-=@ (anything else becomes _), 80 at most."""
-    return "".join(c if c.isalnum() or c in "._-=@ " else "_" for c in str(name or "").strip())[:80]
+    """A fit's name as run.h5 keeps it: letters, digits, spaces and ._-=@ (anything else becomes _), 80 at most. A
+    dot alone is no name: HDF5 reads it as the group the fits are in."""
+    text = "".join(c if c.isalnum() or c in "._-=@ " else "_" for c in str(name or "").strip())[:80]
+    return "" if text == "." else text
 
 
 def store(folder: Path, name: str, result: Dict[str, Any], spec: Dict[str, Any], by: str = "agent",

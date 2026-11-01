@@ -1784,6 +1784,8 @@ class LabRuntime:
         if not kept.get("series"):
             merged.update(assessment=new.get("assessment", ""), next=new.get("next", ""))
         d = self._run_dir(run_id)
+        if rundata.being_recorded(d):   # its record is the run's own until it ends, with the run's analysis last
+            return "not kept: the run is still being measured; analyse it again with accept once it has finished"
         try:
             rundata.set_analysis(d, merged)
         except (OSError, ValueError) as e:
@@ -2023,8 +2025,8 @@ class LabRuntime:
         out = io.StringIO()
         w = csv.writer(out, lineterminator="\n")
         w.writerow(names)
-        for row in rows:
-            w.writerow(["" if v is None else "%.6g" % v if isinstance(v, float) else v for v in row])
+        for row in rows:   # numbers to 12 significant figures: a frequency at 4 GHz to the hertz
+            w.writerow(["" if v is None else "%.12g" % v if isinstance(v, float) else v for v in row])
         text = out.getvalue()
         if not rows:
             text += "(no rows)"
@@ -3752,8 +3754,8 @@ class LabRuntime:
             return "not computed: %s" % e
         value = np.asarray(value, dtype=float)
         scope = "%d points%s" % (picked.size, " where " + where if where else "")
-        if value.ndim == 0:
-            return "%s = %.6g (over %s)" % (expression, float(value), scope)
+        if value.ndim == 0:   # numbers to 12 significant figures (Columns.cell): where a narrow dip is, to the hertz
+            return "%s = %.12g (over %s)" % (expression, float(value), scope)
         if value.ndim > 1:
             return "not computed: the result has %d dimensions" % value.ndim
         n = value.size
@@ -3769,8 +3771,8 @@ class LabRuntime:
         lines = ["%s over %s: %d values" % (expression, scope, n)]
         if np.isfinite(value).any():
             lo, hi = int(np.nanargmin(value)), int(np.nanargmax(value))
-            lines.append("min %.6g at %s; max %.6g at %s; mean %.6g" % (value[lo], at(lo), value[hi], at(hi),
-                                                                          float(np.nanmean(value))))
+            lines.append("min %.12g at %s; max %.12g at %s; mean %.12g" % (value[lo], at(lo), value[hi], at(hi),
+                                                                             float(np.nanmean(value))))
         else:
             lines.append("no finite values")
         step = max(1, -(-n // max(1, int(max_rows))))
@@ -3782,10 +3784,10 @@ class LabRuntime:
         if per_point:
             lines.append(",".join(["i"] + axes + ["value"]))
             lines += [",".join([table.cell("i", int(picked[k]))] + [table.cell(a, int(picked[k])) for a in axes] +
-                               ["%.6g" % value[k]]) for k in shown]
+                               ["%.12g" % value[k]]) for k in shown]
         else:
             lines.append("index,value")
-            lines += ["%d,%.6g" % (k, value[k]) for k in shown]
+            lines += ["%d,%.12g" % (k, value[k]) for k in shown]
         return "\n".join(lines)
 
     def trace(self, run_id: str, row: int, column: str, max_points: int = 200) -> str:

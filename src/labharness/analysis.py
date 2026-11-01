@@ -42,6 +42,7 @@ SELECT_POINTS = 2000      # a longer curve is decimated to about this many point
 TIME_LIMIT = 10.0         # seconds for a whole run's analysis (it runs while the lab is held)
 MAP_MIN = 8               # values on each of two axes that make a sweep a map
 TRACE_ROWS = 12           # a run's traces looked at: spread over its rows, the first and the last among them
+CURVE_ROWS = 12           # an outer loop's curves looked at: spread over its values, the first and the last among them
 RISE = 2 * math.atanh(0.8)   # a tanh step's rise from 10 % to 90 % of its change, in its widths
 DB_UNITS = ("dB", "dBm", "dBc", "dBV", "dBW")
 PEAKS = ("lorentzian", "gaussian")
@@ -678,7 +679,7 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
     def quad_ok(q: Optional[Dict[str, Any]]) -> bool:
         """A bend a straight line misses: the parabola leaves only noise behind, and its curvature stands out."""
         return bool(q) and abs(q["values"][2]) > 5 * q["errors"][2] and (q["r2"] >= 0.99 or adequate(q)) and \
-            not (lin and adequate(lin))
+            not (lin and adequate(lin) and not missed)
 
     def lines() -> Optional[Dict[str, Any]]:
         """The line shape that tells the curve best (a Gaussian fits a broad Lorentzian narrower, never instead of
@@ -708,6 +709,20 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
         return "a possible %s at %s = %s (%.1fσ, %s): average longer, or sweep finer around it, to tell" % (
             "peak" if f["values"][1] > 0 else "dip", x_name, _fmt_pm(f["values"][2], f["errors"][2], x_unit), z, why)
 
+    def beats_line(m: str, f: Optional[Dict[str, Any]]) -> bool:
+        """A richer shape that tells the curve better than noise alone would let it beat a straight line (an F test
+        of the two fits, R² on the values as recorded, strict for each place the shape could be and each shape
+        tried). A few points make their noise out of the curve's own bend, and a line then passes for noise: six
+        points rising to a peak at 1.6 V and falling read as "linear ... no problems found" at R² 0.71."""
+        if not f or m == "linear" or not math.isfinite(r2_shown(f)):
+            return False
+        width = abs(f["values"][3]) if m in LINES + ("step",) else 0.0
+        look = len(yd) / 4 if m == "oscillation" else trials(width) if width else 1.0
+        return _p_more(plain, dict(f, r2=r2_shown(f)), len(yd)) * look * len(candidates) < 1e-5
+
+    plain = lin if lin is None or xd.size == n else _linear(xd, yd)   # the line on the points the shapes were fitted to
+    missed = bool(lin) and force is None and lin["r2"] < 0.98 and any(beats_line(m, f) for m, f in candidates.items())
+
     osc, expo = candidates.get("oscillation"), candidates.get("exponential")
     chosen = None
     if force:
@@ -716,11 +731,11 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
         chosen = osc
     elif expect == "decay" and expo_ok(expo):
         chosen = expo
-    elif level:
+    elif level and not missed:
         chosen = lines()
         if chosen is None:
             return constant(sigma or _mad_sigma(ys_s), possible())
-    elif lin and (lin["r2"] >= 0.995 or adequate(lin)):
+    elif lin and (lin["r2"] >= 0.995 or adequate(lin) and not missed):
         chosen = lin
     if chosen is None and not force:
         line = lines()
@@ -1571,6 +1586,7 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
     ratios = _ratios(rows, measures) if rows else {}
     parts = {k for pair in ratios.values() for k in pair}
     skipped: List[str] = []
+    partly: List[str] = []   # columns whose outer loop had more curves than are looked at
 
     for m in measures:
         if only and m["key"] != only:
@@ -1634,7 +1650,10 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
         groups: Dict[Any, List[Dict[str, Any]]] = {}
         for r in mine:
             groups.setdefault(r.get(outer["key"]) if outer else None, []).append(r)
-        items = list(groups.items())[:12]
+        every = list(groups.items())   # spread over the whole run: the first ones alone once stood for all of it
+        items = [every[k] for k in _spread(len(every), CURVE_ROWS)]
+        if len(items) < len(every):
+            partly.append("%s at %d of its %d %s values" % (m["key"], len(items), len(every), outer["key"]))
 
         def one(k: int, models: Optional[Sequence[str]] = None) -> Dict[str, Any]:
             gval, grows = items[k]
@@ -1683,6 +1702,9 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
     if skipped:
         issues.append("not analysed in the %.0f s the automatic analysis takes: %s (analyze_run with column analyses "
                       "one)" % (time_limit, ", ".join(skipped)))
+    if partly:
+        issues.append("only some curves analysed: %s, spread from the first to the last (fit_run with where fits any "
+                      "of the others)" % "; ".join(partly))
     findings = [s for s in series if s["kind"] not in ("tracking", "none")]
     if rows and measures and series and findings and all(s["kind"] in ("flat",) for s in findings):
         issues.append("no measured column shows a signal above the noise")

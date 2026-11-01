@@ -46,13 +46,18 @@ def encode(text: str) -> bytes:
 
 
 def measure(text: str, size: float, font: str = "regular") -> float:
+    return _units(text, font) * size / 1000
+
+
+def _units(text: str, font: str) -> int:
+    """The text's advance width in 1/1000 em."""
     widths = FONTS[font][2]
     if widths is None:
-        return len(encode(text)) * 600 * size / 1000
+        return len(encode(text)) * 600
     total = 0
     for c in encode(text):
         total += widths[c - 32] if 32 <= c < 127 else _HIGH.get(c, 556)
-    return total * size / 1000
+    return total
 
 
 def _esc(b: bytes) -> bytes:
@@ -175,12 +180,22 @@ def wrap(text: str, width: float, size: float, font: str = "regular") -> List[st
                 continue
             if line:
                 lines.append(line)
-            while measure(word, size, font) > width and len(word) > 1:   # a word longer than the line
-                cut = len(word)
-                while cut > 1 and measure(word[:cut], size, font) > width:
-                    cut -= 1
-                lines.append(word[:cut])
-                word = word[cut:]
+            if len(word) > 1 and measure(word, size, font) > width:   # a word longer than the line: cut where it fills
+                edges = [0]   # its widths added up once: an instrument's whole reply in a stop reason once took minutes
+                for ch in word:
+                    edges.append(edges[-1] + _units(ch, font))
+                start = 0
+                while len(word) - start > 1 and (edges[-1] - edges[start]) * size / 1000 > width:
+                    lo, hi = start + 1, len(word)   # the most that fits, halving; at least one character
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        if (edges[mid] - edges[start]) * size / 1000 <= width:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    lines.append(word[start:lo])
+                    start = lo
+                word = word[start:]
             line = word
         lines.append(line)
     return lines

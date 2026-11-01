@@ -12,7 +12,9 @@ run.h5 is the run's one data file. h5py, MATLAB (h5read), Igor Pro, Origin and H
                      device...); meta_json holds all of it as JSON
     /plan            the plan as run (YAML text)
     /points/<key>    one 1-D array per scalar column (i, t, each swept axis and each reading), with the
-                     attributes unit, role (index, time, axis or measured), kind and quantity
+                     attributes unit, role (index, time, axis or measured), kind and quantity; a / in a key is
+                     written %2F, a % %25 (h5_name), the key itself in the attribute key; a list of names or of
+                     lists is JSON text (attribute type json)
     /traces/<key>    one 2-D array (points x samples) per trace reading, NaN-padded; <key>.length when the
                      traces' lengths differ, and <key>.x (each point's x values) or <key>.axis (start and stop)
     /frames/<key>    one 3-D array (points x rows x columns) per camera reading, compressed
@@ -26,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import shutil
 import struct
 import sys
@@ -394,10 +397,47 @@ def make_card(rec: Recorded, stats: Optional[Dict[str, Dict[str, Any]]] = None) 
 # ------------------------------------------------------------------ run.h5
 
 def _attr(v: Any) -> Any:
-    """A value HDF5 can keep as an attribute (lists and dicts as JSON)."""
-    if isinstance(v, (str, bool, int, float)):
+    """A value HDF5 can keep as an attribute (lists and dicts as JSON; text without NULs, which it can't keep)."""
+    if isinstance(v, str):
+        return v.replace("\x00", "")
+    if isinstance(v, (bool, int, float)):
         return v
     return json.dumps(_jsonable(v), ensure_ascii=False)
+
+
+def h5_name(key: str) -> str:
+    """A column's dataset name in run.h5: its key, with each / written %2F (HDF5 makes groups of a /), a NUL %00
+    and a % %25, so that every key is one dataset and reads back as it was (a card's dI/dV once lost its run)."""
+    return key.replace("%", "%25").replace("/", "%2F").replace("\x00", "%00")
+
+
+def key_of(name: str) -> str:
+    """The column key a run.h5 dataset name stands for (h5_name)."""
+    return re.sub("%(25|2F|00)", lambda m: {"25": "%", "2F": "/", "00": "\x00"}[m.group(1)], name)
+
+
+def datasets(group: Any) -> List[Tuple[str, Any]]:
+    """A run.h5 group's datasets (points, traces) with the column keys they hold. An older run.h5 kept a key with
+    a / in it as groups inside groups: those read back as that key."""
+    if group is None:
+        return []
+    import h5py
+    out: List[Tuple[str, Any]] = []
+    group.visititems(lambda path, item: out.append((key_of(path), item)) if isinstance(item, h5py.Dataset) else None)
+    return out
+
+
+def _trace_column(vals: List[Any]) -> bool:
+    """Whether a column's values are traces: lists of numbers (None for a missing one), at one point or more."""
+    lists = [v for v in vals if isinstance(v, list)]
+    return bool(lists) and all(x is None or isinstance(x, (int, float)) for v in lists for x in v)
+
+
+def _from_json(text: str) -> Any:
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return text
 
 
 def write_h5(folder: Path, rec: Recorded) -> Path:
@@ -419,7 +459,9 @@ def write_h5(folder: Path, rec: Recorded) -> Path:
     keys = [k for k in keys if any(k in r for r in rows)]
     frame_keys = [k for k in keys if any(isinstance(r.get(k), str) and r.get(k, "").startswith("frames/")
                                          for r in rows)]
-    aux = [k for k in keys if (k.endswith(".x") or k.endswith(".axis")) and k.rsplit(".", 1)[0] in keys]
+    traced = {k for k in keys if k not in frame_keys and _trace_column([r.get(k) for r in rows])}
+    aux = [k for k in keys if (k.endswith(".x") or k.endswith(".axis")) and k.rsplit(".", 1)[0] in traced
+           and k in traced]
     tmp = folder / (RUN_FILE + ".tmp")
     with h5py.File(tmp, "w") as f:
         f.attrs["format"] = FORMAT
@@ -431,7 +473,7 @@ def write_h5(folder: Path, rec: Recorded) -> Path:
         f.attrs["meta_json"] = json.dumps(_jsonable(meta), ensure_ascii=False)
         f.attrs["columns_json"] = json.dumps(_jsonable(rec.columns), ensure_ascii=False)
         text = h5py.string_dtype()
-        f.create_dataset("plan", data=rec.plan_text or "", dtype=text)
+        f.create_dataset("plan", data=(rec.plan_text or "").replace("\x00", ""), dtype=text)
         cond = f.create_group("conditions")
         for kind in ("start", "end"):
             cond.create_dataset(kind, data=json.dumps(_jsonable(rec.snapshots.get(kind) or {}), ensure_ascii=False),
@@ -444,26 +486,35 @@ def write_h5(folder: Path, rec: Recorded) -> Path:
                 continue
             vals = [r.get(k) for r in rows]
             col = info.get(k, {"role": "measured", "unit": "", "kind": "scalar", "quantity": quantity_of(k, "")})
-            if any(isinstance(v, list) for v in vals):
-                ds = _traces(traces, k, vals, np)
+            name = h5_name(k)
+            if k in traced:
+                ds = _traces(traces, name, vals, np)
                 for a in (".x", ".axis"):
-                    if k + a in keys:
-                        _traces(traces, k + a, [r.get(k + a) for r in rows], np)
+                    if k + a in aux:
+                        _traces(traces, name + a, [r.get(k + a) for r in rows], np)
                 if col.get("x_unit"):
-                    ds.attrs["x_unit"] = col["x_unit"]
+                    ds.attrs["x_unit"] = _attr(col["x_unit"])
             elif all(v is None or isinstance(v, (int, float)) for v in vals):
                 is_bool = any(isinstance(v, bool) for v in vals)
-                ds = points.create_dataset(k, data=np.array([float("nan") if v is None else float(v) for v in vals],
-                                                            dtype="f8"), chunks=n > 4096 or None)
+                ds = points.create_dataset(name, data=np.array([float("nan") if v is None else float(v) for v in vals],
+                                                               dtype="f8"), chunks=n > 4096 or None)
                 if is_bool:
                     ds.attrs["type"] = "bool"
-            else:
-                ds = points.create_dataset(k, data=["" if v is None else str(v) for v in vals], dtype=text)
+            elif any(isinstance(v, (list, dict)) for v in vals):   # names, lists of lists: as JSON, read back so
+                ds = points.create_dataset(name, data=["" if v is None else json.dumps(_jsonable(v), ensure_ascii=False)
+                                                       for v in vals], dtype=text)
+                ds.attrs["type"] = "json"
+            else:   # text, without the NULs HDF5 can't keep (an instrument's reply padded with them)
+                ds = points.create_dataset(name, data=["" if v is None else str(v).replace("\x00", "") for v in vals],
+                                           dtype=text)
+            if name != k:   # the key as it is, for whoever opens run.h5 elsewhere
+                ds.attrs["key"] = _attr(k)
             for a in ("unit", "role", "kind", "quantity"):
-                ds.attrs[a] = col.get(a) or ""
+                ds.attrs[a] = _attr(col.get(a) or "")
         for k in frame_keys:
-            _frames_into(framed, folder, k, [r.get(k) for r in rows], np)
-            framed[k].attrs.update({"role": "measured", "kind": "image", "unit": info.get(k, {}).get("unit", "")})
+            _frames_into(framed, folder, h5_name(k), [r.get(k) for r in rows], np)
+            framed[h5_name(k)].attrs.update({"role": "measured", "kind": "image",
+                                             "unit": _attr(info.get(k, {}).get("unit", ""))})
     os.replace(tmp, folder / RUN_FILE)
     return folder / RUN_FILE
 
@@ -516,21 +567,24 @@ def read_h5(folder: Path, with_rows: bool = True) -> Recorded:
         rec.analysis = json.loads(_text(f.get("analysis")) or "null")
         if not with_rows:
             return rec
-        n = int(f["points"]["i"].shape[0]) if "i" in f.get("points", {}) else int(rec.meta.get("points") or 0)
+        points = dict(datasets(f.get("points")))
+        n = int(points["i"].shape[0]) if "i" in points else int(rec.meta.get("points") or 0)
         rows: List[Dict[str, Any]] = [{} for _ in range(n)]
-        for k, ds in f.get("points", {}).items():
+        for k, ds in points.items():
             vals = ds[()]
             if ds.dtype.kind in ("O", "S", "U"):
+                as_json = ds.attrs.get("type") == "json"
                 for i in range(n):
                     v = vals[i]
-                    rows[i][k] = v.decode("utf-8") if isinstance(v, bytes) else str(v)
+                    v = v.decode("utf-8") if isinstance(v, bytes) else str(v)
+                    rows[i][k] = _from_json(v) if as_json else v
             else:
                 as_bool = ds.attrs.get("type") == "bool"
                 for i in range(n):
                     v = float(vals[i])
                     rows[i][k] = None if math.isnan(v) else (bool(v) if as_bool else
                                                              (int(v) if k == "i" else v))
-        traces = f.get("traces", {})
+        traces = dict(datasets(f.get("traces")))
         for k, ds in traces.items():
             if k.endswith(".length"):
                 continue
@@ -538,9 +592,9 @@ def read_h5(folder: Path, with_rows: bool = True) -> Recorded:
             lengths = traces[k + ".length"][()] if k + ".length" in traces else [data.shape[1]] * n
             for i in range(min(n, data.shape[0])):
                 rows[i][k] = [None if math.isnan(x) else float(x) for x in data[i, :int(lengths[i])]]
-        for k in f.get("frames", {}):
+        for name in f.get("frames", {}):
             for i in range(n):
-                rows[i][k] = "%s:/frames/%s[%d]" % (RUN_FILE, k, i)
+                rows[i][key_of(name)] = "%s:/frames/%s[%d]" % (RUN_FILE, key_of(name), i)
         rec.rows = rows
     return rec
 
@@ -581,9 +635,17 @@ def finish(folder: Path) -> Optional[Path]:
     if not have_h5():
         return None
     path = write_h5(folder, rec)
-    back = read_h5(folder, with_rows=False)
-    if back.meta.get("run_id") != rec.meta.get("run_id"):
-        raise ValueError("run.h5 did not read back as written")
+    keys = {k for r in rec.rows for k in r}
+    wanted = {k for k in keys if not (k.endswith((".x", ".axis")) and k.rsplit(".", 1)[0] in keys)}
+    try:   # the run's own, with every column read back by its key, before its record goes
+        if read_h5(folder, with_rows=False).meta.get("run_id") != rec.meta.get("run_id"):
+            raise ValueError("another run's")
+        lost = wanted - set(columns(folder).order)
+        if lost:
+            raise ValueError("without %s" % ", ".join(sorted(lost)))
+    except Exception as e:   # the record stays the run's: a run.h5 that doesn't read back never stands in for it
+        path.unlink()
+        raise ValueError("run.h5 did not read back as written (%s)" % e)
     (folder / RECORD).unlink()
     shutil.rmtree(folder / "frames", ignore_errors=True)
     try:
@@ -737,9 +799,11 @@ class Columns:
         raise KeyError("no column %r (have: %s)" % (key, ", ".join(self.order)))
 
     def cell(self, key: str, i: int) -> str:
+        """One value as the AI reads it: numbers to 12 significant figures, so that a sweep's close steps (200 Hz
+        at 4 GHz) stay apart."""
         if key in self.numbers:
             v = float(self.numbers[key][i])
-            return "" if v != v else str(int(v)) if key == "i" else "%.6g" % v
+            return "" if v != v else str(int(v)) if key == "i" else "%.12g" % v
         if key in self.sizes:
             return "trace[%d]" % self.sizes[key][i] if self.kinds[key] == "trace" else "frame"
         return self.texts[key][i] if key in self.texts else ""
@@ -757,12 +821,12 @@ def columns(folder: Path) -> Columns:
         import h5py
         with h5py.File(folder / RUN_FILE, "r") as f:
             cols = json.loads(f.attrs.get("columns_json", "{}"))
-            for k, ds in f.get("points", {}).items():
+            for k, ds in datasets(f.get("points")):
                 if ds.dtype.kind in "fiub":
                     numbers[k] = ds[()].astype(float)
                 else:
                     texts[k] = [x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in ds[()]]
-            traces = f.get("traces", {})
+            traces = dict(datasets(f.get("traces")))
             for k, ds in traces.items():
                 if k.endswith((".length", ".x", ".axis")) and k.rsplit(".", 1)[0] in traces:
                     continue
@@ -770,7 +834,8 @@ def columns(folder: Path) -> Columns:
                 lengths = traces[k + ".length"][()] if k + ".length" in traces else [width] * int(ds.shape[0])
                 sizes[k] = [int(x) for x in lengths]
                 kinds[k] = "trace"
-            for k, item in f.get("frames", {}).items():
+            for name, item in f.get("frames", {}).items():
+                k = key_of(name)
                 sizes[k], kinds[k] = [1] * (int(item.shape[0]) if hasattr(item, "shape") else len(item)), "frame"
         n = len(numbers["i"]) if "i" in numbers else max([len(v) for v in list(numbers.values()) +
                                                            list(texts.values()) + list(sizes.values())] or [0])
@@ -782,12 +847,14 @@ def columns(folder: Path) -> Columns:
             vals = [r.get(k) for r in rows]
             if k.endswith((".x", ".axis")) and k.rsplit(".", 1)[0] in keys:
                 continue
-            if any(isinstance(v, list) for v in vals):
+            if _trace_column(vals):
                 sizes[k], kinds[k] = [len(v) if isinstance(v, list) else 0 for v in vals], "trace"
             elif any(isinstance(v, str) and v.startswith("frames/") for v in vals):
                 sizes[k], kinds[k] = [1] * n, "frame"
             elif all(v is None or isinstance(v, (int, float)) for v in vals):
                 numbers[k] = np.array([np.nan if v is None else float(v) for v in vals])
+            elif any(isinstance(v, (list, dict)) for v in vals):   # as run.h5 keeps them (write_h5)
+                texts[k] = ["" if v is None else json.dumps(_jsonable(v), ensure_ascii=False) for v in vals]
             else:
                 texts[k] = ["" if v is None else str(v) for v in vals]
     known = ["i", "t"] + [a["key"] for a in cols.get("axes") or []] + [m["key"] for m in cols.get("measures") or []]
@@ -805,7 +872,7 @@ def trace_row(folder: Path, key: str, i: int) -> Optional[Dict[str, Any]]:
         return None
     import h5py
     with h5py.File(folder / RUN_FILE, "r") as f:
-        traces = f.get("traces", {})
+        traces = dict(datasets(f.get("traces")))
         if key not in traces or key.endswith(".length"):
             raise KeyError(key)
         ds = traces[key]
@@ -829,7 +896,7 @@ def frame(folder: Path, ref: str) -> Any:
         key, _, i = rest[:-1].rpartition("[")
         import h5py
         with h5py.File(folder / RUN_FILE, "r") as f:
-            item = f["frames"][key]
+            item = f["frames"][h5_name(key) if h5_name(key) in f["frames"] else key]
             if isinstance(item, h5py.Group):   # frames of different sizes: one dataset per point
                 return item["%05d" % int(i)][()]
             return item[int(i)]
