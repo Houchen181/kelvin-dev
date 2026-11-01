@@ -44,20 +44,8 @@ MAX_SUMMARY = 6000      # the summary at the top of a project's master report
 SHARING = ("", "unpublished", "confidential")   # on the Kelvin hub: shared (the default), or never
 GENERAL = "general"     # the workspace of runs and devices outside every project
 NOTE_KINDS = PROJECT_KINDS
-IN_USE_TRIES = 40       # about 2 s: how long a file the system says is in use is tried again (_again)
-
-
-def _again(do: Callable[[], Any]) -> Any:
-    """do(), tried again for a while when the system says a file is in use: on Windows a file being replaced can't be
-    opened for a moment, nor one that another program has open (a virus scanner, a backup) replaced or removed.
-    Then its error."""
-    for attempt in range(IN_USE_TRIES):
-        try:
-            return do()
-        except PermissionError:
-            if attempt == IN_USE_TRIES - 1:
-                raise
-            time.sleep(min(0.05, 0.005 * (attempt + 1)))
+IN_USE_TRIES = 40       # about 2 s: how long a file the system says is in use is tried again (ChatStore._again)
+UNREAD_FOR = 30.0       # s: a chat's file list() couldn't read is left out this long, unless it changes meanwhile
 
 
 def _label(text: Any) -> str:
@@ -96,24 +84,40 @@ class ChatStore:
             self._temp_media: Dict[str, Dict[str, bytes]] = {}   # and their pictures and files
             self._kept_cache: Optional[Tuple[Any, Dict[str, Any]]] = None
             self._listed: Dict[str, Tuple[Any, Dict[str, Any]]] = {}   # what list() read of each chat's file
+            self._unread: Dict[str, Tuple[Any, float]] = {}   # the files list() couldn't read: as they were, until when
 
     def _path(self, chat_id: str) -> Path:
         if not _ID.match(chat_id or ""):
             raise KeyError("no chat %r" % chat_id)
         return self.root / ("%s.json" % chat_id)
 
+    def _again(self, do: Callable[[], Any]) -> Any:
+        """do() under the store's own lock for its files (_io), tried again for a while when the system says a file is
+        in use: on Windows a file being replaced can't be opened for a moment, nor one that another program has open
+        (a virus scanner, a backup) replaced or removed. It waits between tries without the lock, so a file held
+        elsewhere never holds up the store's other reads and writes. Then its error."""
+        for attempt in range(IN_USE_TRIES):
+            try:
+                with self._io:
+                    return do()
+            except PermissionError:
+                if attempt == IN_USE_TRIES - 1:
+                    raise
+            time.sleep(min(0.05, 0.005 * (attempt + 1)))
+
     def _read(self, path: Path) -> str:
         """A file's text, never read while this store writes one, and read again while Windows says it is in use."""
-        with self._io:
-            return _again(lambda: path.read_text(encoding="utf-8"))
+        return self._again(lambda: path.read_text(encoding="utf-8"))
 
     def _put(self, path: Path, text: str) -> None:
         """A file written whole beside it, then put in its place: never while this store reads one, and tried again
         while Windows says it is in use (a turn's save once failed while the sidebar read the chat)."""
         tmp = path.with_suffix(".tmp")
-        with self._io:
-            _again(lambda: tmp.write_text(text, encoding="utf-8"))
-            _again(lambda: os.replace(tmp, path))
+
+        def put() -> None:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, path)
+        self._again(put)
 
     # ------------------------------------------------------------------ chats
 
@@ -180,8 +184,7 @@ class ChatStore:
             return
         path = self._path(chat_id)
         if path.exists():
-            with self._io:
-                _again(path.unlink)
+            self._again(path.unlink)
         import shutil
         shutil.rmtree(self.root / "media" / chat_id, ignore_errors=True)
         with self._lock:
@@ -231,24 +234,33 @@ class ChatStore:
         assign = index["assign"]
         out = []
         listed: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+        unread: Dict[str, Tuple[Any, float]] = {}
         for path in self.root.glob("*.json"):
             if not _ID.match(path.stem):  # the projects index, or a stray file
                 continue
-            try:   # a chat read again only when its file changed: the sidebar reloads the list often
+            try:
                 st = path.stat()
-                key = (st.st_mtime_ns, st.st_size)
-                seen = self._listed.get(path.name)
-                if seen is None or seen[0] != key:
+            except OSError:
+                continue
+            key = (st.st_mtime_ns, st.st_size)   # a chat read again only when its file changed: the list reloads often
+            seen = self._listed.get(path.name)
+            if seen is None or seen[0] != key:
+                failed = self._unread.get(path.name)
+                if failed is not None and failed[0] == key and time.monotonic() < failed[1]:
+                    unread[path.name] = failed   # couldn't be read a moment ago, and unchanged: not tried again yet
+                    continue
+                try:
                     whole = json.loads(self._read(path))
                     seen = (key, {k: whole[k] for k in ("id", "title", "updated", "model", "rules") if k in whole})
-            except (OSError, ValueError):
-                continue
+                except (OSError, ValueError):   # held elsewhere for good (a backup), or damaged: left out a while
+                    unread[path.name] = (key, time.monotonic() + UNREAD_FOR)
+                    continue
             listed[path.name] = seen
             chat = self._with_kept(dict(seen[1]), index)
             out.append({"id": chat["id"], "title": chat.get("title", "Chat"), "updated": chat.get("updated", 0),
                         "model": chat.get("model"), "project": assign.get(chat["id"]),
                         "rules": chat.get("rules"), **{m: True for m in index["marks"].get(chat["id"], [])}})
-        self._listed = listed
+        self._listed, self._unread = listed, unread
         return sorted(out, key=lambda c: c["updated"], reverse=True)
 
     def stamp(self) -> str:

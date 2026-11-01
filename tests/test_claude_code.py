@@ -546,9 +546,18 @@ def test_only_reading_and_stop_work_while_claude_operates(tmp_path):
                                        ("PATCH", device, {"protection": {}}),
                                        ("PATCH", "/api/projects/" + p, {"rules": {"providers": None, "literature": True}}),
                                        ("POST", "/api/owner-pin", {"pin": "9999"}),
-                                       ("POST", "/api/chats", {"model": "scripted:m1"})]:
+                                       ("POST", "/api/chats", {"model": "scripted:m1"}),
+                                       ("POST", "/api/analysis/keep", {"run": "last"}),   # keeping a fit writes
+                                       ("POST", "/api/incident", {"action": "dismiss"})]:  # the restart card's dismiss
                 r = client.request(method, path, headers=h, json=body)
                 assert r.status_code == 423 and "Stop" in r.json()["error"], (method, path, r.status_code)
+            # what only reads, though sent as a POST, and what only makes the lab safer pass (review of the fixes)
+            for path, body in [("/api/analysis", {"spec": {"runs": ["nothere"]}}),
+                               ("/api/analysis/csv", {"spec": {"runs": ["nothere"]}}),
+                               ("/api/alarms/a1/ack", {}), ("/api/incident", {"action": "safe"})]:
+                r = client.post(path, headers=h, json=body)
+                assert r.status_code != 423, (path, r.status_code, r.text)
+            assert client.post("/api/incident", headers=h, json={"action": "safe"}).json()["ok"]
             assert runtime.lab.instruments["smu"].limits("V") == (-5.0, 5.0) and runtime.hands
             assert client.get("/api/projects/" + p, headers=h).json()["rules"]["providers"] == ["local"]
             assert client.get("/api/projects/%s/devices" % p, headers=h).json()["devices"][0]["protection"]

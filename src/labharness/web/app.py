@@ -70,8 +70,14 @@ SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/ac
 # sharing work with the Kelvin hub (hubsync.py) is switched off for now: the hub is for accounts only (central.py)
 HUB_SHARING = False
 # Claude Code bridge: while Claude works the screen, this computer's browser only reads and stops, so its clicks never
-# answer for a person (an approval, a rollback, Hands on the sample, a sample's protection, a project's rules, a PIN)
-WHILE_OPERATING = ("/api/stop", "/api/runs/stop", "/api/safe")   # what only makes the lab safer
+# answer for a person (an approval, a rollback, Hands on the sample, a sample's protection, a project's rules, a PIN).
+# What passes: what only makes the lab safer (Stop, Bring to safe, an alarm's Got it, the restart card's safe: its
+# route keeps the card's dismiss locked) and what only reads, though sent as a POST (the Analysis pane's working out
+# and its CSV; keeping a fit writes, so it waits)
+WHILE_OPERATING = ("/api/stop", "/api/runs/stop", "/api/safe", "/api/incident", "/api/analysis", "/api/analysis/csv")
+ACK_WHILE_OPERATING = re.compile(r"^/api/alarms/[^/]+/ack$")
+OPERATING = ("Claude is operating this computer, so everything in Kelvin but Stop, Bring to safe and reading is locked "
+             "until it finishes. Press Stop to end it.")
 COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
 
 
@@ -193,10 +199,9 @@ class Guard:
                 elif (path.startswith("/api/") and path not in SIGNED_OUT and self.signed_in is not None
                       and not self.signed_in()):
                     problem = (401, "Sign in to Kelvin first.", {"signin": True})
-                elif (method not in ("GET", "HEAD") and path not in WHILE_OPERATING and self.operating is not None
-                      and self.operating()):
-                    problem = (423, "Claude is operating this computer, so everything in Kelvin but Stop is locked "
-                                    "until it finishes. Press Stop to end it.")
+                elif (method not in ("GET", "HEAD") and path not in WHILE_OPERATING
+                      and not ACK_WHILE_OPERATING.match(path) and self.operating is not None and self.operating()):
+                    problem = (423, OPERATING)
                 scope["kelvin"] = {"role": "owner", "device": None}
             if problem:
                 body = dict(problem[2] if len(problem) > 2 else {}, error=problem[1])
@@ -3176,6 +3181,8 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             lines = await asyncio.to_thread(runtime.incident_safe, person(request))
             return JSONResponse({"ok": True, "lines": lines})
         if action == "dismiss":
+            if runtime.operating:   # the guard lets the card's safe through while Claude works the screen, not this
+                return error(423, OPERATING)
             runtime.dismiss_incident(person(request))
             return JSONResponse({"ok": True})
         return error(400, "action is safe or dismiss")
