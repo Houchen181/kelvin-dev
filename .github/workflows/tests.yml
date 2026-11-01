@@ -25,4 +25,4 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -e ".[web,dev]"
-      - run: PYTHONPATH=tests DIAG_LATE_S=7 python -X faulthandler -m pytest -q -p kelvin_threaddiag
+      - run: python -m pytest -q
