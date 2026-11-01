@@ -71,7 +71,7 @@ SIGNED_OUT = {"/api/session", "/api/session/reset", "/api/session/hub", "/api/ac
 HUB_SHARING = False
 # Claude Code bridge: while Claude works the screen, this computer's browser only reads and stops, so its clicks never
 # answer for a person (an approval, a rollback, Hands on the sample, a sample's protection, a project's rules, a PIN)
-WHILE_OPERATING = ("/api/stop", "/api/runs/stop")
+WHILE_OPERATING = ("/api/stop", "/api/runs/stop", "/api/safe")   # what only makes the lab safer
 COLLECTION_EVERY = 12 * 3600   # how often Kelvin looks for a newer instrument collection while it is on
 
 

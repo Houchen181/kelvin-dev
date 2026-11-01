@@ -556,6 +556,7 @@ def test_only_reading_and_stop_work_while_claude_operates(tmp_path):
             assert client.get("/api/lab", headers=h).status_code == 200                  # looking is fine
             assert client.post("/api/runs/stop", headers=h, json={}).status_code == 200   # and both Stops work
             assert client.post("/api/stop", headers=h, json={}).status_code == 200
+            assert client.post("/api/safe", headers=h, json={}).status_code != 423         # and Bring to safe
             runtime.operating = None
             assert client.post("/api/config/rollback", headers=h, json={"n": wide}).json()["ok"]   # a person's, after
             assert runtime.lab.instruments["smu"].limits("V") == (-50.0, 50.0)
