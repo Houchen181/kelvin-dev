@@ -93,15 +93,33 @@ def _hook_exit() -> None:
 
 
 def _at_exit() -> None:
-    """Python is exiting: no run.h5 is opened from now on, and the ones open end first (EXIT_WAIT_S at most). This
-    runs before h5py's own exit, after which a run.h5's text can't be read ("Failed to find converter for 8 ->
-    b'PYTHON:OBJECT'"), and a thread still in HDF5 as Python ends crashes it (a segmentation fault) or hangs it: the
-    automatic reports rewritten 20 s after a run (flush_reports), a tidy, a queue ending its run. A run's record
-    stays until its run.h5 is written and read back (finish), so a run cut off here is finished at the next start."""
+    """Python is exiting: no run.h5 is opened from now on, the ones open end first, and then no other thread runs
+    h5py at all (EXIT_WAIT_S for both, at most). This runs before h5py's own exit, after which a run.h5's text can't
+    be read ("Failed to find converter for 8 -> b'PYTHON:OBJECT'"), and a thread in HDF5 meanwhile crashes Python
+    (a segmentation fault) or hangs it: the automatic reports rewritten 20 s after a run (flush_reports), a tidy, a
+    queue ending its run. A run's record stays until its run.h5 is written and read back (finish), so a run cut off
+    here is finished at the next start."""
     global _closing
+    deadline = time.monotonic() + EXIT_WAIT_S
     with _GATE:
         _closing = True
         _GATE.wait_for(lambda: _open == 0, timeout=EXIT_WAIT_S)
+    _hold_h5py(deadline)
+
+
+def _hold_h5py(deadline: float) -> None:
+    """h5py's lock (phil), taken for good by the thread exiting Python. h5py's own exit unregisters its converters
+    in HDF5 without that lock or the GIL, and HDF5 here serves one thread at a time: a thread still releasing h5py
+    objects then (a dataset of a run.h5 just read) crashed Python inside H5Tunregister. Every other thread now
+    waits at h5py's lock until Python is gone; this one may still take it again (it is re-entrant)."""
+    try:
+        from h5py._objects import phil
+    except ImportError:
+        return
+    while not phil.acquire(False):
+        if time.monotonic() > deadline:
+            return
+        time.sleep(0.005)
 
 
 @contextmanager
