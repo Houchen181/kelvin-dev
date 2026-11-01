@@ -3406,7 +3406,11 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
         latest used first. POST, a person's change on this computer (no phone, no agent tool): {op: import, path}
         → {entry, check, library}; {op: rename, id, name} and {op: remove, id} → {library}; {op: run, id, params?,
         args?, queue?} → {queue, message}: at the front of the queue and started, pausing after it (it returns once
-        the queue's approval is answered), or with queue: true at its end."""
+        the queue's approval is answered), or with queue: true at its end. The scan editor (scanedit.py): {op: parts,
+        id?} → {id, name, edited_from, parts, lab, check}, a scan as its parts (a new one without id); {op: check,
+        parts} → its check (points, time, problems, its plan's text); {op: save, parts, from?} → {entry, new,
+        library}, an entry of its own; {op: run, parts, from?, queue?} → {queue, message, entry, library}: saved, then
+        run as above."""
         if role_of(request) != "owner":   # remote.py lists none of it either
             return error(403, ON_THIS_COMPUTER)
         if request.method == "GET":
@@ -3422,18 +3426,29 @@ def create_app(runtime: LabRuntime, settings: Settings, store: ChatStore, *,
             return error(400, "send {op, ...}")
         op, by = str(body.get("op") or ""), person(request)
         entry_id = str(body.get("id") or "")
+        base = str(body.get("from") or "") or None   # the scan an edited one came from
         try:
             if op == "import":
                 out = await asyncio.to_thread(runtime.library_import, body.get("path"), by)
             elif op in ("rename", "remove"):
                 await asyncio.to_thread(runtime.library_change, op, entry_id, body.get("name"), by)
                 out = {}
+            elif op == "run" and body.get("parts") is not None:   # from the scan editor: kept, then run
+                out = await asyncio.to_thread(as_person, runtime.scan_run, body["parts"], base,
+                                              bool(body.get("queue")), by)
             elif op == "run":
                 return JSONResponse(await asyncio.to_thread(as_person, runtime.library_run, entry_id,
                                                             body.get("params"), body.get("args"),
                                                             bool(body.get("queue")), by))
+            elif op == "parts":
+                return JSONResponse(await asyncio.to_thread(runtime.scan_parts, entry_id or None))
+            elif op == "check":
+                return JSONResponse(await asyncio.to_thread(runtime.scan_check, body.get("parts")))
+            elif op == "save":
+                out = await asyncio.to_thread(runtime.scan_save, body.get("parts"), base, by)
             else:
-                return error(400, "unknown library operation %r (import, rename, remove or run)" % op)
+                return error(400, "unknown library operation %r (import, rename, remove, run, parts, check or save)"
+                             % op)
         except KeyError as e:
             return error(404, e.args[0] if e.args else "nothing like that in the library")
         except ValueError as e:

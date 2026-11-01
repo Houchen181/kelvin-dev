@@ -404,6 +404,64 @@ class _ReadingGate:
             return self._rt.gate.fixed_range(inst, spec)
 
 
+class _SeenLab:
+    """The lab, for the scan editor's check: a reading is the latest Kelvin has seen of it (LabRuntime._kept, else what
+    Kelvin set), never asked of the instrument; ValueError when Kelvin hasn't seen it."""
+
+    def __init__(self, gate: "_SeenGate"):
+        self._gate = gate
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._gate._rt.lab, name)
+
+    def read(self, instr: str, param: str) -> Any:
+        inst = self._gate._rt.lab.instrument(instr)
+        value = self._gate.seen(inst, param)
+        if value is None:
+            raise ValueError("%s.%s: Kelvin hasn't read it yet" % (instr, param))
+        return value
+
+
+class _SeenGate(_ReadingGate):
+    """The safety gate, for the scan editor's check and time (LabRuntime.scan_check): what its checks and the card's
+    forecast need of an instrument (where a drive is now, a ramp's rate, a source's fixed range, an interlock's
+    reading) is the latest Kelvin has seen of it, never asked now. A person edits a scan while another runs, and each
+    change is checked; the queue checks it again with the lab as it is when it is added and when it starts."""
+
+    def __init__(self, rt: "LabRuntime"):
+        super().__init__(rt)
+        self.lab = _SeenLab(self)
+
+    def seen(self, inst: Any, param: str) -> Any:
+        got = self._rt._kept(inst.name).get(param)
+        if got is not None and got[0] is not None:
+            return got[0]
+        if param in inst._last:
+            return inst._last[param]
+        spec = inst.card.params.get(param)
+        return spec.default if spec is not None and spec.get_cmd is None else None
+
+    def _current(self, inst: Any, spec: ParamSpec) -> Any:
+        return self.seen(inst, spec.name)
+
+    def fixed_range(self, inst: Any, spec: ParamSpec) -> Optional[float]:
+        if not spec.range_param or not spec.numeric:
+            return None
+        if spec.autorange_param:
+            auto = self.seen(inst, spec.autorange_param)
+            if auto is None or auto:
+                return None
+        rng = self.seen(inst, spec.range_param)
+        return float(rng) if isinstance(rng, (int, float)) and not isinstance(rng, bool) and rng > 0 else None
+
+    def _fixed_range_problem(self, inst: Any, spec: ParamSpec, target: Any,
+                             rng: Optional[float] = None) -> Optional[str]:
+        return SafetyGate._fixed_range_problem(self, inst, spec, target, rng)   # with the range seen, above
+
+    def _away_problem(self, inst: Any, spec: ParamSpec, later: bool = False) -> Optional[str]:
+        return SafetyGate._away_problem(self, inst, spec, later)   # its interlocks' readings as seen
+
+
 class LabRuntime:
     def __init__(self, lab: Lab, approver: Approver, data_dir: Any, envelope: Optional[Envelope] = None):
         self.lab = lab
@@ -3420,6 +3478,137 @@ class LabRuntime:
             return str(python)
         notes.append("It ran with %s, which isn't here now: it runs with the Python Kelvin picks" % python)
         return None
+
+    # ------------------------------------------------------------------ the scan editor (people, the Runs panel)
+
+    def scan_parts(self, entry_id: Optional[str] = None) -> Dict[str, Any]:
+        """A scan of the library in the scan editor (scanedit.py), or a new scan (no entry_id): {id, name, edited_from
+        (the scan it was edited from, until it is renamed), parts, lab: what a scan can step or set and record ({set,
+        read}: key, unit), check: scan_check}. KeyError: no such entry; ValueError: it is a script, or its text isn't
+        a plan."""
+        from .. import scanedit
+        name, came = "", None
+        if entry_id:
+            entry = self.library.get(entry_id)
+            name = str(entry.get("name") or "")
+            if entry["kind"] != "plan":
+                raise ValueError("%s is a script: its settings are under Show" % name)
+            data = self._kept_plan(entry)
+            if data is None:
+                raise ValueError("%s isn't kept as a plan the editor can read" % name)
+            came = None if entry.get("named") else entry.get("edited_from")
+        else:
+            data = {"plan": "scan"}
+        parts = scanedit.to_parts(data)
+        return {"id": entry_id or None, "name": name, "edited_from": came, "parts": parts, "lab": self._scan_choices(),
+                "check": self.scan_check(parts)}
+
+    @staticmethod
+    def _kept_plan(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """A library scan's plan as a mapping; None when its text isn't one."""
+        try:
+            data = load_yaml(str(entry.get("text") or ""))
+        except yaml.YAMLError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _scan_choices(self) -> Dict[str, List[Dict[str, Any]]]:
+        """What a scan in the editor can step or set (set: the lab's settings, and its cards' actions for a setup) and
+        record (read), each with its unit: from the lab's cards, nothing is read."""
+        settable: List[Dict[str, Any]] = []
+        readable: List[Dict[str, Any]] = []
+        for name in sorted(self.lab.instruments):
+            card = self.lab.instruments[name].card
+            for p in card.params.values():
+                key = "%s.%s" % (name, p.name)
+                if p.set_cmd is not None and p.type not in ("trace", "image"):
+                    settable.append({"key": key, "unit": p.unit, "drive": p.is_drive})
+                if p.get_cmd is not None:
+                    readable.append({"key": key, "unit": p.unit})
+            settable += [{"key": "%s.%s" % (name, a), "unit": "", "action": True} for a in card.actions]
+        return {"set": settable, "read": readable}
+
+    def _unit_of(self, key: str) -> str:
+        spec = self._spec(key)
+        return spec.unit if spec is not None else ""
+
+    def scan_check(self, parts: Any) -> Dict[str, Any]:
+        """A scan in the editor as it stands, checked beside whatever else Kelvin does: {text (its plan), loads (it is
+        a plan), points (with a ramp, an estimate: estimate; None when its time can't be told), counts (each loop's
+        points, by its key), time (as its card would say it: timing.py), problems (load_plan's, then the gate's:
+        limits, read-only settings, instruments off, interlocks)}. No instrument is asked anything: what the checks and
+        the time need of the lab is the latest Kelvin has seen (_SeenGate)."""
+        from .. import scanedit, techniques
+        from ..forecast import Forecast
+        out: Dict[str, Any] = {"text": "", "loads": False, "points": None, "estimate": False, "counts": {}, "time": "",
+                               "problems": []}
+        try:
+            out["text"] = plan_text(scanedit.to_plan(parts))
+            plan = self._plan(out["text"])
+        except PlanError as e:
+            out["problems"] = list(e.errors)
+            return out
+        except (ValueError, yaml.YAMLError) as e:
+            out["problems"] = [str(e).splitlines()[0] if str(e) else type(e).__name__]
+            return out
+        engine = RunEngine(_SeenGate(self))
+        problems = engine.validate(plan)
+        if not problems:
+            problems += engine.interlock_problems(plan)
+        try:
+            forecast = Forecast(engine).plan(plan)
+            techniques.account(forecast, engine.lab, plan)
+            out["time"] = forecast.duration().lstrip(", ")
+        except Exception:   # its time stays unsaid; the problems say what is wrong
+            pass
+        known = [a for a in plan.axes if a.kind in ("instrument", "technique") or a.kind == "ramp" and a.estimate]
+        out.update(loads=True, problems=problems, estimate=plan.ramp is not None,
+                   points=plan.points if plan.ramp is None or plan.ramp.estimate else None,   # a ramp untimed: unknown
+                   counts={a.key: a.count for a in known})
+        return out
+
+    def scan_save(self, parts: Any, base_id: Optional[str] = None, by: str = "human") -> Dict[str, Any]:
+        """A scan from the editor, kept in the library as an entry of its own, the person's; the scan it was edited from
+        (base_id) stays. Named as its plan is; while it keeps the name it came with, as that scan is, marked edited from
+        it. Whose work it is: as that scan's runs were; one taken out of the library meanwhile leaves it a scan of its
+        own. {entry, new: false when the library had this very scan}. ValueError: it isn't a plan, and why."""
+        from .. import scanedit
+        from ..scanlibrary import summary
+        try:
+            base = self.library.get(base_id) if base_id else None
+        except KeyError:
+            base = None
+        data = scanedit.to_plan(parts)
+        text = plan_text(data)
+        try:
+            self._plan(text)
+        except PlanError as e:
+            raise ValueError("not saved: " + "; ".join(e.errors[:5])) from None
+        name = str(data.get("plan") or "")
+        same = base is not None and name == str((self._kept_plan(base) or {}).get("plan") or "")
+        entry, new = self.library.add_plan(text, base["name"] if same else name, summary(data, self._unit_of),
+                                           edited_from=base["name"] if same else None,
+                                           marks=base.get("marks") if base is not None else None)
+        if new:
+            self.gate.log.write("library", by=by, change="saved", name=entry["name"],
+                                edited_from=base["name"] if base is not None else None)
+        return {"entry": self._entry_view(entry), "new": new}
+
+    def scan_run(self, parts: Any, base_id: Optional[str] = None, at_end: bool = False,
+                 by: str = "human") -> Dict[str, Any]:
+        """A scan from the editor, run as a scan of the library runs (library_run: the queue, its gate and its
+        approval; the editor drives nothing itself): checked as the queue checks it, kept in the library (scan_save),
+        then run, or with at_end queued. {queue, message, entry}; ValueError: not added, and why."""
+        from .. import scanedit
+        text = plan_text(scanedit.to_plan(parts))
+        try:
+            problems = self._queue_problems(text)
+        except PlanError as e:
+            problems = [str(e)]
+        if problems:
+            raise ValueError("not added: " + "; ".join(problems[:5]))
+        saved = self.scan_save(parts, base_id, by)
+        return dict(self.library_run(saved["entry"]["id"], at_end=at_end, by=by), entry=saved["entry"])
 
     def queue_run_now(self, texts: List[str], at_end: bool = False, by: str = "human",
                       notes: Iterable[str] = (), restores: bool = False,

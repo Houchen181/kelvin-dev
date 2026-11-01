@@ -22,7 +22,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 FILE = "library.json"
 MAX_RUNS = 10       # the runs an entry lists, newest first
@@ -263,6 +263,30 @@ class Library:
             found[entry_id] = entry
             self._write(found)
             return entry
+
+    def add_plan(self, text: str, name: Any, about: str, edited_from: Optional[str] = None,
+                 marks: Optional[Dict[str, Any]] = None, when: Optional[float] = None) -> Tuple[Dict[str, Any], bool]:
+        """A scan a person made or edited (the scan editor's Save): an entry of its own, theirs (it stays when Kelvin
+        makes room), named as they named it; edited_from: the name of the scan it was edited from; marks: whose work
+        that one's runs were, which its runs keep. The very same scan already there stays as it was, theirs from now
+        on. (entry, whether it is new); ValueError: not a name."""
+        entry_id = plan_id(text)
+        with _LOCK:
+            found = self._read()
+            entry = found.get(entry_id)
+            new = entry is None
+            if new:
+                entry = {"id": entry_id, "kind": "plan", "name": plain_name(name), "source": "you",
+                         "added": when or time.time(), "used": None, "count": 0, "runs": [],
+                         "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text, "summary": about,
+                         "marks": dict(marks or {})}
+                if edited_from:
+                    entry["edited_from"] = str(edited_from)
+            entry["source"] = "you"
+            found[entry_id] = entry
+            self._keep(found)
+            self._write(found)
+            return entry, new
 
     def rename(self, entry_id: str, name: Any) -> Dict[str, Any]:
         text = plain_name(name)
