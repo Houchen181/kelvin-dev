@@ -119,3 +119,53 @@ def test_a_reading_with_no_time_known_is_said_on_the_card(lab, make_engine, monk
     monkeypatch.setattr(lab.instruments["vna"].card, "twin", None)   # a VNA whose card has no twin with physics
     f = Forecast(engine).plan(load_plan("plan: s21\ntime: {every: 1, points: 3}\nmeasure: [vna.S21]\n"))
     assert "the time reading vna.S21 takes" in "; ".join(f.not_counted()) and f.duration().startswith(", at least")
+
+
+SWEEPS = ["sweep: {smu.V: {from: 0, to: 2, step: 0.5}}\nsettle: 0.1",
+          "sweep: {smu.V: {from: -1, to: 1, points: 201, back: true}}",    # through safe: steps away and toward it
+          "sweep: {smu.V: {from: 1, to: -1, step: 0.03}}",                  # its last step shorter
+          "sweep: {smu.V: {values: [0, 1, 1, 2, -1, 0.5]}}\nsettle: 0.2",  # a value the same as the one before
+          "repeat: 3\nsweep: {smu.V: {from: 0, to: 5, step: 0.25, settle: {5: 3}}}",
+          "sweep: {magnet.B: {values: [0, 0.5, 1]}, smu.V: {from: 0, to: 1, points: 51}}",   # a ramp at its own rate
+          "sweep: {lockin.frequency: {from: 10, to: 100000, points: 41, log: true}}",       # one set a step
+          "sweep: {vna.power: {from: -30, to: -10, step: 1}}",
+          "sweep: {smu.V: {from: 2, to: 2, points: 5}}",
+          "setup: {smu.output: on}\nsweep: {smu.V: {from: 0, to: 3, step: 0.1}}\nafter: {smu.V: 0}\n"
+          "time: {every: 2, points: 3}"]
+
+
+def test_a_sweeps_steps_are_added_up_at_once_to_what_each_takes(tmp_path, monkeypatch):
+    """A card's (and the scan editor's) time walked a sweep step by step: a million points took 27 s. Its steps are now
+    added up at once, from their sizes and which way they go; the time is what each step's own takes add up to."""
+    import time
+    from labharness import forecast
+    from labharness.timing import Took
+    rt = runtime(tmp_path)
+    took = Took()   # what steps take in this lab, away from safe and toward it
+    for key, away, s in (("smu.V", True, 0.013), ("smu.V", False, 0.007), ("magnet.B", True, 0.4),
+                         ("lockin.frequency", False, 0.05)):
+        took.step(key, s, away)
+    took.point(0.003)
+    rt.timing.learn("r0", took, {})
+
+    def walked(text):
+        f = Forecast(rt.engine).plan(rt._plan("plan: p\nmeasure: [smu.I]\n" + text))
+        return f.seconds, f.duration(), {k: (c.start, c.values, c.untimed) for k, c in f.changes.items()}, f._rates
+
+    at_once = [walked(text) for text in SWEEPS]
+    with monkeypatch.context() as m:   # each step's own, one after the other, as the card walked them
+        m.setattr(Forecast, "_travels", lambda f, inst, spec, values: (
+            sum(f.travel(inst, spec, a, b)[0] for a, b in zip(values, values[1:])),
+            all(f.travel(inst, spec, a, b)[1] for a, b in zip(values, values[1:]))))
+        m.setattr(Forecast, "_record_all", lambda f, inst, spec, values, t, timed: [
+            f._record(inst, spec, v, t if k == 0 else 0.0, timed) for k, v in enumerate(values)])
+        m.setattr(forecast, "floats", lambda spec, values: None)
+        by_step = [walked(text) for text in SWEEPS]
+    for text, (s, said, changes, rates), (s0, said0, changes0, rates0) in zip(SWEEPS, at_once, by_step):
+        assert s == pytest.approx(s0, rel=1e-12) and said == said0 and changes == changes0 and rates == rates0, text
+    assert [said for _, said, _, _ in at_once] == [", ~5 s", ", ~22 s", ", ~8 s", ", ~15 s", ", ~66 s", ", ~5.3 min",
+                                                   ", ~3 s", ", ~2 s", ", ~5 s", ", ~2.3 min"]
+    t0 = time.perf_counter()
+    big = Forecast(rt.engine).plan(rt._plan("plan: big\nsweep: {smu.V: {from: 0, to: 1, points: 1000000}}\n"
+                                            "measure: [smu.I]"))
+    assert time.perf_counter() - t0 < 5 and big.duration() == ", ~9.1 h"

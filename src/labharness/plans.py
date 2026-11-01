@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .conditions import Condition, Rule, parse_condition, parse_rule
 from .labconfig import read_yaml
@@ -222,53 +222,84 @@ def _steps(data: Any, path: str, errors: List[str]) -> List[Step]:
     return out
 
 
+Made = Tuple[int, Callable[[], List[Any]]]   # how many values, and how they are made (once they are few enough)
+
+
 def _axis_values(spec: Any, path: str, errors: List[str]) -> List[Any]:
-    values = _base_values(spec, path, errors)
-    if isinstance(spec, dict) and spec.get("back") and len(values) > 1:  # there and back, not repeating the turn
-        values = values + values[-2::-1]
-    return values
+    made = _axis_shape(spec, path, errors)
+    return made[1]() if made else []
+
+
+def _axis_shape(spec: Any, path: str, errors: List[str]) -> Optional[Made]:
+    """A stepped axis's values, back: (there and back) included, counted from its spec before any is made."""
+    made = _base_shape(spec, path, errors)
+    if made is None or not (isinstance(spec, dict) and spec.get("back") and made[0] > 1):
+        return made
+    n, base = made
+
+    def there_and_back() -> List[Any]:   # not repeating the turn
+        values = base()
+        return values + values[-2::-1]
+    return 2 * n - 1, there_and_back
 
 
 def _base_values(spec: Any, path: str, errors: List[str]) -> List[Any]:
-    """An axis's values as written, before back: adds the way back."""
+    """An axis's values as written, before back: adds the way back. More than MAX_POINTS are never made."""
+    made = _base_shape(spec, path, errors)
+    if made is not None and made[0] > MAX_POINTS:
+        errors.append("%s: more than %d points" % (path, MAX_POINTS))
+        return []
+    return made[1]() if made else []
+
+
+def _base_shape(spec: Any, path: str, errors: List[str]) -> Optional[Made]:
+    """An axis's values as written, before back: adds the way back: how many, and how they are made, so a plan's
+    points are counted before any is made (a check of a million-point range made every value; a billion would not
+    fit in memory). None after saying what is wrong."""
+    if isinstance(spec, dict) and "values" in spec:
+        try:
+            spec = list(spec["values"])
+        except TypeError:   # values: 5
+            spec = None
     if isinstance(spec, list):
-        return list(spec)
+        return len(spec), lambda: list(spec)
     if not isinstance(spec, dict):
         errors.append("%s: use {from, to, step}, {from, to, points}, {from, to, points, log: true} or {values: [...]}" % path)
-        return []
-    if "values" in spec:
-        values = list(spec["values"])
-    else:
-        try:
-            start, stop = float(spec["from"]), float(spec["to"])
-            if spec.get("log"):
-                n = int(spec["points"])
-                if n < 2 or start <= 0 or stop <= 0:
-                    raise ValueError
-                ratio = (stop / start) ** (1.0 / (n - 1))
+        return None
+    try:
+        start, stop = float(spec["from"]), float(spec["to"])
+        if spec.get("log"):
+            n = int(spec["points"])
+            if n < 2 or start <= 0 or stop <= 0:
+                raise ValueError
+            ratio = (stop / start) ** (1.0 / (n - 1))
+
+            def log() -> List[Any]:
                 values = [start * ratio ** i for i in range(n)]
                 values[-1] = stop
-            elif "points" in spec:
-                n = int(spec["points"])
-                if n < 1:
-                    raise ValueError
-                values = [start + (stop - start) * i / (n - 1) for i in range(n)] if n > 1 else [start]
-            else:
-                step = abs(float(spec["step"]))
-                if step == 0:
-                    raise ValueError
-                n = int(math.floor(abs(stop - start) / step + 1e-9))
-                if n + 1 > MAX_POINTS:
-                    errors.append("%s: more than %d points" % (path, MAX_POINTS))
-                    return []
-                sign = 1.0 if stop >= start else -1.0
-                values = [start + sign * step * i for i in range(n + 1)]
-                if not math.isclose(values[-1], stop, rel_tol=1e-9, abs_tol=1e-12):
-                    values.append(stop)
-        except (KeyError, TypeError, ValueError):
-            errors.append("%s: needs from, to and a nonzero step or points (log sweeps: points ≥ 2 and positive ends)" % path)
-            return []
-    return values
+                return values
+            return n, log
+        if "points" in spec:
+            n = int(spec["points"])
+            if n < 1:
+                raise ValueError
+            return n, lambda: [start + (stop - start) * i / (n - 1) for i in range(n)] if n > 1 else [start]
+        step = abs(float(spec["step"]))
+        if step == 0:
+            raise ValueError
+        n = int(math.floor(abs(stop - start) / step + 1e-9))
+        if n + 1 > MAX_POINTS:
+            errors.append("%s: more than %d points" % (path, MAX_POINTS))
+            return None
+        sign = 1.0 if stop >= start else -1.0
+        short = not math.isclose(start + sign * step * n, stop, rel_tol=1e-9, abs_tol=1e-12)   # `to` itself after
+
+        def stepped() -> List[Any]:
+            return [start + sign * step * i for i in range(n + 1)] + ([stop] if short else [])
+        return n + 1 + short, stepped
+    except (KeyError, TypeError, ValueError, OverflowError):   # OverflowError: an endless number (.inf)
+        errors.append("%s: needs from, to and a nonzero step or points (log sweeps: points ≥ 2 and positive ends)" % path)
+        return None
 
 
 def _seconds(value: Any, path: str, errors: List[str], positive: bool = False, unit: str = "seconds") \
@@ -404,7 +435,8 @@ def _stabilize(spec: Any, path: str, errors: List[str]) -> Optional[Stabilize]:
     return Stabilize(ip[0], ip[1], within, duration, timeout, every, near) if ip else None
 
 
-def _time_axis(spec: Any, errors: List[str]) -> Optional[Axis]:
+def _time_axis(spec: Any, errors: List[str], make: bool = True) -> Optional[Tuple[Axis, int]]:
+    """The time series and its points, counted first; make=False: its times are not made (too many points)."""
     if set(spec) - {"every", "for", "points", "until", "while"}:
         errors.append("time: unknown %s (it has every, for, points, until, while)"
                       % ", ".join(map(str, sorted(set(spec) - {"every", "for", "points", "until", "while"}, key=str))))
@@ -416,12 +448,76 @@ def _time_axis(spec: Any, errors: List[str]) -> Optional[Axis]:
         n = int(spec["points"]) if "points" in spec else int(math.floor(float(spec["for"]) / every + 1e-9)) + 1
         if n < 1:
             raise ValueError
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         errors.append("time: use {every: seconds, for: seconds} or {every: seconds, points: n}, and until: or while: "
                       "to end it early")
         return None
-    return Axis("", "time", [round(i * every, 9) for i in range(n)], kind="time", every=every,
-                until=_rule(spec.get("until"), "time.until", errors), while_=_rule(spec.get("while"), "time.while", errors))
+    return Axis("", "time", [round(i * every, 9) for i in range(n)] if make else [], kind="time", every=every,
+                until=_rule(spec.get("until"), "time.until", errors),
+                while_=_rule(spec.get("while"), "time.while", errors)), n
+
+
+def _axes(data: Dict[Any, Any], errors: List[str], make: bool = True) -> Tuple[List[Axis], int]:
+    """The plan's loops, outer first (repeat:, sweep:'s keys, time:), and the points they make, counted from their
+    shape. make=False: no value is made (they make more points than a plan may have)."""
+    axes: List[Axis] = []
+    points = 1
+    if data.get("repeat") is not None:
+        try:
+            n = int(data["repeat"])
+            if n < 1:
+                raise ValueError
+            if n > 1:
+                axes.append(Axis("", "repeat", list(range(1, n + 1)) if make else [], kind="repeat"))
+                points *= n
+        except (TypeError, ValueError, OverflowError):
+            errors.append("repeat: must be a whole number ≥ 1")
+    sweep = data.get("sweep") or {}
+    if not isinstance(sweep, dict):
+        errors.append("sweep: must be a mapping (several keys = nested, outer first)")
+        sweep = {}
+    for key, spec in sweep.items():
+        ip = _split(key, "sweep", errors)
+        path = "sweep.%s" % key
+        if isinstance(spec, dict) and "ramp" in spec:
+            axis = _ramp_axis(ip[0], ip[1], spec, path, errors) if ip else None
+            if axis:
+                axes.append(axis)
+                points *= axis.count
+            continue
+        if isinstance(spec, dict) and set(spec) - _STEPPED:   # a mistyped until: would never end anything
+            errors.append("%s: unknown %s (a sweep axis has %s; ramp: measures while it ramps)" % (
+                path, ", ".join(map(str, sorted(set(spec) - _STEPPED, key=str))), ", ".join(sorted(_STEPPED))))
+            continue
+        shape = _axis_shape(spec, path, errors)
+        if ip and shape and shape[0]:
+            settle = spec.get("settle") if isinstance(spec, dict) else None
+            settles, settle_s = None, None
+            if isinstance(settle, (list, dict)):   # a hold of its own for each step
+                if make or isinstance(settle, list):   # a list's length is all it is checked with, uncounted
+                    base = _base_values(spec, path, []) if make else range(_base_shape(spec, path, [])[0])
+                    settles = _settles(settle, base, bool(spec.get("back")), path + ".settle", errors)
+            elif settle is not None:
+                settle_s = _seconds(settle, path + ".settle", errors)
+            stab = _stabilize(spec.get("stabilize"), path + ".stabilize", errors) if isinstance(spec, dict) else None
+            until = _rule(spec.get("until"), path + ".until", errors) if isinstance(spec, dict) else None
+            while_ = _rule(spec.get("while"), path + ".while", errors) if isinstance(spec, dict) else None
+            # instrument.technique.parameter: one of a technique's parameters, stepped (techniques.py)
+            kind = "technique" if "." in ip[1] else "instrument"
+            if kind == "technique" and stab is not None:
+                errors.append("%s: a technique's parameter is stepped as the technique runs; stabilize: goes on "
+                              "an instrument's own setting" % path)
+            axes.append(Axis(ip[0], ip[1], shape[1]() if make else [], settle_s, kind=kind, stabilize=stab,
+                             settles=settles, until=until, while_=while_))
+            points *= shape[0]
+    if data.get("time") is not None:
+        t = _time_axis(data["time"], errors, make) if isinstance(data["time"], dict) else None
+        if t is None and not isinstance(data["time"], dict):
+            errors.append("time: use {every: seconds, for: seconds}")
+        if t:
+            axes.append(t[0])
+            points *= t[1]
+    return axes, points
 
 
 def _retry(spec: Any, errors: List[str]) -> Optional[Retry]:
@@ -453,57 +549,9 @@ def load_plan(source: Any) -> Plan:
     if not name:
         errors.append("plan: a name is required")
 
-    axes = []
-    if data.get("repeat") is not None:
-        try:
-            n = int(data["repeat"])
-            if n < 1:
-                raise ValueError
-            if n > 1:
-                axes.append(Axis("", "repeat", list(range(1, n + 1)), kind="repeat"))
-        except (TypeError, ValueError):
-            errors.append("repeat: must be a whole number ≥ 1")
-    sweep = data.get("sweep") or {}
-    if not isinstance(sweep, dict):
-        errors.append("sweep: must be a mapping (several keys = nested, outer first)")
-        sweep = {}
-    for key, spec in sweep.items():
-        ip = _split(key, "sweep", errors)
-        path = "sweep.%s" % key
-        if isinstance(spec, dict) and "ramp" in spec:
-            axis = _ramp_axis(ip[0], ip[1], spec, path, errors) if ip else None
-            if axis:
-                axes.append(axis)
-            continue
-        if isinstance(spec, dict) and set(spec) - _STEPPED:   # a mistyped until: would never end anything
-            errors.append("%s: unknown %s (a sweep axis has %s; ramp: measures while it ramps)" % (
-                path, ", ".join(map(str, sorted(set(spec) - _STEPPED, key=str))), ", ".join(sorted(_STEPPED))))
-            continue
-        values = _axis_values(spec, path, errors)
-        if ip and values:
-            settle = spec.get("settle") if isinstance(spec, dict) else None
-            settles, settle_s = None, None
-            if isinstance(settle, (list, dict)):   # a hold of its own for each step
-                settles = _settles(settle, _base_values(spec, path, []), bool(spec.get("back")), path + ".settle",
-                                   errors)
-            elif settle is not None:
-                settle_s = _seconds(settle, path + ".settle", errors)
-            stab = _stabilize(spec.get("stabilize"), path + ".stabilize", errors) if isinstance(spec, dict) else None
-            until = _rule(spec.get("until"), path + ".until", errors) if isinstance(spec, dict) else None
-            while_ = _rule(spec.get("while"), path + ".while", errors) if isinstance(spec, dict) else None
-            # instrument.technique.parameter: one of a technique's parameters, stepped (techniques.py)
-            kind = "technique" if "." in ip[1] else "instrument"
-            if kind == "technique" and stab is not None:
-                errors.append("%s: a technique's parameter is stepped as the technique runs; stabilize: goes on "
-                              "an instrument's own setting" % path)
-            axes.append(Axis(ip[0], ip[1], values, settle_s, kind=kind, stabilize=stab, settles=settles, until=until,
-                             while_=while_))
-    if data.get("time") is not None:
-        t = _time_axis(data["time"], errors) if isinstance(data["time"], dict) else None
-        if t is None and not isinstance(data["time"], dict):
-            errors.append("time: use {every: seconds, for: seconds}")
-        if t:
-            axes.append(t)
+    # the points first, from the loops' shape alone; their values are made only when there are few enough
+    points = _axes(data, [], make=False)[1]
+    axes, _ = _axes(data, errors, make=points <= MAX_POINTS)
     ramps = [a for a in axes if a.kind == "ramp"]
     if len(ramps) > 1:
         errors.append("sweep: one ramp per plan (%s); nest stepped sweeps outside it" % ", ".join(a.key for a in ramps))
@@ -557,8 +605,8 @@ def load_plan(source: Any) -> Plan:
                 source=data, device=" ".join(str(data.get("device") or "").split())[:60],
                 until=_rule(data.get("until"), "until", errors), while_=_rule(data.get("while"), "while", errors),
                 retry=_retry(data.get("retry"), errors), techniques=techniques)
-    if plan.points > MAX_POINTS:
-        errors.append("plan has %d points (max %d)" % (plan.points, MAX_POINTS))
+    if points > MAX_POINTS:
+        errors.append("plan has %d points (max %d)" % (points, MAX_POINTS))
     used = [s.instr for s in plan.all_steps()] + [t.instr for t in techniques] \
         + [a.instr for a in plan.axes if a.kind in ("instrument", "ramp", "technique")] \
         + [a.read[0] for a in axes if a.read] \

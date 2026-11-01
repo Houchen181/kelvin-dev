@@ -79,9 +79,9 @@ def test_scans_are_selected_and_added_to_the_queue_in_order():
     for text in ('id="scans-pick-queue"', ">Add to queue<", 'id="scans-pick-run"', ">Run<", 'id="scans-pick-edit"',
                  ">Edit<", 'id="scans-pick-clear"', 'role="toolbar"'):
         assert text in bar, text
-    assert PAGE.count('role="listbox" aria-multiselectable="true"') == 2 and 'id="scans-new"' in PAGE
+    assert PAGE.count('role="grid" aria-multiselectable="true"') == 2 and 'id="scans-new"' in PAGE
     entry = _js("scanEntry")
-    assert 'role: "option", "aria-selected": String(at >= 0), tabindex: "0"' in entry
+    assert 'role: "row", "aria-selected": String(at >= 0), tabindex: "-1"' in entry
     assert 'ev.target.closest("button, input, select, textarea, label, a, pre")' in entry   # its own controls
     assert '"range" : ev.ctrlKey || ev.metaKey ? "toggle" : "only"' in entry
     assert 'act("Run",' in entry and 'act("Queue",' in entry and '"lib-order"' in entry
@@ -89,7 +89,26 @@ def test_scans_are_selected_and_added_to_the_queue_in_order():
     keys = _js("scanKeys")
     assert all(k in keys for k in ('" "', '"Enter"', '"ArrowDown"', '"ArrowUp"', '"Escape"'))
     pick = _js("pickScan")
-    assert "SCANS.sel.concat(id)" in pick and "SCANS.sel = [id]" in pick and "ids.slice(a, b + 1)" in pick
+    assert "SCANS.sel.concat(id)" in pick and "SCANS.sel = [id]" in pick
+
+
+def test_the_scans_list_is_a_grid_with_one_tab_stop_and_a_selection_the_person_sees():
+    """A Shift range only grew; rows the filter hid stayed selected (Add to queue queued them unseen); each row was an
+    option holding buttons, and a tab stop of its own."""
+    entry, keys, pick, render = _js("scanEntry"), _js("scanKeys"), _js("pickScan"), _js("renderScans")
+    view = PAGE[PAGE.index('<div id="scans-view"'):PAGE.index('<div id="queue-view"')]
+    assert 'role="listbox"' not in view and 'role: "option"' not in entry   # no buttons inside an option
+    assert entry.count('role: "gridcell"') == 4 and 'role: "gridcell"' in _js("scanDetail")
+    assert entry.count('tabindex: "-1"') == 3                         # the row and its buttons: reached by the keys
+    stop = _js("scanStop")
+    assert "li.tabIndex = li === stop ? 0 : -1" in stop and "SCANS.at" in stop and "scanStop();" in render
+    assert 'li.addEventListener("focusin"' in entry and "SCANS.at = e.id" in entry
+    for key in ('"Home"', '"End"', '"ArrowRight"', '"ArrowLeft"', "btns[0].focus()", "btns[k - 1] || li"):
+        assert key in keys, key
+    assert "a <= b ? ids.slice(a, b + 1) : ids.slice(b, a + 1).reverse()" in pick   # the range alone: it shrinks too
+    assert "SCANS.sel.concat(ids.slice" not in pick
+    assert "SCANS.sel = SCANS.sel.filter((id) => seen.has(id))" in render   # a row out of sight leaves the selection
+    assert render.index("SCANS.sel = SCANS.sel.filter") < render.index("kept.map(scanEntry)")
     queued = _js("queuePicked")
     assert "for (const e of picked)" in queued and 'op: "run", id: e.id, queue: true' in queued
     assert "busyWhile(picked.map(" in queued and "scanParams(e)" in queued   # a script's values, as its Queue sends
@@ -106,6 +125,13 @@ def test_the_scan_editor_follows_the_contract():
     assert "setTimeout(edCheck, 350)" in changed and "clearTimeout(ED.timer)" in changed
     check = _js("edCheck")
     assert 'op: "check", parts: ED.parts' in check and "gen !== ED.gen" in check
+    # the check asked before is dropped (its fetch aborted; Kelvin runs an editor's newest only), and none is left
+    # waiting once the editor closes or opens another scan
+    assert "ED.asking.abort()" in check and "new AbortController()" in check and "signal: asking.signal" in check
+    assert "editor: ED.key" in check and "c.superseded" in check and "signal: opts.signal" in _js("api")
+    assert "if (!ED.open) edStopCheck();" in _js("toggleEditor") and "edStopCheck();" in _js("openEditor")
+    stop = _js("edStopCheck")
+    assert "clearTimeout(ED.timer)" in stop and "ED.asking.abort()" in stop
     assert 'op: "save", parts: ED.parts, from: ED.id' in _js("edSave")
     run = _js("edRun")
     assert '{ op: "run", parts: ED.parts, from: ED.id } : { op: "run", id: ED.id }' in run

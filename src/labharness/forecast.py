@@ -21,7 +21,9 @@ records about duration/every points, and the plan's estimate of its points (Axis
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import math
+import operator
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -56,6 +58,23 @@ def _and(words: List[str]) -> str:
 
 def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def floats(spec: Any, values: List[Any]) -> Optional[List[float]]:
+    """A sweep's values as a setting in floats takes them (spec.coerce gives each the same), at once, when every one is
+    a plain finite number; None otherwise."""
+    try:
+        if spec.type == "float" and set(map(type, values)) <= {float, int} and all(map(math.isfinite, values)):
+            return list(map(float, values))
+    except OverflowError:   # an integer no float holds: coerce says so
+        pass
+    return None
+
+
+def coerced(spec: Any, values: List[Any]) -> List[Any]:
+    """A sweep's values as the parameter takes them (spec.coerce, each): at once for numbers of a setting in floats."""
+    out = floats(spec, values)
+    return out if out is not None else [spec.coerce(v) for v in values]
 
 
 def _read(gate: Any, inst: Any, spec: Any) -> Any:
@@ -194,6 +213,7 @@ class Forecast:
         self._name = "the plan"                 # the plan being walked
         # how long readings and steps take in this lab (timing.py): a twin's lab is paced at the real lab's
         self.timing = getattr(self.lab, "timing", None) or getattr(self.lab, "pace", None)
+        self._step_times: Dict[Tuple[str, bool], float] = {}   # timing's, read once a walk: a sweep has many steps
 
     # ------------------------------------------------------------------ the walk
 
@@ -243,9 +263,48 @@ class Forecast:
 
     def _step_s(self, inst: Any, spec: Any, a: Any, b: Any) -> float:
         """What a step from a toward b takes in this lab beyond its dwell (away from safe, its guard readings too)."""
+        return self._step_way(inst, spec, away_from_safe(spec, a, b))
+
+    def _step_way(self, inst: Any, spec: Any, away: bool) -> float:
         if self.timing is None:
             return 0.0
-        return self.timing.step_s("%s.%s" % (inst.name, spec.name), away_from_safe(spec, a, b))
+        key = ("%s.%s" % (inst.name, spec.name), away)
+        if key not in self._step_times:
+            self._step_times[key] = self.timing.step_s(*key)
+        return self._step_times[key]
+
+    def _travels(self, inst: Any, spec: Any, values: List[Any]) -> Tuple[float, bool]:
+        """travel() of each step of a sweep, from each value to the next, added up, and whether Kelvin could count them
+        all: worked out at once (a million-point sweep was walked step by step for 27 s), from the steps' sizes and
+        which way they go, as travel() takes each; step by step where a step may be one that changes nothing."""
+        if len(values) < 2:
+            return 0.0, True
+        head, tail = values[:-1], values[1:]
+        sizes = list(map(abs, map(operator.sub, tail, head)))
+        top = max(map(abs, (min(values), max(values))))
+        if min(sizes) <= max(1e-9 * top, 1e-15) * (1 + 1e-9):   # _same: a step that changes nothing takes nothing
+            steps = [self.travel(inst, spec, a, b) for a, b in zip(head, tail)]
+            return sum(s for s, _ in steps), all(ok for _, ok in steps)
+        away = 0   # the steps away from safe (their guards read), the others toward it (timing.away)
+        if spec.is_drive and _number(spec.safe):
+            far = list(map(abs, map(operator.sub, values, itertools.repeat(spec.safe))))
+            away = sum(map(operator.gt, far[1:], far[:-1]))
+        each = away * self._step_way(inst, spec, True) + (len(sizes) - away) * self._step_way(inst, spec, False)
+        if spec.ramp == "instrument":   # followed while it moves at its own rate: |Δ|/rate, when Kelvin can tell it
+            self.travel(inst, spec, values[0], values[1])   # the rate it moves at, for the card's line, as each step
+            rate = self._rate_parts(inst, spec)[0]
+            return (math.fsum(sizes) / rate, True) if rate else (0.0, False)
+        if spec.ramp != "gate":   # one set a step
+            return each, True
+        rate = inst.rate(spec.name)
+        if not rate or rate <= 0:
+            return each, True
+        step = spec.ramp_step or rate * 0.2
+        least, most = (max(1, int(math.ceil(s / step - 1e-9))) for s in (min(sizes), max(sizes)))
+        if least != most:   # some steps take a ramp step more than others: each counted
+            steps = [self.travel(inst, spec, a, b) for a, b in zip(head, tail)]
+            return sum(s for s, _ in steps), all(ok for _, ok in steps)
+        return math.fsum(sizes) / rate + least * each, True
 
     def read_s(self, key: str) -> Optional[float]:
         """Seconds one reading of key (instr.param, or a card's action at each point) takes: as this lab's runs took it
@@ -290,6 +349,26 @@ class Forecast:
         change.seconds += seconds
         change.untimed = change.untimed or not timed
         self.now[key] = value
+
+    def _record_all(self, inst: Any, spec: Any, values: List[Any], seconds: float, timed: bool) -> None:
+        """_record of each of a sweep's values in turn, the first with the seconds: at once."""
+        key = "%s.%s" % (inst.name, spec.name)
+        start = self.start(key)
+        self.set_by.add(key)
+        if not timed:
+            self._untimed[key] = None
+        used = self.uses.setdefault(key, [])
+        used.extend(values)
+        change = self.changes.get(key)
+        if change is None and not seconds and start is not None:   # set to what it already is: no change, so far
+            if all(_same(spec, start, v) for v in values):
+                self.now[key] = values[-1]
+                return
+        if change is None:
+            change = self.changes[key] = Change(key, start, used)
+        change.seconds += seconds
+        change.untimed = change.untimed or not timed
+        self.now[key] = values[-1]
 
     def _set(self, inst: Any, spec: Any, target: Any) -> float:
         """One change as the gate makes it (SafetyGate._set, _move, _reapply): a switch going on parks its levels at
@@ -462,18 +541,21 @@ class Forecast:
         doesn't settle again either."""
         try:
             inst, spec = self.lab.resolve(axis.key)
-            values = [spec.coerce(v) for v in axis.values]
+            values = coerced(spec, list(axis.values))
         except (KeyError, ValueError):
             return
         if not values:
             return
         n = len(values)
-        moves = [k for k, v in enumerate(values) if not (k and v == values[k - 1])]   # as the engine sets them
-        holds = [axis.settle_at(k) if hasattr(axis, "settle_at") else axis.settle for k in moves]
-        self.seconds += outer * sum(h if h is not None else (plan.settle or 0.0) for h in holds)
+        moves = n - sum(map(operator.eq, values[1:], values[:-1]))   # as the engine sets them
+        if getattr(axis, "settles", None):   # a hold of its own for some of its values
+            holds = [axis.settle_at(k) for k, v in enumerate(values) if not (k and v == values[k - 1])]
+            self.seconds += outer * sum(h if h is not None else (plan.settle or 0.0) for h in holds)
+        else:
+            self.seconds += outer * moves * (axis.settle if axis.settle is not None else (plan.settle or 0.0))
         if axis.stabilize is not None:
             st = axis.stabilize
-            self.seconds += outer * len(moves) * st.duration
+            self.seconds += outer * moves * st.duration
             self.waits.append(self._wait_words(st, " at each point"))
         self._ends(axis, "%s%s skips its other values" % (axis.key, self._in()))
         if not spec.numeric:   # a switch or a choice: set as the gate does, once per value
@@ -481,13 +563,12 @@ class Forecast:
                 self.seconds += self._set(inst, spec, v)
             return
         first, timed = self.travel(inst, spec, self.value(axis.key), values[0])
-        steps = [self.travel(inst, spec, a, b) for a, b in zip(values, values[1:])]
+        steps, counted = self._travels(inst, spec, values)
         back = self.travel(inst, spec, values[-1], values[0]) if n > 1 else (0.0, True)
-        t = first + outer * sum(s for s, _ in steps) + (outer - 1) * back[0]
-        timed = timed and all(ok for _, ok in steps) and back[1]
+        t = first + outer * steps + (outer - 1) * back[0]
+        timed = timed and counted and back[1]
         self.seconds += t
-        for k, v in enumerate(values):
-            self._record(inst, spec, v, t if k == 0 else 0.0, timed)
+        self._record_all(inst, spec, values, t, timed)
         if spec.is_drive:
             self._asked[axis.key] = values[-1]
 

@@ -88,6 +88,7 @@
       method: opts.method || (opts.body ? "POST" : "GET"),
       headers: { "X-Kelvin-Token": token, "Content-Type": "application/json" },
       body: opts.body ? JSON.stringify(opts.body) : undefined,
+      signal: opts.signal,   // an AbortController's: a request no longer wanted is dropped
     });
     if (!res.ok) {
       let msg = "HTTP " + res.status, data = null;
@@ -4581,9 +4582,11 @@
   // ------------------------------------------------------------------ scans and scripts, kept to run again
   // Each scan Kelvin runs and each script a person imports (GET/POST /api/library): Run puts it first in the queue,
   // which pauses after it; Queue puts it last. A script runs with the settings last used and those changed in Show.
-  // A row is selected with a click (Ctrl adds one, Shift a stretch) or the keyboard (Space, Enter, the arrows); the
-  // bar above the list adds the selected to the queue in the order they were selected, runs one, or edits a scan.
-  const SCANS = { data: null, shown: new Set(), params: new Map(), renaming: null, fresh: null, empty: "", sel: [], anchor: null };
+  // A row is selected with a click (Ctrl adds one, Shift the rows from the last one picked) or the keyboard (Space,
+  // Enter, the arrows); the bar above the list adds the selected to the queue in the order they were selected, runs
+  // one, or edits a scan. The list is a grid with one tab stop (at: the row that has it); a row the filter hides
+  // leaves the selection.
+  const SCANS = { data: null, shown: new Set(), params: new Map(), renaming: null, fresh: null, empty: "", sel: [], anchor: null, at: null };
 
   async function loadScans() {   // a fresh visit: the last import's check and message go
     $("scans-check").hidden = true;
@@ -4607,9 +4610,12 @@
     const lib = SCANS.data || {};
     const q = $("scans-filter").value.trim().toLowerCase();
     const match = (e) => !q || [e.name, e.summary, e.path].some((s) => s && String(s).toLowerCase().includes(q));
+    const lists = [["scans-scripts", lib.scripts || []], ["scans-plans", lib.scans || []]].map(([id, list]) => [id, list, list.filter(match)]);
+    const seen = new Set(lists.flatMap(([, , kept]) => kept.map((e) => e.id)));
+    SCANS.sel = SCANS.sel.filter((id) => seen.has(id));   // a row out of sight is never acted on
+    if (!seen.has(SCANS.anchor)) SCANS.anchor = null;
     let any = 0, shown = 0;
-    for (const [id, list] of [["scans-scripts", lib.scripts || []], ["scans-plans", lib.scans || []]]) {
-      const kept = list.filter(match);
+    for (const [id, list, kept] of lists) {
       any += list.length; shown += kept.length;
       $(id).hidden = !kept.length;
       $(id).querySelector("ul").replaceChildren(...kept.map(scanEntry));
@@ -4619,18 +4625,25 @@
     $("scans-empty").hidden = !SCANS.data || shown > 0;
     $("scans-empty").textContent = any ? "Nothing matches." : SCANS.empty;
     renderPick();
+    scanStop();
     const field = document.querySelector(".lib-rename");
     if (field && document.activeElement !== field) { field.focus(); field.select(); }
+  }
+  // the list's one tab stop: the row the keyboard was last on, else the first selected, else the first
+  function scanStop() {
+    const rows = [...document.querySelectorAll("#scans-view li.lib")];
+    const stop = rows.find((li) => li.dataset.id === SCANS.at) || rows.find((li) => SCANS.sel.includes(li.dataset.id)) || rows[0];
+    for (const li of rows) li.tabIndex = li === stop ? 0 : -1;
   }
   function scanEntry(e) {
     const script = e.kind === "script";
     const key = "lib:" + encodeURIComponent(e.id);
-    const act = (label, title, keys, queue) => {
-      const b = h("button", { type: "button", title, "data-busy": keys.join(" "), disabled: keys.some((k) => BUSY.has(k)) }, label);
+    const act = (label, title, keys, queue) => {   // in the row: reached with → from it (the list is one tab stop)
+      const b = h("button", { type: "button", title, tabindex: "-1", "data-busy": keys.join(" "), disabled: keys.some((k) => BUSY.has(k)) }, label);
       b.addEventListener("click", () => runScan(e, queue, keys));
       return b;
     };
-    const more = h("button", { type: "button", "aria-label": "More: " + e.name, "aria-haspopup": "menu" }, icon("dots"));
+    const more = h("button", { type: "button", tabindex: "-1", "aria-label": "More: " + e.name, "aria-haspopup": "menu" }, icon("dots"));
     more.addEventListener("click", (ev) => { ev.stopPropagation(); scanMenu(more, e); });
     const tag = !script ? (e.source === "labview" ? h("span", { class: "tag", title: "From " + (e.path || e.vi) }, "LabVIEW") : null)
       : !e.exists ? h("span", { class: "tag warn", title: "The file is gone" }, "missing")
@@ -4640,28 +4653,30 @@
     const from = e.edited_from && !e.named ? "edited from " + e.edited_from + " · " : "";   // until renamed
     const at = SCANS.sel.indexOf(e.id);
     const li = h("li", { class: "q-item lib" + (SCANS.fresh === e.id ? " fresh" : "") + (at >= 0 ? " sel" : ""), "data-id": e.id,
-        role: "option", "aria-selected": String(at >= 0), tabindex: "0" },
-      h("span", { class: "lib-name" }, SCANS.sel.length > 1 && at >= 0 ? h("span", { class: "lib-order", title: "Queued in this order" }, String(at + 1)) : null,
+        role: "row", "aria-selected": String(at >= 0), tabindex: "-1" },
+      h("span", { class: "lib-name", role: "gridcell" }, SCANS.sel.length > 1 && at >= 0 ? h("span", { class: "lib-order", title: "Queued in this order" }, String(at + 1)) : null,
         SCANS.renaming === e.id ? renameField(e) : h("span", { class: "q-name" }, e.name), tag),
-      h("span", { class: "q-acts" }, act("Run", "First in the queue, which pauses after it", ["start", key], false),
+      h("span", { class: "q-acts", role: "gridcell" }, act("Run", "First in the queue, which pauses after it", ["start", key], false),
         act("Queue", "Last in the queue", [key], true), more),
-      h("span", { class: "q-sub", title: what }, what), h("span", { class: "lib-used" }, from + used));
+      h("span", { class: "q-sub", role: "gridcell", title: what }, what), h("span", { class: "lib-used", role: "gridcell" }, from + used));
     li.addEventListener("click", (ev) => {
       if (ev.target.closest("button, input, select, textarea, label, a, pre")) return;   // its own controls, its detail
       pickScan(e.id, ev.shiftKey ? "range" : ev.ctrlKey || ev.metaKey ? "toggle" : "only");
     });
     li.addEventListener("keydown", (ev) => scanKeys(ev, li, e));
+    li.addEventListener("focusin", () => { if (SCANS.at !== e.id) { SCANS.at = e.id; scanStop(); } });
     if (SCANS.shown.has(e.id)) li.append(scanDetail(e));
     return li;
   }
-  // the selection: "only" this one (a click), "toggle" it (Ctrl+click, Space), a "range" from the last one picked
-  // (Shift+click); null clears it. In the order picked, which is the order Add to queue adds them in
+  // the selection: "only" this one (a click), "toggle" it (Ctrl+click, Space), a "range": the rows from the last one
+  // picked to this one, those alone (Shift+click: it grows and shrinks); null clears it. In the order picked, which is
+  // the order Add to queue adds them in
   function pickScan(id, how) {
     const ids = [...document.querySelectorAll("#scans-view li.lib")].map((li) => li.dataset.id);
     if (id === null) SCANS.sel = [];
     else if (how === "range" && SCANS.anchor && ids.includes(SCANS.anchor)) {
-      const [a, b] = [ids.indexOf(SCANS.anchor), ids.indexOf(id)].sort((x, y) => x - y);
-      SCANS.sel = SCANS.sel.concat(ids.slice(a, b + 1).filter((x) => !SCANS.sel.includes(x)));
+      const a = ids.indexOf(SCANS.anchor), b = ids.indexOf(id);
+      SCANS.sel = a <= b ? ids.slice(a, b + 1) : ids.slice(b, a + 1).reverse();
     } else if (how === "toggle") {
       SCANS.sel = SCANS.sel.includes(id) ? SCANS.sel.filter((x) => x !== id) : SCANS.sel.concat(id);
       SCANS.anchor = id;
@@ -4674,17 +4689,31 @@
     const back = focused && document.querySelector('#scans-view li[data-id="' + CSS.escape(focused.dataset.id) + '"]');
     if (back) back.focus();
   }
-  function scanKeys(ev, li, e) {   // on a row: Space toggles it, Enter picks it alone, the arrows move, Escape clears
-    if (ev.target !== li) return;
+  // on a row: Space toggles it, Enter picks it alone, the arrows (Home, End) move, Shift with them picks the rows from
+  // the last one picked, Escape clears, → goes to its buttons. On a button: ← → move among them (← from the first and
+  // Escape: back to the row), ↑ ↓ to the row above or below. A field's keys are its own
+  function scanKeys(ev, li, e) {
     const rows = [...document.querySelectorAll("#scans-view li.lib")], i = rows.indexOf(li);
+    const btns = [...li.querySelectorAll(".q-acts button")].filter((b) => !b.disabled);
+    if (ev.target !== li) {
+      const k = btns.indexOf(ev.target);
+      if (k < 0) return;
+      const to = ev.key === "ArrowRight" ? btns[k + 1] : ev.key === "ArrowLeft" ? btns[k - 1] || li : ev.key === "Escape" ? li
+        : ev.key === "ArrowDown" || ev.key === "ArrowUp" ? rows[i + (ev.key === "ArrowDown" ? 1 : -1)] : undefined;
+      if (to === undefined) return;
+      if (to) to.focus();
+      ev.preventDefault();
+      return;
+    }
     if (ev.key === " ") pickScan(e.id, "toggle");
     else if (ev.key === "Enter") pickScan(e.id, ev.shiftKey ? "range" : "only");
-    else if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
-      const next = rows[i + (ev.key === "ArrowDown" ? 1 : -1)];
+    else if (ev.key === "ArrowDown" || ev.key === "ArrowUp" || ev.key === "Home" || ev.key === "End") {
+      const next = ev.key === "Home" ? rows[0] : ev.key === "End" ? rows[rows.length - 1] : rows[i + (ev.key === "ArrowDown" ? 1 : -1)];
       if (!next) return;
       next.focus();
       if (ev.shiftKey) pickScan(next.dataset.id, "range");
-    } else if (ev.key === "Escape" && SCANS.sel.length) pickScan(null);
+    } else if (ev.key === "ArrowRight" && btns.length) btns[0].focus();
+    else if (ev.key === "Escape" && SCANS.sel.length) pickScan(null);
     else return;
     ev.preventDefault();
   }
@@ -4797,7 +4826,7 @@
     return out;
   }
   function scanDetail(e) {
-    if (e.kind !== "script") return h("pre", { class: "lib-detail lib-plan" }, e.text || "");
+    if (e.kind !== "script") return h("pre", { class: "lib-detail lib-plan", role: "gridcell" }, e.text || "");
     const fields = scriptFields(e);
     if (!SCANS.params.has(e.id)) SCANS.params.set(e.id, {});
     const edited = SCANS.params.get(e.id);   // only the fields the person changed, as typed
@@ -4815,7 +4844,7 @@
     });
     const args = e.args && e.args.length ? h("span", { class: "lib-args" }, "args: " + e.args.join(" ")) : null;
     const problem = e.problem ? h("span", { class: "lib-problem hint bad" }, e.problem) : null;
-    return h("div", { class: "lib-detail lib-params" }, problem,
+    return h("div", { class: "lib-detail lib-params", role: "gridcell" }, problem,
       ...(rows.length ? rows : problem ? [] : [h("span", { class: "hint" }, "No settings to change.")]), args);
   }
   function runScan(e, queue, keys) {
@@ -4874,13 +4903,20 @@
   // "edited from" the one it came from, which stays; Run and Add to queue run it as any scan runs, through the queue,
   // its gate and its approval. What the editor doesn't show as fields is kept as written, read-only.
   const ED = { open: false, id: null, from: "", parts: null, base: "", units: new Map(), setKeys: new Set(),
-               readKeys: new Set(), check: null, timer: 0, gen: 0, busy: false };
+               readKeys: new Set(), check: null, timer: 0, gen: 0, busy: false, asking: null,
+               key: Math.random().toString(36).slice(2) };   // this editor, to Kelvin: of its checks, only the newest runs
   const ED_MODES = [["range", "Range"], ["values", "Values"], ["ramp", "Ramp"]];
 
   function toggleEditor(open) {
     ED.open = open === undefined ? !ED.open : open;
     $("edpane").hidden = !ED.open;
+    if (!ED.open) edStopCheck();
     fitLayout();
+  }
+  function edStopCheck() {   // the check about to be asked, and the one asked: nobody waits for them now
+    clearTimeout(ED.timer);
+    if (ED.asking) ED.asking.abort();
+    ED.asking = null;
   }
   // the scan with this library id in the editor, or a new scan (null); the one open there with changes stays open
   // when asked for again, and goes only when the person says so
@@ -4891,6 +4927,8 @@
     let d;
     try { d = await api("/api/library", { body: { op: "parts", id: id || null } }); }
     catch (e) { scansSay(e.message, true); return; }
+    edStopCheck();   // a check of the scan open before is no answer for this one
+    ED.gen++;
     ED.id = d.id || null;
     ED.from = d.edited_from || "";
     ED.parts = d.parts;
@@ -5153,7 +5191,8 @@
       return h("div", { class: "ed-line ed-set" }, key, h("span", { class: "ed-eq" }, "="), value, unit, x);
     }));
   }
-  // a change: the buttons now, the check a moment after typing stops (each newer one replaces the one before)
+  // a change: the buttons now, the check a moment after typing stops (each newer one replaces the one before: the one
+  // asked before it is dropped, here and by Kelvin)
   function edChanged(redraw) {
     if (redraw) renderEditor();
     edSay("");   // what the last Save or Run said is about the scan as it was
@@ -5163,10 +5202,13 @@
   }
   async function edCheck() {
     const gen = ++ED.gen;
+    if (ED.asking) ED.asking.abort();
+    const asking = ED.asking = new AbortController();
     let c;
-    try { c = await api("/api/library", { body: { op: "check", parts: ED.parts } }); }
-    catch (e) { c = { loads: false, problems: [e.message] }; }
-    if (gen !== ED.gen || !ED.parts) return;
+    try { c = await api("/api/library", { body: { op: "check", parts: ED.parts, editor: ED.key }, signal: asking.signal }); }
+    catch (e) { c = asking.signal.aborted ? null : { loads: false, problems: [e.message] }; }
+    if (gen !== ED.gen || !ED.parts || !c || c.superseded) return;
+    ED.asking = null;
     ED.check = c;
     renderEdCheck();
   }

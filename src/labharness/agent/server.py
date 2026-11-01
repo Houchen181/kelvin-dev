@@ -26,7 +26,7 @@ from ..collection import Collection
 from ..labconfig import load_envelope
 from ..homelab import open_home_lab
 from .approval import ApprovalServer, WebApprover
-from .runtime import ClientCall, LabRuntime, Viewer
+from .runtime import ClientCall, LabRuntime, Underway, Viewer
 
 INSTRUCTIONS = """\
 You are connected to a physics lab through Kelvin.
@@ -452,7 +452,10 @@ def build_server(rt: LabRuntime) -> MCPServer:
         Kelvin card that fits each instrument, and each VI Kelvin could read translated into a scan (the plan, what
         each part of the VI became, and what didn't translate). Only reads: no VI is run (LabVIEW isn't needed), and
         nothing is sent to an instrument."""
-        return outside(rt, "the lab's LabVIEW files", rt.survey_labview(path))
+        try:
+            return outside(rt, "the lab's LabVIEW files", rt.survey_labview(path))
+        except Underway as e:   # Set up reads one now: Kelvin's own words, nothing from the files
+            return "not read now: %s" % e
 
     @server.tool(annotations=READ, structured_output=False)
     def check_script(script: str, params: Optional[Dict[str, Any]] = None) -> str:

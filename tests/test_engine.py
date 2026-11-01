@@ -151,9 +151,37 @@ measure: [lockin.X]
 
 def test_bad_loop_options_are_refused():
     for bad in ("repeat: 0", "time: {every: 0, for: 10}", "sweep: {smu.V: {from: -1, to: 1, points: 5, log: true}}",
-                "sweep: {smu.V: {values: [1], stabilize: {read: tc.T_sample, within: -1}}}"):
+                "sweep: {smu.V: {values: [1], stabilize: {read: tc.T_sample, within: -1}}}",
+                "repeat: .inf", "time: {every: 1, for: .inf}", "sweep: {smu.V: {from: 0, to: 1, points: .inf}}",
+                "sweep: {smu.V: {values: 5}}"):   # these were a TypeError or an OverflowError, not a plan's problem
         with pytest.raises(PlanError):
             load_plan("plan: x\nmeasure: [lockin.X]\n" + bad)
+
+
+def test_a_plans_points_are_counted_before_any_is_made():
+    """load_plan made every value of a loop, its repeats and its time series before it compared their number with
+    MAX_POINTS: ten million took 37 s and 314 MB before it was refused, and a billion would not fit in memory."""
+    import time
+    import tracemalloc
+    for loops, points in (("sweep: {smu.V: {from: 0, to: 1, points: 1000000000}}", 10 ** 9),
+                          ("sweep: {smu.V: {from: 1, to: 1000, points: 2000000, log: true}}", 2 * 10 ** 6),
+                          ("sweep: {smu.V: {from: 0, to: 1, points: 600000, back: true}}", 1199999),
+                          ("repeat: 1000000000", 10 ** 9),
+                          ("time: {every: 0.001, for: 1000000}", 10 ** 9 + 1),
+                          ("repeat: 2\nsweep: {smu.V: {values: [0, 1, 2]}, lockin.frequency: {from: 1, to: 2, "
+                           "step: 0.000005}}\ntime: {every: 1, points: 3}", 2 * 3 * 200001 * 3)):
+        tracemalloc.start()
+        t0 = time.perf_counter()
+        with pytest.raises(PlanError) as e:
+            load_plan("plan: big\nmeasure: [smu.I]\n" + loops)
+        took, peak = time.perf_counter() - t0, tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        assert e.value.errors == ["plan has %d points (max 1000000)" % points], loops   # as it was said
+        assert took < 1 and peak < 2 ** 20, (loops, took, peak)
+    with pytest.raises(PlanError, match="sweep.smu.V: more than 1000000 points"):   # a step too fine, as before
+        load_plan("plan: fine\nsweep: {smu.V: {from: 0, to: 1, step: 1e-7}}\nmeasure: [smu.I]")
+    p = load_plan("plan: most\nsweep: {smu.V: {from: 0, to: 1, points: 1000000}}\nmeasure: [smu.I]")
+    assert p.points == 10 ** 6 and len(p.axes[0].values) == 10 ** 6 and p.axes[0].values[-1] == 1   # made
 
 
 def test_run_reports_progress_and_analyses_itself(make_engine, tmp_path):

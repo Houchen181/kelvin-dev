@@ -234,6 +234,79 @@ def test_the_check_says_points_time_and_whats_wrong_reading_no_instrument(ran, m
     assert asked == []
 
 
+def test_every_helper_the_check_calls_gets_what_kelvin_has_seen_never_an_instrument(ran, monkeypatch):
+    """A pulse generator's sequence (is it playing, its times), a ramp's rate, a source's fixed range, a stage's
+    velocity and a counter's integration: each read as Kelvin last saw it, or not known; a pulse generator was asked
+    OUTPut? in the middle of a run."""
+    from labharness.agent.runtime import _SeenGate
+    from labharness.instrument import Instrument
+    rt, _ = ran
+    asked = []
+
+    def no(inst, fn, *args, **kw):
+        asked.append((inst.name, args))
+        raise AssertionError("the editor's check asked an instrument")
+    monkeypatch.setattr(Instrument, "_io", no)
+    with rt._readings_lock:
+        rt._readings.pop("pg", None)                                 # never seen: is it playing? not known
+    parts = rt.scan_parts()["parts"]
+    parts.update(measure=["counter.contrast"], loops=[dict(scanedit._blank("pg.tau", "values"), values=[1e-7, 1e-3])])
+    assert rt.scan_check(parts)["problems"] == []                   # taken as not playing; the queue reads it
+    rt._keep("pg", {"running": True, "protocol": "rabi", "t_laser": 3e-6, "t_wait": 1e-6}, "read")
+    playing = rt.scan_check(parts)                                   # seen playing: every tau checked, as seen
+    assert playing["problems"] == ["pg at tau = 1 ms: the microwave is on 100% of the time, above the lab's 50% limit "
+                                   "(heating): lengthen t_wait or shorten the MW pulses"], playing
+    rt._keep("magnet", {"B_actual": 0.0, "rate": 0.5}, "read")
+    parts.update(loops=[dict(scanedit._blank("magnet.B", "ramp"), legs=[{"to": 1}], every=10)], measure=["smu.I"])
+    assert rt.scan_check(parts)["points"] == 13                      # 1 T at the 0.5 T/min it reads
+    rt._keep("smu", {"V_autorange": False, "V_range": 2.1}, "read")
+    parts["loops"] = [dict(scanedit._blank("smu.V", "values"), values=[0, 5]),
+                      dict(scanedit._blank("stage.position", "values"), values=[0, 1])]
+    assert any("beyond its fixed range (2.1 V)" in p for p in rt.scan_check(parts)["problems"])
+    assert asked == []
+
+    lab = _SeenGate(rt).lab                                          # what the plan code gets for the lab
+    pg = lab.instruments["pg"]
+    assert lab.resolve("pg.tau")[0] is pg and lab.instrument("pg") is pg and pg.read("running") is True
+    assert pg.limits("tau") == (0.0, 0.01) and pg.card.id == "virtual/pulse-generator"
+    with rt._readings_lock:
+        rt._readings.pop("counter", None)
+    with pytest.raises(ValueError, match="not known"):
+        lab.read("counter", "contrast")
+    for send in ("write", "act", "query_raw", "write_raw", "_io", "instrument_error"):
+        assert not hasattr(pg, send), send
+    assert isinstance(pg.backend.state, dict) and not hasattr(pg.backend, "query")
+    assert not hasattr(lab, "snapshot") and not hasattr(lab, "health_check") and lab.away("pg") is None
+    assert asked == []
+
+
+def test_a_check_of_a_million_points_takes_a_moment_and_more_are_refused_before_any_is_made(ran):
+    """The check of a million-point range took 34 s, and ten million took 37 s and 314 MB before they were refused, at
+    every pause in typing. Its points, its time, its limits and its interlocks are worked out from its loops."""
+    import time
+    rt, _ = ran
+    parts = dict(rt.scan_parts()["parts"], measure=["smu.I"])
+
+    def check(loops, **more):
+        t0 = time.perf_counter()
+        out = rt.scan_check(dict(parts, loops=loops, **more))
+        return out, time.perf_counter() - t0
+    big = dict(scanedit._blank("smu.V", "range"), **{"from": 0, "to": 1, "points": 1000000, "by": "points"})
+    c, took = check([big])
+    assert c["problems"] == [] and c["points"] == 1000000 and c["time"].startswith("~") and took < 10, (c, took)
+    c, _ = check([dict(big, **{"from": 14, "to": 16, "points": 21})])
+    assert c["problems"][0].startswith("sweep: smu.V 15.1 V is outside")   # the first beyond, as each was checked
+    field = [{"key": "tc.setpoint", "value": 50}]                    # warms the sample under a field, swept too
+    c, took = check([dict(scanedit._blank("magnet.B", "values"), values=[0, 1]), dict(big, points=500000)],
+                    setup=field)
+    assert any(p.startswith("interlock: magnet.B needs tc.T_sample < 10") for p in c["problems"]) and took < 10
+    for loops, more, points in (([dict(big, points=10 ** 7)], {}, 10 ** 7), ([], {"repeat": 10 ** 9}, 10 ** 9),
+                                ([], {"time": {"every": 0.001, "for": 10 ** 6, "points": None, "order": []}},
+                                 10 ** 9 + 1)):
+        c, took = check(loops, **more)
+        assert c["problems"] == ["plan has %d points (max 1000000)" % points] and took < 2, (c["problems"], took)
+
+
 def test_an_edited_scan_is_a_new_entry_and_the_old_one_stays(ran):
     rt, entry = ran
     marks = {"project": "p1", "confidential": True}
@@ -313,6 +386,48 @@ def test_the_editor_routes_and_an_edited_scan_runs_through_the_queue(ran, tmp_pa
     assert client.post("/api/library", json={"op": "parts"}).json()["parts"]["name"] == "scan"
     assert client.post("/api/library", json={"op": "check", "parts": {"loops": [{}]}}).json()["problems"] == [
         "loop 1: choose what it steps (instrument.parameter)"]
+
+
+def test_checks_have_threads_of_their_own_and_of_an_editors_waiting_checks_only_the_newest_runs(ran, tmp_path,
+                                                                                                monkeypatch):
+    """Each pause in typing asked for a check, which took one of the server's shared threads for as long as it ran
+    (34 s for a million points), and none was ever dropped: the checks have threads of their own, and of the checks
+    an editor asked for that still wait, only its newest runs (the others come back superseded)."""
+    import threading
+    import time
+    from test_scan_library import portal
+    rt, _ = ran
+    client, _ = portal(rt, tmp_path)
+    release, ran_on, check = threading.Event(), [], rt.scan_check
+    parts, out = rt.scan_parts()["parts"], {}
+
+    def slow(parts):
+        ran_on.append((threading.current_thread().name, parts.get("name")))
+        release.wait(30)
+        return check(parts)
+    monkeypatch.setattr(rt, "scan_check", slow)
+
+    def ask(name, editor):
+        out[name] = client.post("/api/library", json={"op": "check", "parts": dict(parts, name=name),
+                                                      "editor": editor}).json()
+    with client:
+        workers = [threading.Thread(target=ask, args=(n, n)) for n in ("x", "y")]   # both check threads taken
+        for w in workers:
+            w.start()
+        t0 = time.time()
+        while len(ran_on) < 2 and time.time() - t0 < 10:
+            time.sleep(0.02)
+        for name in ("e1", "e2", "e3"):   # one editor, typing on: each waits for a thread
+            workers.append(threading.Thread(target=ask, args=(name, "e")))
+            workers[-1].start()
+            time.sleep(0.3)
+        release.set()
+        for w in workers:
+            w.join(30)
+    assert sorted(name for _, name in ran_on) == ["e3", "x", "y"], ran_on
+    assert all(thread.startswith("kelvin-check") for thread, _ in ran_on), ran_on
+    assert out["e1"] == out["e2"] == {"superseded": True}
+    assert out["e3"]["loads"] and out["e3"]["text"].startswith("plan: e3") and out["x"]["loads"]
 
 
 def test_a_script_isnt_edited_here_and_phones_get_none_of_it(tmp_path, monkeypatch):
