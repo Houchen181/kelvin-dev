@@ -195,6 +195,8 @@ Check on a run from the coffee room, or answer an approval from home, with **Kel
 
 **If the phone doesn't connect directly on the lab network:** the computer's firewall must let it in. On Windows, press **Let phones through** in Settings → Phone: Windows asks you to allow it. Many university, housing and hotel Wi-Fi networks keep devices apart; there the phone goes through the hub.
 
+**If this computer's address is public** (as on many campus networks), the iPhone connects through the hub, even on the lab's Wi-Fi; [Tailscale](https://tailscale.com) on both gives the direct connection that opens unshared work.
+
 Settings → Phone lists the phones that reach Kelvin directly, with when each was last seen. Remove one there, or on the phone: swipe left on the computer in **Computers**. A phone paired with an earlier Kelvin keeps working, with what it was allowed then, until you remove it. Your desktop's access key never works on the network; only a phone's own token does. Settings, instruments, the lab config and the approval mode work only on the Kelvin computer.
 
 Each person's phones are their own: a phone works while its person is signed in on the Kelvin computer, and sees that person's chats and runs, never someone else's.
