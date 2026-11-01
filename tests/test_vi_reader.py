@@ -189,6 +189,9 @@ def test_an_iv_sweep_is_read_with_its_drivers_commands_from_the_vis_beside_it():
                                                        ":OUTP 0,(@{Drain_Source_Channel})"]
     missing = next(n for n in top if n["node"] == "call" and n["vi"].endswith("Close.vi"))
     assert missing["sends"] == [] and "isn't beside the VI" in missing["sends_unread"]
+    poly = vigraph.summary(KEYSIGHT / "Agilent U2722" / "Public" / "Configure" / "Configure Channel.vi")
+    assert (poly["read"], poly["diagram"]) == ("panel", [])   # its instances run, never the polymorphic VI itself
+    assert "polymorphic VI" in poly["unread"][0] and "Current, Voltage" in poly["unread"][0]
 
 
 def test_a_state_machine_is_said_with_its_states_never_translated_as_a_sweep():

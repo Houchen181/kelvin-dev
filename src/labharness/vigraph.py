@@ -1295,7 +1295,10 @@ class _Reader:
             for c in vi.controls:
                 if c.kind == "visa" and not c.indicator and c.has_default and isinstance(c.default, str) and c.default:
                     self._visa(c.default, c.name)
-        if self.g.root is not None:
+        if vi.instances:   # a polymorphic VI: its diagram only lists its instances, each a VI of its own
+            out["unread"].append("it is a polymorphic VI: where it is called, one of its instances runs (%s), each "
+                                 "a VI read on its own" % ", ".join(vi.instances[:12]))
+        elif self.g.root is not None:
             out["read"] = "full" if vi.panel is not None else "names"
             self.name_loops(self.g.root)
             out["diagram"] = self.diagram(self.g.root)
