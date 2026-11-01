@@ -5147,11 +5147,13 @@ class LabRuntime:
                   "card": {"id": str(c.get("card") or "")}, "in_lab": None}
                  for c in chosen or [] if isinstance(c, dict)]
         instruments = self._scan_instruments(items, registry)
-        vis = {labview.same_path(s["path"]): s for s in found.vis}
+        vis: Dict[str, Dict[str, Any]] = {}
+        for s in found.vis:   # by the very path the survey gave each, as the review sent it back: a VI library's
+            vis.setdefault(str(s["path"]), s)   # member named ../Main.vi never stands in for the folder's Main.vi
         kept: List[Dict[str, Any]] = []
         missed: List[Dict[str, Any]] = []
         for path in paths:
-            s = vis.get(labview.same_path(path))
+            s = vis.get(str(path))
             if s is None:
                 missed.append({"vi": Path(str(path)).name, "path": str(path),
                                "gaps": ["not one of the VIs in %s" % folder]})
