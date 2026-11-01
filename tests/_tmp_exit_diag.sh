@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# TEMPORARY (reverted before merge): where Python 3.13 crashes as it exits on Linux after run.h5 work at exit.
+# TEMPORARY (reverted before merge): Python's exit on Linux with run.h5 work in a daemon thread, with the fix
+# holding h5py's lock through h5py's own exit.
 set -u
-which gdb || (sudo apt-get update -qq && sudo apt-get install -y -qq gdb > /dev/null)
 work=$(mktemp -d)
 python - "$work" <<'EOF'
 import sys
@@ -33,29 +33,32 @@ def work():
                 rundata.meta(folder)
                 rundata.set_analysis(folder, {'assessment': 'pass %d' % n, 'series': []})
             except OSError as e:
-                if "closing" in str(e):
-                    sys.__stderr__.write("[loop] refused: %s\n" % e)
-                    if park:
-                        threading.Event().wait()
-            except Exception as e:
-                sys.__stderr__.write("[loop] %s: %s\n" % (type(e).__name__, e))
+                if park and "closing" in str(e):
+                    threading.Event().wait()
+            except Exception:
+                pass
 threading.Thread(target=work, daemon=True).start()
 time.sleep(1.0)
 EOF
 
-for mode in park raise; do
-  found=0
-  for i in $(seq 1 120); do
-    timeout 120 gdb -q -batch -ex "set pagination off" -ex "handle SIGPIPE nostop noprint" -ex run \
-      -ex "echo \n=== CRASH backtraces\n" -ex "thread apply all bt 40" \
-      --args python "$work/loop.py" "$mode" $runs > "$work/gdb.txt" 2>&1
-    if grep -q "SIGSEGV\|SIGBUS\|SIGABRT" "$work/gdb.txt"; then
-      echo "##### $mode: crashed on try $i"
-      grep -v "^\[New Thread\|^\[Thread .* exited\|^\[Inferior\|libthread_db\|Using host" "$work/gdb.txt" | tail -150
-      found=1
-      break
+tally() {   # name, runs, command...
+  local name=$1 n=$2; shift 2
+  local bad=0 shown=0 conv=0
+  for i in $(seq 1 "$n"); do
+    rc=0; timeout 90 "$@" > "$work/out.txt" 2>&1 || rc=$?
+    grep -q "Failed to find converter" "$work/out.txt" && conv=$((conv + 1))
+    if [ "$rc" -ne 0 ]; then
+      bad=$((bad + 1))
+      if [ "$shown" -lt 2 ]; then
+        shown=$((shown + 1)); echo "--- $name run $i: exit $rc"; tail -15 "$work/out.txt"
+      fi
     fi
   done
-  [ "$found" = 0 ] && echo "##### $mode: no crash in 120 tries under gdb"
-done
+  echo "=== $name: $bad of $n exits not clean, $conv with converter messages"
+}
+
+tally "run.h5 loop, raising once refused" 100 python -X faulthandler "$work/loop.py" raise $runs
+tally "run.h5 loop, parked once refused" 100 python -X faulthandler "$work/loop.py" park $runs
+tally "flush_reports at exit" 15 python -X faulthandler tests/_tmp_flush_at_exit.py tests
+for i in 1 2 3 4 5; do rc=0; python -m pytest -q -p no:cacheprovider tests/test_rundata.py -k "exits" > "$work/out.txt" 2>&1 || rc=$?; echo "regression tests $i: pytest exit $rc, $(tail -1 "$work/out.txt")"; done
 true

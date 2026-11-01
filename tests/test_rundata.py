@@ -178,9 +178,12 @@ def test_a_new_analysis_updates_run_h5_and_its_card(tmp_path):
 
 def test_as_python_exits_a_run_h5_open_is_finished_and_none_is_opened_after(tmp_path, monkeypatch):
     """Python's exit (before h5py's own, which takes away how a run.h5's text is read) waits for a run.h5 a thread
-    has open, and no run.h5 is opened after it: a thread on its way to one is told Kelvin is closing."""
+    has open, and no run.h5 is opened after it: a thread on its way to one is told Kelvin is closing. Then it takes
+    h5py's lock for good (not here: the tests go on)."""
     pytest.importorskip("h5py")
     monkeypatch.setattr(rundata, "_closing", False)   # as it was again after this test, which ends Kelvin "exiting"
+    held = []
+    monkeypatch.setattr(rundata, "_hold_h5py", held.append)   # h5py's lock taken for good would stop these tests
     folder = crashed_run(tmp_path)
     rundata.finish(folder)
     inside, leave, read = threading.Event(), threading.Event(), []
@@ -202,10 +205,11 @@ def test_as_python_exits_a_run_h5_open_is_finished_and_none_is_opened_after(tmp_
     assert rundata._closing and exiting.is_alive()                  # it waits for the run.h5 open
     with pytest.raises(OSError, match="Kelvin is closing"):
         rundata.meta(folder)                                        # and opens none now
+    assert held == []                                               # h5py's lock only once that run.h5 is closed
     leave.set()
     reader.join(10)
     exiting.join(10)
-    assert not exiting.is_alive() and read == ["interrupted"]
+    assert not exiting.is_alive() and read == ["interrupted"] and len(held) == 1
 
 
 def test_runs_read_and_written_in_the_background_as_python_exits_never_crash_it(tmp_path):
@@ -213,8 +217,9 @@ def test_runs_read_and_written_in_the_background_as_python_exits_never_crash_it(
     b'PYTHON:OBJECT'" three times and crashed as it exited (a segmentation fault, exit 139). A thread in the
     background was still reading runs' run.h5 after h5py's own exit had taken away how their text is read: the
     automatic reports a run rewrites 20 s after it ends (flush_reports), as the tests' last plans did; a tidy, the
-    catalog or a queue ending its run can do the same. Such a thread now finishes the run.h5 it has open first, and
-    opens no other: Python exits as it should, where it hung or crashed (on Windows too)."""
+    catalog or a queue ending its run can do the same. Such a thread now finishes the run.h5 it has open first, opens
+    no other, and waits at h5py's lock while h5py's exit runs HDF5 (a dataset it released then crashed Python inside
+    H5Tunregister): Python exits as it should, where it hung or crashed (on Windows too)."""
     pytest.importorskip("h5py")
     folders = []
     for k in range(3):
