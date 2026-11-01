@@ -45,10 +45,88 @@ def test_the_header_is_runs_scans_queue_and_the_open_runs_have_a_row_below_it():
 
 
 def test_the_side_panels_stay_independent():
-    """Switching the Runs pane's view never opens or closes another panel."""
+    """Switching the Runs pane's view never opens or closes another panel; nor does the scan editor, which opens and
+    closes on its own."""
     for name in ("showView", "showRunList", "showQueue", "loadRunList", "renderRunList", "loadScans", "renderScans"):
         body = _js(name)
         assert not re.search(r"toggle(Lab|Team|Analysis)\(", body), name
+    for name in ("toggleEditor", "openEditor", "renderEditor", "edLoop", "edSave", "edRun", "edRevert", "initEditor",
+                 "pickScan", "renderPick", "queuePicked"):
+        assert not re.search(r"toggle(Lab|Team|Analysis|Runs)\(", _js(name)), name
+
+
+def test_the_scan_editor_is_a_side_panel_of_its_own():
+    work = PAGE[PAGE.index('<div id="workcol"'):PAGE.index('<div id="sidecol"')]
+    assert work.index('<section id="runpane"') < work.index('<section id="edpane"') < work.index('<section id="anpane"')
+    pane = PAGE[PAGE.index('<section id="edpane"'):PAGE.index('<section id="anpane"')]
+    assert 'id="edpane-resize"' in pane and 'id="close-editor"' in pane and 'aria-labelledby="ed-title"' in pane
+    assert re.search(r'edpane: \[\(\) => ED\.open, "workcol", \d+, "lh\.edWidth"\]', JS)
+    assert "PANE_W.edpane" in _js("initPanes")
+    toggle = _js("toggleEditor")
+    assert '$("edpane").hidden = !ED.open' in toggle and "fitLayout()" in toggle
+    assert "ED.open" in _js("syncScrim") and "if (ED.open) toggleEditor(false);" in JS   # the scrim closes all, as ever
+    opened = _js("openEditor")
+    assert 'op: "parts", id: id || null' in opened and "toggleEditor(true)" in opened and "confirm(" in opened
+    for label in (">Edit scan<", ">Plan text<", ">+ Loop<", ">Loops<", ">Record<", ">Setup<", ">At the end<",
+                  ">As written<", ">Add to queue<", ">Run<", ">Save<", ">Revert<"):
+        assert label in pane, label
+
+
+def test_scans_are_selected_and_added_to_the_queue_in_order():
+    """A row is selected by a click (Ctrl adds, Shift a stretch) or the keyboard; the bar adds the selected to the queue
+    in the order they were picked (each as its Queue does), runs one, or edits a scan. The rows' own buttons stay."""
+    bar = PAGE[PAGE.index('<div id="scans-pick"'):PAGE.index('<div id="scans-check"')]
+    for text in ('id="scans-pick-queue"', ">Add to queue<", 'id="scans-pick-run"', ">Run<", 'id="scans-pick-edit"',
+                 ">Edit<", 'id="scans-pick-clear"', 'role="toolbar"'):
+        assert text in bar, text
+    assert PAGE.count('role="listbox" aria-multiselectable="true"') == 2 and 'id="scans-new"' in PAGE
+    entry = _js("scanEntry")
+    assert 'role: "option", "aria-selected": String(at >= 0), tabindex: "0"' in entry
+    assert 'ev.target.closest("button, input, select, textarea, label, a, pre")' in entry   # its own controls
+    assert '"range" : ev.ctrlKey || ev.metaKey ? "toggle" : "only"' in entry
+    assert 'act("Run",' in entry and 'act("Queue",' in entry and '"lib-order"' in entry
+    assert '"edited from " + e.edited_from' in entry and "!e.named" in entry
+    keys = _js("scanKeys")
+    assert all(k in keys for k in ('" "', '"Enter"', '"ArrowDown"', '"ArrowUp"', '"Escape"'))
+    pick = _js("pickScan")
+    assert "SCANS.sel.concat(id)" in pick and "SCANS.sel = [id]" in pick and "ids.slice(a, b + 1)" in pick
+    queued = _js("queuePicked")
+    assert "for (const e of picked)" in queued and 'op: "run", id: e.id, queue: true' in queued
+    assert "busyWhile(picked.map(" in queued and "scanParams(e)" in queued   # a script's values, as its Queue sends
+    shown = _js("renderPick")
+    assert '$("scans-pick-run").hidden = !one' in shown and 'one.kind === "plan"' in shown and "syncBusy()" in shown
+    assert 'label: "Edit", icon: "pencil", onClick: () => openEditor(e.id)' in _js("scanMenu")
+
+
+def test_the_scan_editor_follows_the_contract():
+    """Each change is checked a moment later (the latest answer wins); Save keeps a new scan; Run and Add to queue send
+    the scan itself while it is unchanged, else its parts (kept, then run through the queue and its approval); what the
+    editor doesn't show as fields stays read-only."""
+    changed = _js("edChanged")
+    assert "setTimeout(edCheck, 350)" in changed and "clearTimeout(ED.timer)" in changed
+    check = _js("edCheck")
+    assert 'op: "check", parts: ED.parts' in check and "gen !== ED.gen" in check
+    assert 'op: "save", parts: ED.parts, from: ED.id' in _js("edSave")
+    run = _js("edRun")
+    assert '{ op: "run", parts: ED.parts, from: ED.id } : { op: "run", id: ED.id }' in run
+    assert "body.queue = true" in run
+    assert 'busyWhile(queue ? ["ed"] : ["ed", "start"]' in run and "showQueue()" in run
+    buttons = _js("edButtons")
+    assert "!(dirty || !ED.id)" in buttons and 'BUSY.has("start")' in buttons and "!c.loads" in buttons
+    assert "if (ED.parts) edButtons();" in _js("syncBusy")   # a Run waiting for its approval holds the editor's too
+    loop = _js("edLoop")
+    assert 'loop.mode === "kept"' in loop and '"as written"' in loop and 'h("pre", { class: "ed-kept" }' in loop
+    assert '"Outer"' in loop and '"Inner"' in loop and '"Remove"' in loop
+    fields = _js("edModeFields")
+    for text in ('"from"', '"to"', '"step"', '"points"', '"log"', '"and back"', '"settle"', '"+ Leg"',
+                 '"measure every"', 'fixed.has("settle")', 'fixed.has("step")'):
+        assert text in fields, text
+    render = _js("renderEditor")
+    assert '"as written below"' in render and '$("ed-kept-sec").hidden = !p.kept' in render
+    assert "ED.parts = JSON.parse(ED.base)" in _js("edRevert")
+    assert 'copyText($("ed-plan-text").textContent' in _js("initEditor")
+    count = _js("rangeCount")   # as plans.py counts a range: its steps, and `to` itself when they miss it
+    assert "Math.floor(Math.abs(b - a) / Math.abs(step) + 1e-9)" in count and "1e-12" in count
 
 
 def test_the_recent_runs_list_opens_a_run_and_a_run_view_goes_back_to_it():

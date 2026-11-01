@@ -251,7 +251,17 @@
       <div id="scans-view" class="scans-view" role="tabpanel" aria-labelledby="open-scans" hidden>
         <div class="scans-top">
           <button id="scans-import" class="btn small" type="button">Import a script…</button>
+          <button id="scans-new" class="btn small" type="button" title="A scan of your own, in the scan editor">New scan</button>
           <input id="scans-filter" class="pane-filter" type="search" placeholder="Filter" aria-label="Filter scans and scripts" spellcheck="false" autocomplete="off">
+        </div>
+        <div id="scans-pick" class="scans-pick" role="toolbar" aria-label="Selected" hidden>
+          <span id="scans-pick-what" class="pick-what" role="status"></span>
+          <button id="scans-pick-queue" class="btn small primary" type="button" title="Last in the queue, in the order selected">Add to queue</button>
+          <button id="scans-pick-run" class="btn small" type="button" title="First in the queue, which pauses after it">Run</button>
+          <button id="scans-pick-edit" class="btn small" type="button" title="In the scan editor">Edit</button>
+          <button id="scans-pick-clear" class="icon-btn" type="button" aria-label="Clear the selection" title="Clear (Esc)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
         </div>
         <form id="scans-path" class="scans-path" hidden>
           <input id="scans-path-input" placeholder="The script's full path (.py or .ipynb)" aria-label="The script's full path" spellcheck="false" autocomplete="off">
@@ -259,12 +269,78 @@
         </form>
         <div id="scans-check" class="callout small calm scans-check" role="status" hidden></div>
         <p id="scans-msg" class="hint" role="status"></p>
-        <section id="scans-scripts" aria-labelledby="scans-scripts-h" hidden><h3 id="scans-scripts-h">Your scripts</h3><ul class="q-list"></ul></section>
-        <section id="scans-plans" aria-labelledby="scans-plans-h" hidden><h3 id="scans-plans-h">Kelvin's scans</h3><ul class="q-list"></ul></section>
+        <section id="scans-scripts" aria-labelledby="scans-scripts-h" hidden><h3 id="scans-scripts-h">Your scripts</h3><ul class="q-list" role="listbox" aria-multiselectable="true" aria-labelledby="scans-scripts-h"></ul></section>
+        <section id="scans-plans" aria-labelledby="scans-plans-h" hidden><h3 id="scans-plans-h">Kelvin's scans</h3><ul class="q-list" role="listbox" aria-multiselectable="true" aria-labelledby="scans-plans-h"></ul></section>
         <p id="scans-empty" class="pane-empty" hidden>Each scan Kelvin runs, and each script you import, is kept here to run again.</p>
       </div>
       <div id="queue-view" class="queue-view" role="tabpanel" aria-labelledby="open-queue" hidden></div>
     </div>
+  </section>
+
+  <!-- the scan editor, Special Measure style: a scan's loops, what it records, what it sets first and at the end -->
+  <section id="edpane" class="runpane edpane" aria-labelledby="ed-title" hidden>
+    <div id="edpane-resize" class="pane-resize" role="separator" aria-orientation="vertical" aria-label="Resize the scan editor" tabindex="0"></div>
+    <header class="pane-head">
+      <h2 id="ed-title" class="pane-title">Edit scan</h2>
+      <span id="ed-from" class="ed-from"></span>
+      <div class="spacer"></div>
+      <button id="ed-text" class="btn small ghost" type="button" aria-expanded="false" aria-controls="ed-plan" title="The plan it makes, as YAML">Plan text</button>
+      <button id="close-editor" class="icon-btn" type="button" aria-label="Close the scan editor">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <div id="ed-body" class="pane-body ed-body">
+      <div id="ed-plan" class="ed-plan" hidden>
+        <pre id="ed-plan-text"></pre>
+        <button id="ed-copy" class="btn small ghost" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h8"/></svg><span>Copy</span></button>
+      </div>
+      <div class="ed-line">
+        <label class="ed-f ed-name"><span>Name</span><input id="ed-name" class="ed-in" maxlength="80" spellcheck="false" autocomplete="off"></label>
+        <label class="ed-f ed-desc"><span>Description</span><input id="ed-desc" class="ed-in" autocomplete="off"></label>
+      </div>
+      <section class="ed-sec" aria-labelledby="ed-loops-h">
+        <div class="ed-sec-head"><h3 id="ed-loops-h">Loops</h3><span class="hint">outer first</span><div class="spacer"></div>
+          <button id="ed-add-loop" class="link soft" type="button">+ Loop</button></div>
+        <ol id="ed-loops" class="ed-loops"></ol>
+        <div class="ed-line">
+          <label class="ed-f"><span>Repeat</span><input id="ed-repeat" class="ed-in ed-short" inputmode="numeric" placeholder="1" autocomplete="off"><i>×</i></label>
+          <label class="ed-f"><span>Settle</span><input id="ed-settle" class="ed-in ed-short" inputmode="decimal" placeholder="0" autocomplete="off" title="After setting each value, unless its loop says"><i>s</i></label>
+          <label class="ed-f"><span>Time series every</span><input id="ed-every" class="ed-in ed-short" inputmode="decimal" autocomplete="off" title="The innermost loop: a point this often"><i>s</i></label>
+          <label class="ed-f"><span id="ed-for-label">for</span><input id="ed-for" class="ed-in ed-short" inputmode="decimal" autocomplete="off"><i id="ed-for-unit">s</i></label>
+        </div>
+      </section>
+      <section class="ed-sec" aria-labelledby="ed-measure-h">
+        <div class="ed-sec-head"><h3 id="ed-measure-h">Record</h3><span class="hint">at each point</span></div>
+        <div class="ed-chips"><span id="ed-measure" class="ed-chip-list"></span>
+          <input id="ed-read" class="ed-in ed-add" list="ed-read-keys" placeholder="Add a reading" aria-label="Add a reading to record" spellcheck="false" autocomplete="off"></div>
+      </section>
+      <section class="ed-sec" aria-labelledby="ed-setup-h">
+        <div class="ed-sec-head"><h3 id="ed-setup-h">Setup</h3><span class="hint">set first</span><div class="spacer"></div>
+          <button id="ed-add-setup" class="link soft" type="button">+ Add</button></div>
+        <div id="ed-setup" class="ed-rows"></div>
+      </section>
+      <section class="ed-sec" aria-labelledby="ed-after-h">
+        <div class="ed-sec-head"><h3 id="ed-after-h">At the end</h3><div class="spacer"></div>
+          <button id="ed-add-after" class="link soft" type="button">+ Add</button></div>
+        <div id="ed-after" class="ed-rows"></div>
+      </section>
+      <section id="ed-kept-sec" class="ed-sec" aria-labelledby="ed-kept-h" hidden>
+        <div class="ed-sec-head"><h3 id="ed-kept-h">As written</h3><span class="hint">kept as it is</span></div>
+        <pre id="ed-kept" class="ed-kept"></pre>
+      </section>
+      <datalist id="ed-set-keys"></datalist>
+      <datalist id="ed-read-keys"></datalist>
+    </div>
+    <footer class="ed-foot">
+      <div class="ed-state"><span id="ed-status" class="ed-status" role="status"></span><span id="ed-msg" class="ed-msg" role="status"></span></div>
+      <ul id="ed-problems" class="ed-problems"></ul>
+      <div class="ed-actions">
+        <button id="ed-queue" class="btn small primary" type="button" title="Last in the queue">Add to queue</button>
+        <button id="ed-run" class="btn small" type="button" title="First in the queue, which pauses after it">Run</button>
+        <button id="ed-save" class="btn small" type="button" title="A new scan in your library; the one it came from stays">Save</button>
+        <button id="ed-revert" class="btn small ghost" type="button">Revert</button>
+      </div>
+    </footer>
   </section>
 
   <section id="anpane" class="runpane anpane" aria-label="Analysis" hidden>
