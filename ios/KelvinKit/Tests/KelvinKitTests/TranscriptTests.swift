@@ -71,6 +71,8 @@ final class TranscriptTests: XCTestCase {
         t.apply(.runProgress(callID: "t2", done: 3, total: 10, status: "running"))
         XCTAssertEqual(t.lines.last?.detail, "3 of 10 points")
         XCTAssertTrue(t.lines.last?.working ?? false)
+        t.apply(.runProgress(callID: "t2", done: 21, total: 0, status: "running"))   // a lab script's: no total
+        XCTAssertEqual(t.lines.last?.detail, "21 points")
         t.apply(.reset)
         t.apply(.error("The model stopped answering."))
         t.apply(.ended(reason: "stopped"))

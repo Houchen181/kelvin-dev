@@ -206,7 +206,7 @@ svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width:
 .chat-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
 .chat-item.answering .chat-dot { animation: pulse 1.2s ease-in-out infinite; }
 .chat-item.asking .chat-dot { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
-@media (prefers-reduced-motion: reduce) { .chat-dot { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .chat-dot, .bar.open i { animation: none !important; } }
 .turn-live { display: contents; }   /* a chat's answer in progress: kept whole while another chat is open */
 .row-btn { opacity: 0; border: 0; background: none; padding: 3px; border-radius: 6px; color: var(--muted); cursor: pointer; display: grid; place-items: center; flex: none; }
 .row-btn svg { width: 15px; height: 15px; }
@@ -427,6 +427,7 @@ body.incognito .hero-mark { filter: grayscale(1); opacity: .8; }
 .bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .3s; }
 .bar.done i { background: var(--ok); }
 .bar.done.warn i { background: var(--warn-line); }
+.bar.open i { animation: pulse 1.6s ease-in-out infinite; }   /* a lab script's run: as many points as it takes */
 
 /* a run's card in the conversation (its data are in the runs pane) */
 .runcard { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 9px 12px; display: grid; gap: 7px; }

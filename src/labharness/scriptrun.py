@@ -899,13 +899,15 @@ class ScriptRun:
 
     def __init__(self, gate: SafetyGate, prep: Prepared, store: RunStore, grants: Dict[str, Allowed],
                  allowed: Set[str], meta: Optional[Dict[str, Any]] = None, folder: Any = None,
-                 busy: Optional[Callable[[str], None]] = None):
+                 busy: Optional[Callable[[str], None]] = None,
+                 progress: Optional[Callable[[Dict[str, Any]], None]] = None):
         self.gate, self.lab, self.prep = gate, gate.lab, prep
         self.store, self.grants, self.meta, self.folder = store, grants, dict(meta or {}), folder
         # unknown addresses a person allowed, as VISA resources however they are spelled (the approval's serial://COM5
         # is the script's COM5 or ASRL5::INSTR), and makers' libraries, by name
         self.allowed = {a if a in OPAQUE else canonical(a) for a in allowed}
         self.busy = busy or (lambda text: None)
+        self.progress = progress   # told of the run as it goes, as RunEngine.progress is: the live views follow it
         self.token = secrets.token_hex(16)
         self.stopping: Optional[str] = None  # why the run is stopping
         self.failed: Optional[str] = None    # the gate's refusal (or a person's no) that stopped it
@@ -918,6 +920,9 @@ class ScriptRun:
         self.state: Dict[str, Any] = {}      # what the script set, as it is now
         self.reading: Dict[str, Any] = {}    # readings since its last change
         self.read_keys: Dict[str, None] = {}
+        self.first: Dict[str, str] = {}      # each setting's value in the first row it is in
+        self.changed: Dict[str, None] = {}   # the settings a later row has another value of: the run's axes
+        self.units: Dict[str, str] = {}
         self.rows: List[Dict[str, Any]] = []
         self.held: Dict[str, List[str]] = {}   # errors the gate read from an instrument, for the script's own query
         self.reported = 0                      # commands an instrument reported an error for
@@ -938,9 +943,21 @@ class ScriptRun:
         row.update((k, v) for k, v in self.state.items() if _number(v))
         row.update(self.reading)
         self.rows.append(row)
+        for k in self.state:
+            if k in row and self.first.setdefault(k, repr(row[k])) != repr(row[k]):
+                self.changed[k] = None
         if self.rec is not None:
             self.rec.add(row)
+            self._emit(event="point", run_id=self.rec_id, done=len(self.rows), total=None, row=row, eta_s=None,
+                       columns=self._columns())   # its axes and readings so far: they grow as it runs
         self.reading = {}
+
+    def _emit(self, **event: Any) -> None:
+        if self.progress is not None:
+            try:
+                self.progress(event)
+            except Exception:
+                pass   # a broken display must never stop an experiment
 
     def _note_set(self, key: str, value: Any) -> None:
         if key in self.state and self.state[key] == value:
@@ -975,12 +992,13 @@ class ScriptRun:
 
     def _columns(self) -> Dict[str, Any]:
         def unit(key: str) -> str:
-            try:
-                return self.lab.resolve(key)[1].unit
-            except KeyError:
-                return ""
-        changed = [k for k in self.state if len({repr(r.get(k)) for r in self.rows if k in r}) > 1]
-        return {"axes": [{"key": k, "unit": unit(k), "kind": "instrument"} for k in changed],
+            if key not in self.units:
+                try:
+                    self.units[key] = self.lab.resolve(key)[1].unit
+                except KeyError:
+                    self.units[key] = ""
+            return self.units[key]
+        return {"axes": [{"key": k, "unit": unit(k), "kind": "instrument"} for k in self.state if k in self.changed],
                 "measures": [{"key": k, "unit": unit(k), "kind": "scalar"} for k in self.read_keys]}
 
     def _log(self, **entry: Any) -> None:
@@ -1362,6 +1380,8 @@ class ScriptRun:
         self.rec.snapshot("start", start)
         gate.log.write("run_start", by=gate.operator, run=self.rec.run_id, plan=prep.name, points=0,
                        script=str(prep.path))
+        self._emit(event="start", run_id=self.rec.run_id, plan=prep.name, total=None, axes=[], measures=[],
+                   script=True)   # how many points it takes is the script's own business
         self.commands_file = open(run_dir / "commands.jsonl", "w", encoding="utf-8")
         output_path = run_dir / "output.txt"
         files_before = self._files_now()
@@ -1458,6 +1478,7 @@ class ScriptRun:
             reason = "%s; it did not end within %s of the stop, so Kelvin ended it" % (reason, _dur(GRACE_S))
         cleanup: List[str] = []
         if status != "done":
+            self._emit(event="phase", run_id=self.rec.run_id, phase="stopping", eta_s=None)
             cleanup = self._back_to_safe()
         left = self._left_on() if status == "done" else []
         try:
@@ -1489,6 +1510,7 @@ class ScriptRun:
         self.rec.finish(**meta)
         gate.log.write("run_end", by=gate.operator, run=self.rec.run_id, status=status, reason=reason,
                        points=len(self.rows), duration_s=round(duration, 3), script=str(prep.path))
+        self._emit(event="end", run_id=self.rec.run_id, status=status, done=len(self.rows), total=None)
         if status == "done":
             report.message = "script %s done: %s, %d instrument commands through the gate" % (
                 prep.name, _dur(duration), self.n_commands)

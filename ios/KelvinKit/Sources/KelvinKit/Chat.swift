@@ -184,7 +184,8 @@ public struct Transcript: Equatable, Sendable {
             }
         case .runProgress(let callID, let done, let total, let status):
             if let i = lines.firstIndex(where: { $0.id == "step-" + callID }) {
-                lines[i].detail = status == "running" ? "\(done) of \(total) points" : "\(status): \(done) of \(total) points"
+                let points = total > 0 ? "\(done) of \(total) points" : "\(done) points"   // a lab script's run: no total
+                lines[i].detail = status == "running" ? points : "\(status): \(points)"
             }
         case .note(let text):
             add(.note, text)

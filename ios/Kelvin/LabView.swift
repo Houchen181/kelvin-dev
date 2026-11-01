@@ -309,10 +309,12 @@ struct RunSection: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(run.plan).font(.headline)
                     Spacer()
-                    Text("\(Int((run.fraction * 100).rounded())) %").font(.subheadline.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    if run.total > 0 {
+                        Text("\(Int((run.fraction * 100).rounded())) %").font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                ProgressView(value: run.fraction)
+                if run.total > 0 { ProgressView(value: run.fraction) }   // a lab script's run has no total
                 Text(Format.progress(run)).font(.footnote.monospacedDigit()).foregroundStyle(.secondary)
                 Button(role: .destructive) { confirmStop = true } label: {
                     Label("Stop", systemImage: "stop.fill").foregroundStyle(.red)
@@ -331,7 +333,7 @@ struct RunSection: View {
                 RunStatusIcon(status: run.status)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(run.plan).font(.headline)
-                    Text("\(RunStatusIcon.word(run.status)) · \(run.done) of \(run.total) points")
+                    Text("\(RunStatusIcon.word(run.status)) · \(Format.points(run))")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }
             }

@@ -159,7 +159,9 @@ WAIT_S = 120   # the longest wait inside a turn: a wait holds the lab, so longer
 STOP_POLL_S = 0.2   # how often a tool call that is still running looks at the stop button
 STOPPED_CALL = ("stopped: the person pressed stop while this was still running. Kelvin ends it as soon as the lab "
                 "lets it: a plan stops at once, an instrument still taking a reading is told to stop.")
-_RUN_ID = re.compile(r"run_id='([^']+)'")
+# the tools that make runs, and how their answers name them: run_id='…', or "run <id>" (a recipe's stages)
+RUN_TOOLS = ("run_plan", "run_script", "run_recipe")
+_RUN_NAMED = re.compile(r"run_id='([^']+)'|\brun (\d{8}-\d{6}-[\w.-]*\w)")
 # a message that only says stop: STOP, stop!, Stop now, abort, /stop. A hard stop, never words for the model to read
 # at its next step (a run or a wait could last hours before it got there)
 _TYPED_STOP = re.compile(r"\s*/?(?:stop|abort|halt)(?:\s+(?:it|now|everything|all|stop|abort))*\s*[.!]*\s*", re.I)
@@ -260,20 +262,25 @@ def _why(e: BaseException) -> str:
     return text.splitlines()[0] if text else type(e).__name__
 
 
-def run_id_of(text: str) -> Optional[str]:
-    m = _RUN_ID.search(text or "")
-    return m.group(1) if m else None
+def runs_named(tool: str, text: str) -> List[str]:
+    """The runs a run tool's answer names, in the order they ran (a recipe's stages); none for any other tool."""
+    ids: List[str] = []
+    for m in _RUN_NAMED.finditer(text or "") if tool in RUN_TOOLS else ():
+        rid = m.group(1) or m.group(2)
+        if rid not in ids:
+            ids.append(rid)
+    return ids
 
 
 def runs_in(chats: List[Dict[str, Any]]) -> List[str]:
-    """Run ids that run_plan started in these chats, in the order they ran."""
+    """Run ids that these chats' run tools made (plans, scripts, recipes' stages), in the order they ran."""
     ids: List[str] = []
     for chat in chats:
         for m in chat.get("messages", []):
             for r in m.get("results", []) if m.get("role") == "tool" else []:
-                rid = run_id_of(r.get("content") or "") if r.get("name") == "run_plan" else None
-                if rid and rid not in ids:
-                    ids.append(rid)
+                for rid in runs_named(r.get("name") or "", r.get("content") or ""):
+                    if rid not in ids:
+                        ids.append(rid)
     return sorted(ids)
 
 
@@ -1364,7 +1371,7 @@ class ChatAgent:
             kept = self._keep_pictures(chat["id"], call["id"])
             documents = self._keep_documents(chat["id"], call["id"])
             await emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
-                        "is_error": is_error, "run_id": run_id_of(content) if call["name"] == "run_plan" else None,
+                        "is_error": is_error, "run_id": (runs_named(call["name"], content) or [None])[-1],
                         "images": [k["file"] for k in kept] or None})
         if call["name"] in OUTSIDE_TOOLS and not is_error and "<outside_text from=" in content:   # remembered
             chat["outside"] = OUTSIDE_TOOLS[call["name"]]   # the gate reads it with the chat's next lab call

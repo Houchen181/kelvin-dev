@@ -899,14 +899,21 @@ class LabRuntime:
             if event["event"] == "start":
                 self.live = {"run_id": event["run_id"], "plan": event["plan"], "total": event["total"], "done": 0,
                              "eta_s": None, "status": "running", "phase": "setup", "axes": event["axes"],
-                             "measures": event["measures"], "rows": [], "trace": None}
+                             "measures": event["measures"], "rows": [], "trace": None,
+                             "script": bool(event.get("script"))}   # a lab script's: no total
                 self.live_meta = dict(self.running_meta)   # whose it is, kept after it ends
             elif self.live is None or self.live["run_id"] != event["run_id"]:
                 return
             elif event["event"] == "point":
                 row = event["row"]
+                if event.get("columns"):   # a script's: what it has changed and read so far
+                    self.live["axes"], self.live["measures"] = event["columns"]["axes"], event["columns"]["measures"]
                 axes = {a["key"] for a in self.live["axes"]}
-                keep = {"i", "t"} | axes | {m["key"] for m in self.live["measures"] if m["kind"] == "scalar"}
+                read = {m["key"] for m in self.live["measures"] if m["kind"] == "scalar"}
+                keep = {"i", "t"} | axes | read
+                if event.get("columns"):   # and every value it set: one it changes later is an axis from then on
+                    keep |= set(row)
+                    axes = set(row) - read
                 self._keep_point({k: v for k, v in row.items() if k in keep and k not in ("i", "t")}, axes)
                 self.live["rows"].append({k: None if isinstance(v, float) and not math.isfinite(v) else v
                                           for k, v in row.items() if k in keep})   # JSON has no NaN
@@ -921,6 +928,13 @@ class LabRuntime:
                 self.live["phase"], self.live["eta_s"] = event["phase"], event.get("eta_s")
             elif event["event"] == "end":
                 self.live["status"], self.live["eta_s"], self.live["phase"] = event["status"], 0, "end"
+
+    def _live_ended(self, run_id: Optional[str]) -> None:
+        """A run that ended without telling the live view (an error on its way out) ends there too, so the Runs
+        pane and the chat's card stop following it."""
+        with self._live_lock:
+            if run_id and self.live is not None and self.live["run_id"] == run_id and self.live["status"] == "running":
+                self.live["status"], self.live["eta_s"], self.live["phase"] = "aborted", 0, "end"
 
     def live_view(self, since: int = 0) -> Optional[Dict[str, Any]]:
         """The live run with the rows recorded since `since` (thread-safe copy)."""
@@ -1050,9 +1064,10 @@ class LabRuntime:
         if live.get("status") == "running":
             eta = live.get("eta_s")
             seen = not restricted or self.may_see(self.live_meta)
-            return "%s (point %d of %d%s)%s" % (
-                "the running plan %s" % live.get("plan") if seen else "a running scan of unshared work",
-                live.get("done") or 0, live.get("total") or 0, ", ~%s left" % _dur(eta) if eta else "",
+            return "%s (point %d%s%s)%s" % (
+                "the running %s %s" % ("script" if live.get("script") else "plan", live.get("plan")) if seen
+                else "a running scan of unshared work", live.get("done") or 0,
+                " of %d" % live["total"] if live.get("total") else "", ", ~%s left" % _dur(eta) if eta else "",
                 " in the queue" if self.queue.state in ("running", "pausing") else "")
         pending = getattr(self.approver, "pending_list", lambda: [])()
         if pending:
@@ -5432,9 +5447,13 @@ class LabRuntime:
         def busy(text: str) -> None:
             self.busy = text
         with self._device_protection(meta) as held:
-            report = scriptrun.ScriptRun(gate, prep, self.engine.store, grants,
-                                         set(prep.found.unknown) | set(prep.found.libraries), meta,
-                                         self.attribution.get("folder"), busy).execute()
+            job = scriptrun.ScriptRun(gate, prep, self.engine.store, grants,
+                                      set(prep.found.unknown) | set(prep.found.libraries), meta,
+                                      self.attribution.get("folder"), busy, self.engine.progress)
+            try:
+                report = job.execute()
+            finally:
+                self._live_ended(job.rec_id)
         for name in names if report.status != "done" else []:
             self.engine._healthy.pop(name, None)   # checked again before the next run on them
         made = self._auto_report(report.run_id)

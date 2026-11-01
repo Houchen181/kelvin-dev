@@ -1610,11 +1610,12 @@ def analyze_run(rows: List[Dict[str, Any]], axes: List[Dict[str, str]], measures
     protocol = meta.get("protocol") if isinstance(meta.get("protocol"), str) else None
     guards = set(meta.get("guards") or [])
 
-    status, done, planned = meta.get("status"), meta.get("points", len(rows)), meta.get("planned_points", len(rows))
+    status, done, planned = meta.get("status"), meta.get("points", len(rows)), meta.get("planned_points")
     if not rows:
         issues.append("no data: the run recorded no points")
-    elif status == "aborted":
-        issues.append("run stopped after %s of %s points: %s" % (done, planned, meta.get("reason")))
+    elif status == "aborted":   # a lab script's run has no planned points
+        issues.append("run stopped after %s%s points: %s" % (done, " of %s" % planned if planned else "",
+                                                            meta.get("reason")))
     else:
         quality.append("all %s points recorded" % done)
     for w in meta.get("warnings") or []:

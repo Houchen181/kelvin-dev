@@ -220,8 +220,12 @@ enum Format {
         Date(timeIntervalSince1970: epoch).formatted(date: .omitted, time: .shortened)
     }
 
+    static func points(_ run: RunProgress) -> String {   // a lab script's run has no total
+        run.total > 0 ? "\(run.done) of \(run.total) points" : "\(run.done) points"
+    }
+
     static func progress(_ run: RunProgress) -> String {
-        var s = "\(run.done) of \(run.total) points"
+        var s = points(run)
         if let eta = run.etaSeconds, eta > 0 { s += " · about \(duration(eta)) left" }
         return s
     }

@@ -1279,7 +1279,9 @@
     const m = tab.final ? tab.final.meta || {} : {};
     const total = tab.final ? m.planned_points || tab.final.rows.length : tab.total;
     const done = tab.final ? (m.points != null ? m.points : tab.final.rows.length) : tab.done;
-    v.bar.style.width = (total ? Math.round(100 * done / total) : 0) + "%";
+    const open = !tab.final && !total;   // a lab script's run: as many points as it takes
+    v.bar.style.width = (total ? Math.round(100 * done / total) : open ? 100 : 0) + "%";
+    v.barBox.classList.toggle("open", open && running);
     v.barBox.classList.toggle("done", !running);
     v.barBox.classList.toggle("warn", !!tab.final && m.status !== "done");
     if (running) {
@@ -1287,11 +1289,11 @@
       v.count.textContent = tab.phase === "setup" ? "Setting up" + etaText(eta)
         : tab.phase === "after" ? "All " + done + " points measured · setting the final values" + etaText(eta)
         : tab.phase === "stopping" ? "Stopping · sending the drives it touched back to safe"
-        : done + " / " + total + " points" + etaText(eta);
+        : done + (total ? " / " + total : "") + " points" + etaText(eta);
     }
     else if (!tab.final) v.count.textContent = tab.status === "missing" ? "This run's data could not be read." : "Finished · analysing…";
     else if (m.status === "done") v.count.textContent = "Finished · " + done + " points" + (m.duration_s != null ? " in " + durText(m.duration_s) : "");
-    else if (m.status === "aborted") v.count.textContent = "Stopped after " + done + " of " + total + " points" + (m.reason ? ": " + m.reason : "");
+    else if (m.status === "aborted") v.count.textContent = "Stopped after " + done + (m.planned_points ? " of " + m.planned_points : "") + " points" + (m.reason ? ": " + m.reason : "");
     else if (m.status === "interrupted") v.count.textContent = "Cut short after " + done + (m.planned_points ? " of " + m.planned_points : "") +
       " points: Kelvin stopped while it measured (a crash or a power cut). Every point up to then is kept.";
     else v.count.textContent = "Not finished (" + done + " points recorded)";
@@ -1544,8 +1546,9 @@
     card.progress = (ev) => {
       card.runId = ev.run_id; card.plan = ev.plan;
       title.replaceChildren("Measuring ", h("code", {}, ev.plan));
-      bar.style.width = (ev.total ? Math.round(100 * ev.done / ev.total) : 0) + "%";
-      count.textContent = ev.done + " / " + ev.total;  // the time left is in the runs pane
+      bar.style.width = (ev.total ? Math.round(100 * ev.done / ev.total) : 100) + "%";
+      barBox.classList.toggle("open", !ev.total && ev.status === "running");   // a lab script's: no total
+      count.textContent = ev.total ? ev.done + " / " + ev.total : ev.done + " points";  // the time left is in the runs pane
     };
     card.finish = async (runId) => {
       card.runId = runId;
@@ -2312,7 +2315,7 @@
       this.steps.set(id, step);
       this.el.append(step.el);
     }
-    toolEnd(id, content, isError, runId, images) {
+    toolEnd(id, content, isError, runId, images, live) {   // live: as it happens, not a chat read back
       const step = this.steps.get(id);
       if (!step) return;
       step.finish(content, isError);
@@ -2328,11 +2331,14 @@
         (step.last || step.el).after(step.files);
         step.last = step.files;
       }
+      runId = runId || (step.card && step.card.runId);   // one its answer doesn't name: the run its card followed
       if (!runId) return;
       if (!step.card) { step.card = runCard(); (step.last || step.el).after(step.card.el); }
       step.card.finish(runId);
-      const tab = RUNS.tabs.get(runId);
-      if (tab && !tab.final) { setTabStatus(tab, "finishing"); loadFinal(tab); }
+      const fresh = live && !RUNS.tabs.has(runId) && !RUNS.dismissed.has(runId);   // over before the Runs pane saw it
+      const tab = fresh ? runTab(runId, step.card.plan || runId.replace(/^\d{8}-\d{6}-/, "")) : RUNS.tabs.get(runId);
+      if (tab && !tab.final) { setTabStatus(tab, "finishing"); loadFinal(tab); }   // the Analysis pane hears of it
+      if (fresh) openRun(runId, tab.plan);
     }
     runProgress(ev) {  // the data go to the runs pane; the conversation keeps a compact card
       const step = this.steps.get(ev.call_id);
@@ -2463,6 +2469,13 @@
   }
   function showEmpty(show) { $("empty").hidden = !show; thread.hidden = show; }
 
+  // the last run a run tool's answer names (a recipe's last stage), read as the server does (web/agent.py runs_named)
+  const RUN_TOOLS = ["run_plan", "run_script", "run_recipe"];
+  function runNamed(tool, content) {
+    if (!RUN_TOOLS.includes(tool)) return null;
+    const ids = [...String(content).matchAll(/run_id='([^']+)'|\brun (\d{8}-\d{6}-[\w.-]*\w)/g)].map((m) => m[1] || m[2]);
+    return ids.length ? ids[ids.length - 1] : null;
+  }
   function replayMessage(reply, m) {
     if (m.role === "assistant") {
       for (const b of m.blocks) {
@@ -2476,8 +2489,7 @@
     } else if (m.role === "tool") {
       for (const r of m.results) {
         if (r.review) reply.review(Object.assign({ call_id: r.id }, r.review));
-        const run = r.name === "run_plan" ? (String(r.content).match(/run_id='([^']+)'/) || [])[1] : null;
-        reply.toolEnd(r.id, r.content, r.is_error, run, (r.images || []).map((i) => i.file));
+        reply.toolEnd(r.id, r.content, r.is_error, runNamed(r.name, r.content), (r.images || []).map((i) => i.file));
       }
     }
   }
@@ -3936,7 +3948,7 @@
         if (chatId !== undefined && S.asking.delete(chatId)) renderChats();
         break;
       }
-      case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images); pollState(); break;
+      case "tool_end": reply.toolEnd(ev.id, ev.content, ev.is_error, ev.run_id, ev.images, true); pollState(); break;
       case "run_progress": reply.runProgress(ev); break;
       case "computer_step": reply.computerStep(ev); break;
       case "analysis": if (here) openAnalysis(ev.spec, ev.result); break;
@@ -6446,7 +6458,7 @@
       case "run_progress": {
         let el = TERM.progress.get(ev.call_id);
         if (!el) { termCloseReply(); el = termLine("", "step"); TERM.progress.set(ev.call_id, el); }
-        el.textContent = "  ⎿ " + (ev.plan || "run") + ": " + ev.done + " / " + ev.total + " points" +
+        el.textContent = "  ⎿ " + (ev.plan || "run") + ": " + ev.done + (ev.total ? " / " + ev.total : "") + " points" +
           (ev.status && ev.status !== "running" ? " (" + ev.status + ")" : "");
         if (ev.status === "running") noticeRun(ev.run_id, ev.plan);   // its data show live in the Runs pane
         break;
@@ -7228,7 +7240,7 @@
   // analyze tool opens this pane with its own spec, which the person changes here; Keep fit keeps it with its run.
   const ANA = { open: false, spec: { runs: [], x: "", y: "", where: "", steps: [], fit: null }, result: null, runs: [],
                models: [], hold: {}, params: [], paramsFor: "", gen: 0, timer: null, auto: { x: true, y: true, group: true },
-               traces: new Map() };
+               follow: false, traces: new Map() };
   // op: [its name, its fields: {key, hint (the placeholder), value (its default), choices: [[value, label]], text (a word,
   // not a number), before and after (a word beside the box, so a filled-in number still says what it is)}]
   const X_FROM = { key: "lo", hint: "from x" }, X_TO = { key: "hi", hint: "to x" };
@@ -7259,8 +7271,14 @@
     $("toggle-analysis").classList.toggle("on", ANA.open);
     fitLayout();
     if (!ANA.open) return;
-    if (!ANA.spec.runs.length) startAnalysis();
+    if (!ANA.spec.runs.length || anFollows()) startAnalysis();   // the newest run
     else loadAnalysisRuns().then(renderAnalysisForm);   // runs measured since it was last open
+  }
+  // the pane follows the newest run (or the one the Runs pane shows) until the person makes the analysis theirs: picks
+  // a run, or changes a field, a step or the fit. What Kelvin's analyze (or a run's Analyze) opened stays
+  function anFollows() {
+    const s = ANA.spec, a = ANA.auto;
+    return ANA.follow && a.x && a.y && a.group && s.runs.length <= 1 && !s.where && !s.steps.length && !s.fit;
   }
   async function loadAnalysisRuns() {
     // the runs this chat's model may see: what the pane hands to Kelvin goes into this chat
@@ -7268,10 +7286,11 @@
     $("an-run").replaceChildren(...ANA.runs.map((r) => h("option", { value: r.run_id }, anRunLabel(r))));
   }
   // the run picker and the compare menu as they are now, while the pane is open: a run ended, or another chat (whose
-  // model may see other runs) opened. Only the list changes: what the person is writing in the form stays
+  // model may see other runs) opened. A pane that follows the newest run shows it; else only the list changes: what
+  // the person is writing in the form stays
   async function refreshAnalysisRuns() {
     if (!ANA.open) return;
-    if (!ANA.spec.runs.length) return startAnalysis();   // it said "No runs yet.": the latest now
+    if (!ANA.spec.runs.length || anFollows()) return startAnalysis();   // "No runs yet.", or following: the newest
     await loadAnalysisRuns();
     const first = ANA.spec.runs[0];
     if (!ANA.runs.some((r) => r.run_id === first)) $("an-run").append(h("option", { value: first }, first));
@@ -7284,6 +7303,7 @@
     const shown = RUNS.active && ANA.runs.some((r) => r.run_id === RUNS.active) ? RUNS.active : ANA.runs[0].run_id;
     ANA.spec = { runs: [shown], x: "", y: "", where: "", group: "", steps: [], fit: null };
     ANA.auto = { x: true, y: true, group: true };
+    ANA.follow = true;
     await anColumns(shown);
     renderAnalysisForm();
     computeAnalysis(true);
@@ -7296,6 +7316,7 @@
       steps: Array.isArray(spec.steps) ? spec.steps.map((s) => Object.assign({}, s)) : [],
       fit: spec.fit ? Object.assign({}, spec.fit) : null };
     ANA.auto = auto || { x: !spec.x, y: !spec.y, group: spec.group === undefined || spec.group === null };   // what Kelvin left out follows the run, as the server's does
+    ANA.follow = false;   // the runs it was asked about
     ANA.paramsFor = "";   // Kelvin's start and fixed values shown in the fit's fields
     if (!ANA.open) {
       ANA.open = true;   // shown without starting the pane's own default
@@ -7622,6 +7643,7 @@
     });
     $("an-run").addEventListener("change", async () => {
       const id = $("an-run").value;
+      ANA.follow = false;   // the person's pick
       ANA.spec.runs = [id].concat(ANA.spec.runs.slice(1).filter((x) => x !== id));
       await anColumns(id);
       renderAnalysisForm();
