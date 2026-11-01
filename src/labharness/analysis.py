@@ -429,6 +429,36 @@ def _p_more(simple: Dict[str, Any], rich: Dict[str, Any], n: int) -> float:
     return f_sf(((rss1 - rss2) / (k2 - k1)) / (rss2 / (n - k2)), k2 - k1, n - k2)
 
 
+def _fit_at(f: Dict[str, Any], x: Any) -> Any:
+    """A fit's model at these x, on the values as recorded (in dB for a line fitted on linear power)."""
+    np = _np()
+    if f["model"] == "linear":
+        return f["values"][0] + f["values"][1] * x
+    if f["model"] == "quadratic":
+        return f["values"][1] + f["values"][2] * (x - f["values"][0]) ** 2
+    xc, xs_, yc, ys_ = f["_norm"]
+    level = yc + ys_ * MODELS[f["model"]][0]((x - xc) / xs_, f["_p"])
+    if f.get("on_power"):
+        with np.errstate(all="ignore"):
+            return 10 * np.log10(level)
+    return level
+
+
+def _runs_z(res: Any) -> float:
+    """The runs test on residuals' signs (as fitting's): well below zero, they run in long stretches above and below
+    the model, which noise that is independent from point to point does not (slow drift, 1/f noise does). 0 for
+    too few points to tell."""
+    np = _np()
+    signs = res > np.median(res)
+    n1, n2 = int(signs.sum()), int((~signs).sum())
+    if n1 <= 5 or n2 <= 5:
+        return 0.0
+    runs = 1 + int(np.count_nonzero(signs[1:] != signs[:-1]))
+    mu = 2.0 * n1 * n2 / (n1 + n2) + 1
+    var = (mu - 1) * (mu - 2) / (n1 + n2 - 1)
+    return (runs - mu) / math.sqrt(var) if var > 0 else 0.0
+
+
 def _turns(f: Dict[str, Any], noise: float) -> int:
     """An oscillation's turning points (maxima and minima) at least a quarter period inside both ends of the sweep,
     where its decayed amplitude still reaches the noise: a peak that fills the window has one."""
@@ -710,18 +740,28 @@ def analyze_curve(xs: Sequence[float], ys: Sequence[float], x_name: str, y_name:
             "peak" if f["values"][1] > 0 else "dip", x_name, _fmt_pm(f["values"][2], f["errors"][2], x_unit), z, why)
 
     def beats_line(m: str, f: Optional[Dict[str, Any]]) -> bool:
-        """A richer shape that tells the curve better than noise alone would let it beat a straight line (an F test
-        of the two fits, R² on the values as recorded, strict for each place the shape could be and each shape
+        """A richer shape that tells most of the curve (R² 0.5 or more, on the values as recorded), takes out of
+        the line's residuals a part of a quarter of the noise or more (rms), leaves residuals that don't run in long
+        stretches (the F test holds for noise independent from point to point), and beats the line by more than
+        noise alone would let it (an F test of the two fits, strict for each place the shape could be and each shape
         tried). A few points make their noise out of the curve's own bend, and a line then passes for noise: six
-        points rising to a peak at 1.6 V and falling read as "linear ... no problems found" at R² 0.71."""
-        if not f or m == "linear" or not math.isfinite(r2_shown(f)):
+        points rising to a peak at 1.6 V and falling read as "linear ... no problems found" at R² 0.71. A long
+        steady trace's slow wander (1/f noise, a random walk, a drift's) beats a line by an F test too, but it
+        tells little of the trace, lies far below its noise or leaves residuals that run: that stays steady or a
+        line (the review of the fixes: 1200 points "relaxed exponentially" at R² 0.150)."""
+        if not f or m == "linear" or not math.isfinite(r2_shown(f)) or r2_shown(f) < 0.5:
+            return False
+        if math.sqrt(max(lin["rms"] ** 2 - f.get("rms_db", f["rms"]) ** 2, 0.0)) < 0.25 * sigma:
+            return False
+        if _runs_z(ys_s - _fit_at(f, xs_s)) < -3:   # what it leaves still runs: noise that isn't independent
             return False
         width = abs(f["values"][3]) if m in LINES + ("step",) else 0.0
-        look = len(yd) / 4 if m == "oscillation" else trials(width) if width else 1.0
-        return _p_more(plain, dict(f, r2=r2_shown(f)), len(yd)) * look * len(candidates) < 1e-5
+        look = n / 4 if m == "oscillation" else trials(width) if width else 1.0
+        return _p_more(lin, dict(f, r2=r2_shown(f)), n) * look * len(candidates) < 1e-5
 
-    plain = lin if lin is None or xd.size == n else _linear(xd, yd)   # the line on the points the shapes were fitted to
-    missed = bool(lin) and force is None and lin["r2"] < 0.98 and any(beats_line(m, f) for m, f in candidates.items())
+    # only on a curve whose shapes were fitted to every point (a longer one's are fitted to a decimated copy)
+    missed = bool(lin) and force is None and xd.size == n and lin["r2"] < 0.98 and \
+        any(beats_line(m, f) for m, f in candidates.items())
 
     osc, expo = candidates.get("oscillation"), candidates.get("exponential")
     chosen = None
