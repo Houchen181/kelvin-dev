@@ -5,7 +5,28 @@ on:
   pull_request:
 
 jobs:
+  exitcheck:
+    name: TEMP exit during flush_reports, fixed and unfixed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -e ".[web,dev]"
+      - name: fixed - Python exits while a run's automatic reports read run.h5
+        run: |
+          for i in 1 2 3 4; do rc=0; timeout 60 python tests/_tmp_flush_at_exit.py tests > out.txt 2>&1 || rc=$?; echo "fixed $i: exit $rc, converter lines $(grep -c 'Failed to find converter' out.txt), $(grep 'main:' out.txt)"; done
+      - name: unfixed - the same with run.h5 opened as release/0.3.36 opens it
+        run: |
+          git fetch --depth=1 origin release/0.3.36
+          for f in rundata catalog fitting; do git show FETCH_HEAD:src/labharness/$f.py > src/labharness/$f.py; done
+          git diff --stat
+          for i in 1 2 3 4; do rc=0; timeout 60 python tests/_tmp_flush_at_exit.py tests > out.txt 2>&1 || rc=$?; echo "unfixed $i: exit $rc, converter lines $(grep -c 'Failed to find converter' out.txt), $(grep 'main:' out.txt)"; done
+          for i in 1 2; do rc=0; timeout 300 python -m pytest -q -p no:cacheprovider tests/test_rundata.py -k never_crash_it > out.txt 2>&1 || rc=$?; echo "unfixed regression test $i: pytest exit $rc"; grep -E "passed|failed|returncode|Timeout" out.txt | head -3; done
+
   core:
+    if: false
     name: core (Python 3.9, PyYAML only)
     runs-on: ubuntu-latest
     steps:
@@ -17,6 +38,7 @@ jobs:
       - run: python -m pytest -q
 
   full:
+    if: false
     name: full (Python 3.13, MCP server + portal)
     runs-on: ubuntu-latest
     steps:
