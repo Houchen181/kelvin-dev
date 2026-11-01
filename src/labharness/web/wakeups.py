@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..conditions import Condition, parse_condition
+from ..conditions import Condition, parse_condition, typed
 
 TICK_S = 2.0
 WAKES_PER_DAY = 12
@@ -88,7 +88,8 @@ class Waker:
             within = min(MAX_HOURS, float(args.get("within_hours") or 12.0)) * 3600
             if args.get("until"):
                 cond = parse_condition(str(args["until"]))
-                self.agent.runtime.lab.resolve(cond.key)   # KeyError: no such reading
+                # KeyError: no such reading; ValueError: a word its mode or switch never reads
+                typed(cond, self.agent.runtime.lab.resolve(cond.key)[1])
                 hold = max(0.0, float(args.get("hold_minutes") or 0)) * 60
                 wake = Wake(chat_id, "until", note, "%s%s" % (cond.text, " for %g min" % (hold / 60) if hold else ""),
                             now + within, cond, hold)
@@ -198,6 +199,7 @@ class Waker:
             if why is not None:
                 return None if now < w.due else "it has waited %s, and %s isn't read now (%s)" % (
                     _dur(now - w.created), w.condition.key, why)
+            typed(w.condition, lab.resolve(w.condition.key)[1])   # kept over a restart: its word as written again
             ok, value = w.condition.check(lambda instr, param: value)
         except Exception as e:   # a reading failed: say so rather than wait forever
             return "%s could not be read (%s)" % (w.condition.key, str(e).splitlines()[0] if str(e) else e)

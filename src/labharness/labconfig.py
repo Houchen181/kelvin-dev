@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from .cards import CONNECTION_KEYS, Card, CardError, CardRegistry, ParamSpec, num
-from .conditions import Condition, parse_condition
+from .conditions import Condition, parse_condition, typed
 from .yamlio import load_yaml
 
 TRUST = ("ask", "envelope")
@@ -290,6 +290,11 @@ def load_lab_config(source: Any, registry: CardRegistry) -> LabConfig:
         if spec is None or not spec.is_drive:
             err(path, "%r is not a drive" % lk.get("drive"))
         elif readable(cond.key, path):
+            try:   # a switch's or a mode's word, as its reading gives it: "tc.heater_range != off"
+                typed(cond, _lookup(cards, cond.key))
+            except ValueError as e:
+                err(path, "%s: %s" % (cond.text, e))
+                continue
             interlocks.append(Interlock(str(lk["drive"]), cond))
 
     safe_actions: Dict[str, str] = {}

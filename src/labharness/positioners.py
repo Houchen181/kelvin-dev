@@ -25,7 +25,9 @@ from .drivers import DriverBackend
 
 _PATH = re.compile(r"^(\w+?)(\d+)$")   # "offset1": the parameter, then the axis
 MOVE_TIMEOUT_S = 60.0
-_shared: Dict[str, Tuple[Any, int]] = {}   # one connection per controller, shared by its axes
+# one connection per controller, shared by its axes, with one lock: an axis's exchange never interleaves with another's
+# on the link (a read of axis 1 during axis 2's step took its reply, and a working controller was alarmed as silent)
+_shared: Dict[str, Tuple[Any, int, Any]] = {}
 _shared_lock = threading.Lock()
 
 
@@ -52,7 +54,7 @@ class _Controller(DriverBackend):
         self.module = module
         key = "%s:%s" % (self.KIND, self.target.lower())
         with _shared_lock:
-            dev, users = _shared.get(key, (None, 0))
+            dev, users, lock = _shared.get(key, (None, 0, None))
             if dev is None:
                 try:
                     dev = self.open()
@@ -61,8 +63,9 @@ class _Controller(DriverBackend):
                 except Exception as e:
                     raise AdapterError("%s: could not open the %s at %s: %s" % (name, self.KIND, self.target or "0",
                                                                                e)) from e
-            _shared[key] = (dev, users + 1)
-        self.key, self.dev = key, dev
+                lock = threading.Lock()
+            _shared[key] = (dev, users + 1, lock)
+        self.key, self.dev, self.lock = key, dev, lock
         self.steps: Dict[int, int] = {}
 
     def open(self) -> Any:
@@ -85,11 +88,11 @@ class _Controller(DriverBackend):
 
     def close(self) -> None:
         with _shared_lock:
-            dev, users = _shared.get(self.key, (None, 0))
+            dev, users, lock = _shared.get(self.key, (None, 0, None))
             if dev is None:
                 return
             if users > 1:
-                _shared[self.key] = (dev, users - 1)
+                _shared[self.key] = (dev, users - 1, lock)
                 return
             _shared.pop(self.key, None)
         try:

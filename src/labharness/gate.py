@@ -204,6 +204,15 @@ def feeds_of(inst: Any, spec: ParamSpec) -> List[str]:
     return [key] + (["%s.%s" % (inst.name, spec.readback)] if spec.readback else [])
 
 
+def applied_by(inst: Any, spec: ParamSpec) -> List[ParamSpec]:
+    """The set points a switch applies to the sample as they are set (a heater range: the set point whose applies_when
+    names it), which take their readings there once it is on: tc.heater_range on takes tc.T_sample to tc.setpoint. Not
+    an output's levels (its enables), which are parked at safe as it goes on."""
+    if not spec.is_drive or spec.type not in ("bool", "enum"):
+        return []
+    return [p for p in inst.card.drives if p.applies_when == spec.name and p.readback and p.name not in spec.enables]
+
+
 def paces(card: Any, name: str) -> Optional[ParamSpec]:
     """The set point whose ramp rate this parameter is (a magnet's rate paces its field), or None. Going to safe never
     sends a rate to its safe value: a rate of 0 is not safe, it freezes the drive where it is."""
@@ -274,6 +283,9 @@ class SafetyGate:
         # the drive levels the running plan or queue item set: switching their enable on parks them at safe (_move),
         # then puts them back (_reapply), so a run measures at what was approved, not at safe. None: no plan running
         self._asked: Optional[Dict[str, Any]] = None
+        # the set points the running plan sets itself (its setup and sweep): a switch it turns on leaves their levels to
+        # it, as its own check foresaw them (engine.interlock_problems), not where they were before it
+        self._planned: frozenset = frozenset()
         # alarm(kind, key, text, actions): what the gate meets while it changes something goes up as an alarm (a
         # guard's trip, a wait for a set point that gave up). The monitor sets it (Monitor.from_gate); None on a twin
         self.alarm: Optional[Callable[..., Any]] = None
@@ -679,14 +691,17 @@ class SafetyGate:
         return getattr(self._queued, "on", False) and key in self.queue_actions
 
     @contextmanager
-    def preapproved(self, grants: Dict[str, Allowed]) -> Iterator[None]:
+    def preapproved(self, grants: Dict[str, Allowed], planned: Iterable[str] = ()) -> Iterator[None]:
+        """planned: the set points the running plan sets itself (_planned)."""
         old, self._grants = self._grants, dict(grants)
         asked, self._asked = self._asked, {}
+        was, self._planned = self._planned, frozenset(planned)
         try:
             yield
         finally:
             self._grants = old
             self._asked = asked
+            self._planned = was
 
     def plan_approval(self, drive_values: Dict[str, List[Any]], forecast: Any = None, asking: bool = False,
                       whole_path: bool = False, later: Iterable[str] = (), noun: str = "plan"
@@ -1182,28 +1197,42 @@ class SafetyGate:
         reading, and a 70 K set point with the field up once went ahead). Refused when the new value fails it while its
         drive is away from safe, unless the condition fails already and the change takes it no further (cooling while
         the monitor brings the field down). A reading that drifts out of it is the monitor's to catch
-        (Monitor._check_interlocks)."""
+        (Monitor._check_interlocks). A switch going on is checked for the set points it applies, at their levels now
+        (applied_by): a heater switched on with tc.setpoint left at 15 K heated the sample past "T_sample < 10" with
+        the field up, its card silent. Not those the running plan sets itself (_planned): its check foresaw them."""
         key = "%s.%s" % (inst.name, spec.name)
-        feeds = set(feeds_of(inst, spec))
+        checks: List[Tuple[str, Any, Optional[ParamSpec]]] = [(k, target, None) for k in feeds_of(inst, spec)]
+        deps = [d for d in applied_by(inst, spec) if "%s.%s" % (inst.name, d.name) not in self._planned]
+        if deps and spec.distance(target) > 0:
+            was = self._current(inst, spec)
+            if was is None or spec.distance(was) == 0:   # switching on: each set point takes its reading there
+                checks += [("%s.%s" % (inst.name, d.readback), self._current(inst, d), d) for d in deps]
         for lock in self.lab.config.interlocks:
-            if lock.require.key not in feeds:
-                continue
-            ok, _ = lock.require.check(lambda i, p: target)
-            if ok:
-                continue
-            try:
-                dinst, dspec = self.lab.resolve(lock.drive)
-                now = self._current(dinst, dspec) if dinst.enabled else None
-            except Exception:
-                now = None
-            if now is not None and dspec.distance(now) == 0:
-                continue   # its drive is at safe: nothing the interlock protects
-            if no_further(self.lab, lock, target):
-                continue
-            via = "" if lock.require.key == key else " (it takes %s there)" % lock.require.key
-            return ("interlock: %s (now %s) needs %s; setting %s to %s%s would break it, so bring %s to safe first"
-                    % (lock.drive, dspec.show(now) if now is not None else "unknown", lock.require.text, key,
-                       spec.show(target), via, lock.drive))
+            for reading, value, dep in checks:
+                if lock.require.key != reading:
+                    continue
+                ok, _ = lock.require.check(lambda i, p: value)
+                if ok:
+                    continue
+                try:
+                    dinst, dspec = self.lab.resolve(lock.drive)
+                    now = self._current(dinst, dspec) if dinst.enabled else None
+                except Exception:
+                    now = None
+                if now is not None and dspec.distance(now) == 0:
+                    continue   # its drive is at safe: nothing the interlock protects
+                if no_further(self.lab, lock, value):
+                    continue
+                if dep is not None:
+                    return ("interlock: %s (now %s) needs %s; switching %s to %s would take %s to %s (%s.%s), which "
+                            "breaks it, so bring %s to safe first, or set %s.%s where it holds" % (
+                                lock.drive, dspec.show(now) if now is not None else "unknown", lock.require.text, key,
+                                spec.show(target), reading, dep.show(value) if value is not None else
+                                "a level Kelvin can't read", inst.name, dep.name, lock.drive, inst.name, dep.name))
+                via = "" if lock.require.key == key else " (it takes %s there)" % lock.require.key
+                return ("interlock: %s (now %s) needs %s; setting %s to %s%s would break it, so bring %s to safe first"
+                        % (lock.drive, dspec.show(now) if now is not None else "unknown", lock.require.text, key,
+                           spec.show(target), via, lock.drive))
         return None
 
     def _covered(self, inst: Instrument, spec: ParamSpec, target: Any, envelope: bool = True) -> Optional[str]:
@@ -1562,8 +1591,11 @@ class SafetyGate:
         gives up goes up as an alarm (it stays until a person says Got it), and says the switch the set point goes
         through when that may be why (a heater range too low). A move away from safe whose switch is off (a heater
         range at off) isn't waited for at all: nothing brings the reading there (it was waited on for ten minutes,
-        then called stuck). since: the to-safe count (_safe_seq) when the move began: a drive a to-safe has sent toward
-        safe since (an interlock that failed) is never held, but goes on there (_holding); None: from now."""
+        then called stuck). A reading that fails (a sensor fault, no answer) ends the wait as one that gave up: a move
+        away from safe is set back to the reading's last value (or where it was), never left to go on unwatched (one bad
+        reading once left a set point going to 50 K, with no alarm). since: the to-safe count (_safe_seq) when the move
+        began: a drive a to-safe has sent toward safe since (an interlock that failed) is never held, but goes on there
+        (_holding); None: from now."""
         from .monitor import Approach, rate_per_s, switch_words
         since = self._safe_seq if since is None else since
         clock = self.lab.clock
@@ -1573,9 +1605,24 @@ class SafetyGate:
         poll = max(0.1, min(5.0, (eta or 10.0) / 50))
         t0 = clock.now()
         way = None if arrived else Approach(target, spec.tol, t0, rate_per_s(inst, spec), WAIT_STALL_S)
+        last = None   # the reading's latest value
+
+        def unread(e: Exception) -> Result:
+            why = str(e).splitlines()[0][:160] if str(e) else type(e).__name__
+            if arrived:   # its status says the move is over: a set point put elsewhere would move it again
+                return Result(False, "error", key, value=target, message="%s: its status says the move is over, but %s "
+                              "can't be read (%s)" % (key, spec.readback, why))
+            back = last if last is not None else current if isinstance(current, (int, float)) and not isinstance(
+                current, bool) else spec.safe
+            return self._gave_up(inst, spec, back, target, watch, "%s: %s can't be read (%s), so Kelvin stopped waiting"
+                                 % (key, spec.readback, why), since=since,
+                                 where="%s's last reading" % spec.readback if last is not None else "where it was before")
         off = self._switched_off(inst, spec) if watch and not arrived else None
         if off:
-            val = inst.read(spec.readback)
+            try:
+                val = inst.read(spec.readback)
+            except Exception as e:
+                return unread(e)
             if abs(val - target) > spec.tol:
                 return self._gave_up(inst, spec, val, target, watch, "%s: %s is %s, so nothing brings %s (%s) to %s, "
                                      "and Kelvin didn't wait for it" % (key, off[0], off[1], spec.readback,
@@ -1583,7 +1630,11 @@ class SafetyGate:
                                      " (switch %s on first, or set both in one plan's setup)" % off[0], alarm=False,
                                      since=since)
         while True:
-            val = inst.read(spec.readback)
+            try:
+                val = inst.read(spec.readback)
+            except Exception as e:
+                return unread(e)
+            last = val
             if abs(val - target) <= spec.tol:
                 return None
             if watch:
@@ -1629,17 +1680,19 @@ class SafetyGate:
         return "%s.%s" % (inst.name, switch.name), switch.show(now)
 
     def _gave_up(self, inst: Instrument, spec: ParamSpec, val: Any, target: Any, away: bool, text: str,
-                 after: str = "", alarm: bool = True, since: Optional[int] = None) -> Result:
+                 after: str = "", alarm: bool = True, since: Optional[int] = None, where: str = "") -> Result:
         """A wait for a set point that ends before its reading got there. A move away from safe is set back to where
         its reading got to, as a stop leaves it (its guards are watched only while Kelvin waits, so it must not go on
         by itself unwatched), and the result says so: the set point a person approved was once put back silently.
         Not one a to-safe has sent toward safe since `since` (_holding): that goes on to safe. alarm: it goes up as
-        one (gate.alarm), before the set point changes, so the watchdog's alarm for it becomes this one."""
+        one (gate.alarm), before the set point changes, so the watchdog's alarm for it becomes this one. where: what
+        val is, in words, when not where the reading is now (it can't be read)."""
         key = "%s.%s" % (inst.name, spec.name)
         since = self._safe_seq if since is None else since
         sent = away and self._sent_safe.get(key, 0) > since
         if away and not sent:
-            text += "; %s set back to %s, where %s is, not %s" % (key, spec.show(val), spec.readback, spec.show(target))
+            text += "; %s set back to %s, %s, not %s" % (key, spec.show(val), where or "where %s is" % spec.readback,
+                                                         spec.show(target))
         elif sent:
             text += "; it goes on to safe, where it was sent meanwhile"
         text += after
@@ -1799,10 +1852,11 @@ class SafetyGate:
             results = [Result(False, "error", key, message="%s: instrument error: %s" % (key, e))]
         return [self._done(r, "safe", by) for r in results]
 
-    def _to_safe(self, inst: Instrument, wait: bool) -> List[Result]:
+    def _to_safe(self, inst: Instrument, wait: bool, hold: bool = True) -> List[Result]:
+        """hold=False: the lab config's hold doesn't apply (a reset goes out only with every drive at safe)."""
         out = []
         for name in inst.card.safe_sequence:
-            r = self._safe_one(inst, inst.spec(name), wait)
+            r = self._safe_one(inst, inst.spec(name), wait, hold)
             if r is not None:
                 out.append(r)
         return out
@@ -1849,16 +1903,16 @@ class SafetyGate:
         return self.abort_to_safe(keys, by, hold=False)
 
     def _safe_one(self, inst: Instrument, spec: ParamSpec, wait: bool, hold: bool = True) -> Optional[Result]:
-        """One drive to safe (None: already there, or a rate). Held instead where the lab config says hold, or, when
-        not waiting, where a set point's safe value can't be reached. A drive's ramp rate (a magnet's) is never sent to
-        its safe value: it is how fast the drive gets back to safe, and a stop that zeroed it froze a magnet at
-        -2.5 T above its interlock."""
+        """One drive to safe (None: already there, or a rate). Held instead where the lab config says hold, or where a
+        set point's safe value can't be reached, waiting or not (Bring tc to safe waited 13 min for 0 K, then raised a
+        "may be stuck" alarm). A drive's ramp rate (a magnet's) is never sent to its safe value: it is how fast the
+        drive gets back to safe, and a stop that zeroed it froze a magnet at -2.5 T above its interlock."""
         key = "%s.%s" % (inst.name, spec.name)
         if paces(inst.card, spec.name) is not None:
             return None
         if hold and self.lab.config.safe_actions.get(key) == "hold":
             return self._hold(inst, spec, "")
-        if not wait and _unreachable(spec):
+        if _unreachable(spec):
             return self._hold(inst, spec, " (its safe %s can't be reached)" % spec.show(spec.safe))
         current = self._current(inst, spec)
         if current is not None and spec.distance(current) == 0:
@@ -1933,8 +1987,11 @@ class SafetyGate:
                 return refused("%r not sent; %s" % (cmd, held))
             for r in card.reset:
                 if r.match(cmd) is not None:
-                    prep = self._to_safe(inst, wait=True)
-                    bad = [p for p in prep if not p.ok]
+                    # every drive to safe first, the lab config's hold too (that is for stops: a field held at 1 T
+                    # went into a reset); only a set point no instrument reaches (0 K) stays where its reading is
+                    prep = self._to_safe(inst, wait=True, hold=False)
+                    bad = [p for p in prep if not p.ok or (p.action == "held"
+                                                           and not _unreachable(inst.spec(p.target.split(".", 1)[1])))]
                     if bad:
                         return done(Result(False, bad[0].action, target, message="not sent: " + bad[0].message))
                     inst.write_raw(cmd)

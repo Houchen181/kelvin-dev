@@ -58,6 +58,22 @@ def parse_condition(text: Any) -> Condition:
     return Condition(instr, param, op, _literal(raw), str(text).strip())
 
 
+def typed(c: Any, spec: Any) -> None:
+    """A condition's value (c: a Condition, or a rule's Term) as its reading gives it, once the lab is known (spec:
+    the reading's ParamSpec): a switch's or a mode's word, compared with == or !=, becomes what the reading reads.
+    "off" for a heater range is its name, not False, which a mode never reads ("tc.heater_range != off" always held:
+    an interlock that never failed); "closed" for a shutter is False. Numbers stay as written. ValueError: a word the
+    reading never gives."""
+    if spec is None or c.op not in ("==", "!=") or spec.type not in ("bool", "enum"):
+        return
+    value = c.value
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)   # a mode's code, as written: 0, not 0.0
+    if spec.type == "bool" and isinstance(value, str) and spec.words:   # the switch's own words: open / closed
+        value = {str(w).lower(): flag for w, flag in zip(spec.words, (True, False))}.get(value.strip().lower(), value)
+    c.value = spec.coerce(value)
+
+
 @dataclass
 class Term:
     """One comparison of a rule: a reading (or its size, abs(...)) against a value."""
