@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 
 import labharness
 import simlab
@@ -16,6 +17,26 @@ def _with_the_test_labs_cards():
 
 homelab.builtin_registry = labharness.builtin_registry = _with_the_test_labs_cards
 homelab._BUILTIN_IDS = None
+
+
+@pytest.fixture(autouse=True)
+def isolated_sequence_engine(tmp_path, monkeypatch):
+    """The in-process sequence engine (labharness/sequence) writes under this test's tmp folder, never under
+    ~/Kelvin/sequence: v1 fused labMaster into Kelvin, and a tool a test calls (run_plan, queue_add, a start) would
+    otherwise leave its runs in the person's own Sequence page."""
+    monkeypatch.setenv("KELVIN_SEQUENCE_DIR", str(tmp_path / "sequence"))
+    try:
+        from labharness.sequence import paths, service
+    except Exception:   # noqa: BLE001 - an install without the vendored engine: nothing to isolate
+        yield
+        return
+    try:
+        paths.use_root(tmp_path / "sequence")
+        service.reset_service()
+        yield
+    finally:
+        service.reset_service()
+        paths.use_root(Path.home() / "Kelvin" / "sequence")
 
 
 @pytest.fixture(autouse=True)

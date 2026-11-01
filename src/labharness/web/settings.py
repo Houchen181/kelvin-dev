@@ -34,11 +34,18 @@ EDITABLE = SECRET | {"local_base_url", "local_models", "default_model", "instruc
                      "report_kinds", "claude_code", "claude_code_path",   # these two: Claude Code bridge
                      "updates", "hub_old_runs", "collection", "idle_off", "idle_off_all",
                      "smtp_host", "smtp_port", "smtp_security", "smtp_user", "smtp_from", "smtp_to",   # email notices
-                     "heartbeat_minutes", "approval_wait", "lab_scripts_python"}
+                     "heartbeat_minutes", "approval_wait", "lab_scripts_python",
+                     "lab_sequence_ai_start", "sequence_tools_wait_for_lab"}   # v1-A: the sequence engine's switches
 # the computer's, shared by everyone who uses it; the rest is each person's own
 LAB = {"access_key", "auto_setup", "manuals", "scan_network", "auto_cards", "phone", "phone_port", "updates",
        "account_hub", "hub_installation", "instruments_off", "hands_on", "lab_scripts", "collection", "idle_off",
-       "idle_off_all", "approval_wait", "lab_scripts_python"}
+       "idle_off_all", "approval_wait", "lab_scripts_python",
+       # v1-A (Kelvin × labMaster): one lab, one sequence engine in this Kelvin. A person arms the AI on the
+       # Sequence page (POST /api/labmaster/armed); the second switch is stored for v1-A and read by no tool yet.
+       "lab_sequence_ai_start", "sequence_tools_wait_for_lab"}
+# The v1-A switches and their defaults. Absent from settings.json means the default here; both off, so Kelvin's
+# AI needs a person's approval for every start, and labMaster's tools do not wait for the lab lock (P2).
+SEQUENCE_DEFAULTS = {"lab_sequence_ai_start": False, "sequence_tools_wait_for_lab": False}
 
 ANSWER_WORDS = 200   # the default word budget for answers (brevity.py)
 IDLE_OFF_MINUTES = 60   # outputs left on this long with nothing happening go to safe (LabRuntime._idle_check)
@@ -287,6 +294,43 @@ class Settings:
         if value and not _sealed(value):
             return "settings"
         return "environment" if self.get(name) else None
+
+    def flag(self, name: str, default: Optional[bool] = None) -> bool:
+        """A yes/no setting, as the browser and the engine see it. "on"/"true"/"1"/"yes" is true, and
+        so is a stored JSON true; a setting not stored is SEQUENCE_DEFAULTS' default for the v1-A
+        switches, else `default` (False)."""
+        if default is None:
+            default = bool(SEQUENCE_DEFAULTS.get(name, False))
+        value = self._at(name).get(name) if name in EDITABLE else None
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+    def set_flag(self, name: str, on: bool) -> None:
+        """Store a yes/no setting - "on", or nothing for off, as the other switches are kept - and save.
+        A name Kelvin does not store is refused (ValueError): the browser cannot invent settings."""
+        if name not in EDITABLE:
+            raise ValueError("%s is not a setting Kelvin stores" % name)
+        target = self._at(name)
+        if on:
+            target[name] = "on"
+        else:
+            target.pop(name, None)
+        self._save()
+
+    @property
+    def lab_sequence_ai_start(self) -> bool:
+        """May Kelvin's AI start the sequence engine on its own? A person's switch on the Sequence
+        page (default off: the AI asks before every start)."""
+        return self.flag("lab_sequence_ai_start")
+
+    @property
+    def sequence_tools_wait_for_lab(self) -> bool:
+        """Do labMaster's tools wait for Kelvin's lab lock? v1-A stores this and reads it nowhere:
+        the tools are off the lock (P2, default off)."""
+        return self.flag("sequence_tools_wait_for_lab")
 
     def update(self, values: Dict[str, Any]) -> None:
         for name, value in values.items():
