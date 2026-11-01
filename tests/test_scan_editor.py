@@ -280,6 +280,33 @@ def test_every_helper_the_check_calls_gets_what_kelvin_has_seen_never_an_instrum
     assert asked == []
 
 
+def test_a_check_of_a_million_points_takes_a_moment_and_more_are_refused_before_any_is_made(ran):
+    """The check of a million-point range took 34 s, and ten million took 37 s and 314 MB before they were refused, at
+    every pause in typing. Its points, its time, its limits and its interlocks are worked out from its loops."""
+    import time
+    rt, _ = ran
+    parts = dict(rt.scan_parts()["parts"], measure=["smu.I"])
+
+    def check(loops, **more):
+        t0 = time.perf_counter()
+        out = rt.scan_check(dict(parts, loops=loops, **more))
+        return out, time.perf_counter() - t0
+    big = dict(scanedit._blank("smu.V", "range"), **{"from": 0, "to": 1, "points": 1000000, "by": "points"})
+    c, took = check([big])
+    assert c["problems"] == [] and c["points"] == 1000000 and c["time"].startswith("~") and took < 10, (c, took)
+    c, _ = check([dict(big, **{"from": 14, "to": 16, "points": 21})])
+    assert c["problems"][0].startswith("sweep: smu.V 15.1 V is outside")   # the first beyond, as each was checked
+    field = [{"key": "tc.setpoint", "value": 50}]                    # warms the sample under a field, swept too
+    c, took = check([dict(scanedit._blank("magnet.B", "values"), values=[0, 1]), dict(big, points=500000)],
+                    setup=field)
+    assert any(p.startswith("interlock: magnet.B needs tc.T_sample < 10") for p in c["problems"]) and took < 10
+    for loops, more, points in (([dict(big, points=10 ** 7)], {}, 10 ** 7), ([], {"repeat": 10 ** 9}, 10 ** 9),
+                                ([], {"time": {"every": 0.001, "for": 10 ** 6, "points": None, "order": []}},
+                                 10 ** 9 + 1)):
+        c, took = check(loops, **more)
+        assert c["problems"] == ["plan has %d points (max 1000000)" % points] and took < 2, (c["problems"], took)
+
+
 def test_an_edited_scan_is_a_new_entry_and_the_old_one_stays(ran):
     rt, entry = ran
     marks = {"project": "p1", "confidential": True}

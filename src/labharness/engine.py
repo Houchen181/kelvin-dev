@@ -17,7 +17,7 @@ from .analysis import analyze_run
 from .chain import derived_readings
 from .conditions import typed
 from .eventlog import EventLog, RunStore
-from .forecast import Forecast, action_of, runs
+from .forecast import Forecast, action_of, floats, runs
 from .gate import ApprovalRequest, SafetyGate, SimulationApprover, _dur, applied_by, feeds_of, paces
 from .instrument import InstrumentOff, SensorError, Stopped
 from .monitor import Approach, rate_per_s, switch_words
@@ -276,7 +276,15 @@ class RunEngine:
             inst, spec = settable(axis.instr, axis.param, "sweep")
             if spec:
                 before = len(errors)
-                axis.values = [check_value(inst, spec, v, "sweep") for v in axis.values]
+                numbers = floats(spec, axis.values) if axis.values else None
+                if numbers is not None:   # a limit and a fixed range are ranges of values: when the least and the
+                    for v in (min(numbers), max(numbers)):   # greatest are within them, every value is
+                        check_value(inst, spec, v, "sweep")
+                if numbers is not None and len(errors) == before:
+                    axis.values = numbers   # a million-point sweep was checked value by value
+                else:
+                    del errors[before:]
+                    axis.values = [check_value(inst, spec, v, "sweep") for v in axis.values]
                 del errors[before + 1:]  # one message per axis is enough
             st = axis.stabilize
             if spec and st and st.near is not None and self._set_point_of(st) is None and not self._same_unit(
@@ -509,13 +517,26 @@ class RunEngine:
                 for k, vs in moment.items():
                     state[k] = vs[-1]   # as it leaves it
 
+        watched = {lock.drive for lock in locks} | {lock.require.key for lock in locks}
+
+        def looked_at(key: str) -> bool:
+            """Whether an interlock looks at what a sweep of this key decides (itself, the reading it drives, those
+            of the set points it switches on). One it doesn't is walked at its last value only, where it leaves the
+            lab: a million-point sweep was walked value by value."""
+            try:
+                inst, spec = self.lab.resolve(key)
+            except KeyError:
+                return False
+            decides = feeds_of(inst, spec) + ["%s.%s" % (inst.name, d.readback) for d in applied_by(inst, spec)]
+            return any(k in watched for k in decides)
+
         if plan is None:
             go([("%s.%s" % (instr, param), value, who) for instr, param, value in sets or []])
             return problems
         go([(s.key, s.value, "%s's setup" % who) for s in self.ordered(plan.setup)
             if action_of(self.lab, s.instr, s.param) is None])
-        go([(a.key, v, "%s's sweep" % who) for a in plan.axes if a.kind in ("instrument", "ramp") for v in a.values],
-           together=True)
+        go([(a.key, v, "%s's sweep" % who) for a in plan.axes if a.kind in ("instrument", "ramp")
+            for v in (a.values if looked_at(a.key) else a.values[-1:])], together=True)
         go([(s.key, s.value, "%s's after steps" % who) for s in plan.after
             if action_of(self.lab, s.instr, s.param) is None])
         return problems
