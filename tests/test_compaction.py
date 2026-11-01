@@ -74,6 +74,50 @@ def test_a_long_day_is_summarised_for_the_model_and_kept_whole(tmp_path):
     assert found["name"] == "chat_history" and "Dirac point at 1.2 V" in found["content"]
 
 
+def test_a_stop_while_kelvin_summarises_ends_the_turn_as_stopped(tmp_path):
+    """Stop pressed while Kelvin summarises the long day: the turn ends as any stopped answer does (said, and kept)."""
+    rt = LabRuntime(build_virtual_lab(), ScriptedApprover([]), tmp_path / "data")
+    store = ChatStore(tmp_path / "chats")
+
+    class SlowSummary(SmallModel):
+        async def stream(self, model, system, history, tools, emit):
+            if system == compaction.HANDOFF:
+                self.handoffs.append(history[0]["text"])
+                await asyncio.sleep(60)                                   # summarising takes a while
+            return await super().stream(model, system, history, tools, emit)
+    provider = SlowSummary([])
+    agent = ChatAgent(rt, store, build_server(rt), {"scripted": provider})
+    chat = store.create("scripted:m1")
+    long = "The gate sweep showed the Dirac point at 1.2 V. " * 60
+    for i in range(3):                                                    # a long day: earlier turns to summarise
+        chat["messages"] += [{"role": "user", "text": "sweep %d" % i}, {
+            "role": "assistant", "provider": "scripted", "model": "m1", "raw": None,
+            "blocks": [{"type": "text", "text": long}]}]
+    store.save(chat)
+    events = []
+
+    async def emit(e):
+        events.append(e)
+
+    async def day():
+        await agent.start()
+        try:
+            agent.claim(chat["id"], "scripted:m1")
+            turn = asyncio.ensure_future(agent.run_turn(chat["id"], "and the field?", "scripted:m1", provider, emit))
+            for _ in range(500):                                          # until Kelvin summarises
+                if provider.handoffs:
+                    break
+                await asyncio.sleep(0.02)
+            assert agent.stop(chat["id"])
+            await asyncio.wait_for(turn, 10)
+        finally:
+            await agent.close()
+    asyncio.run(day())
+    assert events[-1] == {"type": "turn_end", "reason": "stopped"}
+    saved = store.load(chat["id"])
+    assert saved["messages"][-1]["blocks"] == [{"type": "text", "text": "(stopped)"}] and "compact" not in saved
+
+
 def test_the_view_and_its_pieces():
     chat = {"messages": [{"role": "user", "text": "a"}, {"role": "assistant", "blocks": [{"type": "text", "text": "bee"}]},
                          {"role": "user", "text": "c"}, {"role": "user", "text": "d"}]}

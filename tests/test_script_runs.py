@@ -554,6 +554,71 @@ def test_run_script_needs_the_lab_scripts_folder(lab, tmp_path):
     assert "script not run: this lab has no scripts folder" in rt.run_script("sweep.py")
 
 
+def script_runtime(lab, folder, tmp_path, timeout=10):
+    """A runtime whose scripts folder is the test's, with a person who answers nothing."""
+    from labharness.agent.approval import WebApprover
+    from labharness.agent.runtime import LabRuntime
+    rt = LabRuntime(lab, WebApprover(timeout=timeout), tmp_path / "data")
+    rt.scripts_folder = lambda: str(folder)
+    rt.scripts_python = lambda: sys.executable
+    rt.auto_report = "off"
+    return rt
+
+
+def test_a_script_waiting_for_the_lab_never_runs_after_a_stop(lab, folder, tmp_path):
+    """As every drive call: one still waiting for the lab when a person presses Stop is not run, never asked anew."""
+    write(folder, "sweep.py", SWEEP)
+    rt = script_runtime(lab, folder, tmp_path)
+    prepare, prepared = rt._prepare_script, threading.Event()
+
+    def read_then_wait(*a, **k):   # the script is read; then the call waits for the lab
+        try:
+            return prepare(*a, **k)
+        finally:
+            prepared.set()
+    rt._prepare_script = read_then_wait
+    hold, out = threading.Event(), {}
+    busy = threading.Thread(target=lambda: rt._do("a run", lambda: hold.wait(10) and ""), daemon=True)
+    busy.start()
+    time.sleep(0.2)
+    waiting = threading.Thread(target=lambda: out.update(said=rt.run_script("sweep.py")), daemon=True)
+    waiting.start()
+    assert prepared.wait(30)
+    time.sleep(0.5)                                                       # it waits for the lab
+    rt.stop("human (portal)")
+    hold.set()
+    busy.join(10)
+    waiting.join(30)
+    assert out["said"].startswith("not run: a person pressed Stop while this waited for the lab"), out
+    assert rt.approver.wait_for_pending(timeout=1) is None and rt.approver.history_list() == []   # never asked
+
+
+def test_a_cancelled_mcp_run_script_call_is_declined_and_never_runs(lab, folder, tmp_path):
+    """As every drive call over MCP: the client cancelling it declines what it asked a person, and nothing runs."""
+    pytest.importorskip("mcp")
+    import asyncio
+    from mcp import Client
+    from labharness.agent.server import build_server
+    write(folder, "sweep.py", SWEEP)
+    rt = script_runtime(lab, folder, tmp_path)
+
+    async def day():
+        async with Client(build_server(rt), mode="legacy") as client:   # JSON-RPC over streams, as over stdio
+            call = asyncio.ensure_future(client.call_tool("run_script", {"script": "sweep.py"}))
+            asked = await asyncio.to_thread(rt.approver.wait_for_pending, 30)
+            assert asked and asked["title"] == "Run script sweep.py?"
+            call.cancel()                                                  # the client gives up on it
+            await asyncio.sleep(0.5)
+            assert rt.approver.pending_list() == []
+            assert rt.approver.answer(asked["id"], True) is False          # too late to say yes to it
+            [answered] = rt.approver.history_list()
+            assert answered["answer"] == "declined" and "cancelled" in answered["by"]
+    asyncio.run(day())
+    record = (tmp_path / "data" / "events.jsonl").read_text(encoding="utf-8")
+    assert '"call_cancelled"' in record and '"run_declined"' in record
+    assert lab.instrument("smu").read("output") is False                  # the script never switched it on
+
+
 def test_the_python_that_has_what_the_script_imports(tmp_path):
     script = write(tmp_path, "s.py", "import json\nimport no_such_module_anywhere\n")
     source = script.read_text()

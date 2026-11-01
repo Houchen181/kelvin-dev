@@ -1969,7 +1969,10 @@ class LabRuntime:
                   since: str = "", until: str = "", quantity: str = "", limit: int = 20) -> str:
         cat = self._fresh_catalog()
         hidden = self._hidden_runs()   # unshared work the viewer of this thread may not see
-        rows = cat.find(text, device, project, plan, status, since, until, quantity, limit, skip=hidden)
+        try:
+            rows = cat.find(text, device, project, plan, status, since, until, quantity, limit, skip=hidden)
+        except ValueError as e:   # since or until isn't a time
+            return "not searched: %s" % e
         running = self._running_id()
         total = cat.count() - len(set(hidden) - {running})   # the running run isn't in the catalog yet
         lines = ["%d run%s, newest first (of %d in the data folder):" % (len(rows), "" if len(rows) == 1 else "s",
@@ -4890,7 +4893,7 @@ class LabRuntime:
             prep = self._prepare_script(path, params, args, drives)
         except scriptrun.ScriptError as e:
             return "script not run: %s" % e
-        return self._do("running script %s" % prep.name, lambda: self._run_script(prep, mark))
+        return self._do("running script %s" % prep.name, lambda: self._run_script(prep, mark), stoppable=True)
 
     def _run_script(self, prep: Any, mark: Callable[[str], str]) -> str:
         return self._script_run(prep, mark)[0]

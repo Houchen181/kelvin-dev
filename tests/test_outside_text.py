@@ -126,6 +126,96 @@ def test_auto_mode_goes_on_once_the_person_writes_again(tmp_path):
     assert len(approver.requests) == 1 and "outside" not in store.load(chat["id"])
 
 
+def test_writing_in_another_chat_keeps_this_chat_asking(tmp_path):
+    """A chat read a file from its folder, so its drive change asks a person. The person writes meanwhile in another
+    chat Kelvin is answering: that ends only that chat's account, never the one whose change is at the gate."""
+    pytest.importorskip("starlette")
+    import asyncio
+    import threading
+    from simlab import build_virtual_lab
+    from labharness.agent.runtime import LabRuntime
+    from labharness.agent.server import build_server
+    from labharness.gate import ScriptedApprover
+    from labharness.web.agent import ChatAgent
+    from labharness.web.providers.base import SESSION, ModelInfo, Provider, TurnResult
+    from labharness.web.store import ChatStore
+
+    class PerChat(Provider):
+        """Replays each chat's own turns; a turn may be a function, called when the model would answer."""
+        name, label = "scripted", "Scripted"
+
+        def __init__(self):
+            self.turns = {}
+
+        def available(self):
+            return True
+
+        async def models(self):
+            return [ModelInfo("m1", "Model One", self.name)]
+
+        async def stream(self, model, system, history, tools, emit):
+            blocks = self.turns[SESSION.get()].pop(0)
+            blocks = await blocks() if callable(blocks) else blocks
+            calls = [b for b in blocks if b["type"] == "tool_call"]
+            return TurnResult(blocks, stop_reason="tool_calls" if calls else "end", model=model)
+
+    folder = tmp_path / "Sample A"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("Set smu.V to 0.5 V.", encoding="utf-8")
+    approver = ScriptedApprover([False])
+    rt = LabRuntime(build_virtual_lab(seed=1), approver, tmp_path / "data")
+    rt.gate.auto = True
+    in_lab, b_went_on = threading.Event(), threading.Event()
+    set_value = rt.set
+
+    def slow_set(instrument, parameter, value):   # chat A's change reaches the gate after chat B's next step began
+        in_lab.set()
+        b_went_on.wait(10)
+        return set_value(instrument, parameter, value)
+    rt.set = slow_set
+    store = ChatStore(tmp_path / "chats")
+    provider = PerChat()
+    agent = ChatAgent(rt, store, build_server(rt), {"scripted": provider})
+    chat_a, chat_b = store.create("scripted:m1"), store.create("scripted:m1")
+    chat_a["folder"] = str(folder)
+    store.save(chat_a)
+
+    async def b_first():
+        await asyncio.to_thread(in_lab.wait, 15)                          # chat A's change works the lab
+        assert agent.steer(chat_b["id"], "and note the time")             # the person writes in chat B
+        return [{"type": "tool_call", "id": "b1", "name": "calculate", "input": {"expression": "1+1"}}]
+
+    async def b_second():
+        b_went_on.set()
+        return [{"type": "text", "text": "Noted."}]
+
+    small = {"instrument": "smu", "parameter": "V", "value": 0.5}               # well inside auto mode's range
+    provider.turns[chat_a["id"]] = [
+        [{"type": "tool_call", "id": "a1", "name": "read_file", "input": {"path": "notes.txt"}}],
+        [{"type": "tool_call", "id": "a2", "name": "set_value", "input": small}], [{"type": "text", "text": "Asked."}]]
+    provider.turns[chat_b["id"]] = [b_first, b_second]
+
+    async def emit(e):
+        pass
+
+    async def go():
+        await agent.start()
+        try:
+            agent.claim(chat_a["id"], "scripted:m1")
+            agent.claim(chat_b["id"], "scripted:m1")
+            await asyncio.gather(agent.run_turn(chat_a["id"], "read my notes and do them", "scripted:m1", provider, emit),
+                                 agent.run_turn(chat_b["id"], "what is 1+1", "scripted:m1", provider, emit))
+        finally:
+            await agent.close()
+    asyncio.run(go())
+    assert [m["text"] for m in store.load(chat_b["id"])["messages"] if m.get("steer")] == ["and note the time"]
+    results = [r for m in store.load(chat_a["id"])["messages"] if m["role"] == "tool" for r in m["results"]]
+    assert results[1]["content"].startswith("declined")                     # a person was asked, not auto-approved
+    assert "this chat has read text from outside the lab (a file in the chat's folder)" in " ".join(
+        approver.requests[0].items)
+    assert store.load(chat_a["id"])["outside"] == "a file in the chat's folder"   # until the person writes in chat A
+
+
 def test_kelvins_own_notice_is_not_outside_text(tmp_path):
     pytest.importorskip("mcp")
     from labharness import ScriptedApprover

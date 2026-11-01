@@ -21,7 +21,7 @@ import sys
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from mcp import Client
 
@@ -775,8 +775,9 @@ class ChatAgent:
             return
         for text in waiting:
             chat["messages"].append({"role": "user", "text": text, "steer": True})
-        chat.pop("outside", None)   # the person wrote: what the chat read before no longer pauses auto mode
-        self.runtime.gate.outside_chat = None
+        # the person wrote: what the chat read before no longer pauses auto mode (its next lab call sets the gate's
+        # mark from the chat; the gate's mark now may be another chat's, working the lab meanwhile)
+        chat.pop("outside", None)
         self.store.save(chat)
         await emit({"type": "steered", "texts": waiting})
 
@@ -1264,12 +1265,25 @@ class ChatAgent:
                 partial.clear()
             await emit(event)
 
+        async def stopped() -> bool:
+            """The person pressed stop: what the model had said so far, marked stopped, ends the turn."""
+            said = "".join(partial).strip()
+            chat["messages"].append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
+                                     "blocks": [{"type": "text", "text": (said + " …" if said else "") + "(stopped)"}]})
+            self.store.save(chat)
+            await emit({"type": "turn_end", "reason": "stopped"})
+            return False
+
         history = compaction.view(chat)
         if compaction.size(context["system"], context["tools"], history) > \
                 compaction.SHARE * compaction.window(provider, model_id):   # a long day: earlier turns, summarised
             self._stream_task = asyncio.ensure_future(compaction.compact(chat, provider, model_id))
             try:
                 folded = await self._stream_task
+            except asyncio.CancelledError:   # stopped while summarising: ends the turn as a stopped answer does
+                if not self._stop:
+                    raise
+                return await stopped()
             finally:
                 self._stream_task = None
             if folded:
@@ -1287,12 +1301,7 @@ class ChatAgent:
         except asyncio.CancelledError:
             if not self._stop:
                 raise
-            said = "".join(partial).strip()
-            chat["messages"].append({"role": "assistant", "provider": provider.name, "model": model_id, "raw": None,
-                                     "blocks": [{"type": "text", "text": (said + " …" if said else "") + "(stopped)"}]})
-            self.store.save(chat)
-            await emit({"type": "turn_end", "reason": "stopped"})
-            return False
+            return await stopped()
         finally:
             self._stream_task = None
 
@@ -1589,7 +1598,7 @@ class ChatAgent:
                 checks = await asyncio.to_thread(self.runtime.validate, plan)
             prompt = review.plan_prompt(review.last_request(chat["messages"]), status, checks, plan)
             text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.PLAN_CHECK, prompt,
-                                                                     viewer), REVIEW_S)
+                                                                     viewer, bool(chat.get("incognito"))), REVIEW_S)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1615,7 +1624,8 @@ class ChatAgent:
         self.check_model(chat, model_key)
         prompt = review.answer_context(chat["messages"])   # ValueError when there is nothing to review
         text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.ANSWER_CHECK, prompt,
-                                                                 self.viewer_for(chat, model_key)), REVIEW_S)
+                                                                 self.viewer_for(chat, model_key),
+                                                                 bool(chat.get("incognito"))), REVIEW_S)
         opinion = dict(review.findings_of(text, "answer"), kind="answer", model=model_key, label=self.label(model_key),
                        lookups=lookups, at=time.time())
         chat = self.store.load(chat_id)   # it may have been saved meanwhile
@@ -1640,7 +1650,8 @@ class ChatAgent:
             raise ValueError("Pick a different model from the one that gave the second opinion.")
         prompt = review.recheck_prompt(review.answer_context(chat["messages"]), opinion)
         text, lookups = await asyncio.wait_for(self._review_loop(provider, model_id, review.RECHECK, prompt,
-                                                                 self.viewer_for(chat, model_key)), REVIEW_S)
+                                                                 self.viewer_for(chat, model_key),
+                                                                 bool(chat.get("incognito"))), REVIEW_S)
         checked = review.apply_recheck(copy.deepcopy(opinion), text, "answer", self.label(model_key))
         checked.update(given=False, recheck_lookups=lookups)   # the main model sees it with the next message
         chat = self.store.load(chat_id)
@@ -1651,10 +1662,11 @@ class ChatAgent:
         return checked
 
     async def _review_loop(self, provider: Provider, model_id: str, system: str, prompt: str,
-                           viewer: Optional[Viewer] = None) -> Tuple[str, int]:
+                           viewer: Optional[Viewer] = None, incognito: bool = False) -> Tuple[str, int]:
         """The reviewer's answer after it has looked things up in the lab's records with read-only tools
         (review.REVIEW_TOOLS; never a camera, never a change): (its answer, how many lookups it made). viewer: what
-        the reviewer's model may see of the lab's runs and records (the chat's project, under its rules)."""
+        the reviewer's model may see of the lab's runs and records (the chat's project, under its rules).
+        incognito: for an incognito chat, which uses no memory: its lookups come without the lab's notes."""
         tools = [t for t in self.tools if t["name"] in review.REVIEW_TOOLS and t["name"] in self.read_only]
         allowed = {t["name"] for t in tools}
         sees = sees_images(provider, model_id)
@@ -1690,6 +1702,8 @@ class ChatAgent:
                                     if sees and getattr(c, "type", "") == "image" and c.mime_type in PICTURE_TYPES]
                     except Exception as e:
                         content, is_error = "tool failed: %s" % e, True
+                    if incognito:
+                        content = without_lab_notes(content)
                 entry: Dict[str, Any] = {"id": call["id"], "name": call["name"], "content": content,
                                          "is_error": is_error}
                 if pictures:
@@ -1698,12 +1712,24 @@ class ChatAgent:
             history.append({"role": "tool", "results": results})
         return text, lookups
 
+    def _own_requests(self, loop: asyncio.AbstractEventLoop,
+                      requests: asyncio.Queue) -> Callable[[Dict[str, Any]], None]:
+        """The approver's listener for one call: it passes on only the requests that call asks, those asked with its
+        viewer (the threads its work runs in take it with their context: agent/server.py). What another chat asks a
+        person meanwhile (keeping a skill, saving a file, beside the lab) shows in that chat, never in this one."""
+        mine = self.runtime.viewer
+
+        def listen(request: Dict[str, Any]) -> None:   # in the requesting thread
+            if mine is None or self.runtime.viewer is mine:
+                loop.call_soon_threadsafe(requests.put_nowait, request)
+        return listen
+
     async def _ask_human(self, call_id: str, emit: Emit, request: ApprovalRequest) -> bool:
         """Ask the user through the approver (inline in the chat), outside any tool call."""
         loop = asyncio.get_running_loop()
         requests: asyncio.Queue = asyncio.Queue()
         subscribe = getattr(self.runtime.approver, "subscribe", None)
-        unsubscribe = subscribe(lambda r: loop.call_soon_threadsafe(requests.put_nowait, r)) if subscribe else None
+        unsubscribe = subscribe(self._own_requests(loop, requests)) if subscribe else None
         task = asyncio.ensure_future(asyncio.to_thread(self.runtime.approver.approve, request))
         shown: List[str] = []
         try:
@@ -1774,7 +1800,8 @@ class ChatAgent:
             if message.get("memory"):
                 await emit({"type": "memory", "notes": message["memory"]})
             self._lanes = [asyncio.ensure_future(self._lane(i, key, provider, model_id, system, base, tools, emit,
-                                                            chat_id, self.viewer_for(chat, key)))
+                                                            chat_id, self.viewer_for(chat, key),
+                                                            bool(chat.get("incognito"))))
                            for i, (key, provider, model_id) in enumerate(lanes)]
             done = await asyncio.gather(*self._lanes, return_exceptions=True)
             results = []
@@ -1805,9 +1832,10 @@ class ChatAgent:
 
     async def _lane(self, i: int, key: str, provider: Provider, model_id: str, system: str,
                     base: List[Dict[str, Any]], tools: List[Dict[str, Any]], emit: Emit,
-                    chat_id: str = "", viewer: Optional[Viewer] = None) -> Dict[str, Any]:
+                    chat_id: str = "", viewer: Optional[Viewer] = None, incognito: bool = False) -> Dict[str, Any]:
         """One model's answer while comparing. viewer: what this lane's model may see of the lab's runs and
-        records (the chat's project, under its rules)."""
+        records (the chat's project, under its rules). incognito: the chat uses no memory, so its tools' answers
+        come without the lab's notes, as in its ordinary turns."""
         out: List[Dict[str, Any]] = []
 
         async def lane_emit(event: Dict[str, Any]) -> None:
@@ -1842,6 +1870,8 @@ class ChatAgent:
                             kept = self._keep_pictures(chat_id, call["id"])
                         except Exception as e:
                             content, is_error = "tool failed: %s" % e, True
+                        if incognito:
+                            content = without_lab_notes(content)
                     await lane_emit({"type": "tool_end", "id": call["id"], "name": call["name"], "content": content,
                                      "is_error": is_error, "images": [k["file"] for k in kept] or None})
                     results.append(dict({"id": call["id"], "name": call["name"], "content": content,
@@ -1900,9 +1930,9 @@ class ChatAgent:
         loop = asyncio.get_running_loop()
         requests: asyncio.Queue = asyncio.Queue()
         # approvals come from the lab call working the lab (one at a time): shown in its chat, not in one that looks
-        # something up meanwhile
+        # something up meanwhile; and only the call's own, never what another chat asks a person beside it
         subscribe = getattr(self.runtime.approver, "subscribe", None) if call["name"] not in OFF_LAB else None
-        unsubscribe = subscribe(lambda r: loop.call_soon_threadsafe(requests.put_nowait, r)) if subscribe else None
+        unsubscribe = subscribe(self._own_requests(loop, requests)) if subscribe else None
         shown: List[str] = []
 
         async def show(request: Dict[str, Any]) -> None:
