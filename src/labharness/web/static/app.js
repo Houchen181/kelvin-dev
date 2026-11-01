@@ -5281,7 +5281,7 @@
       renderScripts();
       const n = LAB.scripts.instruments.length, k = LAB.scripts.vis.filter((v) => v.scan && v.scan.text).length;
       $("lab-msg").textContent = (n ? "Found " + n + " instrument" + (n === 1 ? "" : "s") + ". Check the cards and limits, then add the ones you want."
-        : "No instruments in NI MAX or the LabVIEW there.") + (k ? " " + k + " VI" + (k === 1 ? "" : "s") + " can become scans." : "");
+        : "No instruments in NI MAX or the LabVIEW there.") + (k === 1 ? " 1 VI can become a scan." : k ? " " + k + " VIs can become scans." : "");
     } catch (e) { $("lab-msg").textContent = e.message; }
     finally { btn.disabled = false; btn.textContent = "From your LabVIEW…"; }
   }
