@@ -90,7 +90,10 @@ def test_the_checklist_says_what_is_left_and_where_to_do_it(portal, tmp_path):
         rt.owner.set("4321")
         settings.add_device("Ada's phone", "control", "hash")
         items = {i["key"]: i for i in checklist(rt, settings, tmp_path)}
-        assert items["pin"]["done"] and items["phone"]["done"]
+        assert items["pin"]["done"] and not items["phone"]["done"]       # phone access off: nothing reaches it
+        client.app.remote.port = 8771                                     # as if Kelvin listened for phones
+        items = {i["key"]: i for i in checklist(rt, settings, tmp_path)}
+        assert items["phone"]["done"]
 
         r = client.post("/api/checklist", json={"hidden": True}, headers=headers).json()
         assert r["hidden"] is True and settings.public()["checklist"] is False   # Help keeps it

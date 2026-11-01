@@ -130,10 +130,11 @@ A lab with an owner's PIN can give people roles: **owner**, **operator** and **t
 | Change the roles, and where the owner hears of safety changes | no | no | with the PIN |
 
 - **Whoever has no role is a trainee:** an account made after the roles were given, until the owner gives it one.
+- **A role is its account's:** it goes when that account is taken off the computer (the lab config history says so), and an account made later with the same name doesn't get it. The roles stay on until the owner takes them away.
 - **A trainee's yes, confirmed.** When a trainee approves, the card asks who confirms: an operator or the owner picks their name and types their own account's password, or the owner types the PIN. An account without a password can't confirm, since anyone could give its name. Five wrong tries lock it for five minutes. The record and the reports name both: *approved by Cy (portal) with Ben (operator) at 14:02:11*. A no is anyone's. A trainee's phone can decline but not approve; a queue an operator approved at the card before leaving runs the night on that one approval.
 - **What a trainee can't do at all**, PIN or not: an operator or the owner signs in to do it. A trainee who learnt the PIN still can't widen the lab.
 - **Auto mode** goes back to asking when anyone signs in, and when the owner makes the person signed in a trainee.
-- **The PIN stays while there are roles:** give no one a role first, then remove it. At least one person is an owner, and while one is, only an owner changes the roles.
+- **The PIN stays while there are roles:** give no one a role first, then remove it. At least one person is an owner, and while one is, only an owner changes the roles; once no owner's account is on the computer any more, the PIN alone does.
 - **Nobody signed in:** Kelvin as an MCP server ([agents.md](agents.md)) has no accounts, so with roles every yes on its approval page takes the owner's PIN, and auto mode stays off there.
 - **Not a wall.** The roles are kept in `~/Kelvin/roles.json`. Whoever can edit this computer's files can delete it (the history below still shows what was done); a file Kelvin can't read makes everyone a trainee until the owner gives the roles again.
 

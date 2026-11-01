@@ -213,6 +213,55 @@ def test_a_trainees_yes_is_confirmed_by_an_operators_password_or_the_pin(tmp_pat
         roles.vouch(acc, nopin, pin="1234")
 
 
+def test_a_role_goes_with_its_account_and_a_later_namesake_never_has_it(tmp_path):
+    """Roles were kept by name and outlived their accounts: once the owner's account was removed, nobody could change
+    the roles (not even with the PIN, as said), and whoever made an account with her name was the lab's owner."""
+    acc, pin, roles = accounts_with_roles(tmp_path)
+    pin.set("2468")
+    roles.set({"Ada": "owner", "Ben": "operator", "Cy": "trainee"}, pin, "2468", "Ada", acc)
+    acc.forget("Ada")                                                   # Ada leaves the lab
+    assert roles.all() == {"Ben": "operator", "Cy": "trainee"} and roles.on
+    assert "Ada" not in json.loads(roles.path.read_text(encoding="utf-8"))["roles"]
+    acc.create("Ada", "not-ada-1")                                      # someone else takes her name
+    assert roles.role("Ada") == "trainee" and roles.approvers() == ["Ben"]
+    with pytest.raises(PermissionError, match="not an operator"):
+        roles.vouch(acc, pin, "Ada", "not-ada-1")
+    assert roles.set({"Ben": "owner", "Cy": "operator"}, pin, "2468", "Ben", acc) == {   # no owner left: the PIN
+        "Ben": "owner", "Cy": "operator"}
+    with pytest.raises(PermissionError, match="Ben signs in"):
+        roles.set({"Ada": "owner"}, pin, "2468", "Ada", acc)            # an owner again: Ben's to change
+    acc.forget("Ben")
+    acc.forget("Cy")
+    assert roles.all() == {} and roles.on and roles.role("Dee") == "trainee"   # the roles stay until taken away
+    assert roles.set({}, pin, "2468", "Dee", acc) == {} and not roles.on       # by whoever has the PIN
+
+
+def test_roles_kept_by_name_before_take_their_accounts_once(tmp_path):
+    """A roles.json from Kelvin 0.3.35 or older names people only: each name takes the account that has it when
+    Kelvin starts, a name whose account was removed before is dropped, and nobody is locked out."""
+    acc, pin, roles = accounts_with_roles(tmp_path)
+    pin.set("2468")
+    old = {"roles": {"Ada": "owner", "Ben": "operator", "Zed": "owner"}, "changed": "2026-10-30T10:00:00", "by": "Ada"}
+    roles.path.write_text(json.dumps(old), encoding="utf-8")            # Zed's account was removed before
+    (tmp_path / "accounts.json").rename(tmp_path / "accounts.away")
+    (tmp_path / "accounts.json").write_text("{half saved", encoding="utf-8")
+    assert LabRoles(tmp_path).role("Ada") == "trainee"                  # accounts unreadable now: nothing moves,
+    assert json.loads(roles.path.read_text(encoding="utf-8")) == old    # and nobody has a role meanwhile
+    (tmp_path / "accounts.json").unlink()
+    (tmp_path / "accounts.away").rename(tmp_path / "accounts.json")
+    roles = LabRoles(tmp_path)                                          # as Kelvin starts
+    assert roles.all() == {"Ada": "owner", "Ben": "operator"} and roles.on
+    kept = json.loads(roles.path.read_text(encoding="utf-8"))
+    assert sorted(kept["roles"]) == sorted(kept["accounts"]) == ["Ada", "Ben"]
+    acc.create("Zed", "zed-pass")                                       # a new Zed is not the old one
+    assert roles.role("Zed") == "trainee"
+    with pytest.raises(PermissionError, match="Ada signs in"):
+        roles.set({"Zed": "owner"}, pin, "2468", "Zed", acc)
+    assert roles.set({"Ada": "owner", "Zed": "operator"}, pin, "2468", "Ada", acc) == {"Ada": "owner",
+                                                                                         "Zed": "operator"}
+    assert roles.role("zed") == "operator"
+
+
 # ---------------------------------------------------------------------------------- the owner told
 
 def test_safety_changes_reach_the_owner_and_the_person_only_if_they_ticked_them():
@@ -466,6 +515,25 @@ def test_a_trainee_can_widen_nothing_and_the_owner_hears_of_what_others_widen(la
         hand = client.get("/api/config/history", headers=h).json()["entries"][0]
         assert hand["by"] == "outside Kelvin" and hand["safety"]
         assert any("[-5, 5] → [-50, 50]" in text for _, text in wait_for(posts, 2)[1:])
+
+
+def test_taking_someone_off_the_computer_takes_their_role_and_says_so(lab):
+    client, h, runtime, settings, home, posts = lab
+    with client:
+        sign_in(client, h, "Ada")
+        client.post("/api/owner-pin", headers=h, json={"pin": "2468"})
+        r = client.post("/api/roles", headers=h, json={"roles": {"Ada": "owner", "Ben": "operator"}, "pin": "2468"})
+        assert r.status_code == 200, r.text
+        client.delete("/api/session", headers=h)
+        r = client.post("/api/accounts/remove", headers=h, json={"name": "Ben", "password": "ben-pass"})
+        assert r.status_code == 200, r.text
+        removed = [e for e in runtime.gate.log.events() if e["type"] == "account_removed"]   # the lab's record
+        assert removed[-1]["user"] == "Ben" and removed[-1]["role"] == "operator"
+        assert "lab roles: Ben's role (operator) went with their account" in [
+            e["what"] for e in runtime.versions.history(subject="events")]
+        assert client.post("/api/accounts", headers=h, json={"name": "Ben", "password": "new-ben"}).status_code == 200
+        roles = client.get("/api/roles", headers=h).json()
+        assert roles["roles"] == {"Ada": "owner"} and roles["my_role"] == "trainee"   # the new Ben: no role
 
 
 def test_a_cards_wider_limits_and_review_are_the_owners_and_kept_too(lab):
